@@ -35,6 +35,7 @@ use serde::Serialize;
 use tauri::Url;
 
 use super::web::{WebOrigin, WebSessionKind, WebSessionState, WINDOW_LABEL_PREFIX};
+use super::web_nav_bar::BAR_HEIGHT as NAV_BAR_HEIGHT;
 
 /// Prefix of every web session toolbar webview label. Must not be matched by
 /// `web-*` (the remote content's prefix) nor match it — asserted below and
@@ -79,6 +80,13 @@ pub fn chrome_caller<'a>(webview_label: &'a str, window_label: &str) -> Result<&
     }
 }
 
+/// The smallest logical inner height the toolbar window may be resized to:
+/// the toolbar and the nav bar's strip at full height, no remote content.
+/// Below it the strip the nav bar shim places at the bottom would have to
+/// eat into the toolbar ([`layout`]).
+#[cfg_attr(not(feature = "web_session_chrome"), allow(dead_code))] // window builder only; tested in every build
+pub const MIN_WINDOW_HEIGHT: f64 = CHROME_HEIGHT + NAV_BAR_HEIGHT;
+
 /// A rectangle in logical pixels, origin top-left.
 #[cfg_attr(not(feature = "web_session_chrome"), allow(dead_code))] // window builder only; tested in every build
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -89,15 +97,50 @@ pub struct Bounds {
     pub height: f64,
 }
 
-/// Split a window's logical inner size into `(toolbar, remote)`: the toolbar
-/// is a fixed-height strip across the top, the remote content everything
-/// below it. They never overlap, so the page cannot draw over the toolbar.
+/// Where the toolbar window's three parts go, in logical pixels.
 #[cfg_attr(not(feature = "web_session_chrome"), allow(dead_code))] // window builder only; tested in every build
-pub fn layout(width: f64, height: f64) -> (Bounds, Bounds) {
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ChromeLayout {
+    /// The vault-owned toolbar webview, across the top.
+    pub toolbar: Bounds,
+    /// The remote content webview, between the two bars.
+    pub remote: Bounds,
+    /// The strip the native nav bar (`session::web_nav_bar`) owns at the
+    /// bottom. The host does not place the bar: each platform's shim puts it
+    /// at the bottom of the window itself (`WebviewFrame::HostManaged`). This
+    /// is that strip, so the host leaves it free.
+    pub nav_bar: Bounds,
+}
+
+/// The window's logical inner size for a profile's `window` size: the remote
+/// content keeps the profile's size, and the toolbar above it and the nav
+/// bar's strip below it are added on top.
+#[cfg_attr(not(feature = "web_session_chrome"), allow(dead_code))] // window builder only; tested in every build
+pub fn window_inner_size(profile_width: u32, profile_height: u32) -> (f64, f64) {
+    (f64::from(profile_width), f64::from(profile_height) + CHROME_HEIGHT + NAV_BAR_HEIGHT)
+}
+
+/// Split a window's logical inner size into its toolbar, remote content and
+/// nav bar strip. The nav bar's strip is the bottom
+/// [`BAR_HEIGHT`](super::web_nav_bar::BAR_HEIGHT), or all of the window when
+/// it is shorter, because that is where every shim puts the bar whatever this
+/// layout says. The toolbar is a fixed-height strip across the top of what is
+/// left, the remote content everything between the two. Nothing overlaps and
+/// nothing is negative, so the page can draw over neither bar and no page
+/// content sits under the nav bar (anti-goal A5). [`MIN_WINDOW_HEIGHT`] keeps
+/// both bars at full height in practice.
+#[cfg_attr(not(feature = "web_session_chrome"), allow(dead_code))] // window builder only; tested in every build
+pub fn layout(width: f64, height: f64) -> ChromeLayout {
     let width = if width.is_finite() { width.max(0.0) } else { 0.0 };
     let height = if height.is_finite() { height.max(0.0) } else { 0.0 };
-    let bar = CHROME_HEIGHT.min(height);
-    (Bounds { x: 0.0, y: 0.0, width, height: bar }, Bounds { x: 0.0, y: bar, width, height: height - bar })
+    let nav = NAV_BAR_HEIGHT.min(height);
+    let toolbar = CHROME_HEIGHT.min(height - nav);
+    let remote = height - nav - toolbar;
+    ChromeLayout {
+        toolbar: Bounds { x: 0.0, y: 0.0, width, height: toolbar },
+        remote: Bounds { x: 0.0, y: toolbar, width, height: remote },
+        nav_bar: Bounds { x: 0.0, y: height - nav, width, height: nav },
+    }
 }
 
 /// Whether the toolbar webview may load `url`: only the bundled toolbar page,
@@ -276,6 +319,7 @@ mod tests {
             shared,
             relogin: None,
             engine: None,
+            nav_bar: None,
         }
     }
 
@@ -309,16 +353,67 @@ mod tests {
         }
     }
 
+    /// The three parts tile the window top to bottom: toolbar, remote, nav
+    /// bar strip, with no gap, no overlap and no negative size.
+    fn assert_tiles(l: &ChromeLayout, width: f64, height: f64) {
+        for b in [l.toolbar, l.remote, l.nav_bar] {
+            assert!(b.x == 0.0 && b.width == width && b.height >= 0.0, "{l:?}");
+        }
+        assert_eq!(l.toolbar.y, 0.0, "{l:?}");
+        assert_eq!(l.remote.y, l.toolbar.y + l.toolbar.height, "{l:?}");
+        assert_eq!(l.nav_bar.y, l.remote.y + l.remote.height, "{l:?}");
+        assert_eq!(l.nav_bar.y + l.nav_bar.height, height, "{l:?}");
+    }
+
     #[test]
-    fn layout_keeps_a_fixed_toolbar_over_the_remote_content() {
-        let (bar, remote) = layout(1280.0, 900.0);
-        assert_eq!(bar, Bounds { x: 0.0, y: 0.0, width: 1280.0, height: CHROME_HEIGHT });
-        assert_eq!(remote, Bounds { x: 0.0, y: CHROME_HEIGHT, width: 1280.0, height: 900.0 - CHROME_HEIGHT });
-        // Never overlapping, never negative.
-        let (bar, remote) = layout(300.0, 10.0);
-        assert_eq!((bar.height, remote.y, remote.height), (10.0, 10.0, 0.0));
-        let (bar, remote) = layout(-5.0, f64::NAN);
-        assert_eq!((bar.width, bar.height, remote.height), (0.0, 0.0, 0.0));
+    fn layout_keeps_the_toolbar_on_top_and_the_nav_bar_strip_free_at_the_bottom() {
+        let l = layout(1280.0, 900.0);
+        assert_eq!(l.toolbar, Bounds { x: 0.0, y: 0.0, width: 1280.0, height: CHROME_HEIGHT });
+        assert_eq!(
+            l.remote,
+            Bounds { x: 0.0, y: CHROME_HEIGHT, width: 1280.0, height: 900.0 - CHROME_HEIGHT - NAV_BAR_HEIGHT }
+        );
+        assert_eq!(l.nav_bar, Bounds { x: 0.0, y: 900.0 - NAV_BAR_HEIGHT, width: 1280.0, height: NAV_BAR_HEIGHT });
+        assert_tiles(&l, 1280.0, 900.0);
+        // The strip is the shims' bar height (36), not a second number.
+        assert_eq!(NAV_BAR_HEIGHT, crate::session::web_nav_bar::BAR_HEIGHT);
+        assert_eq!(NAV_BAR_HEIGHT, 36.0);
+    }
+
+    #[test]
+    fn the_remote_content_keeps_the_profiles_window_size() {
+        for (w, h) in [(1280, 860), (400, 400), (1600, 900), (10_000, 10_000)] {
+            let (width, height) = window_inner_size(w, h);
+            assert_eq!(width, f64::from(w));
+            let l = layout(width, height);
+            assert_eq!((l.remote.width, l.remote.height), (f64::from(w), f64::from(h)), "{w}x{h}");
+            assert_tiles(&l, width, height);
+        }
+    }
+
+    #[test]
+    fn a_small_window_gives_way_to_the_nav_bar_strip_the_shims_place() {
+        // The shims put the bar at the bottom `min(36, height)` whatever the
+        // host does, so a window shorter than both bars shrinks the toolbar
+        // and the remote content, never the strip.
+        for height in [0.0, 1.0, 10.0, 35.0, 36.0, 37.0, 50.0, 75.0, 76.0, 77.0, 120.0] {
+            let l = layout(300.0, height);
+            assert_tiles(&l, 300.0, height);
+            assert_eq!(l.nav_bar.height, NAV_BAR_HEIGHT.min(height), "{height}");
+            assert_eq!(l.toolbar.height, CHROME_HEIGHT.min(height - l.nav_bar.height), "{height}");
+        }
+        // At the window's minimum both bars are whole and the page gets nothing.
+        assert_eq!(MIN_WINDOW_HEIGHT, CHROME_HEIGHT + NAV_BAR_HEIGHT);
+        let l = layout(300.0, MIN_WINDOW_HEIGHT);
+        assert_eq!((l.toolbar.height, l.remote.height, l.nav_bar.height), (CHROME_HEIGHT, 0.0, NAV_BAR_HEIGHT));
+        // Garbage sizes collapse to nothing.
+        let l = layout(-5.0, f64::NAN);
+        assert_eq!(
+            (l.toolbar.width, l.toolbar.height, l.remote.height, l.nav_bar.height, l.nav_bar.y),
+            (0.0, 0.0, 0.0, 0.0, 0.0)
+        );
+        let l = layout(f64::INFINITY, -1.0);
+        assert_tiles(&l, 0.0, 0.0);
     }
 
     #[test]

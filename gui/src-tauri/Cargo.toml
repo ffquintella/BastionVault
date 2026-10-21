@@ -312,7 +312,19 @@ webview2-com = "0.38"
 # win32metadata — so the structs and entry points are hand-written there.
 # Pinned to 0.61 to match the version tauri-runtime-wry/wry resolve, so
 # `WebviewWindow::hwnd()` hands back an `HWND` of the same type.
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_LibraryLoader"] }
+# The features after `Win32_System_LibraryLoader` are for the web session nav
+# bar (`session/web_nav_bar/windows.rs`): its child windows, buttons,
+# tooltips and fonts, the subclass on the session window, and freeing
+# WebView2's cookie strings (`GetDpiForWindow` is looked up at run time
+# through `Win32_System_LibraryLoader`). tao 0.35 and wry 0.55 already enable
+# every one of them on windows 0.61, so listing them changes no crate's
+# feature set. The exception is `Win32_Networking_WinHttp`, which no crate
+# in the graph enables: the bar reads the user's system proxy settings
+# (`WinHttpGetIEProxyConfigForCurrentUser`, winhttp.dll, part of every
+# Windows) to refuse its own direct request when WebView2 would go through
+# a proxy. It adds that one module to the `windows` crate on Windows builds
+# only; no package and no `Cargo.lock` entry changes.
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_LibraryLoader", "Win32_Graphics_Gdi", "Win32_System_Com", "Win32_System_SystemServices", "Win32_UI_Controls", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_Networking_WinHttp"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Web Connect `http-auth` mode (features/web-application-connect.md §7, T96
@@ -324,8 +336,19 @@ windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Libr
 # reach the types and the Foundation / WebKit classes the delegate touches.
 objc2 = "0.6"
 block2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSObject", "NSString", "NSURLAuthenticationChallenge", "NSURLProtectionSpace", "NSURLCredential", "NSURLSession"] }
-objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "objc2-app-kit", "block2", "WKWebView", "WKNavigationDelegate"] }
+# The features after `NSURLSession`, and those after `WKNavigationDelegate`
+# below, are for the web session nav bar (`session/web_nav_bar/macos.rs`):
+# KVO on the webview and the download's progress, the window-close
+# notification, the WKDownload delegate and the macOS 10.15–11.2 URLSession
+# refetch. Every one is already enabled on these crates by wry and tao, so
+# listing them changes no crate's feature set (and rebuilds nothing).
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSObject", "NSString", "NSURLAuthenticationChallenge", "NSURLProtectionSpace", "NSURLCredential", "NSURLSession", "NSArray", "NSData", "NSDictionary", "NSEnumerator", "NSError", "NSGeometry", "NSHTTPCookie", "NSKeyValueObserving", "NSNotification", "NSProcessInfo", "NSProgress", "NSURL", "NSURLRequest", "NSURLResponse"] }
+objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "objc2-app-kit", "block2", "WKWebView", "WKNavigationDelegate", "WKDownload", "WKDownloadDelegate", "WKHTTPCookieStore", "WKNavigation", "WKNavigationResponse", "WKWebViewConfiguration", "WKWebsiteDataStore"] }
+# The nav bar's native views (`session/web_nav_bar/macos.rs`): the bar, its
+# buttons and SF Symbol images. Not a new crate: objc2-app-kit 0.3 is in the
+# graph through wry and tao, and every feature listed is one they already
+# enable, so this changes no feature set either.
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "NSButton", "NSCell", "NSColor", "NSControl", "NSImage", "NSResponder", "NSView", "NSVisualEffectView", "NSWindow"] }
 # Web Connect TLS pinning (T96 Phase 4, `commands/connect_web_tls_pin.rs`):
 # the same delegate's server-trust challenge evaluates the `SecTrust`, reads
 # its certificate chain and builds `credentialForTrust:`. No new crates: both
@@ -348,6 +371,11 @@ core-foundation = { version = "0.10", default-features = false }
 # `load-failed-with-tls-errors` signal, `WebContext` certificate exception and
 # its `gio` re-export for the presented chain — no further crate.
 webkit2gtk = { version = "2.0", features = ["v2_30"] }
+# The web session nav bar's native widgets (`session/web_nav_bar/linux.rs`):
+# the strip packed under the webview and its buttons. Not a new crate: gtk
+# 0.18 is in the graph through tauri, tao and wry (tauri enables `v3_24`),
+# and this adds no feature, so no crate's feature set changes.
+gtk = "0.18"
 
 [features]
 # Cloud storage targets are on by default in the desktop GUI build so
@@ -435,6 +463,11 @@ rdp_egfx = ["dep:ironrdp-egfx"]
 web_session_chrome = ["tauri/unstable"]
 
 [dev-dependencies]
+# `test-util` is for `#[tokio::test(start_paused = true)]` in the fill
+# engine's operator-reload tests (`session/web_engine.rs`): a paused clock
+# makes their timing independent of machine load. It adds a feature of the
+# tokio dependency above to the test builds, not a package.
+tokio = { version = "1", features = ["test-util"] }
 # The embedded seal's authorization gate (`commands/system.rs`) is tested
 # against a real `Core` — a real token store to mint tokens in, a real policy
 # store to evaluate them against — because a mock would not catch a change in

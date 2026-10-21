@@ -1,6 +1,6 @@
 # Web session navigation controls (back / forward / reload / download)
 
-Status: design, pending approval.
+Status: implemented (T459, S105), pending live verification on macOS, Windows and Linux. Sections marked *As built* below were corrected after implementation; see "As built / deviations" at the end and the *Session navigation bar* section of [features/web-application-connect.md](../../features/web-application-connect.md).
 Author: Felipe Quintella + Claude.
 Related: [features/web-application-connect.md](../../features/web-application-connect.md).
 
@@ -88,9 +88,9 @@ multi-*webview* layout; a native non-webview sibling is reachable through
 
 | Platform | Webview | How the bar attaches | History / reload | Download trigger |
 |---|---|---|---|---|
-| macOS 10.15+ | WKWebView | `NSWindow.contentView` is replaced with an `NSStackView` (vertical) that holds the webview on top and a 36 px `NSHostingView<Bar>` (SwiftUI) at the bottom. `NSWindow.contentView` is reachable via `-[NSWindow contentView]` from the `NSWindow*` `tao` returns. | `WKWebView.goBack`, `goForward`, `reload`; `canGoBack`, `canGoForward` observed by KVO | macOS 11.3+: `WKWebView.startDownload(using:)` + a `WKDownloadDelegate` that re-enters `RemotePolicy::on_download`. macOS 10.15–11.2: fetch the URL through `URLSession` using the webview's cookie store (`WKHTTPCookieStore.getAllCookies`) and the same `RemotePolicy::on_download` sink; one-time token POSTs cannot be re-played and that case is reported as "not available on this macOS" (§7.5). |
-| Windows 10+ | WebView2 (via wry) | The window's `HWND` already holds the webview as its sole child. A 36 px child `HWND` is created at the bottom via `CreateWindowEx`, hosting Common Controls buttons; the webview's rect is shrunk by that height on resize. | `CoreWebView2.GoBack`, `GoForward`, `Reload`; `CanGoBack`, `CanGoForward` through `add_HistoryChanged` | `CoreWebView2.DownloadStarting` for responses the webview itself detects as downloads. For the bar's own download click, call `CoreWebView2.NavigateWithWebResourceRequest` with the same request as a background `HTTP GET` through `WinHttp`, routed through the same proxy as the webview, and funnelled into `RemotePolicy::on_download`. |
-| Linux (GTK) | WebKitGTK | `GtkWindow`'s child is already the webview (packed in a `GtkBox`); replace that `GtkBox` layout with a vertical box that holds the webview + a `GtkActionBar` at the bottom. | `webkit_web_view_go_back/_forward/_reload`, `webkit_web_view_can_go_back/_forward` | `webkit_web_view_download_uri` for the current URL (WebKitGTK **re-requests** — same POST-body/one-time-token caveat as the macOS 10.15 fallback; §7.5). `WebKitDownload::decide-destination` points at the resolved Downloads folder; the delegate reports to `RemotePolicy::on_download`. |
+| macOS 10.15+ | WKWebView | *As built:* a 36 pt `NSVisualEffectView` added as a **sibling** of the webview at the bottom of the window's content view (the webview's superview); the webview is shrunk by 36 pt once and autoresizing keeps the strip on every resize. The content view is not replaced and no `NSStackView` or SwiftUI is used: that would re-parent wry's `WryWebViewParent`. | `WKWebView.goBack`, `goForward`, `reload`; KVO on `canGoBack`, `canGoForward`, `loading`, `URL`; a forwarding navigation delegate reads the main-frame response type | *As built:* macOS 11.3+: `WKWebView.startDownload(using:)` with the bar's own `WKDownloadDelegate` (`path=webview`); the policy runs on the click, on every redirect and on the final URL. macOS 10.15–11.2: refetch through an ephemeral `URLSession` seeded with the webview's cookies from `WKHTTPCookieStore.getAllCookies` (`path=refetch`). Both routes request the URL again, so a POST result or a one-time link cannot be saved and is reported `unavailable` (§7.5). |
+| Windows 10+ | WebView2 (via wry) | *As built:* a 36 dip child `HWND` that is a sibling of wry's `WRY_WEBVIEW` container, plus a `SetWindowSubclass` on the session window that, after wry's own `WM_SIZE` handling, shrinks the container and `controller.SetBounds` to the client area minus the bar, and again on `WM_DPICHANGED`. | `ICoreWebView2` `GoBack`, `GoForward`, `Reload`; `CanGoBack`/`CanGoForward` from the navigation and history events | *As built:* WebView2 has no API to save the current response, so the bar re-requests the shown URL itself (`path=refetch`): hyper over `rustls-platform-verifier` (platform TLS only, HTTP/1.1, no redirect followed, `Accept-Encoding: identity`, the webview's cookies for that URL). The policy runs on the click and again before connecting. Refused with `refetch_blocked` before any request when the session has TLS pins, an operator-accepted untrusted certificate, no TLS gate, proxy mode, a WebView2 browser-argument proxy or host-remapping switch, or any system proxy, PAC or auto-detect setting (WPAD-only proxies are not detectable). The `Zone.Identifier` stream is written on the staging file before the move; staging is `%LOCALAPPDATA%\.bastion_vault_gui\nav-download-staging`. Not used: `NavigateWithWebResourceRequest`, WinHttp requests. |
+| Linux (GTK) | WebKitGTK | *As built:* a horizontal `GtkBox` (not a `GtkActionBar`, which Adwaita pads past 36 px) packed with `pack_end` into the vertical `GtkBox` wry already packed the webview into; nothing of wry's is moved. | `webkit_web_view_go_back/_forward/_reload`, `can_go_back/_forward` | *As built:* `webkit_web_view_download_uri` for the shown URL (WebKitGTK **re-requests**; same POST/one-time-token caveat), audited `path=refetch`. wry's context-wide `download-started` handler would also act on it, so the bar **claims** the `WebKitDownload` it started: its own `decide-destination` returns `TRUE` (wry's never runs), and `failed` / `finished` stop emission. Downloads WebKitGTK escalates by itself stay with wry. *Residual:* WebKitGTK has no redirect hook, so a 3xx to an origin outside the allow-list is requested (ephemeral per-window cookies of that origin only) and refused at `decide-destination`: no body is saved, audited `outside_allowlist`. The refuse-and-cancel path is unverified on WebKitGTK older than 2.40 (wry's floor is 2.38). |
 
 The macOS 10.15–11.2 fallback and the WebKitGTK re-request path both lose
 POST bodies and one-time tokens. A download the webview itself started
@@ -100,6 +100,13 @@ the bar's button only takes that fast path when the current main-frame
 navigation response is one the webview already escalated to a download —
 otherwise it falls back to the re-request path and surfaces a status if it
 fails.
+
+*As built:* the in-flight-response fast path was not built. The bar's button
+always requests the shown URL again (macOS 11.3+ through `startDownload`,
+Linux through `download_uri`, Windows and macOS 10.15–11.2 through the bar's
+own request), so a POST result or a one-time link is refused as `unavailable`
+on every platform. Downloads the webview escalates by itself keep their
+existing handling and audit lines.
 
 Platform floor comes from `gui/src-tauri/tauri.conf.json:63` (macOS 10.15,
 Windows 10, GTK 3.24).
@@ -112,6 +119,9 @@ A thin bar at the **bottom** of the session webview, as a native sibling of
 the webview inside the window's content area:
 
 - 36 px tall, full width, pinned to the bottom edge, resizes with the window.
+  *As built:* the page keeps the profile's size: the default window is the
+  profile height + 36 px (the chrome build: + 40 px toolbar + 36 px bar), and
+  the chrome window has a minimum height of 76 px so the bars never overlap.
 - The webview is laid out above it; the bar is not an overlay, it owns its
   own 36 px of real estate so page content underneath is **not** covered.
 - Platform-native rendering: SF Symbols on macOS, Fluent icons on Windows,
@@ -208,13 +218,14 @@ is a no-op with a tooltip. Soft cap at 2 GiB per download; above that the
 operator is told via a short-lived error state and the download is
 cancelled. Both limits are per window, per lifetime.
 
-Mark-of-the-web: WKDownload (macOS), WebView2 `DownloadStarting` (Windows)
-and `WebKitDownload` (Linux has no MOTW mechanism) set the quarantine /
-MOTW extended attribute on the saved file as part of their own path. The
-re-request fallbacks (macOS 10.15 and WebKitGTK) do **not** set it, by
-design — the bar is a trusted-origin download helper and the file came from
-a vault-tracked session. The audit line names which path was taken so a
-reviewer can tell.
+Mark-of-the-web: *As built:* `WKDownload` (macOS 11.3+) sets the quarantine
+attribute as part of its own path. The Windows bar never goes through
+WebView2's `DownloadStarting` (it re-requests), so the shim writes the
+`Zone.Identifier` stream (zone 3) itself on the staging file, before the move
+into Downloads. The macOS 10.15–11.2 refetch and the Linux download (which has
+no MOTW mechanism) carry only what the OS applies. The audit line names which
+path was taken (`path=webview` is written by the macOS bar only; the Linux and
+Windows bars write `path=refetch`) so a reviewer can tell.
 
 ### 7.7. Phase 5 coexistence
 
@@ -280,6 +291,13 @@ action:
 - `connect.web.nav: resource=<id> token=<hash> action=back|forward|reload`
 - `connect.web.download: resource=<id> token=<hash> filename=<basename> \
   mime=<type> bytes=<n> path=webview|refetch`
+- *As built:* the `token` is the session's clear `sess_...` token, as in the
+  existing `connect.web.*` lines; `filename` is logged quoted and escaped
+  (`filename="x.pdf"`) with control characters dropped; and a refusal is
+  `connect.web.download_refused: resource=<id> token=<tok> reason=<token>` with
+  a fixed token (`outside_allowlist`, `downloads_disabled`, `size_exceeded`,
+  `too_many_downloads`, `collision_exhausted`, `save_io_error`,
+  `invalid_filename`, `unavailable`, `transfer_failed`, `refetch_blocked`).
 
 URL path and query are never logged (existing discipline). `filename` is
 the sanitized basename only, not a full path.
@@ -292,6 +310,15 @@ does. Downloads reuse `RemotePolicy::on_download` (A6) — the same policy
 and audit sink the webview's own download path uses — so a URL outside the
 session's allow-list is refused before bytes are requested, and a pin
 mismatch surfaces as it does today.
+
+*As built:* the bar calls `web::download_decision` (the decision
+`RemotePolicy::on_download` applies) itself, with the window's own origin set
+and `allow_downloads`, on the click and again on the final URL. Where the bar
+has to make the request itself (Windows, macOS 10.15–11.2) it cannot reuse the
+webview's TLS exceptions: on Windows it fails closed (`refetch_blocked`) rather
+than request around pins, an accepted certificate or a proxy the webview
+follows. Linux has a redirect residual (§6). All three shims share one
+download implementation, `session/web_nav_bar/transfer.rs`.
 
 ### 8.5. `unsafe` justifications
 
@@ -368,3 +395,31 @@ Rust orchestrator, audit lines, G5 and G6 tests). Hand off to
   the fill engine (G5); the fill engine's step-picker is the natural reader.
 - `unsafe` scope and SAFETY comment pattern mirrors the existing TLS pin
   shim.
+
+## 15. As built / deviations
+
+What differs from the design above (details and the manual verification
+checklist are in the *Session navigation bar* section of
+[features/web-application-connect.md](../../features/web-application-connect.md)):
+
+- The platform-neutral download path was extracted into one shared module
+  (`session/web_nav_bar/transfer.rs`, the plan's Task 2b) instead of three
+  copies; the per-platform shims hold only layout and glue.
+- Section 6 is corrected: no `NSStackView` / SwiftUI on macOS, no `GtkActionBar`
+  on Linux, no `NavigateWithWebResourceRequest` / WinHttp request on Windows
+  (the bar's own hyper request, with the `refetch_blocked` gate).
+- The Windows refetch follows no redirect, uses platform TLS only, refuses
+  non-identity `Content-Encoding` and writes `Zone.Identifier` before the move;
+  it is often blocked in practice because auto-detect proxy settings are on by
+  default on many machines.
+- The Linux bar claims its own `WebKitDownload` and always audits `path=refetch`;
+  the redirect residual (§6) is recorded, not closed.
+- macOS refetch on 10.15–11.2 and `startDownload(using:)` on 11.3+ both request
+  the URL again, so neither can save a POST result or a one-time link.
+- The default window is 36 px taller than before so the page keeps the
+  profile's size (§7.1).
+- Audit: clear `sess_...` token, quoted `filename`, and a `download_refused`
+  line with fixed reason tokens (§8.3).
+- Not done: progress indicator, cancel button, reading WebView2 policy browser
+  arguments. Nothing has run live; Windows msvc and Linux x86_64 were not
+  compiled (gnu and arm64 were).

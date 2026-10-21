@@ -688,6 +688,9 @@ struct PageTrack {
     failed: Option<PageFailure>,
     /// Untrusted-certificate prompts open on this window.
     prompts: u32,
+    /// Monotonic count of top-frame loads started; see
+    /// [`WebShared::load_gen`].
+    load_gen: u64,
 }
 
 #[derive(Debug, Default)]
@@ -756,6 +759,16 @@ pub struct WebShared {
     /// gate's refusal hook holds this `WebShared`, and the platform handler
     /// owns the gate for the window's lifetime.
     pin_gate: std::sync::OnceLock<std::sync::Weak<TlsPinGate>>,
+    /// Set by the nav bar's Reload button so the fill engine skips the
+    /// reload's own load (G5 in docs/specs/2026-10-20-web-session-nav-controls-design.md).
+    /// Holds the lowest [`Self::load_gen`] that counts as that load, or `0`
+    /// for no mark (a real load generation is never `0` once a load has
+    /// started, and the threshold is always `load_gen + 1 >= 1`).
+    /// Written through [`super::web_nav_bar::mark_operator_reload`] and
+    /// consumed through [`super::web_nav_bar::take_operator_reload`].
+    /// `pub(crate)` so the sibling `web_nav_bar` module can reach it;
+    /// nothing outside this crate should touch it directly.
+    pub(crate) operator_reload: std::sync::atomic::AtomicU64,
 }
 
 impl WebShared {
@@ -771,6 +784,7 @@ impl WebShared {
             login_window: Mutex::new(LoginWindow::default()),
             relogin: std::sync::atomic::AtomicBool::new(false),
             pin_gate: std::sync::OnceLock::new(),
+            operator_reload: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -845,6 +859,13 @@ impl WebShared {
         {
             let mut p = Self::lock(&self.page);
             p.url = Some(url.clone());
+            // A load starts with a not-finished event; a finished event with
+            // no start before it (nothing was loading) is a load of its own.
+            // Accepted: a lone finish counts as a load, so a platform that
+            // emits one without a start still advances the generation.
+            if !finished || !p.loading {
+                p.load_gen += 1;
+            }
             p.loading = !finished;
             p.failed = None;
         }
@@ -857,7 +878,20 @@ impl WebShared {
 
     pub fn snapshot(&self) -> PageSnapshot {
         let p = Self::lock(&self.page);
-        PageSnapshot { url: p.url.clone(), loading: p.loading, failed: p.failed.map(|f| f.check), held: p.prompts > 0 }
+        PageSnapshot {
+            url: p.url.clone(),
+            loading: p.loading,
+            failed: p.failed.map(|f| f.check),
+            held: p.prompts > 0,
+            load_gen: p.load_gen,
+        }
+    }
+
+    /// Top-frame loads started so far. Strictly increases with every load
+    /// (a reload included), so a caller can tell a new load from the same
+    /// page being polled again.
+    pub fn load_gen(&self) -> u64 {
+        Self::lock(&self.page).load_gen
     }
 
     /// Record that this window refused a server-trust challenge for
@@ -966,6 +1000,9 @@ pub struct WebSessionState {
     /// The running recipe engine, so a re-run can wait for it to report
     /// before the launch it belongs to is closed.
     pub engine: Option<tauri::async_runtime::JoinHandle<()>>,
+    /// The window's native nav bar (`super::web_nav_bar`), attached once the
+    /// window is built. Teardown detaches it ([`finish_session`]).
+    pub nav_bar: Option<Box<dyn super::web_nav_bar::NavBar>>,
 }
 
 /// A `form` session's re-run context: the recipe as the session was opened
@@ -980,16 +1017,21 @@ pub struct FormRelogin {
     pub form: FormLogin,
 }
 
-/// Finish a web session that has just been removed from the registry: stop
-/// its recipe engine, report and close its launch, write the host-side close
-/// audit line and remove the data directory.
+/// Finish a web session that has just been removed from the registry: detach
+/// its nav bar, stop its recipe engine, report and close its launch, write
+/// the host-side close audit line and remove the data directory.
 ///
 /// Every path that drops a web session's registry entry calls this —
 /// window destruction, `session_close`, a window that failed to build, app
 /// exit, and the generic SSH/RDP drop paths should a web token ever reach
 /// them — so neither `v2/connect/web/close` nor the cleanup can be skipped
 /// by taking a different door out.
-pub async fn finish_session(token: &str, session: WebSessionState, reason: WebCloseReason) {
+pub async fn finish_session(token: &str, mut session: WebSessionState, reason: WebCloseReason) {
+    // First, before any network wait: a download the bar still has in flight
+    // ends now, with its placeholder and staging directory removed.
+    if let Some(bar) = session.nav_bar.take() {
+        bar.detach();
+    }
     session.shared.mark_closed();
     let mut launch_hash = String::new();
     if let Some(launch) = &session.launch {
@@ -1523,6 +1565,23 @@ mod tests {
         p["web"]["tls_pin_sha256"] = json!([format!("sha256:{}", "ab".repeat(32))]);
         assert_eq!(parse_web_profile(&p).unwrap().tls_pins.len(), 1);
         assert_eq!(WebSessionKind::HttpAuth.as_str(), "http-auth");
+    }
+
+    #[test]
+    fn load_gen_counts_loads_not_events() {
+        let shared = WebShared::new("fw01", "https://fw01.example.com");
+        let u = url("https://fw01.example.com/login");
+        assert_eq!(shared.load_gen(), 0);
+        shared.page_load(&u, false);
+        assert_eq!(shared.load_gen(), 1, "a start is a new load");
+        shared.page_load(&u, true);
+        assert_eq!(shared.load_gen(), 1, "its finish is not");
+        assert_eq!(shared.snapshot().load_gen, 1);
+        shared.page_load(&u, false);
+        shared.page_load(&u, true);
+        assert_eq!(shared.load_gen(), 2, "a reload of the same URL is a new load");
+        shared.page_load(&u, true);
+        assert_eq!(shared.load_gen(), 3, "a finish with no start before it is a load of its own");
     }
 
     #[test]

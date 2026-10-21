@@ -110,6 +110,7 @@ pub mod connect_sftp;
 pub mod connect_web;
 pub mod connect_web_chrome;
 pub mod connect_web_http_auth;
+pub mod connect_web_nav_bar;
 pub mod connect_web_tls_pin;
 pub mod connect_web_trust_ui;
 pub mod connection;

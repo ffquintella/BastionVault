@@ -140,7 +140,10 @@ the app is built; **it has not been run in a live session** (see *Phase 5
 caveats*). Phase 6 was a spike, now done: proxy mode is a go on macOS 14+
 (run) and a conditional go on Windows and Linux (read from the sources, not
 run); see *Phase 6 spike findings*. Building proxy mode is tracked as T106,
-Phase 7 (`sso`) as T107, blocked by T52, and Phase 8 is future (T97).**
+Phase 7 (`sso`) as T107, blocked by T52, and Phase 8 is future (T97). Every web
+session window also carries a native back / forward / reload / download bar at
+the bottom, in both builds (T459, in progress: compiled on all three platforms,
+**not yet run live**; see *Session navigation bar*).**
 
 ### Phase 6 spike findings
 
@@ -2214,6 +2217,176 @@ content always in its own webview, never a shared realm.
   re-run, a re-run for `http-auth`, CI coverage of the feature build.
 - **Carried forward as caveats:** the per-platform manual checks.
 
+### Session navigation bar (T459) — **Implemented in both builds, not yet run live**
+
+Spec: [docs/specs/2026-10-20-web-session-nav-controls-design.md](../docs/specs/2026-10-20-web-session-nav-controls-design.md)
+(plan: [docs/plans/2026-10-20-web-session-nav-controls.md](../docs/plans/2026-10-20-web-session-nav-controls.md)).
+Tracked as **T459** (S105), in progress: code complete and reviewed, waiting for
+the manual verification below.
+
+**What it is.** A native 36 px bar at the bottom of every web session window
+(including the recipe-test window) with four buttons: back, forward, reload and
+download. It is a native view beside the webview, not a DOM node, so it works on
+an inline PDF and a hostile page has no API that reaches it. It ships in **both**
+the default build and the `web_session_chrome` build. It stays in both until
+Phase 5 absorbs the controls into the vault toolbar; the same commit then
+removes it from the `web_session_chrome` build. There is no runtime switch.
+
+**Behaviour.**
+
+- Back and forward follow the webview's history; reload is disabled while a page
+  loads. A reload by the operator sets a one-shot mark so the fill engine does
+  not re-run the login on the reloaded page (a reload on the login page itself
+  does not fill either).
+- Download is enabled only when the profile sets `allow_downloads`, the shown
+  page is a downloadable type (PDF, archives, office documents, images except
+  SVG, audio, video, generic binary, or a `Content-Disposition: attachment`; an
+  HTML page is never downloadable) and no limit is reached. Disabled, its
+  tooltip reads "Downloads disabled for this profile." A refusal flashes a short
+  message on the button.
+- Files go to the OS Downloads folder under a sanitised name (path separators,
+  control characters, leading dots, trailing dots and spaces, Windows reserved
+  names and `:` neutralised). A taken name becomes `name (1).ext` and so on up
+  to 999. At most 2 downloads run at a time per window, 2 GiB each. Bytes land in
+  a private staging folder and are moved into place; a download interrupted by a
+  window close or an app quit leaves no zero-byte file.
+- The page keeps the profile's window size in both builds: the window is 36 px
+  taller than before (the chrome build: 40 px toolbar plus 36 px bar), and the
+  window cannot be shrunk below the height of both bars.
+
+**Mechanism per platform.**
+
+| Platform | Bar | Download |
+|---|---|---|
+| macOS | A sibling `NSVisualEffectView` at the bottom of the window's content view; the webview is shrunk by 36 pt and autoresizing keeps the strip. Buttons refuse first responder, so keyboard focus stays in the page. State comes from KVO on `canGoBack`, `canGoForward`, `loading` and `URL`, and from a forwarding delegate that reads the main-frame response type. | 11.3+: `WKDownload` through `startDownload(using:)` with the bar's own delegate (`path=webview`). 10.15 to 11.2: refetch through an ephemeral `URLSession` seeded with the webview's cookies (`path=refetch`). |
+| Linux | A horizontal `GtkBox` packed at the end of the vertical box wry already put the webview in; no layout change is needed in either build. | `webkit_web_view_download_uri` on the shown URL. The bar claims the `WebKitDownload` it started (its own `decide-destination`, and `failed` / `finished` stop emission), so wry's download handler does not also act on it; audited `path=refetch`. Downloads WebKitGTK itself escalates stay with wry and keep their existing lines. |
+| Windows | A child `HWND` plus a window subclass that re-shrinks wry's webview container to the client area minus 36 dip after wry's own `WM_SIZE` handling, and again on `WM_DPICHANGED`. | WebView2 has no API to save the current response, so the bar re-requests the shown URL itself (`path=refetch`); see the limits below. |
+
+**Security model.**
+
+- Native, not DOM: no script, no message channel, no page-to-bar push. A test
+  scans each shim's source for script-injection APIs.
+- Policy is the decision the webview's own downloads use,
+  `web::download_decision(allow_downloads, origins, url)`, fed with the same
+  origin set and `allow_downloads` as the window's `on_download`. It runs on the
+  click against the shown URL and again on the final URL (every redirect on
+  macOS, the final response on Linux, before connecting on Windows). A URL
+  outside the allow-list is refused before a body is saved.
+- Audit lines (`target: "audit"`, the session's clear `sess_...` token):
+  `connect.web.nav: resource=<id> token=<tok> action=back|forward|reload`;
+  `connect.web.download: resource=<id> token=<tok> filename="<name>" mime=<type> bytes=<n> path=webview|refetch`
+  (the name is quoted and escaped with control characters dropped, the mime is
+  folded to a safe token); and
+  `connect.web.download_refused: resource=<id> token=<tok> reason=<token>`, with
+  the reason one of `outside_allowlist`, `downloads_disabled`, `size_exceeded`,
+  `too_many_downloads`, `collision_exhausted`, `save_io_error`,
+  `invalid_filename`, `unavailable`, `transfer_failed` or `refetch_blocked`.
+  URLs, cookies, credentials and OS error texts are never logged.
+- The three shims share one reviewed implementation of the download path (the
+  private `session/web_nav_bar/transfer.rs`: policy, response checks, naming,
+  placeholder and staging, the per-download state machine); each shim holds only
+  its layout and platform glue.
+- No persisted format, route or Tauri command. The GUI manifest gains direct
+  dependencies on crates already in the graph (`objc2-app-kit` on macOS, `gtk`
+  on Linux) and the `Win32_Networking_WinHttp` feature of `windows` on Windows
+  (used to read the system proxy settings, not to send requests).
+
+**Known limits.**
+
+- Linux: WebKitGTK has no redirect hook. A 3xx to an origin outside the
+  allow-list is requested (with that origin's ephemeral per-window cookies only)
+  and refused at `decide-destination`: no body is saved and it is audited
+  `outside_allowlist`. The refuse-and-cancel path is unverified on WebKitGTK
+  older than 2.40, while wry's floor is 2.38.
+- Windows: the refetch uses the platform TLS verifier only, follows no redirect
+  (a 3xx is `unavailable`), sends only the cookies the webview holds for that
+  URL (Secure cookies are dropped on plain http), refuses any non-identity
+  `Content-Encoding`, writes a `Zone.Identifier` stream on the staging file
+  before the move, and stages under
+  `%LOCALAPPDATA%\.bastion_vault_gui\nav-download-staging`. It is refused
+  (`refetch_blocked`, before any request) when the session has TLS pins, an
+  operator-accepted untrusted certificate, no TLS gate, proxy mode, a WebView2
+  browser-argument switch that names `proxy`, `host-rules` or
+  `host-resolver-rules` (`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`), or any system
+  proxy, PAC script or auto-detect setting. Auto-detect is on by default on many
+  machines, so **bar downloads are often blocked on Windows**; the page's own
+  download links are unaffected. A proxy found only through WPAD is not
+  detectable, and WebView2 browser arguments from the registry or Edge policies
+  are not read.
+- macOS: both routes fetch the shown URL again. The 10.15 to 11.2 refetch cannot
+  replay a POST body or a one-time token and reports that as `unavailable`;
+  `startDownload(using:)` on 11.3+ also starts a new request, so a page that came
+  from a POST is likewise refused or saved as a different body. A one-time link
+  that answers 200 with a different downloadable body cannot be detected.
+  HTTP-auth credentials are not copied into the refetch.
+- Only the Windows shim writes `Zone.Identifier` itself; the macOS refetch and
+  the Linux download carry no quarantine or mark of the web beyond what the OS
+  applies.
+- Nothing has run live on any platform. The shims were compiled with a real
+  rustc on macOS, on Linux (Docker, Ubuntu 24.04 arm64, WebKitGTK 2.52.6) and on
+  Windows (Docker, `x86_64-pc-windows-gnu`), in both builds. Windows msvc and
+  Linux x86_64 were not compiled (CI's `gui-host` job builds Linux x86_64). The
+  pure logic is unit-tested on every host; the AppKit, GTK and Win32 glue is
+  compile-verified only, and the macOS 10.15 to 11.2 route cannot be exercised
+  on a current Mac.
+- Not done: a download progress indicator, a cancel button for an in-flight
+  download, and reading WebView2 policy browser arguments.
+
+**Manual verification checklist** (run on a dev instance, default build unless
+stated; every step is still open):
+
+1. **Open** a web resource (any profile). A 36 pt strip with four buttons sits
+   at the bottom and covers nothing: scroll to the very bottom of a long page and
+   its last line is above the strip. On a form profile the bar is there before
+   the login fill starts.
+2. **States.** On the first page Back and Forward are disabled and Reload is
+   enabled. Click a link and Back enables; press Back and Forward enables.
+   During a load, Reload and Download are disabled. After a click, keyboard focus
+   stays in the page (type in a field).
+3. **Reload vs fill** (form profile). After the login completes, click Reload on
+   the post-login page: the recipe must not refill. Then Reload on the login page
+   itself: it must not fill either. The audit log shows
+   `connect.web.nav: resource=<res> token=sess_... action=reload|back|forward`,
+   with the same `sess_...` as the `session.open` line.
+4. **PDF, downloads allowed.** With a profile `allow_downloads: true`, open a
+   link to an in-allow-list PDF. Download is enabled; click it. The file lands in
+   the Downloads folder (macOS: `xattr -l` shows `com.apple.quarantine`) and the
+   audit shows `connect.web.download: ... filename="x.pdf" mime=application/pdf bytes=<n> path=webview`
+   (`path=refetch` on Linux and Windows). A second file with the same name
+   becomes `x (1).pdf`.
+5. **Downloads disabled.** With the same PDF on a profile with `allow_downloads`
+   false or unset, the button is disabled and its tooltip reads "Downloads
+   disabled for this profile." An HTML page keeps it disabled in both profiles.
+6. **Refusals.** Click Download three times quickly on a large file: the third
+   flashes "too many". A page whose re-request cannot be repeated (a POST
+   result) gives `download_refused ... reason=unavailable` and a flash, not
+   silence.
+7. **Quit mid-download.** Start a large download and quit the app (macOS: Cmd+Q).
+   Afterwards nothing named after it is left in the Downloads folder (no
+   zero-byte file) and no `bv-nav-download-*` directory remains in the temp
+   folder. One `download_refused reason=transfer_failed` line is logged. Then
+   repeat by closing only the window.
+8. **Resize / fullscreen.** Resize small and large, maximise, enter and leave
+   fullscreen, and drag between Retina and non-Retina displays. The strip stays
+   36 pt at the bottom and the page never slides under it.
+9. **Chrome build** (`--features web_session_chrome`). The vault toolbar is at
+   the top (40) and the nav bar at the bottom (36), with the page between them.
+   The page height equals the profile's `window.height`. Shrink the window
+   vertically: it stops at about 76 pt (toolbar and bar whole) and the bar never
+   overlaps the toolbar. Disconnect from the toolbar removes the window and logs
+   `session.close ... reason=disconnect`.
+10. **Windows and Linux** (when a machine is available). The Linux bar sits below
+    the webview in both builds. On Windows, a pinned or accepted-certificate
+    session, or a machine with a proxy, PAC or auto-detect configured, gets the
+    `refetch_blocked` flash, and a direct session downloads with a
+    `Zone.Identifier` stream.
+11. **Windows browser arguments.** Start the app with
+    `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--proxy-server=http://<proxy>:3128`.
+    Any bar download is refused with `refetch_blocked`, and the page still loads
+    through the proxy.
+12. **Default-build size.** The page area equals the profile's `window.height`:
+    the window is 36 taller than before.
+
 ### Phase 6 — proxy mode — **Spike done; the build is T106 (In progress)**
 
 See *Current State → Phase 6 spike findings*.
@@ -2452,7 +2625,8 @@ a plain-`http://` load, and a login page that reflects the submitted password.
 Tracked as **T96** in `ROADMAP.md` (M5 Resources), spec **S105** — closed
 with Phases 1–5 and the Phase 6 spike, caveats carried in *Current State*.
 Building proxy mode (Phase 6) is **T106** and `sso` mode (Phase 7) is
-**T107**, blocked by T52, both in M5. Phase 8
+**T107**, blocked by T52, both in M5. The session navigation bar is **T459**
+(M5, in progress). Phase 8
 (Rustion browser isolation) is tracked separately as backlog task **T97**,
 because it is cross-repo and unscheduled. When phases
 land, update [CHANGELOG.md](../CHANGELOG.md) (the connect-only/launch endpoint
