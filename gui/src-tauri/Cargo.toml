@@ -324,8 +324,19 @@ windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Libr
 # reach the types and the Foundation / WebKit classes the delegate touches.
 objc2 = "0.6"
 block2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSObject", "NSString", "NSURLAuthenticationChallenge", "NSURLProtectionSpace", "NSURLCredential", "NSURLSession"] }
-objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "objc2-app-kit", "block2", "WKWebView", "WKNavigationDelegate"] }
+# The features after `NSURLSession`, and those after `WKNavigationDelegate`
+# below, are for the web session nav bar (`session/web_nav_bar/macos.rs`):
+# KVO on the webview and the download's progress, the window-close
+# notification, the WKDownload delegate and the macOS 10.15–11.2 URLSession
+# refetch. Every one is already enabled on these crates by wry and tao, so
+# listing them changes no crate's feature set (and rebuilds nothing).
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSObject", "NSString", "NSURLAuthenticationChallenge", "NSURLProtectionSpace", "NSURLCredential", "NSURLSession", "NSArray", "NSData", "NSDictionary", "NSEnumerator", "NSError", "NSGeometry", "NSHTTPCookie", "NSKeyValueObserving", "NSNotification", "NSProcessInfo", "NSProgress", "NSURL", "NSURLRequest", "NSURLResponse"] }
+objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "objc2-app-kit", "block2", "WKWebView", "WKNavigationDelegate", "WKDownload", "WKDownloadDelegate", "WKHTTPCookieStore", "WKNavigation", "WKNavigationResponse", "WKWebViewConfiguration", "WKWebsiteDataStore"] }
+# The nav bar's native views (`session/web_nav_bar/macos.rs`): the bar, its
+# buttons and SF Symbol images. Not a new crate: objc2-app-kit 0.3 is in the
+# graph through wry and tao, and every feature listed is one they already
+# enable, so this changes no feature set either.
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "NSButton", "NSCell", "NSColor", "NSControl", "NSImage", "NSResponder", "NSView", "NSVisualEffectView", "NSWindow"] }
 # Web Connect TLS pinning (T96 Phase 4, `commands/connect_web_tls_pin.rs`):
 # the same delegate's server-trust challenge evaluates the `SecTrust`, reads
 # its certificate chain and builds `credentialForTrust:`. No new crates: both

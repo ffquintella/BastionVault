@@ -36,10 +36,11 @@ pub mod filename;
 
 // Per-platform shim modules are declared by Tasks 2–4 of
 // docs/plans/2026-10-20-web-session-nav-controls.md:
-//   #[cfg(target_os = "macos")]   pub mod macos;    // Task 2
 //   #[cfg(target_os = "windows")] pub mod windows;  // Task 3
 //   #[cfg(target_os = "linux")]   pub mod linux;    // Task 4
 // They all consume the trait, state and audit types defined below.
+#[cfg(target_os = "macos")]
+pub mod macos;
 
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
@@ -57,6 +58,13 @@ pub const DOWNLOAD_SOFT_CAP_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// Per-window maximum of in-flight downloads (spec §7.6). The third
 /// concurrent click is a no-op with a tooltip.
 pub const MAX_CONCURRENT_DOWNLOADS: u8 = 2;
+
+/// Height of the bar in logical pixels (points on macOS). The bar owns this
+/// strip at the bottom of the session window and the webview is laid out
+/// above it, never under it (spec §7.1, anti-goal A5). A host that lays the
+/// remote webview out itself (the `web_session_chrome` window) must leave
+/// exactly this much free at the bottom.
+pub const BAR_HEIGHT: f64 = 36.0;
 
 /// A button on the bar. Each per-platform shim decodes a click into one
 /// of these and dispatches to the webview's history / reload / download
@@ -222,6 +230,15 @@ pub mod reason {
     pub const SAVE_IO_ERROR: &str = "save_io_error";
     /// [`super::NextPathError::InvalidName`].
     pub const INVALID_FILENAME: &str = "invalid_filename";
+    /// The bar could not fetch the shown document again: it is not an
+    /// http(s) document, or the re-request answered with a non-2xx status or
+    /// with a response outside the downloadable set. This is how a page that
+    /// came from a POST body or a one-time link (which a re-request cannot
+    /// replay) is reported, as is an expired session.
+    pub const UNAVAILABLE: &str = "unavailable";
+    /// The transfer failed after it started (network or webview error), or
+    /// the window closed while it was in flight.
+    pub const TRANSFER_FAILED: &str = "transfer_failed";
 }
 
 /// Map a [`NextPathError`] to its fixed audit reason token. The
@@ -723,6 +740,8 @@ mod audit {
             reason::COLLISION_EXHAUSTED,
             reason::SAVE_IO_ERROR,
             reason::INVALID_FILENAME,
+            reason::UNAVAILABLE,
+            reason::TRANSFER_FAILED,
         ];
         for r in all {
             assert!(is_reason_token(r), "{r}");
