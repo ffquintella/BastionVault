@@ -42,7 +42,9 @@ jobs:
       OPENSSL_SRC_PERL: C:/Strawberry/perl/bin/perl.exe
     defaults:
       run:
-        shell: bash
+        # PowerShell, not Git Bash: Git's bin directory on PATH shadows the
+        # system DLLs the test binary loads (STATUS_ENTRYPOINT_NOT_FOUND).
+        shell: pwsh
     steps:
       - uses: actions/checkout@v4
         with:
