@@ -1843,3 +1843,21 @@ All seven tasks are under M5 (Resources) in `ROADMAP.md`; this spec is S109.
 - Kerberos / integrated authentication; client-certificate database
   authentication issued by the PKI engine.
 - XLSX export; visual explain plans; read-only MCP SQL tools.
+
+## Phase 1, subsystem 1 validation
+
+Commands run from the `feat/t124-sql-policy-capabilities` worktree, one at a
+time:
+
+1. `make test-changed PKG=bv-policy-core` — exit 0.
+   `Summary [ 114.848s] 934 tests run: 934 passed, 13 skipped`
+2. `make test-changed PKG=bv-kernel` — exit 0.
+   `Summary [ 124.701s] 900 tests run: 900 passed, 13 skipped`
+3. `make verify-kani` — exit 0.
+   `Complete - 14 successfully verified harnesses, 0 failures, 14 total.`
+   `KANI GATE: PASS`
+4. `make verify-differential CASES=1000000` — exit 0.
+   `Summary [ 956.301s] 13 tests run: 13 passed (2 slow), 277 skipped`
+   `==> verify differential: PASS (958.2 s)`
+
+Subsystems 2–6 remain; T124 stays [ ].
