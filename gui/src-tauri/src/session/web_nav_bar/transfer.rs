@@ -330,6 +330,7 @@ impl DownloadJob {
     }
 
     /// The reserved file in the Downloads folder.
+    #[cfg_attr(not(test), allow(dead_code))] // read by tests only
     pub fn placeholder(&self) -> &Path {
         &self.placeholder
     }
@@ -508,6 +509,9 @@ impl Transfer {
     }
 
     /// A redirect to `to` (refused unless it passes [`url_policy`]).
+    // Only WebKit on macOS reports a download's redirect before following
+    // it; WebKitGTK has no hook and the Windows request follows none.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub fn redirect(&mut self, to: Option<&Url>, allow_downloads: bool, origins: &OriginSet) -> Option<Settled> {
         if !self.is_open() {
             return None;
@@ -539,6 +543,9 @@ impl Transfer {
     }
 
     /// [`DownloadJob::record_total`] on the active job.
+    // WebKit and WebKitGTK report a running total; the Windows request counts
+    // the chunks it writes itself (`write_chunk`).
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     pub fn record_total(&mut self, total: u64) -> Option<Settled> {
         self.on_job(|job| job.record_total(total))
     }

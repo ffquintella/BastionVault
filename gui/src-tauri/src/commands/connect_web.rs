@@ -101,7 +101,9 @@ use super::connect::{
     SessionProtocolTag,
 };
 use super::connect_web_http_auth::{InstallError, NativeGates, TLS_PIN_HANDLER_CHECK};
-use super::connect_web_nav_bar::{nav_bar_wiring, NavBarInputs, SessionNetwork, WebviewRoute, REMOTE_FRAME};
+use super::connect_web_nav_bar::{
+    nav_bar_wiring, session_network, window_policy, SessionNetwork, WindowPolicy, REMOTE_FRAME,
+};
 use crate::error::{CmdResult, CommandError};
 use crate::session::web::{
     self as web_session, display_origin, download_decision, download_file_name, DownloadDecision, FormRelogin,
@@ -359,13 +361,13 @@ pub async fn session_open_web(
     });
     // The nav bar's view of the network: the window's own pin gate, cloned
     // before it moves into the native handlers, and the route the launch's
-    // exposure implies (`WebviewRoute`, fail closed).
-    let launch_exposure = form_run
-        .as_ref()
+    // exposure and the webview's browser arguments imply (`WebviewRoute`,
+    // fail closed).
+    let launch_exposures = form_run
+        .iter()
         .map(|(start, _)| start.exposure.as_str())
-        .or_else(|| http_auth_run.as_ref().map(|start| start.exposure.as_str()));
-    let network =
-        SessionNetwork { tls_pin: tls_pin_gate.clone(), route: WebviewRoute::from_launch_exposure(launch_exposure) };
+        .chain(http_auth_run.iter().map(|start| start.exposure.as_str()));
+    let network = session_network(tls_pin_gate.clone(), launch_exposures);
     let gates = NativeGates {
         http_auth: http_auth_gate.clone(),
         tls_pin: tls_pin_gate,
@@ -1463,7 +1465,7 @@ pub async fn web_recipe_test(
         )
     });
     // A dry run has no launch.
-    let network = SessionNetwork { tls_pin: tls_pin_gate.clone(), route: WebviewRoute::from_launch_exposure(None) };
+    let network = session_network(tls_pin_gate.clone(), std::iter::empty());
     let gates = NativeGates {
         http_auth: None,
         tls_pin: tls_pin_gate,
@@ -1603,25 +1605,24 @@ struct SessionWindow {
     nav_bar: Box<dyn NavBar>,
 }
 
-/// Everything the remote webview's handlers close over.
+/// Everything the remote webview's handlers close over: the app handle and
+/// window label, plus the window's [`WindowPolicy`] (audit identity,
+/// allow-list, session), which the nav bar is configured from too.
 struct RemotePolicy {
     app: AppHandle,
     label: String,
-    token: String,
-    resource: String,
-    origins: Arc<OriginSet>,
-    shared: Arc<WebShared>,
+    window: WindowPolicy,
 }
 
 impl RemotePolicy {
     /// Navigation allow-list.
     fn on_navigation(&self) -> impl Fn(&Url) -> bool + Send + 'static {
-        let origins = Arc::clone(&self.origins);
-        let shared = Arc::clone(&self.shared);
+        let origins = Arc::clone(&self.window.origins);
+        let shared = Arc::clone(&self.window.shared);
         let app = self.app.clone();
         let label = self.label.clone();
-        let token = self.token.clone();
-        let resource = self.resource.clone();
+        let token = self.window.token.clone();
+        let resource = self.window.resource.clone();
         move |url: &Url| -> bool {
             match origins.check(url) {
                 NavigationVerdict::Allow => true,
@@ -1648,11 +1649,11 @@ impl RemotePolicy {
         &self,
         allow_popups: bool,
     ) -> impl Fn(Url, tauri::webview::NewWindowFeatures) -> NewWindowResponse<tauri::Wry> + Send + Sync + 'static {
-        let origins = Arc::clone(&self.origins);
+        let origins = Arc::clone(&self.window.origins);
         let app = self.app.clone();
         let label = self.label.clone();
-        let token = self.token.clone();
-        let resource = self.resource.clone();
+        let token = self.window.token.clone();
+        let resource = self.window.resource.clone();
         move |url: Url, _features: tauri::webview::NewWindowFeatures| {
             match origins.check_popup(&url, allow_popups) {
                 NavigationVerdict::Allow => {
@@ -1683,9 +1684,9 @@ impl RemotePolicy {
         &self,
         allow_downloads: bool,
     ) -> impl Fn(tauri::Webview, DownloadEvent<'_>) -> bool + Send + Sync + 'static {
-        let origins = Arc::clone(&self.origins);
-        let token = self.token.clone();
-        let resource = self.resource.clone();
+        let origins = Arc::clone(&self.window.origins);
+        let token = self.window.token.clone();
+        let resource = self.window.resource.clone();
         move |_webview: tauri::Webview, event: DownloadEvent<'_>| -> bool {
             match event {
                 DownloadEvent::Requested { url, destination } => {
@@ -1736,12 +1737,12 @@ impl RemotePolicy {
         &self,
         http_auth: Option<Arc<HttpAuthGate>>,
     ) -> impl Fn(&Url, PageLoadEvent) -> Option<String> + Send + Sync + 'static {
-        let origins = Arc::clone(&self.origins);
-        let shared = Arc::clone(&self.shared);
+        let origins = Arc::clone(&self.window.origins);
+        let shared = Arc::clone(&self.window.shared);
         let app = self.app.clone();
         let label = self.label.clone();
-        let token = self.token.clone();
-        let resource = self.resource.clone();
+        let token = self.window.token.clone();
+        let resource = self.window.resource.clone();
         move |url: &Url, event: PageLoadEvent| {
             if let NavigationVerdict::Block { origin } = origins.check(url) {
                 // A top-frame load the navigation handler should have
@@ -1802,18 +1803,17 @@ fn build_window(
     let policy = RemotePolicy {
         app: app.clone(),
         label: label.to_string(),
-        token: token.to_string(),
-        resource: resource.to_string(),
-        origins: Arc::new(scope.origins.clone()),
-        shared: Arc::clone(shared),
+        window: window_policy(token, resource, scope, shared),
     };
     let page_load = policy.on_page_load(http_auth);
 
     #[cfg(not(feature = "web_session_chrome"))]
     {
+        // The page keeps the profile's size; the nav bar's strip comes on top.
+        let (width, height) = super::connect_web_nav_bar::default_window_inner_size(cfg.width, cfg.height);
         let mut builder = WebviewWindowBuilder::new(app, label, WebviewUrl::External(initial_url))
             .title(shared.title())
-            .inner_size(f64::from(cfg.width), f64::from(cfg.height))
+            .inner_size(width, height)
             .resizable(true)
             .focused(true)
             .incognito(true)
@@ -1837,7 +1837,7 @@ fn build_window(
         }
         let win = builder.build().map_err(|e| CommandError::from(format!("spawn web session window: {e}")))?;
         let remote = AsRef::<tauri::Webview>::as_ref(&win).clone();
-        let nav_bar = attach_nav_bar(app, &remote, &policy, cfg, &network);
+        let nav_bar = attach_nav_bar(app, &remote, &policy.window, cfg, &network);
         Ok(SessionWindow { window: remote.window(), remote, nav_bar })
     }
 
@@ -1866,33 +1866,25 @@ fn build_window(
         }
         super::connect_web_chrome::build_chrome_window(app, label, token, &shared.title(), cfg, remote).map(
             |(window, remote)| {
-                let nav_bar = attach_nav_bar(app, &remote, &policy, cfg, &network);
+                let nav_bar = attach_nav_bar(app, &remote, &policy.window, cfg, &network);
                 SessionWindow { window, remote, nav_bar }
             },
         )
     }
 }
 
-/// Attach the native nav bar to the remote webview, configured from this
-/// window's own policy: `RemotePolicy`'s allow-list and session, the
-/// `allow_downloads` its `on_download` gets, its resource and token
-/// (`connect_web_nav_bar`).
+/// Attach the native nav bar to the remote webview, configured from the
+/// same [`WindowPolicy`] the window's handlers close over (allow-list,
+/// session, resource and token) and the `allow_downloads` its `on_download`
+/// gets (`connect_web_nav_bar`).
 fn attach_nav_bar(
     app: &AppHandle,
     remote: &tauri::Webview,
-    policy: &RemotePolicy,
+    window: &WindowPolicy,
     cfg: &web_session::WebSessionConfig,
     network: &SessionNetwork,
 ) -> Box<dyn NavBar> {
-    let wiring = nav_bar_wiring(NavBarInputs {
-        cfg,
-        resource: &policy.resource,
-        token: &policy.token,
-        origins: &policy.origins,
-        shared: &policy.shared,
-        network,
-        frame: REMOTE_FRAME,
-    });
+    let wiring = nav_bar_wiring(window, cfg, network, REMOTE_FRAME);
     super::connect_web_nav_bar::attach(app, remote, wiring)
 }
 

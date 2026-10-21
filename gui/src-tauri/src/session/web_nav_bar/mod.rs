@@ -29,25 +29,25 @@
 //! `windows_model`, `windows_refetch` and their unit tests compile on every
 //! host.
 //!
-//! Dead-code allow: the composition root (`commands/connect_web_nav_bar.rs`)
-//! attaches the bar, but on any one host most of this module is still dead
-//! to the compiler on purpose: `linux_model`, `windows_model` and
-//! `windows_refetch` are compiled everywhere so their tests run on every
-//! host, yet only their own platform's shim calls them; `NavBarConfig`'s
-//! `proxy_mode` is read by the Windows shim only; and a few accessors
-//! (`DownloadLimiter::in_flight`, `DownloadSlot::bytes_recorded`,
-//! `NavBar::set_state`) serve tests and diagnostics. Removing the attribute
-//! today gives 69 such warnings on macOS.
-#![allow(dead_code)]
+//! The composition root (`commands/connect_web_nav_bar.rs`) attaches the
+//! bar. Dead-code allows are per module or per item, each with its reason:
+//! the pure halves of the GTK and WebView2 shims are compiled on every host
+//! so their tests run everywhere, but only their own platform calls them.
 
 pub mod filename;
 // Not cfg-gated: the per-platform shims below all drive it.
 mod transfer;
-// The GTK shim's pure half. Not cfg-gated, so its tests run on every host.
+// The GTK shim's pure half. Not cfg-gated, so its tests run on every host;
+// elsewhere only the Windows shim borrows a few of its items, so the rest is
+// dead there by design.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod linux_model;
 // The WebView2 shim's pure half and its own re-request of the shown
-// document. Not cfg-gated either, for the same reason.
+// document. Not cfg-gated either, for the same reason; only the Windows shim
+// calls them.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 mod windows_model;
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 mod windows_refetch;
 
 // Per-platform shim modules (Tasks 2–4 of
@@ -200,8 +200,12 @@ pub fn is_downloadable_mime(mime: &str) -> bool {
 /// calls [`NavBar::detach`] to unparent the native views on the main
 /// thread.
 pub trait NavBar: Send {
-    /// Re-render button enablement from `state`. Called from the host's
-    /// main thread.
+    /// Re-render button enablement from `state`, until the next change the
+    /// shim observes itself. Nothing calls it today: every shim derives its
+    /// state from its own webview observations. It stays the trait's way for
+    /// the host to push a state (for instance a future toolbar's), callable
+    /// from any thread, since each shim hops to its UI thread itself.
+    #[allow(dead_code)] // no caller yet, see above; each shim implements it
     fn set_state(&self, state: &NavState);
     /// Remove the bar from the window and release native resources.
     /// Takes `Box<Self>` so the trait object is consumed.
@@ -244,9 +248,11 @@ pub struct NavBarConfig {
     /// when the gate has pins or the operator accepted an untrusted
     /// certificate for the origin, and when there is no gate at all (the
     /// session's TLS profile is then unknown).
+    #[cfg_attr(target_os = "linux", allow(dead_code))] // not read on Linux, see above
     pub tls_pin: Option<Arc<TlsPinGate>>,
     /// macOS and Windows. On Linux the window's `GtkBox` lays the webview
     /// out in both builds, so the shim never sets a frame.
+    #[cfg_attr(target_os = "linux", allow(dead_code))] // not read on Linux, see above
     pub frame: WebviewFrame,
     /// The session's webview loads through the proxy-mode loopback proxy
     /// (T106, `proxy_url`). Windows refuses the bar's download then
@@ -254,8 +260,9 @@ pub struct NavBarConfig {
     /// proxy. macOS and Linux download in the webview's own network stack,
     /// proxy included, and do not read it. The composition root derives it
     /// from the session (`commands::connect_web_nav_bar::WebviewRoute`: the
-    /// launch's exposure, an unknown route counting as proxied); no session
-    /// is proxied before T106's platform wiring.
+    /// launch's exposure and WebView2's browser arguments, an unknown route
+    /// counting as proxied).
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))] // only the Windows shim requests on its own
     pub proxy_mode: bool,
 }
 
@@ -267,6 +274,9 @@ pub enum DownloadPath {
     /// `WKDownload` on macOS 11.3+, `CoreWebView2.DownloadStarting` on
     /// Windows, `WebKitDownload` on Linux. The native path; MOTW /
     /// quarantine is set on macOS and Windows by the OS.
+    // Only the macOS bar downloads through the webview (WKDownload); the GTK
+    // and WebView2 bars always re-request (`Refetch`).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Webview,
     /// Fallback: `URLSession` on macOS 10.15–11.2, WebKitGTK's
     /// `webkit_web_view_download_uri` (re-requests), and the Windows bar's
@@ -468,6 +478,7 @@ impl DownloadLimiter {
     }
 
     /// Number of slots currently in use. Diagnostic / test only.
+    #[cfg_attr(not(test), allow(dead_code))] // read by tests only
     pub fn in_flight(&self) -> u8 {
         self.concurrent.load(Ordering::SeqCst)
     }
@@ -516,6 +527,7 @@ impl DownloadSlot {
     }
 
     /// Running byte total. Diagnostic / test only.
+    #[cfg_attr(not(test), allow(dead_code))] // read by tests only
     pub fn bytes_recorded(&self) -> u64 {
         self.bytes.load(Ordering::SeqCst)
     }
