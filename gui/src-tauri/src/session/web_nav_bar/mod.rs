@@ -310,8 +310,10 @@ pub mod reason {
     pub const TRANSFER_FAILED: &str = "transfer_failed";
     /// The bar would have to request the document itself, and that request
     /// could not honour the session's TLS profile (pins, an untrusted
-    /// certificate the operator accepted, or no TLS gate to tell) or its
-    /// proxy mode. Refused before anything is requested (Windows).
+    /// certificate the operator accepted, or no TLS gate to tell), its
+    /// proxy mode, or the system proxy the webview follows (a proxy, a PAC
+    /// script or auto-detection configured, or settings that cannot be
+    /// read). Refused before anything is requested (Windows).
     pub const REFETCH_BLOCKED: &str = "refetch_blocked";
 }
 

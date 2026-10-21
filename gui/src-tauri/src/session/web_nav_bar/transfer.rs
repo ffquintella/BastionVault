@@ -207,8 +207,8 @@ pub(crate) fn refusal_message(refusal: &str) -> &'static str {
             "This file cannot be fetched again from here (it may need a form submission or a one-time link)."
         }
         reason::REFETCH_BLOCKED => {
-            "This session's TLS or proxy settings do not let the bar fetch this file again; use the page's own \
-             download link."
+            "The bar cannot fetch this file again with this session's TLS settings or this computer's proxy \
+             settings; use the page's own download link."
         }
         _ => "The download failed.",
     }
@@ -283,11 +283,14 @@ fn create_private_dir(path: &Path) -> std::io::Result<()> {
 ///
 /// Windows has no mode bits: std creates the directory with
 /// `CreateDirectoryW` and no security descriptor, so it inherits its
-/// parent's ACEs. The parent is `std::env::temp_dir()` (`GetTempPath2W`),
-/// by default the user's `%LOCALAPPDATA%\Temp`, whose ACL grants only the
-/// user, SYSTEM and Administrators: the same principals that can read a
-/// 0700 directory on unix (its owner and root). A `%TMP%` pointed at a
-/// shared folder passes that folder's ACL on instead.
+/// parent's ACEs. The parent is the staging root the Windows shim picks
+/// (`windows_model::destination`): `%LOCALAPPDATA%\.bastion_vault_gui\nav-download-staging`,
+/// which inherits `%LOCALAPPDATA%`'s per-user ACL (the user, SYSTEM and
+/// Administrators: the same principals that can read a 0700 directory on
+/// unix, its owner and root) whatever `%TMP%` points at. Only when that
+/// folder cannot be made is it `std::env::temp_dir()` (`GetTempPath2W`),
+/// where a `%TMP%` pointed at a shared folder would pass that folder's ACL
+/// on instead.
 #[cfg(windows)]
 fn create_private_dir(path: &Path) -> std::io::Result<()> {
     fs::DirBuilder::new().create(path)

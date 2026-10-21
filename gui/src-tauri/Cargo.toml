@@ -318,8 +318,13 @@ webview2-com = "0.38"
 # WebView2's cookie strings (`GetDpiForWindow` is looked up at run time
 # through `Win32_System_LibraryLoader`). tao 0.35 and wry 0.55 already enable
 # every one of them on windows 0.61, so listing them changes no crate's
-# feature set (and rebuilds nothing).
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_LibraryLoader", "Win32_Graphics_Gdi", "Win32_System_Com", "Win32_System_SystemServices", "Win32_UI_Controls", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+# feature set. The exception is `Win32_Networking_WinHttp`, which no crate
+# in the graph enables: the bar reads the user's system proxy settings
+# (`WinHttpGetIEProxyConfigForCurrentUser`, winhttp.dll, part of every
+# Windows) to refuse its own direct request when WebView2 would go through
+# a proxy. It adds that one module to the `windows` crate on Windows builds
+# only; no package and no `Cargo.lock` entry changes.
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_LibraryLoader", "Win32_Graphics_Gdi", "Win32_System_Com", "Win32_System_SystemServices", "Win32_UI_Controls", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_Networking_WinHttp"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Web Connect `http-auth` mode (features/web-application-connect.md §7, T96

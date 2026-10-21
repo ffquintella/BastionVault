@@ -40,13 +40,16 @@
 //! (`refetch_blocked`) any session whose webview loads are trusted or routed
 //! in a way the request could not reproduce: a TLS profile with pins, a
 //! certificate the operator accepted for the origin, no TLS gate to tell, or
-//! proxy mode. Only then are the webview's cookies for the URL read
-//! (`ICoreWebView2CookieManager::GetCookies`) and the request started on the
+//! proxy mode; and [`windows_model::system_proxy_gate`] refuses it when the
+//! user's system proxy settings, which WebView2 follows, name a proxy, a PAC
+//! script or auto-detection (or cannot be read). Only then are the
+//! webview's cookies for the URL read (`ICoreWebView2CookieManager::GetCookies`;
+//! `Secure` ones dropped again on plain http) and the request started on the
 //! async runtime. Downloads the webview escalates itself
 //! (`DownloadStarting`) are not the bar's: they stay on wry's handler and
-//! `RemotePolicy::on_download`, as before this change. The saved file gets
-//! a `Zone.Identifier` stream (zone 3), which the request does not get from
-//! WebView2.
+//! `RemotePolicy::on_download`, as before this change. The complete staging
+//! file gets a `Zone.Identifier` stream (zone 3) before it is moved into
+//! Downloads, which the request does not get from WebView2.
 //!
 //! **Isolation.** Nothing here gives the page a way in: no script is
 //! injected or run, no host object is exposed and no page-to-host message
@@ -78,12 +81,16 @@ use std::sync::{Arc, OnceLock};
 
 use ::windows::core::{s, w, Interface, BOOL, HSTRING, PCWSTR, PWSTR};
 use ::windows::Win32::Foundation::{
-    GetLastError, COLORREF, ERROR_CLASS_ALREADY_EXISTS, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM,
+    GetLastError, GlobalFree, COLORREF, ERROR_CLASS_ALREADY_EXISTS, HGLOBAL, HINSTANCE, HWND, LPARAM, LRESULT, RECT,
+    WPARAM,
 };
 use ::windows::Win32::Graphics::Gdi::{
     CreateFontW, DeleteObject, GetSysColorBrush, InvalidateRect, SetBkMode, SetTextColor, CLEARTYPE_QUALITY,
     CLIP_DEFAULT_PRECIS, COLOR_BTNFACE, DEFAULT_CHARSET, DEFAULT_PITCH, FF_DONTCARE, FW_NORMAL, HDC, HFONT, HGDIOBJ,
     OUT_DEFAULT_PRECIS, TRANSPARENT,
+};
+use ::windows::Win32::Networking::WinHttp::{
+    WinHttpGetIEProxyConfigForCurrentUser, WINHTTP_CURRENT_USER_IE_PROXY_CONFIG,
 };
 use ::windows::Win32::System::Com::CoTaskMemFree;
 use ::windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
@@ -324,7 +331,7 @@ unsafe fn take_secret(value: PWSTR) -> Zeroizing<String> {
     // SAFETY: the caller's contract; `as_wide` stops at the terminator.
     let (copy, len) = unsafe {
         let units = value.as_wide();
-        (Zeroizing::new(String::from_utf16_lossy(units)), units.len())
+        (windows_model::utf16_secret(units), units.len())
     };
     // SAFETY: overwrites the `len` code units just read, in a buffer the
     // caller owns, then frees it, once.
@@ -541,11 +548,38 @@ enum InFlight {
 struct Waiting {
     transfer: Transfer,
     url: Url,
-    downloads_dir: std::path::PathBuf,
 }
 
 fn destination() -> Option<transfer::Destination> {
-    windows_model::destination(dirs::download_dir(), dirs::home_dir(), dirs::data_local_dir(), std::env::temp_dir())
+    // `%LOCALAPPDATA%\.bastion_vault_gui`, the crate's per-user data folder.
+    let app_root = crate::embedded::app_root().ok();
+    windows_model::destination(dirs::download_dir(), dirs::home_dir(), app_root, std::env::temp_dir())
+}
+
+/// The current user's WinINET proxy settings, which WebView2 follows; `None`
+/// when they cannot be read (the caller then refuses, fail closed). Only
+/// whether each kind is set is kept, never the proxy names or the PAC URL.
+fn system_proxy() -> Option<windows_model::SystemProxy> {
+    let mut config = WINHTTP_CURRENT_USER_IE_PROXY_CONFIG::default();
+    // SAFETY: fills a local struct; on success its strings are WinHTTP's
+    // `GlobalAlloc` copies, read and freed below, each once.
+    unsafe { WinHttpGetIEProxyConfigForCurrentUser(&mut config) }.ok()?;
+    let set = |s: PWSTR| {
+        // SAFETY: a NUL-terminated string WinHTTP returned, or null.
+        !s.is_null() && unsafe { *s.0 } != 0
+    };
+    let proxy = windows_model::SystemProxy {
+        static_proxy: set(config.lpszProxy),
+        pac_url: set(config.lpszAutoConfigUrl),
+        auto_detect: config.fAutoDetect.as_bool(),
+    };
+    for s in [config.lpszAutoConfigUrl, config.lpszProxy, config.lpszProxyBypass] {
+        if !s.is_null() {
+            // SAFETY: frees a string the call above allocated for us, once.
+            let _ = unsafe { GlobalFree(Some(HGLOBAL(s.0.cast()))) };
+        }
+    }
+    Some(proxy)
 }
 
 /// Build the bar on the UI thread (the `with_webview` closure).
@@ -1009,19 +1043,24 @@ impl NativeBar {
         if let Err(refusal) = windows_model::refetch_gate(self.session_tls(&url), self.proxy_mode) {
             return self.refuse(refusal);
         }
+        // The request goes straight to the origin; the webview follows the
+        // system proxy. Any proxy configured there refuses it.
+        if let Err(refusal) = windows_model::system_proxy_gate(system_proxy()) {
+            return self.refuse(refusal);
+        }
         let Some(cookies) = self.cookie_manager() else { return self.refuse(reason::UNAVAILABLE) };
         let Some(slot) = self.limiter.try_acquire() else { return self.refuse(reason::TOO_MANY_DOWNLOADS) };
         let Some(dest) = destination() else { return self.refuse(reason::SAVE_IO_ERROR) };
         let download = NEXT_DOWNLOAD.fetch_add(1, Ordering::Relaxed);
-        let downloads_dir = dest.downloads_dir.clone();
         let uri = HSTRING::from(url.as_str());
-        let waiting = Waiting { transfer: Transfer::new(slot, dest), url, downloads_dir };
+        let https = url.scheme() == "https";
+        let waiting = Waiting { transfer: Transfer::new(slot, dest), url };
         self.downloads.borrow_mut().insert(download, InFlight::Cookies(Box::new(waiting)));
         let agent = self.user_agent();
         let bar_id = self.id;
         let handler = GetCookiesCompletedHandler::create(Box::new(move |result, list| {
             let cookies = match (result, list) {
-                (Ok(()), Some(list)) => read_cookies(&list),
+                (Ok(()), Some(list)) => read_cookies(&list, https),
                 _ => Err(reason::TRANSFER_FAILED),
             };
             with_bar(bar_id, |bar| bar.cookies_ready(download, cookies, agent));
@@ -1045,7 +1084,7 @@ impl NativeBar {
     ) {
         let entry = self.downloads.borrow_mut().remove(&download);
         let Some(InFlight::Cookies(waiting)) = entry else { return };
-        let Waiting { mut transfer, url, downloads_dir } = *waiting;
+        let Waiting { mut transfer, url } = *waiting;
         let cookie = match cookies {
             Ok(cookie) => cookie,
             Err(refusal) => return self.settle_here(transfer.fail(refusal)),
@@ -1065,10 +1104,9 @@ impl NativeBar {
         let app = self.app.clone();
         let bar_id = self.id;
         tauri::async_runtime::spawn(async move {
-            let settled = windows_refetch::run(refetch, transfer, policy, tls, cancelled).await;
-            if let Settled::Saved(saved) = &settled {
-                mark_of_the_web(&downloads_dir.join(&saved.filename));
-            }
+            // The mark goes on the complete staging file, before it is moved
+            // into Downloads, so the saved file is never unmarked.
+            let settled = windows_refetch::run(refetch, transfer, policy, tls, cancelled, mark_of_the_web).await;
             // One audit line per download, written here even when the bar
             // is gone.
             audit_settled(&audit, &settled);
@@ -1174,34 +1212,43 @@ fn audit_settled(audit: &NavBarAudit, outcome: &Settled) {
     }
 }
 
-/// The `Cookie` header from the webview's cookies for the request's URL.
-fn read_cookies(list: &ICoreWebView2CookieList) -> Result<Option<Zeroizing<String>>, &'static str> {
+/// The `Cookie` header from the webview's cookies for the request's URL. A
+/// `Secure` cookie is dropped again on plain http (`https` false), whatever
+/// `GetCookies` matched; one whose flag cannot be read counts as `Secure`.
+fn read_cookies(list: &ICoreWebView2CookieList, https: bool) -> Result<Option<Zeroizing<String>>, &'static str> {
     let mut count = 0u32;
     // SAFETY: a COM read on the list WebView2 handed the completion handler,
     // on the UI thread.
     unsafe { list.Count(&mut count) }.map_err(|_| reason::TRANSFER_FAILED)?;
-    let mut pairs: Vec<(String, Zeroizing<String>)> = Vec::new();
+    let mut cookies: Vec<(String, Zeroizing<String>, bool)> = Vec::new();
     for index in 0..count.min(windows_model::MAX_COOKIES) {
         let mut name = PWSTR::null();
         let mut value = PWSTR::null();
+        let mut secure = BOOL::from(true);
         // SAFETY: COM reads on the list and its cookies, on the UI thread;
         // the out-pointers are locals, each string is copied once and freed
         // (`take_pwstr`, and `take_secret`, which also wipes the value).
-        let pair = unsafe {
+        let cookie = unsafe {
             let cookie = list.GetValueAtIndex(index).map_err(|_| reason::TRANSFER_FAILED)?;
+            if cookie.IsSecure(&mut secure).is_err() {
+                secure = BOOL::from(true);
+            }
             cookie.Name(&mut name).map_err(|_| reason::TRANSFER_FAILED)?;
             let name = take_pwstr(name);
             cookie.Value(&mut value).map_err(|_| reason::TRANSFER_FAILED)?;
-            (name, take_secret(value))
+            (name, take_secret(value), secure.as_bool())
         };
-        pairs.push(pair);
+        cookies.push(cookie);
     }
-    Ok(windows_model::cookie_header(pairs.iter().map(|(name, value)| (name.as_str(), value.as_str()))))
+    let pairs = cookies.iter().map(|(name, value, secure)| (name.as_str(), value.as_str(), *secure));
+    Ok(windows_model::cookie_header(https, pairs))
 }
 
 /// Mark a downloaded file as from the Internet (zone 3), as WebView2 marks
-/// its own downloads. Failing to (a FAT volume has no alternate data
-/// streams) leaves the file and is logged.
+/// its own downloads. Called on the complete staging file, before it is
+/// moved into Downloads: a rename keeps the stream and the cross-volume copy
+/// (`CopyFileExW`) copies it. Failing to write it is logged and the download
+/// goes on.
 fn mark_of_the_web(file: &Path) {
     if let Err(e) = std::fs::write(windows_model::zone_identifier_path(file), windows_model::ZONE_IDENTIFIER) {
         log::warn!("connect.web.nav_bar: could not mark a download as from the internet ({:?})", e.kind());

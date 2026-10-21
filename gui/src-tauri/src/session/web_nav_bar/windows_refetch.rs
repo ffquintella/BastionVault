@@ -18,10 +18,15 @@
 //!   webview needed either, or whose TLS profile is unknown, never get here
 //!   (`windows_model::refetch_gate`), so the request is never trusted with
 //!   less than the page was.
-//! - **No proxy.** The request goes straight to the origin. Proxy-mode
-//!   sessions are refused by the same gate. A system proxy (WinINET / PAC)
-//!   is not applied either: on a network that requires one, the connection
-//!   fails and the download is refused as `transfer_failed`.
+//! - **No proxy.** The request goes straight to the origin, so it is only
+//!   made where the webview's loads go straight there too: proxy-mode
+//!   sessions are refused by the same gate, and so is a user whose system
+//!   proxy settings (which WebView2 follows) name a proxy, a PAC script or
+//!   auto-detection (`windows_model::system_proxy_gate`), before anything
+//!   is sent.
+//! - **No content coding.** `Accept-Encoding: identity` is asked for, and a
+//!   response that is compressed anyway is refused as `unavailable` rather
+//!   than saved as a corrupt file.
 //! - **No HTTP authentication and no request body**: a document that needs
 //!   either does not come back as a `2xx` downloadable response and is
 //!   refused as `unavailable`.
@@ -33,6 +38,7 @@
 //! Not `cfg`-gated: it is plain tokio / hyper / rustls, so it is tested on
 //! every host against a local server.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -152,15 +158,30 @@ pub(crate) fn response_facts(url: &Url, status: u16, headers: &HeaderMap) -> Res
     }
 }
 
+/// Whether the body is sent as it is (no `Content-Encoding`, or only
+/// `identity`). The request asks for `identity`; a server that compresses
+/// anyway would otherwise have its compressed bytes saved as the file.
+pub(crate) fn identity_encoded(headers: &HeaderMap) -> bool {
+    headers
+        .get_all(header::CONTENT_ENCODING)
+        .iter()
+        .all(|value| std::str::from_utf8(value.as_bytes()).is_ok_and(|v| v.trim().eq_ignore_ascii_case("identity")))
+}
+
 /// Fetch `refetch` into `transfer` and return how it settled — exactly once,
 /// whatever happens: a refusal, a transport failure, `cancel` turning true or
 /// its sender being dropped (the bar is gone), or the file in place.
+///
+/// `mark` is called with the staging file once its last byte is written and
+/// before it is moved into the Downloads folder (the Windows shim writes the
+/// Mark of the Web there, so the file never appears unmarked).
 pub(crate) async fn run(
     refetch: Refetch,
     mut transfer: Transfer,
     policy: Policy,
     tls: Arc<ClientConfig>,
     mut cancel: watch::Receiver<bool>,
+    mark: impl FnOnce(&Path) + Send + 'static,
 ) -> Settled {
     let fetched = tokio::select! {
         biased;
@@ -171,12 +192,22 @@ pub(crate) async fn run(
     drop(refetch);
     match fetched {
         Ok(Some(settled)) => settled,
-        // The last byte is in the staging file: move it into place off the
-        // async workers (a copy when Downloads is on another volume).
-        Ok(None) => match tokio::task::spawn_blocking(move || transfer.finish()).await {
-            Ok(Some(settled)) => settled,
-            _ => Settled::Refused(reason::TRANSFER_FAILED),
-        },
+        // The last byte is in the staging file: mark it, then move it into
+        // place, off the async workers (a copy when Downloads is on another
+        // volume). The mark goes with it: a rename keeps the file's streams,
+        // and the copy fallback (`fs::copy`, `CopyFileExW`) copies them.
+        Ok(None) => {
+            let done = tokio::task::spawn_blocking(move || {
+                if let Some(staging) = transfer.staging_file() {
+                    mark(staging);
+                }
+                transfer.finish()
+            });
+            match done.await {
+                Ok(Some(settled)) => settled,
+                _ => Settled::Refused(reason::TRANSFER_FAILED),
+            }
+        }
         Err(stage) => {
             // A fixed stage name only: an error's text can carry the host.
             log::warn!("connect.web.nav_bar: the download request stopped ({stage})");
@@ -270,6 +301,10 @@ where
         .await
         .map_err(|_| "response")?
         .map_err(|_| "response")?;
+    // Before anything is reserved: compressed bytes are not the file.
+    if !identity_encoded(response.headers()) {
+        return Ok(transfer.fail(reason::UNAVAILABLE));
+    }
     let facts = response_facts(&refetch.url, response.status().as_u16(), response.headers());
     let now = chrono::Local::now().naive_local();
     if let Some(settled) = transfer.begin(&facts, policy.allow_downloads, &policy.origins, now) {
@@ -363,6 +398,9 @@ mod tests {
     fn never_cancelled() -> (watch::Sender<bool>, watch::Receiver<bool>) {
         watch::channel(false)
     }
+
+    /// The Mark of the Web hook, where a test does not look at it.
+    fn no_mark(_: &Path) {}
 
     fn plain_tls() -> Arc<ClientConfig> {
         trusting(&[])
@@ -508,6 +546,7 @@ mod tests {
             policy_for("https://fw.example.com"),
             plain_tls(),
             cancel,
+            no_mark,
         ));
         assert_eq!(limiter.in_flight(), 0, "an unpolled request releases its slot when dropped");
     }
@@ -533,6 +572,7 @@ mod tests {
             policy_for(&origin),
             plain_tls(),
             cancel,
+            no_mark,
         )
         .await;
         match settled {
@@ -568,6 +608,7 @@ mod tests {
             policy_for("https://fw.example.com"),
             plain_tls(),
             cancel,
+            no_mark,
         )
         .await;
         assert_eq!(settled, Settled::Refused(reason::OUTSIDE_ALLOWLIST));
@@ -581,7 +622,8 @@ mod tests {
         let (_keep, cancel) = never_cancelled();
         let origin = format!("http://127.0.0.1:{port}");
         let off = Policy { allow_downloads: false, ..policy_for(&origin) };
-        let settled = run(refetch(&format!("{origin}/a.pdf")), transfer(&limiter, &d), off, plain_tls(), cancel).await;
+        let settled =
+            run(refetch(&format!("{origin}/a.pdf")), transfer(&limiter, &d), off, plain_tls(), cancel, no_mark).await;
         assert_eq!(settled, Settled::Refused(reason::DOWNLOADS_DISABLED));
         assert!(tokio::time::timeout(Duration::from_millis(200), listener.accept()).await.is_err());
     }
@@ -594,9 +636,15 @@ mod tests {
         let d = dest("redirect");
         let limiter = Arc::new(DownloadLimiter::new());
         let (_keep, cancel) = never_cancelled();
-        let settled =
-            run(refetch(&format!("{origin}/a.pdf")), transfer(&limiter, &d), policy_for(&origin), plain_tls(), cancel)
-                .await;
+        let settled = run(
+            refetch(&format!("{origin}/a.pdf")),
+            transfer(&limiter, &d),
+            policy_for(&origin),
+            plain_tls(),
+            cancel,
+            no_mark,
+        )
+        .await;
         assert_eq!(settled, Settled::Refused(reason::UNAVAILABLE));
         assert!(server.await.unwrap().starts_with("GET /a.pdf "));
         assert!(entries(&d.downloads_dir).is_empty());
@@ -609,9 +657,15 @@ mod tests {
         let d = dest("html");
         let limiter = Arc::new(DownloadLimiter::new());
         let (_keep, cancel) = never_cancelled();
-        let settled =
-            run(refetch(&format!("{origin}/a.pdf")), transfer(&limiter, &d), policy_for(&origin), plain_tls(), cancel)
-                .await;
+        let settled = run(
+            refetch(&format!("{origin}/a.pdf")),
+            transfer(&limiter, &d),
+            policy_for(&origin),
+            plain_tls(),
+            cancel,
+            no_mark,
+        )
+        .await;
         assert_eq!(settled, Settled::Refused(reason::UNAVAILABLE));
         assert!(entries(&d.downloads_dir).is_empty());
 
@@ -622,9 +676,15 @@ mod tests {
         let (port, _server) = http_server(big.into_bytes(), Duration::from_millis(500)).await;
         let origin = format!("http://127.0.0.1:{port}");
         let (_keep, cancel) = never_cancelled();
-        let settled =
-            run(refetch(&format!("{origin}/a.zip")), transfer(&limiter, &d), policy_for(&origin), plain_tls(), cancel)
-                .await;
+        let settled = run(
+            refetch(&format!("{origin}/a.zip")),
+            transfer(&limiter, &d),
+            policy_for(&origin),
+            plain_tls(),
+            cancel,
+            no_mark,
+        )
+        .await;
         assert_eq!(settled, Settled::Refused(reason::SIZE_EXCEEDED));
         assert!(entries(&d.downloads_dir).is_empty());
         assert!(entries(&d.staging_root).is_empty());
@@ -639,14 +699,113 @@ mod tests {
         let d = dest("attach");
         let limiter = Arc::new(DownloadLimiter::new());
         let (_keep, cancel) = never_cancelled();
-        let settled =
-            run(refetch(&format!("{origin}/export")), transfer(&limiter, &d), policy_for(&origin), plain_tls(), cancel)
-                .await;
+        let settled = run(
+            refetch(&format!("{origin}/export")),
+            transfer(&limiter, &d),
+            policy_for(&origin),
+            plain_tls(),
+            cancel,
+            no_mark,
+        )
+        .await;
         match settled {
             Settled::Saved(s) => assert_eq!(s.filename, "report.html"),
             other => panic!("{other:?}"),
         }
         assert_eq!(entries(&d.downloads_dir), ["report.html"]);
+    }
+
+    #[test]
+    fn only_an_identity_content_encoding_is_saved_as_it_comes() {
+        let with = |v: &'static str| {
+            let mut h = HeaderMap::new();
+            h.append(header::CONTENT_ENCODING, HeaderValue::from_static(v));
+            h
+        };
+        assert!(identity_encoded(&HeaderMap::new()), "none announced");
+        assert!(identity_encoded(&with("identity")));
+        assert!(identity_encoded(&with(" Identity ")));
+        assert!(!identity_encoded(&with("gzip")));
+        assert!(!identity_encoded(&with("identity, gzip")));
+        assert!(!identity_encoded(&with("br")));
+        let mut twice = with("identity");
+        twice.append(header::CONTENT_ENCODING, HeaderValue::from_static("deflate"));
+        assert!(!identity_encoded(&twice), "every Content-Encoding header counts");
+    }
+
+    #[tokio::test]
+    async fn a_compressed_body_is_refused_not_saved_corrupt() {
+        let (port, _server) =
+            http_server(ok("application/pdf", "Content-Encoding: gzip\r\n", b"\x1f\x8b\x08\0"), Duration::ZERO).await;
+        let origin = format!("http://127.0.0.1:{port}");
+        let d = dest("gzip");
+        let limiter = Arc::new(DownloadLimiter::new());
+        let (_keep, cancel) = never_cancelled();
+        let settled = run(
+            refetch(&format!("{origin}/a.pdf")),
+            transfer(&limiter, &d),
+            policy_for(&origin),
+            plain_tls(),
+            cancel,
+            no_mark,
+        )
+        .await;
+        assert_eq!(settled, Settled::Refused(reason::UNAVAILABLE));
+        assert!(entries(&d.downloads_dir).is_empty(), "nothing reserved");
+        assert!(entries(&d.staging_root).is_empty());
+        assert_eq!(limiter.in_flight(), 0);
+    }
+
+    #[tokio::test]
+    async fn the_mark_of_the_web_goes_on_the_complete_staging_file_before_the_move() {
+        let (port, _server) = http_server(ok("application/pdf", "", b"%PDF-1.7"), Duration::ZERO).await;
+        let origin = format!("http://127.0.0.1:{port}");
+        let d = dest("mark");
+        let limiter = Arc::new(DownloadLimiter::new());
+        let (_keep, cancel) = never_cancelled();
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let record = Arc::clone(&seen);
+        let downloads = d.downloads_dir.clone();
+        let mark = move |staging: &Path| {
+            // At this point the bytes are complete in the staging file and the
+            // reserved name in Downloads is still the empty placeholder.
+            let staged = std::fs::read(staging).unwrap();
+            let placeholder = std::fs::metadata(downloads.join("a.pdf")).unwrap().len();
+            *record.lock().unwrap() = Some((staging.to_path_buf(), staged, placeholder));
+        };
+        let settled = run(
+            refetch(&format!("{origin}/a.pdf")),
+            transfer(&limiter, &d),
+            policy_for(&origin),
+            plain_tls(),
+            cancel,
+            mark,
+        )
+        .await;
+        assert!(matches!(settled, Settled::Saved(ref s) if s.filename == "a.pdf"), "{settled:?}");
+        let (staging, staged, placeholder) = seen.lock().unwrap().take().expect("marked");
+        assert!(staging.starts_with(&d.staging_root), "the staging file, not the final one");
+        assert_eq!((staged.as_slice(), placeholder), (&b"%PDF-1.7"[..], 0));
+        assert_eq!(std::fs::read(d.downloads_dir.join("a.pdf")).unwrap(), b"%PDF-1.7");
+
+        // A refused download is never marked.
+        let (port, _server) = http_server(ok("text/html", "", b"<p>"), Duration::ZERO).await;
+        let origin = format!("http://127.0.0.1:{port}");
+        let (_keep, cancel) = never_cancelled();
+        let marked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = Arc::clone(&marked);
+        let mark = move |_: &Path| flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        let settled = run(
+            refetch(&format!("{origin}/a.pdf")),
+            transfer(&limiter, &d),
+            policy_for(&origin),
+            plain_tls(),
+            cancel,
+            mark,
+        )
+        .await;
+        assert_eq!(settled, Settled::Refused(reason::UNAVAILABLE));
+        assert!(!marked.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[tokio::test]
@@ -657,9 +816,15 @@ mod tests {
         let d = dest("truncated");
         let limiter = Arc::new(DownloadLimiter::new());
         let (_keep, cancel) = never_cancelled();
-        let settled =
-            run(refetch(&format!("{origin}/a.pdf")), transfer(&limiter, &d), policy_for(&origin), plain_tls(), cancel)
-                .await;
+        let settled = run(
+            refetch(&format!("{origin}/a.pdf")),
+            transfer(&limiter, &d),
+            policy_for(&origin),
+            plain_tls(),
+            cancel,
+            no_mark,
+        )
+        .await;
         assert_eq!(settled, Settled::Refused(reason::TRANSFER_FAILED));
         assert!(entries(&d.downloads_dir).is_empty(), "placeholder removed");
         assert!(entries(&d.staging_root).is_empty(), "staging removed");
@@ -680,6 +845,7 @@ mod tests {
             policy_for(&origin),
             plain_tls(),
             cancel,
+            no_mark,
         ));
         tokio::time::sleep(Duration::from_millis(300)).await;
         // The bar's teardown drops the sender.
@@ -699,9 +865,15 @@ mod tests {
         let d = dest("refused");
         let limiter = Arc::new(DownloadLimiter::new());
         let (_keep, cancel) = never_cancelled();
-        let settled =
-            run(refetch(&format!("{origin}/a.pdf")), transfer(&limiter, &d), policy_for(&origin), plain_tls(), cancel)
-                .await;
+        let settled = run(
+            refetch(&format!("{origin}/a.pdf")),
+            transfer(&limiter, &d),
+            policy_for(&origin),
+            plain_tls(),
+            cancel,
+            no_mark,
+        )
+        .await;
         assert_eq!(settled, Settled::Refused(reason::TRANSFER_FAILED));
         assert!(entries(&d.downloads_dir).is_empty());
     }
@@ -770,6 +942,7 @@ mod tests {
             policy_for(&origin),
             trusting(&[&trusted.der]),
             cancel,
+            no_mark,
         )
         .await;
         assert!(matches!(settled, Settled::Saved(ref s) if s.bytes == 4), "{settled:?}");
@@ -787,6 +960,7 @@ mod tests {
             policy_for(&origin),
             trusting(&[&trusted.der]),
             cancel,
+            no_mark,
         )
         .await;
         assert_eq!(settled, Settled::Refused(reason::TRANSFER_FAILED));

@@ -9,8 +9,8 @@
 //! host. The Win32 / WebView2 half only reads values out of COM objects and
 //! window messages, hands them to these functions and applies what they
 //! decide. The platform-neutral pieces it shares with the GTK shim (the
-//! button views, the button order, the staging root) are reused from
-//! `linux_model` as they are.
+//! button views, the button order, the main-frame response record) are
+//! reused from `linux_model` as they are.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use tauri::Url;
 use zeroize::Zeroizing;
 
-use super::linux_model::{self, ACTIONS};
+use super::linux_model::ACTIONS;
 use super::transfer::{self, Destination};
 use super::{reason, NavAction};
 
@@ -238,24 +238,66 @@ pub(crate) fn refetch_gate(tls: Option<SessionTls>, proxy_mode: bool) -> Result<
     }
 }
 
+/// The current user's WinINET proxy settings, which WebView2 follows
+/// (`WinHttpGetIEProxyConfigForCurrentUser`): whether each kind of proxy
+/// configuration is present. Nothing else is kept (no proxy name, no URL).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct SystemProxy {
+    /// A fixed proxy server list (`lpszProxy`).
+    pub static_proxy: bool,
+    /// A proxy auto-config script (`lpszAutoConfigUrl`).
+    pub pac_url: bool,
+    /// Proxy auto-detection, WPAD (`fAutoDetect`).
+    pub auto_detect: bool,
+}
+
+/// Whether the bar's request, which goes straight to the origin, takes the
+/// route the webview's loads take. WebView2 routes through the user's
+/// system proxy, so any proxy configuration refuses the request
+/// (`refetch_blocked`) before anything is sent: with the session's cookies
+/// it would otherwise bypass a corporate proxy (egress policy, DLP), or fail
+/// where direct egress is blocked. `None` (the settings could not be read)
+/// refuses too.
+///
+/// Known limitation: auto-detection (WPAD) is on by default on many
+/// Windows installations, and telling "WPAD finds no proxy" apart from "WPAD
+/// finds one" would need the discovery itself (DHCP / DNS lookups, seconds
+/// of delay). It is refused instead, so on such machines the bar's download
+/// is not available and the page's own download link is the way.
+pub(crate) fn system_proxy_gate(proxy: Option<SystemProxy>) -> Result<(), &'static str> {
+    match proxy {
+        Some(SystemProxy { static_proxy: false, pac_url: false, auto_detect: false }) => Ok(()),
+        _ => Err(reason::REFETCH_BLOCKED),
+    }
+}
+
 // ── Request ────────────────────────────────────────────────────────
 
 /// Most cookies read from the webview for one request (Chromium keeps at
 /// most 180 per domain).
 pub(crate) const MAX_COOKIES: u32 = 180;
 
-/// The `Cookie` header for `cookies` (name, value), as the webview's cookie
-/// manager returned them for the request's URL (it has already matched
-/// domain, path, `Secure` and expiry). A pair that could not be sent as one
-/// cookie (an empty name, a control character, `;`, or `=` in the name) is
-/// left out. `None` when nothing is left. The buffer is sized up front, so
-/// no unzeroized copy is left behind by a reallocation.
-pub(crate) fn cookie_header<'a>(cookies: impl IntoIterator<Item = (&'a str, &'a str)>) -> Option<Zeroizing<String>> {
+/// The `Cookie` header for `cookies` (name, value, `Secure`), as the
+/// webview's cookie manager returned them for the request's URL (it has
+/// already matched domain, path, `Secure` and expiry). On a plain-http
+/// request a `Secure` cookie is left out again, whatever the manager
+/// returned. A pair that could not be sent as one cookie (an empty name, a
+/// control character, `;`, or `=` in the name) is left out. `None` when
+/// nothing is left. The buffer is sized up front, so no unzeroized copy is
+/// left behind by a reallocation.
+pub(crate) fn cookie_header<'a>(
+    request_is_https: bool,
+    cookies: impl IntoIterator<Item = (&'a str, &'a str, bool)>,
+) -> Option<Zeroizing<String>> {
     let sendable = |part: &str, is_name: bool| {
         !(is_name && part.is_empty()) && part.chars().all(|c| !c.is_control() && c != ';' && !(is_name && c == '='))
     };
-    let pairs: Vec<(&str, &str)> =
-        cookies.into_iter().filter(|(name, value)| sendable(name, true) && sendable(value, false)).collect();
+    let pairs: Vec<(&str, &str)> = cookies
+        .into_iter()
+        .filter(|(_, _, secure)| request_is_https || !secure)
+        .filter(|(name, value, _)| sendable(name, true) && sendable(value, false))
+        .map(|(name, value, _)| (name, value))
+        .collect();
     if pairs.is_empty() {
         return None;
     }
@@ -271,6 +313,19 @@ pub(crate) fn cookie_header<'a>(cookies: impl IntoIterator<Item = (&'a str, &'a 
         header.push_str(value);
     }
     Some(header)
+}
+
+/// A secret the webview returned as UTF-16 (a cookie value), decoded into
+/// one zeroizing buffer reserved for the worst case (3 UTF-8 bytes per
+/// UTF-16 unit: a BMP character takes at most 3, a surrogate pair 4 for its
+/// 2 units), so no reallocation leaves an unzeroized copy. A lone surrogate
+/// becomes U+FFFD.
+pub(crate) fn utf16_secret(units: &[u16]) -> Zeroizing<String> {
+    let mut secret = Zeroizing::new(String::with_capacity(units.len().saturating_mul(3)));
+    for c in char::decode_utf16(units.iter().copied()) {
+        secret.push(c.unwrap_or(char::REPLACEMENT_CHARACTER));
+    }
+    secret
 }
 
 /// The file name a `Content-Disposition` value suggests (RFC 6266):
@@ -340,22 +395,33 @@ fn decode_ext_value(raw: &str) -> Option<String> {
 
 // ── Destination, Mark of the Web ───────────────────────────────────
 
+/// The folder under the app's own data folder that holds the download
+/// staging directories.
+pub(crate) const STAGING_DIR: &str = "nav-download-staging";
+
 /// Where the bar's downloads go: the Downloads folder
 /// (`FOLDERID_Downloads`, else `%USERPROFILE%\Downloads`; spec §7.6), with
-/// the private staging directories in `%LOCALAPPDATA%` when it exists, else
-/// the temp directory. `%LOCALAPPDATA%` is the user's own, whatever `%TMP%`
-/// points at, and is normally on the Downloads folder's volume. `None` when
-/// no Downloads folder is known.
+/// the private staging directories in [`STAGING_DIR`] under `app_root`
+/// (`embedded::app_root()`, i.e. `%LOCALAPPDATA%\.bastion_vault_gui`),
+/// created when missing, else in the temp directory. That folder is the
+/// user's own, whatever `%TMP%` points at, is normally on the Downloads
+/// folder's volume, and is where a crash's leftovers can be found. `None`
+/// when no Downloads folder is known.
 pub(crate) fn destination(
     downloads: Option<PathBuf>,
     home: Option<PathBuf>,
-    local_app_data: Option<PathBuf>,
+    app_root: Option<PathBuf>,
     temp: PathBuf,
 ) -> Option<Destination> {
-    Some(Destination {
-        downloads_dir: transfer::downloads_dir(downloads, home)?,
-        staging_root: linux_model::staging_root(local_app_data, temp),
-    })
+    let downloads_dir = transfer::downloads_dir(downloads, home)?;
+    let staging = app_root.map(|root| root.join(STAGING_DIR)).filter(|dir| match std::fs::create_dir_all(dir) {
+        Ok(()) => std::fs::metadata(dir).is_ok_and(|m| m.is_dir()),
+        Err(e) => {
+            log::warn!("connect.web.nav_bar: no download staging folder in the app's data folder ({:?})", e.kind());
+            false
+        }
+    });
+    Some(Destination { downloads_dir, staging_root: staging.unwrap_or(temp) })
 }
 
 /// The Mark of the Web written on a downloaded file: zone 3 (Internet), the
@@ -373,7 +439,7 @@ pub(crate) fn zone_identifier_path(file: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::web_nav_bar::{NavState, BAR_HEIGHT};
+    use crate::session::web_nav_bar::{linux_model, NavState, BAR_HEIGHT};
 
     fn url(s: &str) -> Url {
         Url::parse(s).unwrap()
@@ -571,33 +637,72 @@ mod tests {
         assert_eq!(refetch_gate(Some(plain), true), Err(reason::REFETCH_BLOCKED), "proxy mode");
     }
 
+    // ── system proxy ──
+
+    #[test]
+    fn the_refetch_is_allowed_only_without_any_system_proxy() {
+        assert_eq!(system_proxy_gate(Some(SystemProxy::default())), Ok(()), "no proxy, no PAC, no auto-detect");
+        let static_proxy = SystemProxy { static_proxy: true, ..SystemProxy::default() };
+        assert_eq!(system_proxy_gate(Some(static_proxy)), Err(reason::REFETCH_BLOCKED));
+        let pac = SystemProxy { pac_url: true, ..SystemProxy::default() };
+        assert_eq!(system_proxy_gate(Some(pac)), Err(reason::REFETCH_BLOCKED));
+        let wpad = SystemProxy { auto_detect: true, ..SystemProxy::default() };
+        assert_eq!(system_proxy_gate(Some(wpad)), Err(reason::REFETCH_BLOCKED));
+        assert_eq!(system_proxy_gate(None), Err(reason::REFETCH_BLOCKED), "unreadable settings: fail closed");
+        // The refusal is the "cannot fetch it from here" state, not a failure.
+        assert_ne!(transfer::refusal_message(reason::REFETCH_BLOCKED), transfer::refusal_message("other"));
+    }
+
     // ── cookies ──
 
     #[test]
     fn the_cookie_header_joins_the_webviews_cookies() {
-        let h = cookie_header([("SID", "abc"), ("theme", "dark")]).unwrap();
+        let h = cookie_header(true, [("SID", "abc", true), ("theme", "dark", false)]).unwrap();
         assert_eq!(h.as_str(), "SID=abc; theme=dark");
         assert_eq!(h.capacity(), h.len(), "sized up front, never reallocated");
-        let h = cookie_header([("empty", "")]).unwrap();
+        let h = cookie_header(true, [("empty", "", false)]).unwrap();
         assert_eq!(h.as_str(), "empty=");
-        assert!(cookie_header(std::iter::empty()).is_none());
+        assert!(cookie_header(true, std::iter::empty()).is_none());
+    }
+
+    #[test]
+    fn a_secure_cookie_never_goes_over_plain_http() {
+        let cookies = [("SID", "s3cr3t", true), ("theme", "dark", false)];
+        assert_eq!(cookie_header(false, cookies).unwrap().as_str(), "theme=dark");
+        assert_eq!(cookie_header(true, cookies).unwrap().as_str(), "SID=s3cr3t; theme=dark");
+        assert!(cookie_header(false, [("SID", "s3cr3t", true)]).is_none());
     }
 
     #[test]
     fn a_cookie_that_could_split_or_forge_the_header_is_left_out() {
-        let h = cookie_header([
-            ("ok", "1"),
-            ("", "anonymous"),
-            ("a=b", "x"),
-            ("semi", "a; injected=1"),
-            ("crlf", "a\r\nX-Evil: 1"),
-            ("nul", "a\0b"),
-            ("tab\t", "x"),
-            ("last", "2"),
-        ])
+        let h = cookie_header(
+            true,
+            [
+                ("ok", "1", false),
+                ("", "anonymous", false),
+                ("a=b", "x", false),
+                ("semi", "a; injected=1", false),
+                ("crlf", "a\r\nX-Evil: 1", false),
+                ("nul", "a\0b", false),
+                ("tab\t", "x", false),
+                ("last", "2", false),
+            ],
+        )
         .unwrap();
         assert_eq!(h.as_str(), "ok=1; last=2");
-        assert!(cookie_header([("bad", "\n")]).is_none());
+        assert!(cookie_header(true, [("bad", "\n", false)]).is_none());
+    }
+
+    #[test]
+    fn a_utf16_secret_is_decoded_into_one_presized_buffer() {
+        let units: Vec<u16> = "s3cr3t-é-😀".encode_utf16().collect();
+        let s = utf16_secret(&units);
+        assert_eq!(s.as_str(), "s3cr3t-é-😀");
+        assert_eq!(s.capacity(), units.len() * 3, "the worst case was reserved: no reallocation");
+        // A lone surrogate becomes U+FFFD, as `from_utf16_lossy` would make it.
+        let s = utf16_secret(&[0x61, 0xD800, 0x62]);
+        assert_eq!(s.as_str(), "a\u{FFFD}b");
+        assert_eq!(utf16_secret(&[]).as_str(), "");
     }
 
     // ── content disposition ──
@@ -656,22 +761,27 @@ mod tests {
     // ── destination, MOTW ──
 
     #[test]
-    fn the_destination_is_downloads_with_staging_in_local_app_data() {
+    fn the_destination_is_downloads_with_staging_in_the_apps_own_folder() {
         let root = tempdir("dest");
-        let local = root.join("AppData").join("Local");
-        std::fs::create_dir_all(&local).unwrap();
+        // `%LOCALAPPDATA%\.bastion_vault_gui`, which may not exist yet.
+        let app = root.join("AppData").join("Local").join(".bastion_vault_gui");
         let temp = root.join("Temp");
-        let d =
-            destination(Some(root.join("Downloads")), Some(root.clone()), Some(local.clone()), temp.clone()).unwrap();
-        assert_eq!(d, Destination { downloads_dir: root.join("Downloads"), staging_root: local.clone() });
-        // No known folder: `%USERPROFILE%\Downloads`.
-        let d = destination(None, Some(root.clone()), Some(local.clone()), temp.clone()).unwrap();
-        assert_eq!(d.downloads_dir, root.join("Downloads"));
-        // `%LOCALAPPDATA%` missing: the temp directory.
-        let d = destination(None, Some(root.clone()), Some(root.join("missing")), temp.clone()).unwrap();
+        let d = destination(Some(root.join("Downloads")), Some(root.clone()), Some(app.clone()), temp.clone()).unwrap();
+        let staging = app.join(STAGING_DIR);
+        assert_eq!(d, Destination { downloads_dir: root.join("Downloads"), staging_root: staging.clone() });
+        assert!(std::fs::metadata(&staging).unwrap().is_dir(), "created, so orphans gather in one place");
+        // Already there: reused.
+        let d = destination(None, Some(root.clone()), Some(app.clone()), temp.clone()).unwrap();
+        assert_eq!((d.downloads_dir, d.staging_root), (root.join("Downloads"), staging));
+        // No app folder, or one that cannot hold a directory: the temp directory.
+        let d = destination(None, Some(root.clone()), None, temp.clone()).unwrap();
         assert_eq!(d.staging_root, temp);
-        assert_eq!(destination(None, None, Some(local), root.join("t")), None);
-        assert!(!root.join("Downloads").exists(), "never created");
+        let blocked = root.join("blocked");
+        std::fs::write(&blocked, b"a file, not a folder").unwrap();
+        let d = destination(None, Some(root.clone()), Some(blocked), temp.clone()).unwrap();
+        assert_eq!(d.staging_root, temp);
+        assert_eq!(destination(None, None, Some(app), root.join("t")), None);
+        assert!(!root.join("Downloads").exists(), "the Downloads folder is never created");
     }
 
     #[test]
