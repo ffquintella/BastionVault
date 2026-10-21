@@ -14,6 +14,14 @@
  * bytes between the local xterm.js terminal and the host's session
  * control channel.
  *
+ * T111 — the pane creates a `tauri::ipc::Channel` and hands it to the
+ * host via `session_attach_ssh_output`. The host writes PTY output
+ * onto that channel, so bytes only reach the one webview that owns
+ * the receiving end: no `listen()` in any other webview can pick them
+ * up. The `stdoutEvent` prop is kept for the pre-T111 window URL
+ * grammar and the saved layout shape (both still carry the string),
+ * but the pane no longer subscribes to it.
+ *
  * What a pane in a layout needs, and a window never did:
  * - it fits to its own box (`ResizeObserver`), not to the window, so a
  *   divider drag or a re-shown tab re-fits it — and xterm only reports a
@@ -33,7 +41,7 @@
  */
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -193,15 +201,21 @@ export function SshPane({
     });
     const onBellDispose = term.onBell(() => onActivityRef.current?.("bell"));
 
-    // Subscribe to stdout events from the host.
-    const unlistenStdout = listen<StdoutPayload>(stdoutEvent, (ev) => {
-      if (ev.payload.notice) term.write(`\x1b[2m[${ev.payload.notice}]\x1b[0m\r\n`);
-      const bytes = b64ToBytes(ev.payload.bytes_b64);
+    // T111: PTY bytes come over a per-webview Channel we create and
+    // hand to the host via `session_attach_ssh_output`. The host
+    // writes chunks here directly; no event name is involved and no
+    // other webview can listen in.
+    let channelActive = true;
+    const outputChannel = new Channel<StdoutPayload>();
+    outputChannel.onmessage = (payload) => {
+      if (!channelActive) return;
+      if (payload.notice) term.write(`\x1b[2m[${payload.notice}]\x1b[0m\r\n`);
+      const bytes = b64ToBytes(payload.bytes_b64);
       // xterm wants either string or Uint8Array; pass the bytes
       // directly so escape sequences come through intact.
       term.write(bytes);
       onActivityRef.current?.("output");
-    });
+    };
 
     let closedHandled = false;
     const unlistenClosed = listen<{ reason?: string }>(closedEvent, (ev) => {
@@ -218,24 +232,28 @@ export function SshPane({
       term.write(`\r\n\x1b[33m[${reason}]\x1b[0m\r\n`);
     });
 
-    // Initial resize doubles as the "frontend listener is live"
-    // handshake the host's pump task waits on before draining the
-    // early-bytes buffer (the prompt + MOTD that arrived between
-    // `request_shell` and the React effect mounting). It's
-    // critical that the listen() subscription is fully registered
-    // BEFORE we invoke session_resize — otherwise the host
-    // flushes its buffer into a void and the operator sees an
-    // empty terminal until the first keystroke wakes the shell.
-    // listen() returns a Promise that resolves once Tauri has
-    // installed the subscription; await both before resizing.
+    // T111: installing the output channel on the host IS the
+    // handshake. `session_attach_ssh_output` registers the channel
+    // under the current holder epoch and drives the pump's
+    // handshake-replay delivery, so the first message the channel
+    // carries is whatever `session::output` buffered (the prompt +
+    // MOTD that arrived between `request_shell` and this effect).
+    // We await the closed-event listener too — the host still emits
+    // the closed notice through `emit_to` — before attaching, so a
+    // session that fails right after attach is still noticed.
     let disposed = false;
-    void Promise.all([unlistenStdout, unlistenClosed]).then(() => {
+    void unlistenClosed.then(() => {
       if (disposed) return;
       handshakeSent = true;
       sent = { cols: term.cols, rows: term.rows };
-      void invoke("session_resize", {
+      void invoke("session_attach_ssh_output", {
         request: { token, cols: term.cols, rows: term.rows },
-      }).catch(() => undefined);
+        channel: outputChannel,
+      }).catch((e) => {
+        // Explicit failure — no silent fallback to `emit_to`.
+        setStatus("error");
+        setErrorMessage(`could not attach the SSH output channel: ${extractError(e)}`);
+      });
     });
 
     // Fit to the pane's own box. A hidden tab or a detached (zoomed-out)
@@ -274,6 +292,7 @@ export function SshPane({
 
     return () => {
       disposed = true;
+      channelActive = false;
       if (resizeTimer !== undefined) clearTimeout(resizeTimer);
       observer.disconnect();
       if (frame !== undefined) cancelAnimationFrame(frame);
@@ -281,7 +300,6 @@ export function SshPane({
       onDataDispose.dispose();
       onResizeDispose.dispose();
       onBellDispose.dispose();
-      void unlistenStdout.then((u) => u());
       void unlistenClosed.then((u) => u());
       // Host-side teardown is owned by the host: closing the window
       // stops every session attached to it, and a workspace pane's
@@ -296,6 +314,9 @@ export function SshPane({
       termRef.current = null;
       fitRef.current = null;
     };
+  // `stdoutEvent` is in the dep array for symmetry with the shape
+  // the window URL still carries, even though T111 doesn't subscribe
+  // to it: a changed token would re-mount the effect anyway.
   }, [token, stdoutEvent, closedEvent]);
 
   useEffect(() => {

@@ -251,8 +251,18 @@ pub async fn session_move(
         .await
         .transfer(token, &caller, &target, Instant::now())
         .map_err(|e| CommandError::from(e.message(token)))?;
-    if descriptor.protocol == ProfileProtocol::Rdp {
-        crate::session::rdp::detach_frames(&state, token).await;
+    match descriptor.protocol {
+        ProfileProtocol::Rdp => {
+            crate::session::rdp::detach_frames(&state, token).await;
+        }
+        // T111: SSH output rides a per-webview Channel installed by the
+        // holding window; drop the old one so the pre-move window gets
+        // no further chunks and the new window's `session_attach_ssh_
+        // output` can install a fresh channel at the new epoch.
+        ProfileProtocol::Ssh => {
+            crate::session::ssh::detach_output(&state, token).await;
+        }
+        ProfileProtocol::Web | ProfileProtocol::Sftp => {}
     }
 
     let built = match request.to {

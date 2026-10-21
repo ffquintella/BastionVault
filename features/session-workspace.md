@@ -68,12 +68,12 @@ a window of its own (Phase 6). Nothing from Phases 3–6 has been exercised by
 hand in a running desktop build yet: the evidence is the unit and component
 tests listed under each phase. The per-release manual checklist (Testing
 Plan) is still open, which is why T38 stays in progress; the work this
-feature still owed was split out as T108–T111. T110 — the session-only
-bundle and per-window command sets — is done (§7), and so are T108 —
-confirming before a session window or the workspace closes natively with
-live sessions (§8) — and T109 — replay panes (§9); T111 remains (see *What is not yet
-implemented*). None of T110, T108 or T109 has been exercised by hand in a
-desktop build.
+feature still owed was split out as T108–T111. All four are now done:
+T110 — the session-only bundle and per-window command sets (§7), T108
+— confirming before a session window or the workspace closes natively
+with live sessions (§8), T109 — replay panes (§9), and T111 — SSH
+session output over a per-webview IPC Channel (§10). None of T108,
+T109, T110 or T111 has been exercised by hand in a desktop build.
 
 What Phases 0–6 delivered:
 
@@ -199,10 +199,10 @@ What is not yet implemented — split out of T38:
   holds the resource reads its ⌘K palette and restore need
   (`list_resources`, `read_resource`, `resource_types_read`), which a
   host-side "resolve and open this saved pane" command could remove.
-- **T111** — SSH output (live and replayed) over a per-webview IPC channel
-  instead of `emit_to`, which Tauri 2.11 also delivers to any default-target
-  `listen()` in any webview (see §3 *Phase 3 as built*). Must not reopen the
-  web/RDP channel-id exposure (`session::web_rdp_conflict`).
+- ~~**T111**~~ — done: SSH output (live and the handshake replay from
+  the output ring) rides a per-webview `tauri::ipc::Channel` installed
+  by `session_attach_ssh_output` instead of `emit_to` (§10). Not
+  exercised by hand in a desktop build; added to the manual checklist.
 
 What existed before T38:
 
@@ -529,15 +529,20 @@ existing surface (including every integration test that drives it) stays valid.
   that has no pane yet. The requested placement travels in the listing
   (`SessionDescriptor::placement`). A session placed while the window was still
   loading is therefore not lost, and its split request is still honoured.
-- **`emit_to` is routing, not confidentiality.** The pumps now address SSH
-  output, the closed notice and RDP resize / cursor events to the holding
-  window (`session::routing::SessionEvents`, looked up per event so a session
-  that changes holder follows it; a session already dropped from the registry
-  falls back to its last holder so its closed notice still arrives; a detached
-  one is not addressed at all). By the caveat above this is not the "strict
-  narrowing" the Security section first claimed; the token remains the secret.
-  A real boundary would move SSH output onto a per-webview `Channel`, as RDP
-  frames already are — a follow-up, not done here.
+- **`emit_to` is routing, not confidentiality** (where it is still used).
+  The pumps address the SSH closed notice and RDP resize / cursor events
+  to the holding window (`session::routing::SessionEvents`, looked up per
+  event so a session that changes holder follows it; a session already
+  dropped from the registry falls back to its last holder so its closed
+  notice still arrives; a detached one is not addressed at all). By the
+  caveat above this is not the "strict narrowing" the Security section
+  first claimed; the token remains the secret for anything on this path.
+  **T111** moves live SSH output and the handshake replay onto a
+  per-webview `tauri::ipc::Channel` installed by
+  `session_attach_ssh_output` (§10), so the window itself — not the
+  token — is now the confidentiality boundary for the stream of PTY
+  bytes. The closed notice is still delivered by `emit_to` because it
+  carries only a host-composed reason string, never remote data.
 - **Input is narrowed to the holder.** `session_input`, `session_resize`,
   `session_input_rdp_{key,mouse,wheel,resize}` and `session_attach_rdp_frames`
   take the calling webview and refuse any window but the holder
@@ -837,11 +842,13 @@ mitigations as built:
 | Replay starting mid escape sequence | A wrapped ring is replayed from its first line break. |
 
 Residual, stated rather than solved: the copies made to *deliver* output —
-the base64 string, the serialised event, the webview's JS heap and xterm's
+the base64 string, the serialised chunk, the webview's JS heap and xterm's
 own scrollback — are not zeroed, exactly as for live output before this
-phase; and `emit_to` is still delivered to any default-target `listen()` in
-any webview, so the session token remains the confidentiality boundary for
-replayed output as for live output (T111). Not exercised by hand.
+phase. The `emit_to` escape hatch the review called out — Tauri 2.11
+also delivering a label-targeted event to any default-target `listen()`
+in any webview — is closed since T111 for both live SSH output and the
+handshake replay: both ride the per-webview `tauri::ipc::Channel`
+installed by `session_attach_ssh_output` (§10). Not exercised by hand.
 
 
 ### 7. Session-only bundle and per-window command sets (T110)
@@ -1104,6 +1111,126 @@ recording opened in a standalone `replay-<id>` window only.
   nothing and calls no `session_close`, a replay-only window closes without
   a prompt, nothing saved) and `sessionLayout.test.ts` (the skeleton).
 
+### 10. SSH session output over a per-webview IPC Channel (T111)
+
+Phase 3 as built noted that `emit_to` is routing, not confidentiality:
+Tauri 2.11 delivers an `emit_to(label)` event to listeners in that
+webview *and* to any `listen()` registered with the default `Any`
+target in any webview, so the session token — not the holding window
+— was the confidentiality boundary for live SSH output. The Phase 6
+security review of the output ring (§6) carried the same residual
+forward for the handshake replay. T111 closes both by moving SSH
+output onto a per-webview `tauri::ipc::Channel`, as RDP frames
+already were.
+
+#### As built
+
+- **A new attach command.** `session_attach_ssh_output(token, cols,
+  rows, channel)` is the SSH counterpart to
+  `session_attach_rdp_frames`. The holding pane creates a
+  `new Channel<ChunkPayload>()`, installs its `onmessage` handler
+  (writes the bytes to xterm and renders any host notice before
+  them), and hands the channel to the host. The host authorises the
+  caller against the attachment registry (`attachments::
+  authorize_input` on the current holder-epoch route), reads the
+  current holder epoch, and installs `(channel, epoch)` on the
+  session's `SshOutputSink` (`session::output`). The host then
+  issues a `SshControl::Resize { cols, rows, epoch }` which drives
+  the pump's existing handshake replay path — so the first chunk
+  the fresh channel carries is whatever the output ring buffered
+  for this epoch, exactly as the pre-T111 flow drained its early
+  bytes on the first resize. Subsequent terminal resizes still go
+  through `session_resize`.
+- **The sink.** `session::output::SshOutputSink` holds
+  `Option<Channel<ChunkPayload>>` plus the epoch at which that
+  channel was installed. The pump's `send_if_epoch(payload,
+  expected_epoch)` refuses to deliver unless the sink's stored
+  epoch equals the one the pump just read from the registry — so a
+  stale channel (missed detach after a move) still cannot deliver
+  to the previous holder. The payload type `ChunkPayload` moved out
+  of `session::ssh` into `session::output` so the sink owns it.
+- **Move/detach.** `session_move` now calls
+  `session::ssh::detach_output(token)` for SSH sessions in the same
+  place it already called `detach_frames` for RDP: the sink's
+  channel is dropped on transfer, and the new window's attach at
+  the new epoch installs its own channel. The output ring itself
+  keeps what it holds; the next attach replays it. Holder epoch
+  semantics (`attachments::AttachmentRegistry::route_epoch`)
+  continue to govern delivery; the sink's own epoch is a
+  belt-and-braces second check under its own mutex.
+- **Web/SSH mutual exclusion** (`session::web_channel_conflict`,
+  née `web_rdp_conflict`). Tauri 2.11.5's
+  `plugin:__TAURI_CHANNEL__|fetch` remote-origin ACL exemption
+  means a hostile `web-*` window can poll sequential channel ids
+  and read payloads queued for another session's channel. Before
+  T111 the only channel users were RDP frames, so only RDP ⊕ Web
+  was mutually exclusive. T111 adds SSH to the exclusion: a web
+  session may not run while an SSH session is live, and vice
+  versa. The predicate is now `web_channel_conflict` (the old
+  `web_rdp_conflict` is kept as a back-compat alias). Checked in
+  three places: `session_open_ssh` (early, before any dial or
+  ticket burn), `session_open_web` (unchanged — the alias picks
+  the new rule up for free), and `session_attach_ssh_output`
+  (defence in depth, same shape as the RDP frame attach's check).
+  SFTP, whose transport is SSH but which carries no IPC Channel of
+  its own, does not conflict.
+- **ACL (T110 kept).** The session-window set gains
+  `allow-session-attach-ssh-output`, so SSH own-windows (and the
+  workspace, which nests the session-window set) can call it; no
+  other kind of window can. `window_acl_tests` pins the command
+  against Tauri's resolver, and `sessionBundle.test.tsx` checks
+  that the SSH route's import graph calls exactly the granted set.
+- **No `v1/` routes.** This is a desktop-host IPC change only; no
+  HTTP route is involved.
+- **Not exercised by hand** on a desktop build yet.
+
+#### Decisions
+
+- *The attach command is the handshake.* Pre-T111 the first
+  `session_resize` at a given epoch was treated as the "listener
+  is live" signal. T111 keeps `SshControl::Resize { cols, rows,
+  epoch }` as the mechanism — the attach command sends one right
+  after installing the channel — rather than inventing a new
+  control variant. The pump's existing handshake replay path keeps
+  working, and a reloaded window re-attaches and re-handshakes
+  without any flow change.
+- *The closed notice stays on `emit_to`.* It carries only a
+  host-composed reason string (never remote data), is replayed a
+  few times on short delays so a late-mounted listener still
+  catches it, and the pane subscribes to it before attaching the
+  output channel. Moving it to the channel would make a session
+  that fails before any pane ever attached silently vanish.
+- *No silent fallback.* `session_attach_ssh_output` returning an
+  error marks the pane as `error` with the message surfaced in the
+  status bar; the host never emits the output anywhere else as a
+  consolation. This matches the brief's security discipline for the
+  change.
+
+#### Tests
+
+- `session::output` — `a_channel_registered_under_one_webview_
+  does_not_deliver_to_another` (two real `tauri::ipc::Channel`
+  values with distinct `onmessage` closures; the sink delivers to
+  the attached one only, before and after a move),
+  `a_stale_channel_refuses_the_new_epoch_even_without_detach`
+  (belt-and-braces), `a_fresh_channel_on_attach_replays_the_ring_
+  once` (handshake replay), `attach_and_detach_are_observable`.
+- `session::web_channel_exclusion_tests` — SSH ⊕ Web both ways,
+  RDP ⊕ Web both ways, deterministic reason when both an RDP and
+  an SSH session are live, SFTP never conflicts.
+- `window_acl_tests` — `session_attach_ssh_output` is in
+  SESSION_WINDOW and reachable from the SSH own-window and the
+  workspace via Tauri's own `Resolved::resolve`, and from no
+  other kind of window (incl. the web session's own window, the
+  web toolbar, replays, SFTP windows and the "evil" unknown
+  label).
+- vitest `sessionPanes.test.tsx` — the SSH pane awaits its
+  closed-event listener, then calls `session_attach_ssh_output`
+  with a Channel it created; stdout chunks arrive via
+  `channel.onmessage` and not via any listen(); a host-composed
+  notice is rendered before the bytes it came with; terminal
+  resizes after attach go through `session_resize`.
+
 ## Phases
 
 | Phase | Scope | Status |
@@ -1117,6 +1244,7 @@ recording opened in a standalone `replay-<id>` window only.
 | 6 | Detach / move between windows | **Complete** (not yet exercised by hand; see §6 *Phase 6 as built*) |
 | 7 | Deferred | — |
 | T109 | Recording replays as workspace panes | **Complete** (not yet exercised by hand; see §9) |
+| T111 | SSH session output over a per-webview IPC Channel | **Complete** (not yet exercised by hand; see §10) |
 
 ### Phase 0 — macOS native window tabbing — **Complete**
 
