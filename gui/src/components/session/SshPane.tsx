@@ -347,7 +347,7 @@ export function SshPane({
       />
       <div
         ref={containerRef}
-        style={{ flex: 1, minHeight: 0, padding: 4, overflow: "hidden" }}
+        style={{ flex: 1, minHeight: 0, overflow: "hidden" }}
       />
       {paste && (
         <div
