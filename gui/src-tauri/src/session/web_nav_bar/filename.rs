@@ -90,13 +90,15 @@ pub fn sanitize_filename(raw: &str) -> String {
     // 1. Drop path separators, zero bytes and other C0/DEL control
     //    characters outright. These are the only chars that can create a
     //    path traversal or truncate the name on a legacy syscall. The
-    //    NTFS alternate data stream separator `:` is replaced rather than
+    //    bidi and other invisible format characters go too: a right-to-left
+    //    override can make `exe.txt` display as `txt.exe`. The NTFS
+    //    alternate data stream separator `:` is replaced rather than
     //    dropped, so a name that used `:` between fields still reads.
     let filtered: String = raw
         .chars()
         .filter_map(|c| match c {
             '/' | '\\' => None,
-            c if c.is_control() => None,
+            c if c.is_control() || is_invisible_format_char(c) => None,
             ':' => Some('_'),
             c => Some(c),
         })
@@ -217,15 +219,39 @@ fn floor_char_boundary(s: &str, max: usize) -> &str {
 /// Windows reserves these device names in any directory. The check is
 /// case-insensitive and applies to the stem (the part before the first
 /// dot): `CON`, `CON.txt` and `CON.anything` are all reserved.
+/// Trailing spaces of the stem are ignored (`CON .txt` is the device on
+/// Windows), and `COM`/`LPT` may be followed by a superscript number
+/// (`COM\u{b9}`), which Windows also reserves.
 fn stem_is_windows_reserved(name: &str) -> bool {
-    let stem = name.split('.').next().unwrap_or("");
+    let stem = name.split('.').next().unwrap_or("").trim_end_matches(' ');
     let upper = stem.to_ascii_uppercase();
     matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL") || is_com_or_lpt(&upper)
 }
 
 fn is_com_or_lpt(upper: &str) -> bool {
-    let bytes = upper.as_bytes();
-    bytes.len() == 4 && (&bytes[..3] == b"COM" || &bytes[..3] == b"LPT") && bytes[3].is_ascii_digit()
+    let mut chars = upper.chars();
+    let (Some(a), Some(b), Some(c), Some(num), None) =
+        (chars.next(), chars.next(), chars.next(), chars.next(), chars.next())
+    else {
+        return false;
+    };
+    matches!([a, b, c], ['C', 'O', 'M'] | ['L', 'P', 'T'])
+        && (num.is_ascii_digit() || matches!(num, '\u{b9}' | '\u{b2}' | '\u{b3}'))
+}
+
+/// Characters that render as nothing or reorder the characters around them,
+/// so they can disguise an extension: U+061C, U+200B-U+200F, U+202A-U+202E,
+/// U+2060-U+2064, U+2066-U+2069 and U+FEFF.
+fn is_invisible_format_char(c: char) -> bool {
+    matches!(
+        c,
+        '\u{061c}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{feff}'
+    )
 }
 
 #[cfg(test)]
@@ -274,6 +300,50 @@ mod tests {
         assert_eq!(sanitize_filename("COMA"), "COMA");
         assert_eq!(sanitize_filename("LPT"), "LPT");
         assert_eq!(sanitize_filename("COM10"), "COM10");
+    }
+
+    #[test]
+    fn sanitize_drops_bidi_and_invisible_format_characters() {
+        let dropped = [
+            '\u{061c}', '\u{200b}', '\u{200c}', '\u{200d}', '\u{200e}', '\u{200f}', '\u{202a}', '\u{202b}', '\u{202c}',
+            '\u{202d}', '\u{202e}', '\u{2060}', '\u{2061}', '\u{2062}', '\u{2063}', '\u{2064}', '\u{2066}', '\u{2067}',
+            '\u{2068}', '\u{2069}', '\u{feff}',
+        ];
+        for c in dropped {
+            assert_eq!(sanitize_filename(&format!("a{c}b.pdf")), "ab.pdf", "U+{:04X} kept", c as u32);
+        }
+        // A right-to-left override that would display `invoice_fdp.exe` as
+        // `invoice_exe.pdf` does not survive.
+        let out = sanitize_filename("invoice_\u{202e}fdp.exe");
+        assert_eq!(out, "invoice_fdp.exe");
+        assert!(!out.contains('\u{202e}'));
+        // A name made only of such characters sanitises to nothing.
+        assert_eq!(sanitize_filename("\u{200b}\u{feff}"), "");
+        // The neighbours of the dropped ranges are ordinary characters.
+        assert_eq!(sanitize_filename("a\u{2065}b"), "a\u{2065}b");
+        assert_eq!(sanitize_filename("a\u{2070}b"), "a\u{2070}b");
+        assert_eq!(sanitize_filename("a\u{200a}b"), "a\u{200a}b");
+    }
+
+    #[test]
+    fn sanitize_reserved_stem_ignores_trailing_spaces_and_accepts_superscript_numbers() {
+        assert_eq!(sanitize_filename("CON .txt"), "_CON .txt");
+        assert_eq!(sanitize_filename("nul   .dat"), "_nul   .dat");
+        assert_eq!(sanitize_filename("COM\u{b9}.txt"), "_COM\u{b9}.txt");
+        assert_eq!(sanitize_filename("LPT\u{b2}"), "_LPT\u{b2}");
+        assert_eq!(sanitize_filename("com\u{b3}.log"), "_com\u{b3}.log");
+        // Not reserved: other characters, wrong length, a space inside.
+        assert_eq!(sanitize_filename("COM\u{2074}.txt"), "COM\u{2074}.txt");
+        assert_eq!(sanitize_filename("COM\u{b9}\u{b9}.txt"), "COM\u{b9}\u{b9}.txt");
+        assert_eq!(sanitize_filename("CO N.txt"), "CO N.txt");
+    }
+
+    #[test]
+    fn sanitize_leaves_ordinary_unicode_untouched() {
+        for name in ["résumé.pdf", "報告書_2026.pdf", "🎉 party.png", "Ünïcödé 文件.txt", "שלום.txt", "مرحبا.txt"]
+        {
+            assert_eq!(sanitize_filename(name), name);
+        }
     }
 
     #[test]

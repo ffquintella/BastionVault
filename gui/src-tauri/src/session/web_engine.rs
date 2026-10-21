@@ -1357,7 +1357,11 @@ mod tests {
         assert_eq!(login_fills(&page), 1);
     }
 
-    #[tokio::test]
+    // The three tests below move the page on a driver's clock. The paused
+    // test clock makes that clock deterministic: it advances only when every
+    // task is idle, so the engine's 1 ms polls and the driver's sleeps
+    // interleave the same way on a loaded machine as on an idle one.
+    #[tokio::test(start_paused = true)]
     async fn a_reload_mark_clears_on_a_load_no_step_matches() {
         let page = FakePage::new(LOGIN, Box::new(|_, _| ok(FW)));
         page.new_load("https://fw01.example.com/start");
@@ -1385,7 +1389,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_reload_landing_mid_run_skips_its_load_and_the_next_fills() {
         let page = FakePage::new(LOGIN, Box::new(|_, _| ok(FW)));
         page.new_load("https://fw01.example.com/elsewhere");
@@ -1406,7 +1410,7 @@ mod tests {
         assert_eq!(login_fills(&page), 1, "the next load fills");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_stale_reload_mark_does_not_survive_into_the_next_run() {
         let page = FakePage::new(LOGIN, Box::new(|_, _| ok(FW)));
         page.new_load(LOGIN);
@@ -1430,6 +1434,29 @@ mod tests {
         let before = login_fills(&page);
         fill(&plan, &sc, &page, &launch, 200).await;
         assert_eq!(login_fills(&page), before + 1, "the second run filled its fresh page");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_pending_reload_mark_does_not_skip_the_page_it_was_set_on() {
+        // T6-m7 (anti-goal A1): the page is still loading the login page when
+        // Reload is hit, and finishes that same load (no new load starts).
+        // The mark only affects a load whose generation reaches its
+        // threshold, so the page that was already loading is filled, once.
+        let page = FakePage::new(LOGIN, Box::new(|_, _| ok(FW)));
+        page.state.lock().unwrap().loading = true;
+        let driver = async {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            crate::session::web_nav_bar::mark_operator_reload(&page.shared);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            assert_eq!(login_fills(&page), 0, "still loading: nothing filled yet");
+            page.state.lock().unwrap().loading = false;
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            assert_eq!(login_fills(&page), 1, "the marked-but-not-reloaded page is filled once");
+            assert_ne!(mark_of(&page), 0, "no new load: the mark is still pending");
+        };
+        let (plan, sc, launch) = (one_step(), scope(&[FW]), launch_at(t0()));
+        let (_, ()) = tokio::join!(fill(&plan, &sc, &page, &launch, 200), driver);
+        assert_eq!(login_fills(&page), 1, "exactly one fill for the whole run");
     }
 
     #[tokio::test]

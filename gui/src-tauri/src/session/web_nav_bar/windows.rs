@@ -980,7 +980,13 @@ impl NativeBar {
                 // fill engine skips the reload's own load.
                 mark_operator_reload(&self.shared);
                 // SAFETY: a reload of the attached webview, on its UI thread.
-                unsafe { self.core.Reload() }.is_ok()
+                let reloaded = unsafe { self.core.Reload() }.is_ok();
+                if !reloaded {
+                    // No load is coming: a mark left pending would make the
+                    // fill engine skip a later, unrelated load.
+                    super::clear_operator_reload(&self.shared);
+                }
+                reloaded
             }
             NavAction::Download if state.download_enabled() => {
                 self.start_download();

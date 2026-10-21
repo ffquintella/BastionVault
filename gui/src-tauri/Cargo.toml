@@ -463,6 +463,11 @@ rdp_egfx = ["dep:ironrdp-egfx"]
 web_session_chrome = ["tauri/unstable"]
 
 [dev-dependencies]
+# `test-util` is for `#[tokio::test(start_paused = true)]` in the fill
+# engine's operator-reload tests (`session/web_engine.rs`): a paused clock
+# makes their timing independent of machine load. It adds a feature of the
+# tokio dependency above to the test builds, not a package.
+tokio = { version = "1", features = ["test-util"] }
 # The embedded seal's authorization gate (`commands/system.rs`) is tested
 # against a real `Core` — a real token store to mint tokens in, a real policy
 # store to evaluate them against — because a mock would not catch a change in
