@@ -194,34 +194,121 @@ pub enum DownloadPath {
     Refetch,
 }
 
-/// Per-session audit sink for the bar's events. Bodies are filled in
-/// Task 5 (see
-/// `.ai-skills/sdd/2026-10-20-web-session-nav-controls/task-5-brief.md`);
-/// this task declares the surface so the per-platform shims can call it.
+/// Per-session audit sink for the bar's events. Lines use the
+/// `connect.web.*` shape (`target: "audit"`, `resource=` and `token=`
+/// first). Never log cookies, credentials, the launch id or a URL.
 pub struct NavBarAudit {
     pub app: tauri::AppHandle,
     pub resource: String,
     pub token: String,
 }
 
+/// Refusal reason tokens for [`NavBarAudit::download_refused`]. Every token
+/// matches `[a-z0-9_]{1,32}` so the line stays one parseable `key=value`
+/// field, and none is derived from page-controlled or OS-supplied text.
+pub mod reason {
+    /// The download URL's origin is outside the window's navigation allowlist.
+    pub const OUTSIDE_ALLOWLIST: &str = "outside_allowlist";
+    /// The profile has `allow_downloads = false`.
+    pub const DOWNLOADS_DISABLED: &str = "downloads_disabled";
+    /// The transfer passed [`super::DOWNLOAD_SOFT_CAP_BYTES`] and was cancelled.
+    pub const SIZE_EXCEEDED: &str = "size_exceeded";
+    /// A third concurrent download was refused ([`super::MAX_CONCURRENT_DOWNLOADS`]).
+    pub const TOO_MANY_DOWNLOADS: &str = "too_many_downloads";
+    /// [`super::NextPathError::Exhausted`].
+    pub const COLLISION_EXHAUSTED: &str = "collision_exhausted";
+    /// [`super::NextPathError::Io`].
+    pub const SAVE_IO_ERROR: &str = "save_io_error";
+    /// [`super::NextPathError::InvalidName`].
+    pub const INVALID_FILENAME: &str = "invalid_filename";
+}
+
+/// Map a [`NextPathError`] to its fixed audit reason token. The
+/// `io::Error` text is deliberately dropped: it can carry the destination
+/// path, which the audit trail must not record.
+pub fn refusal_reason(err: &NextPathError) -> &'static str {
+    match err {
+        NextPathError::Exhausted(_) => reason::COLLISION_EXHAUSTED,
+        NextPathError::Io(_) => reason::SAVE_IO_ERROR,
+        NextPathError::InvalidName => reason::INVALID_FILENAME,
+    }
+}
+
+impl DownloadPath {
+    /// The stable `path=` token for the download audit line.
+    pub fn audit_token(self) -> &'static str {
+        match self {
+            Self::Webview => "webview",
+            Self::Refetch => "refetch",
+        }
+    }
+}
+
+/// The `mime=` field comes from a response header the page's server
+/// controls. Keep it to media-type characters (type/subtype, parameters
+/// stripped) and fold anything else to `invalid`, so it can neither carry
+/// whitespace that forges another `key=value` field nor grow the line.
+fn audit_mime(mime: &str) -> String {
+    let base = mime.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    let ok = !base.is_empty()
+        && base.len() <= 127
+        && base.matches('/').count() == 1
+        && base.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'+' | b'.' | b'-' | b'_'));
+    if ok {
+        base
+    } else {
+        "invalid".to_string()
+    }
+}
+
+// The emitters take plain strings so the line shapes are testable without
+// a `tauri::AppHandle`; the `NavBarAudit` methods are one-line delegates.
+fn emit_nav(resource: &str, token: &str, action: NavAction) {
+    log::info!(
+        target: "audit",
+        "connect.web.nav: resource={resource} token={token} action={}",
+        action.audit_token(),
+    );
+}
+
+fn emit_download_ok(resource: &str, token: &str, filename: &str, mime: &str, bytes: u64, path: DownloadPath) {
+    log::info!(
+        target: "audit",
+        "connect.web.download: resource={resource} token={token} filename={filename} mime={} bytes={bytes} path={}",
+        audit_mime(mime),
+        path.audit_token(),
+    );
+}
+
+fn emit_download_refused(resource: &str, token: &str, reason: &'static str) {
+    log::info!(
+        target: "audit",
+        "connect.web.download_refused: resource={resource} token={token} reason={reason}",
+    );
+}
+
 impl NavBarAudit {
     /// Emit `connect.web.nav: resource=… token=… action=back|forward|reload`.
     /// Download clicks go through [`Self::download_ok`] /
     /// [`Self::download_refused`] instead.
-    #[allow(unused_variables)] // body added in Task 5.
-    pub fn nav(&self, action: NavAction) {}
+    pub fn nav(&self, action: NavAction) {
+        emit_nav(&self.resource, &self.token, action);
+    }
 
     /// Emit `connect.web.download: resource=… token=… filename=<basename>
     /// mime=<type> bytes=<n> path=webview|refetch`. `filename` is already
-    /// sanitised by [`sanitize_filename`] before this call.
-    #[allow(unused_variables)] // body added in Task 5.
-    pub fn download_ok(&self, filename: &str, mime: &str, bytes: u64, path: DownloadPath) {}
+    /// sanitised by [`sanitize_filename`] before this call. The URL (path
+    /// and query included) is never part of the line.
+    pub fn download_ok(&self, filename: &str, mime: &str, bytes: u64, path: DownloadPath) {
+        emit_download_ok(&self.resource, &self.token, filename, mime, bytes, path);
+    }
 
-    /// Emit a refusal with a stable `reason=` token
-    /// (`outside_allowlist`, `allow_downloads_false`, `concurrency_cap`,
-    /// `size_exceeded`, `collision_exhausted`, …).
-    #[allow(unused_variables)] // body added in Task 5.
-    pub fn download_refused(&self, reason: &'static str) {}
+    /// Emit `connect.web.download_refused: resource=… token=… reason=…`.
+    /// `reason` is one of the [`reason`] constants, or the result of
+    /// [`refusal_reason`].
+    pub fn download_refused(&self, reason: &'static str) {
+        emit_download_refused(&self.resource, &self.token, reason);
+    }
 }
 
 /// Per-window rate limiter: `2 concurrent downloads / 2 GiB soft cap`
@@ -492,5 +579,135 @@ mod tests {
         mark_operator_reload(&shared);
         assert!(take_operator_reload(&shared), "stacked marks still land once");
         assert!(!take_operator_reload(&shared));
+    }
+}
+
+/// Audit-line tests. The emitters take plain strings, so no
+/// `tauri::AppHandle` is needed; the lines are captured through a
+/// process-global `log` logger and filtered by a per-test resource id so
+/// tests sharing a process cannot read each other's lines.
+#[cfg(test)]
+mod audit {
+    use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    struct Capture;
+    static CAPTURED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    impl log::Log for Capture {
+        fn enabled(&self, _: &log::Metadata<'_>) -> bool {
+            true
+        }
+        fn log(&self, record: &log::Record<'_>) {
+            if record.target() == "audit" {
+                CAPTURED.lock().unwrap().push(record.args().to_string());
+            }
+        }
+        fn flush(&self) {}
+    }
+
+    fn capture_logs() {
+        static INIT: OnceLock<()> = OnceLock::new();
+        INIT.get_or_init(|| {
+            log::set_logger(&Capture).expect("no other logger in this test binary");
+            log::set_max_level(log::LevelFilter::Trace);
+        });
+    }
+
+    /// The single audit line mentioning `resource`.
+    fn line_for(resource: &str) -> String {
+        let marker = format!("resource={resource} ");
+        let lines: Vec<String> = CAPTURED.lock().unwrap().iter().filter(|l| l.contains(&marker)).cloned().collect();
+        assert_eq!(lines.len(), 1, "expected exactly one audit line for {resource}: {lines:?}");
+        lines.into_iter().next().unwrap()
+    }
+
+    fn is_reason_token(t: &str) -> bool {
+        (1..=32).contains(&t.len()) && t.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+    }
+
+    #[test]
+    fn nav_audit_line_matches_connect_web_shape() {
+        capture_logs();
+        emit_nav("res-nav", "tok-nav", NavAction::Reload);
+        assert_eq!(line_for("res-nav"), "connect.web.nav: resource=res-nav token=tok-nav action=reload");
+        emit_nav("res-back", "t", NavAction::Back);
+        assert!(line_for("res-back").ends_with("action=back"));
+        emit_nav("res-fwd", "t", NavAction::Forward);
+        assert!(line_for("res-fwd").ends_with("action=forward"));
+    }
+
+    #[test]
+    fn download_ok_audit_omits_url_path_and_query() {
+        capture_logs();
+        // The emitter has no URL parameter, so a URL cannot reach the line.
+        // `https://x/path?q=1` is what the shim saw; only the sanitised
+        // basename, mime, byte count and path kind are passed on.
+        emit_download_ok(
+            "res-dl",
+            "tok-dl",
+            "report.pdf",
+            "application/pdf; charset=binary",
+            4096,
+            DownloadPath::Webview,
+        );
+        let line = line_for("res-dl");
+        assert_eq!(
+            line,
+            "connect.web.download: resource=res-dl token=tok-dl filename=report.pdf mime=application/pdf bytes=4096 \
+             path=webview"
+        );
+        assert!(!line.contains("https://") && !line.contains("q=1") && !line.contains("/path"), "{line}");
+
+        emit_download_ok("res-dl2", "t", "a.bin", "application/octet-stream", 1, DownloadPath::Refetch);
+        assert!(line_for("res-dl2").ends_with("path=refetch"));
+    }
+
+    #[test]
+    fn download_ok_audit_neutralises_hostile_mime() {
+        capture_logs();
+        emit_download_ok("res-mime", "t", "a.bin", "x/y bytes=0\nconnect.web.nav: forged", 1, DownloadPath::Webview);
+        let line = line_for("res-mime");
+        assert!(line.contains("mime=invalid "), "{line}");
+        assert!(!line.contains('\n'), "{line}");
+    }
+
+    #[test]
+    fn download_refused_audit_names_reason() {
+        capture_logs();
+        emit_download_refused("res-ref", "tok-ref", reason::OUTSIDE_ALLOWLIST);
+        assert_eq!(
+            line_for("res-ref"),
+            "connect.web.download_refused: resource=res-ref token=tok-ref reason=outside_allowlist"
+        );
+    }
+
+    #[test]
+    fn refusal_reason_maps_next_path_errors_without_io_text() {
+        assert_eq!(refusal_reason(&NextPathError::Exhausted(CollisionExhausted)), "collision_exhausted");
+        assert_eq!(refusal_reason(&NextPathError::InvalidName), "invalid_filename");
+        let io = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "/Users/op/Downloads/secret.pdf");
+        let token = refusal_reason(&NextPathError::Io(io));
+        assert_eq!(token, "save_io_error");
+        assert!(!token.contains("Users"));
+    }
+
+    #[test]
+    fn every_reason_constant_is_a_valid_token() {
+        let all = [
+            reason::OUTSIDE_ALLOWLIST,
+            reason::DOWNLOADS_DISABLED,
+            reason::SIZE_EXCEEDED,
+            reason::TOO_MANY_DOWNLOADS,
+            reason::COLLISION_EXHAUSTED,
+            reason::SAVE_IO_ERROR,
+            reason::INVALID_FILENAME,
+        ];
+        for r in all {
+            assert!(is_reason_token(r), "{r}");
+        }
+        assert_eq!(reason::DOWNLOADS_DISABLED, "downloads_disabled");
+        assert_eq!(reason::SIZE_EXCEEDED, "size_exceeded");
+        assert_eq!(reason::TOO_MANY_DOWNLOADS, "too_many_downloads");
     }
 }
