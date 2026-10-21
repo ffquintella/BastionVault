@@ -1000,6 +1000,9 @@ pub struct WebSessionState {
     /// The running recipe engine, so a re-run can wait for it to report
     /// before the launch it belongs to is closed.
     pub engine: Option<tauri::async_runtime::JoinHandle<()>>,
+    /// The window's native nav bar (`super::web_nav_bar`), attached once the
+    /// window is built. Teardown detaches it ([`finish_session`]).
+    pub nav_bar: Option<Box<dyn super::web_nav_bar::NavBar>>,
 }
 
 /// A `form` session's re-run context: the recipe as the session was opened
@@ -1014,16 +1017,21 @@ pub struct FormRelogin {
     pub form: FormLogin,
 }
 
-/// Finish a web session that has just been removed from the registry: stop
-/// its recipe engine, report and close its launch, write the host-side close
-/// audit line and remove the data directory.
+/// Finish a web session that has just been removed from the registry: detach
+/// its nav bar, stop its recipe engine, report and close its launch, write
+/// the host-side close audit line and remove the data directory.
 ///
 /// Every path that drops a web session's registry entry calls this —
 /// window destruction, `session_close`, a window that failed to build, app
 /// exit, and the generic SSH/RDP drop paths should a web token ever reach
 /// them — so neither `v2/connect/web/close` nor the cleanup can be skipped
 /// by taking a different door out.
-pub async fn finish_session(token: &str, session: WebSessionState, reason: WebCloseReason) {
+pub async fn finish_session(token: &str, mut session: WebSessionState, reason: WebCloseReason) {
+    // First, before any network wait: a download the bar still has in flight
+    // ends now, with its placeholder and staging directory removed.
+    if let Some(bar) = session.nav_bar.take() {
+        bar.detach();
+    }
     session.shared.mark_closed();
     let mut launch_hash = String::new();
     if let Some(launch) = &session.launch {

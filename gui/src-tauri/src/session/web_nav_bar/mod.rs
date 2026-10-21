@@ -29,13 +29,15 @@
 //! `windows_model`, `windows_refetch` and their unit tests compile on every
 //! host.
 //!
-//! Dead-code allow: Tasks 2–7 of
-//! docs/plans/2026-10-20-web-session-nav-controls.md consume every item
-//! defined here (the per-platform shims call `NavBar`, `NavBarAudit`,
-//! `DownloadLimiter`, `sanitize_filename` and `next_free_path`; the
-//! composition root in `commands/connect_web.rs` constructs them). Allow
-//! dead_code at the module boundary so the first commit stays
-//! warning-free; later tasks drop the attribute once their callers land.
+//! Dead-code allow: the composition root (`commands/connect_web_nav_bar.rs`)
+//! attaches the bar, but on any one host most of this module is still dead
+//! to the compiler on purpose: `linux_model`, `windows_model` and
+//! `windows_refetch` are compiled everywhere so their tests run on every
+//! host, yet only their own platform's shim calls them; `NavBarConfig`'s
+//! `proxy_mode` is read by the Windows shim only; and a few accessors
+//! (`DownloadLimiter::in_flight`, `DownloadSlot::bytes_recorded`,
+//! `NavBar::set_state`) serve tests and diagnostics. Removing the attribute
+//! today gives 69 such warnings on macOS.
 #![allow(dead_code)]
 
 pub mod filename;
@@ -250,8 +252,10 @@ pub struct NavBarConfig {
     /// (T106, `proxy_url`). Windows refuses the bar's download then
     /// (`refetch_blocked`): its request of its own would not go through the
     /// proxy. macOS and Linux download in the webview's own network stack,
-    /// proxy included, and do not read it. No session sets it before T106's
-    /// platform wiring; that wiring must.
+    /// proxy included, and do not read it. The composition root derives it
+    /// from the session (`commands::connect_web_nav_bar::WebviewRoute`: the
+    /// launch's exposure, an unknown route counting as proxied); no session
+    /// is proxied before T106's platform wiring.
     pub proxy_mode: bool,
 }
 

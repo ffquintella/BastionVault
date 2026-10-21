@@ -81,8 +81,10 @@ pub async fn web_chrome_relogin(state: State<'_, AppState>, app: AppHandle, webv
 }
 
 /// Build the two-webview session window: the toolbar on top, `remote` (the
-/// fully configured remote-content webview, labelled like the window) below.
-/// The window is sized so the remote area keeps the profile's size.
+/// fully configured remote-content webview, labelled like the window) below,
+/// and the native nav bar's strip (`session::web_nav_bar`, attached by the
+/// caller) left free at the bottom. The window is sized so the remote area
+/// keeps the profile's size, and may not be made shorter than the two bars.
 #[cfg(feature = "web_session_chrome")]
 pub(super) fn build_chrome_window(
     app: &AppHandle,
@@ -93,15 +95,26 @@ pub(super) fn build_chrome_window(
     remote: tauri::WebviewBuilder<tauri::Wry>,
 ) -> CmdResult<(tauri::Window, tauri::Webview)> {
     use tauri::webview::NewWindowResponse;
-    use tauri::{LogicalPosition, LogicalSize, WebviewBuilder, WebviewUrl, WindowBuilder};
+    use tauri::{
+        LogicalPosition, LogicalSize, LogicalUnit, PixelUnit, WebviewBuilder, WebviewUrl, WindowBuilder,
+        WindowSizeConstraints,
+    };
 
-    use crate::session::web_chrome::{chrome_label, chrome_navigation_allowed, layout, CHROME_HEIGHT, CHROME_PAGE};
+    use crate::session::web_chrome::{
+        chrome_label, chrome_navigation_allowed, layout, window_inner_size, CHROME_PAGE, MIN_WINDOW_HEIGHT,
+    };
 
-    let width = f64::from(cfg.width);
-    let height = f64::from(cfg.height) + CHROME_HEIGHT;
+    let (width, height) = window_inner_size(cfg.width, cfg.height);
+    // Shorter than both bars, the nav bar (which every shim pins to the
+    // bottom itself) would cover the toolbar.
+    let min_height = WindowSizeConstraints {
+        min_height: Some(PixelUnit::Logical(LogicalUnit(MIN_WINDOW_HEIGHT))),
+        ..WindowSizeConstraints::default()
+    };
     let window = WindowBuilder::new(app, label)
         .title(title)
         .inner_size(width, height)
+        .inner_size_constraints(min_height)
         .resizable(true)
         .focused(true)
         .build()
@@ -130,7 +143,8 @@ pub(super) fn build_chrome_window(
         .on_new_window(|_, _| NewWindowResponse::Deny)
         .on_download(|_, _| false);
 
-    let (bar, content) = layout(width, height);
+    let initial = layout(width, height);
+    let (bar, content) = (initial.toolbar, initial.remote);
     let built = window
         .add_child(toolbar, LogicalPosition::new(bar.x, bar.y), LogicalSize::new(bar.width, bar.height))
         .and_then(|toolbar| {
@@ -150,16 +164,17 @@ pub(super) fn build_chrome_window(
         }
     };
 
-    // Keep the toolbar a fixed strip on resize. Bounds are applied from a
-    // task, not inside the window-event callback, so the runtime is never
-    // re-entered while it dispatches the event.
+    // Keep the toolbar and the nav bar's strip fixed on resize. Bounds are
+    // applied from a task, not inside the window-event callback, so the
+    // runtime is never re-entered while it dispatches the event.
     let resize_window = window.clone();
     let (resize_toolbar, resize_remote) = (toolbar, remote.clone());
     window.on_window_event(move |event| {
         if let tauri::WindowEvent::Resized(size) = event {
             let scale = resize_window.scale_factor().unwrap_or(1.0);
             let logical = size.to_logical::<f64>(scale);
-            let (bar, content) = layout(logical.width, logical.height);
+            let parts = layout(logical.width, logical.height);
+            let (bar, content) = (parts.toolbar, parts.remote);
             let toolbar = resize_toolbar.clone();
             let remote = resize_remote.clone();
             tauri::async_runtime::spawn(async move {

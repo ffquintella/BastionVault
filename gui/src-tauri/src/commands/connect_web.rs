@@ -73,6 +73,13 @@
 //! matched by webview label) grants its three app commands and no plugin
 //! permission. Without the feature the window is the single remote webview
 //! of Phases 1–4.
+//!
+//! In both builds the window also carries the native nav bar (back /
+//! forward / reload / download, `session::web_nav_bar`): a platform view
+//! beside the remote webview, never DOM, attached by `build_window` and
+//! configured from the window's own `RemotePolicy` (`connect_web_nav_bar`).
+//! Its download reuses `web::download_decision` on the same allow-list and
+//! `allow_downloads`, and its Reload marks the session the fill engine polls.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -94,6 +101,7 @@ use super::connect::{
     SessionProtocolTag,
 };
 use super::connect_web_http_auth::{InstallError, NativeGates, TLS_PIN_HANDLER_CHECK};
+use super::connect_web_nav_bar::{nav_bar_wiring, NavBarInputs, SessionNetwork, WebviewRoute, REMOTE_FRAME};
 use crate::error::{CmdResult, CommandError};
 use crate::session::web::{
     self as web_session, display_origin, download_decision, download_file_name, DownloadDecision, FormRelogin,
@@ -108,6 +116,7 @@ use crate::session::web_http_auth::{
     GateAudit, GateEvent, HttpAuthCredential, HttpAuthGate, HttpAuthState, ANSWER_WINDOW,
 };
 use crate::session::web_launch::{self, LaunchChannel, LaunchRequest, WebLaunch};
+use crate::session::web_nav_bar::NavBar;
 use crate::session::web_recipe::{
     check_bundle, outcome_event, reconcile_fill_scope, BundleExpectation, EffectiveScope, ExpectedLogin,
     LaunchCredential, Outcome, PlanSteps, RecipePlan, UrlGlob, WebSessionOutcomeEvent, WEB_SESSION_OUTCOME_EVENT,
@@ -257,6 +266,7 @@ pub async fn session_open_web(
             shared: Arc::clone(&shared),
             relogin: None,
             engine: None,
+            nav_bar: None,
         },
     )
     .await?;
@@ -347,6 +357,15 @@ pub async fn session_open_web(
             },
         )
     });
+    // The nav bar's view of the network: the window's own pin gate, cloned
+    // before it moves into the native handlers, and the route the launch's
+    // exposure implies (`WebviewRoute`, fail closed).
+    let launch_exposure = form_run
+        .as_ref()
+        .map(|(start, _)| start.exposure.as_str())
+        .or_else(|| http_auth_run.as_ref().map(|start| start.exposure.as_str()));
+    let network =
+        SessionNetwork { tls_pin: tls_pin_gate.clone(), route: WebviewRoute::from_launch_exposure(launch_exposure) };
     let gates = NativeGates {
         http_auth: http_auth_gate.clone(),
         tls_pin: tls_pin_gate,
@@ -379,6 +398,7 @@ pub async fn session_open_web(
         data_dir,
         initial_url,
         http_auth_gate.clone(),
+        network,
     ) {
         Ok(w) => w,
         Err(e) => {
@@ -390,6 +410,7 @@ pub async fn session_open_web(
         }
     };
     hook_window_destroyed(&win.window, &app, &token);
+    keep_nav_bar(&state, &token, win.nav_bar).await;
 
     if !gates.is_empty() {
         if let Err(InstallError { check, reason }) = arm_native_handlers(&win.remote, gates, &scope.start_url).await {
@@ -689,6 +710,9 @@ async fn release_reservation(state: &AppState, token: &str) {
         }
     };
     if let Some(SessionState::Web(w)) = removed {
+        if let Some(bar) = w.nav_bar {
+            bar.detach();
+        }
         if let Some(launch) = &w.launch {
             launch.finish("session_closed").await;
         }
@@ -724,6 +748,26 @@ async fn attach_engine(
         w.engine = Some(engine);
         if relogin.is_some() {
             w.relogin = relogin;
+        }
+    }
+}
+
+/// Keep a window's nav bar on its registry entry, where teardown detaches it
+/// (`finish_session`, `close_web_sessions_on_exit`). When the entry is
+/// already gone (the window closed while it was being built), detach it now.
+async fn keep_nav_bar(state: &AppState, token: &str, bar: Box<dyn NavBar>) {
+    let mut sessions = state.connect_sessions.lock().await;
+    match sessions.get_mut(token) {
+        Some(SessionState::Web(w)) => {
+            // One window per entry, so there is never a previous bar; detach
+            // one anyway rather than drop it attached.
+            if let Some(previous) = w.nav_bar.replace(bar) {
+                previous.detach();
+            }
+        }
+        _ => {
+            drop(sessions);
+            bar.detach();
         }
     }
 }
@@ -806,12 +850,17 @@ pub(crate) async fn close_web_session(state: &AppState, app: &AppHandle, token: 
 /// started. Windows are not touched — they are going away with the process.
 /// A launch that cannot be closed in time is reaped by the server, and an
 /// LDAP account it checked out is released when its lease expires.
+///
+/// Every nav bar is detached first, before any network wait, so a session
+/// the budget does not reach still ends its downloads (no placeholder or
+/// staging directory left behind). This runs on the main thread, where each
+/// shim's teardown runs at once.
 pub fn close_web_sessions_on_exit(app: &AppHandle) {
     let app = app.clone();
     let finished = tauri::async_runtime::block_on(async move {
         tokio::time::timeout(EXIT_CLOSE_BUDGET, async {
             let state = app.state::<AppState>();
-            let sessions: Vec<(String, WebSessionState)> = {
+            let mut sessions: Vec<(String, WebSessionState)> = {
                 let mut map = state.connect_sessions.lock().await;
                 let tokens: Vec<String> =
                     map.iter().filter(|(_, s)| matches!(s, SessionState::Web(_))).map(|(t, _)| t.clone()).collect();
@@ -823,6 +872,11 @@ pub fn close_web_sessions_on_exit(app: &AppHandle) {
                     })
                     .collect()
             };
+            for (_, session) in &mut sessions {
+                if let Some(bar) = session.nav_bar.take() {
+                    bar.detach();
+                }
+            }
             for (token, session) in sessions {
                 web_session::finish_session(&token, session, WebCloseReason::AppExit).await;
             }
@@ -1167,6 +1221,12 @@ async fn arm_native_handlers(win: &tauri::Webview, gates: NativeGates, start_url
 /// window gets a pin gate only when its profile has pins.
 const OPERATOR_TLS_OVERRIDE: bool = cfg!(any(target_os = "macos", windows, target_os = "linux"));
 
+// Every Windows session window therefore has a pin gate, which the nav bar's
+// own download request needs: without one it refuses every download
+// (`refetch_blocked`, `NavBarConfig::tls_pin`).
+#[cfg(windows)]
+const _: () = assert!(OPERATOR_TLS_OVERRIDE, "the Windows nav bar needs every session window to have a TLS pin gate");
+
 /// The TLS pin gate of one window. A refusal is shown in the title (fixed
 /// text) and becomes the session's abort reason if it ends before an
 /// outcome. With [`OPERATOR_TLS_OVERRIDE`] a window whose profile has no pins
@@ -1376,6 +1436,7 @@ pub async fn web_recipe_test(
             shared: Arc::clone(&shared),
             relogin: None,
             engine: None,
+            nav_bar: None,
         },
     )
     .await?;
@@ -1391,18 +1452,21 @@ pub async fn web_recipe_test(
         login: WebLogin::Open,
         tls_pins,
     };
+    let tls_pin_gate = (OPERATOR_TLS_OVERRIDE || !cfg.tls_pins.is_empty()).then(|| {
+        pin_gate(
+            &app,
+            &window_label,
+            &shared,
+            &cfg.tls_pins,
+            &scope.origins,
+            PinAudit { resource: TEST_TITLE.to_string(), token: token.clone(), launch_id_hash: None },
+        )
+    });
+    // A dry run has no launch.
+    let network = SessionNetwork { tls_pin: tls_pin_gate.clone(), route: WebviewRoute::from_launch_exposure(None) };
     let gates = NativeGates {
         http_auth: None,
-        tls_pin: (OPERATOR_TLS_OVERRIDE || !cfg.tls_pins.is_empty()).then(|| {
-            pin_gate(
-                &app,
-                &window_label,
-                &shared,
-                &cfg.tls_pins,
-                &scope.origins,
-                PinAudit { resource: TEST_TITLE.to_string(), token: token.clone(), launch_id_hash: None },
-            )
-        }),
+        tls_pin: tls_pin_gate,
         // A dry run fills nothing.
         ui: Some(super::connect_web_trust_ui::TrustUi::new(
             &app,
@@ -1419,16 +1483,27 @@ pub async fn web_recipe_test(
     } else {
         Url::parse("about:blank").map_err(|e| CommandError::from(format!("about:blank: {e}")))?
     };
-    let win =
-        match build_window(&app, &window_label, &token, TEST_TITLE, &cfg, &scope, &shared, data_dir, initial_url, None)
-        {
-            Ok(w) => w,
-            Err(e) => {
-                close_web_session(&state, &app, &token, WebCloseReason::WindowBuildFailed).await;
-                return Err(e);
-            }
-        };
+    let win = match build_window(
+        &app,
+        &window_label,
+        &token,
+        TEST_TITLE,
+        &cfg,
+        &scope,
+        &shared,
+        data_dir,
+        initial_url,
+        None,
+        network,
+    ) {
+        Ok(w) => w,
+        Err(e) => {
+            close_web_session(&state, &app, &token, WebCloseReason::WindowBuildFailed).await;
+            return Err(e);
+        }
+    };
     hook_window_destroyed(&win.window, &app, &token);
+    keep_nav_bar(&state, &token, win.nav_bar).await;
     if !gates.is_empty() {
         if let Err(InstallError { check, reason }) = arm_native_handlers(&win.remote, gates, &scope.start_url).await {
             log::warn!(target: "audit", "connect.web.recipe_test: state=refused reason={check} token={token} — {reason}");
@@ -1523,6 +1598,9 @@ pub(crate) fn session_window(app: &AppHandle, label: &str) -> Option<tauri::Wind
 struct SessionWindow {
     window: tauri::Window,
     remote: tauri::Webview,
+    /// The native nav bar attached to `remote`; the caller keeps it on the
+    /// session's entry (`keep_nav_bar`) until teardown detaches it.
+    nav_bar: Box<dyn NavBar>,
 }
 
 /// Everything the remote webview's handlers close over.
@@ -1705,7 +1783,8 @@ impl RemotePolicy {
 ///
 /// Without `web_session_chrome` this is the single remote webview of
 /// Phases 1–4. With it, the same remote webview sits below the vault-owned
-/// toolbar ([`build_chrome_window`]).
+/// toolbar ([`build_chrome_window`]). Either way the native nav bar is
+/// attached to the remote webview as soon as it exists ([`attach_nav_bar`]).
 #[allow(clippy::too_many_arguments)]
 fn build_window(
     app: &AppHandle,
@@ -1718,6 +1797,7 @@ fn build_window(
     data_dir: Option<PathBuf>,
     initial_url: Url,
     http_auth: Option<Arc<HttpAuthGate>>,
+    network: SessionNetwork,
 ) -> CmdResult<SessionWindow> {
     let policy = RemotePolicy {
         app: app.clone(),
@@ -1757,7 +1837,8 @@ fn build_window(
         }
         let win = builder.build().map_err(|e| CommandError::from(format!("spawn web session window: {e}")))?;
         let remote = AsRef::<tauri::Webview>::as_ref(&win).clone();
-        Ok(SessionWindow { window: remote.window(), remote })
+        let nav_bar = attach_nav_bar(app, &remote, &policy, cfg, &network);
+        Ok(SessionWindow { window: remote.window(), remote, nav_bar })
     }
 
     #[cfg(feature = "web_session_chrome")]
@@ -1783,9 +1864,36 @@ fn build_window(
         if cfg.clipboard.grants_page_clipboard_access() {
             remote = remote.enable_clipboard_access();
         }
-        super::connect_web_chrome::build_chrome_window(app, label, token, &shared.title(), cfg, remote)
-            .map(|(window, remote)| SessionWindow { window, remote })
+        super::connect_web_chrome::build_chrome_window(app, label, token, &shared.title(), cfg, remote).map(
+            |(window, remote)| {
+                let nav_bar = attach_nav_bar(app, &remote, &policy, cfg, &network);
+                SessionWindow { window, remote, nav_bar }
+            },
+        )
     }
+}
+
+/// Attach the native nav bar to the remote webview, configured from this
+/// window's own policy: `RemotePolicy`'s allow-list and session, the
+/// `allow_downloads` its `on_download` gets, its resource and token
+/// (`connect_web_nav_bar`).
+fn attach_nav_bar(
+    app: &AppHandle,
+    remote: &tauri::Webview,
+    policy: &RemotePolicy,
+    cfg: &web_session::WebSessionConfig,
+    network: &SessionNetwork,
+) -> Box<dyn NavBar> {
+    let wiring = nav_bar_wiring(NavBarInputs {
+        cfg,
+        resource: &policy.resource,
+        token: &policy.token,
+        origins: &policy.origins,
+        shared: &policy.shared,
+        network,
+        frame: REMOTE_FRAME,
+    });
+    super::connect_web_nav_bar::attach(app, remote, wiring)
 }
 
 #[cfg(test)]
