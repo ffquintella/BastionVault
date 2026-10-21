@@ -359,6 +359,11 @@ core-foundation = { version = "0.10", default-features = false }
 # `load-failed-with-tls-errors` signal, `WebContext` certificate exception and
 # its `gio` re-export for the presented chain — no further crate.
 webkit2gtk = { version = "2.0", features = ["v2_30"] }
+# The web session nav bar's native widgets (`session/web_nav_bar/linux.rs`):
+# the strip packed under the webview and its buttons. Not a new crate: gtk
+# 0.18 is in the graph through tauri, tao and wry (tauri enables `v3_24`),
+# and this adds no feature, so no crate's feature set changes.
+gtk = "0.18"
 
 [features]
 # Cloud storage targets are on by default in the desktop GUI build so

@@ -15,16 +15,18 @@
 //! - `transfer`, the download button's platform-neutral model (response
 //!   tracker, policy and response checks, naming, the download job and the
 //!   per-download state machine) every shim drives.
+//! - [`NavBarConfig`] and [`WebviewFrame`], what every shim's `attach` takes.
 //! - [`mark_operator_reload`] / [`take_operator_reload`] /
 //!   [`clear_operator_reload`], the load-generation threshold the Reload
 //!   button sets so the fill engine runs no step on the reload's own load
 //!   (G5). The engine takes it on the first ready snapshot at or past the
 //!   threshold and clears it when a run starts and ends.
 //!
-//! Per-platform attachment lives in `macos.rs`, `windows.rs`, `linux.rs`
-//! — added by Tasks 2–4, which also declare them in this file behind
-//! `#[cfg(target_os = "…")]`. Until then the orchestrator and its unit
-//! tests compile on every host without a platform shim.
+//! Per-platform attachment lives in `macos.rs`, `linux.rs` and (Task 3)
+//! `windows.rs`, declared in this file behind `#[cfg(target_os = "…")]`.
+//! Every shim's `attach(&tauri::Webview, NavBarConfig) -> Box<dyn NavBar>`
+//! has the same signature. The orchestrator, `transfer`, `linux_model` and
+//! their unit tests compile on every host.
 //!
 //! Dead-code allow: Tasks 2–7 of
 //! docs/plans/2026-10-20-web-session-nav-controls.md consume every item
@@ -38,12 +40,16 @@
 pub mod filename;
 // Not cfg-gated: the per-platform shims below all drive it.
 mod transfer;
+// The GTK shim's pure half. Not cfg-gated, so its tests run on every host.
+mod linux_model;
 
-// Per-platform shim modules are declared by Tasks 2–4 of
-// docs/plans/2026-10-20-web-session-nav-controls.md:
+// Per-platform shim modules (Tasks 2–4 of
+// docs/plans/2026-10-20-web-session-nav-controls.md); the Windows one is
+// still to come:
 //   #[cfg(target_os = "windows")] pub mod windows;  // Task 3
-//   #[cfg(target_os = "linux")]   pub mod linux;    // Task 4
 // They all consume the trait, state and audit types defined below.
+#[cfg(target_os = "linux")]
+pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
 
@@ -54,6 +60,8 @@ use std::sync::Arc;
 pub use filename::{next_free_path, sanitize_filename, CollisionExhausted, NextPathError};
 
 use super::web;
+use super::web::{OriginSet, WebShared};
+use super::web_tls_pin::TlsPinGate;
 
 /// Per-download soft cap. Above this the shim's download delegate
 /// cancels the transfer and the bar flashes a short-lived error state
@@ -191,6 +199,42 @@ pub trait NavBar: Send {
     /// Remove the bar from the window and release native resources.
     /// Takes `Box<Self>` so the trait object is consumed.
     fn detach(self: Box<Self>);
+}
+
+/// Who owns the remote webview's frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebviewFrame {
+    /// The webview fills its superview through autoresizing (the default
+    /// build, where it is the window's content): the macOS shim shrinks it
+    /// by `BAR_HEIGHT` once and autoresizing keeps it so.
+    ShrinkToFit,
+    /// The host sets the webview's bounds itself (the `web_session_chrome`
+    /// window's resize handler): the macOS shim only places the bar, and the
+    /// host's layout must leave `BAR_HEIGHT` free at the bottom.
+    HostManaged,
+}
+
+/// What one session window's bar needs, on every platform. Nothing here is
+/// a credential: the bar reads navigation state, the origin set and
+/// `allow_downloads` only (spec §8.2).
+pub struct NavBarConfig {
+    /// The profile's `allow_downloads` (spec §7.4).
+    pub allow_downloads: bool,
+    /// The window's navigation allow-list (`RemotePolicy::origins`).
+    pub origins: Arc<OriginSet>,
+    /// The session's audit sink (`connect.web.nav` / `download*`).
+    pub audit: NavBarAudit,
+    /// The session, for the operator-reload mark (G5).
+    pub shared: Arc<WebShared>,
+    /// The window's TLS pin gate, so a download's server-trust challenge is
+    /// decided exactly as the page's (macOS). `None`: platform evaluation
+    /// only. Unused on Linux: WebKitGTK runs the bar's download in the
+    /// webview's own web context, whose TLS policy and the certificate
+    /// exceptions the gate recorded there apply to it unchanged.
+    pub tls_pin: Option<Arc<TlsPinGate>>,
+    /// macOS only. On Linux the window's `GtkBox` lays the webview out in
+    /// both builds, so the shim never sets a frame.
+    pub frame: WebviewFrame,
 }
 
 /// Which download path the shim took. The spec audits this so a

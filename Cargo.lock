@@ -1029,6 +1029,7 @@ dependencies = [
  "cron",
  "dirs",
  "env_logger",
+ "gtk",
  "hex",
  "hkdf 0.13.0",
  "http-body-util",

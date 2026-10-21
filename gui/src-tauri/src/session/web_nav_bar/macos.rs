@@ -93,42 +93,14 @@ use tauri::{AppHandle, Url};
 
 use self::model::{DownloadRoute, Frame};
 use super::transfer::{self, Destination, MainFrameResponse, ResponseFacts, ResponseTracker, Settled, Transfer};
-use super::{mark_operator_reload, reason, DownloadLimiter, DownloadPath, NavAction, NavBar, NavBarAudit, NavState};
+use super::{
+    mark_operator_reload, reason, DownloadLimiter, DownloadPath, NavAction, NavBar, NavBarAudit, NavBarConfig,
+    NavState, WebviewFrame,
+};
 use crate::session::web::{OriginSet, WebShared};
 use crate::session::web_tls_pin::TlsPinGate;
 
 // ── Public surface ─────────────────────────────────────────────────
-
-/// Who owns the remote webview's frame.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WebviewFrame {
-    /// The webview fills its superview through autoresizing (the default
-    /// build, where it is the window's content): the shim shrinks it by
-    /// `BAR_HEIGHT` once and autoresizing keeps it so.
-    ShrinkToFit,
-    /// The host sets the webview's bounds itself (the `web_session_chrome`
-    /// window's resize handler): the shim only places the bar, and the
-    /// host's layout must leave `BAR_HEIGHT` free at the bottom.
-    HostManaged,
-}
-
-/// What one session window's bar needs. Nothing here is a credential: the
-/// bar reads navigation state, the origin set and `allow_downloads` only
-/// (spec §8.2).
-pub struct NavBarConfig {
-    /// The profile's `allow_downloads` (spec §7.4).
-    pub allow_downloads: bool,
-    /// The window's navigation allow-list (`RemotePolicy::origins`).
-    pub origins: Arc<OriginSet>,
-    /// The session's audit sink (`connect.web.nav` / `download*`).
-    pub audit: NavBarAudit,
-    /// The session, for the operator-reload mark (G5).
-    pub shared: Arc<WebShared>,
-    /// The window's TLS pin gate, so a download's server-trust challenge is
-    /// decided exactly as the page's. `None`: platform evaluation only.
-    pub tls_pin: Option<Arc<TlsPinGate>>,
-    pub frame: WebviewFrame,
-}
 
 /// Attach the bar to the session's remote webview. Call it right after the
 /// webview is built (`build_window`), from any thread: the native work is
