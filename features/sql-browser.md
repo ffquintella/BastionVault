@@ -1536,10 +1536,7 @@ that has not been run, with the acceptance check named.
 - **Item 7, HA — read.** No `session_on_other_node` or sticky mechanism exists
   in `src/` or `crates/`. `bv-client` pins one node per backend and fails over
   only idempotent operations when the node is unavailable
-  (`crates/bv-client/src/remote.rs:837`). Recommendation: session-bound plugin
-  operations never fail over. If the node holding a session goes away, the
-  session ends and the client reconnects. This is recorded as a recommendation
-  for the maintainer to confirm.
+  (`crates/bv-client/src/remote.rs:837`). Decision D6 below.
 
 **Decided values (confirmed by the maintainer, 2026-10-21):**
 
@@ -1551,10 +1548,20 @@ that has not been run, with the acceptance check named.
   below 500 ms at 50 sessions with a 20–200 ms backend delay. The real runtime
   must then keep p99 within 1.5× of the single-session p99 on the same
   workload, and be re-measured with the real driver before Phase 1 merges.
+- **D6, session-bound operations and node loss (confirmed 2026-10-21):**
+  operations on an SQL session never fail over to another node. A session
+  holds a live database connection, possibly an open transaction, and a
+  credential released for one endpoint (§5.4). When the node holding it becomes
+  unavailable, the session ends, the workspace says so, and the user opens a
+  new session, which may land on another node. Read failover in `bv-client`
+  stays limited to idempotent requests that are not bound to a session.
+  Replicating sessions across nodes is out of scope for T124 and needs its own
+  design before it is considered.
 
 **Result of Phase 0 (closed 2026-10-21):** D1, D2 (TCP only), D3 (150 kB gzip
-SQL chunk, lazy-loaded), D4 and D5 (p99 ≤ 500 ms on the model, re-measured with
-the real driver before Phase 1 merges) are decided. Items 1 to 4, 6 and 7 are
+SQL chunk, lazy-loaded), D4, D5 (p99 ≤ 500 ms on the model, re-measured with
+the real driver before Phase 1 merges) and D6 (no failover for session-bound
+operations) are decided. Items 1 to 4, 6 and 7 are
 measured or read. Open items that Phase 1 and later must close: TCPS
 cancellation (D2), the `openssl-sys` check on the real build, the
 rolling-upgrade gate, and the real-runtime 50-session measurement. Phase 1 may
