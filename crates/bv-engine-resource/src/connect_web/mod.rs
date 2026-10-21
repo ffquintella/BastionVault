@@ -1113,9 +1113,10 @@ impl super::ResourceBackendInner {
         }
 
         // (4) Exposure cap and heuristic policy (§6), at both tiers. `form`
-        // needs `dom`, `http-auth` `handler`; `allow_insecure_http` is
-        // refused below a `dom` cap, and a launch that allows it is recorded
-        // as `dom` whatever its mode.
+        // needs `dom`, `form` in proxy mode (a recipe `submit_target`)
+        // `proxy`, `http-auth` `handler`; `allow_insecure_http` is refused
+        // below a `dom` cap (and for proxy mode outright, in step 2), and a
+        // launch that allows it is recorded as `dom` whatever its mode.
         let type_def = self.resource_type_def(req, &meta).await?;
         let policy = ExposurePolicy::from_tiers(type_def.as_ref(), &meta)?;
         let cap = policy.check(profile.required_exposure(), profile.needs.heuristic, profile.allow_insecure_http)?;
@@ -1793,5 +1794,27 @@ mod tests {
         assert!(b["recipe_hash"].as_str().unwrap().starts_with("sha256:"));
         assert!(b["credential"].as_object().unwrap().contains_key("totp"));
         assert_eq!(b["totp_refresh_steps"], serde_json::json!([1]));
+    }
+
+    /// Proxy mode (T106): a version-2 recipe with a `submit_target` is still
+    /// `login_mode: form`, released at exposure `proxy`; the password is in
+    /// the bundle (the host-local proxy needs it), the page gets only a
+    /// placeholder.
+    #[test]
+    fn a_proxy_form_bundle_is_released_at_exposure_proxy() {
+        let profile = serde_json::json!({
+            "id": "p", "name": "p", "protocol": "web",
+            "credential_source": { "kind": "secret", "secret_id": "admin" },
+            "web": { "start_url": "https://fw01.example.com/login", "login_mode": "form",
+                     "recipe": { "version": 2, "steps": [ { "when_url": "https://fw01.example.com/*",
+                       "actions": [ { "fill": "#pw", "value": "password" }, { "submit": "form" } ] } ],
+                       "success_when": { "url": "https://fw01.example.com/ng/*" },
+                       "submit_target": { "origin": "https://fw01.example.com", "path": "/logincheck",
+                                          "body": "form" } } }
+        });
+        let b = bundle_for(&profile, &full_credential());
+        assert_eq!(b["login_mode"], Value::String("form".into()));
+        assert_eq!(b["exposure"], Value::String("proxy".into()));
+        assert!(b["credential"].as_object().unwrap().contains_key("password"));
     }
 }

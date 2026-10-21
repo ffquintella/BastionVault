@@ -16,14 +16,31 @@
 //!
 //! This module is `pub` so the desktop host can reuse the same parser and the
 //! same [`recipe_hash`] rather than re-deriving either.
+//!
+//! **Versions.** Version 1 is the format of §2. Version 2 is version 1 plus
+//! one optional key, `submit_target` (proxy mode, §10, T106): the origin,
+//! path and body type of the sign-in request whose placeholder the host-local
+//! proxy replaces with the password. A version-1 recipe is read exactly as
+//! before — same rules, same hash (the hash covers the stored value) — and
+//! `submit_target` on a version-1 recipe is refused, never ignored. A server
+//! that only knows version 1 refuses a version-2 recipe outright, so a proxy
+//! recipe can never be run as a plain `form` one by an older server.
 
 use std::fmt;
 
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
-/// The only recipe version this server understands.
-pub const RECIPE_VERSION: u64 = 1;
+/// The recipe versions this server understands.
+pub const RECIPE_VERSIONS: &[u64] = &[1, 2];
+/// The newest version. Writers use the lowest version that can carry what a
+/// recipe holds (version 1 unless it has a `submit_target`), so a recipe that
+/// does not need proxy mode stays readable by servers that predate it.
+pub const LATEST_RECIPE_VERSION: u64 = 2;
+/// The first version that may carry `submit_target`.
+pub const SUBMIT_TARGET_VERSION: u64 = 2;
+/// Upper bound on `submit_target.path`.
+pub const MAX_SUBMIT_PATH_LEN: usize = 1024;
 pub const MAX_STEPS: usize = 16;
 pub const MAX_ACTIONS_PER_STEP: usize = 32;
 pub const MAX_SELECTOR_LEN: usize = 512;
@@ -41,8 +58,18 @@ pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
 pub const VENDORS: &[&str] =
     &["generic", "fortigate", "vcenter", "idrac", "ilo", "pfsense", "grafana", "jenkins", "other"];
 
-const TOP_LEVEL_KEYS: &[&str] =
+const TOP_LEVEL_KEYS_V1: &[&str] =
     &["version", "vendor", "steps", "success_when", "failure_when", "timeout_secs", "pause_for_operator"];
+const TOP_LEVEL_KEYS_V2: &[&str] = &[
+    "version",
+    "vendor",
+    "steps",
+    "success_when",
+    "failure_when",
+    "timeout_secs",
+    "pause_for_operator",
+    "submit_target",
+];
 
 /// What a `fill` action writes into a field.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,6 +128,39 @@ pub enum PauseReason {
     PushMfa,
 }
 
+/// The body type of the sign-in request in proxy mode — what the proxy
+/// re-encodes the password for (§10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubmitBody {
+    /// `application/x-www-form-urlencoded`.
+    Form,
+    /// `application/json` (or a `+json` type).
+    Json,
+}
+
+impl SubmitBody {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Form => "form",
+            Self::Json => "json",
+        }
+    }
+}
+
+/// `submit_target` (recipe version 2): the one request in which the
+/// host-local proxy may replace the per-launch placeholder with the password
+/// (§10). Its presence is what makes a `form` launch proxy mode, released at
+/// exposure `proxy` instead of `dom`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubmitTarget {
+    /// Normalised origin key (`https://host[:port]`, [`origin_key`]). Always
+    /// https: proxy mode never puts the secret on plain http.
+    pub origin: String,
+    /// The exact request path (no query, no fragment, no glob).
+    pub path: String,
+    pub body: SubmitBody,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebLoginRecipe {
     pub version: u64,
@@ -110,6 +170,8 @@ pub struct WebLoginRecipe {
     pub failure_when: Option<RecipeCondition>,
     pub timeout_secs: u64,
     pub pause_for_operator: Vec<PauseReason>,
+    /// Version 2 only: proxy mode's sign-in request.
+    pub submit_target: Option<SubmitTarget>,
 }
 
 /// Which parts of a credential a recipe consumes. The launch releases nothing
@@ -355,6 +417,69 @@ fn action(v: &Value, at: &str) -> Result<RecipeAction, RecipeError> {
     }
 }
 
+/// `submit_target.path`: matched byte for byte against the request path the
+/// proxy sees, so it is held to what a browser sends on the wire.
+fn submit_path(p: &str) -> Result<(), String> {
+    if !p.starts_with('/') {
+        return Err("must be an absolute path starting with `/`".into());
+    }
+    if p.starts_with("//") {
+        return Err("must not start with `//` (that is a host, not a path)".into());
+    }
+    if p.len() > MAX_SUBMIT_PATH_LEN {
+        return Err(format!("is longer than {MAX_SUBMIT_PATH_LEN} bytes"));
+    }
+    if !p.chars().all(|c| c.is_ascii_graphic()) {
+        return Err("must be printable ASCII with no spaces; percent-encode anything else as the browser does".into());
+    }
+    if p.contains(['?', '#']) {
+        return Err("is matched without its query or fragment; give the path only".into());
+    }
+    if p.contains(['*', '\\']) {
+        return Err("is matched exactly; `*` and `\\` are refused".into());
+    }
+    Ok(())
+}
+
+fn submit_target(v: &Value) -> Result<SubmitTarget, RecipeError> {
+    let at = "submit_target";
+    let obj = v.as_object().ok_or_else(|| err(at, "must be an object with `origin`, `path` and `body`"))?;
+    reject_unknown(obj, at, &["origin", "path", "body"])?;
+
+    let origin_at = join(at, "origin");
+    let raw = obj
+        .get("origin")
+        .and_then(Value::as_str)
+        .ok_or_else(|| err(&origin_at, "is required: the https origin the sign-in form posts to"))?;
+    let (scheme, authority, rest) = split_url(raw).map_err(|r| err(&origin_at, r))?;
+    if !(rest.is_empty() || rest == "/") {
+        return Err(err(&origin_at, "must be a bare origin (no path, query or fragment)"));
+    }
+    if scheme != "https" {
+        return Err(err(&origin_at, "must be https: proxy mode never sends the secret over plain http"));
+    }
+    let origin = origin_key(scheme, authority, false).map_err(|r| err(&origin_at, r))?;
+
+    let path_at = join(at, "path");
+    let path = obj
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| err(&path_at, "is required: the exact path the sign-in form posts to"))?;
+    submit_path(path).map_err(|r| err(&path_at, r))?;
+
+    let body = match obj.get("body").and_then(Value::as_str) {
+        Some("form") => SubmitBody::Form,
+        Some("json") => SubmitBody::Json,
+        _ => {
+            return Err(err(
+                join(at, "body"),
+                "must be `form` (application/x-www-form-urlencoded) or `json` (application/json)",
+            ))
+        }
+    };
+    Ok(SubmitTarget { origin, path: path.to_string(), body })
+}
+
 fn step(v: &Value, at: &str) -> Result<RecipeStep, RecipeError> {
     let obj = v.as_object().ok_or_else(|| err(at, "must be an object"))?;
     reject_unknown(obj, at, &["when_url", "actions"])?;
@@ -386,15 +511,21 @@ impl WebLoginRecipe {
             .get("version")
             .and_then(Value::as_u64)
             .ok_or_else(|| err("version", "is required and must be an integer"))?;
-        if version != RECIPE_VERSION {
+        if !RECIPE_VERSIONS.contains(&version) {
             return Err(err(
                 "version",
-                format!(
-                    "recipe version {version} is not supported; this server understands version {RECIPE_VERSION} only"
-                ),
+                format!("recipe version {version} is not supported; this server understands versions 1 and 2"),
             ));
         }
-        reject_unknown(obj, "", TOP_LEVEL_KEYS)?;
+        if version < SUBMIT_TARGET_VERSION && obj.contains_key("submit_target") {
+            // Named rather than reported as an unknown field: the fix is the
+            // version, not the key.
+            return Err(err(
+                "submit_target",
+                format!("needs recipe version {SUBMIT_TARGET_VERSION} (proxy mode); this recipe is version {version}"),
+            ));
+        }
+        reject_unknown(obj, "", if version >= SUBMIT_TARGET_VERSION { TOP_LEVEL_KEYS_V2 } else { TOP_LEVEL_KEYS_V1 })?;
 
         let vendor = match obj.get("vendor") {
             None => None,
@@ -447,7 +578,33 @@ impl WebLoginRecipe {
             Some(_) => return Err(err("pause_for_operator", "must be an array")),
         };
 
-        Ok(Self { version, vendor, steps, success_when, failure_when, timeout_secs, pause_for_operator })
+        let submit_target = match obj.get("submit_target") {
+            None => None,
+            Some(v) => Some(submit_target(v)?),
+        };
+
+        let recipe = Self {
+            version,
+            vendor,
+            steps,
+            success_when,
+            failure_when,
+            timeout_secs,
+            pause_for_operator,
+            submit_target,
+        };
+        // Proxy mode substitutes the password and nothing else, so a recipe
+        // that never fills one has nothing for the proxy to do; refusing it
+        // keeps a `proxy` launch from being recorded for a login that puts
+        // no secret behind the placeholder. Heuristic mode fills the
+        // password whenever the source has one.
+        if recipe.submit_target.is_some() && !recipe.needs().password {
+            return Err(err(
+                "submit_target",
+                "proxy mode substitutes the password, so the recipe must fill `password` in one of its steps",
+            ));
+        }
+        Ok(recipe)
     }
 
     /// Which credential parts the recipe fills.
@@ -515,7 +672,22 @@ impl WebLoginRecipe {
                 return Err(err(&at, "its origin is not the start URL's origin or one of allowed_origins"));
             }
         }
+        // Already an https origin key (`submit_target` refuses anything else).
+        if let Some(target) = &self.submit_target {
+            if !origins.contains(&target.origin) {
+                return Err(err(
+                    "submit_target.origin",
+                    "is not the start URL's origin or one of allowed_origins; the proxy terminates only those",
+                ));
+            }
+        }
         Ok(())
+    }
+
+    /// Proxy mode (§10): the recipe names the sign-in request the host-local
+    /// proxy substitutes the password into.
+    pub fn is_proxied(&self) -> bool {
+        self.submit_target.is_some()
     }
 }
 
@@ -640,7 +812,11 @@ mod tests {
     #[test]
     fn unknown_versions_and_fields_are_refused() {
         let mut v = fortigate();
-        v["version"] = json!(2);
+        v["version"] = json!(3);
+        assert_eq!(WebLoginRecipe::parse(&v).unwrap_err().at, "version");
+
+        let mut v = fortigate();
+        v["version"] = json!(0);
         assert_eq!(WebLoginRecipe::parse(&v).unwrap_err().at, "version");
 
         let mut v = fortigate();
@@ -814,6 +990,135 @@ mod tests {
         let mut c = fortigate();
         c["steps"][0]["actions"][1]["fill"] = json!("input[name=other]");
         assert_ne!(ha, recipe_hash(&c).unwrap());
+    }
+
+    /// Old data: a version-1 recipe stored before proxy mode existed must
+    /// parse as before and keep the exact hash `launch` binds it to, or every
+    /// saved form profile would fail `recipe_hash_mismatch` after an upgrade.
+    #[test]
+    fn a_version_1_recipe_is_read_as_before_and_keeps_its_hash() {
+        let r = WebLoginRecipe::parse(&fortigate()).unwrap();
+        assert_eq!(r.version, 1);
+        assert_eq!(r.submit_target, None);
+        assert!(!r.is_proxied());
+        assert_eq!(
+            recipe_hash(&fortigate()).unwrap(),
+            "sha256:06dbce008c3306a200b972564dd531d75e81dd375afb925e6686a086b8b201e3"
+        );
+    }
+
+    fn proxied() -> Value {
+        let mut v = fortigate();
+        v["version"] = json!(2);
+        v["submit_target"] =
+            json!({ "origin": "https://FW01.example.com:443/", "path": "/logincheck", "body": "form" });
+        v
+    }
+
+    #[test]
+    fn a_version_2_recipe_carries_a_submit_target() {
+        let r = WebLoginRecipe::parse(&proxied()).unwrap();
+        assert_eq!(r.version, 2);
+        assert!(r.is_proxied());
+        assert_eq!(
+            r.submit_target,
+            Some(SubmitTarget {
+                origin: "https://fw01.example.com".into(),
+                path: "/logincheck".into(),
+                body: SubmitBody::Form
+            })
+        );
+        // Version 2 without a submit target is version 1 with a new number.
+        let mut v = fortigate();
+        v["version"] = json!(2);
+        let r = WebLoginRecipe::parse(&v).unwrap();
+        assert_eq!((r.version, r.is_proxied()), (2, false));
+        // JSON bodies, and a non-default port.
+        let mut v = proxied();
+        v["submit_target"] =
+            json!({ "origin": "https://fw01.example.com:8443", "path": "/api/v1/login", "body": "json" });
+        let t = WebLoginRecipe::parse(&v).unwrap().submit_target.unwrap();
+        assert_eq!((t.origin.as_str(), t.body), ("https://fw01.example.com:8443", SubmitBody::Json));
+        // The hash covers the submit target like any other field.
+        let mut other = proxied();
+        other["submit_target"]["path"] = json!("/other");
+        assert_ne!(recipe_hash(&proxied()).unwrap(), recipe_hash(&other).unwrap());
+    }
+
+    #[test]
+    fn a_submit_target_on_a_version_1_recipe_is_refused_not_ignored() {
+        let mut v = proxied();
+        v["version"] = json!(1);
+        let e = WebLoginRecipe::parse(&v).unwrap_err();
+        assert_eq!(e.at, "submit_target");
+        assert!(e.reason.contains("version 2"), "{e}");
+    }
+
+    #[test]
+    fn malformed_submit_targets_are_refused() {
+        let at = |t: Value| {
+            let mut v = proxied();
+            v["submit_target"] = t;
+            WebLoginRecipe::parse(&v).unwrap_err().at
+        };
+        let o = "https://fw01.example.com";
+        for (t, want) in [
+            (json!("https://fw01.example.com/login"), "submit_target"),
+            (json!({ "origin": o, "path": "/l" }), "submit_target.body"),
+            (json!({ "origin": o, "path": "/l", "body": "multipart" }), "submit_target.body"),
+            (json!({ "origin": o, "path": "/l", "body": "form", "method": "POST" }), "submit_target.method"),
+            (json!({ "path": "/l", "body": "form" }), "submit_target.origin"),
+            (json!({ "origin": "http://fw01.example.com", "path": "/l", "body": "form" }), "submit_target.origin"),
+            (
+                json!({ "origin": "https://fw01.example.com/login", "path": "/l", "body": "form" }),
+                "submit_target.origin",
+            ),
+            (json!({ "origin": "https://a@fw01.example.com", "path": "/l", "body": "form" }), "submit_target.origin"),
+            (json!({ "origin": "https://*.example.com", "path": "/l", "body": "form" }), "submit_target.origin"),
+            (json!({ "origin": o, "body": "form" }), "submit_target.path"),
+            (json!({ "origin": o, "path": "login", "body": "form" }), "submit_target.path"),
+            (json!({ "origin": o, "path": "//evil.example/l", "body": "form" }), "submit_target.path"),
+            (json!({ "origin": o, "path": "/login?x=1", "body": "form" }), "submit_target.path"),
+            (json!({ "origin": o, "path": "/login#a", "body": "form" }), "submit_target.path"),
+            (json!({ "origin": o, "path": "/log*", "body": "form" }), "submit_target.path"),
+            (json!({ "origin": o, "path": "/log in", "body": "form" }), "submit_target.path"),
+            (json!({ "origin": o, "path": "/lögin", "body": "form" }), "submit_target.path"),
+            (
+                json!({ "origin": o, "path": format!("/{}", "a".repeat(MAX_SUBMIT_PATH_LEN)), "body": "form" }),
+                "submit_target.path",
+            ),
+        ] {
+            assert_eq!(at(t.clone()), want, "{t}");
+        }
+    }
+
+    #[test]
+    fn a_proxied_recipe_must_fill_the_password() {
+        let mut v = proxied();
+        v["steps"][0]["actions"][1] = json!({ "fill": "input[name=secretkey]", "value": "literal:x" });
+        assert_eq!(WebLoginRecipe::parse(&v).unwrap_err().at, "submit_target");
+        // Heuristic mode fills the password whenever the source has one.
+        let r = WebLoginRecipe::parse(&json!({
+            "version": 2, "steps": "auto", "success_when": { "selector": "#dashboard" },
+            "submit_target": { "origin": "https://fw01.example.com", "path": "/login", "body": "json" }
+        }))
+        .unwrap();
+        assert!(r.is_proxied());
+    }
+
+    #[test]
+    fn check_origins_covers_the_submit_target() {
+        let r = WebLoginRecipe::parse(&proxied()).unwrap();
+        assert!(r.check_origins(&["https://fw01.example.com".to_string()], false).is_ok());
+        let mut v = proxied();
+        v["submit_target"]["origin"] = json!("https://sso.example.com");
+        let r = WebLoginRecipe::parse(&v).unwrap();
+        assert_eq!(
+            r.check_origins(&["https://fw01.example.com".to_string()], false).unwrap_err().at,
+            "submit_target.origin"
+        );
+        let both = vec!["https://fw01.example.com".to_string(), "https://sso.example.com".to_string()];
+        assert!(r.check_origins(&both, false).is_ok());
     }
 
     #[test]

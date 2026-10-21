@@ -23,14 +23,11 @@
 //! `CONNECT` fails, the webview shows an error, and the secret is never
 //! offered to a server nobody vouched for.
 
-// See the note in `web_proxy.rs`: nothing constructs a session proxy until
-// the platform wiring of T106 step 4.
-#![allow(dead_code)]
-
+use std::collections::HashMap;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use bastion_vault::utils::tls_pin::{decide, PinDecision, PinMatch, PinRefusal, PinSet};
+use bastion_vault::utils::tls_pin::{decide, PinDecision, PinMatch, PinRefusal, PinSet, SpkiPin};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::{verify_tls12_signature, verify_tls13_signature, CryptoProvider};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
@@ -77,13 +74,20 @@ impl UpstreamRefusal {
 
 /// The upstream verifier of one session: the platform's trust, plus the
 /// profile's pins as the override. Shared by every upstream connection the
-/// session makes, so it holds no per-handshake state — a refusal surfaces as
-/// the handshake error, which the listener turns into a named `CONNECT`
-/// failure.
+/// session makes. A refusal surfaces as the handshake error, which the
+/// listener turns into a named `CONNECT` failure; the verdicts are also kept
+/// (by host and leaf key, and the last refusal per host) so the listener can
+/// say *how* an origin was admitted — for the toolbar's lock state and the
+/// audit line — without a second verification.
 pub struct UpstreamVerifier {
     platform: Arc<dyn ServerCertVerifier>,
     pins: PinSet,
     provider: Arc<CryptoProvider>,
+    /// (bare host, leaf SPKI) → how it was admitted. Keyed by the leaf so a
+    /// resumed session (which rustls does not re-verify) finds the verdict of
+    /// the handshake it continues.
+    verdicts: Mutex<HashMap<(String, SpkiPin), UpstreamTrust>>,
+    refusals: Mutex<HashMap<String, UpstreamRefusal>>,
 }
 
 impl fmt::Debug for UpstreamVerifier {
@@ -97,14 +101,38 @@ impl UpstreamVerifier {
         let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
         let platform = rustls_platform_verifier::Verifier::new(Arc::clone(&provider))
             .map_err(|e| format!("web proxy: the platform trust store could not be opened: {e}"))?;
-        Ok(Arc::new(Self { platform: Arc::new(platform), pins, provider }))
+        Ok(Self::build(Arc::new(platform), pins, provider))
+    }
+
+    fn build(platform: Arc<dyn ServerCertVerifier>, pins: PinSet, provider: Arc<CryptoProvider>) -> Arc<Self> {
+        Arc::new(Self {
+            platform,
+            pins,
+            provider,
+            verdicts: Mutex::new(HashMap::new()),
+            refusals: Mutex::new(HashMap::new()),
+        })
     }
 
     /// For the tests, and for a future host that wants to pass its own
     /// anchors: `platform` stands in for the OS trust store.
     #[cfg(test)]
-    fn with_platform(platform: Arc<dyn ServerCertVerifier>, pins: PinSet) -> Arc<Self> {
-        Arc::new(Self { platform, pins, provider: Arc::new(rustls::crypto::aws_lc_rs::default_provider()) })
+    pub(crate) fn with_platform(platform: Arc<dyn ServerCertVerifier>, pins: PinSet) -> Arc<Self> {
+        Self::build(platform, pins, Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
+    }
+
+    /// How the handshake that presented `leaf_der` for `host` (bare, as the
+    /// TLS server name) was admitted. `None` when this verifier never
+    /// admitted that key for that host.
+    pub fn verdict(&self, host: &str, leaf_der: &[u8]) -> Option<UpstreamTrust> {
+        let pin = SpkiPin::of_certificate(leaf_der).ok()?;
+        self.verdicts.lock().unwrap_or_else(|p| p.into_inner()).get(&(host.to_ascii_lowercase(), pin)).copied()
+    }
+
+    /// The last refusal for `host`, taken so a later failure for another
+    /// reason is not mistaken for it.
+    pub fn take_refusal(&self, host: &str) -> Option<UpstreamRefusal> {
+        self.refusals.lock().unwrap_or_else(|p| p.into_inner()).remove(&host.to_ascii_lowercase())
     }
 
     /// A client configuration that trusts exactly what this verifier admits.
@@ -161,15 +189,21 @@ impl ServerCertVerifier for UpstreamVerifier {
         ocsp_response: &[u8],
         now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
+        let host = server_name.to_str().to_ascii_lowercase();
         match self.judge(end_entity, intermediates, server_name, ocsp_response, now) {
             Ok(trust) => {
                 // Origin and verdict only: never a path, a query, or a name
                 // read out of the certificate.
-                log::debug!("web proxy: upstream {} trusted ({})", server_name.to_str(), trust.label());
+                log::debug!("web proxy: upstream {host} trusted ({})", trust.label());
+                if let Ok(pin) = SpkiPin::of_certificate(end_entity.as_ref()) {
+                    self.verdicts.lock().unwrap_or_else(|p| p.into_inner()).insert((host.clone(), pin), trust);
+                }
+                self.refusals.lock().unwrap_or_else(|p| p.into_inner()).remove(&host);
                 Ok(ServerCertVerified::assertion())
             }
             Err((refusal, error)) => {
-                log::warn!("web proxy: upstream {} refused ({})", server_name.to_str(), refusal.check());
+                log::warn!("web proxy: upstream {host} refused ({})", refusal.check());
+                self.refusals.lock().unwrap_or_else(|p| p.into_inner()).insert(host, refusal);
                 Err(error)
             }
         }
@@ -345,6 +379,30 @@ mod tests {
             judge(&v, &[cert, ca.der.clone()], "evil.internal"),
             Err(UpstreamRefusal::Pin(PinRefusal::IssuerUnverified))
         );
+    }
+
+    /// What the lock state and the termination audit line read: the verdict
+    /// of the handshake that presented this leaf for this host, and the last
+    /// refusal for a host (taken once).
+    #[test]
+    fn a_verdict_is_recorded_by_host_and_leaf_key() {
+        let ca = ca();
+        let cert = leaf(&ca, "app.internal");
+        let name = ServerName::try_from("app.internal".to_string()).unwrap();
+        let v = UpstreamVerifier::with_platform(platform(&[]), pins(&[&cert]));
+        assert!(v.verify_server_cert(&CertificateDer::from(cert.as_slice()), &[], &name, &[], UnixTime::now()).is_ok());
+        assert_eq!(v.verdict("APP.internal", &cert), Some(UpstreamTrust::Pinned(PinMatch::Leaf)));
+        assert_eq!(v.verdict("app.internal", &leaf(&ca, "app.internal")), None, "another key was never admitted");
+        assert_eq!(v.verdict("other.internal", &cert), None);
+        assert_eq!(v.take_refusal("app.internal"), None);
+
+        let unpinned = UpstreamVerifier::with_platform(platform(&[]), PinSet::default());
+        let refused =
+            unpinned.verify_server_cert(&CertificateDer::from(cert.as_slice()), &[], &name, &[], UnixTime::now());
+        assert!(refused.is_err());
+        assert_eq!(unpinned.verdict("app.internal", &cert), None);
+        assert_eq!(unpinned.take_refusal("app.internal"), Some(UpstreamRefusal::Unpinned));
+        assert_eq!(unpinned.take_refusal("app.internal"), None);
     }
 
     /// The real constructor has to work on the development host: it is the

@@ -34,6 +34,7 @@ import {
   recipeFileName,
   recipeToJson,
   validateWebRecipe,
+  withSubmitTarget,
 } from "../lib/webRecipe";
 import { recipeBaseOrigin, strictOriginSet } from "../lib/webFormProfile";
 import { WEB_RECIPE_PRESETS, findPreset, presetLabel } from "../lib/webRecipePresets";
@@ -81,6 +82,16 @@ function drawable(r: unknown): r is WebLoginRecipe {
   const rec = r as Partial<WebLoginRecipe>;
   if (typeof rec.success_when !== "object" || rec.success_when === null) return false;
   if (rec.failure_when !== undefined && (typeof rec.failure_when !== "object" || rec.failure_when === null)) {
+    return false;
+  }
+  if (
+    rec.submit_target !== undefined &&
+    (typeof rec.submit_target !== "object" ||
+      rec.submit_target === null ||
+      typeof rec.submit_target.origin !== "string" ||
+      typeof rec.submit_target.path !== "string" ||
+      typeof rec.submit_target.body !== "string")
+  ) {
     return false;
   }
   if (rec.steps === "auto") return true;
@@ -863,6 +874,11 @@ export function WebRecipeEditor({
         </div>
       )}
 
+      {/* Proxy mode (T106) */}
+      {recipe !== undefined && drawable(recipe) && (
+        <ProxyModeFields recipe={recipe} baseOrigin={baseOrigin} onChange={(next) => emit(next)} />
+      )}
+
       {/* Verdict */}
       {recipe !== undefined && (
         <p
@@ -898,6 +914,108 @@ export function WebRecipeEditor({
         )}
         {testResult && <WebRecipeTestReport result={testResult} />}
       </div>
+    </div>
+  );
+}
+
+/**
+ * Proxy mode (spec §10, T106): the recipe's `submit_target`. With one, the
+ * page is filled with a per-launch placeholder and a proxy on the operator's
+ * computer puts the password into that one sign-in request; the launch needs
+ * exposure `proxy`. Shown as unavailable where the desktop host cannot run
+ * it (only macOS 14+ in a `web_proxy_mode` build can) — a connect there is
+ * refused, never run as a plain form fill.
+ */
+function ProxyModeFields({
+  recipe,
+  baseOrigin,
+  onChange,
+}: {
+  recipe: WebLoginRecipe;
+  baseOrigin: string | null;
+  onChange: (next: WebLoginRecipe) => void;
+}) {
+  const [support, setSupport] = useState<api.WebProxyModeSupport | null>(null);
+  const target = recipe.submit_target;
+  const proxied = target !== undefined;
+  // Asked only once the recipe uses proxy mode: nothing else needs it.
+  useEffect(() => {
+    if (!proxied || support !== null) return;
+    let cancelled = false;
+    api
+      .webProxyModeSupport()
+      .then((s) => {
+        if (!cancelled) setSupport(s);
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) setSupport({ available: false, reason: extractError(e) });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [proxied, support]);
+  const update = (patch: Partial<NonNullable<WebLoginRecipe["submit_target"]>>) => {
+    if (target) onChange(withSubmitTarget(recipe, { ...target, ...patch }));
+  };
+  return (
+    <div className="rounded-lg border border-[var(--color-border)] p-3 space-y-2 min-w-0" data-testid="recipe-proxy-mode">
+      <label className="flex items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          aria-label="Proxy mode"
+          checked={target !== undefined}
+          disabled={target === undefined && !baseOrigin}
+          onChange={(e) =>
+            onChange(
+              withSubmitTarget(
+                recipe,
+                e.target.checked ? { origin: baseOrigin ?? "", path: "/", body: "form" } : undefined,
+              ),
+            )
+          }
+        />
+        Keep the password out of the page (proxy mode)
+      </label>
+      <p className="text-xs text-[var(--color-text-muted)]">
+        The page is filled with a one-time placeholder instead of the password. A proxy on this computer puts
+        the password into the sign-in request named here — a POST to this origin and path with this body
+        type — and nowhere else, and removes it from that request&rsquo;s response. A page that hashes or
+        encrypts the password in script before posting cannot sign in this way. Needs the resource
+        type&rsquo;s web exposure cap at <code>proxy</code> or <code>dom</code>.
+      </p>
+      {target && (
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <Input
+            label="Sign-in origin"
+            value={target.origin}
+            onChange={(e) => update({ origin: e.target.value })}
+            placeholder="https://app.example.com"
+            className="font-mono"
+          />
+          <Input
+            label="Sign-in path"
+            value={target.path}
+            onChange={(e) => update({ path: e.target.value })}
+            placeholder="/login"
+            className="font-mono"
+          />
+          <Select
+            label="Body type"
+            value={target.body}
+            onChange={(e) => update({ body: e.target.value === "json" ? "json" : "form" })}
+            options={[
+              { value: "form", label: "Form (application/x-www-form-urlencoded)" },
+              { value: "json", label: "JSON (application/json)" },
+            ]}
+          />
+        </div>
+      )}
+      {target && support && !support.available && (
+        <p role="alert" data-testid="proxy-mode-unavailable" className="text-xs text-[var(--color-danger)] min-w-0 break-words">
+          Proxy mode is not available on this computer: {support.reason}. Connecting with this profile from
+          here is refused; it is never run as a plain form fill.
+        </p>
+      )}
     </div>
   );
 }

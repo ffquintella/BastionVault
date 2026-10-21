@@ -549,11 +549,25 @@ export interface WebRecipeCondition {
   selector?: string;
 }
 
-/** The v1 login recipe of a `form` profile (spec §2), as stored. The server
- *  and the desktop host parse it with the same strict parser; unknown keys
- *  are refused. */
+/** Proxy mode's sign-in request (recipe version 2, spec §10, T106): the one
+ *  POST in which the host-local proxy replaces the per-launch placeholder with
+ *  the password. */
+export interface WebRecipeSubmitTarget {
+  /** A bare https origin of the profile's set. */
+  origin: string;
+  /** The exact request path; no query, fragment or `*`. */
+  path: string;
+  body: "form" | "json";
+}
+
+/** The login recipe of a `form` profile (spec §2), as stored. Version 1, or
+ *  version 2 when it carries a `submit_target` (proxy mode). The server and
+ *  the desktop host parse it with the same strict parser; unknown keys are
+ *  refused. */
 export interface WebLoginRecipe {
-  version: 1;
+  version: 1 | 2;
+  /** Version 2 only. */
+  submit_target?: WebRecipeSubmitTarget;
   vendor?: string;
   /** Explicit steps, or `"auto"` for heuristic mode (policy-gated). */
   steps: WebRecipeStep[] | "auto";

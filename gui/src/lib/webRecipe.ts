@@ -1,5 +1,6 @@
-//! The v1 web login recipe (features/web-application-connect.md §2), validated
-//! in the GUI the way the server validates it.
+//! The web login recipe (features/web-application-connect.md §2; version 2
+//! adds proxy mode's `submit_target`, §10, T106), validated in the GUI the
+//! way the server validates it.
 //!
 //! The authority is `WebLoginRecipe::parse`, `WebLoginRecipe::check_origins`,
 //! `origin_key` and `split_url` in
@@ -22,9 +23,15 @@
 //!   * `recipe_hash` (RFC 8785 canonicalisation) is computed by the host and
 //!     the server, not here; the dry run reports the hash it would carry.
 
-import type { WebLoginRecipe } from "./types";
+import type { WebLoginRecipe, WebRecipeSubmitTarget } from "./types";
 
-export const RECIPE_VERSION = 1;
+/** Versions the server reads. Version 2 = version 1 + optional
+ *  `submit_target`. Writers use version 1 unless the recipe has one, so a
+ *  recipe without proxy mode stays readable by servers that predate it. */
+export const RECIPE_VERSIONS = [1, 2] as const;
+/** The first version that may carry `submit_target`. */
+export const SUBMIT_TARGET_VERSION = 2;
+export const MAX_SUBMIT_PATH_LEN = 1024;
 export const MAX_STEPS = 16;
 export const MAX_ACTIONS_PER_STEP = 32;
 export const MAX_SELECTOR_LEN = 512;
@@ -50,7 +57,7 @@ export const WEB_RECIPE_VENDORS = [
   "other",
 ] as const;
 
-const TOP_LEVEL_KEYS = [
+const TOP_LEVEL_KEYS_V1 = [
   "version",
   "vendor",
   "steps",
@@ -59,6 +66,7 @@ const TOP_LEVEL_KEYS = [
   "timeout_secs",
   "pause_for_operator",
 ] as const;
+const TOP_LEVEL_KEYS_V2 = [...TOP_LEVEL_KEYS_V1, "submit_target"] as const;
 
 /** Why a recipe was refused. `at` is a location such as
  *  `steps[1].actions[0].value`, never the offending value. */
@@ -319,19 +327,60 @@ function step(v: unknown, at: string): void {
   list.forEach((a, i) => action(a, `${actionsAt}[${i}]`));
 }
 
+/** `submit_target.path` (recipe.rs `submit_path`). */
+function submitPathError(p: string): string | null {
+  if (!p.startsWith("/")) return "must be an absolute path starting with `/`";
+  if (p.startsWith("//")) return "must not start with `//` (that is a host, not a path)";
+  if (utf8Len(p) > MAX_SUBMIT_PATH_LEN) return `is longer than ${MAX_SUBMIT_PATH_LEN} bytes`;
+  if (!/^[\x21-\x7e]*$/.test(p)) {
+    return "must be printable ASCII with no spaces; percent-encode anything else as the browser does";
+  }
+  if (/[?#]/.test(p)) return "is matched without its query or fragment; give the path only";
+  if (/[*\\]/.test(p)) return "is matched exactly; `*` and `\\` are refused";
+  return null;
+}
+
+/** recipe.rs `submit_target`, same checks in the same order. */
+function submitTarget(v: unknown): void {
+  const at = "submit_target";
+  if (!isObj(v)) err(at, "must be an object with `origin`, `path` and `body`");
+  rejectUnknown(v, at, ["origin", "path", "body"]);
+  const originAt = join(at, "origin");
+  const raw = get(v, "origin");
+  if (typeof raw !== "string") err(originAt, "is required: the https origin the sign-in form posts to");
+  const parts = splitUrl(raw);
+  if (typeof parts === "string") err(originAt, parts);
+  if (!(parts.rest === "" || parts.rest === "/")) err(originAt, "must be a bare origin (no path, query or fragment)");
+  if (parts.scheme !== "https") err(originAt, "must be https: proxy mode never sends the secret over plain http");
+  const key = originKey(parts.scheme, parts.authority, false);
+  if ("error" in key) err(originAt, key.error);
+  const pathAt = join(at, "path");
+  const path = get(v, "path");
+  if (typeof path !== "string") err(pathAt, "is required: the exact path the sign-in form posts to");
+  const pathError = submitPathError(path);
+  if (pathError) err(pathAt, pathError);
+  const body = get(v, "body");
+  if (body !== "form" && body !== "json") {
+    err(join(at, "body"), "must be `form` (application/x-www-form-urlencoded) or `json` (application/json)");
+  }
+}
+
 function parseOrThrow(value: unknown): WebLoginRecipe {
   if (!isObj(value)) err("", "must be a JSON object");
   // The version is read before anything else, so a later format never
   // half-parses as this one.
   const version = asU64(get(value, "version"));
   if (version === null) err("version", "is required and must be an integer");
-  if (version !== RECIPE_VERSION) {
+  if (!(RECIPE_VERSIONS as readonly number[]).includes(version)) {
+    err("version", `recipe version ${version} is not supported; this server understands versions 1 and 2`);
+  }
+  if (version < SUBMIT_TARGET_VERSION && has(value, "submit_target")) {
     err(
-      "version",
-      `recipe version ${version} is not supported; this server understands version ${RECIPE_VERSION} only`,
+      "submit_target",
+      `needs recipe version ${SUBMIT_TARGET_VERSION} (proxy mode); this recipe is version ${version}`,
     );
   }
-  rejectUnknown(value, "", TOP_LEVEL_KEYS);
+  rejectUnknown(value, "", version >= SUBMIT_TARGET_VERSION ? TOP_LEVEL_KEYS_V2 : TOP_LEVEL_KEYS_V1);
 
   if (has(value, "vendor")) {
     const vendor = get(value, "vendor");
@@ -370,7 +419,34 @@ function parseOrThrow(value: unknown): WebLoginRecipe {
       }
     });
   }
+
+  if (has(value, "submit_target")) {
+    submitTarget(get(value, "submit_target"));
+    // Proxy mode substitutes the password and nothing else.
+    if (!recipeNeeds(value as unknown as WebLoginRecipe).password) {
+      err(
+        "submit_target",
+        "proxy mode substitutes the password, so the recipe must fill `password` in one of its steps",
+      );
+    }
+  }
   return value as unknown as WebLoginRecipe;
+}
+
+/** Proxy mode (spec §10): the recipe names the sign-in request the
+ *  host-local proxy substitutes the password into. Launched at exposure
+ *  `proxy` instead of `dom`. */
+export function isProxiedRecipe(recipe: { submit_target?: unknown } | null | undefined): boolean {
+  return recipe?.submit_target !== undefined;
+}
+
+/** Add, change or remove a recipe's `submit_target`, keeping the version the
+ *  lowest that can carry the result: 2 with a target, 1 without (so a recipe
+ *  that does not use proxy mode stays readable by older servers). */
+export function withSubmitTarget(recipe: WebLoginRecipe, target: WebRecipeSubmitTarget | undefined): WebLoginRecipe {
+  const { submit_target: _old, ...rest } = recipe;
+  void _old;
+  return target === undefined ? { ...rest, version: 1 } : { ...rest, version: SUBMIT_TARGET_VERSION, submit_target: target };
 }
 
 /** Strictly validate a recipe value, exactly as `WebLoginRecipe::parse` does.
@@ -425,6 +501,16 @@ export function checkRecipeOrigins(
     if ("error" in key) return { at, reason: key.error };
     if (!origins.includes(key.origin)) {
       return { at, reason: "its origin is not the start URL's origin or one of allowed_origins" };
+    }
+  }
+  if (recipe.submit_target !== undefined) {
+    const parts = splitUrl(recipe.submit_target.origin);
+    const key = typeof parts === "string" ? null : originKey(parts.scheme, parts.authority, false);
+    if (key === null || "error" in key || !origins.includes(key.origin)) {
+      return {
+        at: "submit_target.origin",
+        reason: "is not the start URL's origin or one of allowed_origins; the proxy terminates only those",
+      };
     }
   }
   return null;

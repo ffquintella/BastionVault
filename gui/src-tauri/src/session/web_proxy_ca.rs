@@ -71,6 +71,13 @@ pub struct SessionCa {
     /// Keyed by the host as [`super::web_proxy::HttpsOrigin`] matches it:
     /// lower-cased, an IPv6 literal still bracketed.
     configs: BTreeMap<String, Arc<ServerConfig>>,
+    /// Each terminated host's leaf certificate (DER, public data), for the
+    /// WebKitGTK shim, which must allow every leaf for its host on the
+    /// window's own `WebContext` before the first load. macOS and Windows
+    /// trust the leaves through the Phase 4 pin gate instead and never read
+    /// this, hence the lint allowance there.
+    #[cfg_attr(not(any(test, target_os = "linux")), allow(dead_code))]
+    leaves: Vec<(String, Vec<u8>)>,
 }
 
 impl fmt::Debug for SessionCa {
@@ -116,6 +123,7 @@ impl SessionCa {
         let leaf_key_der = Zeroizing::new(leaf_key.serialize_der());
 
         let mut configs = BTreeMap::new();
+        let mut leaves = Vec::with_capacity(hosts.len());
         let mut leaf_pin = None;
         let ca_der;
         {
@@ -134,6 +142,7 @@ impl SessionCa {
                             .map_err(|e| format!("web proxy: session leaf public key {e}"))?,
                     );
                 }
+                leaves.push((host.to_ascii_lowercase(), leaf_der.clone()));
                 let chain = vec![CertificateDer::from(leaf_der), CertificateDer::from(ca_der.clone())];
                 let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf_key_der.to_vec()));
                 let certified = CertifiedKey::from_der(chain, key, &provider)
@@ -145,7 +154,13 @@ impl SessionCa {
 
         let ca_pin = SpkiPin::of_certificate(&ca_der).map_err(|e| format!("web proxy: session CA public key {e}"))?;
         let leaf_pin = leaf_pin.ok_or_else(|| "web proxy: no session leaf was minted".to_string())?;
-        Ok(Self { ca_der, ca_pin, leaf_pin, configs })
+        Ok(Self { ca_der, ca_pin, leaf_pin, configs, leaves })
+    }
+
+    /// Every terminated host with its leaf certificate (DER).
+    #[cfg_attr(not(any(test, target_os = "linux")), allow(dead_code))]
+    pub fn leaves(&self) -> &[(String, Vec<u8>)] {
+        &self.leaves
     }
 
     /// The session CA's DER certificate — what the Linux shim registers per
@@ -315,6 +330,24 @@ mod tests {
         let ca = mint(&["app.example.test", "sso.example.test"]);
         assert!(ca.server_config("APP.example.test").is_ok());
         assert!(ca.server_config("cdn.example.test").is_err());
+    }
+
+    /// What the WebKitGTK shim pre-registers: one leaf per host, each with
+    /// the session's single leaf key, each valid under the session CA for
+    /// its own host only.
+    #[test]
+    fn every_host_has_its_own_leaf_under_the_session_key() {
+        let ca = mint(&["App.example.test", "sso.example.test"]);
+        let hosts: Vec<&str> = ca.leaves().iter().map(|(h, _)| h.as_str()).collect();
+        assert_eq!(hosts, ["app.example.test", "sso.example.test"]);
+        for (host, der) in ca.leaves() {
+            assert_eq!(SpkiPin::of_certificate(der).unwrap(), ca.leaf_pin(), "{host}");
+            let chain = [CertificateDer::from(der.clone()), CertificateDer::from(ca.ca_der().to_vec())];
+            assert!(verifies_under(ca.ca_der(), &chain, host), "{host}");
+        }
+        let (_, app_leaf) = &ca.leaves()[0];
+        let chain = [CertificateDer::from(app_leaf.clone()), CertificateDer::from(ca.ca_der().to_vec())];
+        assert!(!verifies_under(ca.ca_der(), &chain, "sso.example.test"), "a leaf names its own host only");
     }
 
     #[test]

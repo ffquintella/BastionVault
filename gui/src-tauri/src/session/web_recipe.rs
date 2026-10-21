@@ -22,7 +22,7 @@ use tauri::Url;
 use zeroize::{Zeroize, Zeroizing};
 
 use bastion_vault::modules::resource::connect_web::recipe::{
-    FillValue, PauseReason, RecipeAction, RecipeCondition, RecipeSteps, WebLoginRecipe,
+    FillValue, PauseReason, RecipeAction, RecipeCondition, RecipeSteps, SubmitBody, WebLoginRecipe,
 };
 
 use super::web::{OriginSet, WebOrigin};
@@ -178,6 +178,17 @@ pub enum PlanSteps {
     Heuristic,
 }
 
+/// Proxy mode's sign-in request (recipe version 2, `submit_target`; §10,
+/// T106): the page is filled with a placeholder and the session proxy puts
+/// the password into this one request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanSubmitTarget {
+    /// Always https (the shared parser refuses anything else).
+    pub origin: WebOrigin,
+    pub path: String,
+    pub body: SubmitBody,
+}
+
 /// A recipe ready to run. Built only from a recipe the shared strict parser
 /// accepted, so every rule the server checked holds here too.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -191,6 +202,8 @@ pub struct RecipePlan {
     pub needs_username: bool,
     pub needs_password: bool,
     pub needs_totp: bool,
+    /// `Some` for a proxy-mode recipe.
+    pub submit_target: Option<PlanSubmitTarget>,
 }
 
 impl RecipePlan {
@@ -228,6 +241,16 @@ impl RecipePlan {
                     .collect::<Result<Vec<_>, String>>()?,
             ),
         };
+        let submit_target = match &recipe.submit_target {
+            None => None,
+            Some(t) => {
+                let url = Url::parse(&format!("{}/", t.origin))
+                    .map_err(|e| format!("recipe submit_target.origin is not a valid origin: {e}"))?;
+                let origin =
+                    WebOrigin::validated(&url, false).map_err(|e| format!("recipe submit_target.origin: {e}"))?;
+                Some(PlanSubmitTarget { origin, path: t.path.clone(), body: t.body })
+            }
+        };
         Ok(Self {
             steps,
             success: PlanCondition::compile(&recipe.success_when)?,
@@ -237,11 +260,18 @@ impl RecipePlan {
             needs_username: !needs.heuristic && needs.username,
             needs_password: !needs.heuristic && needs.password,
             needs_totp: !needs.heuristic && needs.totp,
+            submit_target,
         })
     }
 
     pub fn is_heuristic(&self) -> bool {
         matches!(self.steps, PlanSteps::Heuristic)
+    }
+
+    /// Proxy mode: the launch is released at exposure `proxy`, the page gets
+    /// a placeholder, and the session proxy holds the password.
+    pub fn is_proxied(&self) -> bool {
+        self.submit_target.is_some()
     }
 
     pub fn step_count(&self) -> usize {
@@ -362,6 +392,25 @@ pub const HOST_ABORT_CHECKS: &[&str] = &[
     "tls_pin_malformed",
     "tls_pin_mismatch",
     "tls_pin_issuer",
+    // Proxy mode (T106): the host (`connect_web`, the engine's bypass
+    // check) and the session proxy's own refusals (`web_proxy`,
+    // `web_proxy_listener`, `web_proxy_upstream`), which end the fill.
+    "proxy_unavailable",
+    "proxy_start",
+    "proxy_bypassed",
+    "proxy_credential",
+    "proxy_submit_not_post",
+    "proxy_submit_body_type",
+    "proxy_submit_placeholder_twice",
+    "proxy_submit_body_not_utf8",
+    "proxy_submit_body_too_large",
+    "proxy_submit_body_read",
+    "proxy_upstream_closed",
+    "proxy_upstream_failed",
+    "proxy_upstream_untrusted",
+    "proxy_response_encoded",
+    "proxy_response_too_large",
+    "proxy_response_read",
 ];
 
 /// The outcome once failure / success conditions have been probed. Failure is
@@ -635,10 +684,21 @@ pub fn check_bundle(bundle: &LaunchBundle, expect: &BundleExpectation<'_>) -> Re
     let c = &bundle.credential;
     match expect.login {
         ExpectedLogin::Form { recipe_hash, plan } => {
+            // Proxy mode (a recipe `submit_target`) is released at `proxy`,
+            // a plain fill at `dom`. A server that disagrees about which one
+            // this recipe is would have the host run the wrong mode — a
+            // proxy recipe as a DOM fill, putting the password in the page —
+            // so the launch is refused instead.
+            let exposure = if plan.is_proxied() { "proxy" } else { "dom" };
             if bundle.login_mode != "form"
-                || bundle.exposure != "dom"
+                || bundle.exposure != exposure
                 || bundle.recipe_hash.as_deref() != Some(recipe_hash)
             {
+                return Err("bundle_mismatch");
+            }
+            // Proxy mode is https only, so a scope that allows plain http
+            // cannot be one (`allow_insecure_http` is refused for it).
+            if plan.is_proxied() && bundle.fill_scope.allow_insecure_http {
                 return Err("bundle_mismatch");
             }
             // Heuristic filling runs only when the server says policy allows
@@ -1144,6 +1204,64 @@ mod tests {
         c.remove("totp");
         c.remove("totp_valid_until");
         assert_eq!(check_bundle(&parse_bundle(d).unwrap(), &expect), Err("credential_missing"));
+    }
+
+    fn proxied_two_page() -> Value {
+        let mut v = two_page();
+        v["version"] = json!(2);
+        v["submit_target"] = json!({ "origin": "https://fw01.example.com", "path": "/logincheck", "body": "form" });
+        v
+    }
+
+    #[test]
+    fn a_proxy_recipe_plans_its_submit_target() {
+        let plan = recipe(proxied_two_page());
+        assert!(plan.is_proxied());
+        let t = plan.submit_target.as_ref().unwrap();
+        assert_eq!(
+            (t.origin.to_string(), t.path.as_str(), t.body),
+            ("https://fw01.example.com".into(), "/logincheck", SubmitBody::Form)
+        );
+        assert!(!recipe(two_page()).is_proxied());
+    }
+
+    /// The host and the server must agree on the mode: a proxy recipe whose
+    /// bundle says `dom` would put the password in the page, a plain recipe
+    /// whose bundle says `proxy` would fill a password the host was told to
+    /// keep out of it. Both are refused.
+    #[test]
+    fn a_proxy_recipe_needs_a_proxy_bundle_and_the_reverse() {
+        let proxied = recipe(proxied_two_page());
+        let hash = recipe_hash(&proxied_two_page()).unwrap();
+        let bundle = |exposure: &str, http: bool| {
+            let mut d = bundle_json();
+            take_launch_id(&mut d).unwrap();
+            d["recipe_hash"] = json!(hash);
+            d["exposure"] = json!(exposure);
+            d["fill_scope"]["allow_insecure_http"] = json!(http);
+            parse_bundle(d).unwrap()
+        };
+        let expect = BundleExpectation {
+            resource: "fw01",
+            profile_id: "p_web",
+            login: ExpectedLogin::Form { recipe_hash: &hash, plan: &proxied },
+        };
+        assert_eq!(check_bundle(&bundle("proxy", false), &expect), Ok(()));
+        assert_eq!(check_bundle(&bundle("dom", false), &expect), Err("bundle_mismatch"));
+        assert_eq!(check_bundle(&bundle("proxy", true), &expect), Err("bundle_mismatch"), "proxy mode is https only");
+
+        let plain = recipe(two_page());
+        let plain_hash = recipe_hash(&two_page()).unwrap();
+        let mut d = bundle_json();
+        take_launch_id(&mut d).unwrap();
+        d["recipe_hash"] = json!(plain_hash);
+        d["exposure"] = json!("proxy");
+        let expect = BundleExpectation {
+            resource: "fw01",
+            profile_id: "p_web",
+            login: ExpectedLogin::Form { recipe_hash: &plain_hash, plan: &plain },
+        };
+        assert_eq!(check_bundle(&parse_bundle(d).unwrap(), &expect), Err("bundle_mismatch"));
     }
 
     fn http_auth_bundle_json() -> Map<String, Value> {

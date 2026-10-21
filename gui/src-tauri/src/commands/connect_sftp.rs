@@ -39,8 +39,9 @@ use zeroize::Zeroizing;
 use super::connect::{
     collect_policy_hints, find_profile, is_connect_layer_error, now_rfc3339, open_context, open_rustion_session_v2_ssh,
     profile_host_candidates, profile_port, profile_username, read_effective_policy, read_resource_meta,
-    record_recent_session, require_session_window, resolve_session_layout, resolve_ssh_connect_route,
-    resolve_ssh_credential, spawn_own_session_window, ConnectRoute, OperatorCredential, SessionProtocolTag,
+    record_recent_session, record_session_open, require_session_window, resolve_session_layout,
+    resolve_ssh_connect_route, resolve_ssh_credential, spawn_own_session_window, ConnectRoute, OperatorCredential,
+    SessionProtocolTag,
 };
 use super::connect_provider::{dial_in_order, DialFailure};
 use crate::error::{CmdResult, CommandError};
@@ -290,6 +291,10 @@ pub async fn session_open_sftp(
     }
 
     let dial_port = dial.port;
+    let sftp_target = dial.hosts.first().cloned().unwrap_or_default();
+    let sftp_transport = if dial.bastion_name.is_some() { "rustion" } else { "direct" };
+    record_session_open(&state, &request.resource_name, &request.profile_id, "sftp", sftp_transport, &sftp_target, dial_port)
+        .await?;
     let (host, outcome): (String, SftpOpenOutcome) = dial_in_order("sftp", &dial.hosts, dial_port, |host| {
         let app = app.clone();
         let state = &state;

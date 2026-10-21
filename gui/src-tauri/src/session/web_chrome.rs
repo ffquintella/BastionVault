@@ -36,6 +36,7 @@ use tauri::Url;
 
 use super::web::{WebOrigin, WebSessionKind, WebSessionState, WINDOW_LABEL_PREFIX};
 use super::web_nav_bar::BAR_HEIGHT as NAV_BAR_HEIGHT;
+use super::web_proxy_upstream::UpstreamTrust;
 
 /// Prefix of every web session toolbar webview label. Must not be matched by
 /// `web-*` (the remote content's prefix) nor match it — asserted below and
@@ -176,17 +177,39 @@ pub enum LockState {
     Pinned,
     /// Plain http (`allow_insecure_http`).
     Insecure,
+    /// Proxy mode (T106): the page's origin is terminated by the session
+    /// proxy, which verified the server with the platform's trust. The
+    /// webview's own verdict is about the proxy's certificate and says
+    /// nothing about the server, so it is not shown.
+    Proxied,
+    /// Proxy mode, and the platform rejected the server's certificate: a
+    /// profile pin admitted it, on the proxy's upstream leg.
+    #[serde(rename = "proxied-pinned")]
+    ProxiedPinned,
 }
 
 /// Decide the lock indicator. `accepted_on_pin` answers whether this session
-/// accepted a certificate for an origin on a pin (`TlsPinGate`).
-pub fn lock_state(url: Option<&Url>, accepted_on_pin: impl Fn(&WebOrigin) -> bool) -> LockState {
+/// accepted a certificate for an origin on a pin (`TlsPinGate`);
+/// `proxy_trust` how the session proxy admitted an origin's server, for a
+/// proxy-mode session whose proxy terminated it (`WebShared::proxy_trust`).
+/// The proxy's verdict wins: in proxy mode the webview only ever validates
+/// the proxy.
+pub fn lock_state(
+    url: Option<&Url>,
+    accepted_on_pin: impl Fn(&WebOrigin) -> bool,
+    proxy_trust: impl Fn(&WebOrigin) -> Option<UpstreamTrust>,
+) -> LockState {
     let Some(url) = url else { return LockState::None };
     match url.scheme() {
         "http" => LockState::Insecure,
         "https" => match WebOrigin::of_url(url) {
-            Some(o) if accepted_on_pin(&o) => LockState::Pinned,
-            _ => LockState::Secure,
+            Some(o) => match proxy_trust(&o) {
+                Some(UpstreamTrust::Platform) => LockState::Proxied,
+                Some(UpstreamTrust::Pinned(_)) => LockState::ProxiedPinned,
+                None if accepted_on_pin(&o) => LockState::Pinned,
+                None => LockState::Secure,
+            },
+            None => LockState::Secure,
         },
         _ => LockState::None,
     }
@@ -272,7 +295,7 @@ pub struct ChromeState {
 pub fn chrome_state(session: &WebSessionState, now: Instant) -> ChromeState {
     let shared = &session.shared;
     let view = shared.chrome_view();
-    let lock = lock_state(view.url.as_ref(), |o| shared.accepted_on_pin(o));
+    let lock = lock_state(view.url.as_ref(), |o| shared.accepted_on_pin(o), |o| shared.proxy_trust(o));
     let (relogin, relogin_reason) =
         match relogin_availability(session.kind, session.credential_provider, shared.relogin_running()) {
             Relogin::Available => ("available", None),
@@ -320,6 +343,7 @@ mod tests {
             relogin: None,
             engine: None,
             nav_bar: None,
+            proxy: None,
         }
     }
 
@@ -446,16 +470,37 @@ mod tests {
     #[test]
     fn lock_state_follows_the_host_observed_scheme_and_pin_acceptance() {
         let never = |_: &WebOrigin| false;
-        assert_eq!(lock_state(None, never), LockState::None);
-        assert_eq!(lock_state(Some(&url("about:blank")), never), LockState::None);
-        assert_eq!(lock_state(Some(&url("http://fw01.example.com/")), never), LockState::Insecure);
-        assert_eq!(lock_state(Some(&url("https://fw01.example.com/")), never), LockState::Secure);
+        let unproxied = |_: &WebOrigin| None;
+        assert_eq!(lock_state(None, never, unproxied), LockState::None);
+        assert_eq!(lock_state(Some(&url("about:blank")), never, unproxied), LockState::None);
+        assert_eq!(lock_state(Some(&url("http://fw01.example.com/")), never, unproxied), LockState::Insecure);
+        assert_eq!(lock_state(Some(&url("https://fw01.example.com/")), never, unproxied), LockState::Secure);
         let pinned = WebOrigin::of_url(&url("https://fw01.example.com")).unwrap();
         let on_pin = |o: &WebOrigin| *o == pinned;
-        assert_eq!(lock_state(Some(&url("https://fw01.example.com/ng")), on_pin), LockState::Pinned);
-        assert_eq!(lock_state(Some(&url("https://other.example.com/")), on_pin), LockState::Secure);
+        assert_eq!(lock_state(Some(&url("https://fw01.example.com/ng")), on_pin, unproxied), LockState::Pinned);
+        assert_eq!(lock_state(Some(&url("https://other.example.com/")), on_pin, unproxied), LockState::Secure);
         // A pin never turns plain http into anything but insecure.
-        assert_eq!(lock_state(Some(&url("http://fw01.example.com/")), |_| true), LockState::Insecure);
+        assert_eq!(lock_state(Some(&url("http://fw01.example.com/")), |_| true, unproxied), LockState::Insecure);
+    }
+
+    /// Proxy mode (T106): the lock state is the session proxy's verdict on
+    /// the server, never the webview's on the proxy's own certificate (which
+    /// a session pin always accepts).
+    #[test]
+    fn a_proxied_origin_shows_the_proxys_verdict() {
+        use bastion_vault::utils::tls_pin::PinMatch;
+        let proxied = WebOrigin::of_url(&url("https://fw01.example.com")).unwrap();
+        let platform = |o: &WebOrigin| (*o == proxied).then_some(UpstreamTrust::Platform);
+        let pinned = |o: &WebOrigin| (*o == proxied).then_some(UpstreamTrust::Pinned(PinMatch::Leaf));
+        // The webview accepted the session leaf on a (session) pin; that is
+        // not what the operator is shown.
+        let on_pin = |_: &WebOrigin| true;
+        assert_eq!(lock_state(Some(&url("https://fw01.example.com/login")), on_pin, platform), LockState::Proxied);
+        assert_eq!(lock_state(Some(&url("https://fw01.example.com/login")), on_pin, pinned), LockState::ProxiedPinned);
+        // An origin the proxy has not terminated keeps the webview's verdict.
+        assert_eq!(lock_state(Some(&url("https://other.example.com/")), |_| false, platform), LockState::Secure);
+        assert_eq!(serde_json::to_value(LockState::Proxied).unwrap(), serde_json::json!("proxied"));
+        assert_eq!(serde_json::to_value(LockState::ProxiedPinned).unwrap(), serde_json::json!("proxied-pinned"));
     }
 
     #[test]

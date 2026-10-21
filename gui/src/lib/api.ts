@@ -3440,6 +3440,13 @@ export type WebRecipeTestResponse = {
 export const webRecipeTest = (request: WebRecipeTestRequest) =>
   invoke<WebRecipeTestResponse>("web_recipe_test", { request });
 
+/** Whether this computer and build can open a proxy-mode web session
+ *  (`web_proxy_mode_support`, T106): macOS 14+ in a `web_proxy_mode` build;
+ *  unavailable on Windows and Linux until a run there confirms it. */
+export type WebProxyModeSupport = { available: boolean; reason: string | null };
+
+export const webProxyModeSupport = () => invoke<WebProxyModeSupport>("web_proxy_mode_support");
+
 /** One certificate an https origin presented to `web_tls_fingerprint`. */
 export type WebPresentedCertificate = {
   /** 0 = the server's own (leaf) certificate. */

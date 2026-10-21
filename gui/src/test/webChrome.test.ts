@@ -59,6 +59,17 @@ describe("web session toolbar — pure logic", () => {
     expect(lockLabel("pinned").title).toMatch(/pin/);
     expect(lockLabel("insecure").text).toBe("Not secure");
     expect(lockLabel("none").text).toBe("—");
+    // Proxy mode (T106): the session proxy's verdict on the server.
+    expect(lockLabel("proxied").text).toBe("Proxied");
+    expect(lockLabel("proxied").title).toMatch(/session proxy/);
+    expect(lockLabel("proxied-pinned").text).toBe("Proxied (pinned)");
+    expect(lockLabel("proxied-pinned").title).toMatch(/pin/);
+  });
+
+  it("reads the proxied lock states the host sends", () => {
+    expect(parseChromeState(state({ lock: "proxied" }))?.lock).toBe("proxied");
+    expect(parseChromeState(state({ lock: "proxied-pinned" }))?.lock).toBe("proxied-pinned");
+    expect(parseChromeState({ ...state(), lock: "proxied_pinned" })).toBeNull();
   });
 
   it("shows the sign-in window while a credential is held, the session age otherwise", () => {

@@ -117,10 +117,18 @@ impl WebLaunchProfile {
         }
     }
 
-    /// The exposure the login mode needs (§6): `form` is `dom`, `http-auth`
-    /// is `handler`.
+    /// Proxy mode (§10, T106): a `form` recipe (version 2) carrying a
+    /// `submit_target`. The page is filled with a per-launch placeholder and
+    /// the host-local proxy puts the password into that one request only.
+    pub fn proxied(&self) -> bool {
+        matches!(&self.login, LaunchLogin::Form { recipe, .. } if recipe.is_proxied())
+    }
+
+    /// The exposure the login mode needs (§6): `form` is `dom`, `form` in
+    /// proxy mode is `proxy`, `http-auth` is `handler`.
     pub fn required_exposure(&self) -> WebExposure {
         match self.login {
+            LaunchLogin::Form { .. } if self.proxied() => WebExposure::Proxy,
             LaunchLogin::Form { .. } => WebExposure::Dom,
             LaunchLogin::HttpAuth => WebExposure::Handler,
         }
@@ -386,6 +394,16 @@ pub fn parse_launch_profile(profile: &Value) -> Result<WebLaunchProfile, WebRefu
             web.get("recipe").ok_or_else(|| refuse(422, "invalid_recipe", "a form-mode profile needs a recipe"))?;
         let (recipe, recipe_hash) =
             recipe::parse_and_hash(recipe_value).map_err(|e| refuse(422, "invalid_recipe", e.to_string()))?;
+        // §10: "`allow_insecure_http` is refused for proxy mode" — a secret
+        // the page could send over plain http is not `proxy` exposure, and
+        // the proxy terminates https origins only. Refused rather than
+        // launched at `dom`, so a proxy recipe never runs as a DOM fill.
+        if recipe.is_proxied() && allow_insecure_http {
+            return Err(invalid(
+                "web.allow_insecure_http is refused for proxy mode (a recipe with a submit_target): the proxy \
+                 terminates https only, and a secret sent over plain http is not `proxy` exposure",
+            ));
+        }
         recipe
             .check_origins(&origins, allow_insecure_http)
             .map_err(|e| refuse(422, "invalid_recipe", e.to_string()))?;
@@ -650,6 +668,49 @@ mod tests {
         let mut v = http_auth_profile();
         v["credential_source"] = json!({ "kind": "provider", "provider": "self-accounts" });
         assert_eq!(code(&v), "credential_source_unsupported");
+    }
+
+    fn proxy_profile() -> Value {
+        let mut v = form_profile();
+        v["web"]["recipe"]["version"] = json!(2);
+        v["web"]["recipe"]["submit_target"] =
+            json!({ "origin": "https://fw01.example.com", "path": "/logincheck", "body": "form" });
+        v
+    }
+
+    #[test]
+    fn a_proxy_recipe_launches_at_exposure_proxy() {
+        let p = parse_launch_profile(&proxy_profile()).unwrap();
+        assert!(p.proxied());
+        assert_eq!(p.login_mode(), "form");
+        assert_eq!((p.required_exposure(), p.launched_exposure()), (WebExposure::Proxy, WebExposure::Proxy));
+        // The same recipe without a submit target is a DOM fill, as before.
+        let p = parse_launch_profile(&form_profile()).unwrap();
+        assert!(!p.proxied());
+        assert_eq!(p.required_exposure(), WebExposure::Dom);
+    }
+
+    #[test]
+    fn allow_insecure_http_is_refused_for_proxy_mode() {
+        let mut v = proxy_profile();
+        v["web"]["allow_insecure_http"] = json!(true);
+        let e = parse_launch_profile(&v).unwrap_err();
+        assert_eq!(e.code, "invalid_profile");
+        // Regression: never quietly launched at `dom` instead.
+        assert!(e.message.contains("proxy mode"), "{}", e.message);
+        // `false` is fine.
+        v["web"]["allow_insecure_http"] = json!(false);
+        assert!(parse_launch_profile(&v).unwrap().proxied());
+    }
+
+    #[test]
+    fn a_submit_target_outside_the_profile_origins_is_refused() {
+        let mut v = proxy_profile();
+        v["web"]["recipe"]["submit_target"]["origin"] = json!("https://evil.example");
+        assert_eq!(code(&v), "invalid_recipe");
+        // An allowed origin is fine.
+        v["web"]["recipe"]["submit_target"]["origin"] = json!("https://sso.example.com");
+        assert!(parse_launch_profile(&v).is_ok());
     }
 
     #[test]

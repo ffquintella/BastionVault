@@ -12,10 +12,12 @@ import {
   MAX_RECIPE_JSON_BYTES,
   MAX_SELECTOR_LEN,
   MAX_STEPS,
+  MAX_SUBMIT_PATH_LEN,
   MAX_URL_PATTERN_LEN,
   blankRecipe,
   checkRecipeOrigins,
   heuristicRecipe,
+  isProxiedRecipe,
   originKey,
   parseRecipeJson,
   recipeError,
@@ -23,10 +25,16 @@ import {
   recipeToJson,
   splitUrl,
   validateWebRecipe,
+  withSubmitTarget,
 } from "../lib/webRecipe";
 import { WEB_RECIPE_PRESETS, findPreset, presetLabel } from "../lib/webRecipePresets";
-import { formCredentialSourceError, recipeBaseOrigin, strictOriginSet } from "../lib/webFormProfile";
-import { evaluateWebExposure, savedTypeEntry } from "../lib/webExposure";
+import {
+  formCredentialSourceError,
+  recipeBaseOrigin,
+  strictOriginSet,
+  validateFormWebProfile,
+} from "../lib/webFormProfile";
+import { evaluateWebExposure, requiredExposureForProfile, savedTypeEntry } from "../lib/webExposure";
 import { setWebLoginMode, validateProfile } from "../lib/connectionProfiles";
 import type { ConnectionProfile, WebLoginRecipe, WebProfileSettings } from "../lib/types";
 
@@ -95,10 +103,13 @@ describe("validateWebRecipe — mirrors WebLoginRecipe::parse", () => {
   });
 
   it("refuses unknown versions, a missing version and unknown keys at every level, naming the field", () => {
-    const v2 = fortigate();
-    v2.version = 2;
-    expect(at(v2)).toBe("version");
-    expect(recipeError(v2)).toMatch(/version 2 is not supported/);
+    const v3 = fortigate();
+    v3.version = 3;
+    expect(at(v3)).toBe("version");
+    expect(recipeError(v3)).toMatch(/version 3 is not supported/);
+    const v0 = fortigate();
+    v0.version = 0;
+    expect(at(v0)).toBe("version");
 
     const v15 = fortigate();
     v15.version = 1.5;
@@ -416,7 +427,7 @@ describe("recipe import — strict, data only", () => {
       '{"version":1,"steps":[{"when_url":"https://a.example/","actions":[{"eval":"alert(1)"}]}],"success_when":{"selector":"x"}}',
       '{"version":1,"steps":[{"when_url":"javascript:alert(1)","actions":[{"click":"a"}]}],"success_when":{"selector":"x"}}',
       '{"version":1,"steps":[{"when_url":"https://a.example/","actions":[{"fill":"a","value":"${process.env}"}]}],"success_when":{"selector":"x"}}',
-      '{"version":2,"steps":"auto","success_when":{"selector":"x"}}',
+      '{"version":3,"steps":"auto","success_when":{"selector":"x"}}',
     ];
     for (const text of hostile) {
       const r = parseRecipeJson(text);
@@ -707,5 +718,138 @@ describe("evaluateWebExposure — mirrors exposure.rs", () => {
     // Inherited properties are not saved types.
     expect(savedTypeEntry({}, "constructor")).toBeNull();
     expect(savedTypeEntry({}, "toString")).toBeNull();
+  });
+});
+
+// ── Proxy mode (T106): recipe version 2 and its `submit_target` ──────────────
+// Mirrors the Rust tests in connect_web/recipe.rs and profile.rs.
+
+function proxied(): Record<string, unknown> {
+  const v = fortigate();
+  v.version = 2;
+  v.submit_target = { origin: "https://FW01.example.com:443/", path: "/logincheck", body: "form" };
+  return v;
+}
+
+describe("proxy mode — recipe version 2", () => {
+  it("reads a version-1 recipe exactly as before", () => {
+    const r = validateWebRecipe(fortigate());
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(isProxiedRecipe(r.recipe)).toBe(false);
+  });
+
+  it("accepts a version-2 recipe with or without a submit target", () => {
+    const r = validateWebRecipe(proxied());
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(isProxiedRecipe(r.recipe)).toBe(true);
+    const plain = fortigate();
+    plain.version = 2;
+    expect(validateWebRecipe(plain).ok).toBe(true);
+    const json = proxied();
+    json.submit_target = { origin: "https://fw01.example.com:8443", path: "/api/v1/login", body: "json" };
+    expect(validateWebRecipe(json).ok).toBe(true);
+  });
+
+  it("refuses a submit target on a version-1 recipe, naming the version", () => {
+    const v = proxied();
+    v.version = 1;
+    expect(at(v)).toBe("submit_target");
+    expect(recipeError(v)).toMatch(/version 2/);
+  });
+
+  it("refuses malformed submit targets, naming the field like the server", () => {
+    const o = "https://fw01.example.com";
+    const cases: [unknown, string][] = [
+      ["https://fw01.example.com/login", "submit_target"],
+      [{ origin: o, path: "/l" }, "submit_target.body"],
+      [{ origin: o, path: "/l", body: "multipart" }, "submit_target.body"],
+      [{ origin: o, path: "/l", body: "form", method: "POST" }, "submit_target.method"],
+      [{ path: "/l", body: "form" }, "submit_target.origin"],
+      [{ origin: "http://fw01.example.com", path: "/l", body: "form" }, "submit_target.origin"],
+      [{ origin: "https://fw01.example.com/login", path: "/l", body: "form" }, "submit_target.origin"],
+      [{ origin: "https://a@fw01.example.com", path: "/l", body: "form" }, "submit_target.origin"],
+      [{ origin: "https://*.example.com", path: "/l", body: "form" }, "submit_target.origin"],
+      [{ origin: o, body: "form" }, "submit_target.path"],
+      [{ origin: o, path: "login", body: "form" }, "submit_target.path"],
+      [{ origin: o, path: "//evil.example/l", body: "form" }, "submit_target.path"],
+      [{ origin: o, path: "/login?x=1", body: "form" }, "submit_target.path"],
+      [{ origin: o, path: "/login#a", body: "form" }, "submit_target.path"],
+      [{ origin: o, path: "/log*", body: "form" }, "submit_target.path"],
+      [{ origin: o, path: "/log in", body: "form" }, "submit_target.path"],
+      [{ origin: o, path: "/lögin", body: "form" }, "submit_target.path"],
+      [{ origin: o, path: `/${"a".repeat(MAX_SUBMIT_PATH_LEN)}`, body: "form" }, "submit_target.path"],
+    ];
+    for (const [t, want] of cases) {
+      const v = proxied();
+      v.submit_target = t;
+      expect(at(v), JSON.stringify(t)).toBe(want);
+    }
+  });
+
+  it("needs a recipe that fills the password", () => {
+    const v = clone(proxied()) as { steps: { actions: unknown[] }[] };
+    v.steps[0].actions[1] = { fill: "input[name=secretkey]", value: "literal:x" };
+    expect(at(v)).toBe("submit_target");
+    expect(
+      validateWebRecipe({
+        version: 2,
+        steps: "auto",
+        success_when: { selector: "#dashboard" },
+        submit_target: { origin: O, path: "/login", body: "json" },
+      }).ok,
+    ).toBe(true);
+  });
+
+  it("checks the submit target's origin against the profile's set", () => {
+    const r = validateWebRecipe(proxied());
+    if (!r.ok) throw new Error("expected a valid recipe");
+    expect(checkRecipeOrigins(r.recipe, [O], false)).toBeNull();
+    const elsewhere = clone(r.recipe);
+    elsewhere.submit_target = { origin: "https://sso.example.com", path: "/l", body: "form" };
+    expect(checkRecipeOrigins(elsewhere, [O], false)?.at).toBe("submit_target.origin");
+    expect(checkRecipeOrigins(elsewhere, [O, "https://sso.example.com"], false)).toBeNull();
+  });
+
+  it("writes the lowest version that can carry the recipe", () => {
+    const base = blankRecipe(O);
+    const on = withSubmitTarget(base, { origin: O, path: "/login", body: "form" });
+    expect(on.version).toBe(2);
+    expect(on.submit_target).toEqual({ origin: O, path: "/login", body: "form" });
+    const off = withSubmitTarget(on, undefined);
+    expect(off.version).toBe(1);
+    expect("submit_target" in off).toBe(false);
+    expect(validateWebRecipe(on).ok).toBe(true);
+    expect(validateWebRecipe(off).ok).toBe(true);
+  });
+
+  it("needs exposure `proxy`, not `dom`", () => {
+    expect(requiredExposureForProfile({ login_mode: "form", recipe: proxied() })).toBe("proxy");
+    expect(requiredExposureForProfile({ login_mode: "form", recipe: fortigate() })).toBe("dom");
+    expect(requiredExposureForProfile({ login_mode: "http-auth" })).toBe("handler");
+    // A `proxy` cap admits proxy mode and still refuses a plain DOM fill.
+    const proxyType = { id: "web_application", connect: { web_exposure_max: "proxy" } };
+    const check = (required: "proxy" | "dom") =>
+      evaluateWebExposure({ typeDef: proxyType, resource: {}, required, heuristic: false, allowInsecureHttp: false });
+    expect(check("proxy").refusal).toBeNull();
+    expect(check("dom").refusal?.code).toBe("exposure_cap_exceeded");
+  });
+
+  it("refuses allow_insecure_http for proxy mode when the profile is saved", () => {
+    const web: WebProfileSettings = {
+      start_url: `${O}/login`,
+      allowed_origins: [],
+      login_mode: "form",
+      recipe: proxied() as unknown as WebLoginRecipe,
+      allow_insecure_http: true,
+    };
+    const p = {
+      id: "p_web",
+      name: "Console",
+      protocol: "web",
+      credential_source: { kind: "secret", secret_id: "admin" },
+      web,
+    } as unknown as ConnectionProfile;
+    expect(validateFormWebProfile(p, web)).toMatch(/proxy mode/);
+    expect(validateFormWebProfile(p, { ...web, allow_insecure_http: false })).toBeNull();
   });
 });

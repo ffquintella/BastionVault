@@ -220,6 +220,12 @@ export function validateFormWebProfile(p: ConnectionProfile, web: WebProfileSett
   }
   const parsed = validateWebRecipe(web.recipe);
   if (!parsed.ok) return formatRecipeIssue(parsed.issue);
+  // The server's `parse_launch_profile` check, before the origins: proxy
+  // mode terminates https only, and a secret the page could post over plain
+  // http is not `proxy` exposure.
+  if (parsed.recipe.submit_target !== undefined && web.allow_insecure_http === true) {
+    return "Allow insecure HTTP is refused for proxy mode (a recipe with a submit target): the session proxy terminates https only.";
+  }
   const originIssue = checkRecipeOrigins(parsed.recipe, set.origins, web.allow_insecure_http === true);
   if (originIssue) return formatRecipeIssue(originIssue);
 

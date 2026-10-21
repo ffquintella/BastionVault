@@ -897,6 +897,25 @@ Response:
   proxy challenges. The launch record has no recipe step, so `result` takes
   no `step` (`invalid_step`, 400) and `totp` always refuses
   (`totp_not_configured`, 409).
+- **Proxy mode** (T106, `features/web-application-connect.md` §10): a `form`
+  profile whose recipe is **version 2** and carries
+  `"submit_target": { "origin": "https://host[:port]", "path": "/exact/path",
+  "body": "form" | "json" }`. The response is the `form` shape with
+  `exposure: "proxy"` (`proxy` or `dom` caps admit it; a `proxy` cap refuses a
+  plain DOM fill). The desktop host fills the page with a per-launch
+  placeholder and its host-local proxy puts the password into the one `POST`
+  to that origin and path, with that body type. Validation, all `422`:
+  `submit_target` on a version-1 recipe (`invalid_recipe`, at
+  `submit_target`); an origin that is not https, not a bare origin, or not
+  the start URL's origin or one of `allowed_origins` (`invalid_recipe`); a
+  path that is not an absolute, printable-ASCII path without query,
+  fragment, `*` or `\` (`invalid_recipe`); a recipe that never fills
+  `password` (`invalid_recipe`); and `allow_insecure_http: true`
+  (`invalid_profile` — refused for proxy mode, never launched at `dom`).
+  Version-1 recipes are read exactly as before and keep their
+  `recipe_hash`; a server that predates version 2 refuses a version-2
+  recipe (`invalid_recipe`, at `version`), so a proxy recipe is never run as
+  a DOM fill. Writers use version 1 unless the recipe has a `submit_target`.
 - `credential` carries **only what the login uses** (`form`: what the recipe
   fills — `username`, `password`, `totp`, heuristic mode taking whichever the
   source has; `http-auth`: `username` and `password`, both required). It
@@ -939,8 +958,9 @@ Response:
   isolated < handler < proxy < dom`) on the resource type
   (`config/types[<type>].connect`) and on the resource record (top-level
   key). The resource's `type` must name a type in the **saved**
-  `config/types` that sets `web_exposure_max`; form mode needs `dom`,
-  http-auth `handler` (so `handler`, `proxy` or `dom` admit it). An
+  `config/types` that sets `web_exposure_max`; form mode needs `dom`, form
+  in proxy mode `proxy`, http-auth `handler` (so `handler`, `proxy` or `dom`
+  admit it). An
   unset cap, a type missing from the saved configuration, or a
   configuration never saved leaves the cap at `none` and refuses with
   `exposure_not_permitted`. "Saved" means the resource mount's own

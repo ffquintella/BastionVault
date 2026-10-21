@@ -18,10 +18,10 @@ import { WebRecipeEditor } from "./WebRecipeEditor";
 import { WebTlsPinFields } from "./WebTlsPinFields";
 import * as api from "../lib/api";
 import { WEB_WINDOW_MAX, WEB_WINDOW_MIN, webOriginSet } from "../lib/connectionProfiles";
-import { isHeuristicRecipe } from "../lib/webRecipe";
+import { isHeuristicRecipe, isProxiedRecipe } from "../lib/webRecipe";
 import {
   evaluateWebExposure,
-  requiredExposureForLoginMode,
+  requiredExposureForProfile,
   savedTypeEntry,
   type ExposureVerdict,
 } from "../lib/webExposure";
@@ -78,8 +78,8 @@ export function useWebExposureState(
     verdict: evaluateWebExposure({
       typeDef: savedTypeEntry(saved.config, String(resource["type"] ?? "")),
       resource,
-      // `form` needs `dom`, `http-auth` `handler` (spec §6).
-      required: requiredExposureForLoginMode(web.login_mode) ?? "dom",
+      // `form` needs `dom`, proxy mode `proxy`, `http-auth` `handler` (spec §6).
+      required: requiredExposureForProfile(web) ?? "dom",
       heuristic: web.login_mode === "form" && isHeuristicRecipe(web.recipe),
       allowInsecureHttp: web.allow_insecure_http === true,
     }),
@@ -93,11 +93,13 @@ export function WebExposureNotice({
   mode = "form",
 }: {
   state: WebExposureState;
-  mode?: "form" | "http-auth";
+  /** `proxy`: a form login in proxy mode (a recipe `submit_target`). */
+  mode?: "form" | "proxy" | "http-auth";
 }) {
-  const what = mode === "http-auth" ? "HTTP-authentication logins" : "form logins";
+  const what =
+    mode === "http-auth" ? "HTTP-authentication logins" : mode === "proxy" ? "proxy-mode form logins" : "form logins";
   // The cap that admits this mode (insecure HTTP always needs `dom`).
-  const needed = mode === "http-auth" ? "handler" : "dom";
+  const needed = mode === "http-auth" ? "handler" : mode === "proxy" ? "proxy" : "dom";
   if (state.kind === "loading") return null;
   if (state.kind === "unknown") {
     return (
@@ -114,7 +116,9 @@ export function WebExposureNotice({
         This resource&rsquo;s type allows {what} (exposure cap <code>{state.verdict.cap}</code>).{" "}
         {mode === "http-auth"
           ? "The credential goes to the webview's own authentication handler, never into the page."
-          : "The password is in the page\u2019s DOM between fill and submit."}
+          : mode === "proxy"
+            ? "The page holds only a placeholder; the session proxy puts the password into the sign-in request."
+            : "The password is in the page\u2019s DOM between fill and submit."}
       </p>
     );
   }
@@ -125,7 +129,8 @@ export function WebExposureNotice({
       className="rounded-md border border-yellow-500/40 bg-yellow-500/10 p-2 text-xs min-w-0"
     >
       <p className="font-medium">
-        The server will refuse this profile&rsquo;s {mode === "http-auth" ? "HTTP-authentication" : "form"} login.
+        The server will refuse this profile&rsquo;s{" "}
+        {mode === "http-auth" ? "HTTP-authentication" : mode === "proxy" ? "proxy-mode form" : "form"} login.
       </p>
       <p className="mt-1 min-w-0 break-words">
         <code>{refusal.code}</code>: {refusal.message}.
@@ -138,7 +143,7 @@ export function WebExposureNotice({
               Settings &rarr; Resource Types
             </Link>{" "}
             (edit the type, set &ldquo;Web exposure cap&rdquo; to <code>{needed}</code>
-            {mode === "http-auth" && " or higher"}
+            {mode !== "form" && " or higher"}
             {refusal.code === "heuristic_not_allowed" && ", and allow heuristic fill"}).
           </>
         )}
@@ -291,7 +296,7 @@ export function WebProfileFields({
       {web.login_mode === "form" && (
         <>
           <div className="col-span-2 space-y-2 min-w-0">
-            <WebExposureNotice state={exposure} />
+            <WebExposureNotice state={exposure} mode={isProxiedRecipe(web.recipe) ? "proxy" : "form"} />
             <p className="text-xs text-[var(--color-text-muted)]">
               <strong className="text-[var(--color-text)]">Exposure, plainly:</strong> with a form login the
               password exists in the application&rsquo;s own page from fill until submit, where the page&rsquo;s

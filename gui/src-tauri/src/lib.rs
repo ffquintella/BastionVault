@@ -653,6 +653,7 @@ pub fn run() {
             commands::connect_sftp::sftp_local_list,
             commands::connect_sftp::sftp_local_mkdir,
             commands::connect_web::web_recipe_test,
+            commands::connect_web::web_proxy_mode_support,
             commands::connect_web_tls_pin::web_tls_fingerprint,
             commands::connect_web_chrome::web_chrome_state,
             commands::connect_web_chrome::web_chrome_disconnect,

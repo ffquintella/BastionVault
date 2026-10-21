@@ -31,16 +31,15 @@
 //!
 //! Nothing here logs the secret, the placeholder, a request or response body,
 //! or a path — only `host:port` and fixed check names (`proxy_*`), as §11
-//! requires.
+//! requires. What the listener *did* (termination, substitution, scrubbing,
+//! refusal) is reported through [`ProxyEvents`], in the same terms, and the
+//! command layer writes the audit lines from it (T106 step 6).
 //!
-//! This file is Tauri-free: the platform wiring (T106 step 4) owns
-//! [`WebProxy::proxy_url`], [`WebProxy::ca_pin`] and [`WebProxy::leaf_pin`].
+//! This file is Tauri-free: the platform wiring
+//! ([`super::web_proxy_webview`], T106 step 4) owns [`WebProxy::proxy_url`],
+//! [`WebProxy::ca_pin`] and [`WebProxy::leaf_pin`].
 
-// See the note in `web_proxy.rs`: nothing constructs a session proxy until
-// the platform wiring of T106 step 4. The tests below drive all of it.
-#![allow(dead_code)]
-
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
@@ -72,7 +71,7 @@ use super::web_proxy::{
     SecretBody, SessionSecret, SubmitTarget, Substitution, TerminationScope,
 };
 use super::web_proxy_ca::SessionCa;
-use super::web_proxy_upstream::UpstreamVerifier;
+use super::web_proxy_upstream::{UpstreamRefusal, UpstreamTrust, UpstreamVerifier};
 
 /// Largest `CONNECT` request head the listener reads before giving up. The
 /// client is the session's own webview on loopback; this is a bound, not a
@@ -111,30 +110,100 @@ const HOP_BY_HOP: [&str; 9] = [
     "upgrade",
 ];
 
-/// What the proxy may put into the outgoing submit request. Absent for a
-/// session that terminates TLS but releases no credential (an `open`-mode
-/// window behind the proxy, or a header-injection profile later on).
+/// What the proxy may put into the outgoing submit request, for one sign-in
+/// ([`WebProxy::arm`]). Between sign-ins — and once a sign-in ended and its
+/// secret was released ([`WebProxy::release`]) — the proxy holds none and
+/// substitutes nothing.
 pub struct ProxyInjection {
     pub secret: SessionSecret,
     pub target: SubmitTarget,
 }
 
-/// One session's proxy, as the launch path describes it.
+/// Names one [`WebProxy::arm`]: releasing it drops that sign-in's secret and
+/// nothing a later sign-in armed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InjectionTicket(u64);
+
+#[derive(Default)]
+struct InjectionSlot {
+    /// Bumped by every arm.
+    generation: u64,
+    /// Behind an `Arc` so a request that took it keeps it until its response
+    /// is scrubbed, even if the sign-in ends meanwhile.
+    current: Option<Arc<ProxyInjection>>,
+}
+
+/// What the listener did, for the audit lines and the window (T106 step 6).
+/// Origins (`host`, `port`) and fixed names only: never the secret, the
+/// placeholder, a path, a body or anything read from a response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProxyEvent {
+    /// The proxy terminated a session origin for the first time — or the
+    /// way its upstream was admitted changed since the last time.
+    Terminated { host: String, port: u16, upstream: UpstreamTrust },
+    /// The placeholder in the submit request was replaced by the secret.
+    Substituted { host: String, port: u16 },
+    /// The substituted request's response was scrubbed; `replaced` copies of
+    /// the secret (in any encoding) became the placeholder.
+    Scrubbed { host: String, port: u16, replaced: usize },
+    /// The proxy refused the sign-in request or its response, or refused an
+    /// upstream certificate on a session origin. `check` is the
+    /// `aborted:<check>` name (`[a-z0-9_]{1,32}`), `notice` fixed text for
+    /// the title.
+    Refused { host: String, port: u16, check: &'static str, notice: &'static str },
+}
+
+type EventHook = Arc<dyn Fn(ProxyEvent) + Send + Sync>;
+
+/// Where a session's proxy reports [`ProxyEvent`]s. Called from the proxy's
+/// own tasks; the hook must not block.
+#[derive(Clone, Default)]
+pub struct ProxyEvents(Option<EventHook>);
+
+impl ProxyEvents {
+    pub fn new(hook: impl Fn(ProxyEvent) + Send + Sync + 'static) -> Self {
+        Self(Some(Arc::new(hook)))
+    }
+
+    fn emit(&self, event: ProxyEvent) {
+        if let Some(hook) = &self.0 {
+            hook(event);
+        }
+    }
+}
+
+impl ProxyEvent {
+    /// The event's origin as the audit lines print one (`https://host`, the
+    /// port only when it is not 443).
+    pub fn origin(&self) -> String {
+        let (Self::Terminated { host, port, .. }
+        | Self::Substituted { host, port }
+        | Self::Scrubbed { host, port, .. }
+        | Self::Refused { host, port, .. }) = self;
+        if *port == 443 {
+            format!("https://{host}")
+        } else {
+            format!("https://{host}:{port}")
+        }
+    }
+}
+
+/// One session's proxy, as the launch path describes it. The secret is not
+/// part of it: each sign-in arms its own ([`WebProxy::arm`]).
 pub struct ProxyConfig {
     /// The https origins this session terminates. Everything else is
     /// tunnelled.
     pub scope: TerminationScope,
-    pub injection: Option<ProxyInjection>,
     /// The profile's `tls_pin_sha256`, as the override on the upstream leg.
     pub pins: PinSet,
+    pub events: ProxyEvents,
 }
 
 /// A running session proxy. Dropping it stops the listener; connections
 /// already open end with it.
 pub struct WebProxy {
     addr: SocketAddr,
-    ca: Arc<SessionCa>,
-    terminated: Arc<Mutex<BTreeSet<(String, u16)>>>,
+    ctx: Arc<ProxyCtx>,
     stop: Mutex<Option<oneshot::Sender<()>>>,
 }
 
@@ -146,19 +215,6 @@ impl WebProxy {
         if config.scope.is_empty() {
             return Err("web proxy: the session terminates no origin".to_string());
         }
-        if let Some(injection) = &config.injection {
-            let origin = injection.target.origin();
-            if !config.scope.terminates(origin.host(), origin.port()) {
-                // Otherwise the submit request would leave through a blind
-                // tunnel and the placeholder — not the password — would reach
-                // the application. Fail at launch, visibly, not at sign-in.
-                return Err(format!(
-                    "web proxy: the submit target {}:{} is not one of the session's terminated origins",
-                    origin.host(),
-                    origin.port()
-                ));
-            }
-        }
 
         let ca = Arc::new(SessionCa::mint(&config.scope.hosts())?);
         let verifier = UpstreamVerifier::new(config.pins.clone())?;
@@ -169,54 +225,105 @@ impl WebProxy {
             .map_err(|e| format!("web proxy: could not bind a loopback listener: {e}"))?;
         let addr = listener.local_addr().map_err(|e| format!("web proxy: listener address: {e}"))?;
 
-        let terminated = Arc::new(Mutex::new(BTreeSet::new()));
         let ctx = Arc::new(ProxyCtx {
             scope: config.scope,
-            injection: config.injection,
-            ca: Arc::clone(&ca),
+            injection: Mutex::new(InjectionSlot::default()),
+            ca,
             connector,
-            terminated: Arc::clone(&terminated),
+            verifier,
+            terminated: Mutex::new(BTreeMap::new()),
+            events: config.events,
         });
         let (stop_tx, stop_rx) = oneshot::channel();
-        tokio::spawn(accept_loop(listener, ctx, stop_rx));
+        tokio::spawn(accept_loop(listener, Arc::clone(&ctx), stop_rx));
         log::debug!("web proxy: listening on {addr}");
-        Ok(Self { addr, ca, terminated, stop: Mutex::new(Some(stop_tx)) })
+        Ok(Self { addr, ctx, stop: Mutex::new(Some(stop_tx)) })
     }
 
     /// What `proxy_url` is set to on the session window.
     pub fn proxy_url(&self) -> String {
-        format!("http://{}", self.addr)
+        format!("http://{}", self.local_addr())
     }
 
     pub fn local_addr(&self) -> SocketAddr {
         self.addr
     }
 
-    /// The session CA's DER certificate — the Linux shim registers it per
-    /// host before the first load.
+    /// The session CA's DER certificate, for a test client that trusts only
+    /// this session's CA (what the webview is told to trust through the
+    /// Phase 4 gate).
+    #[cfg(test)]
     pub fn ca_der(&self) -> &[u8] {
-        self.ca.ca_der()
+        self.ctx.ca.ca_der()
     }
 
     /// The two pins the Phase 4 gate is given for this session: the CA's
     /// (issuer path, host-bound) and the leaves' shared key (leaf path).
     pub fn ca_pin(&self) -> SpkiPin {
-        self.ca.ca_pin()
+        self.ctx.ca.ca_pin()
     }
 
     pub fn leaf_pin(&self) -> SpkiPin {
-        self.ca.leaf_pin()
+        self.ctx.ca.leaf_pin()
+    }
+
+    /// Every terminated host with its session leaf (DER, public data): what
+    /// the WebKitGTK shim allows per host before the first load
+    /// (`web_proxy_webview::pre_register_leaves`).
+    // Read by the WebKitGTK shim only; macOS and Windows trust the leaves
+    // through the pin gate.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub fn session_leaves(&self) -> &[(String, Vec<u8>)] {
+        self.ctx.ca.leaves()
     }
 
     /// Whether the proxy has actually terminated this origin. The bypass
     /// check (T106 step 6) reads it: the recipe fills only once the proxy
     /// says it owns the page's origin.
     pub fn has_terminated(&self, host: &str, port: u16) -> bool {
-        self.terminated.lock().unwrap_or_else(|p| p.into_inner()).contains(&(host.to_ascii_lowercase(), port))
+        self.upstream_trust(host, port).is_some()
     }
 
-    /// Stop accepting. Idempotent; [`Drop`] does the same.
+    /// How the upstream of a terminated origin was admitted (the last
+    /// termination's), for the toolbar's lock state. `None` when the proxy
+    /// has not terminated it.
+    pub fn upstream_trust(&self, host: &str, port: u16) -> Option<UpstreamTrust> {
+        self.ctx.terminated.lock().unwrap_or_else(|p| p.into_inner()).get(&(host.to_ascii_lowercase(), port)).copied()
+    }
+
+    /// Give the proxy one sign-in's secret and submit target, replacing any
+    /// earlier one (a re-run login). The target must be a terminated origin.
+    /// The replaced secret is zeroized once no request still uses it.
+    pub fn arm(&self, injection: ProxyInjection) -> Result<InjectionTicket, String> {
+        check_injection_scope(&self.ctx.scope, &injection)?;
+        let mut slot = self.ctx.injection.lock().unwrap_or_else(|p| p.into_inner());
+        slot.generation += 1;
+        slot.current = Some(Arc::new(injection));
+        Ok(InjectionTicket(slot.generation))
+    }
+
+    /// The sign-in `ticket` armed has ended: drop its secret. A no-op when a
+    /// later sign-in has armed its own since, so a retiring sign-in can never
+    /// take its successor's secret away.
+    pub fn release(&self, ticket: InjectionTicket) -> bool {
+        let mut slot = self.ctx.injection.lock().unwrap_or_else(|p| p.into_inner());
+        if slot.generation == ticket.0 && slot.current.is_some() {
+            slot.current = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Whether the proxy still holds a secret to substitute.
+    #[cfg(test)]
+    pub fn holds_secret(&self) -> bool {
+        self.ctx.injection.lock().unwrap_or_else(|p| p.into_inner()).current.is_some()
+    }
+
+    /// Stop accepting and drop the secret. Idempotent; [`Drop`] does the same.
     pub fn shutdown(&self) {
+        self.ctx.injection.lock().unwrap_or_else(|p| p.into_inner()).current = None;
         if let Some(tx) = self.stop.lock().unwrap_or_else(|p| p.into_inner()).take() {
             let _ = tx.send(());
         }
@@ -229,17 +336,54 @@ impl Drop for WebProxy {
     }
 }
 
+/// The submit target must be a terminated origin. Otherwise the submit
+/// request would leave through a blind tunnel and the placeholder — not the
+/// password — would reach the application. Fail at launch, visibly, not at
+/// sign-in.
+fn check_injection_scope(scope: &TerminationScope, injection: &ProxyInjection) -> Result<(), String> {
+    let origin = injection.target.origin();
+    if scope.terminates(origin.host(), origin.port()) {
+        Ok(())
+    } else {
+        Err(format!(
+            "web proxy: the submit target {}:{} is not one of the session's terminated origins",
+            origin.host(),
+            origin.port()
+        ))
+    }
+}
+
 struct ProxyCtx {
     scope: TerminationScope,
-    injection: Option<ProxyInjection>,
+    injection: Mutex<InjectionSlot>,
     ca: Arc<SessionCa>,
     connector: TlsConnector,
-    terminated: Arc<Mutex<BTreeSet<(String, u16)>>>,
+    verifier: Arc<UpstreamVerifier>,
+    terminated: Mutex<BTreeMap<(String, u16), UpstreamTrust>>,
+    events: ProxyEvents,
 }
 
 impl ProxyCtx {
-    fn note_terminated(&self, host: &str, port: u16) {
-        self.terminated.lock().unwrap_or_else(|p| p.into_inner()).insert((host.to_ascii_lowercase(), port));
+    /// Record a termination; reported the first time per origin and when
+    /// its upstream's admission changes, not on every `CONNECT`.
+    fn note_terminated(&self, host: &str, port: u16, upstream: UpstreamTrust) {
+        let changed = self
+            .terminated
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert((host.to_ascii_lowercase(), port), upstream)
+            != Some(upstream);
+        if changed {
+            self.events.emit(ProxyEvent::Terminated { host: host.to_string(), port, upstream });
+        }
+    }
+
+    fn current_injection(&self) -> Option<Arc<ProxyInjection>> {
+        self.injection.lock().unwrap_or_else(|p| p.into_inner()).current.clone()
+    }
+
+    fn refused(&self, host: &str, port: u16, check: &'static str, notice: &'static str) {
+        self.events.emit(ProxyEvent::Refused { host: host.to_string(), port, check, notice });
     }
 }
 
@@ -334,10 +478,15 @@ async fn terminate(
     // opened, so a server whose certificate is not admitted never gets a
     // request — and the webview sees the refusal as a failed CONNECT rather
     // than as a page error inside a tunnel we vouched for.
-    let upstream = match connect_upstream(&ctx, &host, port).await {
-        Ok(stream) => stream,
+    let (upstream, trust) = match connect_upstream(&ctx, &host, port).await {
+        Ok(established) => established,
         Err(e) => {
             log::warn!("web proxy: upstream {host}:{port} not established ({e})");
+            // A certificate nothing admits is the one failure the window
+            // should name: the webview only sees a failed CONNECT.
+            if let Some(refusal) = ctx.verifier.take_refusal(bare_host(&host)) {
+                ctx.refused(&host, port, refusal.check(), refusal_notice(refusal));
+            }
             return refuse(&mut client, StatusCode::BAD_GATEWAY, "proxy_upstream_unavailable").await;
         }
     };
@@ -346,7 +495,7 @@ async fn terminate(
     // the origin is this proxy's the moment the tunnel opens, and the bypass
     // check must never see "not terminated" for a page that is already
     // loading through it.
-    ctx.note_terminated(&host, port);
+    ctx.note_terminated(&host, port, trust);
     client.write_all(CONNECTION_ESTABLISHED).await.map_err(|e| format!("CONNECT reply to {host}:{port}: {e}"))?;
     client.flush().await.map_err(|e| format!("CONNECT reply to {host}:{port}: {e}"))?;
 
@@ -447,17 +596,24 @@ async fn proxy_request(
     let path = req.uri().path().to_string();
     let content_type = req.headers().get(CONTENT_TYPE).and_then(|v| v.to_str().ok()).map(str::to_string);
     // Only a request to the recipe's own submit target is ever buffered or
-    // rewritten; everything else streams through.
-    let injection = ctx.injection.as_ref().filter(|inj| inj.target.matches(&host, port, &path));
+    // rewritten; everything else streams through. The injection is taken
+    // once, so a sign-in that ends mid-request cannot leave this request
+    // half-substituted or its response unscrubbed.
+    let injection = ctx.current_injection().filter(|inj| inj.target.matches(&host, port, &path));
+    let injection = injection.as_deref();
 
     let (mut parts, body) = req.into_parts();
     let mut scrub = false;
 
     let out_body: ProxyBody = if let Some(injection) = injection {
         let buffered = match collect_bounded(body, MAX_SUBMIT_REQUEST_BODY).await {
+            // The page's body: it holds the placeholder, never the secret.
             Ok(bytes) => bytes,
-            Err(CollectError::TooLarge) => return refused_submit(&host, port, RefuseReason::BodyTooLarge),
-            Err(CollectError::Read(e)) => return gateway_error("proxy_submit_body_read", &host, port, &e),
+            Err(CollectError::TooLarge) => return refused_submit(&ctx, &host, port, RefuseReason::BodyTooLarge),
+            Err(CollectError::Read(e)) => {
+                ctx.refused(&host, port, "proxy_submit_body_read", "the session proxy could not read the sign-in");
+                return gateway_error("proxy_submit_body_read", &host, port, &e);
+            }
         };
         let outgoing = OutgoingRequest {
             host: &host,
@@ -469,13 +625,14 @@ async fn proxy_request(
         };
         let forwarded = match substitute_submit(&injection.secret, &injection.target, &outgoing) {
             Substitution::Unchanged => Chunk::Plain(Bytes::from(buffered)),
-            Substitution::Refused(reason) => return refused_submit(&host, port, reason),
+            Substitution::Refused(reason) => return refused_submit(&ctx, &host, port, reason),
             Substitution::Substituted(body) => {
                 scrub = true;
                 // The response has to be searchable for the secret, so ask
                 // for it uncompressed. A server that compresses anyway is
                 // refused below rather than scrubbed blind.
                 parts.headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
+                ctx.events.emit(ProxyEvent::Substituted { host: host.to_string(), port });
                 Chunk::Secret { body, pos: 0 }
             }
         };
@@ -489,14 +646,25 @@ async fn proxy_request(
     strip_hop_by_hop(&mut parts.headers, upgrade_requested);
     ensure_host(&mut parts.headers, &host, port);
 
+    // A failure on the sign-in request itself is the window's business: the
+    // fill ends with it instead of waiting out its deadline.
+    let sign_in_failed = |check: &'static str, notice: &'static str| {
+        if injection.is_some() {
+            ctx.refused(&host, port, check, notice);
+        }
+    };
     let mut res = {
         let mut guard = sender.lock().await;
         if let Err(e) = guard.ready().await {
+            sign_in_failed("proxy_upstream_closed", "the session proxy could not deliver the sign-in");
             return gateway_error("proxy_upstream_closed", &host, port, &e.to_string());
         }
         match guard.send_request(Request::from_parts(parts, out_body)).await {
             Ok(res) => res,
-            Err(e) => return gateway_error("proxy_upstream_failed", &host, port, &e.to_string()),
+            Err(e) => {
+                sign_in_failed("proxy_upstream_failed", "the session proxy could not deliver the sign-in");
+                return gateway_error("proxy_upstream_failed", &host, port, &e.to_string());
+            }
         }
     };
 
@@ -520,6 +688,10 @@ async fn proxy_request(
 
     if let Some(encoding) = parts.headers.get(CONTENT_ENCODING) {
         if !encoding.as_bytes().eq_ignore_ascii_case(b"identity") {
+            sign_in_failed(
+                "proxy_response_encoded",
+                "the session proxy withheld the sign-in response: it was compressed and could not be checked",
+            );
             return gateway_error(
                 "proxy_response_encoded",
                 &host,
@@ -530,13 +702,23 @@ async fn proxy_request(
     }
     let received = match collect_bounded(body, MAX_SCRUBBED_RESPONSE_BODY).await {
         Ok(bytes) => Zeroizing::new(bytes),
-        Err(CollectError::TooLarge) => return gateway_error("proxy_response_too_large", &host, port, "over the cap"),
-        Err(CollectError::Read(e)) => return gateway_error("proxy_response_read", &host, port, &e),
+        Err(CollectError::TooLarge) => {
+            sign_in_failed(
+                "proxy_response_too_large",
+                "the session proxy withheld the sign-in response: it was too large to check",
+            );
+            return gateway_error("proxy_response_too_large", &host, port, "over the cap");
+        }
+        Err(CollectError::Read(e)) => {
+            sign_in_failed("proxy_response_read", "the session proxy could not read the sign-in response");
+            return gateway_error("proxy_response_read", &host, port, &e);
+        }
     };
     let scrubbed = scrub_response(&injection.secret, &received);
+    ctx.events.emit(ProxyEvent::Scrubbed { host: host.to_string(), port, replaced: scrubbed.replaced });
     parts.headers.remove(TRANSFER_ENCODING);
-    parts.headers.insert(CONTENT_LENGTH, HeaderValue::from(scrubbed.len()));
-    Response::from_parts(parts, bytes_body(scrubbed))
+    parts.headers.insert(CONTENT_LENGTH, HeaderValue::from(scrubbed.body.len()));
+    Response::from_parts(parts, bytes_body(scrubbed.body))
 }
 
 /// Relay an upgraded (WebSocket) connection in both directions until either
@@ -579,9 +761,24 @@ where
     Ok(out)
 }
 
-fn refused_submit(host: &str, port: u16, reason: RefuseReason) -> Response<ProxyBody> {
+fn refused_submit(ctx: &ProxyCtx, host: &str, port: u16, reason: RefuseReason) -> Response<ProxyBody> {
     log::warn!("web proxy: did not forward the sign-in request to {host}:{port} ({})", reason.check());
+    ctx.refused(host, port, reason.check(), reason.notice());
     plain_response(StatusCode::BAD_GATEWAY, reason.check())
+}
+
+/// The window's text for an upstream certificate the proxy refused. Fixed:
+/// never a name from the certificate.
+fn refusal_notice(refusal: UpstreamRefusal) -> &'static str {
+    match refusal {
+        UpstreamRefusal::Unpinned => {
+            "the session proxy refused the server's certificate: this computer does not trust it and the profile \
+             pins none"
+        }
+        UpstreamRefusal::Pin(_) => {
+            "the session proxy refused the server's certificate: it matches none of the profile's pins"
+        }
+    }
 }
 
 /// `detail` goes to the log, never to the page, and carries no path, query,
@@ -624,8 +821,7 @@ fn strip_hop_by_hop(headers: &mut HeaderMap, keep_upgrade: bool) {
 fn strip_response_headers(headers: &mut HeaderMap, keep_upgrade: bool) {
     let listed = connection_tokens(headers);
     remove_matching(headers, |name| {
-        (!(keep_upgrade && is_upgrade_header(name))
-            && (HOP_BY_HOP.contains(&name) || listed.iter().any(|t| t == name)))
+        (!(keep_upgrade && is_upgrade_header(name)) && (HOP_BY_HOP.contains(&name) || listed.iter().any(|t| t == name)))
             || is_stripped_response_header(name)
     });
 }
@@ -666,18 +862,32 @@ fn ensure_host(headers: &mut HeaderMap, host: &str, port: u16) {
     }
 }
 
+/// Dial and verify the upstream origin, and say how it was admitted. The
+/// verdict is the one the session's verifier recorded for the leaf this
+/// connection presented (a resumed session presents its original chain).
 async fn connect_upstream(
     ctx: &ProxyCtx,
     host: &str,
     port: u16,
-) -> Result<tokio_rustls::client::TlsStream<TcpStream>, String> {
+) -> Result<(tokio_rustls::client::TlsStream<TcpStream>, UpstreamTrust), String> {
     let tcp = dial(host, port).await?;
     let name = ServerName::try_from(bare_host(host).to_string())
         .map_err(|e| format!("`{host}` is not a valid TLS server name: {e}"))?;
-    timeout(TLS_TIMEOUT, ctx.connector.connect(name, tcp))
+    let tls = timeout(TLS_TIMEOUT, ctx.connector.connect(name, tcp))
         .await
         .map_err(|_| "the TLS handshake timed out".to_string())?
-        .map_err(|e| format!("the TLS handshake failed: {e}"))
+        .map_err(|e| format!("the TLS handshake failed: {e}"))?;
+    // Never reached without a verdict: the handshake succeeded only through
+    // the verifier. Should it happen anyway, the origin is not reported as
+    // verified — the connection is refused.
+    let trust = tls
+        .get_ref()
+        .1
+        .peer_certificates()
+        .and_then(|chain| chain.first())
+        .and_then(|leaf| ctx.verifier.verdict(bare_host(host), leaf.as_ref()))
+        .ok_or_else(|| "the upstream's verdict is missing; refusing it as unverified".to_string())?;
+    Ok((tls, trust))
 }
 
 async fn dial(host: &str, port: u16) -> Result<TcpStream, String> {
@@ -819,6 +1029,7 @@ mod tests {
     use tokio::io::AsyncReadExt;
 
     use super::*;
+    use crate::session::web_proxy::BodyType;
 
     /// The session's own loopback host. `localhost` resolves everywhere the
     /// GUI builds, which lets the proxy exercise its real resolver and TLS
@@ -987,18 +1198,61 @@ mod tests {
         Arc::new(config)
     }
 
-    async fn start_proxy(upstream: &Upstream, secret: &str, pins: PinSet) -> (WebProxy, String) {
-        let origin = format!("https://{HOST}:{}", upstream.port);
+    type EventLog = Arc<StdMutex<Vec<ProxyEvent>>>;
+
+    fn injection_for(origin: &str, secret: &str) -> (ProxyInjection, String) {
         let secret = SessionSecret::new(secret.to_string()).unwrap();
         let placeholder = secret.placeholder().to_string();
+        let target = SubmitTarget::new(origin, "/login", BodyType::Form).unwrap();
+        (ProxyInjection { secret, target }, placeholder)
+    }
+
+    async fn start_proxy_logged(upstream: &Upstream, secret: &str, pins: PinSet) -> (WebProxy, String, EventLog) {
+        let origin = format!("https://{HOST}:{}", upstream.port);
+        let (injection, placeholder) = injection_for(&origin, secret);
+        let log: EventLog = Arc::new(StdMutex::new(Vec::new()));
+        let sink = Arc::clone(&log);
         let proxy = WebProxy::start(ProxyConfig {
             scope: TerminationScope::new([origin.as_str()]).unwrap(),
-            injection: Some(ProxyInjection { secret, target: SubmitTarget::new(&origin, "/login").unwrap() }),
             pins,
+            events: ProxyEvents::new(move |e| sink.lock().unwrap().push(e)),
         })
         .await
         .unwrap();
+        proxy.arm(injection).unwrap();
+        (proxy, placeholder, log)
+    }
+
+    async fn start_proxy(upstream: &Upstream, secret: &str, pins: PinSet) -> (WebProxy, String) {
+        let (proxy, placeholder, _) = start_proxy_logged(upstream, secret, pins).await;
         (proxy, placeholder)
+    }
+
+    /// A terminated, TLS-wrapped HTTP/1.1 client for the upstream's origin,
+    /// as the session webview would hold one.
+    async fn session_client(proxy: &WebProxy, upstream: &Upstream) -> SendRequest<ProxyBody> {
+        let authority = format!("{HOST}:{}", upstream.port);
+        let (sock, status) = open_connect(proxy, &authority).await;
+        assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+        let tls = TlsConnector::from(session_client_config(proxy))
+            .connect(ServerName::try_from(HOST).unwrap(), sock)
+            .await
+            .unwrap();
+        let (sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(tls)).await.unwrap();
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+        sender
+    }
+
+    fn login_post(upstream: &Upstream, body: String) -> Request<ProxyBody> {
+        Request::builder()
+            .method("POST")
+            .uri("/login")
+            .header(HOST, format!("{HOST}:{}", upstream.port))
+            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(bytes_body(body.into_bytes()))
+            .unwrap()
     }
 
     // ---- tests -----------------------------------------------------------
@@ -1296,17 +1550,126 @@ mod tests {
 
     #[tokio::test]
     async fn a_submit_target_outside_the_termination_scope_is_refused_at_launch() {
-        let err = WebProxy::start(ProxyConfig {
+        let proxy = WebProxy::start(ProxyConfig {
             scope: TerminationScope::new(["https://app.example.test"]).unwrap(),
-            injection: Some(ProxyInjection {
-                secret: SessionSecret::new("pw".to_string()).unwrap(),
-                target: SubmitTarget::new("https://sso.example.test", "/login").unwrap(),
-            }),
             pins: PinSet::default(),
+            events: ProxyEvents::default(),
         })
         .await
-        .err()
-        .expect("a submit target outside the scope must not start a proxy");
+        .unwrap();
+        let (injection, _) = injection_for("https://sso.example.test", "pw");
+        let err = proxy.arm(injection).err().expect("a submit target outside the scope must not be armed");
         assert!(err.contains("not one of the session's terminated origins"), "{err}");
+        assert!(!proxy.holds_secret());
+    }
+
+    /// What the audit lines are written from (T106 step 6): one termination
+    /// per origin with how its upstream was admitted, then the substitution
+    /// and the scrub — origins and counts only.
+    #[tokio::test]
+    async fn termination_substitution_and_scrubbing_are_reported() {
+        let upstream = start_upstream().await;
+        let (proxy, placeholder, log) =
+            start_proxy_logged(&upstream, "s3cret-value", pins_of(&upstream.cert_der)).await;
+        let port = upstream.port;
+        let mut sender = session_client(&proxy, &upstream).await;
+        // A second CONNECT to the same origin is not a second termination.
+        let _again = session_client(&proxy, &upstream).await;
+        let res = sender.send_request(login_post(&upstream, format!("password={placeholder}"))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let _ = res.into_body().collect().await.unwrap();
+
+        // The upstream's self-signed certificate is admitted by the profile's
+        // leaf pin, not by the platform.
+        let upstream_trust = UpstreamTrust::Pinned(bastion_vault::utils::tls_pin::PinMatch::Leaf);
+        assert_eq!(proxy.upstream_trust(HOST, port), Some(upstream_trust));
+        let events = log.lock().unwrap().clone();
+        assert_eq!(
+            events,
+            vec![
+                ProxyEvent::Terminated { host: HOST.into(), port, upstream: upstream_trust },
+                ProxyEvent::Substituted { host: HOST.into(), port },
+                // The upstream echoes the body, so the secret came back once.
+                ProxyEvent::Scrubbed { host: HOST.into(), port, replaced: 1 },
+            ]
+        );
+        for e in &events {
+            let shown = format!("{e:?}");
+            assert!(!shown.contains("s3cret-value") && !shown.contains(&placeholder), "{shown}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_sign_in_and_an_untrusted_upstream_are_reported() {
+        let upstream = start_upstream().await;
+        let (proxy, placeholder, log) =
+            start_proxy_logged(&upstream, "s3cret-value", pins_of(&upstream.cert_der)).await;
+        let mut sender = session_client(&proxy, &upstream).await;
+        let res = sender.send_request(login_post(&upstream, format!("a={placeholder}&b={placeholder}"))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
+        let refused = RefuseReason::PlaceholderRepeated;
+        assert!(log.lock().unwrap().contains(&ProxyEvent::Refused {
+            host: HOST.into(),
+            port: upstream.port,
+            check: refused.check(),
+            notice: refused.notice(),
+        }));
+
+        // No pin, self-signed: the CONNECT fails and the refusal is named.
+        let (unpinned, _, log) = start_proxy_logged(&upstream, "pw", PinSet::default()).await;
+        let (_sock, status) = open_connect(&unpinned, &format!("{HOST}:{}", upstream.port)).await;
+        assert!(status.starts_with("HTTP/1.1 502"), "{status}");
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![ProxyEvent::Refused {
+                host: HOST.into(),
+                port: upstream.port,
+                check: "proxy_upstream_untrusted",
+                notice: refusal_notice(UpstreamRefusal::Unpinned),
+            }]
+        );
+    }
+
+    /// Once the sign-in ends the host drops the secret: the same request then
+    /// goes out with the placeholder — the proxy no longer holds anything to
+    /// put in its place.
+    #[tokio::test]
+    async fn a_released_secret_is_never_substituted_again() {
+        let upstream = start_upstream().await;
+        let origin = format!("https://{HOST}:{}", upstream.port);
+        let (proxy, _) = start_proxy(&upstream, "unused", pins_of(&upstream.cert_der)).await;
+        let (injection, placeholder) = injection_for(&origin, "s3cret-value");
+        let ticket = proxy.arm(injection).unwrap();
+        assert!(proxy.holds_secret());
+        assert!(proxy.release(ticket));
+        assert!(!proxy.holds_secret());
+        let mut sender = session_client(&proxy, &upstream).await;
+        let res = sender.send_request(login_post(&upstream, format!("password={placeholder}"))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let received = String::from_utf8(upstream.received.lock().unwrap()[0].clone()).unwrap();
+        assert_eq!(received, format!("password={placeholder}"));
+    }
+
+    /// A re-run login arms a new secret while the previous sign-in is being
+    /// retired: the retiring one's release must not take the new secret away.
+    #[tokio::test]
+    async fn a_release_never_drops_a_later_sign_ins_secret() {
+        let upstream = start_upstream().await;
+        let origin = format!("https://{HOST}:{}", upstream.port);
+        let (proxy, _) = start_proxy(&upstream, "unused", pins_of(&upstream.cert_der)).await;
+        let (first, _) = injection_for(&origin, "first");
+        let (second, _) = injection_for(&origin, "second");
+        let old = proxy.arm(first).unwrap();
+        let new = proxy.arm(second).unwrap();
+        assert_ne!(old, new);
+        assert!(!proxy.release(old), "the retired sign-in's ticket no longer names the armed secret");
+        assert!(proxy.holds_secret());
+        assert!(proxy.release(new));
+        assert!(!proxy.release(new), "released once");
+        // Shutting the proxy down drops whatever it held.
+        let (third, _) = injection_for(&origin, "third");
+        proxy.arm(third).unwrap();
+        proxy.shutdown();
+        assert!(!proxy.holds_secret());
     }
 }

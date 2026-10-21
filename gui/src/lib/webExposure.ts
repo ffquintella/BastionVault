@@ -52,6 +52,18 @@ export function requiredExposureForLoginMode(mode: string): WebExposure | null {
   }
 }
 
+/** The exposure a profile's login needs: as {@link requiredExposureForLoginMode},
+ *  except that a `form` recipe with a `submit_target` is proxy mode (§10,
+ *  T106) and needs `proxy` — the password is never in the page, only the
+ *  placeholder is. */
+export function requiredExposureForProfile(web: {
+  login_mode: string;
+  recipe?: { submit_target?: unknown } | null;
+}): WebExposure | null {
+  if (web.login_mode === "form" && web.recipe?.submit_target !== undefined) return "proxy";
+  return requiredExposureForLoginMode(web.login_mode);
+}
+
 type Tier = "type" | "resource";
 
 /** Stable codes, identical to `ExposureRefusal::code` on the server. */

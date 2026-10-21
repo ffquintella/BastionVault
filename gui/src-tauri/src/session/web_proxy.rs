@@ -6,21 +6,13 @@
 //! the outgoing submit request, and scrubs the secret back out of that
 //! request's response. Everything here is pure: no Tauri, no sockets, no TLS,
 //! so the rules are unit-tested. The listener
-//! ([`super::web_proxy_listener`], T106 step 2) and the platform wiring call
-//! into these functions.
-
-// Proxy mode has no caller yet: the webview is pointed at the listener by the
-// platform wiring (T106 step 4, `proxy_url` + `tauri/macos-proxy`), which is
-// the next step. Until that lands nothing in the GUI constructs a
-// `WebProxy`, so every item in the proxy modules reads as dead to the
-// compiler even though the tests drive all of it end to end. Remove this
-// (here and in `web_proxy_ca` / `web_proxy_listener` / `web_proxy_upstream`)
-// with step 4.
-#![allow(dead_code)]
+//! ([`super::web_proxy_listener`], T106 step 2) and the platform wiring
+//! ([`super::web_proxy_webview`], step 4) call into these functions.
 
 use std::collections::BTreeSet;
 use std::fmt;
 
+use bastion_vault::modules::resource::connect_web::recipe::SubmitBody;
 use rand::distr::{Alphanumeric, SampleString};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -135,10 +127,6 @@ impl TerminationScope {
         self.origins.is_empty()
     }
 
-    pub fn origins(&self) -> impl Iterator<Item = &HttpsOrigin> {
-        self.origins.iter()
-    }
-
     /// The distinct hosts the session's certificates must cover. Two origins
     /// on the same host and different ports share one leaf: a certificate
     /// names hosts, not ports.
@@ -155,6 +143,15 @@ pub enum BodyType {
     Json,
 }
 
+impl From<SubmitBody> for BodyType {
+    fn from(body: SubmitBody) -> Self {
+        match body {
+            SubmitBody::Form => Self::Form,
+            SubmitBody::Json => Self::Json,
+        }
+    }
+}
+
 impl BodyType {
     /// Parses a `Content-Type` value; parameters and case are ignored.
     pub fn of_content_type(value: &str) -> Option<Self> {
@@ -167,31 +164,98 @@ impl BodyType {
         }
     }
 
-    fn encode(self, secret: &str) -> String {
+    /// The secret as it appears inside a body of this type. Written straight
+    /// into a zeroizing buffer, so no intermediate copy of the secret is left
+    /// behind in freed memory.
+    fn encode(self, secret: &str) -> Zeroizing<String> {
         match self {
-            Self::Form => urlencoding::encode(secret).replace("%20", "+"),
-            Self::Json => {
-                let quoted = serde_json::to_string(secret).unwrap_or_default();
-                quoted[1..quoted.len() - 1].to_string()
-            }
+            Self::Form => percent_encode(secret, true),
+            Self::Json => json_escape(secret),
         }
     }
 }
 
+/// `application/x-www-form-urlencoded` (`space_as_plus`) or plain percent
+/// encoding: every byte outside `A-Za-z0-9-._~` as `%XX` — what
+/// `urlencoding::encode` produces, with a space as `+` for form bodies.
+fn percent_encode(secret: &str, space_as_plus: bool) -> Zeroizing<String> {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = Zeroizing::new(String::with_capacity(secret.len() * 3));
+    for &b in secret.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => out.push(char::from(b)),
+            b' ' if space_as_plus => out.push('+'),
+            _ => {
+                out.push('%');
+                out.push(char::from(HEX[usize::from(b >> 4)]));
+                out.push(char::from(HEX[usize::from(b & 0x0f)]));
+            }
+        }
+    }
+    out
+}
+
+/// The inside of a JSON string literal, escaped as `serde_json` escapes it:
+/// `"` and `\`, the short forms for `\b \f \n \r \t`, `\u00XX` for any other
+/// control character below U+0020, everything else verbatim.
+fn json_escape(secret: &str) -> Zeroizing<String> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = Zeroizing::new(String::with_capacity(secret.len() + 8));
+    for c in secret.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0c}' => out.push_str("\\f"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if u32::from(c) < 0x20 => {
+                let b = u32::from(c) as u8;
+                out.push_str("\\u00");
+                out.push(char::from(HEX[usize::from(b >> 4)]));
+                out.push(char::from(HEX[usize::from(b & 0x0f)]));
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// The secret as HTML text or attribute content (`&`, `<`, `>`, `"`, `'`).
+fn html_escape(secret: &str) -> Zeroizing<String> {
+    let mut out = Zeroizing::new(String::with_capacity(secret.len() + 8));
+    for c in secret.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#x27;"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// The recipe's submit target: the origin and path whose POST may carry the
-/// real secret. The query string is not part of the match.
+/// real secret, and the body type it must have. The query string is not part
+/// of the match.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubmitTarget {
     origin: HttpsOrigin,
     path: String,
+    body: BodyType,
 }
 
 impl SubmitTarget {
-    pub fn new(origin_url: &str, path: &str) -> Result<Self, String> {
+    pub fn new(origin_url: &str, path: &str, body: BodyType) -> Result<Self, String> {
         if !path.starts_with('/') {
-            return Err(format!("submit path `{path}` is not absolute"));
+            // The path itself stays out of the message: errors can reach an audit
+            // line, which names origins only.
+            return Err("the submit path is not absolute".to_string());
         }
-        Ok(Self { origin: HttpsOrigin::parse(origin_url)?, path: path.to_string() })
+        Ok(Self { origin: HttpsOrigin::parse(origin_url)?, path: path.to_string(), body })
     }
 
     pub fn origin(&self) -> &HttpsOrigin {
@@ -269,9 +333,22 @@ impl RefuseReason {
         match self {
             Self::NotPost => "proxy_submit_not_post",
             Self::UnsupportedBodyType => "proxy_submit_body_type",
-            Self::PlaceholderRepeated => "proxy_submit_placeholder_repeated",
+            Self::PlaceholderRepeated => "proxy_submit_placeholder_twice",
             Self::BodyNotUtf8 => "proxy_submit_body_not_utf8",
             Self::BodyTooLarge => "proxy_submit_body_too_large",
+        }
+    }
+
+    /// The fixed operator-facing text for the window title.
+    pub fn notice(self) -> &'static str {
+        match self {
+            Self::NotPost => "the session proxy did not send the sign-in: it was not a POST",
+            Self::UnsupportedBodyType => {
+                "the session proxy did not send the sign-in: its body type is not the recipe's submit target's"
+            }
+            Self::PlaceholderRepeated => "the session proxy did not send the sign-in: the placeholder appeared twice",
+            Self::BodyNotUtf8 => "the session proxy did not send the sign-in: its body is not text",
+            Self::BodyTooLarge => "the session proxy did not send the sign-in: its body is too large",
         }
     }
 }
@@ -286,7 +363,10 @@ pub fn substitute_submit(secret: &SessionSecret, target: &SubmitTarget, request:
     if !request.method.eq_ignore_ascii_case("POST") {
         return Substitution::Refused(RefuseReason::NotPost);
     }
-    let Some(body_type) = request.content_type.and_then(BodyType::of_content_type) else {
+    // The recipe names the body type; a request that arrives as the other
+    // one is not the request the operator configured, so it is refused
+    // rather than encoded for whatever the page chose.
+    let Some(body_type) = request.content_type.and_then(BodyType::of_content_type).filter(|t| *t == target.body) else {
         return Substitution::Refused(RefuseReason::UnsupportedBodyType);
     };
     if occurrences > 1 {
@@ -295,7 +375,7 @@ pub fn substitute_submit(secret: &SessionSecret, target: &SubmitTarget, request:
     if std::str::from_utf8(request.body).is_err() {
         return Substitution::Refused(RefuseReason::BodyNotUtf8);
     }
-    let encoded = Zeroizing::new(body_type.encode(&secret.secret));
+    let encoded = body_type.encode(&secret.secret);
     Substitution::Substituted(SecretBody::new(replace_all(
         request.body,
         secret.placeholder.as_bytes(),
@@ -303,13 +383,26 @@ pub fn substitute_submit(secret: &SessionSecret, target: &SubmitTarget, request:
     )))
 }
 
+/// A scrubbed response body and how many copies of the secret (in any of
+/// its encodings) were replaced — a count for the audit line, never the
+/// value.
+pub struct Scrubbed {
+    pub body: Vec<u8>,
+    pub replaced: usize,
+}
+
 /// Replaces every form of the secret in a response body with the placeholder.
-pub fn scrub_response(secret: &SessionSecret, body: &[u8]) -> Vec<u8> {
+pub fn scrub_response(secret: &SessionSecret, body: &[u8]) -> Scrubbed {
     let mut out = body.to_vec();
+    let mut replaced = 0;
     for variant in secret_variants(&secret.secret) {
-        out = replace_all(&out, variant.as_bytes(), secret.placeholder.as_bytes());
+        replaced += count_occurrences(&out, variant.as_bytes());
+        // The previous buffer may hold the secret: it is wiped when this
+        // wrapper drops, before the allocation is freed.
+        let previous = Zeroizing::new(std::mem::take(&mut out));
+        out = replace_all(&previous, variant.as_bytes(), secret.placeholder.as_bytes());
     }
-    out
+    Scrubbed { body: out, replaced }
 }
 
 /// Response headers the proxy strips from every terminated response.
@@ -317,23 +410,21 @@ pub fn is_stripped_response_header(name: &str) -> bool {
     name.eq_ignore_ascii_case("alt-svc")
 }
 
-fn secret_variants(secret: &str) -> Vec<String> {
-    let html = secret
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#x27;");
-    let json = BodyType::Json.encode(secret);
-    let form = BodyType::Form.encode(secret);
-    let raw_percent = urlencoding::encode(secret).into_owned();
-
-    let mut seen = BTreeSet::new();
-    let mut variants = Vec::new();
+/// Every encoding of the secret the scrub looks for, each in a zeroizing
+/// buffer, duplicates dropped.
+fn secret_variants(secret: &str) -> Vec<Zeroizing<String>> {
+    let candidates = [
+        Zeroizing::new(secret.to_string()),
+        BodyType::Form.encode(secret),
+        BodyType::Json.encode(secret),
+        html_escape(secret),
+        percent_encode(secret, false),
+    ];
+    let mut variants: Vec<Zeroizing<String>> = Vec::with_capacity(candidates.len());
     // Longest-first is not needed: each variant is a distinct encoding of the
     // same value, and none can contain another as a substring unless equal.
-    for v in [secret.to_string(), form, json, html, raw_percent] {
-        if seen.insert(v.clone()) {
+    for v in candidates {
+        if !variants.iter().any(|seen| **seen == *v) {
             variants.push(v);
         }
     }
@@ -376,7 +467,11 @@ mod tests {
     }
 
     fn target() -> SubmitTarget {
-        SubmitTarget::new("https://app.example.test", "/login").unwrap()
+        SubmitTarget::new("https://app.example.test", "/login", BodyType::Form).unwrap()
+    }
+
+    fn json_target() -> SubmitTarget {
+        SubmitTarget::new("https://app.example.test", "/login", BodyType::Json).unwrap()
     }
 
     fn post<'a>(path: &'a str, content_type: Option<&'a str>, body: &'a [u8]) -> OutgoingRequest<'a> {
@@ -445,8 +540,62 @@ mod tests {
     fn json_body_gets_json_escaped_secret() {
         let s = secret("q\"u\\o");
         let body = format!(r#"{{"password":"{}"}}"#, s.placeholder());
-        let out = substitute_submit(&s, &target(), &post("/login", Some("application/json"), body.as_bytes()));
+        let out = substitute_submit(&s, &json_target(), &post("/login", Some("application/json"), body.as_bytes()));
         assert_eq!(out, Substitution::Substituted(SecretBody::new(br#"{"password":"q\"u\\o"}"#.to_vec())));
+    }
+
+    /// The recipe's `submit_target.body` is part of the rule: a JSON post to a
+    /// form target (or the reverse) is refused, never encoded for the type
+    /// the page picked.
+    #[test]
+    fn a_body_of_the_other_type_is_refused() {
+        let s = secret("pw");
+        let form = format!("password={}", s.placeholder());
+        let json = format!(r#"{{"password":"{}"}}"#, s.placeholder());
+        let as_json = post("/login", Some("application/json"), json.as_bytes());
+        assert_eq!(
+            substitute_submit(&s, &target(), &as_json),
+            Substitution::Refused(RefuseReason::UnsupportedBodyType)
+        );
+        let as_form = post("/login", Some("application/x-www-form-urlencoded"), form.as_bytes());
+        assert_eq!(
+            substitute_submit(&s, &json_target(), &as_form),
+            Substitution::Refused(RefuseReason::UnsupportedBodyType)
+        );
+    }
+
+    /// The zeroizing encoders are written by hand; they must produce exactly
+    /// what the crates the page side is compared with produce, or the scrub
+    /// would miss an encoding and the substitution would send a different
+    /// password.
+    #[test]
+    fn the_encoders_match_urlencoding_and_serde_json() {
+        for s in ["pw", "a b+c&d=e", "é ü 中", "q\"u\\o", "tab\tnl\ncr\r\u{1}\u{7f}", "~-._!*'()/?#[]@", ""] {
+            assert_eq!(*percent_encode(s, false), urlencoding::encode(s), "{s:?}");
+            assert_eq!(*percent_encode(s, true), urlencoding::encode(s).replace("%20", "+"), "{s:?}");
+            let quoted = serde_json::to_string(s).unwrap();
+            assert_eq!(*json_escape(s), quoted[1..quoted.len() - 1], "{s:?}");
+        }
+        assert_eq!(*html_escape("a&<>\"'b"), "a&amp;&lt;&gt;&quot;&#x27;b");
+    }
+
+    #[test]
+    fn every_check_name_fits_the_abort_vocabulary() {
+        for r in [
+            RefuseReason::NotPost,
+            RefuseReason::UnsupportedBodyType,
+            RefuseReason::PlaceholderRepeated,
+            RefuseReason::BodyNotUtf8,
+            RefuseReason::BodyTooLarge,
+        ] {
+            let c = r.check();
+            assert!(
+                (1..=32).contains(&c.len())
+                    && c.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'),
+                "{c}"
+            );
+            assert!(!r.notice().is_empty());
+        }
     }
 
     #[test]
@@ -511,7 +660,9 @@ mod tests {
         let s = secret("a&\"<'b");
         let body =
             format!("raw=a&\"<'b form=a%26%22%3C%27b json=a&\\\"<'b html=a&amp;&quot;&lt;&#x27;b again={}", "a&\"<'b");
-        let scrubbed = String::from_utf8(scrub_response(&s, body.as_bytes())).unwrap();
+        let out = scrub_response(&s, body.as_bytes());
+        assert_eq!(out.replaced, 5, "raw twice, form, json and html once each");
+        let scrubbed = String::from_utf8(out.body).unwrap();
         assert!(!scrubbed.contains("a&\"<'b"));
         assert!(!scrubbed.contains("a%26%22%3C%27b"));
         assert!(!scrubbed.contains("&quot;&lt;&#x27;b"));
@@ -522,7 +673,8 @@ mod tests {
     fn scrub_leaves_unrelated_bodies_alone() {
         let s = secret("hunter2-unique");
         let body = b"<html>welcome</html>";
-        assert_eq!(scrub_response(&s, body), body.to_vec());
+        let out = scrub_response(&s, body);
+        assert_eq!((out.body, out.replaced), (body.to_vec(), 0));
     }
 
     #[test]
@@ -533,6 +685,6 @@ mod tests {
 
     #[test]
     fn submit_target_rejects_relative_path() {
-        assert!(SubmitTarget::new("https://app.example.test", "login").is_err());
+        assert!(SubmitTarget::new("https://app.example.test", "login", BodyType::Form).is_err());
     }
 }

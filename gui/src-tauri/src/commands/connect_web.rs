@@ -24,6 +24,19 @@
 //!   NTLM challenges on the scope's origins, once per (origin, realm); the
 //!   credential never reaches the page. `result` / `close` and the outcome
 //!   event work as for form mode.
+//! * `login_mode: "form"` with a version-2 recipe carrying `submit_target`
+//!   is **proxy mode** (§10, T106): `launch` releases at exposure `proxy`,
+//!   the host starts the session's loopback proxy
+//!   (`session::web_proxy_listener`) on the launch's scope, moves the
+//!   password into it and hands the recipe a per-launch placeholder. The
+//!   window is pointed at the proxy (`session::web_proxy_webview`, the only
+//!   place a webview is given one) and its TLS pin gate pins the session's
+//!   CA and leaf key; the profile's pins go to the proxy's upstream leg. The
+//!   engine fills only on origins the proxy terminated (`proxy_bypassed`
+//!   otherwise), the proxy's secret is released when the sign-in ends, and
+//!   termination / substitution / scrubbing / refusal are audited by origin.
+//!   Only on macOS 14+ in a `web_proxy_mode` build; refused elsewhere before
+//!   anything is launched, never run as a DOM fill instead.
 //! * Any mode may carry `tls_pin_sha256` (Phase 4). The window then also
 //!   opens on `about:blank`, the TLS pin handler
 //!   (`commands::connect_web_tls_pin`, decisions in `session::web_tls_pin`)
@@ -98,7 +111,7 @@ use bastion_vault::modules::resource::connect_web::recipe::{recipe_hash, WebLogi
 
 use super::connect::{
     collect_policy_hints, find_profile, read_effective_policy, read_resource_meta, record_recent_session,
-    SessionProtocolTag,
+    record_session_open, SessionProtocolTag,
 };
 use super::connect_web_http_auth::{InstallError, NativeGates, TLS_PIN_HANDLER_CHECK};
 use super::connect_web_nav_bar::{
@@ -119,9 +132,15 @@ use crate::session::web_http_auth::{
 };
 use crate::session::web_launch::{self, LaunchChannel, LaunchRequest, WebLaunch};
 use crate::session::web_nav_bar::NavBar;
+use crate::session::web_proxy::{BodyType, SessionSecret, SubmitTarget, TerminationScope};
+use crate::session::web_proxy_listener::{
+    InjectionTicket, ProxyConfig, ProxyEvent, ProxyEvents, ProxyInjection, WebProxy,
+};
+use crate::session::web_proxy_webview::{self, ProxySupport};
 use crate::session::web_recipe::{
     check_bundle, outcome_event, reconcile_fill_scope, BundleExpectation, EffectiveScope, ExpectedLogin,
-    LaunchCredential, Outcome, PlanSteps, RecipePlan, UrlGlob, WebSessionOutcomeEvent, WEB_SESSION_OUTCOME_EVENT,
+    LaunchCredential, Outcome, PlanSteps, PlanSubmitTarget, RecipePlan, UrlGlob, WebSessionOutcomeEvent,
+    WEB_SESSION_OUTCOME_EVENT,
 };
 use crate::session::web_script::{parse_reply, render, ReplyError, ScriptCall, ScriptReply, MAX_REPLY_BYTES};
 use crate::session::web_tls_pin::{PinAudit, PinRefusal, PinSet, TlsPinGate};
@@ -217,6 +236,23 @@ pub async fn session_open_web(
         .map(|p| format!(" provider={:?} account_id={:?}", p.provider, p.account_id))
         .unwrap_or_default();
 
+    // Proxy mode (T106, a recipe `submit_target`) runs only where it has been
+    // run end to end (macOS 14+, in a build with `web_proxy_mode`). Refused
+    // here — before the MFA ticket, the launch or any credential — and never
+    // run as a DOM fill instead.
+    let proxied = matches!(&cfg.login, WebLogin::Form(form) if form.plan.is_proxied());
+    if proxied {
+        if let ProxySupport::Unavailable(reason) = web_proxy_webview::proxy_support() {
+            log::warn!(
+                target: "audit",
+                "connect.web.refused: reason=proxy_unavailable resource={} profile={}",
+                request.resource_name,
+                request.profile_id,
+            );
+            return Err(CommandError::from(reason.to_string()));
+        }
+    }
+
     // Early refusal, before the MFA pre-flight burns the operator's ticket.
     // The authoritative check is the one under the registry lock below.
     if let Some(conflict) = registry_web_rdp_conflict(ProfileProtocol::Web, &*state.connect_sessions.lock().await) {
@@ -269,6 +305,7 @@ pub async fn session_open_web(
             relogin: None,
             engine: None,
             nav_bar: None,
+            proxy: None,
         },
     )
     .await?;
@@ -317,6 +354,47 @@ pub async fn session_open_web(
         }
     };
 
+    // Proxy mode: the session's proxy is started on the launch's effective
+    // scope and given this launch's password; the recipe gets the
+    // placeholder. Before the window exists, which is built pointed at it.
+    let mut session_proxy: Option<(Arc<WebProxy>, InjectionTicket)> = None;
+    if let Some((start, plan)) = form_run.as_mut() {
+        if let Some(target) = plan.submit_target.clone() {
+            let started = start_session_proxy(
+                &app,
+                &window_label,
+                &token,
+                &request.resource_name,
+                &shared,
+                &cfg.tls_pins,
+                start,
+                &target,
+            )
+            .await;
+            match started {
+                Ok(p) => session_proxy = Some(p),
+                Err((check, reason)) => {
+                    log::warn!(
+                        target: "audit",
+                        "connect.web.refused: reason={check} resource={} profile={} launch_id_hash={} — {reason}",
+                        request.resource_name,
+                        request.profile_id,
+                        start.launch.launch_id_hash(),
+                    );
+                    shared.note_abort(check);
+                    close_web_session(&state, &app, &token, WebCloseReason::WindowBuildFailed).await;
+                    return Err(CommandError::from(format!(
+                        "the session proxy could not be started ({reason}); the launch was closed and no credential \
+                         was sent"
+                    )));
+                }
+            }
+        }
+    }
+    if let Some((proxy, _)) = &session_proxy {
+        attach_proxy(&state, &token, proxy).await;
+    }
+
     // http-auth: the credential moves out of the bundle into the gate the
     // native handler consults. `check_bundle` guarantees both parts.
     let mut http_auth: Option<(Arc<HttpAuthGate>, tokio::sync::mpsc::UnboundedReceiver<GateEvent>)> = None;
@@ -345,20 +423,30 @@ pub async fn session_open_web(
         .as_ref()
         .map(|(start, _)| start.launch.launch_id_hash().to_string())
         .or_else(|| http_auth_run.as_ref().map(|start| start.launch.launch_id_hash().to_string()));
-    let tls_pin_gate = (OPERATOR_TLS_OVERRIDE || !cfg.tls_pins.is_empty()).then(|| {
-        pin_gate(
-            &app,
-            &window_label,
-            &shared,
-            &cfg.tls_pins,
-            &scope.origins,
-            PinAudit {
-                resource: request.resource_name.clone(),
-                token: token.clone(),
-                launch_id_hash: launch_id_hash.clone(),
-            },
-        )
-    });
+    let pin_audit = PinAudit {
+        resource: request.resource_name.clone(),
+        token: token.clone(),
+        launch_id_hash: launch_id_hash.clone(),
+    };
+    let tls_pin_gate = match &session_proxy {
+        // Proxy mode: the webview only ever sees the session's own leaves on
+        // the session origins, so its gate pins exactly those two keys and
+        // never asks the operator; the profile's pins went to the proxy's
+        // upstream leg, where the real server is verified.
+        Some((proxy, _)) => match web_proxy_webview::webview_pins(proxy) {
+            Ok(pins) => Some(pin_gate(&app, &window_label, &shared, &pins, &scope.origins, pin_audit)),
+            Err(e) => {
+                shared.note_abort("proxy_start");
+                close_web_session(&state, &app, &token, WebCloseReason::WindowBuildFailed).await;
+                return Err(CommandError::from(format!(
+                    "the session proxy's certificate pins could not be built ({e}); the launch was closed and no \
+                     credential was sent"
+                )));
+            }
+        },
+        None => (OPERATOR_TLS_OVERRIDE || !cfg.tls_pins.is_empty())
+            .then(|| pin_gate(&app, &window_label, &shared, &cfg.tls_pins, &scope.origins, pin_audit)),
+    };
     // The nav bar's view of the network: the window's own pin gate, cloned
     // before it moves into the native handlers, and the route the launch's
     // exposure and the webview's browser arguments imply (`WebviewRoute`,
@@ -401,6 +489,7 @@ pub async fn session_open_web(
         initial_url,
         http_auth_gate.clone(),
         network,
+        session_proxy.as_ref().map(|(proxy, _)| &**proxy),
     ) {
         Ok(w) => w,
         Err(e) => {
@@ -413,6 +502,30 @@ pub async fn session_open_web(
     };
     hook_window_destroyed(&win.window, &app, &token);
     keep_nav_bar(&state, &token, win.nav_bar).await;
+
+    // WebKitGTK: the session leaves are allowed per host on the window's own
+    // context before anything loads (the window is on `about:blank` until
+    // the native handlers are armed below). Not reached today — proxy mode
+    // is unavailable on Linux until a run of the session window confirms it
+    // (`web_proxy_webview::proxy_support`) — but wired, so enabling it is a
+    // gate change, not new code.
+    #[cfg(target_os = "linux")]
+    if let Some((proxy, _)) = &session_proxy {
+        if let Err(reason) = pre_register_proxy_leaves(&win.remote, proxy).await {
+            log::warn!(
+                target: "audit",
+                "connect.web.refused: reason=proxy_start resource={} profile={} — {reason}",
+                request.resource_name,
+                request.profile_id,
+            );
+            shared.note_abort("proxy_start");
+            close_web_session(&state, &app, &token, WebCloseReason::WindowBuildFailed).await;
+            return Err(CommandError::from(format!(
+                "this webview could not be told to trust the session proxy ({reason}); the launch was closed and no \
+                 credential was sent"
+            )));
+        }
+    }
 
     if !gates.is_empty() {
         if let Err(InstallError { check, reason }) = arm_native_handlers(&win.remote, gates, &scope.start_url).await {
@@ -442,18 +555,24 @@ pub async fn session_open_web(
         }
     }
 
+    let web_host = scope.start_url.host_str().unwrap_or_default().to_string();
+    let web_port = scope.start_url.port_or_known_default().unwrap_or(443);
+    record_session_open(&state, &request.resource_name, &request.profile_id, "web", "direct", &web_host, web_port)
+        .await?;
     let start_origin = display_origin(&scope.start_url);
     match (&form_run, &http_auth_run) {
         (Some((start, plan)), _) => log::info!(
             target: "audit",
             "session.open: protocol=web login_mode=form resource={} profile={} origin={} fill_origins={} \
-             narrowed_out={} heuristic={} credential_source={}{} mfa={} launch_id_hash={} downloads={} popups={} \
-             clipboard={:?} tls_pins={} token={}",
+             narrowed_out={} exposure={} proxy={} heuristic={} credential_source={}{} mfa={} launch_id_hash={} \
+             downloads={} popups={} clipboard={:?} tls_pins={} token={}",
             request.resource_name,
             request.profile_id,
             start_origin,
             scope.origins,
             start.narrowed_out_count,
+            start.exposure,
+            plan.submit_target.as_ref().map(|t| t.origin.to_string()).unwrap_or_else(|| "none".into()),
             plan.is_heuristic(),
             start.credential_source,
             provider_audit,
@@ -522,6 +641,7 @@ pub async fn session_open_web(
             plan,
             scope,
             start,
+            session_proxy,
         );
         attach_engine(&state, &token, engine, relogin).await;
         "form"
@@ -774,6 +894,140 @@ async fn keep_nav_bar(state: &AppState, token: &str, bar: Box<dyn NavBar>) {
     }
 }
 
+/// Keep a proxy-mode session's proxy on its registry entry, where teardown
+/// stops it (`finish_session`). When the entry is already gone, stop it now.
+async fn attach_proxy(state: &AppState, token: &str, proxy: &Arc<WebProxy>) {
+    let mut sessions = state.connect_sessions.lock().await;
+    match sessions.get_mut(token) {
+        Some(SessionState::Web(w)) => w.proxy = Some(Arc::clone(proxy)),
+        _ => {
+            drop(sessions);
+            proxy.shutdown();
+        }
+    }
+}
+
+// ── Proxy mode (T106) ──────────────────────────────────────────────
+
+/// Start a proxy-mode session's host-local proxy and arm it with this
+/// launch's password (`arm_session_proxy`). It terminates every origin of
+/// the launch's effective scope — the server's, which may only narrow the
+/// profile's, and which is all https in proxy mode — and verifies the real
+/// servers with the platform's trust and the profile's `tls_pin_sha256` as
+/// the override. `Err` carries the `aborted:<check>` and a reason safe to
+/// show and log (origins only).
+#[allow(clippy::too_many_arguments)]
+async fn start_session_proxy(
+    app: &AppHandle,
+    label: &str,
+    token: &str,
+    resource: &str,
+    shared: &Arc<WebShared>,
+    profile_pins: &PinSet,
+    start: &mut LaunchStart,
+    target: &PlanSubmitTarget,
+) -> Result<(Arc<WebProxy>, InjectionTicket), (&'static str, String)> {
+    let scope =
+        TerminationScope::new(start.scope.origin_keys.iter().map(String::as_str)).map_err(|e| ("proxy_start", e))?;
+    let proxy = WebProxy::start(ProxyConfig {
+        scope,
+        pins: profile_pins.clone(),
+        events: proxy_events(app, label, token, resource, shared),
+    })
+    .await
+    .map_err(|e| ("proxy_start", e))?;
+    let proxy = Arc::new(proxy);
+    let ticket = arm_session_proxy(&proxy, start, target)?;
+    shared.attach_proxy(&proxy);
+    log::info!(
+        target: "audit",
+        "connect.web.proxy_started: resource={resource} token={token} launch_id_hash={} submit_origin={} \
+         upstream_pins={}",
+        start.launch.launch_id_hash(),
+        target.origin,
+        profile_pins.len(),
+    );
+    Ok((proxy, ticket))
+}
+
+/// Move the launch's password into the session proxy for this sign-in and
+/// leave the per-launch placeholder in its place: the recipe fills the
+/// placeholder, the proxy puts the password into the submit request only.
+/// The password is moved, not copied, and zeroized with the proxy's copy.
+fn arm_session_proxy(
+    proxy: &WebProxy,
+    start: &mut LaunchStart,
+    target: &PlanSubmitTarget,
+) -> Result<InjectionTicket, (&'static str, String)> {
+    let Some(mut password) = start.credential.password.take() else {
+        return Err(("proxy_credential", "the launch carried no password for the session proxy".to_string()));
+    };
+    let secret = SessionSecret::new(std::mem::take(&mut *password)).map_err(|e| ("proxy_credential", e))?;
+    drop(password);
+    let placeholder = zeroize::Zeroizing::new(secret.placeholder().to_string());
+    let target = SubmitTarget::new(&target.origin.to_string(), &target.path, BodyType::from(target.body))
+        .map_err(|e| ("proxy_start", e))?;
+    let ticket = proxy.arm(ProxyInjection { secret, target }).map_err(|e| ("proxy_start", e))?;
+    start.credential.password = Some(placeholder);
+    Ok(ticket)
+}
+
+/// WebKitGTK: run [`web_proxy_webview::pre_register_leaves`] on the remote
+/// webview's own context (main thread, through `with_webview`), and wait for
+/// it, so it is done before the first load is sent.
+#[cfg(target_os = "linux")]
+async fn pre_register_proxy_leaves(remote: &tauri::Webview, proxy: &WebProxy) -> Result<(), String> {
+    let leaves = proxy.session_leaves().to_vec();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    remote
+        .with_webview(move |platform| {
+            let _ = tx.send(web_proxy_webview::pre_register_leaves(&platform.inner(), &leaves));
+        })
+        .map_err(|e| format!("the session webview is not reachable: {e}"))?;
+    match tokio::time::timeout(HANDLER_INSTALL_TIMEOUT, rx).await {
+        Ok(Ok(registered)) => registered.map(|_| ()),
+        Ok(Err(_)) => Err("the session window closed before the session leaves were registered".to_string()),
+        Err(_) => Err("registering the session leaves timed out".to_string()),
+    }
+}
+
+/// The audit lines of a session proxy (§11, T106 step 6) — origins, fixed
+/// check names and counts only, never the secret, the placeholder, a path,
+/// a body or a response — and the window's reaction to a refusal: the fill
+/// ends with it and the title says why.
+fn proxy_events(app: &AppHandle, label: &str, token: &str, resource: &str, shared: &Arc<WebShared>) -> ProxyEvents {
+    let app = app.clone();
+    let label = label.to_string();
+    let token = token.to_string();
+    let resource = resource.to_string();
+    let shared = Arc::clone(shared);
+    ProxyEvents::new(move |event| {
+        let origin = event.origin();
+        match event {
+            ProxyEvent::Terminated { upstream, .. } => log::info!(
+                target: "audit",
+                "connect.web.proxy_terminated: resource={resource} token={token} origin={origin} upstream={}",
+                upstream.label(),
+            ),
+            ProxyEvent::Substituted { .. } => log::info!(
+                target: "audit",
+                "connect.web.proxy_substituted: resource={resource} token={token} origin={origin}"
+            ),
+            ProxyEvent::Scrubbed { replaced, .. } => log::info!(
+                target: "audit",
+                "connect.web.proxy_scrubbed: resource={resource} token={token} origin={origin} replaced={replaced}"
+            ),
+            ProxyEvent::Refused { check, notice, .. } => {
+                log::warn!(
+                    target: "audit",
+                    "connect.web.proxy_refused: resource={resource} token={token} origin={origin} reason={check}"
+                );
+                set_title_later(&app, &label, shared.proxy_refused(check, notice));
+            }
+        }
+    })
+}
+
 /// Audit and build the operator-facing error for a web open refused by the
 /// web/RDP exclusion. No profile, credential or URL detail is logged.
 fn refuse_web_open(resource: &str, conflict: WebRdpConflict) -> CommandError {
@@ -930,9 +1184,21 @@ struct TauriPage {
     app: AppHandle,
     label: String,
     shared: Arc<WebShared>,
+    /// Proxy mode: the session proxy the bypass check asks.
+    proxy: Option<Arc<WebProxy>>,
 }
 
 impl RecipePage for TauriPage {
+    /// Proxy mode: a fill happens only on an https origin the session proxy
+    /// has terminated (`has_terminated`, recorded before the proxy answers
+    /// the webview's `CONNECT`). Anything else means the page reached the
+    /// server without the proxy.
+    fn proxy_bypassed(&self, origin: &WebOrigin) -> bool {
+        self.proxy
+            .as_ref()
+            .is_some_and(|proxy| !(origin.scheme() == "https" && proxy.has_terminated(origin.host(), origin.port())))
+    }
+
     fn snapshot(&self) -> PageSnapshot {
         self.shared.snapshot()
     }
@@ -1019,8 +1285,14 @@ fn spawn_recipe_engine(
     plan: RecipePlan,
     scope: EffectiveScope,
     start: LaunchStart,
+    proxy: Option<(Arc<WebProxy>, InjectionTicket)>,
 ) -> tauri::async_runtime::JoinHandle<()> {
-    let page = TauriPage { app: app.clone(), label: label.to_string(), shared: Arc::clone(shared) };
+    let page = TauriPage {
+        app: app.clone(),
+        label: label.to_string(),
+        shared: Arc::clone(shared),
+        proxy: proxy.as_ref().map(|(p, _)| Arc::clone(p)),
+    };
     let app = app.clone();
     let token = token.to_string();
     let resource = resource.to_string();
@@ -1043,7 +1315,18 @@ fn spawn_recipe_engine(
             audit,
         )
         .await;
-        // The credential went with the engine.
+        // The credential went with the engine; in proxy mode the proxy's
+        // copy goes now too (§3: dropped at success, failure or timeout),
+        // unless a re-run login has armed its own since.
+        if let Some((proxy, ticket)) = &proxy {
+            if proxy.release(*ticket) {
+                log::info!(
+                    target: "audit",
+                    "connect.web.proxy_released: resource={resource} token={token} launch_id_hash={}",
+                    launch.launch_id_hash(),
+                );
+            }
+        }
         drop(login_window);
         log::info!(
             target: "audit",
@@ -1082,7 +1365,7 @@ const RELOGIN_ENGINE_STOP: Duration = EVAL_TIMEOUT;
 /// LDAP account back in. The page is then sent to the start URL and the
 /// recipe runs on it. A failure before the swap changes nothing.
 pub(crate) async fn relogin_web_session(state: &State<'_, AppState>, app: &AppHandle, token: &str) -> CmdResult<()> {
-    let (resource, profile_id, label, shared, relogin) = {
+    let (resource, profile_id, label, shared, relogin, proxy) = {
         let sessions = state.connect_sessions.lock().await;
         let Some(SessionState::Web(w)) = sessions.get(token) else {
             return Err(CommandError::from("this web session has ended".to_string()));
@@ -1097,7 +1380,14 @@ pub(crate) async fn relogin_web_session(state: &State<'_, AppState>, app: &AppHa
         let Some(relogin) = w.relogin.clone() else {
             return Err(CommandError::from("this session's first sign-in has not started yet".to_string()));
         };
-        (w.resource_name.clone(), w.profile_id.clone(), w.window_label.clone(), Arc::clone(&w.shared), relogin)
+        (
+            w.resource_name.clone(),
+            w.profile_id.clone(),
+            w.window_label.clone(),
+            Arc::clone(&w.shared),
+            relogin,
+            w.proxy.clone(),
+        )
     };
     let Some(_running) = shared.begin_relogin() else {
         return Err(CommandError::from("a sign-in re-run is already in progress".to_string()));
@@ -1116,16 +1406,47 @@ pub(crate) async fn relogin_web_session(state: &State<'_, AppState>, app: &AppHa
         provider_account_id: None,
     };
     let login = ExpectedLogin::Form { recipe_hash: &relogin.form.recipe_hash, plan: &relogin.form.plan };
-    let start = match start_launch(state, &request, token, &relogin.origins, relogin.allow_insecure_http, login).await {
-        Ok(s) => s,
-        Err(e) => {
-            // `start_launch` audited the refusal and closed any launch it
-            // created; the session keeps its current launch.
-            log::info!(
-                target: "audit",
-                "connect.web.relogin: state=refused resource={resource} profile={profile_id} token={token}"
-            );
-            return Err(e);
+    let mut start =
+        match start_launch(state, &request, token, &relogin.origins, relogin.allow_insecure_http, login).await {
+            Ok(s) => s,
+            Err(e) => {
+                // `start_launch` audited the refusal and closed any launch it
+                // created; the session keeps its current launch.
+                log::info!(
+                    target: "audit",
+                    "connect.web.relogin: state=refused resource={resource} profile={profile_id} token={token}"
+                );
+                return Err(e);
+            }
+        };
+
+    // Proxy mode: the new launch's password goes to the session proxy, the
+    // new placeholder to the recipe. Armed before the previous sign-in is
+    // retired; its release names its own ticket, so it cannot take this one.
+    let proxy_arm = match (&proxy, &relogin.form.plan.submit_target) {
+        (None, None) => None,
+        (Some(proxy), Some(target)) => match arm_session_proxy(proxy, &mut start, target) {
+            Ok(ticket) => Some((Arc::clone(proxy), ticket)),
+            Err((check, reason)) => {
+                log::warn!(
+                    target: "audit",
+                    "connect.web.relogin: state=refused reason={check} resource={resource} profile={profile_id} \
+                     token={token} launch_id_hash={} — {reason}",
+                    start.launch.launch_id_hash(),
+                );
+                start.launch.finish(check).await;
+                return Err(CommandError::from(format!(
+                    "the session proxy could not take the new sign-in ({reason}); nothing was filled or sent"
+                )));
+            }
+        },
+        // A proxy recipe on a session without its proxy (or the reverse) is
+        // not this session's sign-in: never run it as the other mode.
+        _ => {
+            start.launch.finish("proxy_unavailable").await;
+            return Err(CommandError::from(
+                "this session's sign-in mode and its proxy disagree; disconnect and connect again".to_string(),
+            ));
         }
     };
 
@@ -1138,6 +1459,9 @@ pub(crate) async fn relogin_web_session(state: &State<'_, AppState>, app: &AppHa
         }
     };
     let Some((previous, previous_engine)) = swapped else {
+        if let Some((proxy, ticket)) = &proxy_arm {
+            proxy.release(*ticket);
+        }
         start.launch.finish("session_closed").await;
         return Err(CommandError::from(
             "the web session ended during the re-run; the new launch was closed and nothing was filled".to_string(),
@@ -1163,8 +1487,11 @@ pub(crate) async fn relogin_web_session(state: &State<'_, AppState>, app: &AppHa
         start.mfa_method.as_deref().unwrap_or("none"),
     );
 
-    // A fresh login page: the engine waits for the host to see it load.
+    // A fresh login page: the engine waits for the host to see it load. A
+    // refusal the session proxy reported for the previous sign-in is not
+    // this one's outcome.
     shared.expect_navigation();
+    shared.clear_proxy_refusal();
     match remote_webview(app, &label) {
         Some(remote) => {
             if let Err(e) = remote.navigate(start.scope.start_url.clone()) {
@@ -1176,7 +1503,8 @@ pub(crate) async fn relogin_web_session(state: &State<'_, AppState>, app: &AppHa
     }
     let plan = relogin.form.plan.clone();
     let scope = start.scope.clone();
-    let engine = spawn_recipe_engine(app, &label, token, &resource, &profile_id, &shared, plan, scope, start);
+    let engine =
+        spawn_recipe_engine(app, &label, token, &resource, &profile_id, &shared, plan, scope, start, proxy_arm);
     attach_engine(state, token, engine, None).await;
     Ok(())
 }
@@ -1338,6 +1666,27 @@ fn spawn_http_auth_reporter(
     });
 }
 
+// ── web_proxy_mode_support ─────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct WebProxyModeSupport {
+    /// Proxy mode (a recipe `submit_target`) can be opened here.
+    pub available: bool,
+    /// Why not, as fixed text; `None` when available.
+    pub reason: Option<&'static str>,
+}
+
+/// Whether this computer and build can open a proxy-mode session (macOS 14+
+/// in a `web_proxy_mode` build; unavailable on Windows and Linux until a run
+/// there confirms it). For the profile editor, which shows a proxy recipe as
+/// unavailable here instead of letting the connect fail; `session_open_web`
+/// makes the same check itself.
+#[tauri::command]
+pub fn web_proxy_mode_support() -> WebProxyModeSupport {
+    let support = web_proxy_webview::proxy_support();
+    WebProxyModeSupport { available: support.reason().is_none(), reason: support.reason() }
+}
+
 // ── web_recipe_test ────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -1439,6 +1788,7 @@ pub async fn web_recipe_test(
             relogin: None,
             engine: None,
             nav_bar: None,
+            proxy: None,
         },
     )
     .await?;
@@ -1497,6 +1847,8 @@ pub async fn web_recipe_test(
         initial_url,
         None,
         network,
+        // A dry run fills nothing, so it never needs the session proxy.
+        None,
     ) {
         Ok(w) => w,
         Err(e) => {
@@ -1525,7 +1877,7 @@ pub async fn web_recipe_test(
         cfg.tls_pins.len(),
     );
 
-    let page = TauriPage { app: app.clone(), label: window_label, shared };
+    let page = TauriPage { app: app.clone(), label: window_label, shared, proxy: None };
     let report = run_check(&plan, &scope, &page, EngineTiming::for_plan(&plan)).await;
     log::info!(
         target: "audit",
@@ -1799,6 +2151,9 @@ fn build_window(
     initial_url: Url,
     http_auth: Option<Arc<HttpAuthGate>>,
     network: SessionNetwork,
+    // Proxy mode: the session proxy the remote webview is pointed at
+    // (`web_proxy_webview`, the only place a session webview gets a proxy).
+    proxy: Option<&WebProxy>,
 ) -> CmdResult<SessionWindow> {
     let policy = RemotePolicy {
         app: app.clone(),
@@ -1835,6 +2190,7 @@ fn build_window(
         if cfg.clipboard.grants_page_clipboard_access() {
             builder = builder.enable_clipboard_access();
         }
+        builder = web_proxy_webview::route_window(builder, proxy).map_err(CommandError::from)?;
         let win = builder.build().map_err(|e| CommandError::from(format!("spawn web session window: {e}")))?;
         let remote = AsRef::<tauri::Webview>::as_ref(&win).clone();
         let nav_bar = attach_nav_bar(app, &remote, &policy.window, cfg, &network);
@@ -1864,6 +2220,7 @@ fn build_window(
         if cfg.clipboard.grants_page_clipboard_access() {
             remote = remote.enable_clipboard_access();
         }
+        remote = web_proxy_webview::route_webview(remote, proxy).map_err(CommandError::from)?;
         super::connect_web_chrome::build_chrome_window(app, label, token, &shared.title(), cfg, remote).map(
             |(window, remote)| {
                 let nav_bar = attach_nav_bar(app, &remote, &policy.window, cfg, &network);

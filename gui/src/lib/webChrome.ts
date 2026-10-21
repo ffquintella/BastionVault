@@ -22,7 +22,10 @@ export const WEB_CHROME_COMMANDS = {
 /** How often the toolbar asks the host for its state. */
 export const WEB_CHROME_POLL_MS = 1000;
 
-export type WebChromeLock = "none" | "secure" | "pinned" | "insecure";
+/** `proxied` / `proxied-pinned`: proxy mode (T106) — the session proxy verified
+ *  the server (with the system's trust, or a profile pin); the webview only
+ *  ever sees the proxy's own certificate. */
+export type WebChromeLock = "none" | "secure" | "pinned" | "insecure" | "proxied" | "proxied-pinned";
 export type WebChromeRelogin = "available" | "running" | "unavailable";
 export type WebChromeLoginMode = "open" | "form" | "http-auth" | "recipe_test";
 
@@ -41,7 +44,7 @@ export interface WebChromeState {
   relogin_reason: string | null;
 }
 
-const LOCKS: readonly WebChromeLock[] = ["none", "secure", "pinned", "insecure"];
+const LOCKS: readonly WebChromeLock[] = ["none", "secure", "pinned", "insecure", "proxied", "proxied-pinned"];
 const RELOGINS: readonly WebChromeRelogin[] = ["available", "running", "unavailable"];
 const MODES: readonly WebChromeLoginMode[] = ["open", "form", "http-auth", "recipe_test"];
 
@@ -113,6 +116,18 @@ export function lockLabel(lock: WebChromeLock): { text: string; title: string } 
       };
     case "insecure":
       return { text: "Not secure", title: "Plain HTTP, allowed by this profile" };
+    case "proxied":
+      return {
+        text: "Proxied",
+        title:
+          "HTTPS through the session proxy, which verified the server with the system's trust and keeps the password out of the page",
+      };
+    case "proxied-pinned":
+      return {
+        text: "Proxied (pinned)",
+        title:
+          "HTTPS through the session proxy; the system rejected the server's certificate and a pin on this profile accepted it",
+      };
     default:
       return { text: "—", title: "No page loaded yet" };
   }

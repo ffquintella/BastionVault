@@ -20,6 +20,7 @@ pub mod agent_ssh;
 pub mod agent_web;
 pub mod connect_clipboard;
 pub mod connect_mfa;
+pub mod connect_session;
 pub mod connect_provider;
 pub mod connect_web;
 pub mod kernel_service;
@@ -345,6 +346,7 @@ impl ResourceBackend {
         let h_web_result = self.inner.clone();
         let h_web_close = self.inner.clone();
         let h_clipboard_audit = self.inner.clone();
+        let h_session_open = self.inner.clone();
         let h_cfg_effective = self.inner.clone();
         let h_agent_ssh_exec = self.inner.clone();
         let h_agent_web_fetch = self.inner.clone();
@@ -803,6 +805,49 @@ impl ResourceBackend {
                     ],
                     help: "Record a batch of RDP clipboard transfers (direction, kind, outcome, byte \
                            counts) for the audit trail. Never content or file names."
+                },
+                {
+                    // Session open, recorded before the host dials the target
+                    // so a failed audit write stops the connection. Metadata
+                    // only: protocol, transport, host, port.
+                    pattern: r"v2/connect/session/open$",
+                    fields: {
+                        "resource": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Resource name the profile lives on."
+                        },
+                        "profile_id": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Connection-profile id."
+                        },
+                        "protocol": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "One of ssh, rdp, sftp, web; must match the profile."
+                        },
+                        "transport": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "One of direct, rustion."
+                        },
+                        "host": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Target host the session dials."
+                        },
+                        "port": {
+                            field_type: FieldType::Int,
+                            required: true,
+                            description: "Target port the session dials."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_session_open.handle_connect_session_open}
+                    ],
+                    help: "Record that a connection session is opening to a target, before the \
+                           host dials it. Metadata only."
                 },
                 {
                     // MCP brokered sessions, SSH (features/mcp-brokered-sessions.md

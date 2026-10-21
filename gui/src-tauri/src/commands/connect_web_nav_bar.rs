@@ -83,14 +83,13 @@ impl WebviewRoute {
     /// `exposure`; `None` for a session without a launch (`open` mode, a
     /// recipe test), which holds no credential a proxy could substitute.
     ///
-    /// Proxy mode is not wired in this tree: nothing gives a session webview
-    /// a `proxy_url` (`web_proxy.rs`: "Proxy mode has no caller yet"; asserted
-    /// by `no_session_webview_is_given_a_proxy_behind_the_bars_back`),
-    /// `WebSessionConfig` has no proxy setting, and `check_bundle` refuses
-    /// every exposure but `dom` and `handler`. The launch's exposure is the
-    /// session fact proxy mode changes (T106 step 5: `launch` releasing the
-    /// credential at exposure `proxy`), so the route is read from it, and an
-    /// exposure this build does not know is [`Self::Unknown`].
+    /// Proxy mode (T106) gives a session webview a `proxy_url` only through
+    /// `session/web_proxy_webview.rs`, and only for a form launch released
+    /// at exposure `proxy` (`check_bundle` requires `proxy` for a recipe with
+    /// a `submit_target` and refuses it for any other; asserted by
+    /// `no_session_webview_is_given_a_proxy_behind_the_bars_back`). So the
+    /// route is read from the launch's exposure, and an exposure this build
+    /// does not know is [`Self::Unknown`].
     pub(crate) fn from_launch_exposure(exposure: Option<&str>) -> Self {
         match exposure {
             None | Some("dom") | Some("handler") => Self::Direct,
@@ -546,14 +545,21 @@ mod tests {
     }
 
     /// The route is read from the launch's exposure and WebView2's browser
-    /// arguments because nothing else gives a session webview a proxy today.
-    /// The day something does (Tauri's `proxy_url`, a browser argument, a
-    /// host remap, wry's `additional_browser_args`, or another writer of the
-    /// WebView2 variable), this fails, so the route cannot be left saying
-    /// `Direct` for a proxied webview: the Windows bar's own request would
-    /// then go around the proxy. Scans `lib.rs` and every source file under
-    /// `commands/` and `session/` except the proxy-mode modules (whose
-    /// listener is the proxy) and this file.
+    /// arguments because nothing else gives a session webview a proxy. Proxy
+    /// mode (T106) does, and only through `session/web_proxy_webview.rs`,
+    /// for a session whose launch was released at exposure `proxy` — which
+    /// is exactly what `WebviewRoute::from_launch_exposure` reads as
+    /// `LoopbackProxy`. The day anything else does (Tauri's `proxy_url`
+    /// elsewhere, a browser argument, a host remap, wry's
+    /// `additional_browser_args`, or another writer of the WebView2
+    /// variable), this fails, so the route cannot be left saying `Direct`
+    /// for a proxied webview: the Windows bar's own request would then go
+    /// around the proxy. Scans `lib.rs` and every source file under
+    /// `commands/` and `session/` except this file; the proxy modules are
+    /// scanned too, with `proxy_url(` allowed only where the proxy defines
+    /// its URL (`web_proxy_listener.rs`) and where the webview is pointed at
+    /// it (`web_proxy_webview.rs`). No file may set `additional_browser_args`
+    /// (wry drops `--proxy-server` silently when it is set).
     #[test]
     fn no_session_webview_is_given_a_proxy_behind_the_bars_back() {
         let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -572,15 +578,19 @@ mod tests {
         ];
         let env_var = concat!("WEBVIEW2_", "ADDITIONAL_BROWSER_ARGUMENTS");
         let mut scanned = Vec::new();
+        let proxy_url_allowed = ["web_proxy_listener.rs", "web_proxy_webview.rs"];
         for path in &files {
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-            if name.starts_with("web_proxy") || name == "connect_web_nav_bar.rs" {
+            if name == "connect_web_nav_bar.rs" {
                 continue;
             }
             // Lossy, so a stray non-UTF-8 byte neither panics nor hides an
             // ASCII needle next to it.
             let source = String::from_utf8_lossy(&std::fs::read(path).unwrap()).into_owned();
             for needle in needles {
+                if needle == concat!("proxy", "_url(") && proxy_url_allowed.contains(&name) {
+                    continue;
+                }
                 assert!(
                     !source.contains(needle),
                     "{} gives a webview a proxy or a route ({needle}): make `WebviewRoute` report it to the nav bar \
@@ -598,7 +608,16 @@ mod tests {
             );
             scanned.push(name.to_string());
         }
-        for expected in ["lib.rs", "connect_web.rs", "connect_web_chrome.rs", "web.rs", "windows.rs", "linux.rs"] {
+        for expected in [
+            "lib.rs",
+            "connect_web.rs",
+            "connect_web_chrome.rs",
+            "web.rs",
+            "windows.rs",
+            "linux.rs",
+            "web_proxy_listener.rs",
+            "web_proxy_webview.rs",
+        ] {
             assert!(scanned.iter().any(|n| n == expected), "{expected} was not scanned");
         }
         assert!(scanned.len() > 50, "only {} files scanned", scanned.len());

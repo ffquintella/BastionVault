@@ -485,4 +485,31 @@ mod tests {
         let p = ExposurePolicy::from_tiers(Some(&cap("dom")), &Map::new()).unwrap();
         assert_eq!(p.check(WebExposure::Handler, false, true), Ok(WebExposure::Dom));
     }
+
+    /// Proxy mode (T106) needs `proxy`: a `proxy` or `dom` cap admits it, and
+    /// a `proxy` cap admits proxy mode while still refusing a plain DOM fill —
+    /// the setting for an application whose password must never be in a page.
+    #[test]
+    fn proxy_mode_needs_a_proxy_cap() {
+        let cap = |c: &str| json!({ "connect": { "web_exposure_max": c } });
+        for c in ["proxy", "dom"] {
+            let p = ExposurePolicy::from_tiers(Some(&cap(c)), &Map::new()).unwrap();
+            assert_eq!(p.check(WebExposure::Proxy, false, false).map(WebExposure::as_str), Ok(c), "{c}");
+        }
+        for c in ["none", "isolated", "handler"] {
+            let p = ExposurePolicy::from_tiers(Some(&cap(c)), &Map::new()).unwrap();
+            assert!(
+                matches!(
+                    p.check(WebExposure::Proxy, false, false),
+                    Err(ExposureRefusal::CapExceeded { required: WebExposure::Proxy, .. })
+                ),
+                "{c}"
+            );
+        }
+        let p = ExposurePolicy::from_tiers(Some(&cap("proxy")), &Map::new()).unwrap();
+        assert!(matches!(
+            p.check(WebExposure::Dom, false, false),
+            Err(ExposureRefusal::CapExceeded { required: WebExposure::Dom, cap: WebExposure::Proxy, .. })
+        ));
+    }
 }

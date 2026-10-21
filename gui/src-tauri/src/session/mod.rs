@@ -32,6 +32,7 @@ pub mod web_proxy;
 pub mod web_proxy_ca;
 pub mod web_proxy_listener;
 pub mod web_proxy_upstream;
+pub mod web_proxy_webview;
 pub mod web_recipe;
 pub mod web_script;
 pub mod web_tls_pin;

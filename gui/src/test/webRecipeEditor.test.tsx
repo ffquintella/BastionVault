@@ -224,6 +224,38 @@ describe("recipe editor — structured edits and validation messages", () => {
     return { user, get: () => latest! };
   }
 
+  /** Proxy mode (T106): the toggle writes a version-2 recipe with a submit
+   *  target and back, and the editor says when this computer cannot run it. */
+  it("toggles proxy mode and shows it as unavailable where the host cannot run it", async () => {
+    mockTypes(DOM_TYPES, (cmd) =>
+      cmd === "web_proxy_mode_support"
+        ? Promise.resolve({ available: false, reason: "proxy mode is not available on Linux yet" })
+        : undefined,
+    );
+    const user = userEvent.setup();
+    let latest: WebProfileSettings | undefined;
+    render(<Harness onWeb={(w) => (latest = w)} />);
+    await user.selectOptions(screen.getByLabelText("Start from"), "__blank");
+    await user.click(screen.getByRole("button", { name: /use this/i }));
+    expect(mockInvoke.mock.calls.map((c) => c[0])).not.toContain("web_proxy_mode_support");
+
+    await user.click(screen.getByLabelText("Proxy mode"));
+    expect(latest?.recipe).toMatchObject({
+      version: 2,
+      submit_target: { origin: "https://fw01.example.com", path: "/", body: "form" },
+    });
+    await user.clear(screen.getByLabelText("Sign-in path"));
+    await user.type(screen.getByLabelText("Sign-in path"), "/logincheck");
+    expect(latest?.recipe?.submit_target?.path).toBe("/logincheck");
+    expect(validateWebRecipe(latest?.recipe).ok).toBe(true);
+    expect(await screen.findByTestId("proxy-mode-unavailable")).toHaveTextContent(/not available on Linux/);
+    expect(screen.getByTestId("recipe-verdict")).toHaveTextContent(/passes/);
+
+    await user.click(screen.getByLabelText("Proxy mode"));
+    expect(latest?.recipe?.version).toBe(1);
+    expect(latest?.recipe && "submit_target" in latest.recipe).toBe(false);
+  });
+
   it("edits a selector and reports a server-worded error naming the field", async () => {
     const { user } = await withBlank();
     const sel = screen.getByLabelText("Step 1 action 1 selector");

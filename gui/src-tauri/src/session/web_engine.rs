@@ -91,6 +91,15 @@ pub trait RecipePage: Send + Sync {
     /// Drop any pending operator-reload mark. A mark left behind by a run
     /// that ended must not skip the first load of the next one.
     fn clear_operator_reload(&self);
+    /// Proxy mode's bypass check (features/web-application-connect.md §10,
+    /// T106 step 6): `true` when this session signs in through the session
+    /// proxy and the proxy has **not** terminated `origin` — the page reached
+    /// the server some other way, so the engine fills nothing there and
+    /// aborts with `proxy_bypassed`. Always `false` outside proxy mode.
+    fn proxy_bypassed(&self, origin: &WebOrigin) -> bool {
+        let _ = origin;
+        false
+    }
 }
 
 /// Clears the page's pending reload mark when a fill run starts and again
@@ -456,6 +465,21 @@ impl<P: RecipePage, L: LaunchOps> FillRun<'_, P, L> {
                         }
                         continue;
                     }
+                }
+                // Before every fill, not once per step: in proxy mode a
+                // value goes into the page only while the session proxy owns
+                // its origin. A bypass fails closed anyway (the server would
+                // only ever see the placeholder), but it must be seen.
+                if action.kind == ActionKind::Fill && self.page.proxy_bypassed(step_origin) {
+                    log::warn!(
+                        target: "audit",
+                        "connect.web.proxy_bypassed: resource={} token={} launch_id_hash={} origin={key} — the page \
+                         did not load through the session proxy; nothing was filled",
+                        self.audit.resource,
+                        self.audit.token,
+                        self.audit.launch_id_hash,
+                    );
+                    return Err(Outcome::Aborted("proxy_bypassed"));
                 }
                 if matches!(action.value, Some(FillValue::Totp)) {
                     if let Some(refresh_step) = self.totp_refresh_needed(step)? {
@@ -882,11 +906,14 @@ mod tests {
         seen: Mutex<Vec<Seen>>,
         titles: Mutex<Vec<String>>,
         responder: Mutex<Responder>,
+        /// Proxy mode with the page's origin not terminated by the proxy.
+        bypassed: std::sync::atomic::AtomicBool,
     }
 
     impl FakePage {
         fn new(url: &str, responder: Responder) -> Self {
             Self {
+                bypassed: std::sync::atomic::AtomicBool::new(false),
                 state: Mutex::new(PageState {
                     url: Url::parse(url).unwrap(),
                     loading: false,
@@ -959,6 +986,22 @@ mod tests {
         fn show(&self, text: &str) {
             self.titles.lock().unwrap().push(text.to_string());
         }
+        fn proxy_bypassed(&self, _origin: &WebOrigin) -> bool {
+            self.bypassed.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    /// Proxy mode's bypass check (T106 step 6): a page the session proxy has
+    /// not terminated gets no fill at all — not the username, not the
+    /// placeholder — and the run ends with the named check.
+    #[tokio::test]
+    async fn a_page_that_bypassed_the_session_proxy_is_never_filled() {
+        let page = FakePage::new("https://fw01.example.com/login", happy_responder());
+        page.bypassed.store(true, std::sync::atomic::Ordering::SeqCst);
+        let r = fill(&two_page(), &scope(&[FW]), &page, &launch_at(t0()), 2_000).await;
+        assert_eq!(r.outcome, Outcome::Aborted("proxy_bypassed"));
+        assert_eq!(r.fills, 0);
+        assert!(page.actions().iter().all(|s| s.kind != Some(ActionKind::Fill)), "{:?}", page.actions());
     }
 
     fn ok(origin: &str) -> Result<ScriptReply, EvalError> {

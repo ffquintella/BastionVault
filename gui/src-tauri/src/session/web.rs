@@ -32,6 +32,8 @@ use bastion_vault::modules::resource::connect_web::recipe::{recipe_hash, WebLogi
 use super::web_engine::PageSnapshot;
 use super::web_launch::WebLaunch;
 use super::web_load::{LoadFailure, PageFailure};
+use super::web_proxy_listener::WebProxy;
+use super::web_proxy_upstream::UpstreamTrust;
 use super::web_recipe::{session_title, RecipePlan};
 use super::web_tls_pin::{PinSet, TlsPinGate};
 
@@ -525,6 +527,12 @@ pub fn parse_web_profile(profile: &Value) -> Result<WebSessionConfig, String> {
     };
 
     let allow_insecure_http = opt_bool(web, "allow_insecure_http", false)?;
+    // §10, as the server enforces it: proxy mode is https only.
+    if allow_insecure_http && matches!(&login, WebLogin::Form(f) if f.plan.is_proxied()) {
+        return Err("allow_insecure_http is refused for proxy mode (a recipe with a submit_target): the session \
+                    proxy terminates https only"
+            .to_string());
+    }
     let allow_downloads = opt_bool(web, "allow_downloads", false)?;
     let allow_popups = opt_bool(web, "allow_popups_same_origin_set", true)?;
 
@@ -759,6 +767,13 @@ pub struct WebShared {
     /// gate's refusal hook holds this `WebShared`, and the platform handler
     /// owns the gate for the window's lifetime.
     pin_gate: std::sync::OnceLock<std::sync::Weak<TlsPinGate>>,
+    /// Proxy mode (T106): the session proxy, for the toolbar's `proxied`
+    /// lock state. Weak: the registry entry owns the proxy, and its event
+    /// hook holds this `WebShared`.
+    proxy: std::sync::OnceLock<std::sync::Weak<WebProxy>>,
+    /// The first refusal the session proxy reported during the current
+    /// sign-in (see [`Self::proxy_refused`]).
+    proxy_refusal: Mutex<Option<PageFailure>>,
     /// Set by the nav bar's Reload button so the fill engine skips the
     /// reload's own load (G5 in docs/specs/2026-10-20-web-session-nav-controls-design.md).
     /// Holds the lowest [`Self::load_gen`] that counts as that load, or `0`
@@ -784,6 +799,8 @@ impl WebShared {
             login_window: Mutex::new(LoginWindow::default()),
             relogin: std::sync::atomic::AtomicBool::new(false),
             pin_gate: std::sync::OnceLock::new(),
+            proxy: std::sync::OnceLock::new(),
+            proxy_refusal: Mutex::new(None),
             operator_reload: std::sync::atomic::AtomicU64::new(0),
         })
     }
@@ -826,6 +843,37 @@ impl WebShared {
     /// Whether this session accepted a certificate for `origin` on a pin.
     pub fn accepted_on_pin(&self, origin: &WebOrigin) -> bool {
         self.pin_gate.get().and_then(std::sync::Weak::upgrade).is_some_and(|g| g.accepted_on_pin(origin))
+    }
+
+    /// Record the session proxy (proxy mode; first call wins).
+    pub fn attach_proxy(&self, proxy: &Arc<WebProxy>) {
+        let _ = self.proxy.set(Arc::downgrade(proxy));
+    }
+
+    /// How the session proxy admitted `origin`'s server, when this is a
+    /// proxy-mode session whose proxy terminated it. Read-only, for the
+    /// toolbar's lock indicator; decides nothing.
+    pub fn proxy_trust(&self, origin: &WebOrigin) -> Option<UpstreamTrust> {
+        let proxy = self.proxy.get().and_then(std::sync::Weak::upgrade)?;
+        (origin.scheme() == "https").then(|| proxy.upstream_trust(origin.host(), origin.port())).flatten()
+    }
+
+    /// The session proxy refused the sign-in request, its response, or the
+    /// server's certificate (proxy mode): the fill ends with `check` rather
+    /// than waiting out its deadline, and the title says why. Unlike a load
+    /// failure this is not cleared by the next load — the error page the
+    /// proxy answers with *is* the next load — only by the next sign-in
+    /// ([`Self::clear_proxy_refusal`]). Returns the new title.
+    pub fn proxy_refused(&self, check: &'static str, notice: &'static str) -> String {
+        Self::lock(&self.proxy_refusal).get_or_insert(PageFailure { check, notice });
+        self.note_abort(check);
+        self.set_notice(notice.to_string())
+    }
+
+    /// A new sign-in starts (a re-run login): an earlier refusal is not its
+    /// outcome.
+    pub fn clear_proxy_refusal(&self) {
+        Self::lock(&self.proxy_refusal).take();
     }
 
     /// The host is about to send the page elsewhere (a re-run login): treat
@@ -877,11 +925,14 @@ impl WebShared {
     }
 
     pub fn snapshot(&self) -> PageSnapshot {
+        // The proxy's refusal is the cause of whatever load failure follows
+        // it, so it names the outcome.
+        let proxy_refusal = Self::lock(&self.proxy_refusal).map(|f| f.check);
         let p = Self::lock(&self.page);
         PageSnapshot {
             url: p.url.clone(),
             loading: p.loading,
-            failed: p.failed.map(|f| f.check),
+            failed: proxy_refusal.or(p.failed.map(|f| f.check)),
             held: p.prompts > 0,
             load_gen: p.load_gen,
         }
@@ -1003,6 +1054,10 @@ pub struct WebSessionState {
     /// The window's native nav bar (`super::web_nav_bar`), attached once the
     /// window is built. Teardown detaches it ([`finish_session`]).
     pub nav_bar: Option<Box<dyn super::web_nav_bar::NavBar>>,
+    /// Proxy mode (T106): the session's host-local proxy. Owned here, so
+    /// teardown stops it and drops any secret it still holds
+    /// ([`finish_session`]).
+    pub proxy: Option<Arc<WebProxy>>,
 }
 
 /// A `form` session's re-run context: the recipe as the session was opened
@@ -1031,6 +1086,11 @@ pub async fn finish_session(token: &str, mut session: WebSessionState, reason: W
     // ends now, with its placeholder and staging directory removed.
     if let Some(bar) = session.nav_bar.take() {
         bar.detach();
+    }
+    // The session proxy stops accepting and drops its secret now, before
+    // any network wait; connections already open end with it.
+    if let Some(proxy) = session.proxy.take() {
+        proxy.shutdown();
     }
     session.shared.mark_closed();
     let mut launch_hash = String::new();
@@ -1509,7 +1569,12 @@ mod tests {
     #[test]
     fn form_recipes_are_parsed_strictly_by_the_shared_parser() {
         for (bad, why) in [
-            (json!({ "version": 2, "steps": "auto", "success_when": { "url": "https://a.example/" } }), "version"),
+            (json!({ "version": 3, "steps": "auto", "success_when": { "url": "https://a.example/" } }), "version"),
+            (
+                json!({ "version": 1, "steps": "auto", "success_when": { "url": "https://a.example/" },
+                        "submit_target": { "origin": "https://fw01.example.com", "path": "/l", "body": "form" } }),
+                "submit_target needs version 2",
+            ),
             (
                 json!({ "version": 1, "steps": [ { "when_url": "https://fw01.example.com/", "actions": [
                 { "eval": "alert(1)" } ] } ], "success_when": { "url": "https://a.example/" } }),
@@ -1528,6 +1593,27 @@ mod tests {
         ] {
             assert!(parse_web_profile(&form_profile(json!({ "kind": "secret" }), Some(bad))).is_err(), "{why}");
         }
+    }
+
+    /// Proxy mode (T106): a version-2 recipe with a `submit_target` parses
+    /// into a proxied plan, and the host refuses `allow_insecure_http` for it
+    /// as the server does — never a DOM fill over plain http instead.
+    #[test]
+    fn a_proxy_recipe_parses_and_refuses_plain_http() {
+        let recipe = json!({ "version": 2,
+            "steps": [ { "when_url": "https://fw01.example.com/*", "actions": [
+                { "fill": "#p", "value": "password" }, { "submit": "form" } ] } ],
+            "success_when": { "url": "https://fw01.example.com/ng/*" },
+            "submit_target": { "origin": "https://fw01.example.com", "path": "/logincheck", "body": "form" } });
+        let profile = form_profile(json!({ "kind": "secret" }), Some(recipe));
+        let cfg = parse_web_profile(&profile).unwrap();
+        let WebLogin::Form(form) = &cfg.login else { panic!("not a form login") };
+        assert!(form.plan.is_proxied());
+
+        let mut insecure = profile.clone();
+        insecure["web"]["allow_insecure_http"] = json!(true);
+        let err = parse_web_profile(&insecure).unwrap_err();
+        assert!(err.contains("proxy mode"), "{err}");
     }
 
     // ── http-auth mode ──────────────────────────────────────────────

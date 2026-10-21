@@ -29,6 +29,7 @@ mod pki_issuer_renew;
 mod pki_key_ref_policy;
 mod pki_managed_role_key;
 mod pki_tidy_key_refs;
+mod connect_session_open;
 mod rdp_clipboard;
 mod resource;
 mod resource_connect_web;

@@ -140,7 +140,13 @@ the app is built; **it has not been run in a live session** (see *Phase 5
 caveats*). Phase 6 was a spike, now done: proxy mode is a go on macOS 14+
 (run) and a conditional go on Windows and Linux (read from the sources, not
 run); see *Phase 6 spike findings*. Building proxy mode is tracked as T106,
-Phase 7 (`sso`) as T107, blocked by T52, and Phase 8 is future (T97). Every web
+in progress: the recipe's `submit_target` (version 2) and `launch` at
+exposure `proxy` are done server-side, and the host wiring is done but opens
+proxy mode **only on macOS 14+ in the opt-in `web_proxy_mode` build — not
+yet run in a live session window**; Linux's WebKitGTK path has been run
+under Xvfb in a container, not through a Tauri window, and Linux and Windows
+stay unavailable (see *Phase 6*). Phase 7 (`sso`) is T107, blocked by T52,
+and Phase 8 is future (T97). Every web
 session window also carries a native back / forward / reload / download bar at
 the bottom, in both builds (T459, in progress: compiled on all three platforms,
 **not yet run live**; see *Session navigation bar*).**
@@ -300,7 +306,8 @@ changes no lockfile entry.
    intact and it says nothing about the password's length); the substitution
    rule and per-type encoding; the scrub; origin matching. The prototype's
    cases become its unit tests.
-2. The listener, `commands/connect_web_proxy.rs`: loopback, ephemeral port,
+2. The listener (as built: `session/web_proxy_listener.rs`, Tauri-free, with
+   the certificates in `session/web_proxy_ca.rs`): loopback, ephemeral port,
    one per session, `CONNECT` only; terminate the session's https origins;
    **blind-tunnel** any other `CONNECT`, so sub-resources from other hosts
    load as they do today and the webview validates them itself (rejected:
@@ -1916,7 +1923,14 @@ Once S19 ships the SAML IdP and OIDC OP:
   the profile's `tls_pin_sha256` as the Phase 4 override through the same
   `decide`), so the Phase 5 lock state comes from the proxy's verdict.
 - Header injection (`Authorization`, StrongDM-style) is the same mechanism
-  without a placeholder.
+  without a placeholder. (Not built: which header, its value's format, the
+  requests it is added to and where a profile configures it are not decided
+  yet.)
+- As built (T106): the submit target is the recipe's `submit_target`
+  (recipe version 2; *Phase 6* has the rules), and its presence is what
+  makes a `form` launch proxy mode. The host refuses proxy mode where it has
+  not been run (today: anything but macOS 14+ in a `web_proxy_mode` build)
+  before anything is launched.
 - `allow_insecure_http` is refused for proxy mode (§6: a secret sent in clear
   is not `proxy` exposure).
 
@@ -2452,19 +2466,90 @@ See *Current State → Phase 6 spike findings*.
   CA without the OS store (macOS: go, run on macOS 27; Windows and Linux:
   conditional go, read from the pinned sources), and the dependency question
   (everything needed is already in the graph; no OpenSSL).
-- **Not done (T106, steps 4–7):** the per-platform webview wiring
-  (`proxy_url`, `tauri/macos-proxy` and its manifest justification, the macOS
-  14 gate, the Phase 4 shims given the session's CA and leaf pins, Linux
-  pre-registration of each leaf, no Windows `additional_browser_args`); the
-  submit target in the versioned recipe format with server-side validation,
-  `launch` releasing the credential at exposure `proxy`, and
-  `allow_insecure_http` refused for proxy mode; header injection; the bypass
-  check, the `proxied` lock state and the audit lines for termination,
-  substitution, refusal and scrubbing; a Windows and a Linux run before
-  either is enabled; a macOS 13 launch check of a `macos-proxy` build; and
-  `make test-release` before merging. Nothing constructs a `WebProxy` yet, so
-  the four modules carry a documented `#![allow(dead_code)]` that step 4
-  removes. Ships per platform; visibly unavailable elsewhere.
+- **Done (T106 step 5 — the submit target, server side):** recipe **version
+  2** = version 1 plus an optional `submit_target` (`origin`: a bare https
+  origin of the profile's set; `path`: the exact request path, printable
+  ASCII, no query, fragment, `*` or `\`; `body`: `form` | `json`), parsed by
+  the shared strict parser (`connect_web/recipe.rs`). Version-1 recipes are
+  read exactly as before and keep their `recipe_hash` (pinned by a test); a
+  `submit_target` on a version-1 recipe is refused at `submit_target`, not
+  ignored; a server that predates version 2 refuses the whole recipe, so a
+  proxy recipe never runs as a DOM fill. A proxy recipe must fill
+  `password`. `launch` releases it at exposure **`proxy`** (a `proxy` or
+  `dom` cap admits it; a `proxy` cap still refuses a plain form fill), and
+  `allow_insecure_http: true` on it is refused (`invalid_profile`), not
+  downgraded to `dom`. The editor writes version 2 only while proxy mode is
+  on, so a recipe that does not use it stays readable by older servers.
+  `docs/api.md` documents the shape.
+- **Done (T106 step 4 — the webview, macOS):** `session/web_proxy_webview.rs`
+  is the one place a session webview is given a proxy (`proxy_url` to the
+  loopback listener; the nav bar's scan test allows `proxy_url(` there and
+  in the listener only, and no file may set `additional_browser_args`). The
+  window's Phase 4 gate gets exactly the session CA's and leaf key's pins
+  and never asks the operator; the profile's `tls_pin_sha256` goes to the
+  proxy's upstream leg. `tauri/macos-proxy` is behind the GUI's new
+  **`web_proxy_mode`** feature, **off by default** (manifest comment: wry
+  links the macOS 14 `nw_proxy_config` API without a weak import or version
+  check, and no build with it has been launched on macOS 13; without the
+  feature wry drops `proxy_url` on macOS silently, so the host refuses then
+  too). Proxy mode opens only on macOS 14+ in such a build
+  (`proxy_support`); anywhere else `session_open_web` refuses it before the
+  MFA ticket, the launch or any credential (`connect.web.refused:
+  reason=proxy_unavailable`), and the editor shows it as unavailable
+  (`web_proxy_mode_support`). The four proxy modules' `#![allow(dead_code)]`
+  are gone.
+- **Done (T106 step 4 — Linux, wired but not enabled):** each session leaf
+  is allowed for its host on the window's own `WebContext` before the first
+  load (`pre_register_leaves`, called from `session_open_web` through
+  `with_webview`). Linux stays unavailable in `proxy_support` until a run of
+  the real session window there. **Run in a container** (Ubuntu 24.04
+  arm64, WebKitGTK 2.52.6, Xvfb; `webkitgtk_tests`, ignored by default): a
+  WebKitGTK view built as wry builds an incognito one, with custom
+  `NetworkProxySettings` pointing at the session proxy, (a) without
+  pre-registration raises `load-failed-with-tls-errors` for the session leaf
+  and nothing reaches the application; (b) with the main origin's leaf only,
+  an image from a second session origin is refused **with no TLS-error
+  signal** — spike finding 5, now observed — and the page never signs in;
+  (c) with every leaf, both origins load through the proxy, the posted
+  placeholder reaches the application as the real secret, and the page's
+  copy of the response holds only the placeholder. Three runs, all passing.
+  The rest of the GUI crate's tests and `cargo check --all-targets` (the CI
+  `gui-host` job) pass there too.
+- **Done (T106 step 6 — bypass check, lock state, audit):** the recipe
+  engine fills only on an https origin the proxy has terminated
+  (`RecipePage::proxy_bypassed`, recorded before the proxy answers the
+  `CONNECT`), checked before every fill; otherwise it aborts with
+  `aborted:proxy_bypassed` and nothing is filled. A refusal by the proxy (a
+  repeated placeholder, the wrong body type, a compressed or oversized
+  sign-in response, an upstream certificate nothing admits) ends the fill at
+  once with its check name instead of waiting out the deadline. The toolbar
+  shows **Proxied** / **Proxied (pinned)** from the proxy's verdict on the
+  server, never the webview's on the proxy's own certificate. Host audit
+  lines, origins and fixed names only: `connect.web.proxy_started`
+  (submit origin, upstream pin count), `connect.web.proxy_terminated`
+  (once per origin, with `upstream=platform|pinned-leaf|pinned-issuer`),
+  `connect.web.proxy_substituted`, `connect.web.proxy_scrubbed`
+  (`replaced=<count>`), `connect.web.proxy_refused` (`reason=<check>`),
+  `connect.web.proxy_released` and `connect.web.proxy_bypassed`;
+  `session.open` gains `exposure=` and `proxy=<submit origin>|none`.
+- **As built, beyond the list:** the password moves into the proxy (the
+  launch's copy is taken, not cloned) and the proxy drops it when the
+  sign-in ends — success, failure or timeout — or at teardown; a re-run
+  login arms a new secret under its own ticket, so the retiring sign-in's
+  release cannot take it away. Every copy of the secret the proxy encodes
+  (form, JSON, HTML, percent) is built in a zeroizing buffer. The submit
+  request must also match the recipe's body type.
+- **Not done (T106):** a run of the real session window on any platform
+  (the macOS path is unit-tested and type-checked with `web_proxy_mode`, not
+  run in a live window; Linux was run at the WebKitGTK level only, not
+  through a Tauri window); Windows entirely (not built or run here: WebView2
+  needs a Windows host); a macOS 13 launch check of a `web_proxy_mode` build
+  before the feature can be on by default; **header injection** (§10's one
+  line leaves the header, its value, its scope and where it is configured
+  open — a decision for the spec, not made here); a server-side integration
+  test of a proxy launch through the facade (`src/engine_tests/`); and
+  `make test-release` before merging. Ships per platform; visibly
+  unavailable elsewhere.
 
 ### Phase 7 — `sso` mode — **Todo, blocked by T52 (S19); tracked as T107**
 
@@ -2559,7 +2644,12 @@ as T97 in the roadmap backlog.
    the real server with the platform verifier and the profile's pins. The
    browser engine's Certificate Transparency, CRLSet and HSTS-preload
    behaviour no longer covers session origins. The proxy is new code on the
-   credential path and needs L4 and a security review before it merges.
+   credential path and needs L4 and a security review before it merges. As
+   built, the proxy holds the password only between the launch and the end
+   of the sign-in (released by ticket, zeroized), and the webview's gate pins
+   only the session's own two keys for the session origins, so a bypass of
+   the proxy fails closed (the platform's own verdict on the real server
+   stands, and the engine fills nothing — `proxy_bypassed`).
 
 ## Testing Plan
 
@@ -2590,7 +2680,21 @@ as T97 in the roadmap backlog.
   tunnelled, a non-`CONNECT` refused, an SNI other than the `CONNECT`
   authority refused, a repeated placeholder refused before the upstream sees
   it, an unverifiable upstream failing the `CONNECT`, and a `101` upgrade
-  relayed.
+  relayed. Steps 4–6 add: the zeroizing encoders checked against
+  `urlencoding` / `serde_json`, a body of the other type refused, the
+  upstream verdict recorded per host and leaf key, termination /
+  substitution / scrub / refusal events carrying no secret or placeholder, a
+  released secret never substituted, a retiring sign-in's release never
+  dropping its successor's secret, the platform gate for every platform,
+  the bundle refusing a proxy recipe at `dom` and a plain recipe at `proxy`,
+  the engine filling nothing on a page that bypassed the proxy, the
+  `proxied` / `proxied-pinned` lock states, the per-host session leaves, and
+  (Linux, `--ignored`, under Xvfb) the WebKitGTK run described in *Phase 6*.
+- `bv-engine-resource`, proxy mode: recipe version 2 and every malformed
+  `submit_target`, the version-1 hash pinned, `submit_target` refused on
+  version 1, the password-fill rule, the origin check, `launch` at exposure
+  `proxy`, `allow_insecure_http` refused, and the `proxy` cap admitting proxy
+  mode while refusing a DOM fill.
 
 ### Frontend (vitest)
 

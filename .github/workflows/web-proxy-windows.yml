@@ -1,0 +1,64 @@
+name: Web proxy (Windows)
+
+# T106 step 7: the substituting proxy's tests on Windows, where the upstream
+# leg verifies certificates through the platform verifier (Schannel) and the
+# Linux and macOS runs say nothing about it. Scoped to the proxy modules and
+# their manifest so unrelated GUI changes do not spend a Windows build.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "gui/src-tauri/src/session/web_proxy*.rs"
+      - "gui/src-tauri/src/session/mod.rs"
+      - "gui/src-tauri/Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/web-proxy-windows.yml"
+  pull_request:
+    paths:
+      - "gui/src-tauri/src/session/web_proxy*.rs"
+      - "gui/src-tauri/src/session/mod.rs"
+      - "gui/src-tauri/Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/web-proxy-windows.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: web-proxy-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  proxy-tests:
+    name: Proxy tests (windows-latest, x64)
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      # Same Perl the release job and the Makefile use for the vendored
+      # openssl build pulled in by the GUI graph.
+      OPENSSL_SRC_PERL: C:/Strawberry/perl/bin/perl.exe
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: web-proxy-windows-x64
+          cache-on-failure: true
+
+      - name: Run the proxy unit tests
+        run: cargo test -p bastion-vault-gui --lib web_proxy
+
+      - name: Clippy the GUI host lib
+        run: cargo clippy -p bastion-vault-gui --lib

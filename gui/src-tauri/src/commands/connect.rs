@@ -384,6 +384,9 @@ pub async fn session_open_ssh(
     // (provider launch) and a bastion route have exactly one host.
     let username = username_for_dial;
     let credential = credential_for_dial;
+    let ssh_target = host_candidates.first().cloned().unwrap_or_default();
+    record_session_open(&state, &request.resource_name, &request.profile_id, "ssh", route_transport(&route), &ssh_target, port)
+        .await?;
     let (chosen_host, outcome): (String, SshOpenOutcome) =
         connect_provider::dial_in_order("ssh", &host_candidates, port, |host| {
             let app = app.clone();
@@ -972,6 +975,9 @@ pub async fn session_open_rdp(
     // Walk the host candidates in order — IP first when present,
     // hostname as fallback. Only network-layer failures fall through
     // to the next candidate; a pinned plan has exactly one.
+    let rdp_target = host_candidates.first().cloned().unwrap_or_default();
+    record_session_open(&state, &request.resource_name, &request.profile_id, "rdp", route_transport(&route), &rdp_target, port)
+        .await?;
     let (host, outcome): (String, session::rdp::RdpOpenOutcome) =
         connect_provider::dial_in_order("rdp", &host_candidates, port, |host| {
             let app = app.clone();
@@ -2924,6 +2930,35 @@ pub(super) fn is_connect_layer_error(err: &str) -> bool {
         || e.contains("dns lookup")
         || e.contains("tls upgrade")
         || e.contains("connect_begin")
+}
+
+pub(super) fn route_transport(route: &ConnectRoute) -> &'static str {
+    match route {
+        ConnectRoute::Direct => "direct",
+        ConnectRoute::Rustion { .. } => "rustion",
+    }
+}
+
+/// Records a session open with the vault before the host dials the target.
+/// Failing here fails the connect, so no session is dialled without a row.
+pub(super) async fn record_session_open(
+    state: &State<'_, AppState>,
+    resource: &str,
+    profile_id: &str,
+    protocol: &str,
+    transport: &str,
+    host: &str,
+    port: u16,
+) -> CmdResult<()> {
+    let mut body = Map::new();
+    body.insert("resource".into(), Value::from(resource));
+    body.insert("profile_id".into(), Value::from(profile_id));
+    body.insert("protocol".into(), Value::from(protocol));
+    body.insert("transport".into(), Value::from(transport));
+    body.insert("host".into(), Value::from(host));
+    body.insert("port".into(), Value::from(port));
+    make_request(state, Operation::Write, format!("{RESOURCE_MOUNT}v2/connect/session/open"), Some(body)).await?;
+    Ok(())
 }
 
 pub(super) fn profile_port(profile: &Value) -> u16 {

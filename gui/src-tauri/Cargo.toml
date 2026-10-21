@@ -1,6 +1,6 @@
 [package]
 name = "bastion-vault-gui"
-version = "0.44.53"
+version = "0.45.0"
 edition = "2021"
 description = "BastionVault Desktop GUI"
 # Shipped as a signed installer (see roadmaps/packaging-and-distribution.md),
@@ -461,6 +461,27 @@ rdp_egfx = ["dep:ironrdp-egfx"]
 # mitigated per window and checked on all three platforms. Without the
 # feature a web session is the single remote webview of Phases 1–4.
 web_session_chrome = ["tauri/unstable"]
+# Web Application Connect proxy mode (T106, features/web-application-connect.md
+# §10): a `form` login whose recipe names a `submit_target` is filled with a
+# per-launch placeholder, and a host-local proxy puts the password into the
+# sign-in request only. The webview is pointed at that proxy with Tauri's
+# `proxy_url`, which on macOS needs `tauri/macos-proxy` (wry `mac-proxy`):
+# without it wry ignores `proxy_url` there *silently*, so the host refuses proxy
+# mode in a build without this feature rather than open a window that talks to
+# the server directly (`session/web_proxy_webview.rs`).
+#
+# OFF by default, deliberately, until one check is done: wry 0.55.1's
+# `mac-proxy` block calls `nw_proxy_config_create_http_connect` and sets
+# `proxyConfigurations` (both macOS 14 APIs) and links Network.framework with
+# no weak-import or run-time version check. The host never reaches that code
+# below macOS 14 (it refuses proxy mode there first), but whether a build with
+# the feature still *launches* on macOS 10.15–13 — the bundle's minimum is
+# 10.15 — has not been checked on such a host. Unlike `tauri/unstable`, the
+# feature changes nothing for a webview that is not given a proxy (read from
+# the pinned sources), and it adds no crate and no lockfile entry. On Windows
+# and Linux it compiles to nothing, and proxy mode stays unavailable there
+# until a run on each confirms it.
+web_proxy_mode = ["tauri/macos-proxy"]
 
 [dev-dependencies]
 # `test-util` is for `#[tokio::test(start_paused = true)]` in the fill
