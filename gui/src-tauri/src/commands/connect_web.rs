@@ -132,15 +132,17 @@ use crate::session::web_http_auth::{
 };
 use crate::session::web_launch::{self, LaunchChannel, LaunchRequest, WebLaunch};
 use crate::session::web_nav_bar::NavBar;
-use crate::session::web_proxy::{BodyType, SessionSecret, SubmitTarget, TerminationScope};
+use crate::session::web_proxy::{
+    BodyType, HeaderInjection, HeaderInjector, SessionSecret, SubmitTarget, TerminationScope,
+};
 use crate::session::web_proxy_listener::{
     InjectionTicket, ProxyConfig, ProxyEvent, ProxyEvents, ProxyInjection, WebProxy,
 };
 use crate::session::web_proxy_webview::{self, ProxySupport};
 use crate::session::web_recipe::{
     check_bundle, outcome_event, reconcile_fill_scope, BundleExpectation, EffectiveScope, ExpectedLogin,
-    LaunchCredential, Outcome, PlanSteps, PlanSubmitTarget, RecipePlan, UrlGlob, WebSessionOutcomeEvent,
-    WEB_SESSION_OUTCOME_EVENT,
+    LaunchCredential, Outcome, PlanHeaderInjection, PlanSteps, PlanSubmitTarget, RecipePlan, UrlGlob,
+    WebSessionOutcomeEvent, WEB_SESSION_OUTCOME_EVENT,
 };
 use crate::session::web_script::{parse_reply, render, ReplyError, ScriptCall, ScriptReply, MAX_REPLY_BYTES};
 use crate::session::web_tls_pin::{PinAudit, PinRefusal, PinSet, TlsPinGate};
@@ -369,6 +371,7 @@ pub async fn session_open_web(
                 &cfg.tls_pins,
                 start,
                 &target,
+                &plan.inject_headers,
             )
             .await;
             match started {
@@ -926,6 +929,7 @@ async fn start_session_proxy(
     profile_pins: &PinSet,
     start: &mut LaunchStart,
     target: &PlanSubmitTarget,
+    headers: &[PlanHeaderInjection],
 ) -> Result<(Arc<WebProxy>, InjectionTicket), (&'static str, String)> {
     let scope =
         TerminationScope::new(start.scope.origin_keys.iter().map(String::as_str)).map_err(|e| ("proxy_start", e))?;
@@ -937,17 +941,49 @@ async fn start_session_proxy(
     .await
     .map_err(|e| ("proxy_start", e))?;
     let proxy = Arc::new(proxy);
+    // On any error below the proxy is dropped here, which shuts it down and
+    // zeroizes what it was armed with.
     let ticket = arm_session_proxy(&proxy, start, target)?;
+    arm_session_headers(&proxy, start, headers)?;
     shared.attach_proxy(&proxy);
     log::info!(
         target: "audit",
         "connect.web.proxy_started: resource={resource} token={token} launch_id_hash={} submit_origin={} \
-         upstream_pins={}",
+         upstream_pins={} inject_headers={}",
         start.launch.launch_id_hash(),
         target.origin,
         profile_pins.len(),
+        headers.len(),
     );
     Ok((proxy, ticket))
+}
+
+/// Move the launch's header secret into the session proxy with the recipe's
+/// `inject_headers` (T106 step 7). The secret is moved, not copied, and never
+/// reaches the recipe engine or the page. Every entry must name an origin the
+/// proxy terminates — the launch's effective scope, which the server may
+/// have narrowed — or the launch is refused here, never run without it. A
+/// recipe that injects nothing must not have been given a secret
+/// (`check_bundle`), and arms nothing.
+fn arm_session_headers(
+    proxy: &WebProxy,
+    start: &mut LaunchStart,
+    headers: &[PlanHeaderInjection],
+) -> Result<(), (&'static str, String)> {
+    if headers.is_empty() {
+        return Ok(());
+    }
+    let Some(mut secret) = start.credential.header_secret.take() else {
+        return Err(("proxy_credential", "the launch carried no header secret for the session proxy".to_string()));
+    };
+    let entries = headers
+        .iter()
+        .map(|h| HeaderInjection::new(&h.name, h.format, &h.origin.to_string(), &h.path_prefix))
+        .collect::<Result<Vec<_>, String>>()
+        .map_err(|e| ("proxy_start", e))?;
+    let injector = HeaderInjector::new(std::mem::take(&mut *secret), entries).map_err(|e| ("proxy_credential", e))?;
+    drop(secret);
+    proxy.arm_headers(injector).map_err(|e| ("proxy_start", e))
 }
 
 /// Move the launch's password into the session proxy for this sign-in and
@@ -1024,6 +1060,20 @@ fn proxy_events(app: &AppHandle, label: &str, token: &str, resource: &str, share
                 );
                 set_title_later(&app, &label, shared.proxy_refused(check, notice));
             }
+            // Header injection (T106 step 7): origins and fixed names only —
+            // never the header's value, its name's value or a path.
+            ProxyEvent::HeaderInjected { .. } => log::info!(
+                target: "audit",
+                "connect.web.proxy_header_injected: resource={resource} token={token} origin={origin}"
+            ),
+            ProxyEvent::HeaderReplaced { .. } => log::info!(
+                target: "audit",
+                "connect.web.proxy_header_replaced: resource={resource} token={token} origin={origin}"
+            ),
+            ProxyEvent::HeaderRefused { check, .. } => log::warn!(
+                target: "audit",
+                "connect.web.proxy_header_refused: resource={resource} token={token} origin={origin} reason={check}"
+            ),
         }
     })
 }
@@ -1425,7 +1475,19 @@ pub(crate) async fn relogin_web_session(state: &State<'_, AppState>, app: &AppHa
     // retired; its release names its own ticket, so it cannot take this one.
     let proxy_arm = match (&proxy, &relogin.form.plan.submit_target) {
         (None, None) => None,
-        (Some(proxy), Some(target)) => match arm_session_proxy(proxy, &mut start, target) {
+        // The new launch's header secret replaces the session's only once
+        // the new password is armed. If it cannot be armed, the new password
+        // is released at once (its own ticket) and the session keeps its
+        // previous header secret; nothing of the new launch is left armed.
+        (Some(proxy), Some(target)) => match arm_session_proxy(proxy, &mut start, target).and_then(|ticket| {
+            match arm_session_headers(proxy, &mut start, &relogin.form.plan.inject_headers) {
+                Ok(()) => Ok(ticket),
+                Err(e) => {
+                    proxy.release(ticket);
+                    Err(e)
+                }
+            }
+        }) {
             Ok(ticket) => Some((Arc::clone(proxy), ticket)),
             Err((check, reason)) => {
                 log::warn!(

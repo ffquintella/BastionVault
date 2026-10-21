@@ -22,7 +22,7 @@ use tauri::Url;
 use zeroize::{Zeroize, Zeroizing};
 
 use bastion_vault::modules::resource::connect_web::recipe::{
-    FillValue, PauseReason, RecipeAction, RecipeCondition, RecipeSteps, SubmitBody, WebLoginRecipe,
+    FillValue, HeaderFormat, PauseReason, RecipeAction, RecipeCondition, RecipeSteps, SubmitBody, WebLoginRecipe,
 };
 
 use super::web::{OriginSet, WebOrigin};
@@ -189,6 +189,19 @@ pub struct PlanSubmitTarget {
     pub body: SubmitBody,
 }
 
+/// One header the session proxy injects (recipe version 3, `inject_headers`;
+/// §10, T106 step 7). Its value is the launch's header secret, which goes to
+/// the proxy and never to the page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanHeaderInjection {
+    /// Lower-cased, as the shared parser stores it.
+    pub name: String,
+    pub format: HeaderFormat,
+    /// Always https (the shared parser refuses anything else).
+    pub origin: WebOrigin,
+    pub path_prefix: String,
+}
+
 /// A recipe ready to run. Built only from a recipe the shared strict parser
 /// accepted, so every rule the server checked holds here too.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -204,6 +217,9 @@ pub struct RecipePlan {
     pub needs_totp: bool,
     /// `Some` for a proxy-mode recipe.
     pub submit_target: Option<PlanSubmitTarget>,
+    /// Proxy-mode header injection; empty when the recipe injects none (and
+    /// never non-empty without a `submit_target`).
+    pub inject_headers: Vec<PlanHeaderInjection>,
 }
 
 impl RecipePlan {
@@ -251,6 +267,23 @@ impl RecipePlan {
                 Some(PlanSubmitTarget { origin, path: t.path.clone(), body: t.body })
             }
         };
+        let inject_headers = recipe
+            .inject_headers
+            .iter()
+            .enumerate()
+            .map(|(i, h)| {
+                let url = Url::parse(&format!("{}/", h.origin))
+                    .map_err(|e| format!("recipe inject_headers[{i}].origin is not a valid origin: {e}"))?;
+                let origin =
+                    WebOrigin::validated(&url, false).map_err(|e| format!("recipe inject_headers[{i}].origin: {e}"))?;
+                Ok(PlanHeaderInjection {
+                    name: h.name.clone(),
+                    format: h.format,
+                    origin,
+                    path_prefix: h.path_prefix.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         Ok(Self {
             steps,
             success: PlanCondition::compile(&recipe.success_when)?,
@@ -261,7 +294,14 @@ impl RecipePlan {
             needs_password: !needs.heuristic && needs.password,
             needs_totp: !needs.heuristic && needs.totp,
             submit_target,
+            inject_headers,
         })
+    }
+
+    /// Proxy-mode header injection: the launch releases a header secret,
+    /// which goes to the session proxy only.
+    pub fn injects_headers(&self) -> bool {
+        !self.inject_headers.is_empty()
     }
 
     pub fn is_heuristic(&self) -> bool {
@@ -411,6 +451,10 @@ pub const HOST_ABORT_CHECKS: &[&str] = &[
     "proxy_response_encoded",
     "proxy_response_too_large",
     "proxy_response_read",
+    // Proxy-mode header injection (T106 step 7, `web_proxy::HeaderRefusal`).
+    "proxy_header_upgrade",
+    "proxy_header_host",
+    "proxy_header_value",
 ];
 
 /// The outcome once failure / success conditions have been probed. Failure is
@@ -484,6 +528,9 @@ pub struct LaunchCredential {
     pub username: Option<Zeroizing<String>>,
     pub password: Option<Zeroizing<String>>,
     pub totp: Option<TotpCode>,
+    /// Proxy-mode header injection's value. Moved into the session proxy
+    /// before the recipe engine runs; no fill value can name it.
+    pub header_secret: Option<Zeroizing<String>>,
 }
 
 impl fmt::Debug for LaunchCredential {
@@ -492,6 +539,7 @@ impl fmt::Debug for LaunchCredential {
             .field("username", &self.username.as_ref().map(|_| "<redacted>"))
             .field("password", &self.password.as_ref().map(|_| "<redacted>"))
             .field("totp", &self.totp.as_ref().map(|_| "<redacted>"))
+            .field("header_secret", &self.header_secret.as_ref().map(|_| "<redacted>"))
             .finish()
     }
 }
@@ -584,7 +632,7 @@ fn parse_credential(v: Option<Value>) -> Result<LaunchCredential, String> {
     let mut cred = LaunchCredential::default();
     let result = (|| {
         for key in m.keys() {
-            if !matches!(key.as_str(), "username" | "password" | "totp" | "totp_valid_until") {
+            if !matches!(key.as_str(), "username" | "password" | "totp" | "totp_valid_until" | "header_secret") {
                 return Err(format!("`credential.{key}` is not a field this host fills"));
             }
         }
@@ -593,6 +641,9 @@ fn parse_credential(v: Option<Value>) -> Result<LaunchCredential, String> {
         }
         if m.contains_key("password") {
             cred.password = Some(Zeroizing::new(take_string(&mut m, "password")?));
+        }
+        if m.contains_key("header_secret") {
+            cred.header_secret = Some(Zeroizing::new(take_string(&mut m, "header_secret")?));
         }
         match (m.contains_key("totp"), m.contains_key("totp_valid_until")) {
             (false, false) => {}
@@ -709,8 +760,14 @@ pub fn check_bundle(bundle: &LaunchBundle, expect: &BundleExpectation<'_>) -> Re
             if (plan.needs_username && c.username.is_none())
                 || (plan.needs_password && c.password.is_none())
                 || (plan.needs_totp && c.totp.is_none())
+                || (plan.injects_headers() && c.header_secret.is_none())
             {
                 return Err("credential_missing");
+            }
+            // A header secret for a recipe that injects none is a launch for
+            // another recipe; never kept around on the chance it is used.
+            if !plan.injects_headers() && c.header_secret.is_some() {
+                return Err("bundle_mismatch");
             }
         }
         ExpectedLogin::HttpAuth => {
@@ -723,6 +780,7 @@ pub fn check_bundle(bundle: &LaunchBundle, expect: &BundleExpectation<'_>) -> Re
                 || bundle.heuristic
                 || !bundle.totp_refresh_steps.is_empty()
                 || c.totp.is_some()
+                || c.header_secret.is_some()
             {
                 return Err("bundle_mismatch");
             }
@@ -1264,6 +1322,60 @@ mod tests {
         assert_eq!(check_bundle(&parse_bundle(d).unwrap(), &expect), Err("bundle_mismatch"));
     }
 
+    fn injecting_two_page() -> Value {
+        let mut v = proxied_two_page();
+        v["version"] = json!(3);
+        v["inject_headers"] = json!([
+            { "name": "Authorization", "format": "bearer", "origin": "https://fw01.example.com", "path_prefix": "/api" }
+        ]);
+        v
+    }
+
+    /// Header injection (T106 step 7): the plan carries the entries, the
+    /// bundle must carry the header secret exactly when the plan injects —
+    /// one that arrives for a recipe that injects nothing is another launch's.
+    #[test]
+    fn an_injecting_recipe_needs_a_header_secret_and_only_it_gets_one() {
+        let plan = recipe(injecting_two_page());
+        assert!(plan.injects_headers());
+        assert_eq!(plan.inject_headers[0].name, "authorization");
+        assert_eq!(plan.inject_headers[0].format, HeaderFormat::Bearer);
+        assert!(!recipe(proxied_two_page()).injects_headers());
+
+        let hash = recipe_hash(&injecting_two_page()).unwrap();
+        let bundle = |header_secret: Option<&str>, hash: &str| {
+            let mut d = bundle_json();
+            take_launch_id(&mut d).unwrap();
+            d["recipe_hash"] = json!(hash);
+            d["exposure"] = json!("proxy");
+            if let Some(h) = header_secret {
+                d["credential"]["header_secret"] = json!(h);
+            }
+            parse_bundle(d).unwrap()
+        };
+        let expect = BundleExpectation {
+            resource: "fw01",
+            profile_id: "p_web",
+            login: ExpectedLogin::Form { recipe_hash: &hash, plan: &plan },
+        };
+        let b = bundle(Some("hdr-S3CRET-token-0001"), &hash);
+        assert_eq!(b.credential.header_secret.as_deref().map(String::as_str), Some("hdr-S3CRET-token-0001"));
+        assert!(!format!("{:?}", b.credential).contains("hdr-S3CRET"), "Debug never prints it");
+        assert_eq!(check_bundle(&b, &expect), Ok(()));
+        assert_eq!(check_bundle(&bundle(None, &hash), &expect), Err("credential_missing"));
+
+        // A proxy recipe that injects nothing, handed a header secret.
+        let plain = recipe(proxied_two_page());
+        let plain_hash = recipe_hash(&proxied_two_page()).unwrap();
+        let expect = BundleExpectation {
+            resource: "fw01",
+            profile_id: "p_web",
+            login: ExpectedLogin::Form { recipe_hash: &plain_hash, plan: &plain },
+        };
+        assert_eq!(check_bundle(&bundle(None, &plain_hash), &expect), Ok(()));
+        assert_eq!(check_bundle(&bundle(Some("hdr-S3CRET-token-0001"), &plain_hash), &expect), Err("bundle_mismatch"));
+    }
+
     fn http_auth_bundle_json() -> Map<String, Value> {
         let mut d = bundle_json();
         take_launch_id(&mut d).unwrap();
@@ -1299,6 +1411,8 @@ mod tests {
             (Box::new(|d| drop(d.insert("recipe_hash".into(), json!("sha256:abc")))), "bundle_mismatch"),
             (Box::new(|d| d["heuristic"] = json!(true)), "bundle_mismatch"),
             (Box::new(|d| d["totp_refresh_steps"] = json!([0])), "bundle_mismatch"),
+            // Header injection is proxy mode's; an http-auth launch never has one.
+            (Box::new(|d| d["credential"]["header_secret"] = json!("hdr-S3CRET-token-0001")), "bundle_mismatch"),
             (
                 Box::new(|d| {
                     d["credential"]["totp"] = json!("123456");

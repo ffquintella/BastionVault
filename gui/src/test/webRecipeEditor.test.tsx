@@ -256,6 +256,117 @@ describe("recipe editor — structured edits and validation messages", () => {
     expect(latest?.recipe && "submit_target" in latest.recipe).toBe(false);
   });
 
+  /** Proxy mode header injection (T106 step 7): drawn only where proxy mode
+   *  can run and while a submit target is set; edits write version 3 and
+   *  removing the last header returns to version 2. */
+  it("hides the header-injection controls where proxy mode is unavailable", async () => {
+    mockTypes(DOM_TYPES, (cmd) =>
+      cmd === "web_proxy_mode_support"
+        ? Promise.resolve({ available: false, reason: "proxy mode is not available on Linux yet" })
+        : undefined,
+    );
+    const user = userEvent.setup();
+    render(<Harness />);
+    await user.selectOptions(screen.getByLabelText("Start from"), "__blank");
+    await user.click(screen.getByRole("button", { name: /use this/i }));
+    // No submit target yet.
+    expect(screen.queryByTestId("recipe-header-injection")).not.toBeInTheDocument();
+    await user.click(screen.getByLabelText("Proxy mode"));
+    expect(await screen.findByTestId("proxy-mode-unavailable")).toBeInTheDocument();
+    expect(screen.queryByTestId("recipe-header-injection")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "+ Add header" })).not.toBeInTheDocument();
+  });
+
+  it("edits header injection where proxy mode is available: version 3, back to 2", async () => {
+    mockTypes(DOM_TYPES, (cmd) =>
+      cmd === "web_proxy_mode_support" ? Promise.resolve({ available: true, reason: null }) : undefined,
+    );
+    const user = userEvent.setup();
+    let latest: WebProfileSettings | undefined;
+    render(<Harness onWeb={(w) => (latest = w)} />);
+    await user.selectOptions(screen.getByLabelText("Start from"), "__blank");
+    await user.click(screen.getByRole("button", { name: /use this/i }));
+    expect(screen.queryByTestId("recipe-header-injection")).not.toBeInTheDocument();
+
+    await user.click(screen.getByLabelText("Proxy mode"));
+    expect(await screen.findByTestId("recipe-header-injection")).toBeInTheDocument();
+    expect(latest?.recipe?.version).toBe(2);
+    expect(screen.getByTestId("recipe-header-injection")).toHaveTextContent(/header_secret/);
+
+    await user.click(screen.getByRole("button", { name: "+ Add header" }));
+    expect(latest?.recipe).toMatchObject({
+      version: 3,
+      inject_headers: [{ name: "Authorization", format: "bearer", origin: "https://fw01.example.com", path_prefix: "/" }],
+    });
+    expect(validateWebRecipe(latest?.recipe).ok).toBe(true);
+
+    await user.clear(screen.getByLabelText("Header 1 name"));
+    await user.type(screen.getByLabelText("Header 1 name"), "X-Api-Key");
+    await user.selectOptions(screen.getByLabelText("Header 1 format"), "literal");
+    await user.clear(screen.getByLabelText("Header 1 path prefix"));
+    await user.type(screen.getByLabelText("Header 1 path prefix"), "/api");
+    expect(latest?.recipe?.inject_headers).toEqual([
+      { name: "X-Api-Key", format: "literal", origin: "https://fw01.example.com", path_prefix: "/api" },
+    ]);
+    expect(screen.getByTestId("recipe-verdict")).toHaveTextContent(/passes/);
+
+    // A forbidden name is refused with the server's field.
+    await user.clear(screen.getByLabelText("Header 1 name"));
+    await user.type(screen.getByLabelText("Header 1 name"), "Host");
+    expect(screen.getByTestId("recipe-verdict")).toHaveTextContent(/inject_headers\[0\]\.name/);
+    await user.clear(screen.getByLabelText("Header 1 name"));
+    await user.type(screen.getByLabelText("Header 1 name"), "X-Api-Key");
+
+    // A second entry for the same header and an overlapping path is refused.
+    await user.click(screen.getByRole("button", { name: "+ Add header" }));
+    await user.clear(screen.getByLabelText("Header 2 name"));
+    await user.type(screen.getByLabelText("Header 2 name"), "X-Api-Key");
+    expect(screen.getByTestId("recipe-verdict")).toHaveTextContent(/inject_headers\[1\]`: overlaps inject_headers\[0\]/);
+    await user.click(screen.getByRole("button", { name: "Remove header 2" }));
+    expect(latest?.recipe?.inject_headers).toHaveLength(1);
+
+    // An origin outside the profile's set is refused.
+    await user.clear(screen.getByLabelText("Header 1 origin"));
+    await user.type(screen.getByLabelText("Header 1 origin"), "https://evil.example.net");
+    expect(screen.getByTestId("recipe-verdict")).toHaveTextContent(/inject_headers\[0\]\.origin/);
+    await user.clear(screen.getByLabelText("Header 1 origin"));
+    await user.type(screen.getByLabelText("Header 1 origin"), "https://fw01.example.com");
+
+    // Removing the last header goes back to version 2.
+    await user.click(screen.getByRole("button", { name: "Remove header 1" }));
+    expect(latest?.recipe?.version).toBe(2);
+    expect(latest?.recipe && "inject_headers" in latest.recipe).toBe(false);
+    expect(latest?.recipe?.submit_target).toBeDefined();
+
+    // Turning proxy mode off while headers are set drops them with the target.
+    await user.click(screen.getByRole("button", { name: "+ Add header" }));
+    expect(latest?.recipe?.version).toBe(3);
+    await user.click(screen.getByLabelText("Proxy mode"));
+    expect(latest?.recipe?.version).toBe(1);
+    expect(latest?.recipe && "inject_headers" in latest.recipe).toBe(false);
+    expect(screen.queryByTestId("recipe-header-injection")).not.toBeInTheDocument();
+  });
+
+  it("stops at eight headers", async () => {
+    mockTypes(DOM_TYPES, (cmd) =>
+      cmd === "web_proxy_mode_support" ? Promise.resolve({ available: true, reason: null }) : undefined,
+    );
+    const user = userEvent.setup();
+    render(<Harness />);
+    await user.selectOptions(screen.getByLabelText("Start from"), "__blank");
+    await user.click(screen.getByRole("button", { name: /use this/i }));
+    await user.click(screen.getByLabelText("Proxy mode"));
+    await screen.findByTestId("recipe-header-injection");
+    const add = screen.getByRole("button", { name: "+ Add header" });
+    for (let i = 0; i < 8; i++) {
+      await user.click(add);
+      if (i < 7) await user.clear(screen.getByLabelText(`Header ${i + 1} name`));
+      if (i < 7) await user.type(screen.getByLabelText(`Header ${i + 1} name`), `X-H${i}`);
+    }
+    expect(screen.getByLabelText("Header 8 name")).toBeInTheDocument();
+    expect(add).toBeDisabled();
+  });
+
   it("edits a selector and reports a server-worded error naming the field", async () => {
     const { user } = await withBlank();
     const sel = screen.getByLabelText("Step 1 action 1 selector");

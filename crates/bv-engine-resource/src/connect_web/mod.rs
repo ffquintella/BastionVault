@@ -356,6 +356,12 @@ fn launch_bundle(b: BundleParts<'_>) -> Result<Map<String, Value>, WebRefusal> {
     if let Some(p) = &b.cred.password {
         credential.insert("password".into(), Value::String(p.to_string()));
     }
+    // Proxy mode header injection (recipe version 3): the host moves it into
+    // the session proxy, which sets it on the requests the recipe names; the
+    // page never receives it. Only ever in a proxy-mode form bundle.
+    if let (true, true, Some(h)) = (form, b.profile.proxied(), &b.cred.header_secret) {
+        credential.insert("header_secret".into(), Value::String(h.to_string()));
+    }
     let mut refresh_steps = Vec::new();
     if let (true, Some(t)) = (form, &b.cred.totp) {
         credential.insert("totp".into(), Value::String(t.code.to_string()));
@@ -461,6 +467,8 @@ struct ResolvedCredential {
     totp: Option<totp::TotpCode>,
     totp_source: Option<TotpSource>,
     ldap: Option<LdapCheckout>,
+    /// Proxy mode header injection's value (`secret` sources only).
+    header_secret: Option<Zeroizing<String>>,
 }
 
 impl ResolvedCredential {
@@ -470,6 +478,7 @@ impl ResolvedCredential {
             self.username.is_some().then_some("username"),
             self.password.is_some().then_some("password"),
             self.totp.is_some().then_some("totp"),
+            self.header_secret.is_some().then_some("header_secret"),
         ]
         .into_iter()
         .flatten()
@@ -499,6 +508,8 @@ enum PreparedCredential {
         username: Option<Zeroizing<String>>,
         password: Option<Zeroizing<String>>,
         totp: Option<(Zeroizing<Vec<u8>>, TotpSource)>,
+        /// `Some` exactly when the recipe injects a header (`secret` only).
+        header_secret: Option<Zeroizing<String>>,
         /// How the security log names the source.
         source_detail: String,
     },
@@ -539,6 +550,29 @@ fn demand(
         (true, Some(v)) => Ok(Some(v)),
         (true, None) if heuristic => Ok(None),
         (true, None) => Err(unavailable(format!("the credential source supplies no {what}, which this login needs"))),
+    }
+}
+
+/// The header secret a recipe's `inject_headers` sends (recipe version 3).
+/// Required whatever the recipe's mode — the operator named the headers
+/// explicitly — and held to [`recipe::check_header_secret`], before the MFA
+/// ticket is redeemed. A refusal names the secret and the key, never the
+/// value; a value the recipe does not need is dropped here, never released.
+fn demand_header_secret(
+    wanted: bool,
+    value: Option<Zeroizing<String>>,
+    secret_id: &str,
+    field: &str,
+) -> Result<Option<Zeroizing<String>>, WebRefusal> {
+    match (wanted, value) {
+        (false, _) => Ok(None),
+        (true, None) => Err(unavailable(format!(
+            "secret `{secret_id}` has no `{field}` field, which the recipe's inject_headers sends"
+        ))),
+        (true, Some(v)) => match recipe::check_header_secret(&v) {
+            Ok(()) => Ok(Some(v)),
+            Err(reason) => Err(unavailable(format!("secret `{secret_id}` field `{field}`: {reason}"))),
+        },
     }
 }
 
@@ -583,7 +617,7 @@ fn provider_credential(
         }
         _ => None,
     };
-    Ok(ResolvedCredential { username, password, totp, totp_source: None, ldap: None })
+    Ok(ResolvedCredential { username, password, totp, totp_source: None, ldap: None, header_secret: None })
 }
 
 /// A provider-path error as a launch refusal: the reason code becomes the
@@ -666,10 +700,13 @@ impl super::ResourceBackendInner {
                 let username = take_field(&data, &fields.username);
                 let password = take_field(&data, &fields.password);
                 let seed = if needs.totp { take_field(&data, &fields.totp_seed) } else { None };
+                let header_secret = if needs.header_secret { take_field(&data, &fields.header_secret) } else { None };
                 zeroize_map(&mut data);
 
                 let username = demand(needs.username, needs.heuristic, username, "username")?;
                 let password = demand(needs.password, needs.heuristic, password, "password")?;
+                let header_secret =
+                    demand_header_secret(needs.header_secret, header_secret, secret_id, &fields.header_secret)?;
                 let totp = match seed {
                     Some(seed) => {
                         let key = totp::decode_seed(&seed).map_err(|m| {
@@ -703,6 +740,7 @@ impl super::ResourceBackendInner {
                     username,
                     password,
                     totp,
+                    header_secret,
                     source_detail: format!("source=secret key={secret_id:?}"),
                 })
             }
@@ -720,7 +758,13 @@ impl super::ResourceBackendInner {
             WebCredentialSource::DefaultAccount => {
                 let source_detail = "source=default-account".to_string();
                 if !needs.username {
-                    return Ok(PreparedCredential::Ready { username: None, password: None, totp: None, source_detail });
+                    return Ok(PreparedCredential::Ready {
+                        username: None,
+                        password: None,
+                        totp: None,
+                        header_secret: None,
+                        source_detail,
+                    });
                 }
                 let mut data = caller
                     .call(Operation::Read, "sys/identity/default-account/self", None)
@@ -746,7 +790,13 @@ impl super::ResourceBackendInner {
                         "you have no default {family} account configured (Users → Edit User → Default Resource Account)"
                     ))
                 })?;
-                Ok(PreparedCredential::Ready { username: Some(username), password: None, totp: None, source_detail })
+                Ok(PreparedCredential::Ready {
+                    username: Some(username),
+                    password: None,
+                    totp: None,
+                    header_secret: None,
+                    source_detail,
+                })
             }
 
             WebCredentialSource::Provider { provider, totp: params } => {
@@ -831,7 +881,7 @@ impl super::ResourceBackendInner {
                 }
             }
 
-            PreparedCredential::Ready { username, password, totp, source_detail } => {
+            PreparedCredential::Ready { username, password, totp, header_secret, source_detail } => {
                 log::info!(
                     target: "security",
                     "resource-connect-web-resolve: user={user:?} resource={resource:?} {source_detail}"
@@ -840,7 +890,7 @@ impl super::ResourceBackendInner {
                     Some((key, source)) => (Some(totp::code_at(&key, source.params, now_secs)), Some(source)),
                     None => (None, None),
                 };
-                Ok(ResolvedCredential { username, password, totp: code, totp_source, ldap: None })
+                Ok(ResolvedCredential { username, password, totp: code, totp_source, ldap: None, header_secret })
             }
 
             PreparedCredential::LdapStaticRole { mount, role } => {
@@ -1565,6 +1615,7 @@ mod tests {
             totp,
             totp_steps: if totp { vec![1] } else { vec![] },
             step_count: 2,
+            header_secret: false,
         };
 
         // Username + password: the domain is not a web fill.
@@ -1610,6 +1661,7 @@ mod tests {
             totp: true,
             totp_steps: vec![0],
             step_count: 1,
+            header_secret: false,
         };
         assert_eq!(provider_needs(&heuristic), ProviderNeeds { password: true, totp: false });
         let explicit = RecipeNeeds { heuristic: false, ..heuristic.clone() };
@@ -1816,5 +1868,118 @@ mod tests {
         assert_eq!(b["login_mode"], Value::String("form".into()));
         assert_eq!(b["exposure"], Value::String("proxy".into()));
         assert!(b["credential"].as_object().unwrap().contains_key("password"));
+    }
+
+    const HEADER_SECRET: &str = "hdr-S3CRET-token-0001";
+
+    fn injecting_profile() -> Value {
+        serde_json::json!({
+            "id": "p", "name": "p", "protocol": "web",
+            "credential_source": { "kind": "secret", "secret_id": "admin" },
+            "web": { "start_url": "https://fw01.example.com/login", "login_mode": "form",
+                     "recipe": { "version": 3, "steps": [ { "when_url": "https://fw01.example.com/*",
+                       "actions": [ { "fill": "#pw", "value": "password" }, { "submit": "form" } ] } ],
+                       "success_when": { "url": "https://fw01.example.com/ng/*" },
+                       "submit_target": { "origin": "https://fw01.example.com", "path": "/logincheck",
+                                          "body": "form" },
+                       "inject_headers": [ { "name": "Authorization", "format": "bearer",
+                                             "origin": "https://fw01.example.com", "path_prefix": "/api" } ] } }
+        })
+    }
+
+    fn credential_with_header_secret() -> ResolvedCredential {
+        ResolvedCredential { header_secret: Some(Zeroizing::new(HEADER_SECRET.into())), ..full_credential() }
+    }
+
+    /// Header injection (T106 step 7): the header secret travels in a
+    /// proxy-mode bundle only — the host moves it into the session proxy —
+    /// and is named, never shown, by the launch line.
+    #[test]
+    fn an_injecting_bundle_carries_the_header_secret_at_exposure_proxy_only() {
+        let b = bundle_for(&injecting_profile(), &credential_with_header_secret());
+        assert_eq!(b["exposure"], Value::String("proxy".into()));
+        assert_eq!(b["credential"]["header_secret"], Value::String(HEADER_SECRET.into()));
+
+        // A bundle that is not proxy mode never carries one, whatever the
+        // resolved credential holds.
+        let dom = serde_json::json!({
+            "id": "p", "name": "p", "protocol": "web",
+            "credential_source": { "kind": "secret", "secret_id": "admin" },
+            "web": { "start_url": "https://fw01.example.com/login", "login_mode": "form",
+                     "recipe": { "version": 1, "steps": [ { "when_url": "https://fw01.example.com/*",
+                       "actions": [ { "fill": "#pw", "value": "password" } ] } ],
+                       "success_when": { "url": "https://fw01.example.com/ng/*" } } }
+        });
+        let b = bundle_for(&dom, &credential_with_header_secret());
+        assert!(!b["credential"].as_object().unwrap().contains_key("header_secret"));
+        let http_auth = serde_json::json!({
+            "id": "p", "name": "p", "protocol": "web",
+            "credential_source": { "kind": "secret", "secret_id": "admin" },
+            "web": { "start_url": "https://bmc.example.com/", "login_mode": "http-auth" }
+        });
+        let b = bundle_for(&http_auth, &credential_with_header_secret());
+        assert!(!b["credential"].as_object().unwrap().contains_key("header_secret"));
+    }
+
+    /// Regression (T106 step 7): the header secret never reaches an audit or
+    /// error string — the launch line names it, the refusals name the
+    /// secret and its key.
+    #[test]
+    fn the_header_secret_never_appears_in_an_audit_or_error_string() {
+        let cred = credential_with_header_secret();
+        let released = cred.released();
+        assert_eq!(released, "username,password,totp,header_secret");
+        let line = launch_line(&LaunchAudit {
+            principal: "userpass/alice",
+            namespace: "",
+            resource: "fw01",
+            profile: "p",
+            login_mode: "form",
+            exposure: "proxy",
+            exposure_cap: "proxy",
+            credential_source: "secret",
+            provider: None,
+            recipe_hash: "sha256:ab",
+            heuristic: false,
+            mfa: "none",
+            transport: "direct",
+            fill_origins: &["https://fw01.example.com".to_string()],
+            released: &released,
+            launch_id_hash: "cd",
+        });
+        assert!(line.contains("released=username,password,totp,header_secret "), "{line}");
+        assert!(!line.contains(HEADER_SECRET), "{line}");
+
+        // Every refusal of a value names the key, never the value.
+        let bad = [
+            "short".to_string(),
+            format!("{HEADER_SECRET}\r\nX-Evil: 1"),
+            format!(" {HEADER_SECRET}"),
+            format!("{HEADER_SECRET}\u{e9}"),
+            "x".repeat(recipe::MAX_HEADER_SECRET_LEN + 1),
+        ];
+        for value in bad {
+            let r = demand_header_secret(true, Some(Zeroizing::new(value.clone())), "admin", "api_token").unwrap_err();
+            assert_eq!(r.code, "credential_unavailable");
+            assert!(r.message.contains("`api_token`"), "{}", r.message);
+            assert!(!r.message.contains(value.trim()), "{}", r.message);
+            assert!(!r.message.contains(HEADER_SECRET), "{}", r.message);
+            let rv = format!("{:?}", r.into_rv());
+            assert!(!rv.contains(HEADER_SECRET) && !rv.contains(value.trim()), "{rv}");
+        }
+        let r = demand_header_secret(true, None, "admin", "header_secret").unwrap_err();
+        assert!(r.message.contains("no `header_secret` field"), "{}", r.message);
+
+        // A good value is released only when the recipe injects.
+        let ok = || Some(Zeroizing::new(HEADER_SECRET.to_string()));
+        assert_eq!(
+            demand_header_secret(true, ok(), "admin", "header_secret").unwrap().as_deref().map(String::as_str),
+            Some(HEADER_SECRET)
+        );
+        assert!(
+            demand_header_secret(false, ok(), "admin", "header_secret").unwrap().is_none(),
+            "not injected ⇒ dropped"
+        );
+        assert!(demand_header_secret(false, None, "admin", "header_secret").unwrap().is_none());
     }
 }

@@ -916,9 +916,37 @@ Response:
   `recipe_hash`; a server that predates version 2 refuses a version-2
   recipe (`invalid_recipe`, at `version`), so a proxy recipe is never run as
   a DOM fill. Writers use version 1 unless the recipe has a `submit_target`.
+- **Proxy mode header injection** (T106 step 7, §10): a recipe of **version
+  3** — version 2 plus an optional
+  `"inject_headers": [ { "name": "Authorization", "format": "bearer" |
+  "literal", "origin": "https://host[:port]", "path_prefix": "/api" } ]`
+  (1–8 entries, every key required). The host's session proxy sets each
+  header on the requests it terminates for that origin whose path is the
+  prefix or continues it on a `/` boundary (`/api` covers `/api/v1`, never
+  `/apix`; a path with a `.`/`..` segment is never covered), replacing a value
+  the page sent; the value is `Bearer <header secret>` or the header secret
+  as stored, and the page never receives it. The header secret comes from a
+  **`secret` source only**: key `header_secret` in the resource secret,
+  remappable with `credential_source.fields.header_secret`; it must be
+  8–8192 printable-ASCII bytes with no surrounding space. The response
+  carries it as `credential.header_secret`, at `exposure: "proxy"` only.
+  Validation, all `422`: `inject_headers` on a version-1 or version-2 recipe
+  or without a `submit_target` (`invalid_recipe`, at `inject_headers`); a
+  name that is not an HTTP token, longer than 64 bytes, or a hop-by-hop
+  header, `Host`, `Content-Length` or `Transfer-Encoding`; a format other than
+  `bearer`/`literal`; an origin that is not a bare https origin of the
+  profile's set; a path prefix that breaks the `submit_target.path` rules or
+  holds a dot segment; two entries setting one header on one origin for
+  overlapping prefixes (all `invalid_recipe`); a source other than `secret`,
+  a secret without the key, or a value outside the rules
+  (`credential_unavailable` — the message names the secret and key, never
+  the value). Versions 1 and 2 are read as before and keep their
+  `recipe_hash`; a server that predates version 3 refuses a version-3 recipe
+  at `version`.
 - `credential` carries **only what the login uses** (`form`: what the recipe
   fills — `username`, `password`, `totp`, heuristic mode taking whichever the
-  source has; `http-auth`: `username` and `password`, both required). It
+  source has — plus `header_secret` when a version-3 recipe injects headers;
+  `http-auth`: `username` and `password`, both required). It
   travels in plaintext in this response body over the API's TLS channel —
   the host holds it in `Zeroizing` buffers and drops it after
   success / failure / timeout. The TOTP seed never leaves the server. The
@@ -943,8 +971,9 @@ Response:
   on a multi-node deployment serving requests from more than one node,
   concurrent calls on different nodes are not excluded.
 - Credential sources: `secret` (keys `username`, `password`, optional
-  `totp_seed` — base32 — remappable with
-  `credential_source.fields = {username?, password?, totp_seed?}`; TOTP
+  `totp_seed` — base32 — and `header_secret` (read only for a recipe with
+  `inject_headers`), remappable with
+  `credential_source.fields = {username?, password?, totp_seed?, header_secret?}`; TOTP
   parameters in `credential_source.totp = {algorithm: SHA1|SHA256|SHA512,
   digits: 6|8, period: 30|60}`, default SHA1/6/30) is read under the
   server's authority, so a connect-only caller never needs `read`.

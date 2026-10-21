@@ -8,11 +8,20 @@
 //! so the rules are unit-tested. The listener
 //! ([`super::web_proxy_listener`], T106 step 2) and the platform wiring
 //! ([`super::web_proxy_webview`], step 4) call into these functions.
+//!
+//! Header injection (recipe version 3, T106 step 7) is the same mechanism
+//! without a placeholder in the page: [`HeaderInjector`] holds the profile's
+//! header secret and the recipe's `inject_headers`, and the listener sets
+//! each named header on the terminated requests whose origin and path prefix
+//! it covers ([`HeaderInjector::applicable`]), then scrubs the secret out of
+//! their responses like the password's.
 
 use std::collections::BTreeSet;
 use std::fmt;
 
-use bastion_vault::modules::resource::connect_web::recipe::SubmitBody;
+use bastion_vault::modules::resource::connect_web::recipe::{
+    check_header_secret, path_prefix_matches, HeaderFormat, SubmitBody, FORBIDDEN_INJECTED_HEADERS, MAX_HEADER_NAME_LEN,
+};
 use rand::distr::{Alphanumeric, SampleString};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -303,6 +312,172 @@ impl fmt::Debug for SecretBody {
     }
 }
 
+/// So a [`SecretBody`] can back a `bytes::Bytes` (`Bytes::from_owner`): the
+/// header value then lives in this zeroizing buffer, wiped when hyper drops
+/// the request, instead of in a plain copy.
+impl AsRef<[u8]> for SecretBody {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+// ── Header injection (recipe version 3, T106 step 7) ───────────────
+
+/// One header the session proxy sets: `name` on the terminated requests to
+/// `origin` whose path is inside `path_prefix`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeaderInjection {
+    /// Lower-cased HTTP token; never hop-by-hop, `Host`, `Content-Length` or
+    /// `Transfer-Encoding`.
+    name: String,
+    format: HeaderFormat,
+    origin: HttpsOrigin,
+    path_prefix: String,
+}
+
+impl HeaderInjection {
+    /// The recipe's entry, re-checked here: the shared parser already
+    /// refused anything else, and the proxy does not trust a caller to have
+    /// run it. Errors name the header and the origin, never a value.
+    pub fn new(name: &str, format: HeaderFormat, origin_url: &str, path_prefix: &str) -> Result<Self, String> {
+        let lower = name.to_ascii_lowercase();
+        let token = !name.is_empty()
+            && name.len() <= MAX_HEADER_NAME_LEN
+            && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b));
+        if !token {
+            return Err("an injected header name is not an HTTP token".to_string());
+        }
+        if FORBIDDEN_INJECTED_HEADERS.contains(&lower.as_str()) {
+            return Err(format!("the session proxy never sets the `{lower}` header"));
+        }
+        if !path_prefix.starts_with('/') {
+            return Err(format!("the path prefix of the injected `{lower}` header is not absolute"));
+        }
+        Ok(Self { name: lower, format, origin: HttpsOrigin::parse(origin_url)?, path_prefix: path_prefix.to_string() })
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn origin(&self) -> &HttpsOrigin {
+        &self.origin
+    }
+
+    /// Host and port together, and the path on `/` boundaries
+    /// ([`path_prefix_matches`], the parser's own rule): `/api` covers
+    /// `/api/v1`, never `/apix`.
+    pub fn matches(&self, host: &str, port: u16, path: &str) -> bool {
+        self.origin.matches(host, port) && path_prefix_matches(&self.path_prefix, path)
+    }
+}
+
+/// Why the proxy would not inject into a request it otherwise would. Fixed
+/// names in the `aborted:<check>` shape, never anything from the request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeaderRefusal {
+    /// A WebSocket (or other) upgrade: its relayed stream cannot be
+    /// scrubbed, so the secret is never sent on one.
+    Upgrade,
+    /// The request's `Host` names another authority than the terminated
+    /// one: a request a browser does not produce, and one that could route
+    /// the secret to another virtual host behind the same server.
+    HostMismatch,
+    /// The header value could not be built (a header secret the arm check
+    /// should already have refused).
+    Value,
+}
+
+impl HeaderRefusal {
+    pub fn check(self) -> &'static str {
+        match self {
+            Self::Upgrade => "proxy_header_upgrade",
+            Self::HostMismatch => "proxy_header_host",
+            Self::Value => "proxy_header_value",
+        }
+    }
+
+    /// Fixed operator-facing text, for the window title when the refused
+    /// request was the sign-in itself.
+    pub fn notice(self) -> &'static str {
+        match self {
+            Self::Upgrade => "the session proxy refused a connection upgrade on a path it injects a header into",
+            Self::HostMismatch => "the session proxy refused a request whose Host is not the page's origin",
+            Self::Value => "the session proxy could not build an injected header",
+        }
+    }
+}
+
+/// The header secret and the headers it goes into, for one session. The
+/// secret is a [`SessionSecret`] (zeroized on drop, never printed), whose
+/// placeholder is what the response scrub writes in its place — the page
+/// never receives the secret, and a page that never sees it echoed never
+/// sees the placeholder either.
+pub struct HeaderInjector {
+    secret: SessionSecret,
+    entries: Vec<HeaderInjection>,
+}
+
+impl fmt::Debug for HeaderInjector {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HeaderInjector").field("secret", &"<redacted>").field("entries", &self.entries).finish()
+    }
+}
+
+impl HeaderInjector {
+    /// The launch's header secret, held to the server's own rule
+    /// ([`check_header_secret`]: printable ASCII, so it can never split a
+    /// header line). The error is fixed text, never the value.
+    pub fn new(secret: String, entries: Vec<HeaderInjection>) -> Result<Self, String> {
+        // Wiped on every early return; moved (not copied) on success.
+        let mut secret = Zeroizing::new(secret);
+        if entries.is_empty() {
+            return Err("the session proxy was given no header to inject".to_string());
+        }
+        check_header_secret(&secret).map_err(|reason| format!("the launch's header secret is unusable: {reason}"))?;
+        let secret = SessionSecret::new(std::mem::take(&mut *secret))?;
+        Ok(Self { secret, entries })
+    }
+
+    pub fn entries(&self) -> &[HeaderInjection] {
+        &self.entries
+    }
+
+    pub fn secret(&self) -> &SessionSecret {
+        &self.secret
+    }
+
+    /// The entries that apply to a terminated request on `host:port` for
+    /// `path` (no query). Empty when none does.
+    pub fn applicable(&self, host: &str, port: u16, path: &str) -> Vec<&HeaderInjection> {
+        self.entries.iter().filter(|e| e.matches(host, port, path)).collect()
+    }
+
+    /// The value of `entry`'s header, built straight into a zeroizing
+    /// buffer: `Bearer <secret>` or the secret as is.
+    pub fn value(&self, entry: &HeaderInjection) -> SecretBody {
+        let secret = self.secret.secret.as_bytes();
+        // Sized up front, so it never reallocates and leaves no copy behind.
+        let mut out = Zeroizing::new(Vec::with_capacity(secret.len() + 7));
+        if entry.format == HeaderFormat::Bearer {
+            out.extend_from_slice(b"Bearer ");
+        }
+        out.extend_from_slice(secret);
+        SecretBody(out)
+    }
+}
+
+/// Whether a request's `Host` header names the terminated authority. Absent
+/// is fine (the proxy adds the right one); present, it must be `host` with
+/// `port`, the port optional when it is 443. Case-insensitive.
+pub fn host_header_matches(value: Option<&[u8]>, host: &str, port: u16) -> bool {
+    let Some(raw) = value else { return true };
+    let Ok(text) = std::str::from_utf8(raw) else { return false };
+    let text = text.trim();
+    let exact = if port == 443 { format!("{host}:443") } else { format!("{host}:{port}") };
+    text.eq_ignore_ascii_case(&exact) || (port == 443 && text.eq_ignore_ascii_case(host))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Substitution {
     /// Not the submit request, or no placeholder in it: forward untouched.
@@ -403,6 +578,15 @@ pub fn scrub_response(secret: &SessionSecret, body: &[u8]) -> Scrubbed {
         out = replace_all(&previous, variant.as_bytes(), secret.placeholder.as_bytes());
     }
     Scrubbed { body: out, replaced }
+}
+
+/// A response header value with every form of the secret replaced by the
+/// placeholder, or `None` when it holds none. A server that echoes a request
+/// header back as a response header (a debug `X-Echo-Authorization`, a
+/// `WWW-Authenticate` repeating the token) is scrubbed like its body.
+pub fn scrub_header_value(secret: &SessionSecret, value: &[u8]) -> Option<Vec<u8>> {
+    let scrubbed = scrub_response(secret, value);
+    (scrubbed.replaced > 0).then_some(scrubbed.body)
 }
 
 /// Response headers the proxy strips from every terminated response.
@@ -686,5 +870,148 @@ mod tests {
     #[test]
     fn submit_target_rejects_relative_path() {
         assert!(SubmitTarget::new("https://app.example.test", "login", BodyType::Form).is_err());
+    }
+
+    // ── header injection (T106 step 7) ──────────────────────────────
+
+    const HEADER_SECRET: &str = "hdr-S3CRET-token-0001";
+
+    fn api_header() -> HeaderInjection {
+        HeaderInjection::new("Authorization", HeaderFormat::Bearer, "https://app.example.test", "/api").unwrap()
+    }
+
+    fn injector() -> HeaderInjector {
+        HeaderInjector::new(HEADER_SECRET.to_string(), vec![api_header()]).unwrap()
+    }
+
+    #[test]
+    fn an_injection_covers_its_origin_and_path_prefix_only() {
+        let h = api_header();
+        assert_eq!(h.name(), "authorization");
+        assert!(h.matches("app.example.test", 443, "/api"));
+        assert!(h.matches("APP.example.test", 443, "/api/v1/users"));
+        assert!(h.matches("app.example.test", 443, "/api/"));
+        // `/api` is a segment boundary, not a string prefix.
+        assert!(!h.matches("app.example.test", 443, "/apix"));
+        assert!(!h.matches("app.example.test", 443, "/apix/v1"));
+        assert!(!h.matches("app.example.test", 443, "/"));
+        // Host and port together.
+        assert!(!h.matches("app.example.test", 8443, "/api"));
+        assert!(!h.matches("cdn.example.test", 443, "/api"));
+        // A dot segment never matches, raw or encoded.
+        assert!(!h.matches("app.example.test", 443, "/api/../admin"));
+        assert!(!h.matches("app.example.test", 443, "/api/%2e%2e/admin"));
+
+        let inj = injector();
+        assert_eq!(inj.applicable("app.example.test", 443, "/api/x").len(), 1);
+        assert!(inj.applicable("app.example.test", 443, "/apix").is_empty());
+        assert!(inj.applicable("other.example.test", 443, "/api").is_empty());
+    }
+
+    #[test]
+    fn refused_header_names_never_become_an_injection() {
+        for name in [
+            "Connection",
+            "Keep-Alive",
+            "Proxy-Authorization",
+            "TE",
+            "Trailer",
+            "Upgrade",
+            "Host",
+            "content-length",
+            "Transfer-Encoding",
+        ] {
+            assert!(
+                HeaderInjection::new(name, HeaderFormat::Literal, "https://app.example.test", "/").is_err(),
+                "{name}"
+            );
+        }
+        for name in ["", "X Auth", "x:auth", "x\r\nevil", "authorizätion"] {
+            assert!(
+                HeaderInjection::new(name, HeaderFormat::Literal, "https://app.example.test", "/").is_err(),
+                "{name:?}"
+            );
+        }
+        // https only, absolute prefix only.
+        assert!(HeaderInjection::new("x-api-key", HeaderFormat::Literal, "http://app.example.test", "/").is_err());
+        assert!(HeaderInjection::new("x-api-key", HeaderFormat::Literal, "https://app.example.test", "api").is_err());
+    }
+
+    #[test]
+    fn the_injected_value_is_bearer_or_literal_and_never_printed() {
+        let inj = HeaderInjector::new(
+            HEADER_SECRET.to_string(),
+            vec![
+                api_header(),
+                HeaderInjection::new("X-Api-Key", HeaderFormat::Literal, "https://app.example.test", "/").unwrap(),
+            ],
+        )
+        .unwrap();
+        let entries = inj.entries().to_vec();
+        assert_eq!(inj.value(&entries[0]).as_slice(), format!("Bearer {HEADER_SECRET}").as_bytes());
+        assert_eq!(inj.value(&entries[1]).as_slice(), HEADER_SECRET.as_bytes());
+        let shown = format!("{inj:?} {:?}", inj.value(&entries[0]));
+        assert!(!shown.contains(HEADER_SECRET), "{shown}");
+    }
+
+    /// Regression: an unusable header secret is refused before anything is
+    /// armed, and the refusal never carries the value.
+    #[test]
+    fn an_unusable_header_secret_is_refused_without_echoing_it() {
+        for bad in [
+            "short".to_string(),
+            format!("{HEADER_SECRET}\r\nX-Evil: 1"),
+            format!("{HEADER_SECRET}\n"),
+            format!("{HEADER_SECRET}\u{0}"),
+            format!(" {HEADER_SECRET}"),
+            format!("{HEADER_SECRET}é"),
+        ] {
+            let e = HeaderInjector::new(bad.clone(), vec![api_header()]).unwrap_err();
+            assert!(!e.contains(HEADER_SECRET) && !e.contains(bad.trim()), "{e}");
+        }
+        assert!(HeaderInjector::new(HEADER_SECRET.to_string(), Vec::new()).is_err());
+    }
+
+    #[test]
+    fn the_host_header_must_name_the_terminated_authority() {
+        assert!(host_header_matches(None, "app.example.test", 443));
+        assert!(host_header_matches(Some(b"app.example.test"), "app.example.test", 443));
+        assert!(host_header_matches(Some(b"APP.example.test:443"), "app.example.test", 443));
+        assert!(host_header_matches(Some(b"app.example.test:8443"), "app.example.test", 8443));
+        assert!(host_header_matches(Some(b"[::1]:8443"), "[::1]", 8443));
+        assert!(!host_header_matches(Some(b"app.example.test"), "app.example.test", 8443));
+        assert!(!host_header_matches(Some(b"other.example.test"), "app.example.test", 443));
+        assert!(!host_header_matches(Some(b"app.example.test:444"), "app.example.test", 443));
+        assert!(!host_header_matches(Some(b"\xff"), "app.example.test", 443));
+    }
+
+    /// A server that echoes the injected header back — in its body or in a
+    /// response header — leaks nothing to the page.
+    #[test]
+    fn an_echoed_header_secret_is_scrubbed_from_bodies_and_header_values() {
+        let inj = injector();
+        let body = format!(r#"{{"you_sent":"Bearer {HEADER_SECRET}","raw":"{HEADER_SECRET}"}}"#);
+        let out = scrub_response(inj.secret(), body.as_bytes());
+        assert_eq!(out.replaced, 2);
+        let seen = String::from_utf8(out.body).unwrap();
+        assert!(!seen.contains(HEADER_SECRET), "{seen}");
+        assert!(seen.contains(inj.secret().placeholder()));
+
+        let header = format!("Bearer {HEADER_SECRET}");
+        let scrubbed = scrub_header_value(inj.secret(), header.as_bytes()).unwrap();
+        assert_eq!(scrubbed, format!("Bearer {}", inj.secret().placeholder()).into_bytes());
+        assert_eq!(scrub_header_value(inj.secret(), b"no secret here"), None);
+    }
+
+    #[test]
+    fn every_header_check_name_fits_the_abort_vocabulary() {
+        for r in [HeaderRefusal::Upgrade, HeaderRefusal::HostMismatch, HeaderRefusal::Value] {
+            let c = r.check();
+            assert!(
+                (1..=32).contains(&c.len())
+                    && c.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'),
+                "{c}"
+            );
+        }
     }
 }

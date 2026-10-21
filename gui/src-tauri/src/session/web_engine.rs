@@ -1090,6 +1090,7 @@ mod tests {
             username: Some(Zeroizing::new("admin".into())),
             password: Some(Zeroizing::new("hunter2\"</script>".into())),
             totp: Some(TotpCode { code: Zeroizing::new("123456".into()), valid_until: totp_valid_until }),
+            header_secret: None,
         }
     }
 

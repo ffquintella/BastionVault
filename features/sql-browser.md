@@ -1311,6 +1311,192 @@ starts.
    bounds the page size.
 9. **Rolling upgrades.** Design the gate for writing `sql_*` capabilities.
 
+#### Phase 0 findings (appendix, 2026-10-21)
+
+Status legend: **verified** = checked in this tree or in the cited docs;
+**decide** = needs the maintainer; **open** = needs a measurement or prototype
+that has not been run, with the acceptance check named.
+
+1. **Capability model — verified, decide D1.** `Capability` is
+   a fieldless enum cast to `u32` by `*self as u32` with explicit
+   discriminants (`crates/bv-kernel/src/modules/policy/policy.rs:181-206`); bits 10–20 are
+   free, so `SqlScript = 1 << 20` fits. Consumers that must change with the
+   eleven variants:
+   - `CAP_*` constants and the bit-layout host test
+     (`crates/bv-policy-core/src/lib.rs:64-82`);
+   - the differential mapping table
+     (`crates/bv-kernel/src/modules/policy/differential/mod.rs:440`);
+   - `to_granting_capabilities`, which iterates `EnumIter`
+     (`policy.rs:749-754`), so SQL names would appear in every listing;
+   - the share vocabulary `ALLOWED`
+     (`crates/bv-kernel/src/modules/identity/share_store.rs:857`);
+   - **`ShareCap` is `u8` with four bits** (`bv-policy-core/src/model.rs:286-293`,
+     Kani target `proofs.rs:430` is `u8`). The §3.3 share vocabulary cannot
+     reuse that type without widening it and re-running the proofs.
+
+   **D1 (maintainer):** keep the eleven variants in the single `Capability`
+   enum as §9.1 says (one decision path, deny supremacy proved once), accepting
+   the widening of `ShareCap` and the Kani re-run; or put SQL in a separate
+   bitmap evaluated only by `PolicyGate::sql_privileges`, which leaves the
+   existing proofs untouched but duplicates the deny logic. Recommendation: the
+   first, because §3.1 requires that deny and fail-closed behaviour hold for
+   SQL unchanged, and a second evaluator is the larger proof burden.
+
+   **Rolling-upgrade hazard (open, check before Phase 1):** an older node that
+   meets `sql_select` in HCL must refuse or ignore it. Confirm whether
+   `Capability::from_str` failure rejects the whole policy or one path. If it
+   rejects the policy, the §Phase 9 gate must hold `sql_*` writes until every
+   node is on ABI 1.4 (item 9).
+
+2. **Process runtime — verified design gap, open measurement.** Today the host
+   reads one invocation's stdout with `read_line` on a single `BufReader`
+   (`src/plugins/process_runtime.rs:255`, `:292`), so invocations are
+   serialized per child. §9.4 multiplexing needs one reader task that routes
+   `done{id}` / `host_call{id}` to per-invocation channels, one writer behind a
+   lock, `cancel{id}`, and `max_concurrent = 32`. The 50-session latency and
+   memory target is **open**: it needs a prototype child that answers 50
+   interleaved invocations, measured against the serialized baseline. The
+   acceptance threshold is for the maintainer to set (**D5**).
+
+3. **Classifier corpus and `sqlparser` coverage — external verified, open
+   measurement.** `sqlparser` ships `PostgreSqlDialect`, `MySqlDialect`,
+   `MsSqlDialect` and `OracleDialect` ([docs.rs dialect index](https://docs.rs/sqlparser/latest/sqlparser/dialect/index.html)).
+   No corpus exists in the tree yet. The 500-per-dialect corpus must include
+   every §4.3 hazard before any coverage number means anything. Acceptance: a
+   table of parse failures per dialect, each row either classified or refused
+   as `Unclassifiable`, with no row defaulting to `sql_select` (§4.1). Owner of
+   the corpus: the `bv-sql-classify` work in Phase 2 unless the maintainer
+   wants it earlier.
+
+4. **Drivers and rustls — verified state, open build.** The existing
+   `plugins-ext/bastion-plugin-postgres` uses `tokio-postgres` with
+   `default-features = false, features = ["runtime"]` and no TLS
+   (`plugins-ext/bastion-plugin-postgres/Cargo.toml:19-23`), so TLS is new
+   work. None of `sqlparser`, `mysql_async`, `tiberius` or `tokio-postgres`
+   appears in the root `Cargo.lock`. Root `Cargo.toml:241` pins rustls with
+   `aws_lc_rs`; the drivers should use the same provider. The
+   `cargo tree -i openssl-sys` check (must be empty) is **open**: it is a cold
+   build inside `plugins-ext`, so run it once, alone, after the lock is
+   generated.
+
+5. **Oracle — external verified, decide D2.** Two routes:
+   - Oracle's own pure-Rust thin driver `oracledb` is in preview
+     (26.0.0-beta.1) and supports TCPS, but its cancellation API is
+     plain-TCP only, with no TCPS or Windows support yet (crates.io and
+     the project's README, found via web search). §6 requires cancellation per
+     driver, so this route fails today on TCPS.
+   - ODPI-C (`oracle` crate) with Instant Client loaded at run time, opt-in,
+     and documented as a TCB exception confined to the plugin process (§Phase
+     0 item 5 as written).
+
+   **D2 (maintainer):** Recommendation: defer the Oracle choice to Phase 8 and
+   re-check `oracledb` for GA with TCPS cancellation then. Phases 1–7 do not
+   depend on it. If Oracle is needed sooner, choose ODPI-C behind explicit
+   operator opt-in. Either way, vet the crate's publisher and supply chain
+   before adding it.
+
+6. **GUI bundle — verified baseline, open measurement.** `gui/package.json`
+   has neither CodeMirror 6 nor TanStack Virtual, so the delta is additive.
+   Measure with `vite build` before and after adding them, in a scratch
+   worktree, and record gzip size. Accept if the SQL workspace adds less than
+   the owner's budget (**D3**: maintainer sets the number).
+
+7. **HA — open.** Not yet read: which node serves plugin requests, and whether
+   the sticky client honours `session_on_other_node`. The answer needs a read
+   of the HA client path before Phase 1 touches sessions. Acceptance: a
+   written answer with `path:line` citations, and a test plan for a session
+   opened on node A and invoked on node B.
+
+8. **Payload limit — verified gap.** The process runtime has no response size
+   cap. Stdout lines are read with unbounded `read_line`
+   (`process_runtime.rs:292`). The only existing caps are
+   `MAX_RESPONSE_BYTES = 4 MiB` for host HTTP (`src/plugins/net_http.rs:25`)
+   and `MAX_PAYLOAD_BYTES = 4 MiB` for WASM hooks
+   (`crates/bastion-plugin-testkit/src/hooks.rs:23`). **Proposal:** add a
+   bounded line reader to the process runtime at 4 MiB, the same value,
+   failing the invocation (not the child) on overflow. Page size is then
+   derived from that cap, not chosen separately. This change is a prerequisite
+   for §9.4, because a multiplexed child can otherwise starve the reader.
+
+9. **Rolling upgrades — decide D4, open check.** Proposed gate: a cluster-wide
+   setting that the host sets to "SQL capabilities writable" only when every
+   active node reports `HOST_ABI_MINOR >= 4` and the policy schema version that
+   accepts `sql_*`. Until then the validator refuses to write `sql_*` but the
+   parser still accepts them on read, so an upgrade never leaves a policy that
+   an old node cannot load silently. **D4:** confirm that a stored `sql_*`
+   policy written before the gate closes must not be auto-removed on
+   downgrade, only refused at evaluation on old nodes.
+
+**Decisions recorded (2026-10-21, maintainer accepted the recommendations):**
+
+- **D1 — accepted.** SQL capabilities stay in the single `Capability` enum.
+  `ShareCap` is widened from `u8` and the Kani harnesses and differential suite
+  are re-run over the new bits.
+- **D2 — revised 2026-10-21: Oracle is implemented now, on ODPI-C.** The
+  driver is the `oracle` crate with Oracle Instant Client loaded at run time,
+  never bundled, behind explicit operator opt-in, confined to the plugin
+  process as a TCB exception. Rejected: Oracle's pure-Rust `oracledb`, whose
+  cancellation is plain-TCP only (§6 requires cancel over TCPS), and the
+  pure-Rust `oracle-rs` (no cancellation API found).
+  **Cancellation design:** `Connection::break_execution` (OCI break, sent from
+  a second thread) as the primary path, with `set_call_timeout` armed before
+  each call as the backstop. A cancelled call is reported as cancelled and the
+  connection is discarded, not reused. Verify over TCPS in the spike below;
+  if break does not interrupt a TCPS call, the session is torn down rather
+  than left running.
+  **Scope gate:** the spike needs no SQL capability, classifier or plugin
+  wiring. It is a standalone crate in `plugins-ext` that connects, runs a
+  long query, breaks it and checks the error, against `gvenzl/oracle-free` in
+  Docker. Phases 1–3 still gate the production path (§Phase 8 depends on the
+  plugin and classifier). The publisher and supply chain of the `oracle` crate
+  and the Instant Client download source are vetted before the spike merges.
+
+  **Spike results (2026-10-21, `oracle` 0.6.3, Oracle AI Database 26ai Free
+  23.26.3.0.0 in `gvenzl/oracle-free:slim`, client libs from that image,
+  linux/arm64, built in `rust:slim`; the spike lives in the session scratch
+  directory, not in the repository):**
+
+  - Connect, `query_row_as`, `set_call_timeout`, `break_execution` and reuse of
+    the connection after a cancel: **verified over plain TCP.** A 3-second
+    timeout cancels with ORA-03156 at 3.01 s. `break_execution` (from a second
+    thread, via `Arc`) returns in 0.85–9.5 ms and cancels with ORA-01013 at
+    3.0 s; the connection still answers `select 1`.
+  - **TCPS: not verified.** The Free image has no `orapki` jars
+    (`oraclepki.jar` is absent), so no Oracle wallet could be created. PEM and
+    PKCS#12 (empty-password) wallets were both refused by the listener with
+    ORA-28759 / TNS-00566. The listener was restored to plain TCP. TCPS
+    cancellation stays open for D2 and needs a wallet made by a full Oracle
+    install (`orapki`, or `dbca`'s TLS setup) before the decision is final.
+  - The client needs more than `lib/`. A missing `nls`, `network`,
+    `oracore/mesg` or `rdbms/mesg` directory segfaults inside `libclntsh` on
+    the first OCI error. `libaio.so.1` is required; Debian ships
+    `libaio.so.1t64`, so the test build symlinked it. Production packaging must
+    ship the same set.
+  - This image's server `sqlnet.ora` sets `DISABLE_OOB=ON` and
+    `BREAK_POLL_SKIP=1000`. The spike client read no `sqlnet.ora`, so these did
+    not affect the result. Check them against the cancel path before
+    production, because OOB is the usual break channel.
+  - `cargo tree -i openssl-sys` on the `oracle` crate was not run. It is still
+    required before merge.
+
+  D2 is accepted by the maintainer for TCP only (2026-10-21). Cancel over TCPS
+  is not verified and must not be treated as working. TCPS stays an open item
+  that blocks any production claim about cancellation over TLS.
+- **D3 — no value.** The recommendation was that the maintainer sets the GUI
+  bundle budget. No number was given, so the budget stays open and the
+  measurement in item 6 is required before Phase 4 merges.
+- **D4 — accepted.** Writes of `sql_*` are gated on every node reporting
+  ABI 1.4. A stored `sql_*` policy is never auto-removed on downgrade; old
+  nodes refuse it at evaluation.
+- **D5 — no value.** The recommendation was that the maintainer sets the
+  50-session threshold. No number was given, so the threshold stays open and
+  is required before Phase 1 merges.
+
+**Result of Phase 0:** the decisions D1, D2 and D4 are recorded. D3 and D5
+have no value yet. The measurements (items 2, 3, 4, 6) and the HA read (item
+7) are still not run, so Phase 0 is not complete and T124 stays `[ ]`. Phase 1
+must not start on the authz path until the open measurements are run.
+
 ### Phase 1 — host substrate (T124)
 
 §9 in full:

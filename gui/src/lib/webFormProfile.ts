@@ -121,7 +121,7 @@ function releasingSourceError(cs: ConnectionProfile["credential_source"]): strin
       if (cs.fields !== undefined) {
         if (!isRecord(cs.fields)) return "credential_source.fields must be an object";
         for (const [k, val] of Object.entries(cs.fields)) {
-          if (k !== "username" && k !== "password" && k !== "totp_seed") {
+          if (k !== "username" && k !== "password" && k !== "totp_seed" && k !== "header_secret") {
             return `credential_source.fields.${k} is not a field this server understands`;
           }
           const e = secretKeyError(val, `fields.${k}`);
@@ -164,6 +164,7 @@ export function formCredentialSourceError(
   recipe: WebLoginRecipe,
 ): string | null {
   const needs = recipeNeeds(recipe);
+  const injects = (recipe.inject_headers ?? []).length > 0;
   switch (cs.kind) {
     case "secret":
     case "ldap": {
@@ -189,6 +190,14 @@ export function formCredentialSourceError(
     case "pki":
     case "fido2":
       return "ssh-engine, pki and fido2 sources are not valid on a web profile";
+  }
+  // Header injection (recipe version 3) sends the source's header secret.
+  // Only a `secret` source has one.
+  if (injects && cs.kind !== "secret") {
+    return (
+      "the recipe's inject_headers sends a header secret, and only a `secret` source can supply one (its " +
+      "`header_secret` key, or the key credential_source.fields.header_secret names)"
+    );
   }
   // What the source can supply is known without reading it. Heuristic
   // recipes want each value only "if the source has it", so they are exempt.

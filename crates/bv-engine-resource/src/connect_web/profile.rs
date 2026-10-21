@@ -21,11 +21,21 @@ pub struct SecretFieldMap {
     pub username: String,
     pub password: String,
     pub totp_seed: String,
+    /// The value proxy mode's `inject_headers` sends (recipe version 3, §10).
+    /// Read only when the recipe injects a header; a separate key rather than
+    /// the password, so an API token is never the sign-in password and the
+    /// password is still dropped when the sign-in ends.
+    pub header_secret: String,
 }
 
 impl Default for SecretFieldMap {
     fn default() -> Self {
-        Self { username: "username".into(), password: "password".into(), totp_seed: "totp_seed".into() }
+        Self {
+            username: "username".into(),
+            password: "password".into(),
+            totp_seed: "totp_seed".into(),
+            header_secret: "header_secret".into(),
+        }
     }
 }
 
@@ -151,7 +161,15 @@ impl WebLaunchProfile {
 /// What an `http-auth` launch releases: a username and a password, nothing
 /// else. There is no recipe step, so no step index is valid in `result`.
 fn http_auth_needs() -> RecipeNeeds {
-    RecipeNeeds { heuristic: false, username: true, password: true, totp: false, totp_steps: Vec::new(), step_count: 0 }
+    RecipeNeeds {
+        heuristic: false,
+        username: true,
+        password: true,
+        totp: false,
+        totp_steps: Vec::new(),
+        step_count: 0,
+        header_secret: false,
+    }
 }
 
 fn refuse(status: u16, code: &'static str, message: impl Into<String>) -> WebRefusal {
@@ -212,6 +230,7 @@ fn secret_fields(v: Option<&Value>) -> Result<SecretFieldMap, WebRefusal> {
             "username" => map.username = name,
             "password" => map.password = name,
             "totp_seed" => map.totp_seed = name,
+            "header_secret" => map.header_secret = name,
             other => {
                 return Err(invalid(format!("credential_source.fields.{other} is not a field this server understands")))
             }
@@ -444,6 +463,17 @@ pub fn parse_launch_profile(profile: &Value) -> Result<WebLaunchProfile, WebRefu
             }
             _ => {}
         }
+    }
+    // Header injection (recipe version 3) sends the source's header secret.
+    // Only a `secret` source has one: an LDAP account, a default account and a
+    // provider release a username, a password and at most a TOTP seed.
+    if needs.header_secret && !matches!(source, WebCredentialSource::Secret { .. }) {
+        return Err(refuse(
+            422,
+            "credential_unavailable",
+            "the recipe's inject_headers sends a header secret, and only a `secret` source can supply one (its \
+             `header_secret` key, or the key credential_source.fields.header_secret names)",
+        ));
     }
 
     Ok(WebLaunchProfile {
@@ -711,6 +741,101 @@ mod tests {
         // An allowed origin is fine.
         v["web"]["recipe"]["submit_target"]["origin"] = json!("https://sso.example.com");
         assert!(parse_launch_profile(&v).is_ok());
+    }
+
+    // ── header injection (recipe version 3, T106 step 7) ────────────
+
+    fn injecting_profile() -> Value {
+        let mut v = proxy_profile();
+        v["web"]["recipe"]["version"] = json!(3);
+        v["web"]["recipe"]["inject_headers"] = json!([
+            { "name": "Authorization", "format": "bearer", "origin": "https://fw01.example.com", "path_prefix": "/api" }
+        ]);
+        v
+    }
+
+    /// Old data: profiles stored before header injection — a version-1 form
+    /// profile and a version-2 proxy profile — launch exactly as before: same
+    /// recipe hash (the value a stored launch and the host's copy are bound
+    /// to; computed outside this code), same exposure, no header secret
+    /// released. Nothing is migrated: the stored values are what is hashed.
+    #[test]
+    fn profiles_from_before_header_injection_load_unchanged_and_keep_their_hashes() {
+        let p = parse_launch_profile(&form_profile()).unwrap();
+        assert_eq!(p.recipe_hash(), Some("sha256:265ae33f6ecf70ccceaac4ec3140cf1cf582244b33e58f401b7c7894e95fad40"));
+        assert_eq!(p.required_exposure(), WebExposure::Dom);
+        assert!(!p.needs.header_secret);
+
+        let p = parse_launch_profile(&proxy_profile()).unwrap();
+        assert_eq!(p.recipe_hash(), Some("sha256:3127e95d163a313a69003a2dd65dadd814492a8df9e2a37ec7694203638b166f"));
+        assert_eq!(p.required_exposure(), WebExposure::Proxy);
+        assert!(!p.needs.header_secret);
+
+        // An old source mapping (no `header_secret` key) reads as before,
+        // with the new key at its default.
+        let WebCredentialSource::Secret { fields, .. } = p.source else { panic!() };
+        assert_eq!(fields, SecretFieldMap::default());
+        assert_eq!(fields.header_secret, "header_secret");
+
+        // http-auth never releases one.
+        assert!(!parse_launch_profile(&http_auth_profile()).unwrap().needs.header_secret);
+    }
+
+    #[test]
+    fn an_injecting_profile_launches_at_exposure_proxy_with_a_header_secret() {
+        let p = parse_launch_profile(&injecting_profile()).unwrap();
+        assert!(p.proxied());
+        assert!(p.needs.header_secret && p.needs.password);
+        assert_eq!((p.required_exposure(), p.launched_exposure()), (WebExposure::Proxy, WebExposure::Proxy));
+        // The hash moves with the injection, so a host holding the old recipe
+        // is refused `recipe_hash_mismatch` rather than running without it.
+        assert_ne!(p.recipe_hash(), parse_launch_profile(&proxy_profile()).unwrap().recipe_hash());
+
+        // The key can be remapped like the other secret fields.
+        let mut v = injecting_profile();
+        v["credential_source"]["fields"] = json!({ "header_secret": "api_token" });
+        let WebCredentialSource::Secret { fields, .. } = parse_launch_profile(&v).unwrap().source else { panic!() };
+        assert_eq!(fields.header_secret, "api_token");
+        v["credential_source"]["fields"] = json!({ "header_secret": "a/b" });
+        assert_eq!(code(&v), "invalid_profile");
+    }
+
+    #[test]
+    fn header_injection_needs_a_secret_source() {
+        for cs in [
+            json!({ "kind": "default-account" }),
+            json!({ "kind": "ldap", "ldap_mount": "openldap", "bind_mode": "static_role", "static_role": "web" }),
+            json!({ "kind": "provider", "provider": "self-accounts" }),
+        ] {
+            let mut v = injecting_profile();
+            v["credential_source"] = cs.clone();
+            // The recipe fills a TOTP too; drop that step so the refusal is
+            // the header secret's.
+            v["web"]["recipe"]["steps"].as_array_mut().unwrap().truncate(1);
+            let e = parse_launch_profile(&v).unwrap_err();
+            assert_eq!(e.code, "credential_unavailable", "{cs}");
+        }
+        // Without the injection the same sources are fine for a proxy launch.
+        let mut v = proxy_profile();
+        v["web"]["recipe"]["steps"].as_array_mut().unwrap().truncate(1);
+        v["credential_source"] =
+            json!({ "kind": "ldap", "ldap_mount": "openldap", "bind_mode": "static_role", "static_role": "web" });
+        assert!(parse_launch_profile(&v).is_ok());
+    }
+
+    #[test]
+    fn an_injection_outside_the_profile_origins_is_refused_at_launch() {
+        let mut v = injecting_profile();
+        v["web"]["recipe"]["inject_headers"][0]["origin"] = json!("https://evil.example");
+        let e = parse_launch_profile(&v).unwrap_err();
+        assert_eq!(e.code, "invalid_recipe");
+        assert!(e.message.contains("inject_headers[0].origin"), "{}", e.message);
+        // An allowed origin is fine.
+        v["web"]["recipe"]["inject_headers"][0]["origin"] = json!("https://sso.example.com");
+        assert!(parse_launch_profile(&v).is_ok());
+        // So is the same host on another port only if that origin is listed.
+        v["web"]["recipe"]["inject_headers"][0]["origin"] = json!("https://fw01.example.com:8443");
+        assert_eq!(code(&v), "invalid_recipe");
     }
 
     #[test]

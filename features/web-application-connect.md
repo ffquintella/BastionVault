@@ -141,7 +141,9 @@ caveats*). Phase 6 was a spike, now done: proxy mode is a go on macOS 14+
 (run) and a conditional go on Windows and Linux (read from the sources, not
 run); see *Phase 6 spike findings*. Building proxy mode is tracked as T106,
 in progress: the recipe's `submit_target` (version 2) and `launch` at
-exposure `proxy` are done server-side, and the host wiring is done but opens
+exposure `proxy` are done server-side, header injection (recipe version 3,
+`inject_headers`, §10) is done on both sides and unit-tested, and the host
+wiring is done but opens
 proxy mode **only on macOS 14+ in the opt-in `web_proxy_mode` build — not
 yet run in a live session window**; Linux's WebKitGTK path has been run
 under Xvfb in a container, not through a Tauri window, and Linux and Windows
@@ -325,8 +327,9 @@ changes no lockfile entry.
 6. The bypass check, a `proxied` lock state in the toolbar, and audit lines
    for termination, substitution, refusal and scrubbing (origins only).
 7. A per-platform run of the spike's harness on Windows and Linux before
-   either is enabled; header injection afterwards; `make test-release`
-   before merging (secret handling).
+   either is enabled; header injection afterwards (built: recipe version 3,
+   §10 and *Phase 6* record the decisions); `make test-release` before
+   merging (secret handling).
 
 ### What Phase 5 shipped
 
@@ -1923,9 +1926,46 @@ Once S19 ships the SAML IdP and OIDC OP:
   the profile's `tls_pin_sha256` as the Phase 4 override through the same
   `decide`), so the Phase 5 lock state comes from the proxy's verdict.
 - Header injection (`Authorization`, StrongDM-style) is the same mechanism
-  without a placeholder. (Not built: which header, its value's format, the
-  requests it is added to and where a profile configures it are not decided
-  yet.)
+  without a placeholder in the page. **Decided and built (T106 step 7):**
+  - *Where it is configured:* the recipe, as **version 3** = version 2 plus
+    an optional `inject_headers` list (1–8 entries). The recipe rather than
+    a separate `web.*` key, because the recipe is the profile's versioned,
+    hash-bound part: the launch is bound to `recipe_hash`, so the headers the
+    host injects are the ones the server checked, and a server that predates
+    version 3 refuses the recipe instead of silently launching without them.
+    It needs a `submit_target`: there is a proxy only in proxy mode.
+  - *Which header and its value:* each entry has `name` (an HTTP token, at
+    most 64 bytes; never a hop-by-hop header, `Host`, `Content-Length` or
+    `Transfer-Encoding`), `format` — `bearer` (`Bearer <secret>`) or `literal`
+    (the secret as stored) — and a required scope, `origin` (a bare https
+    origin of the profile's set, parsed like `submit_target.origin`) and
+    `path_prefix` (the `submit_target.path` rules, plus no `.`/`..`
+    segment). Two entries setting one header on one origin for overlapping
+    prefixes are refused.
+  - *Which requests:* only requests the proxy terminates, on that origin
+    (host **and** port), whose path equals the prefix or continues it on a
+    `/` boundary (`/api` covers `/api/v1`, never `/apix`); a request path
+    with a dot segment, raw or `%2e`-encoded, is never covered. The proxy
+    adds the header or replaces the page's own value (the operator
+    configured it), and reports a replacement once per origin. It refuses —
+    rather than injects into — an upgrade on a covered path (the relayed
+    stream cannot be scrubbed) and a request whose `Host` is not the
+    terminated authority.
+  - *The value:* the profile's **header secret**, a separate key of a
+    `secret` source (`header_secret`, remappable through
+    `credential_source.fields.header_secret`) — not the password, so an API
+    token is never the sign-in password and the password is still dropped
+    when the sign-in ends. No other source has one (refused,
+    `credential_unavailable`). `launch` releases it at exposure `proxy`, the
+    host moves it into the proxy before the recipe runs, and the proxy holds
+    it, zeroizing, for the **session** (a re-run login replaces it,
+    teardown drops it). 8–8192 printable-ASCII bytes, no surrounding space:
+    it can never split a header line, and the scrub never rewrites ordinary
+    page text.
+  - *Scrub:* a covered request asks for `Accept-Encoding: identity`; its
+    response is buffered (8 MiB cap) and the secret scrubbed from the body
+    **and** the response header values, in every encoding the password scrub
+    knows. A compressed or oversized response is withheld (`502`).
 - As built (T106): the submit target is the recipe's `submit_target`
   (recipe version 2; *Phase 6* has the rules), and its presence is what
   makes a `form` launch proxy mode. The host refuses proxy mode where it has
@@ -2544,12 +2584,50 @@ See *Current State → Phase 6 spike findings*.
   run in a live window; Linux was run at the WebKitGTK level only, not
   through a Tauri window); Windows entirely (not built or run here: WebView2
   needs a Windows host); a macOS 13 launch check of a `web_proxy_mode` build
-  before the feature can be on by default; **header injection** (§10's one
-  line leaves the header, its value, its scope and where it is configured
-  open — a decision for the spec, not made here); a server-side integration
-  test of a proxy launch through the facade (`src/engine_tests/`); and
+  before the feature can be on by default; a server-side integration test
+  of a proxy launch through the facade (`src/engine_tests/`); and
   `make test-release` before merging. Ships per platform; visibly
   unavailable elsewhere.
+- **Done (T106 step 7 — header injection):** the decisions are in §10.
+  Server (`connect_web/recipe.rs`, `profile.rs`, `mod.rs`): recipe version 3
+  with `inject_headers`, strictly parsed by the shared parser (version check
+  first, unknown keys refused, every refusal at a JSON path, never the
+  value); `path_prefix_matches` is the one boundary rule the parser's
+  overlap check and the host's proxy both use; `SecretFieldMap` gains
+  `header_secret`; the launch releases it as `credential.header_secret`
+  in a proxy-mode bundle only, names it in `released=`, and its refusals
+  name the secret and key only. Old data: version-1 and version-2 recipes
+  and the profiles holding them load unchanged and keep their hashes (both
+  pinned against values computed outside the code); nothing is migrated.
+  Host (`session/web_proxy.rs`, `web_proxy_listener.rs`, `web_recipe.rs`,
+  `commands/connect_web.rs`): `HeaderInjector` holds the secret as a
+  `SessionSecret` and builds each value into a zeroizing `SecretBody`, which
+  backs the outgoing `HeaderValue` (`Bytes::from_owner`, marked sensitive);
+  `WebProxy::arm_headers` refuses an entry outside the termination scope at
+  launch; the bundle must carry the secret exactly when the plan injects
+  (`credential_missing` / `bundle_mismatch`). New host audit lines, origins
+  and fixed names only: `connect.web.proxy_header_injected` and
+  `connect.web.proxy_header_replaced` (once per origin per session),
+  `connect.web.proxy_header_refused` (`reason=proxy_header_upgrade`,
+  `proxy_header_host`, `proxy_header_value` or a `proxy_response_*` check);
+  `connect.web.proxy_started` gains `inject_headers=<count>`. GUI: the
+  recipe editor's proxy section edits `inject_headers` only where proxy mode
+  is available (the `web_proxy_mode_support` gate `submit_target` uses) and
+  only with a submit target; the credential editor offers the
+  `header_secret` key name when the recipe injects. **Verified:** unit
+  tests in the engine crate (format, refusals, hash pins, release, the
+  value never in an audit or error string) and in the GUI crate's proxy
+  tests against a local https upstream that echoes the header back (added
+  where absent, replaced where present, `/apix` and other out-of-scope
+  requests untouched, an upgrade or foreign `Host` refused, a compressed or
+  oversized echo withheld, the secret outliving the sign-in and dropped at
+  shutdown, the sign-in on a covered path carrying both secrets and
+  returning neither); `web_proxy_mode` builds type-check. **Not verified:**
+  any live session window (as for the rest of proxy mode), Windows, and
+  responses that must stream (Server-Sent Events or downloads over 8 MiB on
+  a covered path are withheld, not streamed — narrow the prefix).
+  Residual: hyper's and rustls's own write buffers hold transient copies of
+  the header that this code cannot zeroize, as for the substituted body.
 
 ### Phase 7 — `sso` mode — **Todo, blocked by T52 (S19); tracked as T107**
 

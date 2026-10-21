@@ -560,14 +560,31 @@ export interface WebRecipeSubmitTarget {
   body: "form" | "json";
 }
 
+/** One header the session proxy sets (recipe version 3, spec §10, T106
+ *  step 7). The value is the credential source secret's `header_secret` key;
+ *  the page never receives it. */
+export interface WebRecipeHeaderInjection {
+  /** An HTTP token, 1-64 bytes; never a hop-by-hop or framing header. */
+  name: string;
+  /** `bearer` sends `Bearer <secret>`; `literal` sends the secret as is. */
+  format: "bearer" | "literal";
+  /** A bare https origin of the profile's set. */
+  origin: string;
+  /** Requests under this path prefix (on a `/` boundary) carry the header. */
+  path_prefix: string;
+}
+
 /** The login recipe of a `form` profile (spec §2), as stored. Version 1, or
- *  version 2 when it carries a `submit_target` (proxy mode). The server and
+ *  version 2 when it carries a `submit_target` (proxy mode), or version 3
+ *  when it also carries `inject_headers`. The server and
  *  the desktop host parse it with the same strict parser; unknown keys are
  *  refused. */
 export interface WebLoginRecipe {
-  version: 1 | 2;
-  /** Version 2 only. */
+  version: 1 | 2 | 3;
+  /** Version 2 and later. */
   submit_target?: WebRecipeSubmitTarget;
+  /** Version 3 only; needs a `submit_target`. */
+  inject_headers?: WebRecipeHeaderInjection[];
   vendor?: string;
   /** Explicit steps, or `"auto"` for heuristic mode (policy-gated). */
   steps: WebRecipeStep[] | "auto";
@@ -636,8 +653,8 @@ export type CredentialSource =
       kind: "secret";
       secret_id: string;
       /** `form` web logins only: the secret's key names, when they differ
-       *  from `username` / `password` / `totp_seed`. */
-      fields?: { username?: string; password?: string; totp_seed?: string };
+       *  from `username` / `password` / `totp_seed` / `header_secret`. */
+      fields?: { username?: string; password?: string; totp_seed?: string; header_secret?: string };
       /** `form` web logins only: how the `totp_seed` (base32) turns into a
        *  code. Defaults SHA1 / 6 digits / 30 s. */
       totp?: { algorithm?: "SHA1" | "SHA256" | "SHA512"; digits?: 6 | 8; period?: 30 | 60 };

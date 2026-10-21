@@ -533,6 +533,14 @@ pub fn parse_web_profile(profile: &Value) -> Result<WebSessionConfig, String> {
                     proxy terminates https only"
             .to_string());
     }
+    // §10, as the server enforces it: an injected header's value is a
+    // `secret` source's header secret; no other source has one.
+    if source_kind != "secret" && matches!(&login, WebLogin::Form(f) if f.plan.injects_headers()) {
+        return Err(format!(
+            "credential source `{source_kind}` cannot supply the header secret the recipe's inject_headers sends; \
+             use a secret source"
+        ));
+    }
     let allow_downloads = opt_bool(web, "allow_downloads", false)?;
     let allow_popups = opt_bool(web, "allow_popups_same_origin_set", true)?;
 
@@ -1569,7 +1577,15 @@ mod tests {
     #[test]
     fn form_recipes_are_parsed_strictly_by_the_shared_parser() {
         for (bad, why) in [
-            (json!({ "version": 3, "steps": "auto", "success_when": { "url": "https://a.example/" } }), "version"),
+            // Version 3 is header injection's (T106 step 7); 4 is unknown.
+            (json!({ "version": 4, "steps": "auto", "success_when": { "url": "https://a.example/" } }), "version"),
+            (
+                json!({ "version": 2, "steps": "auto", "success_when": { "url": "https://a.example/" },
+                        "submit_target": { "origin": "https://fw01.example.com", "path": "/l", "body": "form" },
+                        "inject_headers": [ { "name": "Authorization", "format": "bearer",
+                                              "origin": "https://fw01.example.com", "path_prefix": "/api" } ] }),
+                "inject_headers needs version 3",
+            ),
             (
                 json!({ "version": 1, "steps": "auto", "success_when": { "url": "https://a.example/" },
                         "submit_target": { "origin": "https://fw01.example.com", "path": "/l", "body": "form" } }),
@@ -1614,6 +1630,31 @@ mod tests {
         insecure["web"]["allow_insecure_http"] = json!(true);
         let err = parse_web_profile(&insecure).unwrap_err();
         assert!(err.contains("proxy mode"), "{err}");
+    }
+
+    /// Header injection (T106 step 7): a version-3 recipe's `inject_headers`
+    /// reach the plan, and only a `secret` source can supply their value.
+    #[test]
+    fn an_injecting_recipe_plans_its_headers_and_needs_a_secret_source() {
+        let recipe = json!({ "version": 3,
+            "steps": [ { "when_url": "https://fw01.example.com/*", "actions": [
+                { "fill": "#u", "value": "username" }, { "fill": "#p", "value": "password" },
+                { "submit": "form" } ] } ],
+            "success_when": { "url": "https://fw01.example.com/ng/*" },
+            "submit_target": { "origin": "https://fw01.example.com", "path": "/logincheck", "body": "form" },
+            "inject_headers": [ { "name": "Authorization", "format": "bearer",
+                                  "origin": "https://fw01.example.com", "path_prefix": "/api" } ] });
+        let cfg = parse_web_profile(&form_profile(json!({ "kind": "secret" }), Some(recipe.clone()))).unwrap();
+        let WebLogin::Form(form) = &cfg.login else { panic!("not a form login") };
+        assert!(form.plan.is_proxied() && form.plan.injects_headers());
+        let h = &form.plan.inject_headers[0];
+        assert_eq!((h.name.as_str(), h.path_prefix.as_str()), ("authorization", "/api"));
+        assert_eq!(h.origin.to_string(), "https://fw01.example.com");
+
+        for kind in ["ldap", "default-account", "provider"] {
+            let err = parse_web_profile(&form_profile(json!({ "kind": kind }), Some(recipe.clone()))).unwrap_err();
+            assert!(err.contains("header secret"), "{kind}: {err}");
+        }
     }
 
     // ── http-auth mode ──────────────────────────────────────────────

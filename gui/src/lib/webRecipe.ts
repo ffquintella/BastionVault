@@ -1,6 +1,6 @@
 //! The web login recipe (features/web-application-connect.md §2; version 2
-//! adds proxy mode's `submit_target`, §10, T106), validated in the GUI the
-//! way the server validates it.
+//! adds proxy mode's `submit_target`, version 3 its `inject_headers`, §10,
+//! T106), validated in the GUI the way the server validates it.
 //!
 //! The authority is `WebLoginRecipe::parse`, `WebLoginRecipe::check_origins`,
 //! `origin_key` and `split_url` in
@@ -23,14 +23,37 @@
 //!   * `recipe_hash` (RFC 8785 canonicalisation) is computed by the host and
 //!     the server, not here; the dry run reports the hash it would carry.
 
-import type { WebLoginRecipe, WebRecipeSubmitTarget } from "./types";
+import type { WebLoginRecipe, WebRecipeHeaderInjection, WebRecipeSubmitTarget } from "./types";
 
 /** Versions the server reads. Version 2 = version 1 + optional
- *  `submit_target`. Writers use version 1 unless the recipe has one, so a
- *  recipe without proxy mode stays readable by servers that predate it. */
-export const RECIPE_VERSIONS = [1, 2] as const;
+ *  `submit_target`; version 3 = version 2 + optional `inject_headers`.
+ *  Writers use the lowest version that carries what the recipe holds, so a
+ *  recipe that does not need a newer feature stays readable by servers that
+ *  predate it. */
+export const RECIPE_VERSIONS = [1, 2, 3] as const;
 /** The first version that may carry `submit_target`. */
 export const SUBMIT_TARGET_VERSION = 2;
+/** The first version that may carry `inject_headers`. */
+export const INJECT_HEADERS_VERSION = 3;
+/** Upper bound on the number of `inject_headers` entries. */
+export const MAX_INJECT_HEADERS = 8;
+/** Upper bound on an injected header's name, in bytes. */
+export const MAX_HEADER_NAME_LEN = 64;
+/** Header names `inject_headers` may never set (compared lower-case):
+ *  hop-by-hop and message-framing headers. */
+export const FORBIDDEN_INJECTED_HEADERS = [
+  "connection",
+  "proxy-connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+  "host",
+  "content-length",
+] as const;
 export const MAX_SUBMIT_PATH_LEN = 1024;
 export const MAX_STEPS = 16;
 export const MAX_ACTIONS_PER_STEP = 32;
@@ -67,6 +90,7 @@ const TOP_LEVEL_KEYS_V1 = [
   "pause_for_operator",
 ] as const;
 const TOP_LEVEL_KEYS_V2 = [...TOP_LEVEL_KEYS_V1, "submit_target"] as const;
+const TOP_LEVEL_KEYS_V3 = [...TOP_LEVEL_KEYS_V2, "inject_headers"] as const;
 
 /** Why a recipe was refused. `at` is a location such as
  *  `steps[1].actions[0].value`, never the offending value. */
@@ -340,20 +364,120 @@ function submitPathError(p: string): string | null {
   return null;
 }
 
+/** recipe.rs `bare_https_origin`: a bare `https://host[:port]` origin (at
+ *  most one trailing `/`), as its normalised key. Shared by
+ *  `submit_target.origin` and `inject_headers[].origin`. */
+function bareHttpsOrigin(raw: unknown, at: string, required: string): string {
+  if (typeof raw !== "string") err(at, required);
+  const parts = splitUrl(raw);
+  if (typeof parts === "string") err(at, parts);
+  if (!(parts.rest === "" || parts.rest === "/")) err(at, "must be a bare origin (no path, query or fragment)");
+  if (parts.scheme !== "https") err(at, "must be https: proxy mode never sends the secret over plain http");
+  const key = originKey(parts.scheme, parts.authority, false);
+  if ("error" in key) err(at, key.error);
+  return key.origin;
+}
+
+/** recipe.rs `is_dot_segment`: a `.` or `..` path segment, raw or
+ *  percent-encoded (`%2e`, any case). */
+function isDotSegment(segment: string): boolean {
+  return [".", "..", "%2e", "%2e%2e", ".%2e", "%2e."].includes(segment.toLowerCase());
+}
+
+/** recipe.rs `path_prefix`: the submit path's rules plus no dot segment. */
+function pathPrefixError(p: string): string | null {
+  const e = submitPathError(p);
+  if (e) return e;
+  if (p.split("/").some(isDotSegment)) return "must not contain a `.` or `..` segment";
+  return null;
+}
+
+/**
+ * recipe.rs `path_prefix_matches`: whether request path `path` (no query) is
+ * inside `prefix`'s scope. The path equals the prefix, or starts with it on a
+ * `/` boundary (the prefix ends with `/`, or the path continues with `/`), so
+ * `/api` covers `/api`, `/api/` and `/api/v1`, never `/apix`; `/` covers every
+ * path. A path holding a dot segment is never inside any scope.
+ */
+export function pathPrefixMatches(prefix: string, path: string): boolean {
+  if (!path.startsWith("/") || path.split("/").some(isDotSegment)) return false;
+  if (!path.startsWith(prefix)) return false;
+  const rest = path.slice(prefix.length);
+  return rest === "" || prefix.endsWith("/") || rest.startsWith("/");
+}
+
+/** RFC 9110 §5.6.2 `tchar` run (a header name is a token). */
+const TOKEN = /^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$/;
+
+/** recipe.rs `header_name`. Returns the lower-cased name. */
+function headerName(v: unknown, at: string): string {
+  if (typeof v !== "string") err(at, "is required: the HTTP header name to set");
+  const len = utf8Len(v);
+  if (len === 0 || len > MAX_HEADER_NAME_LEN) err(at, `must be 1..=${MAX_HEADER_NAME_LEN} bytes`);
+  if (!TOKEN.test(v)) err(at, "must be an HTTP token (letters, digits and !#$%&'*+-.^_`|~)");
+  const lower = v.toLowerCase();
+  if ((FORBIDDEN_INJECTED_HEADERS as readonly string[]).includes(lower)) {
+    err(
+      at,
+      "names a hop-by-hop or message-framing header (Connection, Host, Content-Length, Transfer-Encoding, …), " +
+        "which the proxy never sets",
+    );
+  }
+  return lower;
+}
+
+/** recipe.rs `header_injection`; returns the normalised entry used for the overlap check. */
+function headerInjection(v: unknown, at: string): { name: string; origin: string; prefix: string } {
+  if (!isObj(v)) err(at, "must be an object with `name`, `format`, `origin` and `path_prefix`");
+  rejectUnknown(v, at, ["name", "format", "origin", "path_prefix"]);
+  const name = headerName(get(v, "name"), join(at, "name"));
+  const format = get(v, "format");
+  if (format !== "bearer" && format !== "literal") {
+    err(join(at, "format"), "must be `bearer` (`Bearer <secret>`) or `literal` (the secret as it is stored)");
+  }
+  const origin = bareHttpsOrigin(
+    get(v, "origin"),
+    join(at, "origin"),
+    "is required: the https origin whose requests carry the header",
+  );
+  const prefixAt = join(at, "path_prefix");
+  const prefix = get(v, "path_prefix");
+  if (typeof prefix !== "string") {
+    err(prefixAt, "is required: the path prefix whose requests carry the header (`/` for all)");
+  }
+  const pathError = pathPrefixError(prefix);
+  if (pathError) err(prefixAt, pathError);
+  return { name, origin, prefix };
+}
+
+/** recipe.rs `inject_headers`. */
+function injectHeaders(v: unknown): void {
+  const at = "inject_headers";
+  if (!Array.isArray(v)) err(at, "must be an array of header injections");
+  if (v.length === 0 || v.length > MAX_INJECT_HEADERS) err(at, `must hold 1..=${MAX_INJECT_HEADERS} entries`);
+  const entries = v.map((e, i) => headerInjection(e, `${at}[${i}]`));
+  // The same header on the same origin for overlapping paths would leave
+  // which value wins to the proxy's order; refused. Two scopes overlap
+  // exactly when one prefix lies inside the other's scope.
+  entries.forEach((b, j) => {
+    entries.slice(0, j).forEach((a, i) => {
+      if (
+        a.name === b.name &&
+        a.origin === b.origin &&
+        (pathPrefixMatches(a.prefix, b.prefix) || pathPrefixMatches(b.prefix, a.prefix))
+      ) {
+        err(`${at}[${j}]`, `overlaps ${at}[${i}]: the same header on the same origin for overlapping paths`);
+      }
+    });
+  });
+}
+
 /** recipe.rs `submit_target`, same checks in the same order. */
 function submitTarget(v: unknown): void {
   const at = "submit_target";
   if (!isObj(v)) err(at, "must be an object with `origin`, `path` and `body`");
   rejectUnknown(v, at, ["origin", "path", "body"]);
-  const originAt = join(at, "origin");
-  const raw = get(v, "origin");
-  if (typeof raw !== "string") err(originAt, "is required: the https origin the sign-in form posts to");
-  const parts = splitUrl(raw);
-  if (typeof parts === "string") err(originAt, parts);
-  if (!(parts.rest === "" || parts.rest === "/")) err(originAt, "must be a bare origin (no path, query or fragment)");
-  if (parts.scheme !== "https") err(originAt, "must be https: proxy mode never sends the secret over plain http");
-  const key = originKey(parts.scheme, parts.authority, false);
-  if ("error" in key) err(originAt, key.error);
+  bareHttpsOrigin(get(v, "origin"), join(at, "origin"), "is required: the https origin the sign-in form posts to");
   const pathAt = join(at, "path");
   const path = get(v, "path");
   if (typeof path !== "string") err(pathAt, "is required: the exact path the sign-in form posts to");
@@ -372,7 +496,7 @@ function parseOrThrow(value: unknown): WebLoginRecipe {
   const version = asU64(get(value, "version"));
   if (version === null) err("version", "is required and must be an integer");
   if (!(RECIPE_VERSIONS as readonly number[]).includes(version)) {
-    err("version", `recipe version ${version} is not supported; this server understands versions 1 and 2`);
+    err("version", `recipe version ${version} is not supported; this server understands versions 1, 2 and 3`);
   }
   if (version < SUBMIT_TARGET_VERSION && has(value, "submit_target")) {
     err(
@@ -380,7 +504,21 @@ function parseOrThrow(value: unknown): WebLoginRecipe {
       `needs recipe version ${SUBMIT_TARGET_VERSION} (proxy mode); this recipe is version ${version}`,
     );
   }
-  rejectUnknown(value, "", version >= SUBMIT_TARGET_VERSION ? TOP_LEVEL_KEYS_V2 : TOP_LEVEL_KEYS_V1);
+  if (version < INJECT_HEADERS_VERSION && has(value, "inject_headers")) {
+    err(
+      "inject_headers",
+      `needs recipe version ${INJECT_HEADERS_VERSION} (proxy mode header injection); this recipe is version ${version}`,
+    );
+  }
+  rejectUnknown(
+    value,
+    "",
+    version >= INJECT_HEADERS_VERSION
+      ? TOP_LEVEL_KEYS_V3
+      : version >= SUBMIT_TARGET_VERSION
+        ? TOP_LEVEL_KEYS_V2
+        : TOP_LEVEL_KEYS_V1,
+  );
 
   if (has(value, "vendor")) {
     const vendor = get(value, "vendor");
@@ -420,15 +558,20 @@ function parseOrThrow(value: unknown): WebLoginRecipe {
     });
   }
 
-  if (has(value, "submit_target")) {
-    submitTarget(get(value, "submit_target"));
-    // Proxy mode substitutes the password and nothing else.
-    if (!recipeNeeds(value as unknown as WebLoginRecipe).password) {
-      err(
-        "submit_target",
-        "proxy mode substitutes the password, so the recipe must fill `password` in one of its steps",
-      );
-    }
+  // Both are read before either is cross-checked, as `parse` does.
+  if (has(value, "submit_target")) submitTarget(get(value, "submit_target"));
+  if (has(value, "inject_headers")) injectHeaders(get(value, "inject_headers"));
+  // Proxy mode substitutes the password and nothing else.
+  if (has(value, "submit_target") && !recipeNeeds(value as unknown as WebLoginRecipe).password) {
+    err(
+      "submit_target",
+      "proxy mode substitutes the password, so the recipe must fill `password` in one of its steps",
+    );
+  }
+  // Only the session proxy can inject a header, and there is one only in
+  // proxy mode: refused rather than ignored.
+  if (has(value, "inject_headers") && !has(value, "submit_target")) {
+    err("inject_headers", "header injection runs only in proxy mode: the recipe needs a `submit_target`");
   }
   return value as unknown as WebLoginRecipe;
 }
@@ -440,13 +583,39 @@ export function isProxiedRecipe(recipe: { submit_target?: unknown } | null | und
   return recipe?.submit_target !== undefined;
 }
 
+/** The lowest version that can carry what the recipe holds: 3 with
+ *  `inject_headers`, 2 with only a `submit_target`, else 1. */
+function lowestVersion(recipe: { submit_target?: unknown; inject_headers?: unknown }): 1 | 2 | 3 {
+  if (recipe.inject_headers !== undefined) return INJECT_HEADERS_VERSION;
+  return recipe.submit_target !== undefined ? SUBMIT_TARGET_VERSION : 1;
+}
+
 /** Add, change or remove a recipe's `submit_target`, keeping the version the
- *  lowest that can carry the result: 2 with a target, 1 without (so a recipe
- *  that does not use proxy mode stays readable by older servers). */
+ *  lowest that can carry the result (so a recipe that does not use proxy mode
+ *  stays readable by older servers). Header injection runs only in proxy
+ *  mode, so removing the target drops `inject_headers` too; changing the
+ *  target keeps them. */
 export function withSubmitTarget(recipe: WebLoginRecipe, target: WebRecipeSubmitTarget | undefined): WebLoginRecipe {
-  const { submit_target: _old, ...rest } = recipe;
+  const { submit_target: _old, inject_headers: oldHeaders, ...rest } = recipe;
   void _old;
-  return target === undefined ? { ...rest, version: 1 } : { ...rest, version: SUBMIT_TARGET_VERSION, submit_target: target };
+  if (target === undefined) return { ...rest, version: 1 };
+  const next: WebLoginRecipe = { ...rest, version: 2, submit_target: target };
+  if (oldHeaders !== undefined) next.inject_headers = oldHeaders;
+  return { ...next, version: lowestVersion(next) };
+}
+
+/** Set or clear a recipe's `inject_headers`. An empty or absent list removes
+ *  the key (version 2 with a `submit_target`, else 1); a non-empty one needs
+ *  version 3. */
+export function withInjectHeaders(
+  recipe: WebLoginRecipe,
+  list: WebRecipeHeaderInjection[] | undefined,
+): WebLoginRecipe {
+  const { inject_headers: _old, ...rest } = recipe;
+  void _old;
+  if (list === undefined || list.length === 0) return { ...rest, version: lowestVersion(rest) };
+  const next: WebLoginRecipe = { ...rest, version: INJECT_HEADERS_VERSION, inject_headers: list };
+  return next;
 }
 
 /** Strictly validate a recipe value, exactly as `WebLoginRecipe::parse` does.
@@ -483,6 +652,13 @@ function recipeUrls(recipe: WebLoginRecipe): { at: string; url: string }[] {
   return out;
 }
 
+/** Whether a bare https origin (as validated) normalises into `origins`. */
+function originInSet(origin: string, origins: readonly string[]): boolean {
+  const parts = splitUrl(origin);
+  const key = typeof parts === "string" ? null : originKey(parts.scheme, parts.authority, false);
+  return key !== null && !("error" in key) && origins.includes(key.origin);
+}
+
 /**
  * Spec §2 / `check_origins`: every URL the recipe matches on must sit on an
  * origin of the profile's set, over https unless the profile allows plain
@@ -503,12 +679,18 @@ export function checkRecipeOrigins(
       return { at, reason: "its origin is not the start URL's origin or one of allowed_origins" };
     }
   }
-  if (recipe.submit_target !== undefined) {
-    const parts = splitUrl(recipe.submit_target.origin);
-    const key = typeof parts === "string" ? null : originKey(parts.scheme, parts.authority, false);
-    if (key === null || "error" in key || !origins.includes(key.origin)) {
+  if (recipe.submit_target !== undefined && !originInSet(recipe.submit_target.origin, origins)) {
+    return {
+      at: "submit_target.origin",
+      reason: "is not the start URL's origin or one of allowed_origins; the proxy terminates only those",
+    };
+  }
+  // An injection outside the proxy's termination scope is refused, never
+  // silently skipped.
+  for (const [i, h] of (recipe.inject_headers ?? []).entries()) {
+    if (!originInSet(h.origin, origins)) {
       return {
-        at: "submit_target.origin",
+        at: `inject_headers[${i}].origin`,
         reason: "is not the start URL's origin or one of allowed_origins; the proxy terminates only those",
       };
     }

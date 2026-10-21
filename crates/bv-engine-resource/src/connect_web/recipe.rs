@@ -25,6 +25,16 @@
 //! `submit_target` on a version-1 recipe is refused, never ignored. A server
 //! that only knows version 1 refuses a version-2 recipe outright, so a proxy
 //! recipe can never be run as a plain `form` one by an older server.
+//!
+//! Version 3 is version 2 plus one optional key, `inject_headers` (proxy
+//! mode header injection, §10, T106 step 7): headers the session proxy adds
+//! to — or replaces in — the requests it terminates for a named https origin
+//! and path prefix, their value the profile's header secret. It needs a
+//! `submit_target` (header injection runs only in proxy mode). Versions 1
+//! and 2 are read exactly as before and keep their hashes; `inject_headers`
+//! on a version-1 or version-2 recipe is refused, never ignored, and a
+//! server that knows only versions 1 and 2 refuses a version-3 recipe, so an
+//! injecting recipe is never run by a proxy that would not inject.
 
 use std::fmt;
 
@@ -32,15 +42,44 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 /// The recipe versions this server understands.
-pub const RECIPE_VERSIONS: &[u64] = &[1, 2];
+pub const RECIPE_VERSIONS: &[u64] = &[1, 2, 3];
 /// The newest version. Writers use the lowest version that can carry what a
-/// recipe holds (version 1 unless it has a `submit_target`), so a recipe that
-/// does not need proxy mode stays readable by servers that predate it.
-pub const LATEST_RECIPE_VERSION: u64 = 2;
+/// recipe holds (version 1 unless it has a `submit_target`, version 2 unless
+/// it has `inject_headers`), so a recipe that does not need a newer feature
+/// stays readable by servers that predate it.
+pub const LATEST_RECIPE_VERSION: u64 = 3;
 /// The first version that may carry `submit_target`.
 pub const SUBMIT_TARGET_VERSION: u64 = 2;
-/// Upper bound on `submit_target.path`.
+/// The first version that may carry `inject_headers`.
+pub const INJECT_HEADERS_VERSION: u64 = 3;
+/// Upper bound on `submit_target.path` and `inject_headers[].path_prefix`.
 pub const MAX_SUBMIT_PATH_LEN: usize = 1024;
+/// Upper bound on the number of `inject_headers` entries.
+pub const MAX_INJECT_HEADERS: usize = 8;
+/// Upper bound on an injected header's name.
+pub const MAX_HEADER_NAME_LEN: usize = 64;
+/// Bounds on the header secret (the value `inject_headers` sends), in bytes.
+/// The lower bound keeps the response scrub — which replaces every copy of
+/// the secret in an injected request's response — from rewriting ordinary
+/// page text; the upper bound is far above any real token.
+pub const MIN_HEADER_SECRET_LEN: usize = 8;
+pub const MAX_HEADER_SECRET_LEN: usize = 8192;
+/// Header names `inject_headers` may never set (compared lower-case): the
+/// hop-by-hop headers of RFC 9110 §7.6.1, which the proxy strips, and the
+/// ones that frame or route the message, which the proxy owns.
+pub const FORBIDDEN_INJECTED_HEADERS: &[&str] = &[
+    "connection",
+    "proxy-connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+    "host",
+    "content-length",
+];
 pub const MAX_STEPS: usize = 16;
 pub const MAX_ACTIONS_PER_STEP: usize = 32;
 pub const MAX_SELECTOR_LEN: usize = 512;
@@ -69,6 +108,17 @@ const TOP_LEVEL_KEYS_V2: &[&str] = &[
     "timeout_secs",
     "pause_for_operator",
     "submit_target",
+];
+const TOP_LEVEL_KEYS_V3: &[&str] = &[
+    "version",
+    "vendor",
+    "steps",
+    "success_when",
+    "failure_when",
+    "timeout_secs",
+    "pause_for_operator",
+    "submit_target",
+    "inject_headers",
 ];
 
 /// What a `fill` action writes into a field.
@@ -161,6 +211,38 @@ pub struct SubmitTarget {
     pub body: SubmitBody,
 }
 
+/// How an injected header's value is built from the header secret.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeaderFormat {
+    /// `Bearer <secret>` (RFC 6750 §2.1).
+    Bearer,
+    /// The secret as it is stored.
+    Literal,
+}
+
+impl HeaderFormat {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Bearer => "bearer",
+            Self::Literal => "literal",
+        }
+    }
+}
+
+/// One `inject_headers` entry (recipe version 3): the session proxy sets
+/// `name` on every request it terminates for `origin` whose path is inside
+/// `path_prefix` ([`path_prefix_matches`]), replacing a value the page sent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeaderInjection {
+    /// Lower-cased HTTP token; never a hop-by-hop or framing header.
+    pub name: String,
+    pub format: HeaderFormat,
+    /// Normalised https origin key, like `SubmitTarget::origin`.
+    pub origin: String,
+    /// Absolute path prefix, matched on `/` boundaries.
+    pub path_prefix: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebLoginRecipe {
     pub version: u64,
@@ -170,8 +252,11 @@ pub struct WebLoginRecipe {
     pub failure_when: Option<RecipeCondition>,
     pub timeout_secs: u64,
     pub pause_for_operator: Vec<PauseReason>,
-    /// Version 2 only: proxy mode's sign-in request.
+    /// Version 2 and later: proxy mode's sign-in request.
     pub submit_target: Option<SubmitTarget>,
+    /// Version 3 only: headers the session proxy injects. Empty when absent;
+    /// never empty when present (a present key holds 1.. entries).
+    pub inject_headers: Vec<HeaderInjection>,
 }
 
 /// Which parts of a credential a recipe consumes. The launch releases nothing
@@ -189,6 +274,10 @@ pub struct RecipeNeeds {
     pub totp_steps: Vec<u32>,
     /// Number of steps (`1` for heuristic mode).
     pub step_count: u32,
+    /// The recipe injects headers (`inject_headers`), so the launch releases
+    /// the header secret — always required, heuristic mode or not, because
+    /// the operator configured it explicitly.
+    pub header_secret: bool,
 }
 
 /// Why a recipe was refused. `at` is a JSON-path-like location
@@ -441,24 +530,174 @@ fn submit_path(p: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// A bare `https://host[:port]` origin (at most one trailing `/`), as its
+/// normalised key. Shared by `submit_target.origin` and
+/// `inject_headers[].origin`: both name an origin the proxy terminates, and
+/// proxy mode never puts the secret on plain http.
+fn bare_https_origin(v: Option<&Value>, at: &str, required: &str) -> Result<String, RecipeError> {
+    let raw = v.and_then(Value::as_str).ok_or_else(|| err(at, required))?;
+    let (scheme, authority, rest) = split_url(raw).map_err(|r| err(at, r))?;
+    if !(rest.is_empty() || rest == "/") {
+        return Err(err(at, "must be a bare origin (no path, query or fragment)"));
+    }
+    if scheme != "https" {
+        return Err(err(at, "must be https: proxy mode never sends the secret over plain http"));
+    }
+    origin_key(scheme, authority, false).map_err(|r| err(at, r))
+}
+
+/// A `.` or `..` path segment, raw or percent-encoded (`%2e`, any case) —
+/// what the WHATWG URL parser treats as a dot segment. A browser removes
+/// them before it sends a request, so a request path holding one did not come
+/// from a normal navigation or fetch.
+fn is_dot_segment(segment: &str) -> bool {
+    matches!(segment.to_ascii_lowercase().as_str(), "." | ".." | "%2e" | "%2e%2e" | ".%2e" | "%2e.")
+}
+
+/// `inject_headers[].path_prefix`: the submit path's rules (printable ASCII,
+/// absolute, no query, fragment, `*` or `\`), plus no dot segment — a prefix
+/// holding one could never match a request [`path_prefix_matches`] accepts.
+fn path_prefix(p: &str) -> Result<(), String> {
+    submit_path(p)?;
+    if p.split('/').any(is_dot_segment) {
+        return Err("must not contain a `.` or `..` segment".into());
+    }
+    Ok(())
+}
+
+/// Whether request path `path` (no query) is inside `prefix`'s scope: the
+/// path equals the prefix, or starts with it **on a `/` boundary** — the
+/// prefix ends with `/`, or the path continues with `/`. So `/api` covers
+/// `/api`, `/api/` and `/api/v1`, never `/apix`; `/` covers every path. A
+/// path holding a dot segment ([`is_dot_segment`]) is never inside any
+/// scope, so `/api/../admin` cannot be steered into (or out of) one.
+///
+/// The session proxy matches requests with this function; the parser's
+/// overlap check uses it too, so the two can never disagree.
+pub fn path_prefix_matches(prefix: &str, path: &str) -> bool {
+    if !path.starts_with('/') || path.split('/').any(is_dot_segment) {
+        return false;
+    }
+    match path.strip_prefix(prefix) {
+        None => false,
+        Some(rest) => rest.is_empty() || prefix.ends_with('/') || rest.starts_with('/'),
+    }
+}
+
+/// RFC 9110 §5.6.2 `tchar`.
+fn is_tchar(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)
+}
+
+/// The header secret as `inject_headers` sends it: what a launch refuses to
+/// release, and what the host refuses to arm, when it does not hold. Printable
+/// ASCII (space included, no control character — so it can never split a
+/// header line), no surrounding space (HTTP would trim it, sending another
+/// value), and [`MIN_HEADER_SECRET_LEN`]`..=`[`MAX_HEADER_SECRET_LEN`] bytes.
+/// The error is fixed text: it never carries the value.
+pub fn check_header_secret(secret: &str) -> Result<(), &'static str> {
+    if !(MIN_HEADER_SECRET_LEN..=MAX_HEADER_SECRET_LEN).contains(&secret.len()) {
+        return Err("the header secret must be 8..=8192 bytes long");
+    }
+    if !secret.bytes().all(|b| (0x20..=0x7e).contains(&b)) {
+        return Err("the header secret must be printable ASCII with no control characters");
+    }
+    if secret.starts_with(' ') || secret.ends_with(' ') {
+        return Err("the header secret must not start or end with a space");
+    }
+    Ok(())
+}
+
+fn header_name(v: Option<&Value>, at: &str) -> Result<String, RecipeError> {
+    let name = v.and_then(Value::as_str).ok_or_else(|| err(at, "is required: the HTTP header name to set"))?;
+    if name.is_empty() || name.len() > MAX_HEADER_NAME_LEN {
+        return Err(err(at, format!("must be 1..={MAX_HEADER_NAME_LEN} bytes")));
+    }
+    if !name.bytes().all(is_tchar) {
+        return Err(err(at, "must be an HTTP token (letters, digits and !#$%&'*+-.^_`|~)"));
+    }
+    let lower = name.to_ascii_lowercase();
+    if FORBIDDEN_INJECTED_HEADERS.contains(&lower.as_str()) {
+        return Err(err(
+            at,
+            "names a hop-by-hop or message-framing header (Connection, Host, Content-Length, Transfer-Encoding, …), \
+             which the proxy never sets",
+        ));
+    }
+    Ok(lower)
+}
+
+fn header_injection(v: &Value, at: &str) -> Result<HeaderInjection, RecipeError> {
+    let obj =
+        v.as_object().ok_or_else(|| err(at, "must be an object with `name`, `format`, `origin` and `path_prefix`"))?;
+    reject_unknown(obj, at, &["name", "format", "origin", "path_prefix"])?;
+    let name = header_name(obj.get("name"), &join(at, "name"))?;
+    let format = match obj.get("format").and_then(Value::as_str) {
+        Some("bearer") => HeaderFormat::Bearer,
+        Some("literal") => HeaderFormat::Literal,
+        _ => {
+            return Err(err(
+                join(at, "format"),
+                "must be `bearer` (`Bearer <secret>`) or `literal` (the secret as it is stored)",
+            ))
+        }
+    };
+    let origin = bare_https_origin(
+        obj.get("origin"),
+        &join(at, "origin"),
+        "is required: the https origin whose requests carry the header",
+    )?;
+    let prefix_at = join(at, "path_prefix");
+    let prefix = obj
+        .get("path_prefix")
+        .and_then(Value::as_str)
+        .ok_or_else(|| err(&prefix_at, "is required: the path prefix whose requests carry the header (`/` for all)"))?;
+    path_prefix(prefix).map_err(|r| err(&prefix_at, r))?;
+    Ok(HeaderInjection { name, format, origin, path_prefix: prefix.to_string() })
+}
+
+fn inject_headers(v: &Value) -> Result<Vec<HeaderInjection>, RecipeError> {
+    let at = "inject_headers";
+    let list = v.as_array().ok_or_else(|| err(at, "must be an array of header injections"))?;
+    if list.is_empty() || list.len() > MAX_INJECT_HEADERS {
+        return Err(err(at, format!("must hold 1..={MAX_INJECT_HEADERS} entries")));
+    }
+    let entries = list
+        .iter()
+        .enumerate()
+        .map(|(i, e)| header_injection(e, &format!("{at}[{i}]")))
+        .collect::<Result<Vec<_>, _>>()?;
+    // Two entries setting one header on one origin for overlapping paths
+    // would leave which value wins to the order the proxy applies them in;
+    // refused instead. Two scopes overlap exactly when one prefix lies inside
+    // the other's scope.
+    for (j, b) in entries.iter().enumerate() {
+        for (i, a) in entries[..j].iter().enumerate() {
+            if a.name == b.name
+                && a.origin == b.origin
+                && (path_prefix_matches(&a.path_prefix, &b.path_prefix)
+                    || path_prefix_matches(&b.path_prefix, &a.path_prefix))
+            {
+                return Err(err(
+                    format!("{at}[{j}]"),
+                    format!("overlaps {at}[{i}]: the same header on the same origin for overlapping paths"),
+                ));
+            }
+        }
+    }
+    Ok(entries)
+}
+
 fn submit_target(v: &Value) -> Result<SubmitTarget, RecipeError> {
     let at = "submit_target";
     let obj = v.as_object().ok_or_else(|| err(at, "must be an object with `origin`, `path` and `body`"))?;
     reject_unknown(obj, at, &["origin", "path", "body"])?;
 
-    let origin_at = join(at, "origin");
-    let raw = obj
-        .get("origin")
-        .and_then(Value::as_str)
-        .ok_or_else(|| err(&origin_at, "is required: the https origin the sign-in form posts to"))?;
-    let (scheme, authority, rest) = split_url(raw).map_err(|r| err(&origin_at, r))?;
-    if !(rest.is_empty() || rest == "/") {
-        return Err(err(&origin_at, "must be a bare origin (no path, query or fragment)"));
-    }
-    if scheme != "https" {
-        return Err(err(&origin_at, "must be https: proxy mode never sends the secret over plain http"));
-    }
-    let origin = origin_key(scheme, authority, false).map_err(|r| err(&origin_at, r))?;
+    let origin = bare_https_origin(
+        obj.get("origin"),
+        &join(at, "origin"),
+        "is required: the https origin the sign-in form posts to",
+    )?;
 
     let path_at = join(at, "path");
     let path = obj
@@ -514,7 +753,7 @@ impl WebLoginRecipe {
         if !RECIPE_VERSIONS.contains(&version) {
             return Err(err(
                 "version",
-                format!("recipe version {version} is not supported; this server understands versions 1 and 2"),
+                format!("recipe version {version} is not supported; this server understands versions 1, 2 and 3"),
             ));
         }
         if version < SUBMIT_TARGET_VERSION && obj.contains_key("submit_target") {
@@ -525,7 +764,21 @@ impl WebLoginRecipe {
                 format!("needs recipe version {SUBMIT_TARGET_VERSION} (proxy mode); this recipe is version {version}"),
             ));
         }
-        reject_unknown(obj, "", if version >= SUBMIT_TARGET_VERSION { TOP_LEVEL_KEYS_V2 } else { TOP_LEVEL_KEYS_V1 })?;
+        if version < INJECT_HEADERS_VERSION && obj.contains_key("inject_headers") {
+            return Err(err(
+                "inject_headers",
+                format!(
+                    "needs recipe version {INJECT_HEADERS_VERSION} (proxy mode header injection); this recipe is \
+                     version {version}"
+                ),
+            ));
+        }
+        let keys = match version {
+            v if v >= INJECT_HEADERS_VERSION => TOP_LEVEL_KEYS_V3,
+            v if v >= SUBMIT_TARGET_VERSION => TOP_LEVEL_KEYS_V2,
+            _ => TOP_LEVEL_KEYS_V1,
+        };
+        reject_unknown(obj, "", keys)?;
 
         let vendor = match obj.get("vendor") {
             None => None,
@@ -582,6 +835,10 @@ impl WebLoginRecipe {
             None => None,
             Some(v) => Some(submit_target(v)?),
         };
+        let inject_headers = match obj.get("inject_headers") {
+            None => Vec::new(),
+            Some(v) => inject_headers(v)?,
+        };
 
         let recipe = Self {
             version,
@@ -592,6 +849,7 @@ impl WebLoginRecipe {
             timeout_secs,
             pause_for_operator,
             submit_target,
+            inject_headers,
         };
         // Proxy mode substitutes the password and nothing else, so a recipe
         // that never fills one has nothing for the proxy to do; refusing it
@@ -602,6 +860,15 @@ impl WebLoginRecipe {
             return Err(err(
                 "submit_target",
                 "proxy mode substitutes the password, so the recipe must fill `password` in one of its steps",
+            ));
+        }
+        // Only the session proxy can inject a header, and there is one only
+        // in proxy mode. Refused rather than ignored: a recipe that names
+        // headers must never launch as a fill that sends none.
+        if !recipe.inject_headers.is_empty() && recipe.submit_target.is_none() {
+            return Err(err(
+                "inject_headers",
+                "header injection runs only in proxy mode: the recipe needs a `submit_target`",
             ));
         }
         Ok(recipe)
@@ -617,6 +884,7 @@ impl WebLoginRecipe {
                 totp: true,
                 totp_steps: vec![0],
                 step_count: 1,
+                header_secret: !self.inject_headers.is_empty(),
             },
             RecipeSteps::Explicit(steps) => {
                 let mut needs = RecipeNeeds {
@@ -626,6 +894,7 @@ impl WebLoginRecipe {
                     totp: false,
                     totp_steps: Vec::new(),
                     step_count: steps.len() as u32,
+                    header_secret: !self.inject_headers.is_empty(),
                 };
                 for (i, s) in steps.iter().enumerate() {
                     let mut step_fills_totp = false;
@@ -681,7 +950,23 @@ impl WebLoginRecipe {
                 ));
             }
         }
+        // §10, T106 step 7: an injection outside the proxy's termination
+        // scope is refused at launch, never silently skipped.
+        for (i, h) in self.inject_headers.iter().enumerate() {
+            if !origins.contains(&h.origin) {
+                return Err(err(
+                    format!("inject_headers[{i}].origin"),
+                    "is not the start URL's origin or one of allowed_origins; the proxy terminates only those",
+                ));
+            }
+        }
         Ok(())
+    }
+
+    /// Proxy mode header injection (§10): the recipe names headers the
+    /// session proxy sets, so the launch releases the header secret.
+    pub fn injects_headers(&self) -> bool {
+        !self.inject_headers.is_empty()
     }
 
     /// Proxy mode (§10): the recipe names the sign-in request the host-local
@@ -811,8 +1096,9 @@ mod tests {
 
     #[test]
     fn unknown_versions_and_fields_are_refused() {
+        // Version 3 is header injection's (T106 step 7); 4 is unknown.
         let mut v = fortigate();
-        v["version"] = json!(3);
+        v["version"] = json!(4);
         assert_eq!(WebLoginRecipe::parse(&v).unwrap_err().at, "version");
 
         let mut v = fortigate();
@@ -1119,6 +1405,289 @@ mod tests {
         );
         let both = vec!["https://fw01.example.com".to_string(), "https://sso.example.com".to_string()];
         assert!(r.check_origins(&both, false).is_ok());
+    }
+
+    // ── version 3: inject_headers (T106 step 7) ─────────────────────
+
+    fn injecting() -> Value {
+        let mut v = proxied();
+        v["version"] = json!(3);
+        v["inject_headers"] = json!([
+            { "name": "Authorization", "format": "bearer", "origin": "https://FW01.example.com:443/",
+              "path_prefix": "/api" },
+            { "name": "X-Api-Key", "format": "literal", "origin": "https://fw01.example.com", "path_prefix": "/" }
+        ]);
+        v
+    }
+
+    /// Old data: a version-2 recipe stored before header injection existed
+    /// parses as before and keeps the exact hash `launch` binds it to. The
+    /// pinned value was computed outside this code (canonical JSON, SHA-256),
+    /// the same way the version-1 pin above reproduces.
+    #[test]
+    fn a_version_2_recipe_is_read_as_before_and_keeps_its_hash() {
+        let r = WebLoginRecipe::parse(&proxied()).unwrap();
+        assert_eq!(r.version, 2);
+        assert!(r.is_proxied() && !r.injects_headers());
+        assert!(r.inject_headers.is_empty());
+        assert!(!r.needs().header_secret);
+        assert_eq!(
+            recipe_hash(&proxied()).unwrap(),
+            "sha256:064be67411cd7184f92ee52dc87430dedd12ea30bc8bec26a11f480a1474996e"
+        );
+        // And version 1 releases no header secret either.
+        assert!(!WebLoginRecipe::parse(&fortigate()).unwrap().needs().header_secret);
+    }
+
+    #[test]
+    fn a_version_3_recipe_carries_header_injections() {
+        let r = WebLoginRecipe::parse(&injecting()).unwrap();
+        assert_eq!(r.version, 3);
+        assert!(r.is_proxied() && r.injects_headers());
+        assert_eq!(
+            r.inject_headers,
+            vec![
+                HeaderInjection {
+                    name: "authorization".into(),
+                    format: HeaderFormat::Bearer,
+                    origin: "https://fw01.example.com".into(),
+                    path_prefix: "/api".into(),
+                },
+                HeaderInjection {
+                    name: "x-api-key".into(),
+                    format: HeaderFormat::Literal,
+                    origin: "https://fw01.example.com".into(),
+                    path_prefix: "/".into(),
+                },
+            ]
+        );
+        let needs = r.needs();
+        assert!(needs.header_secret && needs.password);
+        // Version 3 with no injection is version 2 with a new number.
+        let mut v = proxied();
+        v["version"] = json!(3);
+        let r = WebLoginRecipe::parse(&v).unwrap();
+        assert!(r.is_proxied() && !r.injects_headers() && !r.needs().header_secret);
+        // The hash covers every entry.
+        let mut other = injecting();
+        other["inject_headers"][0]["path_prefix"] = json!("/apiv2");
+        assert_ne!(recipe_hash(&injecting()).unwrap(), recipe_hash(&other).unwrap());
+        let mut other = injecting();
+        other["inject_headers"][1]["format"] = json!("bearer");
+        assert_ne!(recipe_hash(&injecting()).unwrap(), recipe_hash(&other).unwrap());
+    }
+
+    #[test]
+    fn inject_headers_on_a_version_1_or_2_recipe_is_refused_not_ignored() {
+        for version in [1, 2] {
+            let mut v = injecting();
+            v["version"] = json!(version);
+            if version == 1 {
+                v.as_object_mut().unwrap().remove("submit_target");
+            }
+            let e = WebLoginRecipe::parse(&v).unwrap_err();
+            assert_eq!(e.at, "inject_headers", "version {version}");
+            assert!(e.reason.contains("version 3"), "{e}");
+        }
+    }
+
+    #[test]
+    fn header_injection_needs_proxy_mode() {
+        let mut v = injecting();
+        v.as_object_mut().unwrap().remove("submit_target");
+        let e = WebLoginRecipe::parse(&v).unwrap_err();
+        assert_eq!(e.at, "inject_headers");
+        assert!(e.reason.contains("submit_target"), "{e}");
+    }
+
+    #[test]
+    fn malformed_header_injections_are_refused() {
+        let at = |entries: Value| {
+            let mut v = injecting();
+            v["inject_headers"] = entries;
+            WebLoginRecipe::parse(&v).unwrap_err().at
+        };
+        let o = "https://fw01.example.com";
+        let entry = |name: &str| json!({ "name": name, "format": "bearer", "origin": o, "path_prefix": "/api" });
+
+        // Hop-by-hop, `Host`, `Content-Length`, `Transfer-Encoding`, in any case.
+        for name in [
+            "Connection",
+            "proxy-connection",
+            "Keep-Alive",
+            "Proxy-Authenticate",
+            "PROXY-AUTHORIZATION",
+            "TE",
+            "Trailer",
+            "Transfer-Encoding",
+            "Upgrade",
+            "Host",
+            "content-length",
+        ] {
+            assert_eq!(at(json!([entry(name)])), "inject_headers[0].name", "{name}");
+        }
+        // Not an HTTP token.
+        for name in ["", "X Auth", "x:auth", "x-auth\r\nx-evil", "authorizätion", "(a)", &"a".repeat(65)] {
+            assert_eq!(at(json!([entry(name)])), "inject_headers[0].name", "{name:?}");
+        }
+        assert_eq!(at(json!([{ "format": "bearer", "origin": o, "path_prefix": "/" }])), "inject_headers[0].name");
+        assert_eq!(
+            at(json!([{ "name": 7, "format": "bearer", "origin": o, "path_prefix": "/" }])),
+            "inject_headers[0].name"
+        );
+
+        for (e, want) in [
+            (
+                json!({ "name": "authorization", "format": "basic", "origin": o, "path_prefix": "/" }),
+                "inject_headers[0].format",
+            ),
+            (json!({ "name": "authorization", "origin": o, "path_prefix": "/" }), "inject_headers[0].format"),
+            (json!({ "name": "authorization", "format": "bearer", "path_prefix": "/" }), "inject_headers[0].origin"),
+            (
+                json!({ "name": "authorization", "format": "bearer", "origin": "http://fw01.example.com", "path_prefix": "/" }),
+                "inject_headers[0].origin",
+            ),
+            (
+                json!({ "name": "authorization", "format": "bearer", "origin": "https://fw01.example.com/api", "path_prefix": "/" }),
+                "inject_headers[0].origin",
+            ),
+            (
+                json!({ "name": "authorization", "format": "bearer", "origin": "https://*.example.com", "path_prefix": "/" }),
+                "inject_headers[0].origin",
+            ),
+            (json!({ "name": "authorization", "format": "bearer", "origin": o }), "inject_headers[0].path_prefix"),
+            (
+                json!({ "name": "authorization", "format": "bearer", "origin": o, "path_prefix": "api" }),
+                "inject_headers[0].path_prefix",
+            ),
+            (
+                json!({ "name": "authorization", "format": "bearer", "origin": o, "path_prefix": "//evil/" }),
+                "inject_headers[0].path_prefix",
+            ),
+            (
+                json!({ "name": "authorization", "format": "bearer", "origin": o, "path_prefix": "/api?x=1" }),
+                "inject_headers[0].path_prefix",
+            ),
+            (
+                json!({ "name": "authorization", "format": "bearer", "origin": o, "path_prefix": "/api*" }),
+                "inject_headers[0].path_prefix",
+            ),
+            (
+                json!({ "name": "authorization", "format": "bearer", "origin": o, "path_prefix": "/a/../b" }),
+                "inject_headers[0].path_prefix",
+            ),
+            (
+                json!({ "name": "authorization", "format": "bearer", "origin": o, "path_prefix": "/a/%2E%2e/b" }),
+                "inject_headers[0].path_prefix",
+            ),
+            (
+                json!({ "name": "authorization", "format": "bearer", "origin": o, "path_prefix": "/a/./" }),
+                "inject_headers[0].path_prefix",
+            ),
+            (
+                json!({ "name": "authorization", "format": "bearer", "origin": o, "path_prefix": "/", "value": "x" }),
+                "inject_headers[0].value",
+            ),
+            (json!("authorization"), "inject_headers[0]"),
+        ] {
+            assert_eq!(at(json!([e])), want, "{e}");
+        }
+
+        // The list itself.
+        assert_eq!(at(json!([])), "inject_headers");
+        assert_eq!(at(json!({ "name": "authorization" })), "inject_headers");
+        let nine: Vec<Value> = (0..=MAX_INJECT_HEADERS).map(|i| entry(&format!("x-h{i}"))).collect();
+        assert_eq!(at(Value::Array(nine)), "inject_headers");
+
+        // One header, one origin, overlapping paths: refused. Disjoint paths,
+        // another header or another origin: fine.
+        let pair = |a: &str, b: &str| {
+            json!([
+                { "name": "Authorization", "format": "bearer", "origin": o, "path_prefix": a },
+                { "name": "authorization", "format": "literal", "origin": o, "path_prefix": b }
+            ])
+        };
+        for (a, b) in [("/api", "/api/v1"), ("/", "/api"), ("/api/", "/api"), ("/api", "/api")] {
+            assert_eq!(at(pair(a, b)), "inject_headers[1]", "{a} {b}");
+        }
+        let parse = |entries: Value| {
+            let mut v = injecting();
+            v["inject_headers"] = entries;
+            WebLoginRecipe::parse(&v)
+        };
+        assert!(parse(pair("/api", "/apix")).is_ok(), "`/api` and `/apix` do not overlap");
+        assert!(parse(pair("/api/", "/apiv2/")).is_ok());
+        assert!(parse(json!([entry("authorization"), entry("x-api-key")])).is_ok());
+    }
+
+    #[test]
+    fn path_prefixes_match_on_segment_boundaries() {
+        for (prefix, path, want) in [
+            ("/api", "/api", true),
+            ("/api", "/api/", true),
+            ("/api", "/api/v1/users", true),
+            ("/api", "/apix", false),
+            ("/api", "/apix/v1", false),
+            ("/api", "/ap", false),
+            ("/api", "/", false),
+            ("/api", "/API", false),
+            ("/api/", "/api", false),
+            ("/api/", "/api/", true),
+            ("/api/", "/api/v1", true),
+            ("/api/", "/apix", false),
+            ("/", "/", true),
+            ("/", "/anything/at/all", true),
+            // A dot segment is never inside a scope, raw or encoded.
+            ("/api", "/api/../admin", false),
+            ("/api", "/api/./v1", false),
+            ("/api", "/api/%2e%2e/admin", false),
+            ("/api", "/api/%2E./admin", false),
+            ("/", "/a/../b", false),
+            // Not an absolute path.
+            ("/", "api", false),
+            ("/", "", false),
+            // A segment that merely contains dots is an ordinary segment.
+            ("/api", "/api/v1.2/x..y", true),
+        ] {
+            assert_eq!(path_prefix_matches(prefix, path), want, "{prefix} vs {path}");
+        }
+    }
+
+    #[test]
+    fn check_origins_covers_header_injections() {
+        let r = WebLoginRecipe::parse(&injecting()).unwrap();
+        let fw = vec!["https://fw01.example.com".to_string()];
+        assert!(r.check_origins(&fw, false).is_ok());
+        let mut v = injecting();
+        v["inject_headers"][1]["origin"] = json!("https://api.example.com");
+        let r = WebLoginRecipe::parse(&v).unwrap();
+        assert_eq!(r.check_origins(&fw, false).unwrap_err().at, "inject_headers[1].origin");
+        let both = vec!["https://fw01.example.com".to_string(), "https://api.example.com".to_string()];
+        assert!(r.check_origins(&both, false).is_ok());
+    }
+
+    /// The header secret's own check: never echoes the value.
+    #[test]
+    fn the_header_secret_check_is_strict_and_never_echoes_the_value() {
+        assert!(check_header_secret("tok-ABCDEF.123_~+/=").is_ok());
+        assert!(check_header_secret("Token with inner spaces").is_ok());
+        assert!(check_header_secret(&"a".repeat(MAX_HEADER_SECRET_LEN)).is_ok());
+        for bad in [
+            String::new(),
+            "short".to_string(),
+            "a".repeat(MAX_HEADER_SECRET_LEN + 1),
+            "abcdefgh\r\nX-Evil: 1".to_string(),
+            "abcdefgh\nmore".to_string(),
+            "abcdefgh\0nul".to_string(),
+            "abcdefgh\ttab".to_string(),
+            "abcdefgh\u{7f}".to_string(),
+            "abcdéfghij".to_string(),
+            " leading-space".to_string(),
+            "trailing-space ".to_string(),
+        ] {
+            let reason = check_header_secret(&bad).unwrap_err();
+            assert!(bad.is_empty() || !reason.contains(bad.trim()), "{reason}");
+        }
     }
 
     #[test]

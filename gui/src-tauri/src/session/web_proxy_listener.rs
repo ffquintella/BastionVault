@@ -20,6 +20,16 @@
 //!   stripped from every terminated response, so the page cannot be steered
 //!   onto HTTP/3 around the proxy. `101` upgrades (WebSocket) are relayed
 //!   byte for byte.
+//! * **Header injection** (recipe version 3, T106 step 7) — on a terminated
+//!   request whose origin and path prefix an `inject_headers` entry covers,
+//!   the proxy sets that header from the session's header secret
+//!   ([`super::web_proxy::HeaderInjector`]), replacing a value the page sent
+//!   (reported once per origin), asks for an identity-encoded response and
+//!   scrubs the secret out of the response's body and header values before
+//!   the page sees it. An upgrade on such a path, or a `Host` that is not the
+//!   terminated authority, is refused rather than sent the secret. The header
+//!   secret is held for the session's lifetime (the password only for its
+//!   sign-in), replaced by a re-run login and dropped at shutdown.
 //! * **`CONNECT` outside the scope** — blind-tunnelled, never terminated, so
 //!   sub-resources from other hosts load as they do today and the webview
 //!   validates them itself. Refusing them was rejected: an egress allow-list
@@ -39,7 +49,7 @@
 //! ([`super::web_proxy_webview`], T106 step 4) owns [`WebProxy::proxy_url`],
 //! [`WebProxy::ca_pin`] and [`WebProxy::leaf_pin`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
@@ -67,8 +77,9 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 use zeroize::Zeroizing;
 
 use super::web_proxy::{
-    bare_host, is_stripped_response_header, scrub_response, substitute_submit, OutgoingRequest, RefuseReason,
-    SecretBody, SessionSecret, SubmitTarget, Substitution, TerminationScope,
+    bare_host, host_header_matches, is_stripped_response_header, scrub_header_value, scrub_response, substitute_submit,
+    HeaderInjection, HeaderInjector, HeaderRefusal, OutgoingRequest, RefuseReason, SecretBody, SessionSecret,
+    SubmitTarget, Substitution, TerminationScope,
 };
 use super::web_proxy_ca::SessionCa;
 use super::web_proxy_upstream::{UpstreamRefusal, UpstreamTrust, UpstreamVerifier};
@@ -151,6 +162,17 @@ pub enum ProxyEvent {
     /// `aborted:<check>` name (`[a-z0-9_]{1,32}`), `notice` fixed text for
     /// the title.
     Refused { host: String, port: u16, check: &'static str, notice: &'static str },
+    /// The proxy set an injected header on a request to this origin — the
+    /// first time per origin in the session.
+    HeaderInjected { host: String, port: u16 },
+    /// The page itself sent a header the proxy injects, and the proxy
+    /// replaced it — the first time per origin in the session.
+    HeaderReplaced { host: String, port: u16 },
+    /// The proxy refused a request it would have injected a header into, or
+    /// that request's response (`check` as for [`Self::Refused`]). Not a
+    /// sign-in failure: the fill is told through [`Self::Refused`] when the
+    /// request was the sign-in.
+    HeaderRefused { host: String, port: u16, check: &'static str },
 }
 
 type EventHook = Arc<dyn Fn(ProxyEvent) + Send + Sync>;
@@ -179,7 +201,10 @@ impl ProxyEvent {
         let (Self::Terminated { host, port, .. }
         | Self::Substituted { host, port }
         | Self::Scrubbed { host, port, .. }
-        | Self::Refused { host, port, .. }) = self;
+        | Self::Refused { host, port, .. }
+        | Self::HeaderInjected { host, port }
+        | Self::HeaderReplaced { host, port }
+        | Self::HeaderRefused { host, port, .. }) = self;
         if *port == 443 {
             format!("https://{host}")
         } else {
@@ -228,6 +253,8 @@ impl WebProxy {
         let ctx = Arc::new(ProxyCtx {
             scope: config.scope,
             injection: Mutex::new(InjectionSlot::default()),
+            headers: Mutex::new(None),
+            header_reported: Mutex::new(BTreeSet::new()),
             ca,
             connector,
             verifier,
@@ -321,9 +348,39 @@ impl WebProxy {
         self.ctx.injection.lock().unwrap_or_else(|p| p.into_inner()).current.is_some()
     }
 
-    /// Stop accepting and drop the secret. Idempotent; [`Drop`] does the same.
+    /// Give the proxy the session's header injections and their secret
+    /// (recipe version 3, T106 step 7), replacing any earlier set (a re-run
+    /// login). Every entry must name a terminated origin: one that does not
+    /// would never be injected, so it is refused here — at launch — rather
+    /// than skipped. Held until a later arm or [`Self::shutdown`], not
+    /// released when the sign-in ends: the headers are for the session.
+    pub fn arm_headers(&self, injector: HeaderInjector) -> Result<(), String> {
+        for entry in injector.entries() {
+            let origin = entry.origin();
+            if !self.ctx.scope.terminates(origin.host(), origin.port()) {
+                // `injector` drops here, and its secret with it.
+                return Err(format!(
+                    "web proxy: the `{}` header injection for {}:{} is not one of the session's terminated origins",
+                    entry.name(),
+                    origin.host(),
+                    origin.port()
+                ));
+            }
+        }
+        *self.ctx.headers.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::new(injector));
+        Ok(())
+    }
+
+    /// Whether the proxy holds a header secret.
+    #[cfg(test)]
+    pub fn holds_header_secret(&self) -> bool {
+        self.ctx.headers.lock().unwrap_or_else(|p| p.into_inner()).is_some()
+    }
+
+    /// Stop accepting and drop the secrets. Idempotent; [`Drop`] does the same.
     pub fn shutdown(&self) {
         self.ctx.injection.lock().unwrap_or_else(|p| p.into_inner()).current = None;
+        *self.ctx.headers.lock().unwrap_or_else(|p| p.into_inner()) = None;
         if let Some(tx) = self.stop.lock().unwrap_or_else(|p| p.into_inner()).take() {
             let _ = tx.send(());
         }
@@ -356,6 +413,12 @@ fn check_injection_scope(scope: &TerminationScope, injection: &ProxyInjection) -
 struct ProxyCtx {
     scope: TerminationScope,
     injection: Mutex<InjectionSlot>,
+    /// Behind an `Arc` for the same reason as the submit injection: a
+    /// request that took it keeps it until its response is scrubbed.
+    headers: Mutex<Option<Arc<HeaderInjector>>>,
+    /// `(host, port, replaced)` already reported, so the audit gets one
+    /// `HeaderInjected` / `HeaderReplaced` per origin, not one per request.
+    header_reported: Mutex<BTreeSet<(String, u16, bool)>>,
     ca: Arc<SessionCa>,
     connector: TlsConnector,
     verifier: Arc<UpstreamVerifier>,
@@ -384,6 +447,30 @@ impl ProxyCtx {
 
     fn refused(&self, host: &str, port: u16, check: &'static str, notice: &'static str) {
         self.events.emit(ProxyEvent::Refused { host: host.to_string(), port, check, notice });
+    }
+
+    fn current_headers(&self) -> Option<Arc<HeaderInjector>> {
+        self.headers.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    fn header_refused(&self, host: &str, port: u16, check: &'static str) {
+        self.events.emit(ProxyEvent::HeaderRefused { host: host.to_string(), port, check });
+    }
+
+    /// Report an injection, and a replacement of the page's own header, the
+    /// first time each happens on an origin.
+    fn note_header(&self, host: &str, port: u16, replaced: bool) {
+        let (first_injected, first_replaced) = {
+            let mut seen = self.header_reported.lock().unwrap_or_else(|p| p.into_inner());
+            let host = host.to_ascii_lowercase();
+            (seen.insert((host.clone(), port, false)), replaced && seen.insert((host, port, true)))
+        };
+        if first_injected {
+            self.events.emit(ProxyEvent::HeaderInjected { host: host.to_string(), port });
+        }
+        if first_replaced {
+            self.events.emit(ProxyEvent::HeaderReplaced { host: host.to_string(), port });
+        }
     }
 }
 
@@ -602,6 +689,24 @@ async fn proxy_request(
     let injection = ctx.current_injection().filter(|inj| inj.target.matches(&host, port, &path));
     let injection = injection.as_deref();
 
+    // Header injection: the entries covering this origin and path, decided
+    // once per request like the submit injection (the `Arc` keeps the
+    // secret until the response is scrubbed, even across a re-arm).
+    let header_arm = ctx.current_headers();
+    let header_entries: Vec<&HeaderInjection> =
+        header_arm.as_deref().map(|h| h.applicable(&host, port, &path)).unwrap_or_default();
+    let injector = header_arm.as_deref().filter(|_| !header_entries.is_empty());
+    if injector.is_some() {
+        // Both checked before anything is read or sent: the secret never
+        // goes onto a stream the scrub cannot see, or to another authority.
+        if upgrade_requested {
+            return refused_header(&ctx, &host, port, HeaderRefusal::Upgrade, injection.is_some());
+        }
+        if !host_header_matches(req.headers().get(HOST).map(HeaderValue::as_bytes), &host, port) {
+            return refused_header(&ctx, &host, port, HeaderRefusal::HostMismatch, injection.is_some());
+        }
+    }
+
     let (mut parts, body) = req.into_parts();
     let mut scrub = false;
 
@@ -646,6 +751,31 @@ async fn proxy_request(
     strip_hop_by_hop(&mut parts.headers, upgrade_requested);
     ensure_host(&mut parts.headers, &host, port);
 
+    // After the hop-by-hop strip, so a `Connection` token naming the header
+    // cannot remove what the proxy sets. The page's own value is replaced:
+    // the operator configured this header on purpose.
+    if let Some(injector) = injector {
+        let mut replaced = false;
+        for entry in &header_entries {
+            let Ok(name) = HeaderName::from_bytes(entry.name().as_bytes()) else {
+                return refused_header(&ctx, &host, port, HeaderRefusal::Value, injection.is_some());
+            };
+            replaced |= parts.headers.remove(&name).is_some();
+            // Backed by the zeroizing buffer itself (no copy into a plain
+            // `Bytes`), and marked sensitive so no `Debug` of these headers
+            // can print it.
+            let Ok(mut value) = HeaderValue::from_maybe_shared(Bytes::from_owner(injector.value(entry))) else {
+                return refused_header(&ctx, &host, port, HeaderRefusal::Value, injection.is_some());
+            };
+            value.set_sensitive(true);
+            parts.headers.insert(name, value);
+        }
+        // The response is searched for the secret, so ask for it
+        // uncompressed; a compressed one is refused below.
+        parts.headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
+        ctx.note_header(&host, port, replaced);
+    }
+
     // A failure on the sign-in request itself is the window's business: the
     // fill ends with it instead of waiting out its deadline.
     let sign_in_failed = |check: &'static str, notice: &'static str| {
@@ -682,13 +812,28 @@ async fn proxy_request(
 
     let (mut parts, body) = res.into_parts();
     strip_response_headers(&mut parts.headers, false);
-    let Some(injection) = injection.filter(|_| scrub) else {
+    // Every secret this request carried is scrubbed from what it returns:
+    // the password of a substituted sign-in, the header secret of an
+    // injected request (a server may echo either back).
+    let submit_secret = injection.filter(|_| scrub).map(|inj| &inj.secret);
+    let header_secret = injector.map(HeaderInjector::secret);
+    let secrets: Vec<&SessionSecret> = submit_secret.into_iter().chain(header_secret).collect();
+    if secrets.is_empty() {
         return Response::from_parts(parts, stream_body(body));
+    }
+    // A failure to check the response withholds it. On the sign-in request
+    // the fill ends with it; on an injected one it is audited.
+    let withheld = |check: &'static str, notice: &'static str| {
+        if submit_secret.is_some() {
+            sign_in_failed(check, notice);
+        } else {
+            ctx.header_refused(&host, port, check);
+        }
     };
 
     if let Some(encoding) = parts.headers.get(CONTENT_ENCODING) {
         if !encoding.as_bytes().eq_ignore_ascii_case(b"identity") {
-            sign_in_failed(
+            withheld(
                 "proxy_response_encoded",
                 "the session proxy withheld the sign-in response: it was compressed and could not be checked",
             );
@@ -696,29 +841,93 @@ async fn proxy_request(
                 "proxy_response_encoded",
                 &host,
                 port,
-                "the sign-in response was compressed and could not be scrubbed",
+                "the response was compressed and could not be scrubbed",
             );
         }
     }
     let received = match collect_bounded(body, MAX_SCRUBBED_RESPONSE_BODY).await {
         Ok(bytes) => Zeroizing::new(bytes),
         Err(CollectError::TooLarge) => {
-            sign_in_failed(
+            withheld(
                 "proxy_response_too_large",
                 "the session proxy withheld the sign-in response: it was too large to check",
             );
             return gateway_error("proxy_response_too_large", &host, port, "over the cap");
         }
         Err(CollectError::Read(e)) => {
-            sign_in_failed("proxy_response_read", "the session proxy could not read the sign-in response");
+            withheld("proxy_response_read", "the session proxy could not read the sign-in response");
             return gateway_error("proxy_response_read", &host, port, &e);
         }
     };
-    let scrubbed = scrub_response(&injection.secret, &received);
-    ctx.events.emit(ProxyEvent::Scrubbed { host: host.to_string(), port, replaced: scrubbed.replaced });
+    let (body, replaced) = scrub_body(&secrets, received);
+    let replaced = replaced + scrub_response_headers(&secrets, &mut parts.headers);
+    // A sign-in's scrub is always reported; an injected request's only when
+    // it found something, so ordinary API traffic writes no line per call.
+    if submit_secret.is_some() || replaced > 0 {
+        ctx.events.emit(ProxyEvent::Scrubbed { host: host.to_string(), port, replaced });
+    }
     parts.headers.remove(TRANSFER_ENCODING);
-    parts.headers.insert(CONTENT_LENGTH, HeaderValue::from(scrubbed.body.len()));
-    Response::from_parts(parts, bytes_body(scrubbed.body))
+    parts.headers.insert(CONTENT_LENGTH, HeaderValue::from(body.len()));
+    Response::from_parts(parts, bytes_body(body))
+}
+
+/// Scrub every secret from a buffered response body. Intermediate buffers
+/// may hold a later secret, so each is wiped as it is replaced; the result
+/// holds none.
+fn scrub_body(secrets: &[&SessionSecret], received: Zeroizing<Vec<u8>>) -> (Vec<u8>, usize) {
+    let mut current = received;
+    let mut replaced = 0;
+    for secret in secrets {
+        let scrubbed = scrub_response(secret, &current);
+        replaced += scrubbed.replaced;
+        current = Zeroizing::new(scrubbed.body);
+    }
+    (std::mem::take(&mut *current), replaced)
+}
+
+/// Scrub every secret from the response's header values; returns how many
+/// values changed. A value that cannot be rebuilt is dropped rather than
+/// forwarded.
+fn scrub_response_headers(secrets: &[&SessionSecret], headers: &mut HeaderMap) -> usize {
+    let names: Vec<HeaderName> = headers.keys().cloned().collect();
+    let mut changed = 0;
+    for name in names {
+        let values: Vec<HeaderValue> = headers.get_all(&name).iter().cloned().collect();
+        let mut rebuilt: Vec<HeaderValue> = Vec::with_capacity(values.len());
+        let mut touched = false;
+        for value in values {
+            let mut bytes = Zeroizing::new(value.as_bytes().to_vec());
+            for secret in secrets {
+                if let Some(scrubbed) = scrub_header_value(secret, &bytes) {
+                    bytes = Zeroizing::new(scrubbed);
+                    touched = true;
+                    changed += 1;
+                }
+            }
+            if let Ok(v) = HeaderValue::from_bytes(&bytes) {
+                rebuilt.push(v);
+            }
+        }
+        if touched {
+            headers.remove(&name);
+            for v in rebuilt {
+                headers.append(name.clone(), v);
+            }
+        }
+    }
+    changed
+}
+
+/// A request the proxy would have injected a header into, refused: audited
+/// by origin and check name, and — when it was the sign-in itself — the
+/// fill ends with it.
+fn refused_header(ctx: &ProxyCtx, host: &str, port: u16, refusal: HeaderRefusal, sign_in: bool) -> Response<ProxyBody> {
+    log::warn!("web proxy: did not send a header-injected request to {host}:{port} ({})", refusal.check());
+    ctx.header_refused(host, port, refusal.check());
+    if sign_in {
+        ctx.refused(host, port, refusal.check(), refusal.notice());
+    }
+    plain_response(StatusCode::BAD_GATEWAY, refusal.check())
 }
 
 /// Relay an upgraded (WebSocket) connection in both directions until either
@@ -1028,6 +1237,8 @@ mod tests {
     use rustls::{ClientConfig, RootCertStore, ServerConfig};
     use tokio::io::AsyncReadExt;
 
+    use bastion_vault::modules::resource::connect_web::recipe::HeaderFormat;
+
     use super::*;
     use crate::session::web_proxy::BodyType;
 
@@ -1043,7 +1254,12 @@ mod tests {
         cert_der: Vec<u8>,
         /// Request bodies the upstream received, in order.
         received: Arc<StdMutex<Vec<Vec<u8>>>>,
+        /// Request headers the upstream received, in the same order.
+        received_headers: Arc<StdMutex<Vec<HeaderMap>>>,
     }
+
+    /// Bytes of filler in front of the `/api/big` echo: one past the scrub cap.
+    const BIG_RESPONSE: usize = MAX_SCRUBBED_RESPONSE_BODY + 1;
 
     /// An https server on 127.0.0.1 that echoes the request body back in its
     /// response — so a secret that reaches it shows up in the reply and the
@@ -1066,23 +1282,56 @@ mod tests {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let received: Arc<StdMutex<Vec<Vec<u8>>>> = Arc::new(StdMutex::new(Vec::new()));
+        let received_headers: Arc<StdMutex<Vec<HeaderMap>>> = Arc::new(StdMutex::new(Vec::new()));
         let sink = Arc::clone(&received);
+        let header_sink = Arc::clone(&received_headers);
 
         tokio::spawn(async move {
             loop {
                 let Ok((sock, _)) = listener.accept().await else { return };
                 let acceptor = acceptor.clone();
                 let sink = Arc::clone(&sink);
+                let header_sink = Arc::clone(&header_sink);
                 tokio::spawn(async move {
                     let Ok(tls) = acceptor.accept(sock).await else { return };
                     let service = service_fn(move |req: Request<Incoming>| {
                         let sink = Arc::clone(&sink);
+                        let header_sink = Arc::clone(&header_sink);
                         async move {
                             let upgrade = wants_upgrade(req.headers());
+                            let path = req.uri().path().to_string();
+                            // The application echoes the `Authorization` it
+                            // received, in its body and in a header — so an
+                            // injected secret that reaches it comes back, and
+                            // the scrub has something to remove.
+                            let auth = req
+                                .headers()
+                                .get("authorization")
+                                .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned());
+                            header_sink.lock().unwrap().push(req.headers().clone());
                             let mut req = req;
                             let on_upgrade = hyper::upgrade::on(&mut req);
                             let body = req.into_body().collect().await.unwrap().to_bytes().to_vec();
                             sink.lock().unwrap().push(body.clone());
+                            if let Some(auth) = auth.as_deref().filter(|_| !upgrade) {
+                                let echoed = format!("<html>auth: {auth}</html>");
+                                let mut res = Response::builder()
+                                    .status(StatusCode::OK)
+                                    .header(CONTENT_TYPE, "text/html")
+                                    .header("x-echo-authorization", auth);
+                                let echoed = if path.starts_with("/api/gzip") {
+                                    // Compressed despite the identity request.
+                                    res = res.header(CONTENT_ENCODING, "gzip");
+                                    echoed.into_bytes()
+                                } else if path.starts_with("/api/big") {
+                                    let mut big = vec![b'a'; BIG_RESPONSE];
+                                    big.extend_from_slice(echoed.as_bytes());
+                                    big
+                                } else {
+                                    echoed.into_bytes()
+                                };
+                                return Ok::<_, Infallible>(res.body(bytes_body(echoed)).unwrap());
+                            }
                             if upgrade {
                                 tokio::spawn(async move {
                                     if let Ok(upgraded) = on_upgrade.await {
@@ -1120,7 +1369,7 @@ mod tests {
             }
         });
 
-        Upstream { port, cert_der, received }
+        Upstream { port, cert_der, received, received_headers }
     }
 
     /// A plain TCP echo server, to prove an out-of-scope `CONNECT` is
@@ -1671,5 +1920,279 @@ mod tests {
         proxy.arm(third).unwrap();
         proxy.shutdown();
         assert!(!proxy.holds_secret());
+    }
+
+    // ---- header injection (T106 step 7) ----------------------------------
+
+    const HEADER_SECRET: &str = "hdr-S3CRET-token-0001";
+
+    fn bearer_on(origin: &str, prefix: &str) -> HeaderInjection {
+        HeaderInjection::new("Authorization", HeaderFormat::Bearer, origin, prefix).unwrap()
+    }
+
+    /// A proxy armed with a sign-in (as every proxy-mode session is) and with
+    /// `Authorization: Bearer <HEADER_SECRET>` on `/api` of the upstream.
+    async fn start_injecting(upstream: &Upstream) -> (WebProxy, String, EventLog) {
+        let (proxy, password_placeholder, log) =
+            start_proxy_logged(upstream, "s3cret-password", pins_of(&upstream.cert_der)).await;
+        let origin = format!("https://{HOST}:{}", upstream.port);
+        let injector = HeaderInjector::new(HEADER_SECRET.to_string(), vec![bearer_on(&origin, "/api")]).unwrap();
+        proxy.arm_headers(injector).unwrap();
+        (proxy, password_placeholder, log)
+    }
+
+    /// `hyper::header::HOST` spelled out: inside this module `HOST` is the
+    /// test host name, not the header.
+    fn get(upstream: &Upstream, path: &str, auth: Option<&str>) -> Request<ProxyBody> {
+        let mut req =
+            Request::builder().method("GET").uri(path).header(hyper::header::HOST, format!("{HOST}:{}", upstream.port));
+        if let Some(auth) = auth {
+            req = req.header("authorization", auth);
+        }
+        req.body(empty_body()).unwrap()
+    }
+
+    async fn body_text(res: Response<Incoming>) -> String {
+        String::from_utf8(res.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap()
+    }
+
+    fn assert_no_secret(log: &EventLog) {
+        for e in log.lock().unwrap().iter() {
+            let shown = format!("{e:?} {}", e.origin());
+            assert!(!shown.contains(HEADER_SECRET), "{shown}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_injected_header_reaches_the_upstream_and_is_scrubbed_from_the_reply() {
+        let upstream = start_upstream().await;
+        let (proxy, _, log) = start_injecting(&upstream).await;
+        let mut sender = session_client(&proxy, &upstream).await;
+
+        let res = sender.send_request(get(&upstream, "/api/v1/items", None)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        // Echoed in a response header too: scrubbed there as well.
+        let echoed_header = res.headers().get("x-echo-authorization").unwrap().to_str().unwrap().to_string();
+        assert!(!echoed_header.contains(HEADER_SECRET), "{echoed_header}");
+        assert!(echoed_header.starts_with("Bearer "), "{echoed_header}");
+        let seen = body_text(res).await;
+        assert!(!seen.contains(HEADER_SECRET), "the header secret came back to the page: {seen}");
+
+        let got = upstream.received_headers.lock().unwrap()[0].clone();
+        assert_eq!(got.get_all("authorization").iter().count(), 1);
+        assert_eq!(got.get("authorization").unwrap(), format!("Bearer {HEADER_SECRET}").as_str());
+        assert_eq!(got.get(ACCEPT_ENCODING).unwrap(), "identity");
+
+        let port = upstream.port;
+        let events = log.lock().unwrap().clone();
+        assert!(events.contains(&ProxyEvent::HeaderInjected { host: HOST.into(), port }), "{events:?}");
+        assert!(!events.iter().any(|e| matches!(e, ProxyEvent::HeaderReplaced { .. })), "{events:?}");
+        // Body and header copies, both scrubbed.
+        assert!(events.contains(&ProxyEvent::Scrubbed { host: HOST.into(), port, replaced: 2 }), "{events:?}");
+
+        // A second request injects again but is not reported again.
+        let res = sender.send_request(get(&upstream, "/api", None)).await.unwrap();
+        let _ = body_text(res).await;
+        let injected = log.lock().unwrap().iter().filter(|e| matches!(e, ProxyEvent::HeaderInjected { .. })).count();
+        assert_eq!(injected, 1);
+        assert_no_secret(&log);
+    }
+
+    /// The page sending the header itself: the proxy's value replaces it —
+    /// the upstream sees one header, the operator's — and that is audited.
+    #[tokio::test]
+    async fn a_header_the_page_sent_is_replaced_and_reported() {
+        let upstream = start_upstream().await;
+        let (proxy, _, log) = start_injecting(&upstream).await;
+        let mut sender = session_client(&proxy, &upstream).await;
+
+        let res = sender.send_request(get(&upstream, "/api/me", Some("Bearer page-chosen-token"))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let _ = body_text(res).await;
+        let got = upstream.received_headers.lock().unwrap()[0].clone();
+        let values: Vec<_> = got.get_all("authorization").iter().collect();
+        assert_eq!(values, vec![format!("Bearer {HEADER_SECRET}").as_str()]);
+        assert!(log.lock().unwrap().contains(&ProxyEvent::HeaderReplaced { host: HOST.into(), port: upstream.port }));
+        assert_no_secret(&log);
+    }
+
+    /// Outside the path prefix — including `/apix`, which `/api` must not
+    /// cover — the request goes out exactly as the page sent it, and its
+    /// response streams unscrubbed (it never carried the secret).
+    #[tokio::test]
+    async fn a_request_outside_the_injection_scope_is_untouched() {
+        let upstream = start_upstream().await;
+        let (proxy, _, log) = start_injecting(&upstream).await;
+        let mut sender = session_client(&proxy, &upstream).await;
+
+        for (i, path) in ["/apix", "/apix/v1", "/", "/login-page"].into_iter().enumerate() {
+            let res = sender.send_request(get(&upstream, path, Some("Bearer page-chosen-token"))).await.unwrap();
+            assert_eq!(res.status(), StatusCode::OK, "{path}");
+            let seen = body_text(res).await;
+            assert!(seen.contains("page-chosen-token"), "{path}: {seen}");
+            let got = upstream.received_headers.lock().unwrap()[i].clone();
+            assert_eq!(got.get("authorization").unwrap(), "Bearer page-chosen-token", "{path}");
+            assert!(got.get(ACCEPT_ENCODING).is_none(), "{path}");
+        }
+        // No header requests: nothing injected at all.
+        let res = sender.send_request(get(&upstream, "/apix", None)).await.unwrap();
+        let _ = body_text(res).await;
+        assert!(upstream.received_headers.lock().unwrap().last().unwrap().get("authorization").is_none());
+        let events = log.lock().unwrap().clone();
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                ProxyEvent::HeaderInjected { .. } | ProxyEvent::HeaderReplaced { .. } | ProxyEvent::Scrubbed { .. }
+            )),
+            "{events:?}"
+        );
+    }
+
+    /// The secret never goes onto a stream the scrub cannot see (an upgrade)
+    /// or to another authority (`Host` mismatch): both are refused before
+    /// the upstream sees anything.
+    #[tokio::test]
+    async fn an_upgrade_or_a_foreign_host_on_an_injected_path_is_refused() {
+        let upstream = start_upstream().await;
+        let (proxy, _, log) = start_injecting(&upstream).await;
+        let authority = format!("{HOST}:{}", upstream.port);
+
+        let mut sender = session_client(&proxy, &upstream).await;
+        let ws = Request::builder()
+            .method("GET")
+            .uri("/api/socket")
+            .header(hyper::header::HOST, &authority)
+            .header(CONNECTION, "upgrade")
+            .header(UPGRADE, "websocket")
+            .body(empty_body())
+            .unwrap();
+        let res = sender.send_request(ws).await.unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
+        assert!(!body_text(res).await.contains(HEADER_SECRET));
+
+        let mut sender = session_client(&proxy, &upstream).await;
+        let foreign = Request::builder()
+            .method("GET")
+            .uri("/api/v1")
+            .header(hyper::header::HOST, "other.example.test")
+            .body(empty_body())
+            .unwrap();
+        let res = sender.send_request(foreign).await.unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
+
+        assert!(upstream.received_headers.lock().unwrap().is_empty(), "the upstream saw a refused request");
+        let port = upstream.port;
+        let events = log.lock().unwrap().clone();
+        for check in [HeaderRefusal::Upgrade.check(), HeaderRefusal::HostMismatch.check()] {
+            assert!(events.contains(&ProxyEvent::HeaderRefused { host: HOST.into(), port, check }), "{events:?}");
+        }
+        // Not the sign-in: the fill is not told.
+        assert!(!events.iter().any(|e| matches!(e, ProxyEvent::Refused { .. })), "{events:?}");
+        assert_no_secret(&log);
+    }
+
+    /// Regression: when the response to an injected request cannot be
+    /// checked (compressed despite the identity request, or over the cap),
+    /// it is withheld — the page gets a fixed refusal, never the echoed
+    /// secret — and the refusal is audited without it.
+    #[tokio::test]
+    async fn an_unscrubbable_response_to_an_injected_request_is_withheld() {
+        let upstream = start_upstream().await;
+        let (proxy, _, log) = start_injecting(&upstream).await;
+        let mut sender = session_client(&proxy, &upstream).await;
+
+        for (path, check) in [("/api/gzip", "proxy_response_encoded"), ("/api/big", "proxy_response_too_large")] {
+            let res = sender.send_request(get(&upstream, path, None)).await.unwrap();
+            assert_eq!(res.status(), StatusCode::BAD_GATEWAY, "{path}");
+            assert!(res.headers().get("x-echo-authorization").is_none(), "{path}");
+            let seen = body_text(res).await;
+            assert!(!seen.contains(HEADER_SECRET), "{path}: {seen}");
+            assert_eq!(seen, format!("BastionVault session proxy: {check}\n"));
+            assert!(
+                log.lock().unwrap().contains(&ProxyEvent::HeaderRefused {
+                    host: HOST.into(),
+                    port: upstream.port,
+                    check
+                }),
+                "{path}"
+            );
+            // The connection closes after a refusal; reconnect for the next.
+            sender = session_client(&proxy, &upstream).await;
+        }
+        assert_no_secret(&log);
+    }
+
+    /// Entries outside the termination scope are refused at launch, never
+    /// skipped, and the refusal carries neither secret.
+    #[tokio::test]
+    async fn header_injection_outside_the_termination_scope_is_refused_at_launch() {
+        let proxy = WebProxy::start(ProxyConfig {
+            scope: TerminationScope::new(["https://app.example.test"]).unwrap(),
+            pins: PinSet::default(),
+            events: ProxyEvents::default(),
+        })
+        .await
+        .unwrap();
+        for origin in ["https://api.example.test", "https://app.example.test:8443"] {
+            let injector = HeaderInjector::new(
+                HEADER_SECRET.to_string(),
+                vec![bearer_on("https://app.example.test", "/api"), bearer_on(origin, "/")],
+            )
+            .unwrap();
+            let err = proxy.arm_headers(injector).unwrap_err();
+            assert!(err.contains("not one of the session's terminated origins"), "{err}");
+            assert!(!err.contains(HEADER_SECRET), "{err}");
+            assert!(!proxy.holds_header_secret());
+        }
+        let ok = HeaderInjector::new(HEADER_SECRET.to_string(), vec![bearer_on("https://app.example.test", "/")]);
+        proxy.arm_headers(ok.unwrap()).unwrap();
+        assert!(proxy.holds_header_secret());
+        proxy.shutdown();
+        assert!(!proxy.holds_header_secret(), "shutdown drops the header secret");
+    }
+
+    /// The header secret is for the session: releasing the sign-in's
+    /// password leaves the injection in place.
+    #[tokio::test]
+    async fn the_header_secret_outlives_the_sign_in() {
+        let upstream = start_upstream().await;
+        let origin = format!("https://{HOST}:{}", upstream.port);
+        let (proxy, _, _) = start_injecting(&upstream).await;
+        let (injection, _) = injection_for(&origin, "another-password");
+        let ticket = proxy.arm(injection).unwrap();
+        assert!(proxy.release(ticket));
+        assert!(!proxy.holds_secret() && proxy.holds_header_secret());
+
+        let mut sender = session_client(&proxy, &upstream).await;
+        let res = sender.send_request(get(&upstream, "/api/after-sign-in", None)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(!body_text(res).await.contains(HEADER_SECRET));
+        let got = upstream.received_headers.lock().unwrap()[0].clone();
+        assert_eq!(got.get("authorization").unwrap(), format!("Bearer {HEADER_SECRET}").as_str());
+    }
+
+    /// The sign-in request inside an injection scope gets both: the password
+    /// substituted into its body and the header set, and both secrets are
+    /// scrubbed from its response.
+    #[tokio::test]
+    async fn a_sign_in_on_an_injected_path_carries_both_and_returns_neither() {
+        let upstream = start_upstream().await;
+        let origin = format!("https://{HOST}:{}", upstream.port);
+        let (proxy, placeholder, _) =
+            start_proxy_logged(&upstream, "s3cret-password", pins_of(&upstream.cert_der)).await;
+        let injector = HeaderInjector::new(HEADER_SECRET.to_string(), vec![bearer_on(&origin, "/")]).unwrap();
+        proxy.arm_headers(injector).unwrap();
+        let mut sender = session_client(&proxy, &upstream).await;
+
+        let res = sender.send_request(login_post(&upstream, format!("password={placeholder}"))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let seen = body_text(res).await;
+        assert!(!seen.contains(HEADER_SECRET) && !seen.contains("s3cret-password"), "{seen}");
+        assert_eq!(
+            String::from_utf8(upstream.received.lock().unwrap()[0].clone()).unwrap(),
+            "password=s3cret-password"
+        );
+        let got = upstream.received_headers.lock().unwrap()[0].clone();
+        assert_eq!(got.get("authorization").unwrap(), format!("Bearer {HEADER_SECRET}").as_str());
     }
 }

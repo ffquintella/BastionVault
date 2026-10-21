@@ -20,11 +20,13 @@ import {
   isProxiedRecipe,
   originKey,
   parseRecipeJson,
+  pathPrefixMatches,
   recipeError,
   recipeNeeds,
   recipeToJson,
   splitUrl,
   validateWebRecipe,
+  withInjectHeaders,
   withSubmitTarget,
 } from "../lib/webRecipe";
 import { WEB_RECIPE_PRESETS, findPreset, presetLabel } from "../lib/webRecipePresets";
@@ -103,10 +105,10 @@ describe("validateWebRecipe — mirrors WebLoginRecipe::parse", () => {
   });
 
   it("refuses unknown versions, a missing version and unknown keys at every level, naming the field", () => {
-    const v3 = fortigate();
-    v3.version = 3;
-    expect(at(v3)).toBe("version");
-    expect(recipeError(v3)).toMatch(/version 3 is not supported/);
+    const v4 = fortigate();
+    v4.version = 4;
+    expect(at(v4)).toBe("version");
+    expect(recipeError(v4)).toMatch(/version 4 is not supported/);
     const v0 = fortigate();
     v0.version = 0;
     expect(at(v0)).toBe("version");
@@ -427,7 +429,7 @@ describe("recipe import — strict, data only", () => {
       '{"version":1,"steps":[{"when_url":"https://a.example/","actions":[{"eval":"alert(1)"}]}],"success_when":{"selector":"x"}}',
       '{"version":1,"steps":[{"when_url":"javascript:alert(1)","actions":[{"click":"a"}]}],"success_when":{"selector":"x"}}',
       '{"version":1,"steps":[{"when_url":"https://a.example/","actions":[{"fill":"a","value":"${process.env}"}]}],"success_when":{"selector":"x"}}',
-      '{"version":3,"steps":"auto","success_when":{"selector":"x"}}',
+      '{"version":4,"steps":"auto","success_when":{"selector":"x"}}',
     ];
     for (const text of hostile) {
       const r = parseRecipeJson(text);
@@ -496,8 +498,8 @@ describe("validateProfile — form-mode web profiles now save", () => {
     );
     const slow = { ...(fortigate() as object), timeout_secs: 61 } as unknown as WebLoginRecipe;
     expect(validateProfile(formProfile({ recipe: slow }))).toMatch(/timeout_secs/);
-    const v3 = { ...(fortigate() as object), version: 3 } as unknown as WebLoginRecipe;
-    expect(validateProfile(formProfile({ recipe: v3 }))).toMatch(/version 3 is not supported/);
+    const v4 = { ...(fortigate() as object), version: 4 } as unknown as WebLoginRecipe;
+    expect(validateProfile(formProfile({ recipe: v4 }))).toMatch(/version 4 is not supported/);
   });
 
   it("refuses a recipe URL off the profile's origins, and plain http", () => {
@@ -851,5 +853,257 @@ describe("proxy mode — recipe version 2", () => {
     } as unknown as ConnectionProfile;
     expect(validateFormWebProfile(p, web)).toMatch(/proxy mode/);
     expect(validateFormWebProfile(p, { ...web, allow_insecure_http: false })).toBeNull();
+  });
+});
+
+// ── Version 3: inject_headers (T106 step 7) ─────────────────────────────────
+
+function injecting(): Record<string, unknown> {
+  const v = proxied();
+  v.version = 3;
+  v.inject_headers = [{ name: "Authorization", format: "bearer", origin: O, path_prefix: "/api" }];
+  return v;
+}
+
+function entry(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return { name: "Authorization", format: "bearer", origin: O, path_prefix: "/", ...over };
+}
+
+function withEntries(entries: unknown): Record<string, unknown> {
+  const v = injecting();
+  v.inject_headers = entries;
+  return v;
+}
+
+describe("proxy mode header injection — recipe version 3", () => {
+  it("accepts a version-3 recipe with headers, and still reads version 1 and 2", () => {
+    expect(validateWebRecipe(injecting()).ok).toBe(true);
+    expect(validateWebRecipe(withEntries([entry(), entry({ name: "X-Api-Key", format: "literal" })])).ok).toBe(true);
+    expect(validateWebRecipe(proxied()).ok).toBe(true);
+    expect(validateWebRecipe(fortigate()).ok).toBe(true);
+    // Version 3 without the key is fine.
+    const plain = proxied();
+    plain.version = 3;
+    expect(validateWebRecipe(plain).ok).toBe(true);
+  });
+
+  it("refuses inject_headers on a version 1 or 2 recipe, naming the version", () => {
+    for (const version of [1, 2]) {
+      const v = injecting();
+      v.version = version;
+      // On version 1 the submit-target version check would fire first, as on the server.
+      if (version === 1) delete v.submit_target;
+      expect(at(v), `version ${version}`).toBe("inject_headers");
+      expect(recipeError(v)).toMatch(/version 3 \(proxy mode header injection\); this recipe is version/);
+    }
+    // The version check precedes the unknown-key rejection and the shape checks.
+    const bad = injecting();
+    bad.version = 2;
+    bad.inject_headers = "not a list";
+    expect(recipeError(bad)).toMatch(/needs recipe version 3/);
+  });
+
+  it("refuses a version the server does not read", () => {
+    const v = injecting();
+    v.version = 4;
+    expect(at(v)).toBe("version");
+    expect(recipeError(v)).toMatch(/versions 1, 2 and 3/);
+  });
+
+  it("needs a submit target", () => {
+    const v = injecting();
+    delete v.submit_target;
+    expect(at(v)).toBe("inject_headers");
+    expect(recipeError(v)).toMatch(/proxy mode: the recipe needs a `submit_target`/);
+    // A malformed list is reported as such before the missing target.
+    v.inject_headers = [entry({ name: "Host" })];
+    expect(at(v)).toBe("inject_headers[0].name");
+  });
+
+  it("holds the list to 1..=8 entries", () => {
+    expect(at(withEntries([]))).toBe("inject_headers");
+    expect(at(withEntries("x"))).toBe("inject_headers");
+    expect(at(withEntries({}))).toBe("inject_headers");
+    const eight = Array.from({ length: 8 }, (_, i) => entry({ name: `X-H${i}` }));
+    expect(validateWebRecipe(withEntries(eight)).ok).toBe(true);
+    expect(at(withEntries([...eight, entry({ name: "X-H8" })]))).toBe("inject_headers");
+  });
+
+  it("refuses header names that are not tokens or that the proxy never sets", () => {
+    for (const name of ["Connection", "Host", "Content-Length", "Transfer-Encoding", "Keep-Alive", "TE", "Upgrade", "Proxy-Authorization", "X Auth", "X:Auth", "", "X-Ünï", "a".repeat(65)]) {
+      expect(at(withEntries([entry({ name })])), JSON.stringify(name)).toBe("inject_headers[0].name");
+    }
+    expect(at(withEntries([{ format: "bearer", origin: O, path_prefix: "/" }]))).toBe("inject_headers[0].name");
+    expect(at(withEntries([entry({ name: 7 })]))).toBe("inject_headers[0].name");
+    for (const name of ["Authorization", "X-Api-Key", "x_token", "a".repeat(64), "!#$%&'*+-.^_`|~"]) {
+      expect(validateWebRecipe(withEntries([entry({ name })])).ok, name).toBe(true);
+    }
+  });
+
+  it("refuses a bad format, origin, path prefix and unknown key", () => {
+    const cases: [Record<string, unknown>, string][] = [
+      [entry({ format: "basic" }), "inject_headers[0].format"],
+      [{ name: "Authorization", origin: O, path_prefix: "/" }, "inject_headers[0].format"],
+      [entry({ origin: "http://fw01.example.com" }), "inject_headers[0].origin"],
+      [entry({ origin: `${O}/api` }), "inject_headers[0].origin"],
+      [entry({ origin: "https://*.example.com" }), "inject_headers[0].origin"],
+      [{ name: "Authorization", format: "bearer", path_prefix: "/" }, "inject_headers[0].origin"],
+      [{ name: "Authorization", format: "bearer", origin: O }, "inject_headers[0].path_prefix"],
+      [entry({ path_prefix: "api" }), "inject_headers[0].path_prefix"],
+      [entry({ path_prefix: "//evil/" }), "inject_headers[0].path_prefix"],
+      [entry({ path_prefix: "/api?x=1" }), "inject_headers[0].path_prefix"],
+      [entry({ path_prefix: "/api*" }), "inject_headers[0].path_prefix"],
+      [entry({ path_prefix: "/a/../b" }), "inject_headers[0].path_prefix"],
+      [entry({ path_prefix: "/a/%2E%2e/b" }), "inject_headers[0].path_prefix"],
+      [entry({ path_prefix: "/a/./b" }), "inject_headers[0].path_prefix"],
+      [entry({ path_prefix: "/a/%2e" }), "inject_headers[0].path_prefix"],
+      [entry({ path_prefix: "/a/.%2E/b" }), "inject_headers[0].path_prefix"],
+      [entry({ method: "POST" }), "inject_headers[0].method"],
+    ];
+    for (const [e, want] of cases) {
+      expect(at(withEntries([e])), JSON.stringify(e)).toBe(want);
+    }
+    expect(recipeError(withEntries([entry({ path_prefix: "/a/../b" })]))).toMatch(/must not contain a `\.` or `\.\.` segment/);
+    expect(at(withEntries(["x"]))).toBe("inject_headers[0]");
+    // A dotted segment that is not a dot segment is fine.
+    expect(validateWebRecipe(withEntries([entry({ path_prefix: "/v1.0/..x/.well-known" })])).ok).toBe(true);
+  });
+
+  it("refuses overlapping entries for one header on one origin, naming the later one", () => {
+    const overlap = withEntries([entry({ path_prefix: "/api" }), entry({ path_prefix: "/api/v1" })]);
+    expect(at(overlap)).toBe("inject_headers[1]");
+    expect(recipeError(overlap)).toMatch(/overlaps inject_headers\[0\]/);
+    // Either order, and `/` overlaps everything.
+    expect(at(withEntries([entry({ path_prefix: "/api/v1" }), entry({ path_prefix: "/api" })]))).toBe("inject_headers[1]");
+    expect(at(withEntries([entry({ path_prefix: "/api" }), entry({ path_prefix: "/" })]))).toBe("inject_headers[1]");
+    // Case-insensitive name, and the origin is normalised.
+    expect(
+      at(withEntries([entry({ name: "authorization" }), entry({ name: "AUTHORIZATION", origin: `${O}:443/` })])),
+    ).toBe("inject_headers[1]");
+    // Disjoint prefixes, other names and other origins are fine.
+    expect(validateWebRecipe(withEntries([entry({ path_prefix: "/api" }), entry({ path_prefix: "/apix" })])).ok).toBe(true);
+    expect(
+      validateWebRecipe(withEntries([entry({ path_prefix: "/api" }), entry({ name: "X-Api-Key", path_prefix: "/api" })])).ok,
+    ).toBe(true);
+    expect(
+      validateWebRecipe(
+        withEntries([entry({ path_prefix: "/api" }), entry({ origin: "https://sso.example.com", path_prefix: "/api" })]),
+      ).ok,
+    ).toBe(true);
+  });
+
+  it("checks each injection origin against the profile's set", () => {
+    const r = validateWebRecipe(injecting());
+    if (!r.ok) throw new Error("expected a valid recipe");
+    expect(checkRecipeOrigins(r.recipe, [O], false)).toBeNull();
+    const elsewhere = clone(r.recipe);
+    elsewhere.inject_headers = [
+      { name: "Authorization", format: "bearer", origin: O, path_prefix: "/api" },
+      { name: "X-Api-Key", format: "literal", origin: "https://api.example.com", path_prefix: "/" },
+    ];
+    expect(checkRecipeOrigins(elsewhere, [O], false)?.at).toBe("inject_headers[1].origin");
+    expect(checkRecipeOrigins(elsewhere, [O, "https://api.example.com"], false)).toBeNull();
+  });
+
+  it("matches request paths on a `/` boundary and never through a dot segment", () => {
+    expect(pathPrefixMatches("/api", "/api")).toBe(true);
+    expect(pathPrefixMatches("/api", "/api/")).toBe(true);
+    expect(pathPrefixMatches("/api", "/api/v1")).toBe(true);
+    expect(pathPrefixMatches("/api", "/apix")).toBe(false);
+    expect(pathPrefixMatches("/api", "/ap")).toBe(false);
+    expect(pathPrefixMatches("/api/", "/api/v1")).toBe(true);
+    expect(pathPrefixMatches("/api/", "/api")).toBe(false);
+    expect(pathPrefixMatches("/", "/anything/at/all")).toBe(true);
+    expect(pathPrefixMatches("/api", "/api/../x")).toBe(false);
+    expect(pathPrefixMatches("/", "/a/%2E%2e/b")).toBe(false);
+    expect(pathPrefixMatches("/", "/a/./b")).toBe(false);
+    expect(pathPrefixMatches("/api", "api")).toBe(false);
+  });
+
+  it("writes the lowest version that can carry the recipe", () => {
+    const target = { origin: O, path: "/login", body: "form" as const };
+    const list = [{ name: "Authorization", format: "bearer" as const, origin: O, path_prefix: "/api" }];
+    const proxy = withSubmitTarget(blankRecipe(O), target);
+    expect(proxy.version).toBe(2);
+
+    const injected = withInjectHeaders(proxy, list);
+    expect(injected.version).toBe(3);
+    expect(injected.inject_headers).toEqual(list);
+    expect(validateWebRecipe(injected).ok).toBe(true);
+
+    // Changing the target keeps the headers and the version.
+    const moved = withSubmitTarget(injected, { ...target, path: "/other" });
+    expect(moved.version).toBe(3);
+    expect(moved.inject_headers).toEqual(list);
+
+    // Removing the headers goes back to 2 (empty list and undefined alike).
+    for (const none of [undefined, []]) {
+      const back = withInjectHeaders(injected, none);
+      expect(back.version).toBe(2);
+      expect("inject_headers" in back).toBe(false);
+      expect(validateWebRecipe(back).ok).toBe(true);
+    }
+
+    // Removing the submit target drops the headers (they need proxy mode).
+    const off = withSubmitTarget(injected, undefined);
+    expect(off.version).toBe(1);
+    expect("inject_headers" in off).toBe(false);
+    expect("submit_target" in off).toBe(false);
+    expect(validateWebRecipe(off).ok).toBe(true);
+
+    // Headers on a recipe with no target are version 3 and refused by the validator.
+    expect(withInjectHeaders(blankRecipe(O), list).version).toBe(3);
+    expect(withInjectHeaders(blankRecipe(O), undefined).version).toBe(1);
+  });
+});
+
+describe("header injection — credential source", () => {
+  function profile(cs: unknown, recipe: Record<string, unknown> = injecting()): { p: ConnectionProfile; web: WebProfileSettings } {
+    const web: WebProfileSettings = {
+      start_url: `${O}/login`,
+      allowed_origins: [],
+      login_mode: "form",
+      recipe: recipe as unknown as WebLoginRecipe,
+    };
+    const p = { id: "p_web", name: "Console", protocol: "web", credential_source: cs, web } as unknown as ConnectionProfile;
+    return { p, web };
+  }
+
+  it("accepts credential_source.fields.header_secret on a secret source", () => {
+    const { p, web } = profile({ kind: "secret", secret_id: "admin", fields: { header_secret: "api_token" } });
+    expect(validateFormWebProfile(p, web)).toBeNull();
+    const bad = profile({ kind: "secret", secret_id: "admin", fields: { header_secret: "a/b" } });
+    expect(validateFormWebProfile(bad.p, bad.web)).toMatch(/fields\.header_secret must be a single secret key name/);
+    const unknown = profile({ kind: "secret", secret_id: "admin", fields: { header: "x" } });
+    expect(validateFormWebProfile(unknown.p, unknown.web)).toMatch(/fields\.header is not a field/);
+  });
+
+  it("refuses injection on a source that is not a secret", () => {
+    const sources = [
+      { kind: "default-account" },
+      { kind: "ldap", ldap_mount: "openldap/", bind_mode: "static_role", static_role: "fw-admin" },
+      { kind: "provider", provider: "vault-account" },
+    ];
+    for (const cs of sources) {
+      const { p, web } = profile(cs);
+      const e = validateFormWebProfile(p, web);
+      expect(e, JSON.stringify(cs)).not.toBeNull();
+    }
+    const ldap = profile(sources[1]);
+    expect(validateFormWebProfile(ldap.p, ldap.web)).toMatch(/inject_headers sends a header secret, and only a `secret` source/);
+    expect(formCredentialSourceError({ kind: "default-account" }, injecting() as unknown as WebLoginRecipe)).toMatch(
+      /only a `secret` source/,
+    );
+    // A recipe without injection is unaffected.
+    expect(formCredentialSourceError({ kind: "default-account" }, heuristicRecipe(O))).toBeNull();
+  });
+
+  it("checks the injection origins when the profile is saved", () => {
+    const v = injecting();
+    (v.inject_headers as { origin: string }[])[0].origin = "https://evil.example.com";
+    const { p, web } = profile({ kind: "secret", secret_id: "admin" }, v);
+    expect(validateFormWebProfile(p, web)).toMatch(/inject_headers\[0\]\.origin/);
+    const ok = profile({ kind: "secret", secret_id: "admin" }, v);
+    expect(validateFormWebProfile(ok.p, { ...ok.web, allowed_origins: ["https://evil.example.com"] })).toBeNull();
   });
 });

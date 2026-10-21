@@ -309,7 +309,12 @@ mod tests {
     #[test]
     fn the_basic_credential_follows_the_field_map() {
         let data = json!({ "user": "ops", "pass": "hunter2" }).as_object().cloned().unwrap();
-        let fields = SecretFieldMap { username: "user".into(), password: "pass".into(), totp_seed: "t".into() };
+        let fields = SecretFieldMap {
+            username: "user".into(),
+            password: "pass".into(),
+            totp_seed: "t".into(),
+            ..SecretFieldMap::default()
+        };
         let (u, p) = basic_credential(&data, &fields, "login").unwrap();
         assert_eq!((u.as_str(), p.as_str()), ("ops", "hunter2"));
         assert_eq!(

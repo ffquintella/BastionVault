@@ -18,10 +18,12 @@ import type {
   WebLoginRecipe,
   WebProfileSettings,
   WebRecipeAction,
+  WebRecipeHeaderInjection,
   WebRecipeStep,
 } from "../lib/types";
 import {
   MAX_ACTIONS_PER_STEP,
+  MAX_INJECT_HEADERS,
   MAX_STEPS,
   MAX_TIMEOUT_SECS,
   WEB_RECIPE_VENDORS,
@@ -34,6 +36,7 @@ import {
   recipeFileName,
   recipeToJson,
   validateWebRecipe,
+  withInjectHeaders,
   withSubmitTarget,
 } from "../lib/webRecipe";
 import { recipeBaseOrigin, strictOriginSet } from "../lib/webFormProfile";
@@ -91,6 +94,21 @@ function drawable(r: unknown): r is WebLoginRecipe {
       typeof rec.submit_target.origin !== "string" ||
       typeof rec.submit_target.path !== "string" ||
       typeof rec.submit_target.body !== "string")
+  ) {
+    return false;
+  }
+  if (
+    rec.inject_headers !== undefined &&
+    (!Array.isArray(rec.inject_headers) ||
+      !rec.inject_headers.every(
+        (h) =>
+          typeof h === "object" &&
+          h !== null &&
+          typeof h.name === "string" &&
+          typeof h.format === "string" &&
+          typeof h.origin === "string" &&
+          typeof h.path_prefix === "string",
+      ))
   ) {
     return false;
   }
@@ -1010,12 +1028,112 @@ function ProxyModeFields({
           />
         </div>
       )}
+      {target && support?.available === true && (
+        <HeaderInjectionFields
+          recipe={recipe}
+          defaultOrigin={target.origin}
+          onChange={(list) => onChange(withInjectHeaders(recipe, list))}
+        />
+      )}
       {target && support && !support.available && (
         <p role="alert" data-testid="proxy-mode-unavailable" className="text-xs text-[var(--color-danger)] min-w-0 break-words">
           Proxy mode is not available on this computer: {support.reason}. Connecting with this profile from
           here is refused; it is never run as a plain form fill.
         </p>
       )}
+    </div>
+  );
+}
+
+/**
+ * Proxy mode header injection (spec §10, T106 step 7): the recipe's
+ * `inject_headers`. The session proxy adds or replaces each header on the
+ * requests it terminates for that origin and path prefix; the value is read
+ * from the credential source secret, never typed here, and the page never
+ * receives it. Drawn only where proxy mode can run and while a submit target
+ * is set (a recipe with headers and no target is refused).
+ */
+function HeaderInjectionFields({
+  recipe,
+  defaultOrigin,
+  onChange,
+}: {
+  recipe: WebLoginRecipe;
+  defaultOrigin: string;
+  onChange: (list: WebRecipeHeaderInjection[]) => void;
+}) {
+  const list = recipe.inject_headers ?? [];
+  const update = (i: number, patch: Partial<WebRecipeHeaderInjection>) =>
+    onChange(list.map((h, j) => (j === i ? { ...h, ...patch } : h)));
+  return (
+    <div className="space-y-2 min-w-0" data-testid="recipe-header-injection">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-sm font-medium">Header injection</span>
+        <Button
+          size="sm"
+          variant="secondary"
+          disabled={list.length >= MAX_INJECT_HEADERS}
+          onClick={() =>
+            onChange([...list, { name: "Authorization", format: "bearer", origin: defaultOrigin, path_prefix: "/" }])
+          }
+        >
+          + Add header
+        </Button>
+      </div>
+      <p className="text-xs text-[var(--color-text-muted)]">
+        The value comes from the credential source secret&rsquo;s <code>header_secret</code> key (rename it with{" "}
+        <code>credential_source.fields.header_secret</code>); only a <code>secret</code> source can supply it. The
+        proxy adds or replaces the header only on requests it terminates for that origin and path prefix, and the
+        page never receives the value. At most {MAX_INJECT_HEADERS} headers.
+      </p>
+      {list.map((h, i) => (
+        <div
+          key={i}
+          className="grid grid-cols-2 gap-3 rounded-md border border-[var(--color-border)] p-2 min-w-0"
+          data-testid={`recipe-header-${i}`}
+        >
+          <Input
+            label={`Header ${i + 1} name`}
+            value={h.name}
+            onChange={(e) => update(i, { name: e.target.value })}
+            placeholder="Authorization"
+            className="font-mono"
+          />
+          <Select
+            label={`Header ${i + 1} format`}
+            value={h.format}
+            onChange={(e) => update(i, { format: e.target.value === "literal" ? "literal" : "bearer" })}
+            options={[
+              { value: "bearer", label: "Bearer (sends “Bearer <secret>”)" },
+              { value: "literal", label: "Literal (sends the secret as is)" },
+            ]}
+          />
+          <Input
+            label={`Header ${i + 1} origin`}
+            value={h.origin}
+            onChange={(e) => update(i, { origin: e.target.value })}
+            placeholder="https://app.example.com"
+            className="font-mono"
+          />
+          <Input
+            label={`Header ${i + 1} path prefix`}
+            value={h.path_prefix}
+            onChange={(e) => update(i, { path_prefix: e.target.value })}
+            placeholder="/"
+            className="font-mono"
+          />
+          <div className="col-span-2 flex justify-end">
+            <Button
+              size="sm"
+              variant="secondary"
+              aria-label={`Remove header ${i + 1}`}
+              onClick={() => onChange(list.filter((_, j) => j !== i))}
+            >
+              Remove
+            </Button>
+          </div>
+        </div>
+      ))}
     </div>
   );
 }

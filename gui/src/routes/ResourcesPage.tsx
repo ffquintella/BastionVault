@@ -2690,6 +2690,7 @@ function ConnectionProfileEditor({
                     loadingSecrets={loadingSecrets}
                     mode={profile.web.login_mode}
                     providers={credentialProviders}
+                    injectsHeaders={(profile.web.recipe?.inject_headers?.length ?? 0) > 0}
                   />
                 ) : undefined
               }
@@ -3513,6 +3514,7 @@ function WebFormCredentialEditor({
   loadingSecrets,
   mode = "form",
   providers = [],
+  injectsHeaders = false,
 }: {
   cs: CredentialSource;
   onChange: (s: CredentialSource) => void;
@@ -3521,6 +3523,9 @@ function WebFormCredentialEditor({
   mode?: "form" | "http-auth";
   /** Approved credential providers; offered in `form` mode only. */
   providers?: api.CredentialProviderInfo[];
+  /** The recipe injects headers (proxy mode, recipe version 3): offer the
+   *  header secret's key name too. */
+  injectsHeaders?: boolean;
 }) {
   const httpAuth = mode === "http-auth";
   const value =
@@ -3578,10 +3583,23 @@ function WebFormCredentialEditor({
               {httpAuth ? "Secret key names" : "Secret key names and TOTP"}
             </summary>
             <div className="mt-2 grid grid-cols-2 gap-3">
-              {(httpAuth ? (["username", "password"] as const) : (["username", "password", "totp_seed"] as const)).map((key) => (
+              {(httpAuth
+                ? (["username", "password"] as const)
+                : injectsHeaders
+                  ? (["username", "password", "totp_seed", "header_secret"] as const)
+                  : (["username", "password", "totp_seed"] as const)
+              ).map((key) => (
                 <Input
                   key={key}
-                  label={`${key === "totp_seed" ? "TOTP seed" : key === "username" ? "Username" : "Password"} key`}
+                  label={`${
+                    key === "totp_seed"
+                      ? "TOTP seed"
+                      : key === "header_secret"
+                        ? "Header secret"
+                        : key === "username"
+                          ? "Username"
+                          : "Password"
+                  } key`}
                   value={cs.fields?.[key] ?? ""}
                   onChange={(e) => {
                     const fields = { ...cs.fields, [key]: e.target.value };
@@ -3596,7 +3614,11 @@ function WebFormCredentialEditor({
               <p className="col-span-2 text-xs text-[var(--color-text-muted)]">
                 {httpAuth
                   ? "Names of the keys inside the secret, when they differ from the defaults shown. HTTP authentication uses no TOTP."
-                  : "Names of the keys inside the secret, when they differ from the defaults shown. The TOTP seed is base32 and never leaves the server: the host receives only the current code."}
+                  : `Names of the keys inside the secret, when they differ from the defaults shown. The TOTP seed is base32 and never leaves the server: the host receives only the current code.${
+                      injectsHeaders
+                        ? " The header secret goes to the session proxy, which sets it on the requests the recipe's header injection names; the page never receives it."
+                        : ""
+                    }`}
               </p>
               {!httpAuth && (
                 <>
