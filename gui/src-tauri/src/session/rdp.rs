@@ -3126,7 +3126,9 @@ fn cert_der_sha256(der: &[u8]) -> String {
 /// closed connection, say so and point at the hop that actually broke.
 fn describe_finalize_error(args: &RdpOpenArgs, e: &ironrdp::connector::ConnectorError) -> String {
     let report = format!("rdp: connect_finalize: {}", e.report());
-    if args.ticket_cookie.is_some() && peer_hung_up(e) {
+    if let Some(message) = logon_failure_message(&report, &args.host, args.username.as_str()) {
+        message
+    } else if args.ticket_cookie.is_some() && peer_hung_up(e) {
         format!(
             "{report} — the Rustion bastion at {}:{} closed the connection without \
              answering the RDP exchange. The bastion never reports why on the wire, so \
@@ -3139,6 +3141,21 @@ fn describe_finalize_error(args: &RdpOpenArgs, e: &ironrdp::connector::Connector
     } else {
         report
     }
+}
+
+/// Turn the NTSTATUS the server returned during CredSSP into an operator
+/// message. `STATUS_LOGON_FAILURE` (`0xc000006d`) means the target rejected
+/// the username/password pair; the raw report is kept at the end so the
+/// NTSTATUS stays visible in support logs.
+fn logon_failure_message(report: &str, host: &str, username: &str) -> Option<String> {
+    const LOGON_FAILURE: &str = "STATUS_LOGON_FAILURE";
+    if !report.contains(LOGON_FAILURE) {
+        return None;
+    }
+    Some(format!(
+        "Logon refused by {host}: the username or password for `{username}` is wrong. \
+         Update the saved password for this account and try again. (raw: {report})"
+    ))
 }
 
 /// Walk an error's source chain looking for an `io::Error` that means
@@ -3352,6 +3369,22 @@ mod nego_cookie_tests {
         assert_eq!(normalize_logon("alice@corp.example", Some("CORP")), ("alice@corp.example".into(), None));
         assert_eq!(normalize_logon("alice", Some("CORP")), ("alice".into(), Some("CORP".into())));
         assert_eq!(normalize_logon("alice", Some("")), ("alice".into(), None));
+    }
+
+    /// Regression: a wrong saved password surfaced as a raw CredSSP
+    /// `InvalidToken` report. The NTSTATUS must map to an operator message
+    /// that names the account, and other failures must pass through unchanged.
+    #[test]
+    fn logon_failure_maps_to_wrong_password_message() {
+        use super::logon_failure_message;
+        let raw = "rdp: connect_finalize: [CredSSP] CredSSP, caused by: InvalidToken: \
+                   CredSSP server returned an error status; status is STATUS_LOGON_FAILURE [0xc000006d]";
+        let msg = logon_failure_message(raw, "evdc400.fgv.br", "CORP\\felipe").expect("logon failure is mapped");
+        assert!(msg.contains("username or password for `CORP\\felipe` is wrong"), "{msg}");
+        assert!(msg.contains("evdc400.fgv.br"), "{msg}");
+        assert!(msg.contains("0xc000006d"), "raw NTSTATUS kept for support: {msg}");
+
+        assert_eq!(logon_failure_message("rdp: connect_finalize: TLS handshake", "h", "u"), None);
     }
 
     #[test]

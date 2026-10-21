@@ -74,6 +74,12 @@ EXAMPLE ENTRY:
 - **Open a recording as a replay pane in the Session Workspace** (T109, S56)
   -- Recordings → *Open in workspace* (and *…in workspace* on a keystroke-search hit, which seeks to the match) places the recording as a tab in the workspace; *Open in window* still opens the standalone replay window. A replay is identified by its recording id, not a session token: the main window queues the id in the host, the workspace is woken with the payload-less `session://placed` and drains the queue with the new `session_replay_take` (workspace only). The workspace's command set gains that command and the four recording reads its replay pane makes — listed one by one, not the whole `session-replay` set. Opening a recording already open focuses its pane; closing a replay pane asks nothing, and a workspace holding only replays closes without a prompt. Replays are not saved in the restorable layout (spec §9). Refused in the *Separate windows* layout. Not yet exercised by hand in a desktop build.
 
+### Changed
+
+#### Resource Connect RDP
+
+- Explain a refused RDP logon in plain words: when the target rejects the saved username or password (`STATUS_LOGON_FAILURE`), the error now names the account and says the password is wrong, instead of only a raw CredSSP `InvalidToken` report. The NTSTATUS stays in the message for support.
+
 ### Security
 
 #### Resource Connect SSH
