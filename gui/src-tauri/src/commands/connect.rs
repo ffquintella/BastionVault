@@ -132,6 +132,23 @@ pub async fn session_open_ssh(
     let (placement, layout_prefs) = resolve_session_layout(request.placement)?;
     require_restore_in_workspace(&opened_in, placement)?;
 
+    // Web / SSH mutual exclusion (T111: SSH joined `session::web_channel_
+    // conflict` once its output moved onto a per-webview Channel). Refused
+    // early so nothing is resolved or dialled and no MFA ticket is burnt;
+    // `session_attach_ssh_output` re-checks under the registry lock when
+    // it installs the channel, which is the check that closes the race.
+    if let Some(conflict) =
+        session::registry_web_channel_conflict(session::ProfileProtocol::Ssh, &*state.connect_sessions.lock().await)
+    {
+        log::warn!(
+            target: "audit",
+            "connect.ssh.refused: reason={} action=open resource={}",
+            conflict.audit_reason,
+            request.resource_name,
+        );
+        return Err(CommandError::from(conflict.message));
+    }
+
     // Compute the effective target, user, port from the profile +
     // resource metadata defaults.
     let host_candidates = profile_host_candidates(&profile, &meta);
@@ -531,6 +548,87 @@ pub struct SshResizeRequest {
     pub token: String,
     pub cols: u16,
     pub rows: u16,
+}
+
+#[derive(Deserialize)]
+pub struct SshAttachOutputRequest {
+    pub token: String,
+    /// Pane dimensions at attach time. The PTY resizes to these and the
+    /// pump treats the attach as the holder's listener handshake, so the
+    /// first chunk the fresh channel carries is whatever
+    /// `session::output` buffered for this epoch.
+    pub cols: u16,
+    pub rows: u16,
+}
+
+/// Install the holding window's output channel on the SSH pump (T111).
+///
+/// The pane calls this once its xterm is mounted, passing a
+/// `tauri::ipc::Channel` it created. From then on PTY output goes
+/// only to that channel — not through `emit_to`, which Tauri 2.11
+/// also delivers to any default-target `listen()` in any webview.
+///
+/// Idempotent by design: a reloaded window calls it again with a
+/// fresh channel, which replaces the stale one and triggers a
+/// handshake replay (the ring the pump kept while nothing was
+/// listening) at the current holder epoch.
+#[tauri::command]
+pub async fn session_attach_ssh_output(
+    state: State<'_, AppState>,
+    webview: Webview,
+    request: SshAttachOutputRequest,
+    channel: tauri::ipc::Channel<session::output::ChunkPayload>,
+) -> CmdResult<()> {
+    // Only the window that holds the session may install an output
+    // channel on it — same rule as RDP's `session_attach_rdp_frames`.
+    require_session_window(&state, &webview, &request.token).await?;
+    // Defence in depth for the web/SSH exclusion: `session_open_*` keep
+    // the two kinds apart, and this keeps an SSH output channel from
+    // being armed while a web window could poll for channel ids.
+    let sessions = state.connect_sessions.lock().await;
+    if let Some(conflict) = session::registry_web_channel_conflict(session::ProfileProtocol::Ssh, &sessions) {
+        log::warn!(
+            target: "audit",
+            "connect.ssh.refused: reason={} action=attach_output token={}",
+            conflict.audit_reason,
+            request.token,
+        );
+        return Err(CommandError::from(conflict.message));
+    }
+    let sink = match sessions.get(&request.token) {
+        Some(session::SessionState::Ssh(s)) => std::sync::Arc::clone(&s.output_sink),
+        Some(_) => {
+            return Err(CommandError::from(format!(
+                "session `{}` is not an SSH session (cannot attach an output channel)",
+                request.token
+            )))
+        }
+        None => return Err(CommandError::from(format!("session token `{}` not found", request.token))),
+    };
+    drop(sessions);
+    // Read the current holder epoch and install the channel under it.
+    // The pump's `send_if_epoch` compares the attached epoch with the
+    // one it read from the registry, so a stale channel (missed detach
+    // on a move) refuses to deliver even if this ever gets ahead of a
+    // transfer.
+    let (route, epoch) = state.session_attachments.lock().await.route_epoch(&request.token);
+    session::attachments::authorize_input(&route, webview.label(), &request.token).map_err(CommandError::from)?;
+    match sink.lock() {
+        Ok(mut sink) => sink.attach(channel, epoch),
+        Err(poisoned) => poisoned.into_inner().attach(channel, epoch),
+    };
+    // Drive the handshake replay the same way the pre-T111 flow did —
+    // a Resize at the current epoch — so the pump calls
+    // `output.handshake(epoch)` and lands whatever is buffered on the
+    // just-installed channel. Also sets the remote PTY to the pane's
+    // size on first paint.
+    session::ssh::send_control(
+        &state,
+        &request.token,
+        SshControl::Resize { cols: request.cols, rows: request.rows, epoch },
+    )
+    .await
+    .map_err(CommandError::from)
 }
 
 #[tauri::command]

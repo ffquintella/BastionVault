@@ -36,7 +36,36 @@
 //! (the base64 string, the serialised event, the webview's JS heap) are not
 //! zeroed — the same as for live output before this phase.
 
+use serde::Serialize;
+use tauri::ipc::Channel;
 use zeroize::{Zeroize, Zeroizing};
+
+/// What the pump hands the holding window on every chunk — the raw PTY
+/// bytes (base64 so JSON stays honest) and, only on a handshake replay, a
+/// host-composed note the pane renders before them (never remote data).
+///
+/// Delivered over a per-webview [`tauri::ipc::Channel`] installed by
+/// `session_attach_ssh_output` (T111). Before T111 the pump used
+/// `emit_to`, which Tauri 2.11 also delivers to any default-target
+/// `listen()` in any webview, so the session token — not the window —
+/// was the confidentiality boundary. A `Channel` is bound to the
+/// webview that created it; the only residual exposure is the
+/// `plugin:__TAURI_CHANNEL__|fetch` remote-origin ACL exemption which
+/// a hostile web page could use to poll channel ids, and
+/// `session::web_channel_conflict` keeps web sessions out while SSH or
+/// RDP is live for exactly that reason.
+#[derive(Serialize, Clone)]
+pub struct ChunkPayload {
+    /// Base64 — the raw PTY bytes, including escape sequences. xterm.js
+    /// decodes b64 → Uint8Array → TextDecoder before passing the result
+    /// to `terminal.write`.
+    pub bytes_b64: String,
+    /// Host-composed note the pane renders before the bytes — set only
+    /// on a handshake replay (output dropped, or not kept across a
+    /// move). Never remote data.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
+}
 
 /// Bytes kept per SSH session (the spec's proposal: 256 KiB).
 pub const OUTPUT_BUFFER_CAPACITY: usize = 256 * 1024;
@@ -242,6 +271,90 @@ impl SessionOutput {
     }
 }
 
+/// The per-session output sink the holding webview installs via
+/// `session_attach_ssh_output` (T111). The pump writes chunks here
+/// instead of `emit_to`-ing them, so SSH output can only reach the one
+/// webview that created the channel — not every webview that happened
+/// to `listen()` on the same event name.
+///
+/// A channel installed at holder epoch `E` only ever carries epoch-`E`
+/// output: `send_if_epoch` checks the stored epoch against the one the
+/// pump just read from the attachment registry, and refuses if they
+/// disagree. The move path detaches the sink before transferring the
+/// session, and the new holder installs its own channel on attach, so
+/// a stale channel can never deliver.
+pub struct SshOutputSink {
+    channel: Option<Channel<ChunkPayload>>,
+    /// The holder epoch at which the current channel was installed. `0`
+    /// (epochs start at 1) when no channel is installed.
+    attached_epoch: u64,
+}
+
+impl Default for SshOutputSink {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SshOutputSink {
+    pub fn new() -> Self {
+        Self { channel: None, attached_epoch: 0 }
+    }
+
+    /// Install `channel` as the sink for holder epoch `epoch`. Replaces
+    /// any predecessor (a reloaded window creates a fresh one), and the
+    /// old channel is dropped without being sent to again.
+    pub fn attach(&mut self, channel: Channel<ChunkPayload>, epoch: u64) {
+        self.channel = Some(channel);
+        self.attached_epoch = epoch;
+    }
+
+    /// Drop the current channel when the session moves to another
+    /// window (T38 Phase 6 / T111), so no further chunk reaches the
+    /// webview that gave the session up. The pump's output ring keeps
+    /// what it holds and the next `attach` — the new window's — replays
+    /// it at the new epoch.
+    pub fn detach(&mut self) {
+        self.channel = None;
+        self.attached_epoch = 0;
+    }
+
+    /// Hand `payload` to the webview if the sink's installed epoch
+    /// equals `expected_epoch`. Returns whether the payload was pushed
+    /// onto the channel. The epoch gate is belt-and-braces: the move
+    /// path already detaches the old sink before transferring, but a
+    /// bug that skipped the detach would still only deliver output to
+    /// the window that completed the handshake at the current epoch.
+    pub fn send_if_epoch(&self, payload: ChunkPayload, expected_epoch: u64) -> bool {
+        let Some(channel) = self.channel.as_ref() else {
+            return false;
+        };
+        if self.attached_epoch != expected_epoch {
+            return false;
+        }
+        match channel.send(payload) {
+            Ok(()) => true,
+            Err(e) => {
+                // Likely the webview went away without a detach; refuse
+                // to pretend we delivered it so the pump keeps the chunk
+                // for the next handshake. No payload bytes in the log.
+                log::debug!("ssh output: channel send failed (webview gone?): {e}");
+                false
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub fn attached_epoch(&self) -> u64 {
+        self.attached_epoch
+    }
+
+    #[cfg(test)]
+    pub fn is_attached(&self) -> bool {
+        self.channel.is_some()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -359,6 +472,161 @@ mod tests {
         let again = out.handshake(2).unwrap();
         assert_eq!(&again.bytes[..], b"prompt");
         assert!(again.notice.is_none(), "still the first window to be served");
+    }
+
+    // ─── T111: per-webview output channel ──────────────────────────
+    //
+    // These tests use real `tauri::ipc::Channel` values (built from a
+    // closure that just records what came in) so the sink's gates run
+    // under the same `channel.send → on_message` path a real webview
+    // takes. They are the Rust side of the confidentiality property
+    // T111 exists for: a channel installed by webview A is the only
+    // one that can see A's output.
+
+    use std::sync::{Arc, Mutex};
+    use tauri::ipc::{Channel, InvokeResponseBody};
+
+    /// Record every payload a channel receives, deserialised back from
+    /// the `InvokeResponseBody::Json` body the sink encodes it into.
+    #[derive(Default, Clone)]
+    struct Spy {
+        received: Arc<Mutex<Vec<ChunkPayload>>>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct ChunkIn {
+        bytes_b64: String,
+        #[serde(default)]
+        notice: Option<String>,
+    }
+
+    impl Spy {
+        fn new() -> Self {
+            Self::default()
+        }
+        fn channel(&self) -> Channel<ChunkPayload> {
+            let bucket = Arc::clone(&self.received);
+            Channel::new(move |body| {
+                let json = match body {
+                    InvokeResponseBody::Json(s) => s,
+                    InvokeResponseBody::Raw(bytes) => String::from_utf8(bytes).unwrap(),
+                };
+                let decoded: ChunkIn = serde_json::from_str(&json).unwrap();
+                bucket.lock().unwrap().push(ChunkPayload {
+                    bytes_b64: decoded.bytes_b64,
+                    notice: decoded.notice,
+                });
+                Ok(())
+            })
+        }
+        fn into_received(self) -> Vec<ChunkPayload> {
+            self.received.lock().unwrap().clone()
+        }
+    }
+
+    /// A channel installed under webview A is the only one that sees
+    /// A's output. Even if the sink were somehow asked to deliver at
+    /// A's epoch after an attach swap, the second channel takes over.
+    #[test]
+    fn a_channel_registered_under_one_webview_does_not_deliver_to_another() {
+        let mut sink = SshOutputSink::new();
+        let a = Spy::new();
+        let b = Spy::new();
+        sink.attach(a.channel(), 7);
+
+        // Deliver one chunk at epoch 7: lands on A.
+        let delivered = sink.send_if_epoch(ChunkPayload { bytes_b64: "YQ==".into(), notice: None }, 7);
+        assert!(delivered);
+        assert_eq!(a.received.lock().unwrap().len(), 1);
+        assert!(b.received.lock().unwrap().is_empty());
+
+        // The session is handed to webview B at a new epoch. The move
+        // path detaches A's channel; B then installs its own.
+        sink.detach();
+        assert!(!sink.send_if_epoch(ChunkPayload { bytes_b64: "YQ==".into(), notice: None }, 7));
+        sink.attach(b.channel(), 8);
+
+        // A chunk at the new epoch lands on B only.
+        let delivered = sink.send_if_epoch(ChunkPayload { bytes_b64: "Yg==".into(), notice: None }, 8);
+        assert!(delivered);
+        assert_eq!(a.received.lock().unwrap().len(), 1, "A got nothing after the move");
+        assert_eq!(b.received.lock().unwrap().len(), 1);
+
+        // A late chunk tagged for the OLD epoch (which the pump would
+        // normally gate out of before this call) never reaches B even
+        // if it were handed in: the sink's attached_epoch is 8.
+        assert!(!sink.send_if_epoch(ChunkPayload { bytes_b64: "Yg==".into(), notice: None }, 7));
+        assert_eq!(b.received.lock().unwrap().len(), 1);
+    }
+
+    /// Belt-and-braces: a stale channel left behind by a bug that
+    /// skipped the detach still refuses to send at the new epoch.
+    #[test]
+    fn a_stale_channel_refuses_the_new_epoch_even_without_detach() {
+        let mut sink = SshOutputSink::new();
+        let a = Spy::new();
+        let b = Spy::new();
+        sink.attach(a.channel(), 1);
+        // Bug: move happened but detach never ran. The new window
+        // reattaches, which must replace the stale channel.
+        sink.attach(b.channel(), 2);
+        assert!(!sink.send_if_epoch(ChunkPayload { bytes_b64: "x".into(), notice: None }, 1));
+        assert!(a.into_received().is_empty());
+        let delivered = sink.send_if_epoch(ChunkPayload { bytes_b64: "x".into(), notice: None }, 2);
+        assert!(delivered);
+        assert_eq!(b.into_received().len(), 1);
+    }
+
+    /// A fresh channel attach replays the ring once: the sink hands
+    /// the handshake replay over and nothing after it until more
+    /// output arrives. (The ring + handshake live in `SessionOutput`;
+    /// this test checks they land through the sink as one chunk.)
+    #[test]
+    fn a_fresh_channel_on_attach_replays_the_ring_once() {
+        let mut out = SessionOutput::new(64, false);
+        out.record(b"motd\r\n$ ", false);
+        let mut sink = SshOutputSink::new();
+        let spy = Spy::new();
+        sink.attach(spy.channel(), 1);
+
+        let replay = out.handshake(1).unwrap();
+        assert!(!replay.is_empty());
+        let delivered = sink.send_if_epoch(
+            ChunkPayload { bytes_b64: encode_b64(&replay.bytes), notice: replay.notice.clone() },
+            1,
+        );
+        assert!(delivered);
+        out.handshake_done(1);
+
+        // A later resize at the same epoch is not a handshake, so
+        // nothing more lands on the channel until the pump records
+        // actual output.
+        assert!(out.handshake(1).is_none());
+        let received = spy.into_received();
+        assert_eq!(received.len(), 1, "exactly one replay chunk");
+        assert_eq!(received[0].bytes_b64, encode_b64(&replay.bytes));
+    }
+
+    fn encode_b64(bytes: &[u8]) -> String {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        STANDARD.encode(bytes)
+    }
+
+    /// The sink reports what the handshake told it: once the attached
+    /// epoch is set, `attached_epoch()` reflects it; a detach zeroes
+    /// it so `is_attached()` is false.
+    #[test]
+    fn attach_and_detach_are_observable() {
+        let mut sink = SshOutputSink::new();
+        assert!(!sink.is_attached());
+        assert_eq!(sink.attached_epoch(), 0);
+        let spy = Spy::new();
+        sink.attach(spy.channel(), 42);
+        assert!(sink.is_attached());
+        assert_eq!(sink.attached_epoch(), 42);
+        sink.detach();
+        assert!(!sink.is_attached());
+        assert_eq!(sink.attached_epoch(), 0);
     }
 
     #[test]

@@ -292,11 +292,13 @@ pub async fn open_ssh_session(
 
     // Control channel — the per-session task pumps from here.
     let (tx, mut rx) = mpsc::channel::<SshControl>(64);
-    // Output goes to the window that holds the session, not to every
-    // webview (T38; see `session::routing` for what that does and does
-    // not narrow).
+    // Output goes to the one webview that installed its IPC channel on
+    // the sink (T111). `events` is still used for the closed notice,
+    // which carries only a host-composed reason string and is still
+    // routed to the holder's window label with `emit_to`.
     let events = super::routing::SessionEvents::new(app.clone(), token.clone());
-    let stdout_event_for_task = stdout_event.clone();
+    let output_sink = std::sync::Arc::new(std::sync::Mutex::new(super::output::SshOutputSink::new()));
+    let output_sink_for_task = std::sync::Arc::clone(&output_sink);
     let closed_event_for_task = closed_event.clone();
     let retain_output = args.retain_output;
 
@@ -336,13 +338,23 @@ pub async fn open_ssh_session(
                             received_output = true;
                             let delivered = match output.live_epoch() {
                                 Some(epoch) => {
-                                    events
-                                        .emit_if_epoch(
-                                            &stdout_event_for_task,
-                                            ChunkPayload { bytes_b64: encode_b64(&data), notice: None },
-                                            epoch,
-                                        )
-                                        .await
+                                    // Gate the registry's current epoch under
+                                    // the attachment lock first (the same
+                                    // check `emit_if_epoch` did), then push
+                                    // onto the sink's channel. The sink's own
+                                    // attached_epoch is checked under its own
+                                    // mutex, so a stale channel (missed detach
+                                    // on a move) still refuses.
+                                    if events.holder_epoch_is(epoch).await {
+                                        let payload = super::output::ChunkPayload {
+                                            bytes_b64: encode_b64(&data),
+                                            notice: None,
+                                        };
+                                        let sink = output_sink_for_task.lock().unwrap_or_else(|p| p.into_inner());
+                                        sink.send_if_epoch(payload, epoch)
+                                    } else {
+                                        false
+                                    }
                                 }
                                 None => false,
                             };
@@ -403,16 +415,26 @@ pub async fn open_ssh_session(
                             }
                             // The first Resize a holder sends at an epoch
                             // is its "listener is live" signal: deliver
-                            // what was buffered in one emit and go live.
+                            // what was buffered in one send and go live.
+                            // T111: the signal is really `session_attach_
+                            // ssh_output` installing the channel; the attach
+                            // command issues this Resize so the handshake
+                            // replay lands on the fresh channel.
                             if let Some(replay) = output.handshake(epoch) {
-                                let delivered = if replay.is_empty() {
-                                    events.holder_epoch_is(epoch).await
+                                let delivered = if !events.holder_epoch_is(epoch).await {
+                                    false
+                                } else if replay.is_empty() {
+                                    // Still mark the epoch live: the window
+                                    // is listening even though there was
+                                    // nothing buffered to send.
+                                    true
                                 } else {
-                                    let payload = ChunkPayload {
+                                    let payload = super::output::ChunkPayload {
                                         bytes_b64: encode_b64(&replay.bytes),
                                         notice: replay.notice.clone(),
                                     };
-                                    events.emit_if_epoch(&stdout_event_for_task, payload, epoch).await
+                                    let sink = output_sink_for_task.lock().unwrap_or_else(|p| p.into_inner());
+                                    sink.send_if_epoch(payload, epoch)
                                 };
                                 if delivered {
                                     output.handshake_done(epoch);
@@ -465,6 +487,7 @@ pub async fn open_ssh_session(
             token.clone(),
             SessionState::Ssh(SshSessionState {
                 input_tx: tx,
+                output_sink: std::sync::Arc::clone(&output_sink),
                 label: args.label.clone(),
                 on_close: args.on_close.clone(),
             }),
@@ -577,19 +600,9 @@ pub(super) struct ClosedPayload {
     pub(super) reason: String,
 }
 
-#[derive(Serialize, Clone)]
-struct ChunkPayload {
-    /// Base64 — the raw PTY bytes, including escape sequences.
-    /// xterm.js's `terminal.write` accepts UTF-8 strings, so the
-    /// frontend decodes from b64 → Uint8Array → TextDecoder before
-    /// passing the result in.
-    bytes_b64: String,
-    /// Host-composed note the pane shows before the bytes — set only on a
-    /// handshake replay (output dropped, or not kept across a move). Never
-    /// remote data.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    notice: Option<String>,
-}
+// `ChunkPayload` moved to `session::output` (T111): it is now the
+// item type of the per-webview `tauri::ipc::Channel<ChunkPayload>`
+// that `session_attach_ssh_output` installs on the sink.
 
 fn encode_b64(bytes: &[u8]) -> String {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -632,6 +645,22 @@ fn openssh_sha256_fingerprint(key: &PublicKey) -> String {
     let mut h = Sha256::new();
     h.update(key.public_key_bytes());
     format!("SHA256:{}", STANDARD_NO_PAD.encode(h.finalize()))
+}
+
+/// Detach the IPC output channel of SSH session `token`, if it is
+/// one — the move path's counterpart to [`rdp::detach_frames`]. The
+/// pump keeps the chunks it holds and the next
+/// `session_attach_ssh_output` — the new window's — replays them at
+/// the new holder epoch.
+pub async fn detach_output(state: &crate::state::AppState, token: &str) {
+    let sink = match state.connect_sessions.lock().await.get(token) {
+        Some(SessionState::Ssh(s)) => std::sync::Arc::clone(&s.output_sink),
+        _ => return,
+    };
+    match sink.lock() {
+        Ok(mut sink) => sink.detach(),
+        Err(poisoned) => poisoned.into_inner().detach(),
+    };
 }
 
 /// Push a control message into a session's control channel. Used by

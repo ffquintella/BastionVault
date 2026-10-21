@@ -658,6 +658,7 @@ pub fn run() {
             commands::connect_web_chrome::web_chrome_disconnect,
             commands::connect_web_chrome::web_chrome_relogin,
             commands::connect::session_input,
+            commands::connect::session_attach_ssh_output,
             commands::connect::session_attach_rdp_frames,
             commands::connect::session_input_rdp_mouse,
             commands::connect::session_input_rdp_wheel,

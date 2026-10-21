@@ -2,11 +2,12 @@
   "set": [
     {
       "identifier": "session-window",
-      "description": "A session's own window (ssh-<token> / rdp-<token>, session.html). Drives the one session it renders: SSH/RDP input and resize, the RDP frame channel, close, liveness, Move to workspace, asking before its native close and closing itself (session_window_closing / session_window_close, T108 — the calling window only, never another by label), the session-input preferences it reads, and the Rustion chip's read / renew / end (session_rustion_info / _renew / _kill, T145: each takes the session token, and the host takes the bastion, session and correlation ids from the bundle it stashed at open, never from the webview). Every input command and the three Rustion commands are further narrowed by the host to the window holding the session (attachments::authorize_input); the raw-id rustion_session_renew / _kill stay in the main window's set only. No vault reads, no session opens, no token. Derived from what session.html's own-window routes call; gui/src/test/sessionBundle.test.ts keeps the two equal. Features/session-workspace.md, T110.",
+      "description": "A session's own window (ssh-<token> / rdp-<token>, session.html). Drives the one session it renders: SSH/RDP input and resize, the SSH output channel (T111: allow-session-attach-ssh-output), the RDP frame channel, close, liveness, Move to workspace, asking before its native close and closing itself (session_window_closing / session_window_close, T108 — the calling window only, never another by label), the session-input preferences it reads, and the Rustion chip's read / renew / end (session_rustion_info / _renew / _kill, T145: each takes the session token, and the host takes the bastion, session and correlation ids from the bundle it stashed at open, never from the webview). Every input command and the three Rustion commands are further narrowed by the host to the window holding the session (attachments::authorize_input); the raw-id rustion_session_renew / _kill stay in the main window's set only. No vault reads, no session opens, no token. Derived from what session.html's own-window routes call; gui/src/test/sessionBundle.test.ts keeps the two equal. Features/session-workspace.md, T110, T111.",
       "permissions": [
         "allow-session-input",
         "allow-session-resize",
         "allow-session-close",
+        "allow-session-attach-ssh-output",
         "allow-session-attach-rdp-frames",
         "allow-session-input-rdp-key",
         "allow-session-input-rdp-mouse",

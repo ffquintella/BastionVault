@@ -37,6 +37,8 @@ const TOKEN: &str = "sess_0123456789abcdef0123456789abcdef";
 const SESSION_WINDOW: &[&str] = &[
     "get_session_workspace_prefs",
     "session_attach_rdp_frames",
+    // T111: SSH output rides a per-webview IPC channel installed here.
+    "session_attach_ssh_output",
     "session_close",
     "session_heartbeat",
     "session_input",
