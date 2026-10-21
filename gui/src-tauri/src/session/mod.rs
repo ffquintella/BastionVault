@@ -26,6 +26,7 @@ pub mod web_engine;
 pub mod web_http_auth;
 pub mod web_launch;
 pub mod web_load;
+pub mod web_nav_bar;
 pub mod web_proxy;
 pub mod web_proxy_ca;
 pub mod web_proxy_listener;

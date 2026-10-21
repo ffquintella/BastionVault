@@ -756,6 +756,14 @@ pub struct WebShared {
     /// gate's refusal hook holds this `WebShared`, and the platform handler
     /// owns the gate for the window's lifetime.
     pin_gate: std::sync::OnceLock<std::sync::Weak<TlsPinGate>>,
+    /// One-shot flag set by the nav bar's Reload button so the fill
+    /// engine's step-picker skips the next matching step on the URL the
+    /// operator reloaded (G5 in docs/specs/2026-10-20-web-session-nav-controls-design.md).
+    /// Read and cleared through [`super::web_nav_bar::take_operator_reload`];
+    /// Task 6 of that plan wires the step-picker's read. `pub(crate)` so
+    /// the sibling `web_nav_bar` module can mark / take it; nothing
+    /// outside this crate should touch it directly.
+    pub(crate) operator_reload: std::sync::atomic::AtomicBool,
 }
 
 impl WebShared {
@@ -771,6 +779,7 @@ impl WebShared {
             login_window: Mutex::new(LoginWindow::default()),
             relogin: std::sync::atomic::AtomicBool::new(false),
             pin_gate: std::sync::OnceLock::new(),
+            operator_reload: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
