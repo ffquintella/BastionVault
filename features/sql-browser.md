@@ -1492,10 +1492,74 @@ that has not been run, with the acceptance check named.
   50-session threshold. No number was given, so the threshold stays open and
   is required before Phase 1 merges.
 
-**Result of Phase 0:** the decisions D1, D2 and D4 are recorded. D3 and D5
-have no value yet. The measurements (items 2, 3, 4, 6) and the HA read (item
-7) are still not run, so Phase 0 is not complete and T124 stays `[ ]`. Phase 1
-must not start on the authz path until the open measurements are run.
+**Measurement results (2026-10-21):**
+
+- **Item 1, rolling upgrade — confirmed.** `Policy::from_str` deserializes
+  `capabilities` with `hcl::from_body` into `Vec<Capability>`
+  (`crates/bv-kernel/src/modules/policy/policy.rs:327`, field at `:141`). An
+  unknown name such as `sql_select` fails that call with `?`, so the whole
+  policy is refused on an older node. That is fail-closed, but it removes every
+  path of the policy there. This is the reason for the D4 write gate.
+- **Item 2, 50-session model — measured on a model, not the runtime.** A child
+  with a 20–200 ms sleep and no database, 50 sessions × 20 invocations, Docker
+  on macOS arm64, one run per model:
+
+  | Model | p50 | p99 | max | RSS harness / child |
+  |---|---|---|---|---|
+  | serialized (today) | 5674 ms | 6086 ms | 6198 ms | 2.8 / 2.6 MiB |
+  | multiplexed (32 in flight, one reader) | 172 ms | 277 ms | 305 ms | 2.8 / 2.6 MiB |
+
+  Serialized invocations at 50 sessions queue for seconds. Multiplexing adds
+  about 24 KiB to the harness and 36 KiB to the child. Caveats: one run each,
+  no host_call round trip, no cancel, no result payload, no real driver.
+- **Item 3, sqlparser coverage — measured on our own corpus.** `sqlparser`
+  0.63.0 over 520 generated statements per dialect (2,080 total): PostgreSQL
+  512, T-SQL 506, MySQL/MariaDB 505, Oracle 497 accepted. Gaps that the
+  classifier must handle explicitly in Phase 2: anonymous blocks and PL/SQL,
+  `DO $$`, procedure bodies, MySQL executable comments and T-SQL `GO` (refuse
+  them), file writes and `xp_cmdshell` (refuse, §4.2), and maintenance and
+  utility commands (`VACUUM`, `REINDEX`, `OPTIMIZE`, `DBCC`, `BULK INSERT`,
+  Oracle `INSERT ALL`). "Accepted" means no parse error only; tree correctness
+  is not checked, and most hand-written families have one sample.
+- **Item 4, drivers — checked, not built.** With `default-features = false`,
+  `tokio-postgres` (`runtime` plus `tokio-postgres-rustls`), `mysql_async`
+  (`rustls-tls`), `tiberius` (`rustls`) and `oracle` 0.6.3 show no
+  `openssl-sys` in `cargo tree`. `aws-lc-sys` is present through rustls, which
+  is the chosen provider (`Cargo.toml:241`). Not compiled or linked on
+  macOS, Linux or Windows.
+- **Item 6, GUI bundle — measured, minimum case.** A Vite build with React
+  19 and CodeMirror 6 (`lang-sql`) plus TanStack Virtual adds 106 kB gzip to a
+  68 KiB baseline (70,058 → 176,076 bytes). Most of the addition is
+  `lang-sql`. The real workspace imports more, so this is a floor.
+  Measured with the host Node (v26), not the `node:22-slim` image, which was
+  not pulled.
+- **Item 7, HA — read.** No `session_on_other_node` or sticky mechanism exists
+  in `src/` or `crates/`. `bv-client` pins one node per backend and fails over
+  only idempotent operations when the node is unavailable
+  (`crates/bv-client/src/remote.rs:837`). Recommendation: session-bound plugin
+  operations never fail over. If the node holding a session goes away, the
+  session ends and the client reconnects. This is recorded as a recommendation
+  for the maintainer to confirm.
+
+**Decided values (confirmed by the maintainer, 2026-10-21):**
+
+- **D3, GUI bundle budget:** load the SQL workspace with a dynamic import so
+  the main chunk is unchanged for users who never open it, and cap the SQL
+  chunk at 150 kB gzip. The measured floor is 106 kB, leaving room for the
+  real workspace.
+- **D5, 50-session threshold:** on the model, multiplexed p99 must stay at or
+  below 500 ms at 50 sessions with a 20–200 ms backend delay. The real runtime
+  must then keep p99 within 1.5× of the single-session p99 on the same
+  workload, and be re-measured with the real driver before Phase 1 merges.
+
+**Result of Phase 0 (closed 2026-10-21):** D1, D2 (TCP only), D3 (150 kB gzip
+SQL chunk, lazy-loaded), D4 and D5 (p99 ≤ 500 ms on the model, re-measured with
+the real driver before Phase 1 merges) are decided. Items 1 to 4, 6 and 7 are
+measured or read. Open items that Phase 1 and later must close: TCPS
+cancellation (D2), the `openssl-sys` check on the real build, the
+rolling-upgrade gate, and the real-runtime 50-session measurement. Phase 1 may
+start; T124 stays `[ ]` until its exit gate (`make test-release` and the Kani
+gate) passes.
 
 ### Phase 1 — host substrate (T124)
 
