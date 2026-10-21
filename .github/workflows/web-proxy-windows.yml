@@ -42,8 +42,6 @@ jobs:
       OPENSSL_SRC_PERL: C:/Strawberry/perl/bin/perl.exe
     defaults:
       run:
-        # PowerShell, not Git Bash: Git's bin directory on PATH shadows the
-        # system DLLs the test binary loads (STATUS_ENTRYPOINT_NOT_FOUND).
         shell: pwsh
     steps:
       - uses: actions/checkout@v4
@@ -58,6 +56,24 @@ jobs:
         with:
           key: web-proxy-windows-x64
           cache-on-failure: true
+
+      - name: Build the proxy unit tests
+        run: cargo test -p bastion-vault-gui --lib web_proxy --no-run
+
+      # Diagnostic: the test binary exits with STATUS_ENTRYPOINT_NOT_FOUND
+      # before any test runs. Its imports show which DLL lacks the export.
+      - name: Dump the test binary's DLL imports
+        if: always()
+        continue-on-error: true
+        run: |
+          $exe = Get-ChildItem target/debug/deps -Filter 'bastion_vault_gui-*.exe' |
+            Sort-Object LastWriteTime | Select-Object -Last 1
+          Write-Output "test binary: $($exe.FullName)"
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $dumpbin = & $vswhere -latest -find 'VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe' | Select-Object -First 1
+          Write-Output "dumpbin: $dumpbin"
+          & $dumpbin /nologo /dependents $exe.FullName
+          & $dumpbin /nologo /imports $exe.FullName
 
       - name: Run the proxy unit tests
         run: cargo test -p bastion-vault-gui --lib web_proxy
