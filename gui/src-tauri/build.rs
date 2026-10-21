@@ -83,7 +83,36 @@ fn main() {
         println!("{error:#}");
         std::process::exit(1);
     }
+    embed_test_manifest();
 }
+
+// tauri_build embeds the Common-Controls v6 manifest only in the app binary.
+// Without it the test harness loads comctl32 v5, which lacks the exports the
+// webview stack needs, and Windows refuses to start it
+// (STATUS_ENTRYPOINT_NOT_FOUND).
+fn embed_test_manifest() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows")
+        || std::env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc")
+    {
+        return;
+    }
+    let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR is set by cargo"));
+    let manifest = out_dir.join("test-common-controls.manifest");
+    write_if_changed(&manifest, COMMON_CONTROLS_V6_MANIFEST);
+    println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
+    println!("cargo:rustc-link-arg=/MANIFESTINPUT:{}", manifest.display());
+    println!("cargo:rerun-if-changed=build.rs");
+}
+
+const COMMON_CONTROLS_V6_MANIFEST: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0" processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*" />
+    </dependentAssembly>
+  </dependency>
+</assembly>
+"#;
 
 fn write_if_changed(path: &Path, body: &str) {
     let needs_write = match std::fs::read_to_string(path) {
