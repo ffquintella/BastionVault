@@ -1,7 +1,7 @@
 ---
 name: architect
 description: Handles complex changes in BastionVault — multi-file or multi-crate features, new abstractions, unclear approaches, unlocalised bugs, and anything touching authn/authz, token/policy evaluation, key management, seal/unseal/HSM, storage barriers, TLS/PKI, persisted formats, the plugin ABI, bv-kernel-api or the config schema. Opus at xhigh effort. Also the escalation target when builder fails.
-model: opus
+model: claude-opus-5-5
 effort: xhigh
 ---
 

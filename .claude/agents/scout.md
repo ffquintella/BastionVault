@@ -1,8 +1,9 @@
 ---
 name: scout
-description: Read-only lookup agent for "where is X", "how does Y work", "which crates/files reference Z" questions in BastionVault. Cheapest tier (Haiku); no effort control. Use for exploration whose output would otherwise flood the main context.
+description: Read-only lookup agent for "where is X", "how does Y work", "which crates/files reference Z" questions in BastionVault. Cheapest tier (Haiku 5.5) at low effort. Use for exploration whose output would otherwise flood the main context.
 tools: Read, Grep, Glob, Bash
-model: haiku
+model: claude-haiku-5-5
+effort: low
 ---
 
 You answer one scoped question about the BastionVault codebase and return

@@ -28,23 +28,29 @@ commands at the same time (§5).
 ### Delegation (Claude Code)
 
 Before implementing, fixing, refactoring, testing, reviewing, investigating or
-planning anything, run the `agent-router` skill to decide whether to work
-inline or delegate, and to which tier. The project's tier agents live in
-`.claude/agents/` and already encode this file's rules:
+planning anything, invoke the `ai-skills:agent-router` skill to decide
+whether to work inline or delegate, and to which tier, model and effort. The
+router is the single source of truth for that matrix — do not duplicate it
+here, and do not pick an agent or model from memory. The project's tier
+agents live in `.claude/agents/` (`scout`, `builder`, `architect`, `reviewer`,
+`test-runner`) and already encode this file's rules; they pin the model IDs
+and effort the router's current matrix prescribes, so dispatching to the
+agent name is enough.
 
-| Task | Agent | Model / effort |
-|---|---|---|
-| Answerable from context, one-line edit | inline (no agent) | — |
-| "Where is X / how does Y work" | `scout` | haiku |
-| Scoped change, 1–3 files, existing pattern | `builder` | sonnet / high |
-| Multi-crate, new abstraction, unlocalised bug, or any §7 high-risk area (authn/authz, crypto, keys, seal/HSM, storage barriers, TLS/PKI, persisted formats, plugin ABI, `bv-kernel-api`) | `architect` | opus / xhigh |
-| Review a diff against this file | `reviewer` | sonnet / high; opus for §7 high-risk areas |
-| Run a check or test, report failures only | `test-runner` | haiku |
+Project-specific constraints the router does not know about, and that still
+apply on top of its decision:
 
-Escalate on failure: `builder` → `architect`. Parallel agents may read and
-search at the same time, but only **one** agent builds or tests at a time —
-they share the `target/` lock (§5). Fan out writers only when they touch
-disjoint files and the build runs are serialized.
+- §7 high-risk areas (authn/authz, crypto, key management, seal/HSM, storage
+  barriers, TLS/PKI, persisted formats, plugin ABI, `bv-kernel-api`) escalate
+  one tier: `builder`-shaped work goes to `architect`, and a `reviewer` run
+  overrides its model to Opus. Mention the trigger in the brief so the agent
+  can confirm.
+- Parallel agents may read and search at the same time, but only **one**
+  agent builds or tests at a time — they share the `target/` lock (§5). Fan
+  out writers only when they touch disjoint files and the build runs are
+  serialized.
+- Escalate on failure one rung at a time (`builder` → `architect`), carrying
+  the failure into the next brief. The router's own ladder covers the rest.
 
 ### Codebase navigation (graphify)
 

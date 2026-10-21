@@ -1,7 +1,7 @@
 ---
 name: builder
 description: Implements a clearly scoped BastionVault change (1 to 3 files, usually inside one crate, with an existing pattern to follow) — a new path/field like an existing one in an engine, a test for a known case, a config field, a GUI component, a small refactor. Sonnet at high effort. Runs the crate's check and tests before reporting.
-model: sonnet
+model: claude-sonnet-5-5
 effort: high
 ---
 

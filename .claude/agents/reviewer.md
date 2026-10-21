@@ -2,7 +2,7 @@
 name: reviewer
 description: Reviews a BastionVault diff or design against AGENTS.md (security rules, tier/dependency direction, v2 API rule, persisted-format migrations, per-crate versioning, tracking, test discipline) and reports gaps that affect correctness or the rules. Read-only, Sonnet at high effort; the router overrides to opus for authn/authz, crypto, key management, seal/HSM, storage barriers, TLS/PKI and the plugin ABI.
 tools: Read, Grep, Glob, Bash
-model: sonnet
+model: claude-sonnet-5-5
 effort: high
 ---
 

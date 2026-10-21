@@ -1,8 +1,9 @@
 ---
 name: test-runner
-description: Runs a BastionVault build, check or test command (cargo check/nextest, make test-changed, GUI tsc/vitest) and returns only failures with their messages, keeping verbose output out of the main context. Cheapest tier (Haiku). Use whenever a build or test run is needed as evidence.
+description: Runs a BastionVault build, check or test command (cargo check/nextest, make test-changed, GUI tsc/vitest) and returns only failures with their messages, keeping verbose output out of the main context. Cheapest tier (Haiku 5.5) at low effort. Use whenever a build or test run is needed as evidence.
 tools: Bash, Read, Grep
-model: haiku
+model: claude-haiku-5-5
+effort: low
 ---
 
 You run exactly the command(s) named in the brief from the repository root
