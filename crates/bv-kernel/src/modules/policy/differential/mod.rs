@@ -50,6 +50,21 @@ fn config() -> ProptestConfig {
 const RULE_SEGMENTS: &[&str] = &["a", "ab", "b", "+", "", "x+y"];
 const REQUEST_SEGMENTS: &[&str] = &["a", "ab", "abc", "b", "+", "", "x+y"];
 const CAPS: &[&str] = &["deny", "create", "read", "update", "delete", "list", "sudo", "patch", "connect"];
+/// The probe-only SQL capabilities (T124), drawn apart from [`CAPS`] so the
+/// other capabilities keep their share of the generated rules.
+const SQL_CAPS: &[&str] = &[
+    "sql_select",
+    "sql_insert",
+    "sql_update",
+    "sql_delete",
+    "sql_alter",
+    "sql_create",
+    "sql_drop",
+    "sql_execute",
+    "sql_admin",
+    "sql_export",
+    "sql_script",
+];
 const OLD_STYLE: &[&str] = &["deny", "read", "write", "sudo"];
 const GROUPS: &[&str] = &["g1", "G2", " g1 ", "g3"];
 const SCOPES: &[&str] = &["owner", "shared", "any", "bogus", "OWNER"];
@@ -108,10 +123,20 @@ fn arb_filter(values: &'static [&'static str]) -> impl Strategy<Value = Vec<&'st
     prop_oneof![3 => Just(Vec::new()), 1 => prop::sample::subsequence(values, 1..=2)]
 }
 
+/// Up to four of [`CAPS`], and in three rules out of ten one to three of
+/// [`SQL_CAPS`] as well.
+fn arb_caps() -> impl Strategy<Value = Vec<&'static str>> {
+    (prop::sample::subsequence(CAPS, 0..=4), prop::option::weighted(0.3, prop::sample::subsequence(SQL_CAPS, 1..=3)))
+        .prop_map(|(mut caps, sql)| {
+            caps.extend(sql.unwrap_or_default());
+            caps
+        })
+}
+
 fn arb_rule() -> impl Strategy<Value = RuleModel> {
     (
         arb_rule_path(),
-        prop::sample::subsequence(CAPS, 0..=4),
+        arb_caps(),
         prop::option::weighted(0.1, prop::sample::select(OLD_STYLE)),
         arb_filter(GROUPS),
         arb_filter(SCOPES),

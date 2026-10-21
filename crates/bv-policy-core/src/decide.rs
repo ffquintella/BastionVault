@@ -258,8 +258,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Cand, Index, Rule, Rules, Trace};
-    use crate::{CAP_READ, CAP_SUDO};
+    use crate::model::{Cand, Index, Key, Rule, Rules, Trace};
+    use crate::{
+        merge_caps, Merge, MostSpecific, Specificity, CAP_CONNECT, CAP_READ, CAP_SQL_ADMIN, CAP_SQL_ALTER,
+        CAP_SQL_CREATE, CAP_SQL_DELETE, CAP_SQL_DROP, CAP_SQL_EXECUTE, CAP_SQL_EXPORT, CAP_SQL_INSERT, CAP_SQL_SCRIPT,
+        CAP_SQL_SELECT, CAP_SQL_UPDATE, CAP_SUDO,
+    };
 
     fn q(op: Op, probe: bool) -> Query {
         Query { acl_is_root: false, op, probe }
@@ -359,5 +363,252 @@ mod tests {
         assert_eq!(d, Decision { allowed: false, root_privs: false, is_root: false, caps: CAP_DENY, filtered: false });
         assert_eq!(fx.wipes, 1);
         assert!(!fx.grants_live);
+    }
+
+    // ── SQL capabilities (T124, features/sql-browser.md §3.1) ──────────
+
+    /// A refusal: nothing allowed, no capability reported.
+    const REFUSED: Decision = Decision { allowed: false, root_privs: false, is_root: false, caps: 0, filtered: false };
+    /// What an applying deny decides ([`denied`]): exactly `deny`.
+    const DENIED: Decision = Decision { caps: CAP_DENY, ..REFUSED };
+
+    fn rule_caps(caps: u32) -> Cand {
+        Cand::caps(caps)
+    }
+
+    /// `rule` is the exact ungated rule for the request path; enforcement.
+    fn decide_for(rule: Cand, op: Op) -> Decision {
+        let idx = Index { exact: Some(rule), ..Index::default() };
+        decide(&q(op, false), &idx, &Rules::default(), &Rules::default(), &mut Trace::default())
+    }
+
+    /// Where a test rule sits in the ACL `ACL::new` builds from it.
+    #[derive(Clone, Copy, Debug)]
+    enum Via {
+        /// No `groups` or `scopes`: an exact or prefix rule in the tries.
+        Ungated,
+        /// `groups = [...]`, with the target in one of them.
+        Gated,
+        /// `scopes = [...]`, with the caller passing one (owner or share).
+        Scoped,
+    }
+
+    /// A test rule: its path, its capability bitmap, and where it sits.
+    type SqlRule<'a> = (&'a str, u32, Via);
+
+    /// An SQL check of `request`, made as `ACL::explain_capability` makes
+    /// one — a READ capability probe, or, with `probe` false, the enforcing
+    /// READ — against `rules`, each placed where the host's index finds it.
+    /// A path ending in `*` is a prefix rule, any other path an exact one;
+    /// among matching ungated prefix rules the most specific governs
+    /// ([`crate::compare`]). Segment wildcards are not modelled, and rules
+    /// that share a path must be merged first, as `ACL::new` merges them.
+    fn decide_sql(rules: &[SqlRule], request: &str, probe: bool) -> (Decision, Trace) {
+        let mut idx = Index::default();
+        let mut prefixes = MostSpecific::new();
+        let (mut gated, mut scoped) = (Rules::default(), Rules::default());
+        for (i, &(path, caps, via)) in rules.iter().enumerate() {
+            assert!(!path.contains('+'), "segment wildcards are not modelled: {path}");
+            let prefix = path.strip_suffix('*');
+            let matches = match prefix {
+                Some(p) => request.starts_with(p),
+                None => path == request,
+            };
+            match (via, prefix) {
+                (Via::Ungated, _) if !matches => {}
+                (Via::Ungated, None) => {
+                    assert!(idx.exact.is_none(), "merge rules that share a path first");
+                    idx.exact = Some(Cand::caps(caps));
+                }
+                (Via::Ungated, Some(p)) => prefixes.offer(Key {
+                    spec: Specificity { first_wildcard: p.len() as isize, is_prefix: true, wildcards: 0, len: p.len() },
+                    tie: i as u8,
+                }),
+                (Via::Gated | Via::Scoped, _) => {
+                    let layer = if matches!(via, Via::Gated) { &mut gated } else { &mut scoped };
+                    layer.rules[layer.len] = Rule { matches, gate: true, has_filter: true, cand: Cand::caps(caps) };
+                    layer.len += 1;
+                }
+            }
+        }
+        idx.non_exact = prefixes.into_winner().map(|k: Key| Cand::caps(rules[usize::from(k.tie)].1));
+        let mut fx = Trace::default();
+        let d = decide(&q(Op::Read, probe), &idx, &gated, &scoped, &mut fx);
+        (d, fx)
+    }
+
+    const SQL_ROOT: &str = "resources/resources/r/sql/*";
+    const SQL_SERVER: &str = "resources/resources/r/sql/server";
+    const SQL_OBJECTS: &str = "resources/resources/r/sql/objects/*";
+    const SQL_OBJECT: &str = "resources/resources/r/sql/objects/def/s/t";
+
+    /// Every SQL capability, `sql_select` … `sql_script`.
+    const SQL_CAPS: [u32; 11] = [
+        CAP_SQL_SELECT,
+        CAP_SQL_INSERT,
+        CAP_SQL_UPDATE,
+        CAP_SQL_DELETE,
+        CAP_SQL_ALTER,
+        CAP_SQL_CREATE,
+        CAP_SQL_DROP,
+        CAP_SQL_EXECUTE,
+        CAP_SQL_ADMIN,
+        CAP_SQL_EXPORT,
+        CAP_SQL_SCRIPT,
+    ];
+
+    /// The eleven bits together: bits 10..=20.
+    const ALL_SQL: u32 = (1 << 21) - (1 << 10);
+
+    /// Each SQL bit alone, then all of them at once.
+    fn sql_sets() -> impl Iterator<Item = u32> {
+        SQL_CAPS.into_iter().chain([ALL_SQL])
+    }
+
+    /// Every operation a rule can grant (`Help` consults no rule).
+    const PLAIN_OPS: [Op; 7] = [Op::List, Op::Read, Op::Write, Op::Delete, Op::Renew, Op::Revoke, Op::Rollback];
+
+    #[test]
+    fn the_sql_bits_are_the_eleven_above_connect() {
+        assert!(SQL_CAPS.iter().all(|bit| bit.count_ones() == 1));
+        assert_eq!(SQL_CAPS.iter().fold(0, |all, bit| all | bit), ALL_SQL);
+        assert_eq!(ALL_SQL.count_ones(), 11);
+        assert_eq!(ALL_SQL & ((CAP_CONNECT << 1) - 1), 0);
+        for op in PLAIN_OPS {
+            assert_eq!(op.required_capability().unwrap() & ALL_SQL, 0, "{op:?}");
+        }
+    }
+
+    // §3.1 "Nothing implies them", and the converse: they imply nothing.
+
+    #[test]
+    fn sql_select_alone_does_not_grant_read() {
+        let d = decide_for(rule_caps(CAP_SQL_SELECT), Op::Read);
+        assert_eq!(d, REFUSED);
+    }
+
+    /// An SQL-only rule grants no operation wherever it sits — governing
+    /// exactly, as the most specific prefix rule, or as a group-gated or
+    /// scope-filtered rule whose gate passes — and reports no granting
+    /// policy or LIST filter. A probe still reports the bits, which is the
+    /// only way an SQL capability is ever read (§9.1, probe-only).
+    #[test]
+    fn no_sql_capability_grants_a_plain_operation() {
+        let none = Rules::default();
+        for sql in sql_sets() {
+            let rule = rule_caps(sql);
+            let layered = Rules::of(&[Rule { matches: true, gate: true, has_filter: true, cand: rule }]);
+            let placements = [
+                (Index { exact: Some(rule), ..Index::default() }, none, none),
+                (Index { non_exact: Some(rule), ..Index::default() }, none, none),
+                (Index::default(), layered, none),
+                (Index::default(), none, layered),
+            ];
+            for op in PLAIN_OPS {
+                for (placement, (idx, gated, scoped)) in placements.iter().enumerate() {
+                    let at = alloc::format!("caps = {sql:#x}, {op:?}, placement {placement}");
+                    let mut fx = Trace::default();
+                    let d = decide(&q(op, false), idx, gated, scoped, &mut fx);
+                    assert_eq!(d, REFUSED, "{at}");
+                    assert!(!fx.grants_live && !fx.filters_live, "{at}");
+                    let d = decide(&q(op, true), idx, gated, scoped, &mut Trace::default());
+                    assert_eq!(d, Decision { caps: sql, ..REFUSED }, "probe, {at}");
+                }
+            }
+        }
+    }
+
+    /// Adding SQL bits to any combination of the plain capabilities
+    /// (`create` … `connect`) never changes whether an operation is
+    /// allowed, nor `root_privs` or the LIST filter.
+    #[test]
+    fn sql_bits_never_change_a_plain_verdict() {
+        let mut allowed = 0;
+        for plain in 0..(1u32 << 9) {
+            let plain = plain << 1; // bits 1..=9; `deny` is never combined (`Perm::is_well_formed`)
+            for op in PLAIN_OPS {
+                let without = decide_for(rule_caps(plain), op);
+                allowed += usize::from(without.allowed);
+                for sql in sql_sets() {
+                    let with = decide_for(rule_caps(plain | sql), op);
+                    assert_eq!(
+                        (with.allowed, with.root_privs, with.filtered),
+                        (without.allowed, without.root_privs, without.filtered),
+                        "plain = {plain:#x}, sql = {sql:#x}, {op:?}"
+                    );
+                }
+            }
+        }
+        // The sweep met granted and refused verdicts alike.
+        assert!(allowed > 0 && allowed < PLAIN_OPS.len() << 9, "allowed = {allowed}");
+    }
+
+    // §3.1 "`deny` wins": an applying deny on an SQL path revokes every SQL
+    // capability, in a probe (how an SQL check is made) and on enforcement
+    // (T119, theorem `t1_deny_wins_on_enforcement`).
+
+    /// A deny applies when it governs the path or sits in a layer whose gate
+    /// passes; then it wins over a narrower grant in any other position:
+    /// layered grants (asset-group and share rules) are never reached under
+    /// a governing deny, and a layered deny wipes a narrower governing grant.
+    #[test]
+    fn deny_on_sql_path_wins_over_a_narrower_grant() {
+        let cases: [(&[SqlRule], &str); 5] = [
+            // The deny governs; the grant is narrower, in a layer.
+            (&[(SQL_ROOT, CAP_DENY, Via::Ungated), (SQL_OBJECT, ALL_SQL, Via::Gated)], SQL_OBJECT),
+            (&[(SQL_ROOT, CAP_DENY, Via::Ungated), (SQL_OBJECT, ALL_SQL, Via::Scoped)], SQL_OBJECT),
+            // The deny is layered; the grant is narrower and governs.
+            (&[(SQL_ROOT, CAP_DENY, Via::Gated), (SQL_OBJECT, ALL_SQL, Via::Ungated)], SQL_OBJECT),
+            (&[(SQL_ROOT, CAP_DENY, Via::Scoped), (SQL_OBJECT, ALL_SQL, Via::Ungated)], SQL_OBJECT),
+            // The deny governs a path the narrower grant does not reach.
+            (&[(SQL_ROOT, CAP_DENY, Via::Ungated), (SQL_OBJECT, ALL_SQL, Via::Ungated)], SQL_SERVER),
+        ];
+        for (i, (rules, request)) in cases.into_iter().enumerate() {
+            for probe in [true, false] {
+                let (d, fx) = decide_sql(rules, request, probe);
+                assert_eq!(d, DENIED, "case {i}, probe = {probe}");
+                assert!(!fx.grants_live && !fx.filters_live, "case {i}, probe = {probe}");
+            }
+            // Control: without the deny, the grant is reached where it applies.
+            let (control, _) = decide_sql(&rules[1..], request, true);
+            assert_eq!(control.caps, if request == SQL_OBJECT { ALL_SQL } else { 0 }, "case {i}, no deny");
+        }
+    }
+
+    /// Two policies naming the same SQL path: `merge_caps` keeps exactly
+    /// `deny`, in either order, and the merged rule decides `deny`.
+    #[test]
+    fn deny_merged_into_a_sql_path_wins() {
+        for sql in sql_sets() {
+            for (existing, incoming) in [(sql, CAP_DENY), (CAP_DENY, sql)] {
+                let merged = match merge_caps(existing, incoming) {
+                    Merge::KeepExisting => existing,
+                    Merge::Deny => CAP_DENY,
+                    Merge::Union(caps) => caps,
+                };
+                assert_eq!(merged, CAP_DENY, "{existing:#x} + {incoming:#x}");
+                for probe in [true, false] {
+                    let (d, _) = decide_sql(&[(SQL_OBJECT, merged, Via::Ungated)], SQL_OBJECT, probe);
+                    assert_eq!(d, DENIED, "{existing:#x} + {incoming:#x}, probe = {probe}");
+                }
+            }
+        }
+    }
+
+    /// `decide` has no notion of an SQL path: among ungated rules the most
+    /// specific governs, here as everywhere (§3.2: "a more specific path
+    /// wins over a broader one"; T4). A broader ungated deny therefore does
+    /// not reach a narrower ungated grant; it applies only where it governs
+    /// (above), or when written at the narrower path or in a layer.
+    #[test]
+    fn a_narrower_ungated_sql_grant_governs_over_a_broader_ungated_deny() {
+        for narrower in [SQL_OBJECT, SQL_OBJECTS] {
+            let rules = [(SQL_ROOT, CAP_DENY, Via::Ungated), (narrower, CAP_SQL_SELECT, Via::Ungated)];
+            let (d, _) = decide_sql(&rules, SQL_OBJECT, true);
+            assert_eq!(d, Decision { caps: CAP_SQL_SELECT, ..REFUSED }, "{narrower}");
+            // And on enforcement it grants no plain operation.
+            let (d, _) = decide_sql(&rules, SQL_OBJECT, false);
+            assert_eq!(d, REFUSED, "{narrower}");
+        }
     }
 }
