@@ -47,7 +47,7 @@
     },
     {
       "identifier": "session-workspace",
-      "description": "The Session Workspace window (session-workspace, session.html). Everything a session window may call, plus: the listing and placement hand-off (session_list_open), the saved layout (session_layout_save / _get / _forget), and the normal connect path its ⌘T palette and explicit layout restore go through — the resource reads that path needs (list_resources, read_resource, resource_types_read), connect-time MFA (connect_mfa_*), the credential-provider account list for the host-rendered picker (connect_provider_candidates: metadata only, features/self-accounts.md §6) and session_open_ssh / _rdp / _web / _sftp (an SFTP session always opens its own window), each still behind the host's connect gate, transport tier and MFA ticket check. No secret reads, no credential release to the frontend, no admin command, no vault token. Derived from what the /workspace route calls; gui/src/test/sessionBundle.test.ts keeps the two equal. Features/session-workspace.md, T110.",
+      "description": "The Session Workspace window (session-workspace, session.html). Everything a session window may call, plus: the listing and placement hand-off (session_list_open), the saved layout (session_layout_save / _get / _forget), and the normal connect path its ⌘T palette and explicit layout restore go through — the resource reads that path needs (list_resources, read_resource, resource_types_read), connect-time MFA (connect_mfa_*), the credential-provider account list for the host-rendered picker (connect_provider_candidates: metadata only, features/self-accounts.md §6) and session_open_ssh / _rdp / _web / _sftp (an SFTP session always opens its own window), each still behind the host's connect gate, transport tier and MFA ticket check. T109: replay panes — the queue of recordings the main window handed over (session_replay_take: workspace only, drains once) and the four reads of the recording a pane plays, listed one by one rather than by nesting the session-replay set, so the two sets can diverge. No secret reads, no credential release to the frontend, no admin command, no vault token. Derived from what the /workspace route calls; gui/src/test/sessionBundle.test.ts keeps the two equal. Features/session-workspace.md, T110.",
       "permissions": [
         "session-window",
         "allow-session-list-open",
@@ -64,7 +64,12 @@
         "allow-session-open-ssh",
         "allow-session-open-rdp",
         "allow-session-open-web",
-        "allow-session-open-sftp"
+        "allow-session-open-sftp",
+        "allow-session-replay-take",
+        "allow-rustion-recording-read",
+        "allow-rustion-recording-blob",
+        "allow-rustion-recording-blob-chunk",
+        "allow-rustion-recording-replay-log"
       ]
     },
     {

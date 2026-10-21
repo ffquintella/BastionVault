@@ -56,6 +56,13 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Added
+
+#### Session Workspace: recording replays as panes
+
+- **Open a recording as a replay pane in the Session Workspace** (T109, S56)
+  -- Recordings → *Open in workspace* (and *…in workspace* on a keystroke-search hit, which seeks to the match) places the recording as a tab in the workspace; *Open in window* still opens the standalone replay window. A replay is identified by its recording id, not a session token: the main window queues the id in the host, the workspace is woken with the payload-less `session://placed` and drains the queue with the new `session_replay_take` (workspace only). The workspace's command set gains that command and the four recording reads its replay pane makes — listed one by one, not the whole `session-replay` set. Opening a recording already open focuses its pane; closing a replay pane asks nothing, and a workspace holding only replays closes without a prompt. Replays are not saved in the restorable layout (spec §9). Refused in the *Separate windows* layout. Not yet exercised by hand in a desktop build.
+
 ## [0.44.47] - 2026-10-19
 
 ### Added

@@ -69,10 +69,10 @@ hand in a running desktop build yet: the evidence is the unit and component
 tests listed under each phase. The per-release manual checklist (Testing
 Plan) is still open, which is why T38 stays in progress; the work this
 feature still owed was split out as T108–T111. T110 — the session-only
-bundle and per-window command sets — is done (§7), and so is T108 —
+bundle and per-window command sets — is done (§7), and so are T108 —
 confirming before a session window or the workspace closes natively with
-live sessions (§8); T109 and T111 remain (see *What is not yet
-implemented*). Neither T110 nor T108 has been exercised by hand in a
+live sessions (§8) — and T109 — replay panes (§9); T111 remains (see *What is not yet
+implemented*). None of T110, T108 or T109 has been exercised by hand in a
 desktop build.
 
 What Phases 0–6 delivered:
@@ -188,10 +188,9 @@ What is not yet implemented — split out of T38:
 - ~~**T108**~~ — done: the native close of a session window or the workspace
   asks first while a session is live (§8). Not exercised by hand in a
   desktop build; added to the manual checklist.
-- **T109** — replay panes in the workspace. The `replay` pane kind exists in
-  the model; nothing places one. Needs a recording hand-off into the
-  workspace (placement is keyed on live session tokens today) and a
-  decision on whether a replay joins the saved layout.
+- ~~**T109**~~ — done: recordings open as replay panes in the workspace
+  (§9). Not exercised by hand in a desktop build; added to the manual
+  checklist.
 - ~~**T110**~~ — done: the session-only bundle and per-window command sets
   (§7). Follow-ups it leaves, not tracked as tasks yet: plugin windows
   (`plugin-*`) still load the full vault UI with every command; `session.html`
@@ -892,8 +891,8 @@ any local webview could call every app command whatever its capability said.
   |---|---|---|---|
   | `main`, `plugin-*` | `default.json` | every command (`app-all-commands`) | unchanged: `core:default`, shell open, file dialogs, window drag / minimise / close / maximise / fullscreen |
   | `ssh-*`, `rdp-*` | `session-window.json` | `session-window` (16): SSH / RDP input and resize, RDP frames, close, heartbeat, move, read the session prefs, Rustion info / renew / end, and — since T108 — `session_window_closing` / `session_window_close` (§8) | `core:event:allow-listen`, `allow-unlisten` |
-  | `session-workspace` | `session-workspace.json` | `session-workspace` (29): the above, plus `session_list_open`, `session_layout_save` / `_get` / `_forget`, `list_resources`, `read_resource`, `resource_types_read`, `connect_mfa_begin` / `_verify_totp` / `_verify_fido2`, `session_open_ssh` / `_rdp` / `_web` | the above; T110 also granted `core:window:allow-close`, which T108 removed (§8) |
-  | `replay-*` | `session-replay.json` | `session-replay` (4): read the recording it plays | none (as before) |
+  | `session-workspace` | `session-workspace.json` | `session-workspace` (since T109 incl. `session_replay_take` and the four recording reads): the above, plus `session_list_open`, `session_layout_save` / `_get` / `_forget`, `list_resources`, `read_resource`, `resource_types_read`, `connect_mfa_begin` / `_verify_totp` / `_verify_fido2`, `session_open_ssh` / `_rdp` / `_web` | the above; T110 also granted `core:window:allow-close`, which T108 removed (§8) |
+  | `replay-*` | `session-replay.json` | `session-replay` (4): read the recording it plays. Still used for *Open in window*; a replay in the workspace uses the four reads listed in the workspace's own set (T109, §9) | none (as before) |
   | `webchrome-*` (webview) | `web-chrome-toolbar.json` | `web_chrome_state` / `_disconnect` / `_relogin` | none (as before) |
   | `web-*` | — | none | none |
 
@@ -1053,6 +1052,58 @@ has two halves: the veto, and an escape hatch the page cannot hold shut.
   to the manual checklist. Quitting the app (⌘Q, the main window's Quit)
   still does not ask.
 
+### 9. Recording replays as workspace panes (T109)
+
+The `replay` pane kind existed since Phase 1 but nothing placed one: a
+recording opened in a standalone `replay-<id>` window only.
+
+#### As built
+
+- **Both stay.** *Open in workspace* (Recordings, and on a keystroke-search
+  hit, which seeks to the match) puts the recording in the workspace;
+  *Open in window* still opens the standalone window, for an operator who
+  wants it apart from the shared realm or on another screen. Replaced would
+  have meant removing the `session-replay` window kind and its capability
+  for no isolation gain, so it is an alternative, not a replacement.
+- **Hand-off keyed on the recording id.** A replay is not a session: no
+  token, no attachment, nothing to stop. `rustion_open_replay_in_workspace`
+  (main window only) pushes `{recording_id, at_ms}` onto a bounded host queue
+  (`session::replays`, 32 entries, one per recording), builds or raises the
+  workspace and sends the same payload-less `session://placed` a session
+  uses. The workspace drains the queue with `session_replay_take` — workspace
+  window only — on that event and on its first load, so a recording queued
+  while the window was still loading is not lost, and each is delivered once.
+  The id never travels in an event payload (the `emit_to` caveat in §3).
+  Refused in the *Separate windows* layout, as a workspace open is.
+- **Pane identity.** The pane's token is `replay:<recording id>`, so the host-
+  element registry and the layout reducer work unchanged, and opening a
+  recording already open focuses its pane. Closing a replay pane never calls
+  `session_close` and asks nothing; it is never "live", so a workspace that
+  holds only replays closes natively without the T108 question.
+- **Decision: replays are not part of the saved layout.** The spec's rule is
+  that the host writes the skeleton from sessions its registry vouches for
+  and files it per vault. A recording id has neither: no registry entry, no
+  vault or namespace recorded at open. Persisting it would mean either
+  letting the frontend name what the file holds, or a host replay registry
+  plus a new node kind in `session_layouts.json` — which version 1 readers
+  refuse. The skeleton already skipped `replay` panes; a split that held one
+  collapses onto its neighbour and a replay-only tab saves nothing. A saved
+  recording id would also be inventory metadata like a target list, with
+  little value: reopening one is a click in Recordings. Revisit with a
+  host-side replay registry if operators ask for it.
+- **ACL (T110 kept).** The workspace set gains `session_replay_take` and the
+  four reads `ReplayPane` makes (`rustion_recording_read`,
+  `_blob`, `_blob_chunk`, `_replay_log`), each named in the set; it does not
+  nest the `session-replay` set, so the two can diverge.
+  `rustion_open_replay_in_workspace` stays main-only. `window_acl_tests` pins
+  the new set against Tauri's resolver, and `sessionBundle.test.tsx` checks
+  the routes call exactly it.
+- **Tests.** `session::replays` (queue order, dedupe, bound, malformed ids,
+  workspace-only take); `window_acl_tests`; vitest — `sessionWorkspace.test.tsx`
+  (a queued recording becomes a pane, a duplicate focuses it, close asks
+  nothing and calls no `session_close`, a replay-only window closes without
+  a prompt, nothing saved) and `sessionLayout.test.ts` (the skeleton).
+
 ## Phases
 
 | Phase | Scope | Status |
@@ -1065,6 +1116,7 @@ has two halves: the veto, and an escape hatch the page cannot hold shut.
 | 5 | Layout persistence + restore | **Complete** (not yet exercised by hand; see §5 *Phase 5 as built*) |
 | 6 | Detach / move between windows | **Complete** (not yet exercised by hand; see §6 *Phase 6 as built*) |
 | 7 | Deferred | — |
+| T109 | Recording replays as workspace panes | **Complete** (not yet exercised by hand; see §9) |
 
 ### Phase 0 — macOS native window tabbing — **Complete**
 
@@ -1323,7 +1375,7 @@ to fight with Tailwind 4. The tree we need is 60 lines of reducer.
   session each work in their own window and in the workspace (input, resize,
   Disconnect, *Move to workspace*, *Pop out*), ⌘T opens the palette and
   connects, an MFA-gated profile prompts, *Restore last layout* re-opens
-  panes, a recording replays — and no window's console shows `not allowed by
+  panes, a recording replays, in its own window and as a workspace pane (*Open in workspace*: a duplicate focuses the pane, closing it asks nothing) — and no window's console shows `not allowed by
   ACL`. T108, on each platform: the close button, Alt+F4 and (macOS) ⌘W on
   a session's own window and on the workspace ask while a session is live,
   Cancel keeps it, *Disconnect and close* ends it with one

@@ -16,6 +16,7 @@ pub mod layouts;
 pub mod output;
 pub mod rdp;
 pub mod rdp_clipboard;
+pub mod replays;
 pub mod routing;
 pub mod sftp;
 pub mod sk_signer;

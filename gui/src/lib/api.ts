@@ -3278,6 +3278,14 @@ export const sessionClose = (token: string) =>
  *  call this; any other window is refused. */
 export const sessionListOpen = () => invoke<OpenSessionListing[]>("session_list_open");
 
+/** A recording the main window handed to the workspace to open as a replay
+ *  pane (T109). Identified by recording id, never by a session token. */
+export type ReplayRequest = { recording_id: string; at_ms: number | null };
+
+/** Drain the recordings queued for the workspace. Workspace window only;
+ *  each request is delivered once. */
+export const sessionReplayTake = () => invoke<ReplayRequest[]>("session_replay_take");
+
 /** Claim a session for the calling window (its own window or the
  *  workspace). The host identifies the window from the call. */
 export const sessionAttach = (token: string) =>

@@ -1003,6 +1003,15 @@ export const rustionOpenReplayWindow = (recordingId: string, atMs?: number) =>
     atMs: atMs ?? null,
   });
 
+/** T109 — open a recording as a replay pane in the Session Workspace.
+ *  Refused in the *Separate windows* layout. Same seek rule as
+ *  {@link rustionOpenReplayWindow}: a numeric offset and nothing else. */
+export const rustionOpenReplayInWorkspace = (recordingId: string, atMs?: number) =>
+  invoke<void>("rustion_open_replay_in_workspace", {
+    recordingId,
+    atMs: atMs ?? null,
+  });
+
 export const rustionTelemetryList = () =>
   invoke<RustionTelemetryTarget[]>("rustion_telemetry_list");
 
