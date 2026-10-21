@@ -33,6 +33,12 @@
  * is re-opened through the normal connect path, MFA included, into a
  * placeholder holding its place in the saved shape.
  *
+ * Replays (T109). A recording is not a session: the main window queues its
+ * id on the host, the same payload-less `session://placed` wakes this
+ * window, and it drains the queue with `session_replay_take` and places each
+ * as a tab. A replay pane has no token to stop, so closing it never asks
+ * and never calls `session_close`, and it is not part of the saved layout.
+ *
  * Moving (Phase 6). "Pop out" (or dragging a tab out of the strip) moves a
  * live session to a window of its own; the session keeps running.
  */
@@ -45,6 +51,7 @@ import { useConnectMfa } from "../components/ConnectMfaPrompt";
 import { useProviderAccountPicker } from "../components/ProviderAccountPicker";
 import { CloseConfirm } from "../components/session/CloseConfirm";
 import { RdpPane } from "../components/session/RdpPane";
+import { ReplayPane } from "../components/session/ReplayPane";
 import { SshPane } from "../components/session/SshPane";
 import type { SessionPaneStatus } from "../components/session/SessionPaneHeader";
 import { SplitView } from "../components/session/workspace/SplitView";
@@ -57,6 +64,7 @@ import {
   sessionLayoutSave,
   sessionListOpen,
   sessionMove,
+  sessionReplayTake,
   type OpenSessionListing,
   type SavedLayout,
 } from "../lib/api";
@@ -150,6 +158,7 @@ function findPane(paneId: string): PaneNode | undefined {
 export function SessionWorkspaceWindow() {
   const layout = useSessionWorkspaceStore((s) => s.layout);
   const sessions = useSessionWorkspaceStore((s) => s.sessions);
+  const replays = useSessionWorkspaceStore((s) => s.replays);
   const status = useSessionWorkspaceStore((s) => s.status);
   const hostReady = useSessionWorkspaceStore((s) => s.hostReady);
   const dispatch = useSessionWorkspaceStore((s) => s.dispatch);
@@ -214,6 +223,13 @@ export function SessionWorkspaceWindow() {
       useSessionWorkspaceStore.getState().adopt(rows);
     } catch (e) {
       if (aliveRef.current) setError(`Could not read the open sessions: ${extractError(e)}`);
+    }
+    try {
+      const replays = await sessionReplayTake();
+      if (!aliveRef.current) return;
+      useSessionWorkspaceStore.getState().adoptReplays(replays);
+    } catch (e) {
+      if (aliveRef.current) setError(`Could not read the queued recordings: ${extractError(e)}`);
     }
   }, []);
 
@@ -378,6 +394,11 @@ export function SessionWorkspaceWindow() {
   const closePaneNow = useCallback(async (paneId: string) => {
     const pane = findPane(paneId);
     if (!pane) return;
+    if (pane.protocol === "replay") {
+      // No session behind it: nothing for the host to stop.
+      useSessionWorkspaceStore.getState().dispatch({ type: "closePane", paneId });
+      return;
+    }
     if (pane.pending) {
       // A placeholder skipped mid-restore: no session to stop, and the
       // window stays open even if it was the last one.
@@ -653,11 +674,19 @@ export function SessionWorkspaceWindow() {
         ))}
       </div>
       {panes
-        .filter((pane) => hostReady[pane.token] && (pane.pending || sessions[pane.token]))
+        .filter((pane) => hostReady[pane.token] && (pane.pending || sessions[pane.token] || replays[pane.token]))
         .map((pane) =>
           createPortal(
             pane.pending ? (
               <RestorePlaceholder pane={pane} onClose={() => requestClose([pane.id])} />
+            ) : replays[pane.token] ? (
+              <div style={{ height: "100%", minWidth: 0 }}>
+                <ReplayPane
+                  recordingId={replays[pane.token].recordingId}
+                  initialSeekMs={replays[pane.token].atMs}
+                  onClose={() => requestClose([pane.id])}
+                />
+              </div>
             ) : (
               <WorkspacePane
                 pane={pane}

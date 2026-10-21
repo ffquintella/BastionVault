@@ -83,6 +83,24 @@ vi.mock("@tauri-apps/api/window", () => ({
     },
   }),
 }));
+vi.mock("../lib/rustion", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/rustion")>()),
+  rustionRecordingRead: vi.fn().mockResolvedValue({
+    recordingId: "rec_1",
+    authority: "",
+    format: "smb-log",
+    sha256: "",
+    targetHost: "files01",
+    targetUser: "op",
+  }),
+  fetchRecordingBytes: vi.fn().mockResolvedValue({
+    recordingId: "rec_1",
+    format: "smb-log",
+    sha256: "",
+    bytes: new TextEncoder().encode("open a\n"),
+  }),
+  rustionRecordingReplayLog: vi.fn().mockResolvedValue(undefined),
+}));
 vi.mock("@xterm/xterm", () => ({ Terminal: h.FakeTerminal }));
 vi.mock("@xterm/addon-fit", () => ({ FitAddon: class { fit() {} } }));
 vi.mock("@xterm/xterm/css/xterm.css", () => ({}));
@@ -125,6 +143,8 @@ function row(
 }
 
 let listed: OpenSessionListing[];
+/** Recordings the main window has queued for the workspace (T109). */
+let queuedReplays: { recording_id: string; at_ms: number | null }[];
 let closeRefusal: string | null;
 let savedView: { vault_id: string; active_namespace: string; layout: SavedLayout | null };
 let opened: number;
@@ -181,6 +201,7 @@ beforeEach(() => {
   resetPaneHostsForTests();
   resetSessionInputPrefsForTests();
   listed = [];
+  queuedReplays = [];
   closeRefusal = null;
   savedView = { vault_id: "v1", active_namespace: "", layout: null };
   opened = 0;
@@ -199,6 +220,11 @@ beforeEach(() => {
     switch (cmd) {
       case "session_list_open":
         return Promise.resolve(listed);
+      case "session_replay_take": {
+        const out = queuedReplays;
+        queuedReplays = [];
+        return Promise.resolve(out);
+      }
       case "session_layout_get":
         return Promise.resolve(savedView);
       case "session_layout_save":
@@ -429,6 +455,63 @@ describe("SessionWorkspaceWindow", () => {
     fireEvent.click(screen.getByRole("button", { name: "Close pane ssh op@B:22" }));
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
     await waitFor(() => expect(paneHostTokens()).toEqual(["A"]));
+  });
+
+  // ── T109: replay panes ───────────────────────────────────────────
+
+  it("places a queued recording as a replay pane, with no session behind it", async () => {
+    queuedReplays = [{ recording_id: "rec_1", at_ms: 5000 }];
+    render(<SessionWorkspaceWindow />);
+    await waitFor(() => expect(screen.getAllByRole("tab")).toHaveLength(1));
+    expect(await screen.findByText("sha256:", { exact: false })).toBeInTheDocument();
+    expect(paneHostTokens()).toEqual(["replay:rec_1"]);
+    expect(useSessionWorkspaceStore.getState().replays["replay:rec_1"]).toEqual({ recordingId: "rec_1", atMs: 5000 });
+    // The same recording again focuses its pane rather than adding one.
+    queuedReplays = [{ recording_id: "rec_1", at_ms: null }];
+    await placed();
+    expect(screen.getAllByRole("tab")).toHaveLength(1);
+    expect(invokedWith("session_replay_take").length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("closing a replay pane asks nothing and never calls session_close", async () => {
+    listed = [row("A")];
+    queuedReplays = [{ recording_id: "rec_1", at_ms: null }];
+    render(<SessionWorkspaceWindow />);
+    await waitFor(() => expect(screen.getAllByRole("tab")).toHaveLength(2));
+    await screen.findByText("sha256:", { exact: false });
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    await waitFor(() => expect(paneHostTokens()).toEqual(["A"]));
+    expect(invokedWith("session_close")).toHaveLength(0);
+    expect(useSessionWorkspaceStore.getState().replays).toEqual({});
+    // Reopening it later is a new pane.
+    queuedReplays = [{ recording_id: "rec_1", at_ms: null }];
+    await placed();
+    await waitFor(() => expect(paneHostTokens().sort()).toEqual(["A", "replay:rec_1"]));
+  });
+
+  it("a workspace holding only a replay closes natively without asking", async () => {
+    queuedReplays = [{ recording_id: "rec_1", at_ms: null }];
+    render(<SessionWorkspaceWindow />);
+    await screen.findByText("sha256:", { exact: false });
+    await nativeClose();
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    await waitFor(() => expect(invokedWith("session_window_close")).toHaveLength(1));
+  });
+
+  it("a replay is not part of the saved layout", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      queuedReplays = [{ recording_id: "rec_1", at_ms: null }];
+      render(<SessionWorkspaceWindow />);
+      await screen.findByText("sha256:", { exact: false });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(LAYOUT_SAVE_DEBOUNCE_MS + 100);
+      });
+      expect(invokedWith("session_layout_save")).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   // ── T108: the window's native close ──────────────────────────────

@@ -37,6 +37,8 @@ const TOKEN: &str = "sess_0123456789abcdef0123456789abcdef";
 const SESSION_WINDOW: &[&str] = &[
     "get_session_workspace_prefs",
     "session_attach_rdp_frames",
+    // T111: SSH output rides a per-webview IPC channel installed here.
+    "session_attach_ssh_output",
     "session_close",
     "session_heartbeat",
     "session_input",
@@ -76,6 +78,14 @@ const WORKSPACE_EXTRA: &[&str] = &[
     "session_open_sftp",
     "session_open_ssh",
     "session_open_web",
+    // T109: replay panes — the hand-off queue (workspace only), and the
+    // reads of the recording a pane plays. Listed, not nested from
+    // REPLAY_WINDOW: the two sets may diverge.
+    "rustion_recording_blob",
+    "rustion_recording_blob_chunk",
+    "rustion_recording_read",
+    "rustion_recording_replay_log",
+    "session_replay_take",
 ];
 
 /// An SFTP session's own window (features/sftp-connect.md): its session's
@@ -151,6 +161,8 @@ const NEVER_IN_A_SESSION_WINDOW: &[&str] = &[
     "session_attach",
     "session_detach",
     "rustion_open_replay_window",
+    // T109: queues a recording for the workspace; the main window's alone.
+    "rustion_open_replay_in_workspace",
     // T145: the raw-id lifecycle commands act on any bastion session the
     // vault policy allows; a session window uses the token-bound
     // `session_rustion_renew` / `_kill` instead.

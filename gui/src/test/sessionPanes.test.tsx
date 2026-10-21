@@ -188,6 +188,20 @@ function invokedWith(cmd: string) {
   return h.mockInvoke.mock.calls.filter((c) => c[0] === cmd);
 }
 
+/** Pull the IPC Channel the pane passed to a `session_attach_*` invoke. */
+function channelFrom(cmd: string): InstanceType<typeof h.FakeChannel> | undefined {
+  const call = invokedWith(cmd)[0];
+  const args = call?.[1] as { channel?: InstanceType<typeof h.FakeChannel> } | undefined;
+  return args?.channel;
+}
+
+/** Simulate the host pushing a stdout chunk onto the SSH output channel. */
+function fireStdout(payload: { bytes_b64: string; notice?: string }) {
+  const ch = channelFrom("session_attach_ssh_output");
+  if (!ch?.onmessage) throw new Error("no SSH output channel attached");
+  ch.onmessage(payload);
+}
+
 beforeEach(() => {
   h.listeners.clear();
   h.pendingListens.length = 0;
@@ -227,32 +241,38 @@ describe("SshPane", () => {
     );
   }
 
-  it("subscribes to stdout and closed before the first session_resize (early-bytes handshake)", async () => {
+  it("awaits the closed listener before attaching the output channel (T111 handshake)", async () => {
+    // T111: the first invoke is `session_attach_ssh_output`, which
+    // installs the IPC channel the host writes output into. It is
+    // sent only after the closed-event listener is live, so a close
+    // that fires right at attach is still seen.
     h.state.deferListen = true;
     renderSsh();
-    expect(h.listeners.has(STDOUT)).toBe(true);
     expect(h.listeners.has(CLOSED)).toBe(true);
-    // Neither subscription is live yet: the host must not be told to
-    // drain its early-bytes buffer.
     await Promise.resolve();
+    expect(invokedWith("session_attach_ssh_output")).toHaveLength(0);
     expect(invokedWith("session_resize")).toHaveLength(0);
 
     h.pendingListens[0]();
-    await Promise.resolve();
+    await waitFor(() => expect(invokedWith("session_attach_ssh_output")).toHaveLength(1));
+    const call = invokedWith("session_attach_ssh_output")[0][1] as {
+      request: { token: string; cols: number; rows: number };
+      channel: InstanceType<typeof h.FakeChannel>;
+    };
+    expect(call.request).toEqual({ token: TOKEN, cols: 80, rows: 24 });
+    expect(call.channel).toBeInstanceOf(h.FakeChannel);
+    expect(call.channel.onmessage).toBeTypeOf("function");
+    // `session_resize` is only sent for later resizes; attach carries
+    // the initial geometry.
     expect(invokedWith("session_resize")).toHaveLength(0);
-
-    h.pendingListens[1]();
-    await waitFor(() => expect(invokedWith("session_resize")).toHaveLength(1));
-    expect(invokedWith("session_resize")[0][1]).toEqual({
-      request: { token: TOKEN, cols: 80, rows: 24 },
-    });
   });
 
-  it("writes stdout bytes to the terminal and forwards keystrokes as base64", async () => {
+  it("writes stdout bytes from the host channel and forwards keystrokes as base64", async () => {
     renderSsh();
     const term = h.FakeTerminal.instances[0];
     expect(term.opened).toBeInstanceOf(HTMLElement);
-    act(() => h.listeners.get(STDOUT)!({ payload: { bytes_b64: btoa("hi") } }));
+    await waitFor(() => expect(invokedWith("session_attach_ssh_output")).toHaveLength(1));
+    act(() => fireStdout({ bytes_b64: btoa("hi") }));
     expect(term.written[term.written.length - 1]).toEqual(new Uint8Array([104, 105]));
 
     term.dataCb!("ls\r");
@@ -300,25 +320,29 @@ describe("SshPane", () => {
     expect(h.FakeTerminal.instances).toHaveLength(0);
   });
 
-  it("fits to its own box: no resize before the handshake, then only when cols/rows change", async () => {
+  it("fits to its own box: attach carries the handshake size, then session_resize only on changes", async () => {
     h.state.deferListen = true;
     renderSsh();
     const term = h.FakeTerminal.instances[0];
     const ro = h.FakeResizeObserver.instances[0];
     expect(ro.targets[0]).toBe(term.opened);
 
-    // The slot attaches and the pane is measured before the listeners are
-    // live: the terminal re-fits, but the host is not told yet.
+    // The slot attaches and the pane is measured before the closed
+    // listener is live: the terminal re-fits, but the host is not
+    // told yet — the channel attach is held behind the listener.
     h.fitTo.size = { cols: 100, rows: 30 };
     act(() => ro.fire(800, 600));
     expect(term.cols).toBe(100);
+    expect(invokedWith("session_attach_ssh_output")).toHaveLength(0);
     expect(invokedWith("session_resize")).toHaveLength(0);
 
-    // The handshake carries the size as of now.
+    // The channel attach carries the size as of now (T111 handshake).
     h.pendingListens[0]();
-    h.pendingListens[1]();
-    await waitFor(() => expect(invokedWith("session_resize")).toHaveLength(1));
-    expect(invokedWith("session_resize")[0][1]).toEqual({ request: { token: TOKEN, cols: 100, rows: 30 } });
+    await waitFor(() => expect(invokedWith("session_attach_ssh_output")).toHaveLength(1));
+    expect(invokedWith("session_attach_ssh_output")[0][1]).toMatchObject({
+      request: { token: TOKEN, cols: 100, rows: 30 },
+    });
+    expect(invokedWith("session_resize")).toHaveLength(0);
 
     // Hidden (a background tab, a zoomed-out pane): skipped.
     h.fitTo.size = { cols: 2, rows: 1 };
@@ -327,17 +351,18 @@ describe("SshPane", () => {
     // Re-shown at the same size: nothing reaches the host.
     h.fitTo.size = { cols: 100, rows: 30 };
     act(() => ro.fire(800, 600));
-    expect(invokedWith("session_resize")).toHaveLength(1);
-    // A divider drag: the terminal re-fits on every frame, the host hears
-    // once, with the grid it settled on (T38 Phase 3 residual).
+    expect(invokedWith("session_resize")).toHaveLength(0);
+    // A divider drag: the terminal re-fits on every frame, the host
+    // hears once (via session_resize now; attach already landed), with
+    // the grid it settled on (T38 Phase 3 residual).
     h.fitTo.size = { cols: 70, rows: 30 };
     act(() => ro.fire(560, 600));
     h.fitTo.size = { cols: 60, rows: 30 };
     act(() => ro.fire(480, 600));
     expect(term.cols).toBe(60);
-    expect(invokedWith("session_resize")).toHaveLength(1);
-    await waitFor(() => expect(invokedWith("session_resize")).toHaveLength(2));
-    expect(invokedWith("session_resize")[1][1]).toEqual({ request: { token: TOKEN, cols: 60, rows: 30 } });
+    expect(invokedWith("session_resize")).toHaveLength(0);
+    await waitFor(() => expect(invokedWith("session_resize")).toHaveLength(1));
+    expect(invokedWith("session_resize")[0][1]).toEqual({ request: { token: TOKEN, cols: 60, rows: 30 } });
 
     // Dragged away and back before it settles: nothing to tell the host.
     h.fitTo.size = { cols: 50, rows: 30 };
@@ -345,17 +370,16 @@ describe("SshPane", () => {
     h.fitTo.size = { cols: 60, rows: 30 };
     act(() => ro.fire(480, 600));
     await new Promise((r) => setTimeout(r, SSH_RESIZE_DEBOUNCE_MS * 2));
-    expect(invokedWith("session_resize")).toHaveLength(2);
+    expect(invokedWith("session_resize")).toHaveLength(1);
   });
 
   /** T38 Phase 6: a handshake replay can carry a host notice (output not
    *  kept across a move, or dropped); it is written before the bytes. */
-  it("writes a host notice before the bytes it came with", () => {
+  it("writes a host notice before the bytes it came with", async () => {
     renderSsh();
     const term = h.FakeTerminal.instances[0];
-    act(() =>
-      h.listeners.get(STDOUT)!({ payload: { bytes_b64: btoa("$ "), notice: "replaying the last 1 KiB" } }),
-    );
+    await waitFor(() => expect(invokedWith("session_attach_ssh_output")).toHaveLength(1));
+    act(() => fireStdout({ bytes_b64: btoa("$ "), notice: "replaying the last 1 KiB" }));
     expect(term.written.slice(-2)).toEqual([
       "\x1b[2m[replaying the last 1 KiB]\x1b[0m\r\n",
       new Uint8Array([36, 32]),
@@ -373,7 +397,7 @@ describe("SshPane", () => {
     expect(handler(new KeyboardEvent("keydown", { code: "KeyA" }))).toBe(true);
   });
 
-  it("reports output and the bell, and takes focus when focused", () => {
+  it("reports output and the bell, and takes focus when focused", async () => {
     const onActivity = vi.fn();
     const { rerender } = render(
       <SshPane
@@ -387,7 +411,8 @@ describe("SshPane", () => {
     );
     const term = h.FakeTerminal.instances[0];
     expect(term.focusCount).toBe(0);
-    act(() => h.listeners.get(STDOUT)!({ payload: { bytes_b64: btoa("x") } }));
+    await waitFor(() => expect(invokedWith("session_attach_ssh_output")).toHaveLength(1));
+    act(() => fireStdout({ bytes_b64: btoa("x") }));
     act(() => term.bellCb!());
     expect(onActivity.mock.calls).toEqual([["output"], ["bell"]]);
     rerender(
@@ -743,7 +768,10 @@ describe("session window wrappers", () => {
       </MemoryRouter>,
     );
     expect(screen.getByText("ssh op@web01:22")).toBeInTheDocument();
-    expect(h.listeners.has(STDOUT)).toBe(true);
+    // T111: SSH output rides a per-webview IPC channel installed by
+    // `session_attach_ssh_output` (asserted in SshPane tests above),
+    // so no `listen()` for the STDOUT event name exists on the pane.
+    expect(h.listeners.has(STDOUT)).toBe(false);
     expect(h.listeners.has(CLOSED)).toBe(true);
     // One beat on mount. It names no window: the host derives the
     // window from the call itself.

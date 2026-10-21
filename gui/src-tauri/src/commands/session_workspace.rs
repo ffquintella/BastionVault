@@ -82,6 +82,26 @@ pub async fn session_list_open(state: State<'_, AppState>, webview: Webview) -> 
     Ok(listing.into_iter().filter(|row| live.contains(&row.descriptor.token)).collect())
 }
 
+/// Recordings queued for the workspace to place as replay panes (T109).
+/// Workspace window only; draining is the hand-off, so each request is
+/// delivered once.
+#[tauri::command]
+pub async fn session_replay_take(
+    state: State<'_, AppState>,
+    webview: Webview,
+) -> CmdResult<Vec<crate::session::replays::ReplayRequest>> {
+    let caller = webview.label().to_string();
+    if !crate::session::replays::may_take_replays(&caller) {
+        log::warn!("resource-connect: session_replay_take refused for window `{caller}`");
+        return Err(CommandError::from(format!(
+            "window `{caller}` may not take replay requests; only the Session Workspace can"
+        )));
+    }
+    let mut queue =
+        state.replay_requests.lock().map_err(|_| CommandError::from("replay queue poisoned".to_string()))?;
+    Ok(queue.take())
+}
+
 #[derive(Deserialize)]
 pub struct SessionTokenRequest {
     pub token: String,
@@ -231,8 +251,18 @@ pub async fn session_move(
         .await
         .transfer(token, &caller, &target, Instant::now())
         .map_err(|e| CommandError::from(e.message(token)))?;
-    if descriptor.protocol == ProfileProtocol::Rdp {
-        crate::session::rdp::detach_frames(&state, token).await;
+    match descriptor.protocol {
+        ProfileProtocol::Rdp => {
+            crate::session::rdp::detach_frames(&state, token).await;
+        }
+        // T111: SSH output rides a per-webview Channel installed by the
+        // holding window; drop the old one so the pre-move window gets
+        // no further chunks and the new window's `session_attach_ssh_
+        // output` can install a fresh channel at the new epoch.
+        ProfileProtocol::Ssh => {
+            crate::session::ssh::detach_output(&state, token).await;
+        }
+        ProfileProtocol::Web | ProfileProtocol::Sftp => {}
     }
 
     let built = match request.to {

@@ -16,6 +16,7 @@ pub mod layouts;
 pub mod output;
 pub mod rdp;
 pub mod rdp_clipboard;
+pub mod replays;
 pub mod routing;
 pub mod sftp;
 pub mod sk_signer;
@@ -141,66 +142,119 @@ impl SessionState {
 }
 
 /// Why a session of one kind may not start while a session of the other is
-/// live (see [`web_rdp_conflict`]).
+/// live (see [`web_channel_conflict`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WebRdpConflict {
+pub struct WebChannelConflict {
     /// Stable `reason=` token for the host audit line.
     pub audit_reason: &'static str,
     /// Operator-facing refusal.
     pub message: String,
 }
 
-/// Web / RDP mutual exclusion.
+/// Back-compat alias for [`WebChannelConflict`] — the type was called
+/// `WebRdpConflict` before T111 extended it to SSH. New code uses the
+/// new name.
+pub type WebRdpConflict = WebChannelConflict;
+
+/// Web / `Channel`-using-session mutual exclusion.
 ///
 /// Tauri 2.11.5 exempts `plugin:__TAURI_CHANNEL__|fetch` from the
 /// remote-origin ACL, so a hostile page in a `web-*` window could poll
 /// sequential channel ids and read payloads queued for another session's
-/// `tauri::ipc::Channel`. The only channel users are the RDP frame path
-/// (`session_attach_rdp_frames`, `session::rdp::FrameSink`), so a web
-/// session and an RDP session are never allowed to be live together. This
-/// is the pure predicate; callers evaluate it while holding the
-/// `connect_sessions` lock at the point of registration so two concurrent
-/// opens cannot both pass. Remove this once upstream drops the exemption.
-/// See features/web-application-connect.md, Security Considerations.
+/// `tauri::ipc::Channel`. Before T111 the only channel user was the RDP
+/// frame path (`session_attach_rdp_frames`, `session::rdp::FrameSink`),
+/// so only RDP and web had to be mutually exclusive. T111 moves SSH
+/// output onto a per-webview channel too (`session_attach_ssh_output`,
+/// `session::output::SshOutputSink`), so SSH joins the exclusion: web
+/// cannot run while SSH or RDP is live, and vice versa. The predicate
+/// is pure; callers evaluate it while holding the `connect_sessions`
+/// lock at the point of registration so two concurrent opens cannot
+/// both pass. Remove this once upstream drops the exemption. See
+/// features/web-application-connect.md and features/session-workspace.md
+/// (§"T111").
 ///
 /// `opening` is the kind of session about to start; `live` are the kinds
-/// already registered. SSH and SFTP sessions never conflict.
+/// already registered. SFTP sessions never conflict — their transport is
+/// SSH but no `tauri::ipc::Channel` carries any of their data.
+pub fn web_channel_conflict(
+    opening: ProfileProtocol,
+    live: impl IntoIterator<Item = ProfileProtocol>,
+) -> Option<WebChannelConflict> {
+    let live: Vec<ProfileProtocol> = live.into_iter().collect();
+    match opening {
+        // Opening a web session is refused while any Channel-using session
+        // (RDP or SSH) is live, because that live session's channel ids
+        // would be reachable from the new web window.
+        ProfileProtocol::Web => {
+            let rdp_live = live.iter().any(|p| *p == ProfileProtocol::Rdp);
+            let ssh_live = live.iter().any(|p| *p == ProfileProtocol::Ssh);
+            if !rdp_live && !ssh_live {
+                return None;
+            }
+            Some(WebChannelConflict {
+                audit_reason: if rdp_live { "rdp_session_live" } else { "ssh_session_live" },
+                message: if rdp_live {
+                    "an RDP session is open; close it before opening a web application session. Web and RDP \
+                     sessions cannot run at the same time because the webview's IPC channel transport cannot yet \
+                     isolate the RDP desktop stream from web content"
+                        .to_string()
+                } else {
+                    "an SSH session is open; close it before opening a web application session. Web and SSH \
+                     sessions cannot run at the same time because the webview's IPC channel transport cannot yet \
+                     isolate SSH output from web content"
+                        .to_string()
+                },
+            })
+        }
+        // Opening an RDP or SSH session is refused while a web session is
+        // live, same reason in the other direction.
+        ProfileProtocol::Rdp | ProfileProtocol::Ssh => {
+            if !live.iter().any(|p| *p == ProfileProtocol::Web) {
+                return None;
+            }
+            Some(WebChannelConflict {
+                audit_reason: "web_session_live",
+                message: match opening {
+                    ProfileProtocol::Rdp => "a web application session is open; close it before opening an RDP \
+                                             session. Web and RDP sessions cannot run at the same time because \
+                                             the webview's IPC channel transport cannot yet isolate the RDP \
+                                             desktop stream from web content"
+                        .to_string(),
+                    _ => "a web application session is open; close it before opening an SSH session. Web and \
+                          SSH sessions cannot run at the same time because the webview's IPC channel transport \
+                          cannot yet isolate SSH output from web content"
+                        .to_string(),
+                },
+            })
+        }
+        ProfileProtocol::Sftp => None,
+    }
+}
+
+/// Back-compat alias for [`web_channel_conflict`].
+#[allow(dead_code)]
 pub fn web_rdp_conflict(
     opening: ProfileProtocol,
     live: impl IntoIterator<Item = ProfileProtocol>,
-) -> Option<WebRdpConflict> {
-    let other = match opening {
-        ProfileProtocol::Web => ProfileProtocol::Rdp,
-        ProfileProtocol::Rdp => ProfileProtocol::Web,
-        ProfileProtocol::Ssh | ProfileProtocol::Sftp => return None,
-    };
-    if !live.into_iter().any(|p| p == other) {
-        return None;
-    }
-    Some(match opening {
-        ProfileProtocol::Web => WebRdpConflict {
-            audit_reason: "rdp_session_live",
-            message: "an RDP session is open; close it before opening a web application session. Web and RDP \
-                 sessions cannot run at the same time because the webview's IPC channel transport cannot yet \
-                 isolate the RDP desktop stream from web content"
-                .to_string(),
-        },
-        _ => WebRdpConflict {
-            audit_reason: "web_session_live",
-            message: "a web application session is open; close it before opening an RDP session. Web and RDP \
-                 sessions cannot run at the same time because the webview's IPC channel transport cannot yet \
-                 isolate the RDP desktop stream from web content"
-                .to_string(),
-        },
-    })
+) -> Option<WebChannelConflict> {
+    web_channel_conflict(opening, live)
 }
 
-/// [`web_rdp_conflict`] over a `connect_sessions` map. Call with the lock held.
+/// [`web_channel_conflict`] over a `connect_sessions` map. Call with
+/// the lock held.
+pub fn registry_web_channel_conflict(
+    opening: ProfileProtocol,
+    sessions: &std::collections::HashMap<String, SessionState>,
+) -> Option<WebChannelConflict> {
+    web_channel_conflict(opening, sessions.values().map(SessionState::protocol))
+}
+
+/// Back-compat alias for [`registry_web_channel_conflict`].
 pub fn registry_web_rdp_conflict(
     opening: ProfileProtocol,
     sessions: &std::collections::HashMap<String, SessionState>,
-) -> Option<WebRdpConflict> {
-    web_rdp_conflict(opening, sessions.values().map(SessionState::protocol))
+) -> Option<WebChannelConflict> {
+    registry_web_channel_conflict(opening, sessions)
 }
 
 pub struct RdpSessionState {
@@ -226,6 +280,10 @@ pub struct SshSessionState {
     /// pushes a Vec<u8> here; the spawned task awaits on the rx
     /// side and writes into the russh channel.
     pub input_tx: mpsc::Sender<SshControl>,
+    /// Where the pump sends terminal output chunks. Empty until the
+    /// holding window calls `session_attach_ssh_output` with the IPC
+    /// channel it created (T111). See [`output::SshOutputSink`].
+    pub output_sink: std::sync::Arc<std::sync::Mutex<output::SshOutputSink>>,
     /// For the `Disconnect` button + the future audit close
     /// event. Read by Phase 7's session-history surface; allow
     /// dead_code until that lands.
@@ -317,30 +375,59 @@ mod profile_protocol_tests {
 }
 
 #[cfg(test)]
-mod web_rdp_exclusion_tests {
-    use super::{web_rdp_conflict, ProfileProtocol::*};
+mod web_channel_exclusion_tests {
+    use super::{web_channel_conflict, ProfileProtocol::*};
 
     #[test]
     fn web_is_refused_while_rdp_is_live() {
-        let c = web_rdp_conflict(Web, [Ssh, Rdp]).unwrap();
+        let c = web_channel_conflict(Web, [Sftp, Rdp]).unwrap();
         assert_eq!(c.audit_reason, "rdp_session_live");
         assert!(c.message.contains("RDP session is open"), "{}", c.message);
     }
 
     #[test]
-    fn rdp_is_refused_while_web_is_live() {
-        let c = web_rdp_conflict(Rdp, [Web]).unwrap();
-        assert_eq!(c.audit_reason, "web_session_live");
-        assert!(c.message.contains("web application session is open"), "{}", c.message);
+    fn web_is_refused_while_ssh_is_live() {
+        // T111: SSH joined the exclusion because its output moved onto a
+        // per-webview Channel too.
+        let c = web_channel_conflict(Web, [Ssh]).unwrap();
+        assert_eq!(c.audit_reason, "ssh_session_live");
+        assert!(c.message.contains("SSH session is open"), "{}", c.message);
     }
 
     #[test]
-    fn same_kind_ssh_and_empty_registries_do_not_conflict() {
-        assert_eq!(web_rdp_conflict(Web, [Web, Ssh]), None);
-        assert_eq!(web_rdp_conflict(Rdp, [Rdp, Ssh]), None);
-        assert_eq!(web_rdp_conflict(Web, []), None);
-        assert_eq!(web_rdp_conflict(Rdp, []), None);
-        // SSH never conflicts, whatever is live.
-        assert_eq!(web_rdp_conflict(Ssh, [Web, Rdp]), None);
+    fn rdp_is_refused_while_web_is_live() {
+        let c = web_channel_conflict(Rdp, [Web]).unwrap();
+        assert_eq!(c.audit_reason, "web_session_live");
+        assert!(c.message.contains("web application session is open"), "{}", c.message);
+        assert!(c.message.contains("RDP"), "{}", c.message);
+    }
+
+    #[test]
+    fn ssh_is_refused_while_web_is_live() {
+        // T111: SSH + web is now also mutually exclusive.
+        let c = web_channel_conflict(Ssh, [Web]).unwrap();
+        assert_eq!(c.audit_reason, "web_session_live");
+        assert!(c.message.contains("web application session is open"), "{}", c.message);
+        assert!(c.message.contains("SSH"), "{}", c.message);
+    }
+
+    #[test]
+    fn rdp_prevails_over_ssh_in_the_refusal_reason_when_both_are_live() {
+        // Deterministic reason: when a new web open sees both an RDP and an
+        // SSH session, we name RDP (the longer-standing exclusion).
+        let c = web_channel_conflict(Web, [Ssh, Rdp]).unwrap();
+        assert_eq!(c.audit_reason, "rdp_session_live");
+    }
+
+    #[test]
+    fn same_kind_sftp_and_empty_registries_do_not_conflict() {
+        assert_eq!(web_channel_conflict(Web, [Web, Sftp]), None);
+        assert_eq!(web_channel_conflict(Rdp, [Rdp, Sftp]), None);
+        assert_eq!(web_channel_conflict(Ssh, [Ssh, Sftp]), None);
+        assert_eq!(web_channel_conflict(Web, []), None);
+        assert_eq!(web_channel_conflict(Rdp, []), None);
+        assert_eq!(web_channel_conflict(Ssh, []), None);
+        // SFTP has no Channel; nothing it does conflicts.
+        assert_eq!(web_channel_conflict(Sftp, [Web, Rdp, Ssh]), None);
     }
 }

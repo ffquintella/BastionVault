@@ -1126,7 +1126,7 @@ mod teardown_tests {
         let (tx, rx) = tokio::sync::mpsc::channel(4);
         state.connect_sessions.lock().await.insert(
             token.to_string(),
-            SessionState::Ssh(SshSessionState { input_tx: tx, label: token.into(), on_close }),
+            SessionState::Ssh(SshSessionState { input_tx: tx, output_sink: std::sync::Arc::new(std::sync::Mutex::new(crate::session::output::SshOutputSink::new())), label: token.into(), on_close }),
         );
         let d = SessionDescriptor {
             token: token.into(),
@@ -1209,7 +1209,7 @@ mod teardown_tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(4);
         state.connect_sessions.lock().await.insert(
             "sess_1".into(),
-            SessionState::Ssh(SshSessionState { input_tx: tx, label: "x".into(), on_close: Some(cleanup("a1")) }),
+            SessionState::Ssh(SshSessionState { input_tx: tx, output_sink: std::sync::Arc::new(std::sync::Mutex::new(crate::session::output::SshOutputSink::new())), label: "x".into(), on_close: Some(cleanup("a1")) }),
         );
         let stopped = stop_window_sessions(&state, "ssh-sess_1", Some("sess_1")).await;
         assert_eq!(stopped.len(), 1);
@@ -1278,7 +1278,7 @@ mod teardown_tests {
         let (tx, _rx3) = tokio::sync::mpsc::channel(4);
         state.connect_sessions.lock().await.insert(
             "sess_lost".into(),
-            SessionState::Ssh(SshSessionState { input_tx: tx, label: "x".into(), on_close: Some(cleanup("a3")) }),
+            SessionState::Ssh(SshSessionState { input_tx: tx, output_sink: std::sync::Arc::new(std::sync::Mutex::new(crate::session::output::SshOutputSink::new())), label: "x".into(), on_close: Some(cleanup("a3")) }),
         );
 
         let stopped = stop_all_sessions(&state).await;

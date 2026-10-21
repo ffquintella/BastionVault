@@ -107,6 +107,7 @@ impl SessionEvents {
     /// delivered to the window that completed the handshake at `epoch` or
     /// kept by the caller for the next one — never addressed to a window
     /// that gave the session up or is not listening yet.
+    #[allow(dead_code)]
     pub async fn emit_if_epoch<S: Serialize + Clone>(&self, event: &str, payload: S, epoch: u64) -> bool {
         let Some(state) = self.app.try_state::<crate::state::AppState>() else {
             return false;

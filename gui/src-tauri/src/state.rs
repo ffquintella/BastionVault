@@ -212,6 +212,9 @@ pub struct AppState {
     /// `session_detach`; an entry is removed by `drop_session`. Never held
     /// across another of these locks.
     pub session_attachments: tokio::sync::Mutex<crate::session::attachments::AttachmentRegistry>,
+    /// T109: recordings queued for the Session Workspace to place as replay
+    /// panes. Not sessions: no token, no attachment, nothing to tear down.
+    pub replay_requests: std::sync::Mutex<crate::session::replays::ReplayQueue>,
     /// T108: the close requests a session window's page has not answered
     /// yet — the escape hatch that force-closes a window whose renderer
     /// cannot answer its close veto. A plain mutex, because the window
@@ -270,6 +273,7 @@ impl AppState {
             connect_sessions: tokio::sync::Mutex::new(HashMap::new()),
             rustion_session_bundles: tokio::sync::Mutex::new(HashMap::new()),
             session_attachments: tokio::sync::Mutex::new(crate::session::attachments::AttachmentRegistry::new()),
+            replay_requests: std::sync::Mutex::new(crate::session::replays::ReplayQueue::new()),
             session_close_guard: std::sync::Mutex::new(crate::session::close_guard::CloseGuard::new()),
             plugin_surface_cache: Mutex::new(None),
             app_modules: Mutex::new(HashMap::new()),
