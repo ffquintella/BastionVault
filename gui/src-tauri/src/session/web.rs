@@ -688,6 +688,9 @@ struct PageTrack {
     failed: Option<PageFailure>,
     /// Untrusted-certificate prompts open on this window.
     prompts: u32,
+    /// Monotonic count of top-frame loads started; see
+    /// [`WebShared::load_gen`].
+    load_gen: u64,
 }
 
 #[derive(Debug, Default)]
@@ -756,14 +759,16 @@ pub struct WebShared {
     /// gate's refusal hook holds this `WebShared`, and the platform handler
     /// owns the gate for the window's lifetime.
     pin_gate: std::sync::OnceLock<std::sync::Weak<TlsPinGate>>,
-    /// One-shot flag set by the nav bar's Reload button so the fill
-    /// engine's step-picker skips the next matching step on the URL the
-    /// operator reloaded (G5 in docs/specs/2026-10-20-web-session-nav-controls-design.md).
-    /// Read and cleared through [`super::web_nav_bar::take_operator_reload`];
-    /// Task 6 of that plan wires the step-picker's read. `pub(crate)` so
-    /// the sibling `web_nav_bar` module can mark / take it; nothing
-    /// outside this crate should touch it directly.
-    pub(crate) operator_reload: std::sync::atomic::AtomicBool,
+    /// Set by the nav bar's Reload button so the fill engine skips the
+    /// reload's own load (G5 in docs/specs/2026-10-20-web-session-nav-controls-design.md).
+    /// Holds the lowest [`Self::load_gen`] that counts as that load, or `0`
+    /// for no mark (a real load generation is never `0` once a load has
+    /// started, and the threshold is always `load_gen + 1 >= 1`).
+    /// Written through [`super::web_nav_bar::mark_operator_reload`] and
+    /// consumed through [`super::web_nav_bar::take_operator_reload`].
+    /// `pub(crate)` so the sibling `web_nav_bar` module can reach it;
+    /// nothing outside this crate should touch it directly.
+    pub(crate) operator_reload: std::sync::atomic::AtomicU64,
 }
 
 impl WebShared {
@@ -779,7 +784,7 @@ impl WebShared {
             login_window: Mutex::new(LoginWindow::default()),
             relogin: std::sync::atomic::AtomicBool::new(false),
             pin_gate: std::sync::OnceLock::new(),
-            operator_reload: std::sync::atomic::AtomicBool::new(false),
+            operator_reload: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -854,6 +859,11 @@ impl WebShared {
         {
             let mut p = Self::lock(&self.page);
             p.url = Some(url.clone());
+            // A load starts with a not-finished event; a finished event with
+            // no start before it (nothing was loading) is a load of its own.
+            if !finished || !p.loading {
+                p.load_gen += 1;
+            }
             p.loading = !finished;
             p.failed = None;
         }
@@ -866,7 +876,20 @@ impl WebShared {
 
     pub fn snapshot(&self) -> PageSnapshot {
         let p = Self::lock(&self.page);
-        PageSnapshot { url: p.url.clone(), loading: p.loading, failed: p.failed.map(|f| f.check), held: p.prompts > 0 }
+        PageSnapshot {
+            url: p.url.clone(),
+            loading: p.loading,
+            failed: p.failed.map(|f| f.check),
+            held: p.prompts > 0,
+            load_gen: p.load_gen,
+        }
+    }
+
+    /// Top-frame loads started so far. Strictly increases with every load
+    /// (a reload included), so a caller can tell a new load from the same
+    /// page being polled again.
+    pub fn load_gen(&self) -> u64 {
+        Self::lock(&self.page).load_gen
     }
 
     /// Record that this window refused a server-trust challenge for
@@ -1532,6 +1555,23 @@ mod tests {
         p["web"]["tls_pin_sha256"] = json!([format!("sha256:{}", "ab".repeat(32))]);
         assert_eq!(parse_web_profile(&p).unwrap().tls_pins.len(), 1);
         assert_eq!(WebSessionKind::HttpAuth.as_str(), "http-auth");
+    }
+
+    #[test]
+    fn load_gen_counts_loads_not_events() {
+        let shared = WebShared::new("fw01", "https://fw01.example.com");
+        let u = url("https://fw01.example.com/login");
+        assert_eq!(shared.load_gen(), 0);
+        shared.page_load(&u, false);
+        assert_eq!(shared.load_gen(), 1, "a start is a new load");
+        shared.page_load(&u, true);
+        assert_eq!(shared.load_gen(), 1, "its finish is not");
+        assert_eq!(shared.snapshot().load_gen, 1);
+        shared.page_load(&u, false);
+        shared.page_load(&u, true);
+        assert_eq!(shared.load_gen(), 2, "a reload of the same URL is a new load");
+        shared.page_load(&u, true);
+        assert_eq!(shared.load_gen(), 3, "a finish with no start before it is a load of its own");
     }
 
     #[test]

@@ -433,23 +433,26 @@ impl Drop for DownloadSlot {
     }
 }
 
-/// Mark the operator's reload intent on `shared` (G5). The fill engine's
-/// step-picker reads this on its next pass over the matching URL and
-/// skips one match, so an operator who reloaded mid-fill does not have
-/// the engine re-apply the same step on top of its own click. One-shot:
-/// [`take_operator_reload`] returns `true` only once per set.
-///
-/// The step-picker's own read is wired up in Task 6; the field is added
-/// to [`web::WebShared`] here so this crate compiles against it today.
+/// Mark the operator's reload intent on `shared` (G5). The fill engine
+/// skips the first load whose generation is newer than the page's now,
+/// i.e. the reload's own load, so an operator who reloaded the login page
+/// does not have the engine re-run a step on it. The page still loaded
+/// when this is called keeps being polled normally: nothing is skipped
+/// until the reload actually starts. One-shot per mark; marking again
+/// before the reload starts re-targets the same load.
 pub fn mark_operator_reload(shared: &web::WebShared) {
-    shared.operator_reload.store(true, Ordering::SeqCst);
+    shared.operator_reload.store(shared.load_gen() + 1, Ordering::SeqCst);
 }
 
-/// Consume the one-shot operator-reload flag on `shared`. Returns the
-/// value the flag held before the call; `false` on every subsequent call
-/// until Reload is clicked again.
-pub fn take_operator_reload(shared: &web::WebShared) -> bool {
-    shared.operator_reload.swap(false, Ordering::SeqCst)
+/// Consume the operator-reload mark on `shared` if `load_gen` (the engine's
+/// current page snapshot) is the marked load or a later one. Returns `true`
+/// exactly once per mark, and `false` while the page is still the one that
+/// was loaded when Reload was clicked.
+pub fn take_operator_reload(shared: &web::WebShared, load_gen: u64) -> bool {
+    let threshold = shared.operator_reload.load(Ordering::SeqCst);
+    threshold != 0
+        && load_gen >= threshold
+        && shared.operator_reload.compare_exchange(threshold, 0, Ordering::SeqCst, Ordering::SeqCst).is_ok()
 }
 
 #[cfg(test)]
@@ -582,20 +585,27 @@ mod tests {
     }
 
     #[test]
-    fn operator_reload_flag_is_one_shot() {
+    fn operator_reload_mark_lands_once_on_the_reloads_own_load() {
         let shared = web::WebShared::new("test", "https://test.example");
-        // Initially unset.
-        assert!(!take_operator_reload(&shared));
-        // Mark then take once.
+        let url = tauri::Url::parse("https://test.example/login").unwrap();
+        shared.page_load(&url, false);
+        shared.page_load(&url, true);
+        let gen = shared.load_gen();
+        // Unset: nothing to take.
+        assert!(!take_operator_reload(&shared, gen));
+        // Marked, but the page is still the one loaded at mark time.
         mark_operator_reload(&shared);
-        assert!(take_operator_reload(&shared), "first take sees the flag");
-        // One-shot: a second take without a mark is false.
-        assert!(!take_operator_reload(&shared), "flag is consumed");
-        // Mark again, take again.
+        assert!(!take_operator_reload(&shared, gen), "no skip before the reload starts");
+        // The reload starts: a new generation takes the mark, once.
+        shared.page_load(&url, false);
+        assert!(take_operator_reload(&shared, shared.load_gen()), "first new load takes the mark");
+        assert!(!take_operator_reload(&shared, shared.load_gen()), "the mark is consumed");
+        // Stacked marks before the reload still land once.
         mark_operator_reload(&shared);
         mark_operator_reload(&shared);
-        assert!(take_operator_reload(&shared), "stacked marks still land once");
-        assert!(!take_operator_reload(&shared));
+        shared.page_load(&url, false);
+        assert!(take_operator_reload(&shared, shared.load_gen()));
+        assert!(!take_operator_reload(&shared, shared.load_gen()));
     }
 }
 

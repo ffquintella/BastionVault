@@ -61,6 +61,9 @@ pub struct PageSnapshot {
     /// The window is waiting on the operator (an untrusted-certificate
     /// prompt): the engine's deadline does not run meanwhile.
     pub held: bool,
+    /// Top-frame loads started so far; strictly increasing, so a reload of
+    /// the same URL is a new value. See `WebShared::load_gen`.
+    pub load_gen: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +85,9 @@ pub trait RecipePage: Send + Sync {
     fn eval(&self, call: &ScriptCall<'_>) -> impl Future<Output = Result<ScriptReply, EvalError>> + Send;
     /// Show the login state in the host-owned title.
     fn show(&self, text: &str);
+    /// Consume the operator's reload mark if `load_gen` is the reload's own
+    /// load (or later); `true` at most once per mark.
+    fn take_operator_reload(&self, load_gen: u64) -> bool;
 }
 
 pub trait LaunchOps: Send + Sync {
@@ -141,11 +147,17 @@ fn scope_verdict(scope: &EffectiveScope, url: &Url) -> ScopeVerdict {
 }
 
 fn ready_url<P: RecipePage>(page: &P) -> Option<Url> {
+    ready_load(page).map(|(url, _)| url)
+}
+
+/// The ready URL and the generation of the load that produced it, from one
+/// snapshot so the two always agree.
+fn ready_load<P: RecipePage>(page: &P) -> Option<(Url, u64)> {
     let s = page.snapshot();
     if s.loading {
         None
     } else {
-        s.url
+        s.url.map(|url| (url, s.load_gen))
     }
 }
 
@@ -178,6 +190,8 @@ struct FillRun<'a, P, L> {
     credential: LaunchCredential,
     refresh_steps: Vec<u32>,
     fills: u32,
+    /// The load generation the operator reloaded into; no step runs on it.
+    reload_skip_gen: Option<u64>,
 }
 
 /// Run a recipe with the launch's credential. Consumes the credential: it is
@@ -206,6 +220,7 @@ pub async fn run_fill<P: RecipePage, L: LaunchOps>(
         credential,
         refresh_steps,
         fills: 0,
+        reload_skip_gen: None,
     };
     run.run().await
 }
@@ -247,12 +262,19 @@ impl<P: RecipePage, L: LaunchOps> FillRun<'_, P, L> {
             if Instant::now() >= self.deadline {
                 break Outcome::Timeout;
             }
-            let Some(url) = ready_url(self.page) else {
+            let Some((url, load_gen)) = ready_load(self.page) else {
                 if let Some(r) = self.pause().await {
                     break Outcome::Aborted(r);
                 }
                 continue;
             };
+            // The operator reloaded the page (G5): the mark is consumed by
+            // the first ready snapshot of the reload's own load, whether or
+            // not a step matches it, so it cannot linger. That load is then
+            // not filled; the next one is.
+            if self.page.take_operator_reload(load_gen) {
+                self.reload_skip_gen = Some(load_gen);
+            }
             let origin = match scope_verdict(self.scope, &url) {
                 ScopeVerdict::In(o) => o,
                 // The navigation allow-list is the fill scope, so this is a
@@ -278,7 +300,9 @@ impl<P: RecipePage, L: LaunchOps> FillRun<'_, P, L> {
                 }
             }
 
+            let skip_load = self.reload_skip_gen == Some(load_gen);
             let to_run: Option<(u32, Cow<'_, [PlanAction]>)> = match &plan.steps {
+                _ if skip_load => None,
                 PlanSteps::Explicit(steps) => {
                     select_step(steps, next, &url).map(|i| (i as u32, Cow::Borrowed(steps[i].actions.as_slice())))
                 }
@@ -816,9 +840,13 @@ mod tests {
         closed: bool,
         failed: Option<&'static str>,
         held: bool,
+        load_gen: u64,
     }
 
     struct FakePage {
+        /// Carries the real operator-reload mark; the fake's `load_gen`
+        /// always equals this one's (see `new_load`).
+        shared: std::sync::Arc<crate::session::web::WebShared>,
         state: Mutex<PageState>,
         seen: Mutex<Vec<Seen>>,
         titles: Mutex<Vec<String>>,
@@ -834,11 +862,24 @@ mod tests {
                     closed: false,
                     failed: None,
                     held: false,
+                    load_gen: 0,
                 }),
+                shared: crate::session::web::WebShared::new("fw01", FW),
                 seen: Mutex::new(Vec::new()),
                 titles: Mutex::new(Vec::new()),
                 responder: Mutex::new(responder),
             }
+        }
+        /// The webview started and finished a new top-frame load of `url`
+        /// (a reload is the same URL again).
+        fn new_load(&self, url: &str) {
+            let u = Url::parse(url).unwrap();
+            self.shared.page_load(&u, false);
+            self.shared.page_load(&u, true);
+            let mut st = self.state.lock().unwrap();
+            st.url = u;
+            st.loading = false;
+            st.load_gen = self.shared.load_gen();
         }
         fn seen(&self) -> Vec<Seen> {
             self.seen.lock().unwrap().clone()
@@ -851,7 +892,16 @@ mod tests {
     impl RecipePage for FakePage {
         fn snapshot(&self) -> PageSnapshot {
             let s = self.state.lock().unwrap();
-            PageSnapshot { url: Some(s.url.clone()), loading: s.loading, failed: s.failed, held: s.held }
+            PageSnapshot {
+                url: Some(s.url.clone()),
+                loading: s.loading,
+                failed: s.failed,
+                held: s.held,
+                load_gen: s.load_gen,
+            }
+        }
+        fn take_operator_reload(&self, load_gen: u64) -> bool {
+            crate::session::web_nav_bar::take_operator_reload(&self.shared, load_gen)
         }
         fn closed(&self) -> bool {
             self.state.lock().unwrap().closed
@@ -1240,6 +1290,86 @@ mod tests {
         let (plan, sc, launch) = (two_page(), scope(&[FW]), launch_at(t0()));
         let (r, ()) = tokio::join!(fill(&plan, &sc, &page, &launch, 150), release);
         assert_eq!(r.outcome, Outcome::Success);
+    }
+
+    // ── Operator reload (G5) ───────────────────────────────────────
+
+    const LOGIN: &str = "https://fw01.example.com/login";
+
+    fn login_fills(page: &FakePage) -> usize {
+        page.actions().iter().filter(|s| s.kind == Some(ActionKind::Fill)).count()
+    }
+
+    fn one_step() -> RecipePlan {
+        plan(json!({
+            "version": 1,
+            "steps": [ { "when_url": "https://fw01.example.com/login", "actions": [
+                { "fill": "#u", "value": "username" } ] } ],
+            "success_when": { "selector": "#never" },
+            "timeout_secs": 30
+        }))
+    }
+
+    fn mark_of(page: &FakePage) -> u64 {
+        page.shared.operator_reload.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[tokio::test]
+    async fn without_a_reload_mark_the_matching_step_is_filled() {
+        let page = FakePage::new(LOGIN, Box::new(|_, _| ok(FW)));
+        page.new_load(LOGIN);
+        let (plan, sc, launch) = (one_step(), scope(&[FW]), launch_at(t0()));
+        fill(&plan, &sc, &page, &launch, 200).await;
+        assert_eq!(login_fills(&page), 1);
+    }
+
+    #[tokio::test]
+    async fn an_operator_reload_skips_the_reloads_own_load_once() {
+        let page = FakePage::new(LOGIN, Box::new(|_, _| ok(FW)));
+        page.new_load(LOGIN);
+        crate::session::web_nav_bar::mark_operator_reload(&page.shared);
+        // The reload starts before the engine's first poll.
+        page.new_load(LOGIN);
+        let driver = async {
+            // The reload's own load is polled for a while and never filled.
+            tokio::time::sleep(Duration::from_millis(60)).await;
+            assert_eq!(login_fills(&page), 0, "the reload's load is skipped");
+            assert_eq!(mark_of(&page), 0, "mark cleared");
+            // The next load behaves normally.
+            page.new_load(LOGIN);
+        };
+        let (plan, sc, launch) = (one_step(), scope(&[FW]), launch_at(t0()));
+        let (_, ()) = tokio::join!(fill(&plan, &sc, &page, &launch, 400), driver);
+        assert_eq!(login_fills(&page), 1, "the following load is filled");
+    }
+
+    #[tokio::test]
+    async fn a_reload_mark_clears_on_a_load_no_step_matches() {
+        let page = FakePage::new(LOGIN, Box::new(|_, _| ok(FW)));
+        page.new_load(LOGIN);
+        crate::session::web_nav_bar::mark_operator_reload(&page.shared);
+        page.new_load("https://fw01.example.com/elsewhere");
+        let driver = async {
+            tokio::time::sleep(Duration::from_millis(60)).await;
+            assert_eq!(mark_of(&page), 0, "mark did not linger");
+            assert_eq!(login_fills(&page), 0);
+            page.new_load(LOGIN);
+        };
+        let (plan, sc, launch) = (one_step(), scope(&[FW]), launch_at(t0()));
+        let (_, ()) = tokio::join!(fill(&plan, &sc, &page, &launch, 400), driver);
+        assert_eq!(login_fills(&page), 1, "a later matching load fills normally");
+    }
+
+    #[tokio::test]
+    async fn a_reload_mark_does_not_affect_the_page_still_loaded() {
+        let page = FakePage::new(LOGIN, Box::new(|_, _| ok(FW)));
+        page.new_load(LOGIN);
+        // Marked, but no new load has started: normal polling continues.
+        crate::session::web_nav_bar::mark_operator_reload(&page.shared);
+        let (plan, sc, launch) = (one_step(), scope(&[FW]), launch_at(t0()));
+        fill(&plan, &sc, &page, &launch, 200).await;
+        assert_eq!(login_fills(&page), 1);
+        assert_ne!(mark_of(&page), 0, "the mark waits for the reload");
     }
 
     #[tokio::test]
