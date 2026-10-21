@@ -889,6 +889,10 @@ impl RecipePage for TauriPage {
         crate::session::web_nav_bar::take_operator_reload(&self.shared, load_gen)
     }
 
+    fn clear_operator_reload(&self) {
+        crate::session::web_nav_bar::clear_operator_reload(&self.shared)
+    }
+
     fn eval(&self, call: &ScriptCall<'_>) -> impl std::future::Future<Output = Result<ScriptReply, EvalError>> + Send {
         let mut script = render(call);
         let app = self.app.clone();

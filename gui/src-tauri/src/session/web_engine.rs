@@ -88,6 +88,35 @@ pub trait RecipePage: Send + Sync {
     /// Consume the operator's reload mark if `load_gen` is the reload's own
     /// load (or later); `true` at most once per mark.
     fn take_operator_reload(&self, load_gen: u64) -> bool;
+    /// Drop any pending operator-reload mark. A mark left behind by a run
+    /// that ended must not skip the first load of the next one.
+    fn clear_operator_reload(&self);
+}
+
+/// Clears the page's pending reload mark when a fill run starts and again
+/// when it ends by any path (outcome, cancel, or the run's future dropped).
+struct ReloadMarkGuard<'a, P: RecipePage>(&'a P);
+
+impl<'a, P: RecipePage> ReloadMarkGuard<'a, P> {
+    fn new(page: &'a P) -> Self {
+        page.clear_operator_reload();
+        Self(page)
+    }
+}
+
+impl<P: RecipePage> Drop for ReloadMarkGuard<'_, P> {
+    fn drop(&mut self) {
+        self.0.clear_operator_reload();
+    }
+}
+
+/// The audit line for a load the engine skipped after an operator reload.
+/// Names and hashes only, like the other `connect.web.fill` lines.
+fn reload_skip_line(a: &AuditTag<'_>) -> String {
+    format!(
+        "connect.web.fill: step skipped after operator reload: resource={} token={} launch_id_hash={}",
+        a.resource, a.token, a.launch_id_hash
+    )
 }
 
 pub trait LaunchOps: Send + Sync {
@@ -208,6 +237,7 @@ pub async fn run_fill<P: RecipePage, L: LaunchOps>(
     timing: EngineTiming,
     audit: AuditTag<'_>,
 ) -> FillReport {
+    let _mark = ReloadMarkGuard::new(page);
     let run = FillRun {
         plan,
         scope,
@@ -274,6 +304,7 @@ impl<P: RecipePage, L: LaunchOps> FillRun<'_, P, L> {
             // not filled; the next one is.
             if self.page.take_operator_reload(load_gen) {
                 self.reload_skip_gen = Some(load_gen);
+                log::info!(target: "audit", "{}", reload_skip_line(&self.audit));
             }
             let origin = match scope_verdict(self.scope, &url) {
                 ScopeVerdict::In(o) => o,
@@ -903,6 +934,9 @@ mod tests {
         fn take_operator_reload(&self, load_gen: u64) -> bool {
             crate::session::web_nav_bar::take_operator_reload(&self.shared, load_gen)
         }
+        fn clear_operator_reload(&self) {
+            crate::session::web_nav_bar::clear_operator_reload(&self.shared)
+        }
         fn closed(&self) -> bool {
             self.state.lock().unwrap().closed
         }
@@ -1324,32 +1358,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_operator_reload_skips_the_reloads_own_load_once() {
-        let page = FakePage::new(LOGIN, Box::new(|_, _| ok(FW)));
-        page.new_load(LOGIN);
-        crate::session::web_nav_bar::mark_operator_reload(&page.shared);
-        // The reload starts before the engine's first poll.
-        page.new_load(LOGIN);
-        let driver = async {
-            // The reload's own load is polled for a while and never filled.
-            tokio::time::sleep(Duration::from_millis(60)).await;
-            assert_eq!(login_fills(&page), 0, "the reload's load is skipped");
-            assert_eq!(mark_of(&page), 0, "mark cleared");
-            // The next load behaves normally.
-            page.new_load(LOGIN);
-        };
-        let (plan, sc, launch) = (one_step(), scope(&[FW]), launch_at(t0()));
-        let (_, ()) = tokio::join!(fill(&plan, &sc, &page, &launch, 400), driver);
-        assert_eq!(login_fills(&page), 1, "the following load is filled");
-    }
-
-    #[tokio::test]
     async fn a_reload_mark_clears_on_a_load_no_step_matches() {
         let page = FakePage::new(LOGIN, Box::new(|_, _| ok(FW)));
-        page.new_load(LOGIN);
-        crate::session::web_nav_bar::mark_operator_reload(&page.shared);
-        page.new_load("https://fw01.example.com/elsewhere");
+        page.new_load("https://fw01.example.com/start");
         let driver = async {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            crate::session::web_nav_bar::mark_operator_reload(&page.shared);
+            // The reload lands on a page no step matches.
+            page.new_load("https://fw01.example.com/elsewhere");
             tokio::time::sleep(Duration::from_millis(60)).await;
             assert_eq!(mark_of(&page), 0, "mark did not linger");
             assert_eq!(login_fills(&page), 0);
@@ -1360,16 +1376,60 @@ mod tests {
         assert_eq!(login_fills(&page), 1, "a later matching load fills normally");
     }
 
+    #[test]
+    fn the_reload_skip_line_names_no_secret() {
+        let line = reload_skip_line(&AUDIT);
+        assert_eq!(
+            line,
+            "connect.web.fill: step skipped after operator reload: resource=fw01 token=sess_t launch_id_hash=h"
+        );
+    }
+
     #[tokio::test]
-    async fn a_reload_mark_does_not_affect_the_page_still_loaded() {
+    async fn a_reload_landing_mid_run_skips_its_load_and_the_next_fills() {
+        let page = FakePage::new(LOGIN, Box::new(|_, _| ok(FW)));
+        page.new_load("https://fw01.example.com/elsewhere");
+        let driver = async {
+            // The engine is already polling the old page when Reload is hit.
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            crate::session::web_nav_bar::mark_operator_reload(&page.shared);
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            assert_ne!(mark_of(&page), 0, "nothing consumed the mark before the reload landed");
+            page.new_load(LOGIN);
+            tokio::time::sleep(Duration::from_millis(60)).await;
+            assert_eq!(login_fills(&page), 0, "the reload's load is skipped");
+            assert_eq!(mark_of(&page), 0);
+            page.new_load(LOGIN);
+        };
+        let (plan, sc, launch) = (one_step(), scope(&[FW]), launch_at(t0()));
+        let (_, ()) = tokio::join!(fill(&plan, &sc, &page, &launch, 600), driver);
+        assert_eq!(login_fills(&page), 1, "the next load fills");
+    }
+
+    #[tokio::test]
+    async fn a_stale_reload_mark_does_not_survive_into_the_next_run() {
         let page = FakePage::new(LOGIN, Box::new(|_, _| ok(FW)));
         page.new_load(LOGIN);
-        // Marked, but no new load has started: normal polling continues.
-        crate::session::web_nav_bar::mark_operator_reload(&page.shared);
         let (plan, sc, launch) = (one_step(), scope(&[FW]), launch_at(t0()));
+        // The first run ends with a mark pending: Reload was hit while the
+        // engine was no longer taking it.
+        let first = async {
+            fill(&plan, &sc, &page, &launch, 100).await;
+        };
+        let reload = async {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            crate::session::web_nav_bar::mark_operator_reload(&page.shared);
+        };
+        tokio::join!(first, reload);
+        assert_eq!(mark_of(&page), 0, "the ended run dropped the mark");
+        // A reload lands with nobody polling; the relogin then runs a new
+        // engine on a fresh load that is past the old threshold.
+        crate::session::web_nav_bar::mark_operator_reload(&page.shared);
+        page.new_load(LOGIN);
+        page.new_load(LOGIN);
+        let before = login_fills(&page);
         fill(&plan, &sc, &page, &launch, 200).await;
-        assert_eq!(login_fills(&page), 1);
-        assert_ne!(mark_of(&page), 0, "the mark waits for the reload");
+        assert_eq!(login_fills(&page), before + 1, "the second run filled its fresh page");
     }
 
     #[tokio::test]

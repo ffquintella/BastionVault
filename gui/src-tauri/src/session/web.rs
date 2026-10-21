@@ -861,6 +861,8 @@ impl WebShared {
             p.url = Some(url.clone());
             // A load starts with a not-finished event; a finished event with
             // no start before it (nothing was loading) is a load of its own.
+            // Accepted: a lone finish counts as a load, so a platform that
+            // emits one without a start still advances the generation.
             if !finished || !p.loading {
                 p.load_gen += 1;
             }

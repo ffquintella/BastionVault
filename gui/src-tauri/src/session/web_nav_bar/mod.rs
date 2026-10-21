@@ -12,10 +12,11 @@
 //!   rate limiter the shim's download delegate consults.
 //! - [`sanitize_filename`] and [`next_free_path`] (re-exported from
 //!   [`filename`]), the pure-Rust path helpers.
-//! - [`mark_operator_reload`] / [`take_operator_reload`], the one-shot
-//!   flag the Reload button sets so the fill engine's step-picker skips
-//!   the next match on the URL the operator reloaded (G5; wired in
-//!   Task 6).
+//! - [`mark_operator_reload`] / [`take_operator_reload`] /
+//!   [`clear_operator_reload`], the load-generation threshold the Reload
+//!   button sets so the fill engine runs no step on the reload's own load
+//!   (G5). The engine takes it on the first ready snapshot at or past the
+//!   threshold and clears it when a run starts and ends.
 //!
 //! Per-platform attachment lives in `macos.rs`, `windows.rs`, `linux.rs`
 //! — added by Tasks 2–4, which also declare them in this file behind
@@ -440,8 +441,19 @@ impl Drop for DownloadSlot {
 /// when this is called keeps being polled normally: nothing is skipped
 /// until the reload actually starts. One-shot per mark; marking again
 /// before the reload starts re-targets the same load.
+///
+/// Known narrow edge: a second Reload click after the first reload has
+/// started but before the engine polled it moves the threshold to the
+/// generation after that, so the first reload's load is filled and the
+/// second's is skipped.
 pub fn mark_operator_reload(shared: &web::WebShared) {
     shared.operator_reload.store(shared.load_gen() + 1, Ordering::SeqCst);
+}
+
+/// Drop any pending operator-reload mark. The fill engine calls this when a
+/// run starts and ends, so a mark nobody took cannot skip a later run.
+pub fn clear_operator_reload(shared: &web::WebShared) {
+    shared.operator_reload.store(0, Ordering::SeqCst);
 }
 
 /// Consume the operator-reload mark on `shared` if `load_gen` (the engine's
