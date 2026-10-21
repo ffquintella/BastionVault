@@ -199,6 +199,44 @@ pub enum Capability {
     Root = 1 << 8,
     #[strum(to_string = "connect")]
     Connect = 1 << 9,
+    // SQL browser capabilities (features/sql-browser.md §3.1, §9.1). Probe-only
+    // like `connect`: no request operation requires one, and no old-style
+    // `policy = ...` expands to one. Each needs its own serde name, because
+    // HCL reaches this enum through serde and `rename_all = "lowercase"` would
+    // spell `SqlSelect` as `sqlselect`.
+    #[strum(to_string = "sql_select")]
+    #[serde(rename = "sql_select")]
+    SqlSelect = 1 << 10,
+    #[strum(to_string = "sql_insert")]
+    #[serde(rename = "sql_insert")]
+    SqlInsert = 1 << 11,
+    #[strum(to_string = "sql_update")]
+    #[serde(rename = "sql_update")]
+    SqlUpdate = 1 << 12,
+    #[strum(to_string = "sql_delete")]
+    #[serde(rename = "sql_delete")]
+    SqlDelete = 1 << 13,
+    #[strum(to_string = "sql_alter")]
+    #[serde(rename = "sql_alter")]
+    SqlAlter = 1 << 14,
+    #[strum(to_string = "sql_create")]
+    #[serde(rename = "sql_create")]
+    SqlCreate = 1 << 15,
+    #[strum(to_string = "sql_drop")]
+    #[serde(rename = "sql_drop")]
+    SqlDrop = 1 << 16,
+    #[strum(to_string = "sql_execute")]
+    #[serde(rename = "sql_execute")]
+    SqlExecute = 1 << 17,
+    #[strum(to_string = "sql_admin")]
+    #[serde(rename = "sql_admin")]
+    SqlAdmin = 1 << 18,
+    #[strum(to_string = "sql_export")]
+    #[serde(rename = "sql_export")]
+    SqlExport = 1 << 19,
+    #[strum(to_string = "sql_script")]
+    #[serde(rename = "sql_script")]
+    SqlScript = 1 << 20,
 }
 
 impl Capability {
@@ -769,6 +807,67 @@ mod mod_policy_tests {
         assert_eq!(policy.paths[0].permissions.capabilities_bitmap, Capability::Connect.to_bits());
         // Crucially, connect-only does not imply read.
         assert_eq!(policy.paths[0].permissions.capabilities_bitmap & Capability::Read.to_bits(), 0);
+    }
+
+    #[test]
+    fn sql_capabilities_have_spec_names_and_disjoint_bits() {
+        assert_eq!(Capability::from_str("sql_select").unwrap(), Capability::SqlSelect);
+        assert_eq!(Capability::SqlSelect.to_bits(), 1 << 10);
+        assert_eq!(Capability::SqlScript.to_bits(), 1 << 20);
+        let all: Vec<u32> = [
+            Capability::SqlSelect,
+            Capability::SqlInsert,
+            Capability::SqlUpdate,
+            Capability::SqlDelete,
+            Capability::SqlAlter,
+            Capability::SqlCreate,
+            Capability::SqlDrop,
+            Capability::SqlExecute,
+            Capability::SqlAdmin,
+            Capability::SqlExport,
+            Capability::SqlScript,
+        ]
+        .iter()
+        .map(|c| c.to_bits())
+        .collect();
+        let mut seen = 0u32;
+        for bit in &all {
+            assert_eq!(bit.count_ones(), 1);
+            assert_eq!(seen & bit, 0);
+            seen |= bit;
+        }
+        assert_eq!(bv_policy_core::CAP_SQL_SELECT, 1 << 10);
+        assert_eq!(bv_policy_core::CAP_CONNECT & seen, 0);
+    }
+
+    /// features/sql-browser.md §9.1: the SQL capabilities are spelled
+    /// `sql_select` … `sql_script` in HCL. HCL reaches `Capability` through
+    /// serde (`hcl::from_body`), not strum, so both names must agree.
+    #[test]
+    fn sql_capabilities_parse_from_hcl_by_their_spec_names() {
+        let named = [
+            ("sql_select", Capability::SqlSelect),
+            ("sql_insert", Capability::SqlInsert),
+            ("sql_update", Capability::SqlUpdate),
+            ("sql_delete", Capability::SqlDelete),
+            ("sql_alter", Capability::SqlAlter),
+            ("sql_create", Capability::SqlCreate),
+            ("sql_drop", Capability::SqlDrop),
+            ("sql_execute", Capability::SqlExecute),
+            ("sql_admin", Capability::SqlAdmin),
+            ("sql_export", Capability::SqlExport),
+            ("sql_script", Capability::SqlScript),
+        ];
+        for (name, cap) in named {
+            assert_eq!(Capability::from_str(name).unwrap(), cap, "{name}");
+            assert_eq!(cap.to_string(), name);
+            let hcl = format!(r#"path "resources/resources/r/sql/*" {{ capabilities = ["{name}"] }}"#);
+            let policy = Policy::from_str(&hcl).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(policy.paths[0].permissions.capabilities_bitmap, cap.to_bits(), "{name}");
+        }
+        // The spelling `rename_all = "lowercase"` would derive is not an alias.
+        let lowercase_alias = r#"path "resources/resources/r/sql/*" { capabilities = ["sqlselect"] }"#;
+        assert!(Policy::from_str(lowercase_alias).is_err());
     }
 
     #[test]

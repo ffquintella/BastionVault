@@ -438,6 +438,17 @@ fn capability_bit_layout_matches_core() {
         (Capability::Patch, bv_policy_core::CAP_PATCH),
         (Capability::Root, bv_policy_core::CAP_ROOT),
         (Capability::Connect, bv_policy_core::CAP_CONNECT),
+        (Capability::SqlSelect, bv_policy_core::CAP_SQL_SELECT),
+        (Capability::SqlInsert, bv_policy_core::CAP_SQL_INSERT),
+        (Capability::SqlUpdate, bv_policy_core::CAP_SQL_UPDATE),
+        (Capability::SqlDelete, bv_policy_core::CAP_SQL_DELETE),
+        (Capability::SqlAlter, bv_policy_core::CAP_SQL_ALTER),
+        (Capability::SqlCreate, bv_policy_core::CAP_SQL_CREATE),
+        (Capability::SqlDrop, bv_policy_core::CAP_SQL_DROP),
+        (Capability::SqlExecute, bv_policy_core::CAP_SQL_EXECUTE),
+        (Capability::SqlAdmin, bv_policy_core::CAP_SQL_ADMIN),
+        (Capability::SqlExport, bv_policy_core::CAP_SQL_EXPORT),
+        (Capability::SqlScript, bv_policy_core::CAP_SQL_SCRIPT),
     ];
     for (cap, bit) in pairs {
         assert_eq!(cap.to_bits(), bit, "{cap}");

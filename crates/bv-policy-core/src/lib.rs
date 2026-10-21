@@ -80,6 +80,31 @@ pub const CAP_PATCH: u32 = 1 << 7;
 pub const CAP_ROOT: u32 = 1 << 8;
 /// `connect`.
 pub const CAP_CONNECT: u32 = 1 << 9;
+/// `sql_select` — read rows and metadata (features/sql-browser.md §3.1).
+/// Probe-only, like every `CAP_SQL_*` (§9.1):
+/// [`Op::required_capability`] never names it.
+pub const CAP_SQL_SELECT: u32 = 1 << 10;
+/// `sql_insert` — add rows (features/sql-browser.md §3.1).
+pub const CAP_SQL_INSERT: u32 = 1 << 11;
+/// `sql_update` — change rows, take row and table locks (features/sql-browser.md §3.1).
+pub const CAP_SQL_UPDATE: u32 = 1 << 12;
+/// `sql_delete` — remove rows (features/sql-browser.md §3.1).
+pub const CAP_SQL_DELETE: u32 = 1 << 13;
+/// `sql_alter` — change existing objects (features/sql-browser.md §3.1).
+pub const CAP_SQL_ALTER: u32 = 1 << 14;
+/// `sql_create` — create objects (features/sql-browser.md §3.1).
+pub const CAP_SQL_CREATE: u32 = 1 << 15;
+/// `sql_drop` — destroy objects or all their rows (features/sql-browser.md §3.1).
+pub const CAP_SQL_DROP: u32 = 1 << 16;
+/// `sql_execute` — run code whose effect cannot be determined statically
+/// (features/sql-browser.md §3.1).
+pub const CAP_SQL_EXECUTE: u32 = 1 << 17;
+/// `sql_admin` — server-level administration (features/sql-browser.md §3.1).
+pub const CAP_SQL_ADMIN: u32 = 1 << 18;
+/// `sql_export` — bulk export of a result set (features/sql-browser.md §3.1).
+pub const CAP_SQL_EXPORT: u32 = 1 << 19;
+/// `sql_script` — multi-statement batches and script files (features/sql-browser.md §3.1).
+pub const CAP_SQL_SCRIPT: u32 = 1 << 20;
 
 /// Verification bound, not a production limit: the proofs consider every
 /// group-gated layer and every scope-filtered layer of up to this many rules.
