@@ -1,5 +1,7 @@
 # Web session navigation controls implementation plan
 
+> Executed with deviations: Task 2b was added (the platform-neutral download path moved into a shared `transfer` module) and Windows and Linux got their own per-platform shims; the list is in the execution ledger. As built, see "Session navigation bar (T459)" in [features/web-application-connect.md](../../features/web-application-connect.md).
+
 > For agents: use `subagent-driven-development` (recommended) or
 > `executing-plans` to implement this plan task by task. Steps use checkbox
 > (`- [ ]`) syntax for tracking.

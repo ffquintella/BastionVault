@@ -56,6 +56,12 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Added
+
+#### Web session navigation bar
+
+- Give web session windows a native 36 px bottom bar with back, forward, reload and download buttons on macOS, Windows and Linux, in both the default and the `web_session_chrome` builds; the bar is native (not injected into the page), so it still works on an inline PDF, and the page keeps the profile's window size because the window is 36 px taller than before. Download is enabled only on a downloadable page the origin allow-list permits and only when the profile sets `allow_downloads` (the button is disabled otherwise); files go to the Downloads folder under a sanitised, collision-free name, at most 2 at a time and 2 GiB each, and every click and download is audited as `connect.web.nav` / `connect.web.download` / `connect.web.download_refused`. A reload never re-runs the login fill. The bar's download fetches the shown URL again on every platform, so a page that came from a POST or a one-time link cannot be saved from the bar and is reported as unavailable; on Windows that fetch is made by the bar itself and is refused (`refetch_blocked`) when the session has TLS pins, an operator-accepted untrusted certificate, or any proxy, PAC or auto-detect setting, which includes many default machines. Not yet run live on any platform; the manual verification checklist is in `features/web-application-connect.md`. (T459, S105)
+
 ## [0.44.47] - 2026-10-19
 
 ### Added
