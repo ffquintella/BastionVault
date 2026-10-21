@@ -7,8 +7,7 @@
 //! - [`NavAction`], [`NavState`] and the [`NavBar`] trait each per-platform
 //!   shim implements.
 //! - [`NavBarAudit`], the per-session audit sink the shim calls on nav /
-//!   download events (bodies filled in Task 5 — see
-//!   [`.ai-skills/sdd/2026-10-20-web-session-nav-controls/task-5-brief.md`]).
+//!   download events (`connect.web.nav` / `download` / `download_refused`).
 //! - [`DownloadLimiter`], the per-window `2 concurrent / 2 GiB soft cap`
 //!   rate limiter the shim's download delegate consults.
 //! - [`sanitize_filename`] and [`next_free_path`] (re-exported from
@@ -70,8 +69,9 @@ pub enum NavAction {
 }
 
 impl NavAction {
-    /// The stable `action=` token for the audit line
-    /// (spec §8.3; wired in Task 5).
+    /// The stable `action=` token for the audit line (spec §8.3).
+    /// [`NavBarAudit::nav`] logs only back / forward / reload; a download
+    /// click is audited by `download_ok` / `download_refused`.
     pub fn audit_token(self) -> &'static str {
         match self {
             Self::Back => "back",
@@ -261,30 +261,46 @@ fn audit_mime(mime: &str) -> String {
     }
 }
 
-// The emitters take plain strings so the line shapes are testable without
-// a `tauri::AppHandle`; the `NavBarAudit` methods are one-line delegates.
+/// The `filename=` field, self-contained: control characters are dropped
+/// (a name with a newline cannot start a second audit line) and the rest is
+/// logged quoted and escaped (`{:?}`), so spaces, `=` and `"` in the name
+/// cannot pass for further `key=value` fields.
+fn audit_filename(filename: &str) -> String {
+    let printable: String = filename.chars().filter(|c| !c.is_control()).collect();
+    format!("{printable:?}")
+}
+
+// The line builders are pure so the shapes are testable without a
+// `tauri::AppHandle` or a global logger; the `NavBarAudit` methods go
+// through the `emit_*` wrappers, which only log the built line.
+fn nav_line(resource: &str, token: &str, action: NavAction) -> String {
+    debug_assert!(action != NavAction::Download, "a download click is audited by download_ok / download_refused");
+    format!("connect.web.nav: resource={resource} token={token} action={}", action.audit_token())
+}
+
+fn download_line(resource: &str, token: &str, filename: &str, mime: &str, bytes: u64, path: DownloadPath) -> String {
+    format!(
+        "connect.web.download: resource={resource} token={token} filename={} mime={} bytes={bytes} path={}",
+        audit_filename(filename),
+        audit_mime(mime),
+        path.audit_token(),
+    )
+}
+
+fn refused_line(resource: &str, token: &str, reason: &'static str) -> String {
+    format!("connect.web.download_refused: resource={resource} token={token} reason={reason}")
+}
+
 fn emit_nav(resource: &str, token: &str, action: NavAction) {
-    log::info!(
-        target: "audit",
-        "connect.web.nav: resource={resource} token={token} action={}",
-        action.audit_token(),
-    );
+    log::info!(target: "audit", "{}", nav_line(resource, token, action));
 }
 
 fn emit_download_ok(resource: &str, token: &str, filename: &str, mime: &str, bytes: u64, path: DownloadPath) {
-    log::info!(
-        target: "audit",
-        "connect.web.download: resource={resource} token={token} filename={filename} mime={} bytes={bytes} path={}",
-        audit_mime(mime),
-        path.audit_token(),
-    );
+    log::info!(target: "audit", "{}", download_line(resource, token, filename, mime, bytes, path));
 }
 
 fn emit_download_refused(resource: &str, token: &str, reason: &'static str) {
-    log::info!(
-        target: "audit",
-        "connect.web.download_refused: resource={resource} token={token} reason={reason}",
-    );
+    log::info!(target: "audit", "{}", refused_line(resource, token, reason));
 }
 
 impl NavBarAudit {
@@ -295,10 +311,11 @@ impl NavBarAudit {
         emit_nav(&self.resource, &self.token, action);
     }
 
-    /// Emit `connect.web.download: resource=… token=… filename=<basename>
-    /// mime=<type> bytes=<n> path=webview|refetch`. `filename` is already
-    /// sanitised by [`sanitize_filename`] before this call. The URL (path
-    /// and query included) is never part of the line.
+    /// Emit `connect.web.download: resource=… token=… filename="<basename>"
+    /// mime=<type> bytes=<n> path=webview|refetch`. `filename` should be
+    /// sanitised by [`sanitize_filename`]; the line builder also drops
+    /// control characters and quotes/escapes the name. The URL (path and
+    /// query included) is never part of the line.
     pub fn download_ok(&self, filename: &str, mime: &str, bytes: u64, path: DownloadPath) {
         emit_download_ok(&self.resource, &self.token, filename, mime, bytes, path);
     }
@@ -582,45 +599,12 @@ mod tests {
     }
 }
 
-/// Audit-line tests. The emitters take plain strings, so no
-/// `tauri::AppHandle` is needed; the lines are captured through a
-/// process-global `log` logger and filtered by a per-test resource id so
-/// tests sharing a process cannot read each other's lines.
+/// Audit-line tests. They assert on the pure line builders, so there is no
+/// `tauri::AppHandle` and no process-global `log` logger (which would
+/// collide with the one `session/rdp.rs` installs in the same test binary).
 #[cfg(test)]
 mod audit {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
-
-    struct Capture;
-    static CAPTURED: Mutex<Vec<String>> = Mutex::new(Vec::new());
-
-    impl log::Log for Capture {
-        fn enabled(&self, _: &log::Metadata<'_>) -> bool {
-            true
-        }
-        fn log(&self, record: &log::Record<'_>) {
-            if record.target() == "audit" {
-                CAPTURED.lock().unwrap().push(record.args().to_string());
-            }
-        }
-        fn flush(&self) {}
-    }
-
-    fn capture_logs() {
-        static INIT: OnceLock<()> = OnceLock::new();
-        INIT.get_or_init(|| {
-            log::set_logger(&Capture).expect("no other logger in this test binary");
-            log::set_max_level(log::LevelFilter::Trace);
-        });
-    }
-
-    /// The single audit line mentioning `resource`.
-    fn line_for(resource: &str) -> String {
-        let marker = format!("resource={resource} ");
-        let lines: Vec<String> = CAPTURED.lock().unwrap().iter().filter(|l| l.contains(&marker)).cloned().collect();
-        assert_eq!(lines.len(), 1, "expected exactly one audit line for {resource}: {lines:?}");
-        lines.into_iter().next().unwrap()
-    }
 
     fn is_reason_token(t: &str) -> bool {
         (1..=32).contains(&t.len()) && t.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
@@ -628,22 +612,20 @@ mod audit {
 
     #[test]
     fn nav_audit_line_matches_connect_web_shape() {
-        capture_logs();
-        emit_nav("res-nav", "tok-nav", NavAction::Reload);
-        assert_eq!(line_for("res-nav"), "connect.web.nav: resource=res-nav token=tok-nav action=reload");
-        emit_nav("res-back", "t", NavAction::Back);
-        assert!(line_for("res-back").ends_with("action=back"));
-        emit_nav("res-fwd", "t", NavAction::Forward);
-        assert!(line_for("res-fwd").ends_with("action=forward"));
+        assert_eq!(
+            nav_line("res-nav", "tok-nav", NavAction::Reload),
+            "connect.web.nav: resource=res-nav token=tok-nav action=reload"
+        );
+        assert!(nav_line("r", "t", NavAction::Back).ends_with("action=back"));
+        assert!(nav_line("r", "t", NavAction::Forward).ends_with("action=forward"));
     }
 
     #[test]
     fn download_ok_audit_omits_url_path_and_query() {
-        capture_logs();
-        // The emitter has no URL parameter, so a URL cannot reach the line.
-        // `https://x/path?q=1` is what the shim saw; only the sanitised
-        // basename, mime, byte count and path kind are passed on.
-        emit_download_ok(
+        // The builder has no URL parameter, so a URL cannot reach the line.
+        // `https://x/path?q=1` is what the shim saw; only the basename,
+        // mime, byte count and path kind are passed on.
+        let line = download_line(
             "res-dl",
             "tok-dl",
             "report.pdf",
@@ -651,33 +633,50 @@ mod audit {
             4096,
             DownloadPath::Webview,
         );
-        let line = line_for("res-dl");
         assert_eq!(
             line,
-            "connect.web.download: resource=res-dl token=tok-dl filename=report.pdf mime=application/pdf bytes=4096 \
-             path=webview"
+            "connect.web.download: resource=res-dl token=tok-dl filename=\"report.pdf\" mime=application/pdf \
+             bytes=4096 path=webview"
         );
         assert!(!line.contains("https://") && !line.contains("q=1") && !line.contains("/path"), "{line}");
 
-        emit_download_ok("res-dl2", "t", "a.bin", "application/octet-stream", 1, DownloadPath::Refetch);
-        assert!(line_for("res-dl2").ends_with("path=refetch"));
+        let refetch = download_line("r", "t", "a.bin", "application/octet-stream", 1, DownloadPath::Refetch);
+        assert!(refetch.ends_with("path=refetch"));
     }
 
     #[test]
     fn download_ok_audit_neutralises_hostile_mime() {
-        capture_logs();
-        emit_download_ok("res-mime", "t", "a.bin", "x/y bytes=0\nconnect.web.nav: forged", 1, DownloadPath::Webview);
-        let line = line_for("res-mime");
+        let line = download_line("r", "t", "a.bin", "x/y bytes=0\nconnect.web.nav: forged", 1, DownloadPath::Webview);
         assert!(line.contains("mime=invalid "), "{line}");
         assert!(!line.contains('\n'), "{line}");
     }
 
     #[test]
-    fn download_refused_audit_names_reason() {
-        capture_logs();
-        emit_download_refused("res-ref", "tok-ref", reason::OUTSIDE_ALLOWLIST);
+    fn download_ok_audit_quotes_filename_so_it_cannot_forge_fields() {
+        let line = download_line("r", "t", "a mime=x bytes=0", "application/pdf", 7, DownloadPath::Webview);
         assert_eq!(
-            line_for("res-ref"),
+            line,
+            "connect.web.download: resource=r token=t filename=\"a mime=x bytes=0\" mime=application/pdf bytes=7 \
+             path=webview"
+        );
+        // An embedded quote is escaped, so it cannot close the field early.
+        let quoted = download_line("r", "t", "a\" mime=x", "application/pdf", 7, DownloadPath::Webview);
+        assert!(quoted.contains("filename=\"a\\\" mime=x\" mime=application/pdf"), "{quoted}");
+    }
+
+    #[test]
+    fn download_ok_audit_drops_control_characters_from_filename() {
+        // The builder does not trust the caller to have sanitised the name.
+        let line =
+            download_line("r", "t", "a\nconnect.web.nav: forged\r\tb.pdf", "application/pdf", 1, DownloadPath::Webview);
+        assert!(!line.chars().any(|c| c.is_control()), "{line:?}");
+        assert!(line.contains("filename=\"aconnect.web.nav: forgedb.pdf\""), "{line}");
+    }
+
+    #[test]
+    fn download_refused_audit_names_reason() {
+        assert_eq!(
+            refused_line("res-ref", "tok-ref", reason::OUTSIDE_ALLOWLIST),
             "connect.web.download_refused: resource=res-ref token=tok-ref reason=outside_allowlist"
         );
     }
