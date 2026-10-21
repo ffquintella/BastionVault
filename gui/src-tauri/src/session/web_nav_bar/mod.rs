@@ -45,7 +45,7 @@ use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 
 #[allow(unused_imports)] // consumed by the per-platform shims (Tasks 2–4).
-pub use filename::{next_free_path, sanitize_filename, CollisionExhausted};
+pub use filename::{next_free_path, sanitize_filename, CollisionExhausted, NextPathError};
 
 use super::web;
 
@@ -100,10 +100,11 @@ pub struct NavState {
     /// known (spec §7.3 "except mid-reload", plus the Review focus
     /// pin: "download during an in-flight navigation").
     pub is_loading: bool,
-    /// `Content-Type` (parameters stripped by [`is_downloadable_mime`])
-    /// of the current main-frame response. `None` before the first load
-    /// completes, which the shim treats as "no response, nothing to
-    /// download".
+    /// `Content-Type` of the current main-frame response, as received
+    /// ([`is_downloadable_mime`] strips parameters). `None` before the
+    /// first response, and for a response that carried no Content-Type;
+    /// such a response is downloadable only through
+    /// `content_disposition_attachment`.
     pub current_mime: Option<String>,
     /// `true` iff the current main-frame response carried
     /// `Content-Disposition: attachment`. Enables the download button
@@ -120,19 +121,16 @@ impl NavState {
     ///
     /// Follows spec §7.3 / §7.4 / §7.5 exactly:
     /// - `allow_downloads` must be true (profile gate, §7.4);
-    /// - a response must be loaded (not `is_loading`, has
-    ///   `current_mime`);
-    /// - the mime must be in the downloadable set
-    ///   ([`is_downloadable_mime`]) OR
-    ///   `content_disposition_attachment` must be true (§7.5).
+    /// - the main frame must not be loading (its response headers are not
+    ///   known yet);
+    /// - the response carried `Content-Disposition: attachment`, or its
+    ///   mime is in the downloadable set ([`is_downloadable_mime`]). An
+    ///   attachment needs no Content-Type (§7.3: mime **or** attachment).
     pub fn download_enabled(&self) -> bool {
         if !self.allow_downloads || self.is_loading {
             return false;
         }
-        let Some(mime) = self.current_mime.as_deref() else {
-            return false;
-        };
-        self.content_disposition_attachment || is_downloadable_mime(mime)
+        self.content_disposition_attachment || self.current_mime.as_deref().is_some_and(is_downloadable_mime)
     }
 }
 
@@ -140,10 +138,9 @@ impl NavState {
 /// are stripped before matching; the comparison is ASCII case-insensitive
 /// (RFC 7231: media types are case-insensitive).
 ///
-/// Builder may extend the `application/vnd.*` list; `text/*`,
-/// `application/xhtml+xml` and `application/*+xml` / `+json` stay
-/// excluded (the attachment-disposition path handles the HTML download
-/// case).
+/// `text/*`, `application/xhtml+xml` and `application/*+xml` / `+json`
+/// are excluded; an HTML response is downloadable only through
+/// `Content-Disposition: attachment` ([`NavState::download_enabled`]).
 pub fn is_downloadable_mime(mime: &str) -> bool {
     let base = mime.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
     // image/svg+xml is scriptable and is explicitly excluded, even though
@@ -218,14 +215,7 @@ impl NavBarAudit {
     /// mime=<type> bytes=<n> path=webview|refetch`. `filename` is already
     /// sanitised by [`sanitize_filename`] before this call.
     #[allow(unused_variables)] // body added in Task 5.
-    pub fn download_ok(
-        &self,
-        filename: &str,
-        mime: &str,
-        bytes: u64,
-        path: DownloadPath,
-    ) {
-    }
+    pub fn download_ok(&self, filename: &str, mime: &str, bytes: u64, path: DownloadPath) {}
 
     /// Emit a refusal with a stable `reason=` token
     /// (`outside_allowlist`, `allow_downloads_false`, `concurrency_cap`,
@@ -268,18 +258,8 @@ impl DownloadLimiter {
             if cur >= MAX_CONCURRENT_DOWNLOADS {
                 return None;
             }
-            match self.concurrent.compare_exchange_weak(
-                cur,
-                cur + 1,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ) {
-                Ok(_) => {
-                    return Some(DownloadSlot {
-                        limiter: Arc::clone(self),
-                        bytes: AtomicU64::new(0),
-                    })
-                }
+            match self.concurrent.compare_exchange_weak(cur, cur + 1, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => return Some(DownloadSlot { limiter: Arc::clone(self), bytes: AtomicU64::new(0) }),
                 Err(v) => cur = v,
             }
         }
@@ -316,15 +296,16 @@ impl std::error::Error for SizeExceeded {}
 
 impl DownloadSlot {
     /// Add `n` bytes to the running total. `Err(SizeExceeded)` when the
-    /// running total passes [`DOWNLOAD_SOFT_CAP_BYTES`] — the shim
-    /// cancels on the first error, so later calls that would also
-    /// overflow return the same error without masking anything.
+    /// running total passes [`DOWNLOAD_SOFT_CAP_BYTES`]. The error is
+    /// sticky: the total never decreases, so every later call fails too.
     pub fn record(&self, n: u64) -> Result<(), SizeExceeded> {
-        // Saturating add defends against a hostile `Content-Length` or a
-        // delegate that was handed `u64::MAX` by mistake: a saturated
-        // total trips the cap check immediately rather than wrapping to
-        // zero and silently accepting the next chunk.
-        let total = self.bytes.fetch_add(n, Ordering::SeqCst).saturating_add(n);
+        // The stored total saturates at u64::MAX instead of wrapping, so a
+        // huge chunk (a hostile length, a delegate bug) can never bring the
+        // counter back under the cap for the chunks that follow. `update`
+        // is the infallible successor of the deprecated `fetch_update`; it
+        // returns the previous value.
+        let previous = self.bytes.update(Ordering::SeqCst, Ordering::SeqCst, |c| c.saturating_add(n));
+        let total = previous.saturating_add(n);
         if total > DOWNLOAD_SOFT_CAP_BYTES {
             Err(SizeExceeded)
         } else {
@@ -340,9 +321,10 @@ impl DownloadSlot {
 
 impl Drop for DownloadSlot {
     fn drop(&mut self) {
-        // Release the concurrency slot. `fetch_sub` is sound even if a
-        // test leaked a slot through `mem::forget`: in-flight will
-        // underflow only after that leak, which is caller error.
+        // Release the concurrency slot. Each slot exists only after one
+        // successful increment in `try_acquire`, so this decrement cannot
+        // underflow. A slot leaked through `mem::forget` never decrements:
+        // the window keeps one fewer slot for the rest of its life.
         self.limiter.concurrent.fetch_sub(1, Ordering::SeqCst);
     }
 }
@@ -373,27 +355,16 @@ mod tests {
     #[test]
     fn download_enabled_requires_allow_and_downloadable_mime() {
         // allow_downloads false blocks everything, downloadable mime or not.
-        let s = NavState {
-            allow_downloads: false,
-            current_mime: Some("application/pdf".into()),
-            ..NavState::default()
-        };
+        let s =
+            NavState { allow_downloads: false, current_mime: Some("application/pdf".into()), ..NavState::default() };
         assert!(!s.download_enabled(), "allow_downloads=false blocks a pdf");
 
         // allow_downloads true + downloadable mime → enabled.
-        let s = NavState {
-            allow_downloads: true,
-            current_mime: Some("application/pdf".into()),
-            ..NavState::default()
-        };
+        let s = NavState { allow_downloads: true, current_mime: Some("application/pdf".into()), ..NavState::default() };
         assert!(s.download_enabled(), "pdf with allow_downloads is enabled");
 
         // allow_downloads true + non-downloadable mime → disabled.
-        let s = NavState {
-            allow_downloads: true,
-            current_mime: Some("text/plain".into()),
-            ..NavState::default()
-        };
+        let s = NavState { allow_downloads: true, current_mime: Some("text/plain".into()), ..NavState::default() };
         assert!(!s.download_enabled(), "text/plain stays disabled");
 
         // No response yet (current_mime None) stays disabled even with the
@@ -410,10 +381,7 @@ mod tests {
             content_disposition_attachment: true,
             ..NavState::default()
         };
-        assert!(
-            s.download_enabled(),
-            "text/html + Content-Disposition: attachment is downloadable (spec §7.5)"
-        );
+        assert!(s.download_enabled(), "text/html + Content-Disposition: attachment is downloadable (spec §7.5)");
     }
 
     #[test]
@@ -424,10 +392,25 @@ mod tests {
             content_disposition_attachment: false,
             ..NavState::default()
         };
-        assert!(
-            !s.download_enabled(),
-            "text/html without attachment stays non-downloadable (spec §7.5)"
-        );
+        assert!(!s.download_enabled(), "text/html without attachment stays non-downloadable (spec §7.5)");
+    }
+
+    #[test]
+    fn download_enabled_for_attachment_without_content_type() {
+        // A response with `Content-Disposition: attachment` and no
+        // Content-Type is still a download (spec §7.3: mime OR attachment).
+        let s = NavState { allow_downloads: true, content_disposition_attachment: true, ..NavState::default() };
+        assert!(s.download_enabled(), "attachment with no mime is downloadable");
+        // The profile and loading gates still apply.
+        let s = NavState { allow_downloads: false, content_disposition_attachment: true, ..NavState::default() };
+        assert!(!s.download_enabled(), "allow_downloads=false blocks an attachment");
+        let s = NavState {
+            allow_downloads: true,
+            is_loading: true,
+            content_disposition_attachment: true,
+            ..NavState::default()
+        };
+        assert!(!s.download_enabled(), "loading blocks an attachment");
     }
 
     #[test]
@@ -480,6 +463,18 @@ mod tests {
         // Subsequent record calls stay in the error state (do not
         // silently accept bytes after the cap trips).
         assert_eq!(slot.record(1), Err(SizeExceeded));
+    }
+
+    #[test]
+    fn limiter_size_error_is_sticky_on_counter_overflow() {
+        // A total that would overflow u64 saturates instead of wrapping, so
+        // a small chunk after it can never read as back under the cap.
+        let l = Arc::new(DownloadLimiter::new());
+        let slot = l.try_acquire().expect("acquire");
+        assert_eq!(slot.record(u64::MAX), Err(SizeExceeded));
+        assert_eq!(slot.record(2), Err(SizeExceeded));
+        assert_eq!(slot.record(1), Err(SizeExceeded), "no wrap back under the cap");
+        assert_eq!(slot.bytes_recorded(), u64::MAX);
     }
 
     #[test]

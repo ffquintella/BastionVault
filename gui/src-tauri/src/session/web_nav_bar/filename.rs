@@ -10,7 +10,9 @@
 //! strip path separators, zero bytes, control characters, leading dots,
 //! trailing dots and spaces; replace `:` with `_` (NTFS streams); prefix
 //! Windows reserved stems with `_`; retry collisions with ` (n)` before
-//! the extension up to 999, then fail.
+//! the extension up to 999, then fail. Names are also capped at
+//! [`MAX_FILENAME_BYTES`] so the ` (n)` suffix never pushes a name past
+//! the common 255-byte filesystem limit.
 
 use std::fs::OpenOptions;
 use std::io;
@@ -20,24 +22,70 @@ use std::path::{Path, PathBuf};
 /// through `name (999)` before giving up.
 pub const MAX_COLLISION_SUFFIX: u32 = 999;
 
-/// Reserved by `next_free_path` when the directory already holds the
-/// name and every suffix up to [`MAX_COLLISION_SUFFIX`]. The caller
-/// surfaces this as the `collision_exhausted` audit reason and a
-/// short-lived error state on the bar (spec §7.6).
+/// Upper bound on a sanitised name, in bytes, including any `_` prefix.
+/// Leaves room for the ` (999)` collision suffix under the 255-byte name
+/// limit of APFS, NTFS, ext4 and friends.
+pub const MAX_FILENAME_BYTES: usize = 200;
+
+/// An extension longer than this is not treated as one when a long name
+/// is truncated: the whole name is cut instead.
+const MAX_EXTENSION_BYTES: usize = 16;
+
+/// Every name [`next_free_path`] would try already exists: the base name
+/// and every suffix up to [`MAX_COLLISION_SUFFIX`]. The caller surfaces
+/// this as the `collision_exhausted` audit reason and a short-lived error
+/// state on the bar (spec §7.6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CollisionExhausted;
 
 impl std::fmt::Display for CollisionExhausted {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("destination directory already holds this name and every (n) suffix up to 999")
+        f.write_str("could not save, directory full of this name (every (n) suffix up to 999 is taken)")
     }
 }
 
 impl std::error::Error for CollisionExhausted {}
 
-/// Return a safe basename for `raw`. Empty input returns an empty string;
-/// the caller then falls back to the `download-YYYYMMDD-HHMMSS.bin` form
-/// per spec §7.6.
+/// Why [`next_free_path`] could not reserve a destination.
+#[derive(Debug)]
+pub enum NextPathError {
+    /// Every candidate name exists. Audit reason `collision_exhausted`.
+    Exhausted(CollisionExhausted),
+    /// A filesystem error other than "already exists" (missing directory,
+    /// permission denied, read-only filesystem, no space, name too long).
+    /// Returned on the first such error; the remaining suffixes are not
+    /// tried, since they would fail the same way.
+    Io(io::Error),
+    /// `name` is not a single plain path component: empty, `.`, `..`, or
+    /// containing a path separator, `:` or a NUL. Callers pass the output
+    /// of [`sanitize_filename`], which never produces one of these.
+    InvalidName,
+}
+
+impl std::fmt::Display for NextPathError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Exhausted(e) => e.fmt(f),
+            Self::Io(e) => write!(f, "could not reserve the download destination: {e}"),
+            Self::InvalidName => f.write_str("download file name is not a single plain path component"),
+        }
+    }
+}
+
+impl std::error::Error for NextPathError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Exhausted(e) => Some(e),
+            Self::Io(e) => Some(e),
+            Self::InvalidName => None,
+        }
+    }
+}
+
+/// Return a safe basename for `raw`, at most [`MAX_FILENAME_BYTES`] bytes.
+/// A name that sanitises to nothing returns an empty string; the caller
+/// then falls back to the `download-YYYYMMDD-HHMMSS.bin` form per spec
+/// §7.6.
 pub fn sanitize_filename(raw: &str) -> String {
     // 1. Drop path separators, zero bytes and other C0/DEL control
     //    characters outright. These are the only chars that can create a
@@ -54,97 +102,116 @@ pub fn sanitize_filename(raw: &str) -> String {
         })
         .collect();
 
-    // 2. Strip leading dots (a leading-dot name is "hidden" on Unix and
-    //    breaks Windows path parsing). Safe to drop them wholesale: the
-    //    rest of the name still identifies the file.
-    let no_leading_dots = filtered.trim_start_matches('.');
-
-    // 3. Strip trailing dots and spaces (Windows ignores them silently,
-    //    so `x.pdf. ` would read as `x.pdf` and shadow an existing file).
-    let trimmed = no_leading_dots.trim_end_matches(['.', ' ']);
-
-    // 4. If the stem (part before the last dot) is a Windows reserved
-    //    device name, prefix `_` so the saved file can be opened on NTFS.
-    if trimmed.is_empty() {
+    // 2. Strip leading dots (hidden on Unix, ambiguous on Windows) and
+    //    trailing dots and spaces (Windows drops them silently, so
+    //    `x.pdf. ` would land as `x.pdf` and shadow an existing file).
+    // 3. Cap the length, keeping one byte for a possible `_` prefix, and
+    //    trim again: the cut can expose a trailing space or dot.
+    let capped = cap_length(trim_dots_and_spaces(&filtered), MAX_FILENAME_BYTES - 1);
+    let name = trim_dots_and_spaces(&capped);
+    if name.is_empty() {
         return String::new();
     }
-    if stem_is_windows_reserved(trimmed) {
-        let mut out = String::with_capacity(trimmed.len() + 1);
-        out.push('_');
-        out.push_str(trimmed);
-        out
+
+    // 4. A Windows reserved device stem gets a `_` prefix so the saved file
+    //    can be opened on NTFS. Done last, so no later step can turn a
+    //    name back into a reserved one.
+    if stem_is_windows_reserved(name) {
+        format!("_{name}")
     } else {
-        trimmed.to_string()
+        name.to_string()
     }
 }
 
-/// Return the first path under `dir` whose basename does not already
-/// exist, trying `name`, `name (1)`, ..., up to [`MAX_COLLISION_SUFFIX`].
+/// Reserve the first free path under `dir`, trying `name`, then
+/// `name (1)`, ..., `name (999)` with the suffix before the extension.
 ///
-/// Uses `O_CREAT|O_EXCL` (via `create_new(true)`) to race safely against
-/// a concurrent writer: a successful create means the file is now ours;
-/// an `AlreadyExists` error means we must try the next suffix. The caller
-/// re-opens the returned path for writing — this helper only reserves it
-/// and leaves it as a zero-byte placeholder so the next download in the
-/// same session does not collide against it.
-pub fn next_free_path(dir: &Path, name: &str) -> Result<PathBuf, CollisionExhausted> {
-    // Try the bare name first (no `(0)` suffix).
-    if let Some(path) = try_create(dir, name)? {
+/// Each candidate is created with `O_CREAT|O_EXCL` (`create_new(true)`),
+/// so the reservation is race-free against any other writer.
+///
+/// **Placeholder contract.** On success the returned path exists as a
+/// zero-byte file this call created. The caller must:
+/// - open it for writing with `write(true).truncate(true)` — not
+///   `create_new`, which would fail on the placeholder; and
+/// - delete it on any abort (cancel, transfer failure, size cap
+///   exceeded, policy refusal), so a failed download leaves no empty file
+///   in the operator's Downloads folder.
+///
+/// Errors: [`NextPathError::InvalidName`] when `name` is not a single plain
+/// component (nothing is created); [`NextPathError::Io`] on the first
+/// filesystem error other than "already exists";
+/// [`NextPathError::Exhausted`] once all 1000 candidates exist.
+pub fn next_free_path(dir: &Path, name: &str) -> Result<PathBuf, NextPathError> {
+    if !is_plain_component(name) {
+        return Err(NextPathError::InvalidName);
+    }
+    if let Some(path) = try_create(dir, name).map_err(NextPathError::Io)? {
         return Ok(path);
     }
     for n in 1..=MAX_COLLISION_SUFFIX {
-        let candidate = decorate_name(name, n);
-        if let Some(path) = try_create(dir, &candidate)? {
+        if let Some(path) = try_create(dir, &decorate_name(name, n)).map_err(NextPathError::Io)? {
             return Ok(path);
         }
     }
-    Err(CollisionExhausted)
+    Err(NextPathError::Exhausted(CollisionExhausted))
 }
 
-/// Insert ` (n)` immediately before the final extension, if any:
-/// `a.pdf` + 1 → `a (1).pdf`; `tarball.tar.gz` + 2 → `tarball.tar (2).gz`
-/// (the common two-dot archive case keeps the final suffix for the OS
-/// filer, which is what operators expect to recognise); `README` + 3 →
-/// `README (3)`.
-fn decorate_name(name: &str, n: u32) -> String {
-    match name.rfind('.') {
-        // Leading-dot names are already stripped by sanitize_filename;
-        // defend against a direct caller all the same.
-        Some(0) => format!("{name} ({n})"),
-        Some(dot) => {
-            let (stem, ext) = name.split_at(dot);
-            format!("{stem} ({n}){ext}")
-        }
-        None => format!("{name} ({n})"),
-    }
-}
-
-/// Try to reserve `dir/name`. `Ok(Some(path))` on success, `Ok(None)` on
-/// a plain `AlreadyExists`. Other IO errors (permission denied, no space,
-/// name too long) are also folded to `Ok(None)` on purpose: the next
-/// suffix will hit the same error and the loop falls through to
-/// `CollisionExhausted` after a bounded number of attempts, which keeps a
-/// locked-down Downloads directory from spin-looping. The real IO error
-/// resurfaces when the caller re-opens the returned path for writing.
-/// The signature returns `Result<_, CollisionExhausted>` for symmetry
-/// with [`next_free_path`] — it never actually constructs that error.
-fn try_create(dir: &Path, name: &str) -> Result<Option<PathBuf>, CollisionExhausted> {
+/// Create `dir/name` exclusively. `Ok(Some(path))` when it was created,
+/// `Ok(None)` when it already exists, `Err` for any other IO error.
+fn try_create(dir: &Path, name: &str) -> io::Result<Option<PathBuf>> {
     let path = dir.join(name);
     match OpenOptions::new().write(true).create_new(true).open(&path) {
         Ok(_file) => Ok(Some(path)),
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(None),
-        Err(_) => {
-            // Treat an unexpected IO error (permission denied, no space,
-            // name too long on this filesystem) as a collision so the loop
-            // exits after a bounded number of attempts; the next suffix
-            // will hit the same error and we fall through to
-            // CollisionExhausted. The caller already has a cheaper audit
-            // line for "collision_exhausted", and the download delegate
-            // re-opens the returned path for writing — the real IO error
-            // surfaces there with full context.
-            Ok(None)
+        Err(e) => Err(e),
+    }
+}
+
+/// Whether `name` joins onto a directory as exactly one entry inside it.
+fn is_plain_component(name: &str) -> bool {
+    !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\', ':', '\0'])
+}
+
+/// Insert ` (n)` immediately before the final extension, if any:
+/// `a.pdf` + 1 → `a (1).pdf`; `tarball.tar.gz` + 2 → `tarball.tar (2).gz`;
+/// `README` + 3 → `README (3)`.
+fn decorate_name(name: &str, n: u32) -> String {
+    match name.rfind('.') {
+        // A leading dot is not an extension separator (sanitize_filename
+        // strips it, but a direct caller may not have).
+        Some(0) | None => format!("{name} ({n})"),
+        Some(dot) => {
+            let (stem, ext) = name.split_at(dot);
+            format!("{stem} ({n}){ext}")
         }
     }
+}
+
+fn trim_dots_and_spaces(name: &str) -> &str {
+    name.trim_start_matches('.').trim_end_matches(['.', ' '])
+}
+
+/// Cut `name` to at most `max` bytes on a char boundary, keeping a short
+/// final extension (at most [`MAX_EXTENSION_BYTES`]) intact.
+fn cap_length(name: &str, max: usize) -> String {
+    if name.len() <= max {
+        return name.to_string();
+    }
+    let (stem, ext) = match name.rfind('.') {
+        Some(dot) if dot > 0 && name.len() - dot <= MAX_EXTENSION_BYTES => name.split_at(dot),
+        _ => (name, ""),
+    };
+    format!("{}{ext}", floor_char_boundary(stem, max - ext.len()))
+}
+
+/// The longest prefix of `s` that is at most `max` bytes and ends on a
+/// char boundary.
+fn floor_char_boundary(s: &str, max: usize) -> &str {
+    let mut end = max.min(s.len());
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 /// Windows reserves these device names in any directory. The check is
@@ -153,30 +220,27 @@ fn try_create(dir: &Path, name: &str) -> Result<Option<PathBuf>, CollisionExhaus
 fn stem_is_windows_reserved(name: &str) -> bool {
     let stem = name.split('.').next().unwrap_or("");
     let upper = stem.to_ascii_uppercase();
-    matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || is_com_or_lpt(&upper)
+    matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL") || is_com_or_lpt(&upper)
 }
 
 fn is_com_or_lpt(upper: &str) -> bool {
-    if upper.len() != 4 {
-        return false;
-    }
     let bytes = upper.as_bytes();
-    let prefix = &bytes[..3];
-    let digit = bytes[3];
-    (prefix == b"COM" || prefix == b"LPT") && digit.is_ascii_digit()
+    bytes.len() == 4 && (&bytes[..3] == b"COM" || &bytes[..3] == b"LPT") && bytes[3].is_ascii_digit()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn tempdir(tag: &str) -> PathBuf {
+    fn tempdir_path(tag: &str) -> PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let p = std::env::temp_dir()
-            .join(format!("bv-nav-bar-{tag}-{}-{n}", std::process::id()));
+        std::env::temp_dir().join(format!("bv-nav-bar-{tag}-{}-{n}", std::process::id()))
+    }
+
+    fn tempdir(tag: &str) -> PathBuf {
+        let p = tempdir_path(tag);
         std::fs::create_dir_all(&p).expect("create tempdir");
         p
     }
@@ -225,6 +289,41 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_caps_long_names_and_keeps_extension() {
+        // A 300-byte Content-Disposition name would hit ENAMETOOLONG on
+        // most filesystems once the ` (n)` suffix is added.
+        let long = format!("{}.pdf", "a".repeat(296));
+        let out = sanitize_filename(&long);
+        assert!(out.len() <= 200, "capped: {} bytes", out.len());
+        assert!(out.ends_with(".pdf"), "extension kept: {out}");
+        assert!(out.starts_with('a'));
+
+        // Multi-byte characters are cut on a char boundary.
+        let wide = format!("{}.pdf", "é".repeat(150));
+        let out = sanitize_filename(&wide);
+        assert!(out.len() <= 200, "capped: {} bytes", out.len());
+        assert!(out.ends_with(".pdf"), "extension kept: {out}");
+        assert!(out.trim_end_matches(".pdf").chars().all(|c| c == 'é'));
+
+        // Short names are untouched.
+        assert_eq!(sanitize_filename("report.pdf"), "report.pdf");
+    }
+
+    #[test]
+    fn sanitize_cap_cannot_produce_a_reserved_stem() {
+        // The cut exposes trailing spaces, which are trimmed, leaving `CON`:
+        // the reserved-stem prefix runs after the cap, so it still applies.
+        let raw = format!("CON{}x", " ".repeat(300));
+        assert_eq!(sanitize_filename(&raw), "_CON");
+        // A reserved stem with an over-long "extension" stays within the cap
+        // including its `_` prefix.
+        let raw = format!("CON.{}", "x".repeat(300));
+        let out = sanitize_filename(&raw);
+        assert!(out.starts_with("_CON."), "{out}");
+        assert!(out.len() <= MAX_FILENAME_BYTES, "{} bytes", out.len());
+    }
+
+    #[test]
     fn next_free_path_returns_input_on_empty_dir() {
         let dir = tempdir("empty");
         let p = next_free_path(&dir, "report.pdf").expect("free name");
@@ -245,7 +344,6 @@ mod tests {
         // No extension — suffix goes at the end.
         let p3 = next_free_path(&dir, "README").expect("README free");
         assert_eq!(p3, dir.join("README"));
-        std::fs::write(&p3, b"").ok();
         let p4 = next_free_path(&dir, "README").expect("README (1) free");
         assert_eq!(p4, dir.join("README (1)"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -258,11 +356,36 @@ mod tests {
         let dir = tempdir("exhausted");
         std::fs::write(dir.join("a.pdf"), b"").expect("seed base");
         for n in 1..=MAX_COLLISION_SUFFIX {
-            std::fs::write(dir.join(format!("a ({n}).pdf")), b"")
-                .expect("seed suffix");
+            std::fs::write(dir.join(format!("a ({n}).pdf")), b"").expect("seed suffix");
         }
         let err = next_free_path(&dir, "a.pdf").expect_err("exhausted");
-        assert_eq!(err, CollisionExhausted);
+        assert!(matches!(err, NextPathError::Exhausted(CollisionExhausted)), "{err:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn next_free_path_reports_io_error_not_exhaustion() {
+        // A missing directory is an IO failure, not a full one: the
+        // `collision_exhausted` audit reason would be false.
+        let dir = tempdir_path("missing");
+        assert!(!dir.exists());
+        let err = next_free_path(&dir, "a.pdf").expect_err("missing dir");
+        match err {
+            NextPathError::Io(e) => assert_eq!(e.kind(), io::ErrorKind::NotFound),
+            other => panic!("expected Io(NotFound), got {other:?}"),
+        }
+        assert!(!dir.exists(), "nothing created");
+    }
+
+    #[test]
+    fn next_free_path_refuses_names_that_are_not_one_component() {
+        let dir = tempdir("invalid");
+        for name in ["", ".", "..", "a/b.pdf", "../a.pdf", "a\\b.pdf", "a.pdf:stream", "a\0b"] {
+            let err = next_free_path(&dir, name).expect_err(name);
+            assert!(matches!(err, NextPathError::InvalidName), "{name:?}: {err:?}");
+        }
+        let left: Vec<_> = std::fs::read_dir(&dir).expect("read dir").collect();
+        assert!(left.is_empty(), "nothing created: {left:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
