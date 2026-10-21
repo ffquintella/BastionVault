@@ -475,15 +475,18 @@ path "resources/resources/+/sql/*" {
   groups       = ["prod-databases"]
 }
 
-# Nobody drops anything in the PCI database, whatever else they hold.
+# Nobody drops anything in the PCI database, unless a more specific grant below says otherwise.
 path "resources/resources/pci-db/sql/*" {
   capabilities = ["deny"]
 }
 ```
 
-The `deny` in the last example also blocks `sql_select`, by design: a `deny`
-on a path is total. To block only destructive classes on one resource, grant a
-narrower capability set there; a more specific path wins over a broader one.
+The `deny` in the last example blocks every SQL capability on the path it
+governs, and every layered grant (group, scope, share) on that path. A more
+specific path wins over a broader one, so an ungated grant on a narrower path,
+such as `.../sql/objects/...`, overrides a `deny` on `.../sql/*`. To make a
+`deny` hold against a narrower grant, write the `deny` at the narrower path.
+This rule is pending the maintainer's confirmation (ledger Ruling 10).
 
 #### 3.3 Shares
 
@@ -1332,7 +1335,10 @@ that has not been run, with the acceptance check named.
      (`crates/bv-kernel/src/modules/identity/share_store.rs:857`);
    - **`ShareCap` is `u8` with four bits** (`bv-policy-core/src/model.rs:286-293`,
      Kani target `proofs.rs:430` is `u8`). The §3.3 share vocabulary cannot
-     reuse that type without widening it and re-running the proofs.
+     reuse that type without widening it and re-running the proofs. (Update,
+   T124 subsystem 1: `ShareCap` is now `u16` with 15 variants; the share
+   harness is `t6_scope_gate_is_sound`, and `proofs.rs:430` is the
+   asset-group harness and stays `u8`.)
 
    **D1 (maintainer):** keep the eleven variants in the single `Capability`
    enum as §9.1 says (one decision path, deny supremacy proved once), accepting
