@@ -54,6 +54,15 @@ export interface PendingPane {
 
 export const PLACEHOLDER_PREFIX = "restore:";
 
+/** A replay pane's identity. A replay is not a session: its "token" is
+ *  derived from the recording id, so opening the same recording twice
+ *  focuses the pane it already has instead of adding a second. */
+export const REPLAY_TOKEN_PREFIX = "replay:";
+
+export function replayToken(recordingId: string): string {
+  return `${REPLAY_TOKEN_PREFIX}${recordingId}`;
+}
+
 export interface SplitNode {
   kind: "split";
   /** `row` = side by side, `col` = stacked. */

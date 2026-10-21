@@ -50,6 +50,7 @@ import { extractError } from "../lib/error";
 import {
   rustionKeystrokeSearch,
   rustionKeystrokesIndex,
+  rustionOpenReplayInWorkspace,
   rustionOpenReplayWindow,
   fetchRecordingBytes,
   rustionRecordingPull,
@@ -570,6 +571,18 @@ function RecordingPlayerModal({
               <Button
                 onClick={async () => {
                   try {
+                    await rustionOpenReplayInWorkspace(entry.recordingId);
+                  } catch (e) {
+                    toast.toast("error", `Open in workspace: ${extractError(e)}`);
+                  }
+                }}
+                variant="secondary"
+              >
+                Open in workspace
+              </Button>
+              <Button
+                onClick={async () => {
+                  try {
                     await rustionOpenReplayWindow(entry.recordingId);
                   } catch (e) {
                     toast.toast("error", `Open replay window: ${extractError(e)}`);
@@ -988,6 +1001,19 @@ function KeystrokeHitRow({ hit }: { hit: RustionKeystrokeHit }) {
           }}
         >
           Open replay at {formatOffset(hit.tMs)}
+        </Button>{" "}
+        <Button
+          size="sm"
+          variant="secondary"
+          onClick={async () => {
+            try {
+              await rustionOpenReplayInWorkspace(hit.recordingId, hit.tMs);
+            } catch (e) {
+              toast.toast("error", `Open in workspace: ${extractError(e)}`);
+            }
+          }}
+        >
+          …in workspace
         </Button>
       </div>
     </li>

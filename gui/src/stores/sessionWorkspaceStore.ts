@@ -8,12 +8,13 @@
 
 import { create } from "zustand";
 
-import type { OpenSessionListing } from "../lib/api";
+import type { OpenSessionListing, ReplayRequest } from "../lib/api";
 import { SESSION_WORKSPACE_LABEL } from "../lib/api";
 import {
   emptyLayout,
   layoutReducer,
   paneOfToken,
+  replayToken,
   type LayoutAction,
   type PaneKind,
   type WorkspaceLayout,
@@ -24,6 +25,9 @@ interface SessionWorkspaceState {
   layout: WorkspaceLayout;
   /** token → the host's descriptor for it. */
   sessions: Record<string, OpenSessionListing>;
+  /** replay token → what its pane plays (T109). Recording id and seek
+   *  offset only; a replay holds no session. */
+  replays: Record<string, { recordingId: string; atMs?: number }>;
   /** token → pane status, for the tab strip. */
   status: Record<string, SessionPaneStatus>;
   /** Tokens whose host element a layout slot has put in the document; a
@@ -39,6 +43,9 @@ interface SessionWorkspaceState {
    *  this window that has no pane yet — into its restore placeholder when
    *  it names one. Returns the tokens placed. */
   adopt: (rows: readonly OpenSessionListing[]) => string[];
+  /** Place each requested recording as a tab; one already open is focused
+   *  instead. Returns the tokens of the panes now showing them. */
+  adoptReplays: (requests: readonly ReplayRequest[]) => string[];
   setStatus: (token: string, status: SessionPaneStatus) => void;
   markHostReady: (token: string) => void;
   /** Forget a session whose pane has been removed from the layout. */
@@ -53,6 +60,7 @@ function paneKind(protocol: string): PaneKind | null {
 export const useSessionWorkspaceStore = create<SessionWorkspaceState>((set, get) => ({
   layout: emptyLayout(),
   sessions: {},
+  replays: {},
   status: {},
   hostReady: {},
   retired: {},
@@ -85,6 +93,27 @@ export const useSessionWorkspaceStore = create<SessionWorkspaceState>((set, get)
     return fresh.map((r) => r.token);
   },
 
+  adoptReplays(requests) {
+    const tokens: string[] = [];
+    for (const req of requests) {
+      const token = replayToken(req.recording_id);
+      const existing = paneOfToken(get().layout, token);
+      if (existing) {
+        get().dispatch({ type: "focusPane", paneId: existing.id });
+      } else {
+        const atMs = req.at_ms && req.at_ms > 0 ? req.at_ms : undefined;
+        set((s) => ({ replays: { ...s.replays, [token]: { recordingId: req.recording_id, atMs } } }));
+        get().dispatch({
+          type: "place",
+          session: { token, protocol: "replay", label: `replay ${req.recording_id}` },
+          placement: "workspace-tab",
+        });
+      }
+      tokens.push(token);
+    }
+    return tokens;
+  },
+
   setStatus(token, status) {
     if (get().status[token] === status) return;
     set((s) => ({ status: { ...s.status, [token]: status } }));
@@ -98,17 +127,23 @@ export const useSessionWorkspaceStore = create<SessionWorkspaceState>((set, get)
   forget(token) {
     set((s) => {
       const sessions = { ...s.sessions };
+      const replays = { ...s.replays };
       const status = { ...s.status };
       const hostReady = { ...s.hostReady };
       const epoch = s.sessions[token]?.attach_epoch ?? 0;
       delete sessions[token];
+      delete replays[token];
       delete status[token];
       delete hostReady[token];
-      return { sessions, status, hostReady, retired: { ...s.retired, [token]: Math.max(epoch, s.retired[token] ?? 0) } };
+      // A replay leaves no mark: reopening the recording later is a new pane.
+      const retired = s.replays[token]
+        ? s.retired
+        : { ...s.retired, [token]: Math.max(epoch, s.retired[token] ?? 0) };
+      return { sessions, replays, status, hostReady, retired };
     });
   },
 
   reset() {
-    set({ layout: emptyLayout(), sessions: {}, status: {}, hostReady: {}, retired: {} });
+    set({ layout: emptyLayout(), sessions: {}, replays: {}, status: {}, hostReady: {}, retired: {} });
   },
 }));

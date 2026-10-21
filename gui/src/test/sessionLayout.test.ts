@@ -341,6 +341,23 @@ describe("restore + save (Phase 5)", () => {
     expect(s.closeWindow).toBe(false);
   });
 
+  it("a replay pane is left out of the skeleton, and its split collapses onto the session", () => {
+    let s = layoutReducer(emptyLayout(), { type: "place", session: { token: "A", protocol: "ssh", label: "A" }, placement: "workspace-tab" });
+    s = layoutReducer(s, {
+      type: "place",
+      session: { token: "replay:rec_1", protocol: "replay", label: "replay rec_1" },
+      placement: "workspace-split-right",
+    });
+    s = layoutReducer(s, {
+      type: "place",
+      session: { token: "replay:rec_2", protocol: "replay", label: "replay rec_2" },
+      placement: "workspace-tab",
+    });
+    // The replay-only tab saves nothing; the mixed tab saves the session alone.
+    expect(skeleton(s)).toEqual([{ root: { kind: "pane", token: "A" } }]);
+    expect(JSON.stringify(skeleton(s))).not.toContain("rec_");
+  });
+
   it("the skeleton is tab order, splits and ratios by token — not focus, zoom or unread", () => {
     let s = place(place(emptyLayout(), "A"), "B", "workspace-split-right");
     s = place(s, "C");

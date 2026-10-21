@@ -962,6 +962,41 @@ pub async fn rustion_open_replay_window(
     Ok(())
 }
 
+/// Open a recording as a replay pane in the Session Workspace (T109).
+///
+/// The recording id is queued host-side and the workspace is woken with the
+/// payload-less `session://placed`; it drains the queue with
+/// `session_replay_take`. Refused in the *Separate windows* layout, where
+/// the operator chose per-window isolation, as a workspace session open is.
+/// The standalone window ([`rustion_open_replay_window`]) stays available.
+#[tauri::command]
+pub async fn rustion_open_replay_in_workspace(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    recording_id: String,
+    at_ms: Option<u64>,
+) -> CmdResult<()> {
+    use tauri::Emitter;
+    let prefs = crate::preferences::load()?.session_workspace;
+    crate::session::workspace::resolve_placement(Some(crate::session::workspace::Placement::WorkspaceTab), &prefs)
+        .map_err(crate::error::CommandError::from)?;
+    let at_ms = at_ms.filter(|ms| *ms > 0);
+    state
+        .replay_requests
+        .lock()
+        .map_err(|_| crate::error::CommandError::from("replay queue poisoned".to_string()))?
+        .push(crate::session::replays::ReplayRequest { recording_id, at_ms })
+        .map_err(crate::error::CommandError::from)?;
+    super::connect::ensure_workspace_window(&app)
+        .map_err(|e| crate::error::CommandError::from(format!("session workspace window: {e}")))?;
+    if let Err(e) =
+        app.emit_to(crate::session::workspace::WORKSPACE_WINDOW_LABEL, crate::session::workspace::PLACED_EVENT, ())
+    {
+        log::warn!("resource-connect: could not notify the session workspace of a replay: {e}");
+    }
+    Ok(())
+}
+
 /// The replay window's URL: the session-only bundle, not the vault UI
 /// (T110), at its `/session-replay` route.
 pub(crate) fn replay_window_url(recording_id: &str, at_ms: Option<u64>) -> String {

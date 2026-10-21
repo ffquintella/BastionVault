@@ -82,6 +82,26 @@ pub async fn session_list_open(state: State<'_, AppState>, webview: Webview) -> 
     Ok(listing.into_iter().filter(|row| live.contains(&row.descriptor.token)).collect())
 }
 
+/// Recordings queued for the workspace to place as replay panes (T109).
+/// Workspace window only; draining is the hand-off, so each request is
+/// delivered once.
+#[tauri::command]
+pub async fn session_replay_take(
+    state: State<'_, AppState>,
+    webview: Webview,
+) -> CmdResult<Vec<crate::session::replays::ReplayRequest>> {
+    let caller = webview.label().to_string();
+    if !crate::session::replays::may_take_replays(&caller) {
+        log::warn!("resource-connect: session_replay_take refused for window `{caller}`");
+        return Err(CommandError::from(format!(
+            "window `{caller}` may not take replay requests; only the Session Workspace can"
+        )));
+    }
+    let mut queue =
+        state.replay_requests.lock().map_err(|_| CommandError::from("replay queue poisoned".to_string()))?;
+    Ok(queue.take())
+}
+
 #[derive(Deserialize)]
 pub struct SessionTokenRequest {
     pub token: String,
