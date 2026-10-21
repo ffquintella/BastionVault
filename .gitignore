@@ -41,6 +41,7 @@ node_modules/
 !.claude/agents/
 !.claude/skills/
 !.claude/memory/
+!.claude/hooks/
 !.claude/settings.json
 .claude/memory/__pycache__/
 
