@@ -765,6 +765,11 @@ pub struct WebShared {
     /// refused challenge as a *cancelled* navigation, which is not a failure
     /// by itself; this tells the two apart. Cleared by the next load.
     tls_refused: Mutex<Option<(WebOrigin, PageFailure)>>,
+    /// Set when the operator accepted a certificate and the window reloads
+    /// its start URL ([`Self::expect_tls_reload`]). The first load failure
+    /// after that is the cancelled challenge that asked the question, not the
+    /// reload's outcome, so it is swallowed once ([`Self::load_failed`]).
+    tls_reload_pending: std::sync::atomic::AtomicBool,
     /// Set by teardown; the recipe engine and the dry run stop on it.
     closed: std::sync::atomic::AtomicBool,
     /// The sign-in window, for the toolbar's countdown.
@@ -803,6 +808,7 @@ impl WebShared {
             title: Mutex::new(TitleParts { origin: start_origin.to_string(), ..TitleParts::default() }),
             abort_hint: Mutex::new(None),
             tls_refused: Mutex::new(None),
+            tls_reload_pending: std::sync::atomic::AtomicBool::new(false),
             closed: std::sync::atomic::AtomicBool::new(false),
             login_window: Mutex::new(LoginWindow::default()),
             relogin: std::sync::atomic::AtomicBool::new(false),
@@ -891,6 +897,18 @@ impl WebShared {
         Self::lock(&self.page).loading = true;
     }
 
+    /// The operator accepted a certificate and the window reloads its start
+    /// URL. The challenge that asked the question was cancelled, and WebKit
+    /// reports that cancel as a failed load, arriving after the answer. That
+    /// failure is not the reload's outcome, so [`Self::load_failed`] swallows
+    /// exactly one failure after this call; a failure after that, the
+    /// reload's own, ends the sign-in as usual.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn expect_tls_reload(&self) {
+        self.tls_reload_pending.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.expect_navigation();
+    }
+
     pub fn chrome_view(&self) -> ChromeView {
         let url = Self::lock(&self.page).url.clone();
         let login_deadline = Self::lock(&self.login_window).deadline;
@@ -973,6 +991,11 @@ impl WebShared {
         origin: Option<&WebOrigin>,
         failure: Option<LoadFailure>,
     ) -> Option<(PageFailure, String)> {
+        // The cancelled challenge behind the operator's accept (see
+        // `expect_tls_reload`): nothing to report, and the reload still runs.
+        if self.tls_reload_pending.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return None;
+        }
         let refused = {
             let mut r = Self::lock(&self.tls_refused);
             match (&*r, origin) {
@@ -1776,6 +1799,24 @@ mod tests {
         shared.note_tls_refused(&o, pin);
         shared.page_load(&url("https://km.example.com/"), true);
         assert_eq!(shared.load_failed(Some(&o), None), None);
+    }
+
+    #[test]
+    fn the_cancelled_challenge_behind_an_accept_is_swallowed_once() {
+        use crate::session::web_load::LoadFailure;
+        let shared = WebShared::new("km", "https://km.example.com");
+        let o = WebOrigin::parse_config("https://km.example.com", false).unwrap();
+
+        // The accept reloads the start URL. The cancel that asked the question
+        // is reported after the answer: nothing to report, the reload runs on.
+        shared.expect_tls_reload();
+        assert_eq!(shared.load_failed(None, Some(LoadFailure::TlsUntrusted)), None, "the cancelled challenge");
+        assert!(shared.snapshot().loading, "the reload is still expected");
+
+        // The reload's own failure is reported, and the swallow is spent.
+        let (f, _) = shared.load_failed(Some(&o), Some(LoadFailure::TlsUntrusted)).unwrap();
+        assert_eq!(f.check, "load_tls_untrusted");
+        assert!(shared.snapshot().failed.is_some());
     }
 
     #[test]

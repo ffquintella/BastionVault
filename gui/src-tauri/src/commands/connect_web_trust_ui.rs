@@ -69,7 +69,7 @@ impl TrustUi {
     /// for this load.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub fn reload_start(&self) {
-        self.shared.expect_navigation();
+        self.shared.expect_tls_reload();
         match super::connect_web::remote_webview(&self.app, &self.label) {
             Some(remote) => {
                 if let Err(e) = remote.navigate(self.start_url.clone()) {

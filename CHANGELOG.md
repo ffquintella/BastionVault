@@ -80,6 +80,12 @@ EXAMPLE ENTRY:
 
 - Explain a refused RDP logon in plain words: when the target rejects the saved username or password (`STATUS_LOGON_FAILURE`), the error now names the account and says the password is wrong, instead of only a raw CredSSP `InvalidToken` report. The NTSTATUS stays in the message for support.
 
+### Fixed
+
+#### Web Application Connect: untrusted certificate accepted on macOS
+
+- **Keep a web sign-in going after the operator accepts an untrusted certificate (macOS)** -- the cancelled challenge that asked the question is reported as a failed load after the answer, and that failure ended the sign-in before the reload ran. The reload's first failure is now ignored once, so the reload decides the outcome; a later failure still ends the sign-in. (T139, S105)
+
 ### Security
 
 #### Resource Connect SSH
