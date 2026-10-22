@@ -1,6 +1,6 @@
 [package]
 name = "bv-sql-guard"
-version = "0.41.0"
+version = "0.41.1"
 edition = "2021"
 description = "Literal-only SQL statements with allow-listed identifiers — BastionVault's SQL injection guard"
 license = "Apache-2.0"
