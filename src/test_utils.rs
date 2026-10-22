@@ -376,7 +376,10 @@ pub fn get_project_binary_path() -> String {
     // SSH helper, which knows nothing about the `auth`/`policy`/etc.
     // subcommands the tests exercise. Hard-coding the name keeps the
     // resolution stable across cargo + platform variations.
-    let bin_name = "bvault";
+    // `EXE_SUFFIX` is `.exe` on Windows: without it `candidate.exists()` is
+    // always false there and the lookup falls through to the per-package
+    // fallback below, which points at a directory that does not exist.
+    let bin_name = format!("bvault{}", env::consts::EXE_SUFFIX);
 
     // Preferred: derive it from the running test executable, which cargo puts
     // at `<target>/<profile>/deps/<name>-<hash>` — so its grandparent is the
@@ -390,7 +393,7 @@ pub fn get_project_binary_path() -> String {
     // also honours `CARGO_TARGET_DIR`, which the plugin targets set.
     if let Ok(exe) = env::current_exe() {
         if let Some(profile_dir) = exe.parent().and_then(|deps| deps.parent()) {
-            let candidate = profile_dir.join(bin_name);
+            let candidate = profile_dir.join(&bin_name);
             if candidate.exists() {
                 return candidate.into_os_string().into_string().unwrap_or_default();
             }

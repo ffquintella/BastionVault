@@ -86,6 +86,11 @@ EXAMPLE ENTRY:
 
 - **Keep a web sign-in going after the operator accepts an untrusted certificate (macOS)** -- the cancelled challenge that asked the question is reported as a failed load after the answer, and that failure ended the sign-in before the reload ran. The reload's first failure is now ignored once, so the reload decides the outcome; a later failure still ends the sign-in. (T139, S105)
 
+#### Test suite on Windows
+
+- Find `bvault.exe` in the CLI tests on Windows: the test fixture looked for `target/debug/bvault` without the executable suffix, fell back to a per-package path that does not exist, and every `bvault-cli` test that spawns the binary failed with `os error 3`.
+- Keep the expiration register-and-restore benchmark's leases alive for the whole test: their 400 s TTL was shorter than the 10 000-lease registration loop on Windows (453 s alone, ~960 s in a full run), so leases expired before the count.
+
 ### Security
 
 #### Resource Connect SSH
