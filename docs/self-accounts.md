@@ -106,7 +106,12 @@ The policy ships as a built-in baseline, seeded once and then yours to edit, but
 path "self-accounts/v2/accounts"   { capabilities = ["create", "read", "update", "delete", "list"] }
 path "self-accounts/v2/accounts/*" { capabilities = ["create", "read", "update", "delete", "list"] }
 path "self-accounts/v2/settings"   { capabilities = ["read"] }
+path "sys/plugins/active-surfaces" { capabilities = ["read"] }
 ~~~
+
+The last rule is what lets the GUI draw the **My accounts** menu entry: it reads the plugin surface bundle from that path, and a caller without `read` on it gets a 403 and no entry, whatever else it holds.
+
+Inside a namespace, write the three `self-accounts/` rules with the namespace prefix (`dti/esi/self-accounts/v2/accounts`, and so on) and leave the `sys/plugins/active-surfaces` rule out: a namespace policy may not name a root-owned path, and the implicit `namespace-self` policy already grants it to every namespace-bound token.
 
 Granting it broadly is safe: users are separated by the host's per-entity storage scope, not by the path. A token with no identity entity (for example a bare root token) is refused with `403` before the plugin runs, because self-accounts belong to entities, not tokens.
 

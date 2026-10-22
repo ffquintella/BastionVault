@@ -504,6 +504,15 @@ path "sys/namespaces-self"            { capabilities = ["read"] }
 # can, so this grant exposes nothing beyond what the caller already reaches.
 path "sys/dashboard/summary"          { capabilities = ["read"] }
 
+# --- The GUI's plugin menu ---
+# The bundle of plugin pages the GUI draws its menu from (names, routes and the
+# mount each one is reachable at in the caller's namespace). `sys/` is global, so
+# a namespace policy cannot name it (`refuse_cross_namespace_paths`); without
+# this grant a tenant token gets a 403 and never sees a plugin page, such as
+# "My accounts", whatever its own policies allow. It lists pages only: opening
+# one still needs the plugin's own paths in a tenant policy.
+path "sys/plugins/active-surfaces"    { capabilities = ["read"] }
+
 # --- Caller-introspecting identity lookups (only ever return the caller) ---
 path "identity/entity/self"   { capabilities = ["read"] }
 path "identity/sharing/for-me" { capabilities = ["read", "list"] }
@@ -1417,6 +1426,10 @@ static SELF_ACCOUNTS_USER_POLICY: &str = r#"
 path "self-accounts/v2/accounts"   { capabilities = ["create", "read", "update", "delete", "list"] }
 path "self-accounts/v2/accounts/*" { capabilities = ["create", "read", "update", "delete", "list"] }
 path "self-accounts/v2/settings"   { capabilities = ["read"] }
+
+# The GUI builds its menu from this bundle (plugin pages and their routes). Without
+# it the "My accounts" entry is never drawn, even with the paths above.
+path "sys/plugins/active-surfaces" { capabilities = ["read"] }
 "#;
 
 /// LDAP administrator baseline. Grants full management of an
@@ -4274,6 +4287,18 @@ mod implicit_rustion_grant_tests {
         assert!(rule(p, "rustion/targets/*").is_none());
     }
 
+    /// A tenant token needs `read` on the plugin surface bundle to draw plugin
+    /// pages, and no tenant-authored policy can grant it: `sys/` is root-owned.
+    /// `read` and nothing more.
+    #[test]
+    fn namespace_self_grants_the_plugin_surface_bundle() {
+        let p = &*NAMESPACE_SELF_POLICY_PARSED;
+        let r = rule(p, "sys/plugins/active-surfaces").expect("sys/plugins/active-surfaces must be granted");
+        assert_eq!(r.capabilities, vec![Capability::Read], "the bundle is a GET: `read` and nothing else");
+        assert!(rule(p, "sys/plugins").is_none(), "no wider plugin catalog access");
+        assert!(rule(p, "sys/plugins/*").is_none(), "no wildcard over the plugin catalog");
+    }
+
     /// The `ssh-broker/` resolver, for the same reason and with the same
     /// failure mode: root-owned and header-scoped, so no tenant-authored
     /// policy can name it, and without the grant a namespace-bound token got
@@ -4481,8 +4506,8 @@ mod implicit_rustion_grant_tests {
         assert!(r.capabilities.contains(&Capability::Connect));
     }
 
-    /// `self-accounts-user` grants the plugin's account and settings paths and
-    /// nothing else, and is not folded into `default`.
+    /// `self-accounts-user` grants the plugin's account and settings paths plus
+    /// read of the surface bundle, and nothing else, and is not folded into `default`.
     #[test]
     fn self_accounts_user_is_scoped_to_the_plugin_mount() {
         let p = Policy::from_str(SELF_ACCOUNTS_USER_POLICY).expect("self-accounts-user must parse");
@@ -4495,6 +4520,8 @@ mod implicit_rustion_grant_tests {
             }
         }
         assert!(has("self-accounts/v2/settings", "read"));
+        assert!(has("sys/plugins/active-surfaces", "read"), "the GUI menu needs the surface bundle");
+        assert!(!has("sys/plugins/active-surfaces", "update"));
         assert!(!has("self-accounts/v2/settings", "update"), "settings are read-only");
         assert!(!has("self-accounts/v2/other", "read"), "no other plugin path");
         assert!(!has("secret/data/x", "read"), "nothing outside the plugin mount");

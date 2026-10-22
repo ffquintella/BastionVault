@@ -86,6 +86,10 @@ EXAMPLE ENTRY:
 
 ### Fixed
 
+#### Self-Accounts
+
+- **Show plugin pages such as "My accounts" to non-root users, including inside a namespace** -- the GUI draws its menu from `sys/plugins/active-surfaces`, which `default` did not grant and no namespace policy can name (it is root-owned, so `refuse_cross_namespace_paths` rejects it), so a user with every `self-accounts/` permission still got a 403 and no menu entry. The implicit `namespace-self` policy now grants `read` on it, and the built-in `self-accounts-user` policy carries it for root. It lists the pages only; opening one still needs the plugin's own paths. (T462, S107)
+
 #### Web Application Connect: untrusted certificate accepted on macOS
 
 - **Keep a web sign-in going after the operator accepts an untrusted certificate (macOS)** -- the cancelled challenge that asked the question is reported as a failed load after the answer, and that failure ended the sign-in before the reload ran. The reload's first failure is now ignored once, so the reload decides the outcome; a later failure still ends the sign-in. (T139, S105)

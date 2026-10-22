@@ -615,7 +615,7 @@ failed binding in a tight loop.
 - **Plugin paths.** Ship a built-in baseline policy, `self-accounts-user`
   (T461; seeded once and then operator-owned, and also in the plugin's docs). It grants `create/read/update/delete/list` on
   `self-accounts/v2/accounts` and `self-accounts/v2/accounts/*`, plus `read`
-  on `self-accounts/v2/settings`. Granting it broadly is safe, because the
+  on `self-accounts/v2/settings`, and `read` on `sys/plugins/active-surfaces`, which the GUI needs to draw the menu entry. Granting it broadly is safe, because the
   entity scope (§4.3) isolates users and not because of the path. It is
   **not** added to `default` automatically: installing a plugin must not
   silently widen a built-in policy. The administrator attaches it to
