@@ -904,6 +904,7 @@ mod mod_policy_tests {
             "pki-admin",
             "pki-user",
             "secret-author",
+            "self-accounts-user",
             "shared-access",
             "standard-user",
             "standard-user-readonly",

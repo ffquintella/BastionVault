@@ -1404,6 +1404,21 @@ path "cubbyhole/*" {
 }
 "#;
 
+/// `self-accounts` credential-provider plugin baseline. Lets a holder keep
+/// their own accounts in the plugin's mount. It grants only the plugin's
+/// paths: the host separates users by identity entity, not by path, so
+/// granting it broadly is safe, and a token without an entity is refused
+/// before the plugin runs. It is a standalone grant for an operator to attach
+/// (to a user or group); it is deliberately not part of `default`. See
+/// `features/self-accounts.md` §8 and `docs/self-accounts.md` §2.6.
+static SELF_ACCOUNTS_USER_POLICY_NAME: &str = "self-accounts-user";
+static SELF_ACCOUNTS_USER_POLICY: &str = r#"
+# self-accounts-user
+path "self-accounts/v2/accounts"   { capabilities = ["create", "read", "update", "delete", "list"] }
+path "self-accounts/v2/accounts/*" { capabilities = ["create", "read", "update", "delete", "list"] }
+path "self-accounts/v2/settings"   { capabilities = ["read"] }
+"#;
+
 /// LDAP administrator baseline. Grants full management of an
 /// `openldap` mount: connection config CRUD, role CRUD, library
 /// CRUD, `rotate-root`, plus everything `ldap-user` grants.
@@ -2111,6 +2126,9 @@ impl PolicyStore {
         // OpenLDAP / AD delegated baselines.
         self.load_acl_policy(LDAP_USER_POLICY_NAME, LDAP_USER_POLICY).await?;
         self.load_acl_policy(LDAP_ADMIN_POLICY_NAME, LDAP_ADMIN_POLICY).await?;
+        // Credential-provider plugin baseline. Seeded once and then
+        // operator-owned: an operator policy already holding the name is kept.
+        self.load_acl_policy(SELF_ACCOUNTS_USER_POLICY_NAME, SELF_ACCOUNTS_USER_POLICY).await?;
         // Per-module `-full` / `-read` / `-connect` / `-shared` baselines.
         // Seeded once and then operator-owned, like the engine pairs above; an
         // operator policy that already holds one of these names is kept.
@@ -4461,6 +4479,28 @@ mod implicit_rustion_grant_tests {
         let shared = &*NAMESPACE_SHARED_POLICY_PARSED;
         let r = rule(shared, "{{namespace.path}}/resources/").expect("tenant resources rule");
         assert!(r.capabilities.contains(&Capability::Connect));
+    }
+
+    /// `self-accounts-user` grants the plugin's account and settings paths and
+    /// nothing else, and is not folded into `default`.
+    #[test]
+    fn self_accounts_user_is_scoped_to_the_plugin_mount() {
+        let p = Policy::from_str(SELF_ACCOUNTS_USER_POLICY).expect("self-accounts-user must parse");
+        let acl = ACL::new(&[Arc::new(p)]).expect("ACL must build");
+        let has = |path: &str, cap: &str| acl.capabilities(path.to_string()).iter().any(|c| c == cap);
+
+        for path in ["self-accounts/v2/accounts", "self-accounts/v2/accounts/abc"] {
+            for cap in ["create", "read", "update", "delete", "list"] {
+                assert!(has(path, cap), "{path} must grant {cap}");
+            }
+        }
+        assert!(has("self-accounts/v2/settings", "read"));
+        assert!(!has("self-accounts/v2/settings", "update"), "settings are read-only");
+        assert!(!has("self-accounts/v2/other", "read"), "no other plugin path");
+        assert!(!has("secret/data/x", "read"), "nothing outside the plugin mount");
+
+        let default = Policy::from_str(DEFAULT_POLICY).expect("default must parse");
+        assert!(rule(&default, "self-accounts/v2/accounts").is_none(), "`default` must not carry it");
     }
 
     /// `shared-access` must reach objects through a share and through nothing

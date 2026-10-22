@@ -58,6 +58,10 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### Self-Accounts
+
+- **Ship the `self-accounts-user` policy as a built-in baseline** -- a fresh vault, and an existing one on its next unseal, now seeds it with the other baselines instead of leaving each operator to paste it from the guide. It grants the plugin's `self-accounts/v2/accounts` and `self-accounts/v2/settings` paths and nothing else, and is still not part of `default`: the administrator attaches it to a user or group. A policy of that name an operator already created is kept as is. (T461, S107)
+
 #### Web Application Connect: proxy mode (opt-in build, macOS 14+)
 
 - **Keep the password out of the page in web form logins, through a session proxy on the operator's computer** (T106, S105)

@@ -99,7 +99,7 @@ The grant is pinned to the SHA-256 of the manifest's `credential_provider` block
 
 ### 2.6 Attach the `self-accounts-user` policy
 
-The policy is **not** added to `default` or any built-in policy: installing a plugin must not silently widen one. Attach it to `default`, or to the groups whose members may keep accounts:
+The policy ships as a built-in baseline, seeded once and then yours to edit, but it is **not** added to `default` or any other built-in policy: installing a plugin must not silently widen one. Attach it to `default`, or to the groups whose members may keep accounts. A vault that predates the built-in keeps any policy of that name you created. The text is:
 
 ~~~hcl
 # self-accounts-user
