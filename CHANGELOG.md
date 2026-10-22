@@ -80,6 +80,13 @@ EXAMPLE ENTRY:
 
 - Explain a refused RDP logon in plain words: when the target rejects the saved username or password (`STATUS_LOGON_FAILURE`), the error now names the account and says the password is wrong, instead of only a raw CredSSP `InvalidToken` report. The NTSTATUS stays in the message for support.
 
+### Fixed
+
+#### Test suite on Windows
+
+- Find `bvault.exe` in the CLI tests on Windows: the test fixture looked for `target/debug/bvault` without the executable suffix, fell back to a per-package path that does not exist, and every `bvault-cli` test that spawns the binary failed with `os error 3`.
+- Keep the expiration register-and-restore benchmark's leases alive for the whole test: their 400 s TTL was shorter than the 10 000-lease registration loop on Windows (453 s alone, ~960 s in a full run), so leases expired before the count.
+
 ### Security
 
 #### Resource Connect SSH

@@ -1236,7 +1236,11 @@ mod mod_expiration_tests {
         let n = 10000;
         for i in 0..n {
             let mut secret = SecretData::default();
-            secret.ttl = Duration::from_secs(400);
+            // The TTL must outlive the whole registration loop, or leases
+            // expire before the count below. Under a full-suite run on
+            // Windows the loop has been measured at ~960s, well past the
+            // former 400s, leaving 4399 of 10000 leases.
+            secret.ttl = Duration::from_secs(24 * 60 * 60);
             let mut request = Request::new(format!("secret/{}", i));
             request.client_token = "root".into();
 
