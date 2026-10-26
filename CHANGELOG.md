@@ -83,6 +83,12 @@ EXAMPLE ENTRY:
 - **Open a recording as a replay pane in the Session Workspace** (T109, S56)
   -- Recordings → *Open in workspace* (and *…in workspace* on a keystroke-search hit, which seeks to the match) places the recording as a tab in the workspace; *Open in window* still opens the standalone replay window. A replay is identified by its recording id, not a session token: the main window queues the id in the host, the workspace is woken with the payload-less `session://placed` and drains the queue with the new `session_replay_take` (workspace only). The workspace's command set gains that command and the four recording reads its replay pane makes — listed one by one, not the whole `session-replay` set. Opening a recording already open focuses its pane; closing a replay pane asks nothing, and a workspace holding only replays closes without a prompt. Replays are not saved in the restorable layout (spec §9). Refused in the *Separate windows* layout. Not yet exercised by hand in a desktop build.
 
+#### SQL Browser: SQL privilege evaluation (Phase 1, subsystem 2)
+
+- Ask for SQL privileges through `PolicyGate::sql_privileges`: one capability probe per check on `resources/resources/<resource>/sql/server` or `…/sql/objects/<catalog>/<schema>/<object>`, with the owner, share and asset-group qualifiers of the resource resolved for the caller; any error refuses the whole batch, and each check refused for a plugin is recorded on the Audit page's denied view with `reason=sql-privilege`, the capability, the namespace and the plugin. No HTTP route or plugin host call uses it yet. (T124, S109)
+- Share SQL privileges on resources and asset groups: the share vocabulary accepts the eleven `sql_*` names for `resource` and `asset-group` targets, and a share-scoped `resources/resources/+/sql/*` rule in `default`, `namespace-shared` and `shared-access` conveys exactly the entries a share names; owning the resource record grants none. (T124, S109)
+- Prove with theorem T9 (two Kani harnesses, `docs/verification.md`) that `connect` and the SQL capabilities decide nothing but their own bits. (T124, S108)
+
 ### Changed
 
 #### MCP namespace selection (Phase 3)
@@ -94,6 +100,10 @@ EXAMPLE ENTRY:
 
 - **Run an MCP agent's calls in the namespace of the operator who paired it** (T457, S115)
   -- the pairing exchange binds the minted token to the exchanging session's own namespace (never child-visible) and the `/v2/mcp` dispatcher routes every tool call there, so `bv_resource_list` and the session tools reach a signed-in-to-`dti/esi` operator's resources instead of root's. The namespace comes only from the token's stored binding: `X-BastionVault-Namespace` on `/v2/mcp` and a `namespace` tool argument change nothing. A token whose namespace was deleted or does not resolve is refused with `mcp_namespace_unavailable`, never run at root. Re-exchanging a pairing from a session in another namespace follows that session and records `mcp.pairing.namespace_changed`. `bv_whoami`, `bv_resource_list`, the `request.mcp` audit block, the `connect.agent.*` events, transcripts, `sys/mcp/tokens` and the exchange answer now name the namespace (absent on old records = root). `bvault mcp serve` and the desktop app send the operator session's namespace on the MFA step-up and show it in the pairing and confirmation prompts. App tokens are bound to their AppRole login's namespace the same way.
+
+#### SQL Browser: SQL privilege evaluation (Phase 1, subsystem 2)
+
+- Refuse a share that names a SQL capability on a KV secret or a file with a `400`, and refuse a policy rule that combines a SQL capability with `allowed_parameters`, `denied_parameters` or `required_parameters`, instead of ignoring either silently. (T124, S109)
 
 #### Resource Connect RDP
 

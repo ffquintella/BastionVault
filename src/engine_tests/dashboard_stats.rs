@@ -91,6 +91,7 @@ async fn put_denial_at(server: &TestHttpServer, t: DateTime<Utc>, path: &str) {
         authenticated: true,
         remote_addr: String::new(),
         reason: "policy".into(),
+        ..Default::default()
     };
     view.put(&StorageEntry { key: nanos_key(t), value: serde_json::to_vec(&entry).unwrap() }).await.unwrap();
 }
@@ -221,6 +222,7 @@ async fn summary_counters_come_from_storage_not_the_ring() {
                 authenticated: true,
                 remote_addr: String::new(),
                 reason: "policy".into(),
+                ..Default::default()
             })
             .await
             .expect("append denial");

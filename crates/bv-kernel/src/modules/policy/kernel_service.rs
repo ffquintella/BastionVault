@@ -1,6 +1,6 @@
 //! `PolicyModule` as the vault's [`PolicyGate`].
 //!
-//! Three questions, one evaluator. The point of the narrow surface is that an
+//! Four questions, one evaluator. The point of the narrow surface is that an
 //! engine cannot obtain an `ACL` and decide for itself: every verdict here
 //! comes from `PolicyStore`, the same object the request pipeline uses.
 //!
@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use crate::{
     errors::RvError,
-    kernel_api::policy::PolicyGate,
+    kernel_api::policy::{PolicyGate, SqlCheck, SqlPurpose, SqlVerdict},
     logical::Request,
 };
 
@@ -55,6 +55,16 @@ impl PolicyGate for PolicyModule {
             .await?;
         let verdict = acl.explain_capability(path, Capability::Sudo);
         Ok(verdict.allowed || verdict.is_root)
+    }
+
+    async fn sql_privileges(
+        &self,
+        req: &Request,
+        purpose: SqlPurpose<'_>,
+        resource: &str,
+        checks: &[SqlCheck],
+    ) -> Result<Vec<SqlVerdict>, RvError> {
+        self.store().sql_privileges(req, purpose, resource, checks).await
     }
 }
 

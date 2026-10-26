@@ -40,6 +40,7 @@ queries. The harnesses are in `crates/bv-policy-core/src/proofs.rs`.
 | T6 | **Scope-gate soundness.** `owner` passes only for the target's owner (or a write to an unowned target — first write records ownership); `shared` passes only when the caller's shares include the override capability if one is named, else the capability the operation needs; unknown scopes never pass; no caller entity, no pass. A failed scope contributes nothing to a non-LIST request. | `t6_scope_gate_is_sound`, `t5_t6_a_failed_gate_contributes_nothing` | Exact characterisation (sound and complete). |
 | T7 | **Root isolation.** Only the root ACL yields `is_root`, and it is always allowed with `root_privs`. A non-root ACL yields `root_privs` only when an evaluated permission set (the governing rule, or a layered rule that applies) carries `sudo`. | `t7_root_isolation` | `root_privs` comes from `sudo`, by design — it is not exclusive to the root ACL. |
 | T8 | **Parameter constraints.** On `read`/`write`: a missing `required_parameters` key refuses; a parameter matching its `denied_parameters` entry, or any parameter under a `"*"` deny key, refuses; under a restrictive `allowed_parameters` (not empty, not only `"*"`) a value that is not allowed, or an unlisted key without `"*"`, refuses. A grant also needs the capability and wrapping TTLs that are not inverted, and the characterisation is complete. | `t8_parameter_constraints` | `read` and `write` only: on every other operation the parameters are **not consulted** (proved). A request with no parameters at all skips the allow/deny lists. |
+| T9 | **Probe-only capabilities.** `connect` and the eleven SQL capabilities (`CAP_PROBE_ONLY`, bits 9–20; features/sql-browser.md §3) decide nothing but their own bits: removing them from every candidate leaves `allowed`, `root_privs`, `is_root`, the LIST filter and every granting-policy and filter effect unchanged, and changes the bitmap in exactly those bits. A probe-only bit is reported only when an evaluated permission set (the governing rule, or a layered rule that applies) carries that very bit, so none implies another and no ordinary capability implies one. A deny that governs or applies leaves none. | `t9_probe_only_capabilities_decide_nothing_but_their_own_bits`, `t9_a_probe_only_capability_needs_a_rule_that_carries_it` | Enforcement and probes. T1, T2 and T6 already quantify over every `u32` bitmap and every `u16` share set, so deny supremacy, the fail-closed default and the scope gate (with the share override a SQL probe sets) hold for the new bits unchanged. |
 
 Each harness has at least one `kani::cover` vacuity guard: an `UNSATISFIABLE`
 cover means the harness's interesting case is unreachable and the harness
@@ -135,7 +136,9 @@ real strings by the differential property
 - **Callers' interpretation of the result**, e.g. `readable_targets` treating
   `root_privs` as readable (sound for a deny since T119, which clears
   `root_privs` on enforcement), or `may_connect_target` treating an ungated
-  `read` as `connect`.
+  `read` as `connect`. `PolicyGate::sql_privileges` reads a SQL verdict as
+  `is_root`, or the probed bit without `deny`; its synthetic path building and
+  name canonicalization (`bv_kernel_api::policy::sql`) are tested, not proved.
 - **Concurrency** (`DashMap` interleavings) and wrapping-TTL enforcement
   (only the inverted-TTL refusal is decided).
 
@@ -150,6 +153,18 @@ entity, owner, shares, override), in enforcement and probe mode. They must
 agree on the verdict, capabilities, `root_privs`, granting-policy names, LIST
 filter entries and their order, `capabilities()`, `has_mount_access`, the
 scope diagnostics and the built index.
+
+The generated rules draw one to three of the eleven SQL capabilities in three
+rules out of ten (T124), and generated shares and share overrides include
+`sql_select` and `sql_drop`. Parameter constraints are dropped from any rule
+sharing its raw path with a SQL rule, because `Policy::init` refuses that
+combination. `capability_bit_layout_matches_core` pins every `Capability` to
+its `bv-policy-core` constant, including `CAP_SQL_ALL` and `CAP_PROBE_ONLY`.
+T9 has no real-strings property: one that compared two ACLs built from the
+same generated text, with and without the SQL capabilities, found that two
+builds of identical text can disagree on `root_privs` in a capability probe
+(`PolicyConfig.path` is a `HashMap`, so rule order varies per parse). That
+disagreement does not involve the SQL capabilities and is open.
 
 `a_qualified_rule_matches_what_the_same_rule_matches_ungated` (T121) checks
 the host against itself rather than against `legacy`: for every generated
@@ -249,6 +264,14 @@ and 6.2 s), including at least one harness for each of T1–T8. The four slow on
 `t5_t6_a_failed_gate_contributes_nothing` (26 s) — run in tier 2 only. No
 harness falls between 14.1 s and 26.3 s, so the split does not depend on the
 exact threshold. Re-measure before moving a row (the `secs` column).
+
+T124 added T9's two harnesses (full run of 2026-10-26, 20 harnesses, 326 s
+wall): `t9_a_probe_only_capability_needs_a_rule_that_carries_it` (19.1 s) is
+fast and `t9_probe_only_capabilities_decide_nothing_but_their_own_bits`
+(29.2 s) is slow. The fast set is now 15 harnesses, 93.0 s on that run,
+covering T1–T9. Its slowest harness is the T9 one, 0.9 s under the threshold,
+and the fastest slow harness on that run measured 26.8 s, so a slower machine
+could move T9's fast harness across: re-measure before trusting the split.
 
 ### The report
 

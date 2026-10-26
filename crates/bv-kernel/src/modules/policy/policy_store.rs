@@ -335,6 +335,17 @@ path "resources/*" {
     scopes       = ["shared"]
 }
 
+# SQL privileges shared on a database resource (features/sql-browser.md §3.3).
+# Inert without a share: the scope gate demands the probed `sql_*` entry on
+# the share itself, so each capability is conveyed only by a share naming it.
+# No `owner` rule: owning the inventory record grants no SQL privilege.
+path "resources/resources/+/sql/*" {
+    capabilities = ["sql_select", "sql_insert", "sql_update", "sql_delete", "sql_alter",
+                    "sql_create", "sql_drop", "sql_execute", "sql_admin",
+                    "sql_export", "sql_script"]
+    scopes       = ["shared"]
+}
+
 # Asset groups shared with the caller. `groups` (list) is ungated like
 # `standard-user`; the handler narrows the response set to groups the caller
 # owns or has been shared on. `groups/+` (read a specific group) is
@@ -659,6 +670,16 @@ path "{{namespace.path}}/resources/*" {
     scopes       = ["shared"]
 }
 
+# SQL privileges shared on a database resource in this namespace. As in
+# `default`: inert without a share naming the probed `sql_*` entry, and no
+# `owner` rule.
+path "{{namespace.path}}/resources/resources/+/sql/*" {
+    capabilities = ["sql_select", "sql_insert", "sql_update", "sql_delete", "sql_alter",
+                    "sql_create", "sql_drop", "sql_execute", "sql_admin",
+                    "sql_export", "sql_script"]
+    scopes       = ["shared"]
+}
+
 # Asset groups. `groups` (list) is ungated -- the handler narrows the response
 # to groups the caller owns or has been shared on; reading one is share-scoped.
 path "{{namespace.path}}/resource-group/groups" {
@@ -755,6 +776,16 @@ path "{{request.namespace}}/secret/metadata/*" {
 # share granting only `read` conveys no session.
 path "{{request.namespace}}/resources/*" {
     capabilities = ["read", "list", "update", "connect"]
+    scopes       = ["shared"]
+}
+
+# SQL privileges shared on a database resource, in the namespace being
+# addressed. As in `default`: inert without a share naming the probed `sql_*`
+# entry, and no `owner` rule.
+path "{{request.namespace}}/resources/resources/+/sql/*" {
+    capabilities = ["sql_select", "sql_insert", "sql_update", "sql_delete", "sql_alter",
+                    "sql_create", "sql_drop", "sql_execute", "sql_admin",
+                    "sql_export", "sql_script"]
     scopes       = ["shared"]
 }
 
@@ -2866,6 +2897,11 @@ fn mount_relative_path<'a>(req_path: &'a str, ns_path: Option<&str>) -> &'a str 
 ///
 /// The returned value is the *storage key*, not the display name: bare at root,
 /// `<ns>/<name>` in a namespace (see `OwnerStore::scope_target_name`).
+///
+/// The SQL browser's synthetic paths `resources/resources/<name>/sql/**`
+/// resolve to the same `(resource, <name>)` target, so `scopes` and `groups`
+/// rules apply to SQL checks exactly as to the record (features/sql-browser.md
+/// §3.4; pinned by `sql_paths_resolve_to_their_resource`).
 fn resource_name_from_path(req_path: &str, ns_path: Option<&str>) -> Option<String> {
     let p = mount_relative_path(req_path, ns_path);
     let rest = p.strip_prefix("resources/")?;
@@ -2954,7 +2990,7 @@ fn looks_like_kv_path(req_path: &str, ns_path: Option<&str>) -> bool {
 /// record, path shape we don't recognize). `scope_passes` treats an
 /// empty `asset_owner` as "no owner match", so a resolution miss can
 /// only narrow access for owner-scoped rules.
-async fn resolve_asset_owner(core: &Weak<Core>, req_path: &str, ns_path: Option<&str>) -> String {
+pub(super) async fn resolve_asset_owner(core: &Weak<Core>, req_path: &str, ns_path: Option<&str>) -> String {
     let Some(core) = core.upgrade() else {
         return String::new();
     };
@@ -3014,7 +3050,7 @@ async fn resolve_asset_owner(core: &Weak<Core>, req_path: &str, ns_path: Option<
 /// initialized, caller has no `entity_id`, path shape we don't
 /// recognize). A resolution miss can only narrow access for
 /// shared-scoped rules — fail-closed.
-async fn resolve_target_shared_caps(
+pub(super) async fn resolve_target_shared_caps(
     core: &Weak<Core>,
     req: &Request,
 ) -> Vec<String> {
@@ -3293,7 +3329,7 @@ async fn caller_policies_opt_in_group_shared(core: &crate::core::Core, req: &Req
 /// initialized, path we don't recognize, storage error). The ACL
 /// evaluator treats empty here as "target is in no groups", so a
 /// lookup failure can only narrow access, never widen it.
-async fn resolve_asset_groups(
+pub(super) async fn resolve_asset_groups(
     core: &Weak<Core>,
     req_path: &str,
     ns_path: Option<&str>,
@@ -5464,6 +5500,68 @@ mod default_policy_does_not_narrow_admins_tests {
                 MatchKind::SegmentWildcard,
                 "{collection} is decided by `{rule_path}` — `+` matched the trailing empty segment"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod sql_privilege_substrate_tests {
+    use super::super::policy::Capability;
+    use super::*;
+    use crate::kernel_api::policy::{sql_check_path, SqlTarget};
+
+    /// The qualifier resolver's SQL edge (features/sql-browser.md §3.4):
+    /// every synthetic path resolves to `(resource, <r>)`, at root and inside
+    /// a namespace, and to nothing else — not a KV path, file or asset group.
+    #[test]
+    fn sql_paths_resolve_to_their_resource() {
+        let targets = [
+            SqlTarget::Server,
+            SqlTarget::Object { catalog: "def".into(), schema: "netrisk".into(), object: "users".into() },
+            SqlTarget::Object { catalog: "def".into(), schema: "netrisk".into(), object: "a/b".into() },
+        ];
+        for (ns, ns_opt, want) in [("", None, "netrisk-db"), ("dti/esi", Some("dti/esi"), "dti/esi/netrisk-db")] {
+            for t in &targets {
+                let path = sql_check_path(ns, "NetRisk-DB", t).unwrap();
+                assert_eq!(resource_name_from_path(&path, ns_opt).as_deref(), Some(want), "{path}");
+                assert!(!looks_like_kv_path(&path, ns_opt), "{path}");
+                assert_eq!(file_id_from_path(&path, ns_opt), None, "{path}");
+                assert_eq!(asset_group_name_from_path(&path, ns_opt), None, "{path}");
+            }
+        }
+    }
+
+    /// The baseline rule (§3.3) is in `default`, `namespace-shared` and
+    /// `shared-access`, templated like the connect grants, share-scoped, with
+    /// all eleven SQL capabilities and nothing else, and no rule in any of the
+    /// three grants a SQL capability through ownership.
+    #[test]
+    fn every_share_baseline_carries_the_shared_sql_rule_and_no_owner_rule() {
+        for (name, text, prefix) in [
+            ("default", DEFAULT_POLICY, ""),
+            ("namespace-shared", NAMESPACE_SHARED_POLICY, "{{namespace.path}}/"),
+            ("shared-access", SHARED_ACCESS_POLICY, "{{request.namespace}}/"),
+        ] {
+            let p = Policy::from_str(text).unwrap_or_else(|e| panic!("{name} must parse: {e}"));
+            let sql_rules: Vec<_> = p.paths.iter().filter(|r| r.capabilities.iter().any(Capability::is_sql)).collect();
+            assert_eq!(sql_rules.len(), 1, "{name}: exactly one rule grants SQL capabilities");
+            let r = sql_rules[0];
+            assert_eq!(r.path, format!("{prefix}resources/resources/+/sql/*"), "{name}");
+            assert_eq!(r.scopes, vec!["shared".to_string()], "{name}: share-scoped only");
+            assert!(r.groups.is_empty(), "{name}");
+            let mut caps: Vec<String> = r.capabilities.iter().map(|c| c.to_string()).collect();
+            caps.sort();
+            let mut want: Vec<String> =
+                crate::kernel_api::policy::SqlCapability::ALL.iter().map(|c| c.as_str().to_string()).collect();
+            want.sort();
+            assert_eq!(caps, want, "{name}: all eleven, nothing else");
+            for owner_rule in p.paths.iter().filter(|r| r.scopes.iter().any(|s| s == "owner")) {
+                assert!(
+                    !owner_rule.capabilities.iter().any(Capability::is_sql),
+                    "{name}: {} grants SQL through ownership",
+                    owner_rule.path
+                );
+            }
         }
     }
 }

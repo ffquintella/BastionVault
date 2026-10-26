@@ -2824,6 +2824,17 @@ impl SystemBackend {
             if !e.remote_addr.is_empty() {
                 fields.push(format!("from={}", e.remote_addr));
             }
+            // SQL privilege refusals (features/sql-browser.md §3.4) name what
+            // was refused, in which namespace, and for which plugin.
+            if !e.capability.is_empty() {
+                fields.push(format!("capability={}", e.capability));
+            }
+            if !e.namespace.is_empty() {
+                fields.push(format!("namespace={}", e.namespace));
+            }
+            if !e.plugin.is_empty() {
+                fields.push(format!("plugin={}", e.plugin));
+            }
             events.push(AuditEventBuilder {
                 ts: e.ts,
                 user: e.user,

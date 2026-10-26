@@ -807,6 +807,59 @@ kinds are resolved server-side; `provider` takes `provider_account_id` (see
 *Credential providers at Connect* below). v1 `POST /v1/rustion/session/open`
 (raw `credential_material`) is unchanged.
 
+### SQL privileges (policy and share vocabulary)
+
+Eleven capabilities grant SQL privileges on a database resource for the SQL
+browser ([features/sql-browser.md](../features/sql-browser.md) §3, T124):
+`sql_select`, `sql_insert`, `sql_update`, `sql_delete`, `sql_alter`,
+`sql_create`, `sql_drop`, `sql_execute`, `sql_admin`, `sql_export` and
+`sql_script`. They are probe-only, like `connect`: no request operation needs
+one, no other capability implies one (`read`, `update`, `sudo` and `connect`
+grant none), none implies another, and an applying `deny` revokes them. Only
+the root token holds them all implicitly.
+
+They are evaluated on synthetic paths under the resource, which are never
+routed. The resource name is the trimmed, lower-case canonical name, as owner,
+share and asset-group records key it:
+
+~~~
+resources/resources/<resource>/sql/server
+resources/resources/<resource>/sql/objects/<catalog>/<schema>/<object>
+~~~
+
+~~~hcl
+path "resources/resources/netrisk-db/sql/*" {
+  capabilities = ["sql_select"]
+}
+~~~
+
+A rule that lists a SQL capability cannot also set `allowed_parameters`,
+`denied_parameters` or `required_parameters`; the policy is refused. An
+object whose name contains `/`, `*`, `+` or a control character, or is empty,
+`.` or `..`, is checked on `…/sql/objects/` instead, so no rule naming a
+catalog, schema or object applies to it, and only a grant covering every
+object does.
+
+Shares on `resource` and `asset-group` targets accept the same eleven names
+(`identity/sharing/…`, `capabilities`). On `kv-secret` and `file` targets a
+SQL capability is refused with a `400`; it is not dropped. A share takes
+effect through the share-scoped rule on `resources/resources/+/sql/*` in the
+`default`, `namespace-shared` and `shared-access` baselines, which conveys
+exactly the `sql_*` entries the share names. Owning the resource record grants
+no SQL privilege.
+
+No HTTP route uses these yet. The SQL browser's host calls and the
+`resources/v2/sql/privileges/<resource>` read land with later Phase 1
+subsystems of T124. A refused check made for a plugin is recorded on the Audit
+page's denied view with `reason=sql-privilege`, the capability, the namespace
+and the plugin name.
+
+A node built before T124 cannot parse a policy that names a `sql_*`
+capability and refuses the whole policy, including `default`, which carries
+the baseline rule above. The cluster-wide write gate for `sql_*` (§13,
+decision D4) is not implemented yet, so this vocabulary is not for clusters
+running mixed versions.
+
 ### Web Connect (`form` and `http-auth` modes)
 
 Server half of [Web Application Connect](../features/web-application-connect.md)

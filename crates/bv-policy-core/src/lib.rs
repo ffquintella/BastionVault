@@ -22,6 +22,8 @@
 //! - [`segments_match`] — how a segment-wildcard rule (`+`) matches a path.
 //! - [`compare`] / [`MostSpecific`] — which non-exact rule is the most specific.
 //! - [`merge_caps`] — how two rules with an identical path combine.
+//! - [`CAP_PROBE_ONLY`] — `connect` and the eleven SQL capabilities, which no
+//!   operation requires and the decision treats as plain bits (theorem T9).
 //!
 //! The crate is `no_std`, `unsafe`-free and has no dependencies, so
 //! `cargo kani -p bv-policy-core` builds and verifies it in isolation. The
@@ -111,6 +113,25 @@ pub const CAP_SQL_ADMIN: u32 = 1 << 18;
 pub const CAP_SQL_EXPORT: u32 = 1 << 19;
 /// `sql_script` — multi-statement batches and script files (features/sql-browser.md §3.1).
 pub const CAP_SQL_SCRIPT: u32 = 1 << 20;
+
+/// Every SQL capability bit, `sql_select` … `sql_script` (bits 10–20).
+pub const CAP_SQL_ALL: u32 = CAP_SQL_SELECT
+    | CAP_SQL_INSERT
+    | CAP_SQL_UPDATE
+    | CAP_SQL_DELETE
+    | CAP_SQL_ALTER
+    | CAP_SQL_CREATE
+    | CAP_SQL_DROP
+    | CAP_SQL_EXECUTE
+    | CAP_SQL_ADMIN
+    | CAP_SQL_EXPORT
+    | CAP_SQL_SCRIPT;
+
+/// The capabilities no [`Op`] requires: `connect` and the SQL family. They
+/// are only ever asked about in a capability probe, never granted as an
+/// operation. Theorem T9 (`docs/verification.md`) proves the decision core
+/// treats them as inert everywhere except in their own bit.
+pub const CAP_PROBE_ONLY: u32 = CAP_CONNECT | CAP_SQL_ALL;
 
 /// Verification bound, not a production limit: the proofs consider every
 /// group-gated layer and every scope-filtered layer of up to this many rules.
