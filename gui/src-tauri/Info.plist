@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Merged into the macOS bundle's Info.plist by Tauri.
+
+	     App Transport Security applies to a bundled app's web content and
+	     refuses, with NSURLErrorSecureConnectionFailed (-1200), a server whose
+	     certificate the platform rejected (expired, private CA) even after the
+	     operator confirmed it in the web-session trust dialog or a profile pin
+	     matched: the page then fails with "page not loaded: the TLS connection
+	     failed". Web-content ATS is therefore off. Certificate trust is still
+	     decided per connection by the session's TLS pin gate
+	     (session/web_tls_pin.rs); this only drops ATS's extra minimums (TLS
+	     version, cipher suites). features/web-application-connect.md section 8.2. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoadsInWebContent</key>
+		<true/>
+	</dict>
+</dict>
+</plist>

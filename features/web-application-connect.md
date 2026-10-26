@@ -1858,6 +1858,20 @@ main-resource loads only. On Windows, a WebView2 runtime without
 `ICoreWebView2_14` keeps its own handling for a window without pins (and
 refuses to open a pinned one, as before).
 
+**macOS and App Transport Security.** A bundled `.app` has ATS enforced on
+its web content, and ATS fails a connection to a server whose certificate the
+platform rejected with `NSURLErrorSecureConnectionFailed` (-1200) *even when
+the delegate answers the trust challenge with `UseCredential`* — so Continue,
+and a pin match on a privately issued certificate, ended in `page not loaded:
+the TLS connection failed` (`load_tls`). Reproduced with a minimal WKWebView
+against an expired chain: the bare binary loads the page, the same code in a
+bundle fails with -1200, and the bundle with
+`NSAllowsArbitraryLoadsInWebContent` loads it. `gui/src-tauri/Info.plist`
+therefore sets that key. Trust is still decided per connection by the gate;
+what is given up is ATS's minimums (TLS version, cipher suites) for web
+content. Verify with a packaged build (`make build`), not `make run-dev-gui`:
+an unbundled binary has no ATS.
+
 ### 9. `sso` mode (Phase 7, blocked by T52)
 
 Once S19 ships the SAML IdP and OIDC OP:
