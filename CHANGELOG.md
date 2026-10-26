@@ -133,6 +133,10 @@ EXAMPLE ENTRY:
 
 - Fix exporting an issuer certificate as PKCS#7 failing with "HTTP 500: export: DER error: SET OF contains duplicate"; a certificate that appears both as the leaf and in the chain (always the case for an issuer export) is now bundled once.
 
+#### Resource Connect Web
+
+- Fix a web session to a server with an expired or privately-issued certificate ending in "page not loaded: the TLS connection failed" on macOS even after choosing Continue in the certificate dialog: the app bundle now opts its web content out of App Transport Security, which was refusing the connection the operator had accepted (T139, S105)
+
 #### Resource Connect RDP
 
 - Fix "mixed username format" when connecting over RDP with a `DOMAIN\user` or `user@domain` account: the qualified name is split into user and domain (or kept as a UPN with the separate domain dropped) before CredSSP sees it
