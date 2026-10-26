@@ -92,6 +92,7 @@ mod dispatch_tests {
             accessor: "acc-test".into(),
             display_name: "test principal".into(),
             policies: vec!["ai-reader".into()],
+            namespace: "dti/esi".into(),
         }
     }
 
@@ -250,7 +251,10 @@ mod dispatch_tests {
         let p = principal();
         let guard = SingleUseGuard::new();
         let result = dispatcher::call("bv_whoami", Map::new(), None, &ctx(&b, &backend, &p, &guard)).await.unwrap();
-        assert_eq!(result.structured_content.unwrap()["accessor"], json!("acc-test"));
+        let sc = result.structured_content.unwrap();
+        assert_eq!(sc["accessor"], json!("acc-test"));
+        // T457: the namespace the token is bound to, from the principal.
+        assert_eq!(sc["namespace"], json!("dti/esi"));
     }
 
     #[tokio::test]
@@ -522,8 +526,20 @@ mod dispatch_tests {
         let backend = FakeBackend::default().with("resources/resources/", json!({ "keys": ["db1"] }));
         let result =
             dispatcher::call("bv_resource_list", Map::new(), None, &ctx(&b, &backend, &p, &guard)).await.unwrap();
-        assert_eq!(result.structured_content.unwrap()["keys"], json!(["db1"]));
+        let sc = result.structured_content.unwrap();
+        assert_eq!(sc["keys"], json!(["db1"]));
+        assert_eq!(sc["namespace"], json!("dti/esi"), "the list says whose resources these are");
         assert_eq!(backend.only_call().0, Operation::List);
+
+        // A `namespace` argument is not an input: it changes neither the
+        // routed path nor the namespace reported (T457 injection regression).
+        let backend = FakeBackend::default().with("resources/resources/", json!({ "keys": ["db1"] }));
+        let mut injected = Map::new();
+        injected.insert("namespace".into(), json!("other-tenant"));
+        let result =
+            dispatcher::call("bv_resource_list", injected, None, &ctx(&b, &backend, &p, &guard)).await.unwrap();
+        assert_eq!(result.structured_content.unwrap()["namespace"], json!("dti/esi"));
+        assert_eq!(backend.only_call().1, "resources/resources/");
 
         let backend = FakeBackend::default().with("resources/resources/db1", json!({ "hostname": "db1.example" }));
         let mut args = Map::new();

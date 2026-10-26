@@ -135,6 +135,12 @@ pub struct McpPairing {
     pub expires_at: Option<u64>,
     pub last_used_at: u64,
     pub expired: bool,
+    /// The namespace the operator narrowed this pairing to (T457 Phase 2);
+    /// `None`: its tokens follow the session.
+    pub namespace: Option<String>,
+    /// Where this pairing's live token is bound, as the vault answered its
+    /// exchange (`""` = root). `None`: no live token, or the vault did not say.
+    pub token_namespace: Option<String>,
 }
 
 fn str_list(v: Option<&Value>) -> Vec<String> {
@@ -297,13 +303,16 @@ pub fn mcp_pairings_path() -> CmdResult<String> {
 }
 
 #[tauri::command]
-pub fn mcp_list_pairings() -> CmdResult<Vec<McpPairing>> {
+pub fn mcp_list_pairings(state: State<'_, AppState>) -> CmdResult<Vec<McpPairing>> {
     let records = PairingStore::at(PairingStore::default_path()?).load()?;
     let now = now_secs();
+    let live = state.mcp_host.token_namespaces();
     Ok(records
         .into_iter()
         .map(|r| McpPairing {
             expired: r.is_expired(now),
+            token_namespace: live.get(&r.id).cloned().flatten(),
+            namespace: r.namespace,
             id: r.id,
             client_name: r.client_name,
             client_version: r.client_version,

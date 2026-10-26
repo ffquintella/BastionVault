@@ -63,6 +63,9 @@ pub struct PairingPrompt {
     /// The vault this session is signed in to: the remote address, or the
     /// local vault. An approval is not bound to it (see `link`).
     pub vault: String,
+    /// The namespace this client's tokens will be bound to: the session's
+    /// own (`""` = root). `None` when it could not be read.
+    pub namespace: Option<String>,
     pub deadline_unix_ms: u64,
     /// The read-only tools that never reveal a value: the default grant.
     pub default_tools: Vec<String>,
@@ -83,6 +86,9 @@ pub struct ConfirmPrompt {
     pub reveals: bool,
     pub destructive: bool,
     pub deadline_unix_ms: u64,
+    /// The namespace the call runs in (`""` = root): the one the pairing's
+    /// token is bound to. `None` when it could not be read.
+    pub namespace: Option<String>,
     /// A brokered-session call: what it will do, field by field. Its
     /// confirmation is mandatory.
     pub session: Option<SessionPrompt>,
@@ -154,6 +160,10 @@ pub struct McpGrantInput {
     #[serde(default)]
     pub connect_allowed: bool,
     pub ttl_secs: u64,
+    /// The dialog's namespace selector (T457 Phase 2): a narrowing the vault
+    /// validates at every exchange. Absent or `null`: follow the session.
+    #[serde(default)]
+    pub namespace: Option<String>,
 }
 
 /// The factor the operator chose in a session confirmation.
@@ -231,6 +241,7 @@ pub fn reply_for(answer: McpPromptAnswer) -> Result<PromptReply, String> {
                 // Forced on with `connect_allowed` by `normalize_grant`.
                 confirm_connect: g.connect_allowed,
                 ttl_secs: g.ttl_secs,
+                namespace: g.namespace,
             })?;
             Ok(PromptReply::Pairing(PairingDecision::Approved(grant)))
         }
@@ -396,6 +407,7 @@ impl Prompter for GuiPrompter {
                 peer_uid: request.peer_uid,
                 same_user: request.peer_uid.is_some() && request.peer_uid == self.same_uid,
                 vault: self.vault_label.clone(),
+                namespace: request.namespace.map(sanitize_for_model),
                 deadline_unix_ms: now_ms() + PAIRING_TIMEOUT.as_millis() as u64,
                 default_tools: default_tool_allowlist(),
                 default_ttl_secs: DEFAULT_TOKEN_TTL_SECS,
@@ -436,6 +448,7 @@ impl Prompter for GuiPrompter {
                 reveals: request.reveals,
                 destructive: request.destructive,
                 deadline_unix_ms: now_ms() + CONFIRM_TIMEOUT.as_millis() as u64,
+                namespace: request.namespace.map(sanitize_for_model),
                 session,
                 mfa,
                 fido2_challenge,
@@ -533,6 +546,7 @@ mod tests {
             client_version: "2.1",
             transport: Transport::Uds,
             peer_uid: Some(501),
+            namespace: Some("dti/esi"),
         }
     }
 
@@ -560,7 +574,31 @@ mod tests {
             confirm_destructive: true,
             connect_allowed: false,
             ttl_secs: 3600,
+            namespace: None,
         }
+    }
+
+    /// T457 Phase 2: the selector's namespace reaches the grant canonical; a
+    /// malformed one refuses the answer (the dialog stays open); an answer
+    /// written before the selector existed follows the session.
+    #[test]
+    fn the_namespace_selector_reaches_the_grant() {
+        let mut g = grant_input();
+        g.namespace = Some("/dti/esi/".into());
+        let Ok(PromptReply::Pairing(PairingDecision::Approved(grant))) =
+            reply_for(McpPromptAnswer::Pairing { approved: true, grant: Some(g.clone()) })
+        else {
+            panic!("a well-formed namespace is accepted")
+        };
+        assert_eq!(grant.namespace.as_deref(), Some("dti/esi"));
+        g.namespace = Some("dti/../x".into());
+        assert!(reply_for(McpPromptAnswer::Pairing { approved: true, grant: Some(g) }).is_err());
+        let old: McpGrantInput = serde_json::from_value(serde_json::json!({
+            "tool_allowlist": ["bv_whoami"], "path_scope": [], "reveal_allowed": false,
+            "destructive_allowed": false, "confirm_reveal": true, "confirm_destructive": true, "ttl_secs": 60,
+        }))
+        .unwrap();
+        assert_eq!(old.namespace, None);
     }
 
     /// A grant with sessions gets them confirmed; a session tool without
@@ -598,6 +636,7 @@ mod tests {
         assert_eq!(prompt.client_name, "claude-code", "client-chosen strings are sanitized");
         assert_eq!((prompt.transport.as_str(), prompt.peer_uid, prompt.same_user), ("uds", Some(501), true));
         assert_eq!(prompt.vault, "https://vault.example.com:8200", "the dialog names the vault asked for");
+        assert_eq!(prompt.namespace.as_deref(), Some("dti/esi"), "and the namespace its tokens are bound to");
         assert_eq!(prompt.default_tools, default_tool_allowlist());
         assert_eq!(lock(&sink.withdrawn).as_slice(), std::slice::from_ref(&prompt.id));
     }
@@ -644,6 +683,7 @@ mod tests {
             session: None,
             open_world: false,
             mfa: None,
+            namespace: Some(""),
         };
         assert_eq!(p.confirm(&call), None);
         assert!(lock(&sink.shown).is_empty());
@@ -686,6 +726,7 @@ mod tests {
             session: None,
             open_world: false,
             mfa: None,
+            namespace: Some(""),
         };
         let answering = answer_when_shown(broker.clone(), McpPromptAnswer::Confirm { allow: false, mfa: None });
         assert_eq!(p.confirm(&call), Some(false));
@@ -699,6 +740,7 @@ mod tests {
         assert_eq!((prompt.tool.as_str(), prompt.summary.as_str()), ("bv_kv_read", "mount=secret path=ai/x"));
         assert!(prompt.reveals && !prompt.destructive);
         assert!(!prompt.tool_description.is_empty());
+        assert_eq!(prompt.namespace.as_deref(), Some(""), "root is named, not left out");
     }
 
     #[test]
@@ -766,6 +808,7 @@ mod tests {
             reveals: true,
             destructive: false,
             deadline_unix_ms: 1,
+            namespace: None,
             session: None,
             mfa: None,
             fido2_challenge: Some(serde_json::json!({ "publicKey": { "challenge": "c2VjcmV0" } })),
@@ -803,6 +846,7 @@ mod tests {
             session: Some(call),
             open_world: true,
             mfa,
+            namespace: Some("dti/esi"),
         }
     }
 

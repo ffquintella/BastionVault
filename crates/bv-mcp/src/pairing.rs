@@ -100,6 +100,12 @@ pub struct PairingRecord {
     pub approved_at: u64,
     pub expires_at: Option<u64>,
     pub last_used_at: u64,
+    /// The namespace the operator narrowed this pairing's tokens to when
+    /// approving it (T457 Phase 2): a request the vault re-validates at each
+    /// exchange. Absent (every record written before it existed): the
+    /// tokens follow the operator's session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
 }
 
 fn record_version() -> u32 {
@@ -372,7 +378,25 @@ mod tests {
             approved_at: 100,
             expires_at: Some(1_000),
             last_used_at: 100,
+            namespace: None,
         }
+    }
+
+    /// T457 Phase 2: a record written before narrowing existed follows the
+    /// operator's session (no `namespace`), a narrowed one round-trips, and a
+    /// record that never narrowed is written exactly as before.
+    #[test]
+    fn a_record_without_a_namespace_follows_the_session() {
+        let plain = record("a", "claude", None, Transport::Stdio);
+        let written = serde_json::to_value(&plain).unwrap();
+        assert!(written.get("namespace").is_none(), "nothing new on disk for a record that did not narrow");
+        let read: PairingRecord = serde_json::from_value(written).unwrap();
+        assert_eq!(read.namespace, None);
+
+        let mut narrowed = record("b", "claude", None, Transport::Stdio);
+        narrowed.namespace = Some("dti/esi".to_string());
+        let back: PairingRecord = serde_json::from_value(serde_json::to_value(&narrowed).unwrap()).unwrap();
+        assert_eq!(back, narrowed);
     }
 
     fn temp_store(name: &str) -> (PairingStore, PathBuf) {

@@ -565,16 +565,20 @@ mod mod_test {
             confirm_connect: false,
             operator: None,
         };
-        let expired =
-            token_store.mint_mcp_token(&op, &[], 600, "t-expired".into(), binding(Some(unix_now() - 5))).await.unwrap();
+        let expired = token_store
+            .mint_mcp_token(&op, &[], 600, "t-expired".into(), binding(Some(unix_now() - 5)), None)
+            .await
+            .unwrap();
         assert!(
             token_store.check_token("mcp/dispatch", &expired.client_token, "", true).await.is_err(),
             "a token whose waiver has expired must be refused at its next call"
         );
-        let live =
-            token_store.mint_mcp_token(&op, &[], 600, "t-live".into(), binding(Some(unix_now() + 600))).await.unwrap();
+        let live = token_store
+            .mint_mcp_token(&op, &[], 600, "t-live".into(), binding(Some(unix_now() + 600)), None)
+            .await
+            .unwrap();
         assert!(token_store.check_token("mcp/dispatch", &live.client_token, "", true).await.unwrap().is_some());
-        let unwaived = token_store.mint_mcp_token(&op, &[], 600, "t-plain".into(), binding(None)).await.unwrap();
+        let unwaived = token_store.mint_mcp_token(&op, &[], 600, "t-plain".into(), binding(None), None).await.unwrap();
         assert!(token_store.check_token("mcp/dispatch", &unwaived.client_token, "", true).await.unwrap().is_some());
 
         // Revocation: the waiver record goes, and so do the tokens minted under it.
@@ -1270,5 +1274,687 @@ mod mod_test {
         let stored: Value = serde_json::from_slice(&view.get("mcp/config").await.unwrap().unwrap().value).unwrap();
         assert!(stored.get("brokered_sessions_target_cidrs_source").is_none(), "{stored}");
         assert!(stored.get("brokered_sessions_effective_target_cidrs").is_none(), "{stored}");
+    }
+
+    // ── MCP namespace selection, Phase 1 (features/mcp-namespace-selection.md) ──
+
+    use crate::logical::{Operation, Response, CHILD_VISIBLE_META, NS_PATH_META};
+    use crate::mcp_endpoint::{handle_jsonrpc, McpEndpoint, McpEndpointOutcome};
+    use bv_mcp::request_state::SingleUseGuard;
+
+    /// A call as `token`, addressed to namespace `ns` the way a client
+    /// addresses one (the header); `""` is root.
+    async fn ns_call(
+        core: &crate::core::Core,
+        token: &str,
+        op: Operation,
+        ns: &str,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<Option<Response>, RvError> {
+        let mut req = crate::logical::Request::new(path);
+        req.operation = op;
+        req.client_token = token.to_string();
+        req.body = body.and_then(|b| b.as_object().cloned());
+        if !ns.is_empty() {
+            req.headers = Some(std::collections::HashMap::from([("x-bastionvault-namespace".into(), ns.into())]));
+        }
+        core.handle_request(&mut req).await
+    }
+
+    /// `hcl` as policy `name` in namespace `ns`'s own store. Written through
+    /// the store: `sys/policy` refuses a tenant policy that names a `sys/`
+    /// path (`refuse_cross_namespace_paths`), and the exchange is one.
+    async fn tenant_policy(core: &crate::core::Core, ns: &str, name: &str, hcl: &str) {
+        use std::str::FromStr as _;
+        let mut policy = crate::modules::policy::Policy::from_str(hcl).unwrap();
+        policy.name = name.to_string();
+        let module = core.module_manager().get_module::<crate::modules::policy::PolicyModule>("policy").unwrap();
+        module.policy_store.load().set_policy_ns(policy, ns).await.unwrap();
+    }
+
+    fn tenant_operator_policy(ns: &str) -> String {
+        format!(
+            r#"
+            path "sys/mcp/token"                {{ capabilities = ["update"] }}
+            path "sys/mcp/pairings/*"           {{ capabilities = ["delete"] }}
+            path "{ns}/resources/resources/*"   {{ capabilities = ["read", "list"] }}
+        "#
+        )
+    }
+
+    /// Namespaces `tenant-a` and `tenant-b`, a resource in each and one at
+    /// root; `alice` (root userpass) holds `mcp-tenant` in both tenants, and
+    /// `felipe` holds the root-namespace equivalent.
+    async fn tenants(core: &crate::core::Core, root: &str) {
+        for ns in ["tenant-a", "tenant-b"] {
+            ns_call(core, root, Operation::Write, "", &format!("sys/namespaces/{ns}"), Some(json!({}))).await.unwrap();
+            tenant_policy(core, ns, "mcp-tenant", &tenant_operator_policy(ns)).await;
+        }
+        for (ns, name) in [("tenant-a", "gw-a"), ("tenant-b", "gw-b"), ("", "gw-root")] {
+            let record = json!({ "type": "server", "hostname": format!("{name}.example") });
+            ns_call(core, root, Operation::Write, ns, &format!("resources/resources/{name}"), Some(record))
+                .await
+                .unwrap();
+        }
+        let root_policy = r#"
+            path "sys/mcp/token"         { capabilities = ["update"] }
+            path "resources/resources/*" { capabilities = ["read", "list"] }
+        "#;
+        let _ = test_write_api(
+            core,
+            root,
+            "sys/policy/mcp-root",
+            true,
+            json!({ "policy": root_policy }).as_object().cloned(),
+        )
+        .await;
+        test_mount_auth_api(core, root, "userpass", "userpass").await;
+        for (user, policies) in [("alice", "mcp-tenant"), ("felipe", "mcp-root")] {
+            let body = json!({ "password": "pw", "policies": policies }).as_object().cloned();
+            let _ = test_write_api(core, root, &format!("auth/userpass/users/{user}"), true, body).await;
+        }
+    }
+
+    /// `user`'s login, bound to namespace `ns` by the header at login.
+    async fn login_in(core: &crate::core::Core, user: &str, ns: &str) -> String {
+        let resp = ns_call(
+            core,
+            "",
+            Operation::Write,
+            ns,
+            &format!("auth/userpass/login/{user}"),
+            Some(json!({ "password": "pw" })),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        resp.auth.expect("a login mints a token").client_token
+    }
+
+    fn tenant_pairing(id: &str) -> Option<serde_json::Map<String, Value>> {
+        json!({
+            "pairing": {
+                "id": id,
+                "client_name": "claude-code",
+                "client_version": "2.1",
+                "tool_allowlist": ["bv_whoami", "bv_resource_list", "bv_resource_describe"],
+                "path_scope": ["resources/*"],
+            },
+        })
+        .as_object()
+        .cloned()
+    }
+
+    /// Exchanges `id` as `operator`; returns the token and the namespace the
+    /// exchange answer reports.
+    async fn pair_as(core: &crate::core::Core, operator: &str, id: &str) -> (String, Value) {
+        let data = test_write_api(core, operator, "sys/mcp/token", true, tenant_pairing(id))
+            .await
+            .unwrap()
+            .unwrap()
+            .data
+            .unwrap();
+        (data["auth"]["client_token"].as_str().unwrap().to_string(), data["auth"]["metadata"]["namespace"].clone())
+    }
+
+    async fn tool_call(ep: &McpEndpoint<'_>, token: &str, tool: &str, arguments: Value) -> Value {
+        let body = serde_json::to_vec(&json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": tool, "arguments": arguments },
+        }))
+        .unwrap();
+        match handle_jsonrpc(ep, token, &body).await.unwrap() {
+            McpEndpointOutcome::Answer(r) => serde_json::to_value(r).unwrap(),
+            other => panic!("expected a JSON-RPC answer, got {other:?}"),
+        }
+    }
+
+    fn ok(answer: Value) -> Value {
+        assert!(answer["error"].is_null(), "the call failed: {answer}");
+        answer["result"]["structuredContent"].clone()
+    }
+
+    fn refusal_code(answer: &Value) -> String {
+        answer["error"]["data"]["code"]
+            .as_str()
+            .unwrap_or_else(|| panic!("expected a refusal, got {answer}"))
+            .to_string()
+    }
+
+    /// A file audit device auditing namespace `ns` (`mirror` on a root one
+    /// also receives every namespace's entries).
+    async fn audit_device(
+        core: &crate::core::Core,
+        name: &str,
+        ns: &str,
+        mirror: bool,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "bv-mcp-ns-audit-{name}-{}",
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("audit.log");
+        let broker = core.audit_broker.load().as_ref().cloned().expect("broker installed at unseal");
+        let options = std::collections::HashMap::from([("file_path".to_string(), log.display().to_string())]);
+        broker
+            .enable_device(crate::audit::AuditDeviceConfig {
+                path: format!("ns-{name}"),
+                device_type: "file".into(),
+                description: String::new(),
+                options,
+                namespace: ns.to_string(),
+                mirror,
+            })
+            .await
+            .unwrap();
+        (dir, log)
+    }
+
+    fn event_data(log: &std::path::Path, name: &str) -> Vec<Value> {
+        audit_lines(log)
+            .into_iter()
+            .filter(|e| e["type"] == "event" && e["request"]["path"] == name)
+            .map(|e| e["request"]["data"].clone())
+            .collect()
+    }
+
+    /// An operator signed in to `tenant-a` pairs: the token is bound to
+    /// `tenant-a` and never child-visible, `bv_resource_list` sees that
+    /// tenant's resources and not root's or a sibling's, `bv_whoami` names
+    /// the namespace, a `namespace` argument changes nothing, and the audit
+    /// block carries it in the tenant's stream and the root mirror. A root
+    /// operator is unchanged.
+    #[tokio::test]
+    async fn test_mcp_pairing_in_a_child_namespace_acts_there() {
+        let (_bvault, core_arc, root) = new_unseal_test_bastion_vault("test_mcp_ns_child").await;
+        let core: &crate::core::Core = &core_arc;
+        let (root_dir, root_log) = audit_device(core, "root", "", true).await;
+        let (tenant_dir, tenant_log) = audit_device(core, "tenant", "tenant-a", false).await;
+        tenants(core, &root).await;
+
+        let alice = login_in(core, "alice", "tenant-a").await;
+        let (token, reported) = pair_as(core, &alice, "alice-a").await;
+        assert_eq!(reported, json!("tenant-a"), "the exchange says where the token is bound");
+        let auth_module = core.module_manager().get_module::<crate::modules::auth::AuthModule>("auth").unwrap();
+        let store = auth_module.token_store.load_full().unwrap();
+        let auth = store.check_token("mcp/dispatch", &token, "", true).await.unwrap().unwrap();
+        assert_eq!(auth.metadata.get(NS_PATH_META).map(String::as_str), Some("tenant-a"));
+        assert_eq!(auth.metadata.get(CHILD_VISIBLE_META).map(String::as_str), Some("false"));
+        assert_eq!(auth.mcp_binding.unwrap().operator.unwrap().namespace, "tenant-a");
+
+        let guard = SingleUseGuard::new();
+        let ep = McpEndpoint {
+            core: &core_arc,
+            client_ip: "",
+            tool_timeout: std::time::Duration::from_secs(30),
+            server_version: "9.9",
+            request_state_key: b"ns-test-key",
+            single_use_guard: &guard,
+        };
+        assert_eq!(ok(tool_call(&ep, &token, "bv_whoami", json!({})).await)["namespace"], json!("tenant-a"));
+        let listed = ok(tool_call(&ep, &token, "bv_resource_list", json!({})).await);
+        assert_eq!(listed["keys"], json!(["gw-a"]), "the tenant's resources, not root's: {listed}");
+        assert_eq!(listed["namespace"], json!("tenant-a"));
+        let gw = ok(tool_call(&ep, &token, "bv_resource_describe", json!({ "name": "gw-a" })).await);
+        assert_eq!(gw["hostname"], json!("gw-a.example"));
+        for elsewhere in ["gw-root", "gw-b"] {
+            let answer = tool_call(&ep, &token, "bv_resource_describe", json!({ "name": elsewhere })).await;
+            assert!(
+                answer["error"].is_object() || ok(answer.clone()).get("hostname").is_none(),
+                "{elsewhere}: {answer}"
+            );
+        }
+        // A `namespace` argument is not an input.
+        for injected in [json!(""), json!("tenant-b"), json!("/")] {
+            let listed = ok(tool_call(&ep, &token, "bv_resource_list", json!({ "namespace": injected })).await);
+            assert_eq!((listed["keys"].clone(), listed["namespace"].clone()), (json!(["gw-a"]), json!("tenant-a")));
+        }
+
+        // A root operator is unchanged.
+        let felipe = login_in(core, "felipe", "").await;
+        let (root_token, reported) = pair_as(core, &felipe, "felipe-root").await;
+        assert_eq!(reported, json!(""));
+        let listed = ok(tool_call(&ep, &root_token, "bv_resource_list", json!({})).await);
+        assert_eq!((listed["keys"].clone(), listed["namespace"].clone()), (json!(["gw-root"]), json!("")));
+        assert_eq!(ok(tool_call(&ep, &root_token, "bv_whoami", json!({})).await)["namespace"], json!(""));
+
+        // The audit block names the namespace, in the tenant's own stream and
+        // in the root mirror.
+        for log in [&tenant_log, &root_log] {
+            let entries = audit_lines(log);
+            let listed = entries
+                .iter()
+                .find(|e| e["request"]["mcp"]["tool"] == "bv_resource_list" && e["namespace"] == "tenant-a")
+                .unwrap_or_else(|| panic!("the tenant call is audited in {log:?}: {entries:#?}"));
+            assert_eq!(listed["request"]["mcp"]["namespace"], json!("tenant-a"));
+            assert_eq!(listed["request"]["path"], json!("tenant-a/resources/resources/"));
+        }
+        assert!(
+            audit_lines(&tenant_log).iter().all(|e| e["request"]["mcp"]["namespace"] != json!("")),
+            "the root operator's calls are not in the tenant's stream"
+        );
+        let _ = std::fs::remove_dir_all(root_dir);
+        let _ = std::fs::remove_dir_all(tenant_dir);
+    }
+
+    /// Follow the operator's session: re-exchanging the same pairing from a
+    /// session in another namespace binds the new token there and records
+    /// `mcp.pairing.namespace_changed`; a pairing whose earlier tokens predate
+    /// namespace binding (root-bound) records the move from root; revoking
+    /// the pairing removes its namespace record.
+    #[tokio::test]
+    async fn test_mcp_pairing_follows_the_operators_session_and_records_the_move() {
+        use crate::storage::{Storage as _, StorageEntry};
+
+        let (_bvault, core_arc, root) = new_unseal_test_bastion_vault("test_mcp_ns_follow").await;
+        let core: &crate::core::Core = &core_arc;
+        let (dir, log) = audit_device(core, "follow", "", true).await;
+        tenants(core, &root).await;
+        let guard = SingleUseGuard::new();
+        let ep = McpEndpoint {
+            core: &core_arc,
+            client_ip: "",
+            tool_timeout: std::time::Duration::from_secs(30),
+            server_version: "9.9",
+            request_state_key: b"ns-test-key",
+            single_use_guard: &guard,
+        };
+
+        let in_a = login_in(core, "alice", "tenant-a").await;
+        let (token_a, _) = pair_as(core, &in_a, "follow").await;
+        let (again, _) = pair_as(core, &in_a, "follow").await;
+        assert!(event_data(&log, "mcp.pairing.namespace_changed").is_empty(), "no move, no record");
+
+        let in_b = login_in(core, "alice", "tenant-b").await;
+        let (token_b, reported) = pair_as(core, &in_b, "follow").await;
+        assert_eq!(reported, json!("tenant-b"));
+        assert_eq!(ok(tool_call(&ep, &token_b, "bv_resource_list", json!({})).await)["keys"], json!(["gw-b"]));
+        // The earlier tokens keep their own binding.
+        assert_eq!(ok(tool_call(&ep, &token_a, "bv_resource_list", json!({})).await)["keys"], json!(["gw-a"]));
+        assert_eq!(ok(tool_call(&ep, &again, "bv_whoami", json!({})).await)["namespace"], json!("tenant-a"));
+
+        let moved = event_data(&log, "mcp.pairing.namespace_changed");
+        assert_eq!(moved.len(), 1, "{moved:?}");
+        assert_eq!(moved[0]["pairing_id"], json!("follow"));
+        assert_eq!(moved[0]["previous_namespace"], json!("tenant-a"));
+        assert_eq!(moved[0]["namespace"], json!("tenant-b"));
+        assert_eq!(moved[0]["client_name"], json!("claude-code"));
+        assert_eq!(moved[0]["operator"]["username"], json!("alice"));
+
+        // A pairing whose tokens were minted before binding existed: an index
+        // entry with no namespace, and no record. Those tokens were root-bound.
+        let view = sys_mount_view(core);
+        let old = br#"{"id":"gone","app_name":"pairing_legacy","client_name":"claude-code","client_version":"1","issued_at":1,"expires_at":2,"kind":"pairing"}"#;
+        view.put(&StorageEntry { key: "mcp/app-tokens/pairing_legacy/old".into(), value: old.to_vec() }).await.unwrap();
+        pair_as(core, &in_a, "legacy").await;
+        let moved = event_data(&log, "mcp.pairing.namespace_changed");
+        let legacy = moved.iter().find(|e| e["pairing_id"] == "legacy").expect("the move from root is recorded");
+        assert_eq!((legacy["previous_namespace"].clone(), legacy["namespace"].clone()), (json!(""), json!("tenant-a")));
+
+        // The token list says where each token is bound.
+        let rows =
+            test_list_api(core, &root, "sys/mcp/tokens", true).await.unwrap().unwrap().data.unwrap()["tokens"].clone();
+        let namespaces: Vec<Value> = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| r["app"] == "pairing_follow")
+            .map(|r| r["namespace"].clone())
+            .collect();
+        assert!(namespaces.contains(&json!("tenant-a")) && namespaces.contains(&json!("tenant-b")), "{rows}");
+
+        assert!(view.get("mcp/pairing-namespaces/follow").await.unwrap().is_some());
+        ns_call(core, &in_b, Operation::Delete, "", "sys/mcp/pairings/follow", None).await.unwrap();
+        assert!(view.get("mcp/pairing-namespaces/follow").await.unwrap().is_none(), "revoked with the pairing");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Fail closed: a namespace deleted after the token was minted, or a
+    /// binding that does not normalize, refuses every call with
+    /// `mcp_namespace_unavailable` -- never runs it at root -- and the
+    /// exchange refuses to mint from a session in a deleted namespace.
+    #[tokio::test]
+    async fn test_mcp_namespace_unavailable_fails_closed() {
+        use crate::modules::namespace::{NamespaceModule, NamespaceQuotas, NAMESPACE_MODULE_NAME};
+
+        let (_bvault, core_arc, root) = new_unseal_test_bastion_vault("test_mcp_ns_gone").await;
+        let core: &crate::core::Core = &core_arc;
+        tenants(core, &root).await;
+        let ns_store =
+            core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME).unwrap().store().unwrap();
+        ns_store.create("tenant-gone", NamespaceQuotas::default(), false).await.unwrap();
+        tenant_policy(core, "tenant-gone", "mcp-tenant", &tenant_operator_policy("tenant-gone")).await;
+        let in_gone = login_in(core, "alice", "tenant-gone").await;
+        let (token, reported) = pair_as(core, &in_gone, "gone").await;
+        assert_eq!(reported, json!("tenant-gone"));
+        ns_store.delete("tenant-gone", 0).await.unwrap();
+
+        let guard = SingleUseGuard::new();
+        let ep = McpEndpoint {
+            core: &core_arc,
+            client_ip: "",
+            tool_timeout: std::time::Duration::from_secs(30),
+            server_version: "9.9",
+            request_state_key: b"ns-test-key",
+            single_use_guard: &guard,
+        };
+        for tool in ["bv_whoami", "bv_resource_list"] {
+            let answer = tool_call(&ep, &token, tool, json!({})).await;
+            assert_eq!(refusal_code(&answer), "mcp_namespace_unavailable", "{tool}: {answer}");
+            assert!(answer["error"]["message"].as_str().unwrap().contains("never run at root"), "{answer}");
+        }
+        let err = test_write_api(core, &in_gone, "sys/mcp/token", false, tenant_pairing("gone")).await.unwrap_err();
+        assert!(err.to_string().contains("mcp_namespace_unavailable"), "{err}");
+
+        // A stored binding that does not normalize is refused, not read as root.
+        let in_a = login_in(core, "alice", "tenant-a").await;
+        let (token, _) = pair_as(core, &in_a, "malformed").await;
+        let auth_module = core.module_manager().get_module::<crate::modules::auth::AuthModule>("auth").unwrap();
+        let store = auth_module.token_store.load_full().unwrap();
+        let mut entry = store.lookup(&token).await.unwrap().unwrap();
+        entry.meta.insert(NS_PATH_META.into(), "tenant-a/../tenant-b".into());
+        store.create(&mut entry).await.unwrap();
+        let answer = tool_call(&ep, &token, "bv_resource_list", json!({})).await;
+        assert_eq!(refusal_code(&answer), "mcp_namespace_unavailable", "{answer}");
+    }
+
+    /// Injection regression: `X-BastionVault-Namespace` on `/v2/mcp` has no
+    /// effect. A tenant-bound token stays in its tenant whatever the header
+    /// says, and a root-bound token cannot be steered into a tenant.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_mcp_namespace_header_on_v2_mcp_changes_nothing() {
+        use crate::test_utils::TestHttpServer;
+
+        let server = TestHttpServer::new("test_mcp_ns_header", false).await;
+        let core: &crate::core::Core = &server.core;
+        let root = server.root_token.clone();
+        tenants(core, &root).await;
+        let (tenant_token, _) = pair_as(core, &login_in(core, "alice", "tenant-a").await, "hdr-a").await;
+        let (root_token, _) = pair_as(core, &login_in(core, "felipe", "").await, "hdr-root").await;
+
+        let post = |token: &str, header: Option<&str>| {
+            let agent = ureq::Agent::config_builder().http_status_as_error(false).build().new_agent();
+            let mut builder = ::http::Request::builder()
+                .method("POST")
+                .uri(format!("http://{}/v2/mcp", server.listen_addr))
+                .header("Content-Type", "application/json")
+                .header("Authorization", format!("Bearer {token}"));
+            if let Some(ns) = header {
+                builder = builder.header("X-BastionVault-Namespace", ns);
+            }
+            let body = json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": { "name": "bv_resource_list", "arguments": {} },
+            });
+            let mut resp = agent.run(builder.body(serde_json::to_vec(&body).unwrap()).unwrap()).unwrap();
+            assert_eq!(resp.status().as_u16(), 200);
+            ok(resp.body_mut().read_json::<Value>().unwrap())
+        };
+        for header in [None, Some(""), Some("tenant-b"), Some("tenant-a/../tenant-b")] {
+            let listed = post(&tenant_token, header);
+            assert_eq!(
+                (listed["keys"].clone(), listed["namespace"].clone()),
+                (json!(["gw-a"]), json!("tenant-a")),
+                "{header:?}"
+            );
+        }
+        for header in [Some("tenant-a"), Some("tenant-b")] {
+            let listed = post(&root_token, header);
+            assert_eq!(
+                (listed["keys"].clone(), listed["namespace"].clone()),
+                (json!(["gw-root"]), json!("")),
+                "{header:?}"
+            );
+        }
+    }
+
+    // ── MCP namespace selection, Phase 2: narrowing at the exchange ──────
+
+    /// `id`'s pairing body, asking to narrow to `namespace`.
+    fn narrowed_pairing(id: &str, namespace: &str) -> Option<serde_json::Map<String, Value>> {
+        let mut body = tenant_pairing(id).unwrap();
+        body.insert("namespace".into(), json!(namespace));
+        Some(body)
+    }
+
+    /// The exchange answer's data, or the refusal's text.
+    async fn narrow_as(core: &crate::core::Core, operator: &str, id: &str, namespace: &str) -> Result<Value, String> {
+        let body = narrowed_pairing(id, namespace).map(Value::Object);
+        ns_call(core, operator, Operation::Write, "", "sys/mcp/token", body)
+            .await
+            .map(|r| Value::Object(r.and_then(|r| r.data).unwrap_or_default()))
+            .map_err(|e| e.to_string())
+    }
+
+    /// `dti` (child-visible by default, so its logins are), with children
+    /// `dti/esi` and `dti/ops`; `mcp-tenant` in `dti`, a resource in `dti/esi`.
+    async fn dti_tree(core: &crate::core::Core, root: &str) {
+        tenants(core, root).await;
+        let dti = json!({ "child_visible_default": true });
+        ns_call(core, root, Operation::Write, "", "sys/namespaces/dti", Some(dti)).await.unwrap();
+        for child in ["dti/esi", "dti/ops", "tenant-a/sub"] {
+            ns_call(core, root, Operation::Write, "", &format!("sys/namespaces/{child}"), Some(json!({})))
+                .await
+                .unwrap();
+        }
+        tenant_policy(core, "dti", "mcp-tenant", &tenant_operator_policy("dti")).await;
+        let record = json!({ "type": "server", "hostname": "gw-esi.example" });
+        ns_call(core, root, Operation::Write, "dti/esi", "resources/resources/gw-esi", Some(record)).await.unwrap();
+    }
+
+    /// T457 Phase 2: a child-visible operator narrows a pairing to a
+    /// descendant. Policies must exist there first
+    /// (`mcp_policy_not_in_namespace`, naming them); then the token is bound
+    /// there, never child-visible, acts there, and the move from the
+    /// session's namespace is recorded like any other. The operator's MFA
+    /// reference follows the token, so a ticket binds where its calls run.
+    #[tokio::test]
+    async fn test_mcp_pairing_narrows_to_a_descendant() {
+        let (_bvault, core_arc, root) = new_unseal_test_bastion_vault("test_mcp_ns_narrow").await;
+        let core: &crate::core::Core = &core_arc;
+        let (dir, log) = audit_device(core, "narrow", "", true).await;
+        dti_tree(core, &root).await;
+        let alice = login_in(core, "alice", "dti").await;
+
+        let (_, reported) = pair_as(core, &alice, "narrow").await;
+        assert_eq!(reported, json!("dti"), "no `namespace`: the session's own");
+
+        let err = narrow_as(core, &alice, "narrow", "dti/esi").await.unwrap_err();
+        assert!(err.contains("mcp_policy_not_in_namespace") && err.contains("mcp-tenant"), "{err}");
+        assert!(err.contains("dti/esi"), "{err}");
+
+        tenant_policy(core, "dti/esi", "mcp-tenant", &tenant_operator_policy("dti/esi")).await;
+        let data = narrow_as(core, &alice, "narrow", "/dti/esi/").await.unwrap();
+        assert_eq!(data["auth"]["metadata"]["namespace"], json!("dti/esi"), "the answer names the narrowed namespace");
+        let token = data["auth"]["client_token"].as_str().unwrap().to_string();
+        let auth_module = core.module_manager().get_module::<crate::modules::auth::AuthModule>("auth").unwrap();
+        let store = auth_module.token_store.load_full().unwrap();
+        let auth = store.check_token("mcp/dispatch", &token, "", true).await.unwrap().unwrap();
+        assert_eq!(auth.metadata.get(NS_PATH_META).map(String::as_str), Some("dti/esi"));
+        assert_eq!(auth.metadata.get(CHILD_VISIBLE_META).map(String::as_str), Some("false"));
+        let operator = auth.mcp_binding.unwrap().operator.unwrap();
+        assert_eq!((operator.username.as_str(), operator.namespace.as_str()), ("alice", "dti/esi"));
+
+        let guard = SingleUseGuard::new();
+        let ep = McpEndpoint {
+            core: &core_arc,
+            client_ip: "",
+            tool_timeout: std::time::Duration::from_secs(30),
+            server_version: "9.9",
+            request_state_key: b"ns-test-key",
+            single_use_guard: &guard,
+        };
+        let listed = ok(tool_call(&ep, &token, "bv_resource_list", json!({})).await);
+        assert_eq!((listed["keys"].clone(), listed["namespace"].clone()), (json!(["gw-esi"]), json!("dti/esi")));
+
+        let moved = event_data(&log, "mcp.pairing.namespace_changed");
+        let moved: Vec<_> = moved.iter().filter(|e| e["pairing_id"] == "narrow").collect();
+        assert_eq!(moved.len(), 1, "{moved:?}");
+        assert_eq!(
+            (moved[0]["previous_namespace"].clone(), moved[0]["namespace"].clone()),
+            (json!("dti"), json!("dti/esi"))
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// T457 Phase 2 refusals, each with its stable code and never a token in
+    /// another namespace: a sibling, the parent, a namespace that is not
+    /// well formed, a descendant of a non-child-visible session, and an app
+    /// exchange asking to narrow. A permitted descendant that does not exist
+    /// is `mcp_namespace_unavailable`. The namespace header is not a
+    /// narrowing request.
+    #[tokio::test]
+    async fn test_mcp_narrowing_is_refused_outside_the_sessions_reach() {
+        let (_bvault, core_arc, root) = new_unseal_test_bastion_vault("test_mcp_ns_narrow_refused").await;
+        let core: &crate::core::Core = &core_arc;
+        dti_tree(core, &root).await;
+        let in_dti = login_in(core, "alice", "dti").await;
+        let in_a = login_in(core, "alice", "tenant-a").await;
+
+        for (operator, target, code) in [
+            (&in_dti, "tenant-a", "mcp_namespace_not_permitted"),
+            (&in_dti, "", "mcp_namespace_not_permitted"),
+            (&in_dti, "dti/../tenant-a", "mcp_namespace_not_permitted"),
+            (&in_dti, "dti/missing", "mcp_namespace_unavailable"),
+            (&in_a, "tenant-a/sub", "mcp_namespace_not_permitted"),
+            (&in_a, "tenant-b", "mcp_namespace_not_permitted"),
+            (&in_a, "", "mcp_namespace_not_permitted"),
+        ] {
+            let err = narrow_as(core, operator, "refused", target).await.unwrap_err();
+            assert!(err.contains(code), "{target:?}: {err}");
+        }
+        let view = sys_mount_view(core);
+        assert!(view.list("mcp/app-tokens/pairing_refused/").await.unwrap().is_empty(), "nothing was minted");
+
+        // The session's own namespace is always within reach.
+        let own = narrow_as(core, &in_a, "own", "tenant-a").await.unwrap();
+        assert_eq!(own["auth"]["metadata"]["namespace"], json!("tenant-a"));
+
+        let mut app = narrowed_pairing("x", "dti/esi").unwrap();
+        app.remove("pairing");
+        app.insert("app".into(), json!("some-app"));
+        let err = ns_call(core, &in_dti, Operation::Write, "", "sys/mcp/token", Some(Value::Object(app)))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("applies to pairing exchanges only"), "{err}");
+
+        // `X-BastionVault-Namespace` on the exchange asks for nothing: the
+        // token follows the session, or the request is refused outright.
+        let headed = ns_call(
+            core,
+            &in_dti,
+            Operation::Write,
+            "dti/esi",
+            "sys/mcp/token",
+            tenant_pairing("hdr").map(Value::Object),
+        )
+        .await;
+        if let Ok(Some(resp)) = headed {
+            assert_eq!(resp.data.unwrap()["auth"]["metadata"]["namespace"], json!("dti"));
+        }
+    }
+
+    // ── MCP namespace selection: app tokens ───────────────────────────────
+
+    /// A login as AppRole `tenant-app-role`, bound to namespace `ns` by the
+    /// header at login (`""` is root), exchanged for app `tenant-app`'s MCP
+    /// token holding only `policies`. Returns the answer's `auth` block.
+    async fn app_exchange_in(core: &crate::core::Core, root: &str, ns: &str, policies: &str) -> Value {
+        let resp = test_read_api(core, root, "auth/approle/role/tenant-app-role/role-id", true).await;
+        let role_id = resp.unwrap().unwrap().data.unwrap()["role_id"].as_str().unwrap().to_string();
+        let resp = test_write_api(core, root, "auth/approle/role/tenant-app-role/secret-id", true, None).await;
+        let secret_id = resp.unwrap().unwrap().data.unwrap()["secret_id"].as_str().unwrap().to_string();
+        let credentials = json!({ "role_id": role_id, "secret_id": secret_id });
+        let login = ns_call(core, "", Operation::Write, ns, "auth/approle/login", Some(credentials))
+            .await
+            .unwrap()
+            .unwrap()
+            .auth
+            .expect("an approle login mints a token")
+            .client_token;
+        let body = json!({ "app": "tenant-app", "policies": policies }).as_object().cloned();
+        let data = test_write_api(core, &login, "sys/mcp/token", true, body).await.unwrap().unwrap().data.unwrap();
+        data["auth"].clone()
+    }
+
+    /// T457 regression, app mode: a tenant AppRole's MCP token is bound to
+    /// the tenant (never root, never child-visible) and its policy names
+    /// resolve in the tenant's store. A name that exists only in root's
+    /// store -- and does grant there -- grants nothing in the tenant. Before
+    /// T457 the token was root-bound, so that root policy applied to it.
+    #[tokio::test]
+    async fn test_mcp_app_exchange_in_a_tenant_binds_there_and_resolves_policies_there() {
+        let (_bvault, core_arc, root) = new_unseal_test_bastion_vault("test_mcp_ns_app").await;
+        let core: &crate::core::Core = &core_arc;
+        tenants(core, &root).await;
+        // Root's store only. Grants the tenant's resources under either
+        // spelling of the path, so it would act if it were resolved at root.
+        let root_only = r#"
+            path "sys/mcp/token"                  { capabilities = ["update"] }
+            path "resources/resources/*"          { capabilities = ["read", "list"] }
+            path "tenant-a/resources/resources/*" { capabilities = ["read", "list"] }
+        "#;
+        let body = json!({ "policy": root_only }).as_object().cloned();
+        let _ = test_write_api(core, &root, "sys/policy/mcp-app-root-only", true, body).await;
+        test_mount_auth_api(core, &root, "approle", "approle").await;
+        let role = json!({ "policies": "mcp-tenant,mcp-app-root-only", "bypass_machine_binding": true });
+        let _ = test_write_api(core, &root, "auth/approle/role/tenant-app-role", true, role.as_object().cloned()).await;
+        let app = json!({
+            "approle_role": "tenant-app-role",
+            "tool_allowlist": "bv_resource_list,bv_resource_describe",
+            "path_scope": "resources/*",
+        });
+        let _ = test_write_api(core, &root, "sys/mcp/apps/tenant-app", true, app.as_object().cloned()).await;
+        let waiver = json!({ "reason": "no FerroGate agent in this test", "expires_in_days": 1 });
+        let path = "sys/mcp/apps/tenant-app/machine-waiver";
+        let _ = test_write_api(core, &root, path, true, waiver.as_object().cloned()).await;
+
+        let auth_module = core.module_manager().get_module::<crate::modules::auth::AuthModule>("auth").unwrap();
+        let store = auth_module.token_store.load_full().unwrap();
+        let guard = SingleUseGuard::new();
+        let ep = McpEndpoint {
+            core: &core_arc,
+            client_ip: "",
+            tool_timeout: std::time::Duration::from_secs(30),
+            server_version: "9.9",
+            request_state_key: b"ns-test-key",
+            single_use_guard: &guard,
+        };
+
+        // Bound to the tenant: the answer says so, and so does the token.
+        let tenant = app_exchange_in(core, &root, "tenant-a", "mcp-tenant").await;
+        assert_eq!(tenant["metadata"]["namespace"], json!("tenant-a"), "{tenant}");
+        let token = tenant["client_token"].as_str().unwrap();
+        let auth = store.check_token("mcp/dispatch", token, "", true).await.unwrap().unwrap();
+        assert_eq!(auth.metadata.get(NS_PATH_META).map(String::as_str), Some("tenant-a"));
+        assert_eq!(auth.metadata.get(CHILD_VISIBLE_META).map(String::as_str), Some("false"));
+        // A tenant policy name resolves in the tenant's store and acts there.
+        let listed = ok(tool_call(&ep, token, "bv_resource_list", json!({})).await);
+        assert_eq!((listed["keys"].clone(), listed["namespace"].clone()), (json!(["gw-a"]), json!("tenant-a")));
+        let gw = ok(tool_call(&ep, token, "bv_resource_describe", json!({ "name": "gw-a" })).await);
+        assert_eq!(gw["hostname"], json!("gw-a.example"));
+
+        // The root-only name is live at root: a root login's token acts with it.
+        let at_root = app_exchange_in(core, &root, "", "mcp-app-root-only").await;
+        assert_eq!(at_root["metadata"]["namespace"], json!(""), "{at_root}");
+        let listed = ok(tool_call(&ep, at_root["client_token"].as_str().unwrap(), "bv_resource_list", json!({})).await);
+        assert_eq!(listed["keys"], json!(["gw-root"]), "{listed}");
+
+        // ...and dead in the tenant: held by the token, granting nothing.
+        let root_named = app_exchange_in(core, &root, "tenant-a", "mcp-app-root-only").await;
+        assert_eq!(root_named["metadata"]["namespace"], json!("tenant-a"), "{root_named}");
+        let held = root_named["policies"].as_array().unwrap();
+        assert!(held.contains(&json!("mcp-app-root-only")) && !held.contains(&json!("mcp-tenant")), "{root_named}");
+        let token = root_named["client_token"].as_str().unwrap();
+        let auth = store.check_token("mcp/dispatch", token, "", true).await.unwrap().unwrap();
+        assert_eq!(auth.metadata.get(NS_PATH_META).map(String::as_str), Some("tenant-a"));
+        // Resolved at root it would list and read `gw-a`; in the tenant's store
+        // it does not exist, so the token sees and reads nothing there.
+        let listed = ok(tool_call(&ep, token, "bv_resource_list", json!({})).await);
+        assert_eq!((listed["keys"].clone(), listed["namespace"].clone()), (json!([]), json!("tenant-a")), "{listed}");
+        let answer = tool_call(&ep, token, "bv_resource_describe", json!({ "name": "gw-a" })).await;
+        assert_eq!(refusal_code(&answer), "mcp_backend_error", "the root policy must not apply: {answer}");
     }
 }

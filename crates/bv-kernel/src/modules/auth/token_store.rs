@@ -182,6 +182,69 @@ fn reject_reserved_meta(meta: &HashMap<String, String>, display_name: &str) -> R
     )))
 }
 
+/// A namespace an MCP exchange asked to narrow its token to (T457 Phase 2),
+/// resolved from the namespace store: canonical path and id. A request, not
+/// an authority: [`mcp_namespace_binding`] re-checks it before minting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpNamespaceTarget {
+    pub path: String,
+    pub id: String,
+}
+
+/// The stable refusal for a narrowing the exchanging token may not make.
+pub const MCP_NAMESPACE_NOT_PERMITTED: &str = "mcp_namespace_not_permitted";
+
+/// The metadata of an MCP token minted from a parent with `parent_meta`
+/// (`features/mcp-namespace-selection.md`): the parent's namespace, or
+/// `target` when `token_may_operate(parent's binding, target)` holds, and
+/// `child_visible = false` always. A malformed parent binding is refused,
+/// never read as root; a target the binding does not cover is refused with
+/// [`MCP_NAMESPACE_NOT_PERMITTED`], never rewritten to the parent's.
+fn mcp_namespace_binding(
+    parent_meta: &HashMap<String, String>,
+    target: Option<&McpNamespaceTarget>,
+) -> Result<HashMap<String, String>, RvError> {
+    use crate::modules::namespace::token_binding::{
+        binding_from_metadata, token_may_operate, CHILD_VISIBLE_META, NS_ID_META, NS_PATH_META,
+    };
+    let ns_path = crate::kernel_api::namespace::bound_namespace(parent_meta).map_err(|_| {
+        crate::bv_error_response_status!(
+            403,
+            "mcp_namespace_unavailable: the exchanging token's namespace binding is malformed; no MCP token is minted"
+        )
+    })?;
+    let mut meta = HashMap::new();
+    match target {
+        None => {
+            meta.insert(NS_PATH_META.to_string(), ns_path);
+            if let Some(id) = parent_meta.get(NS_ID_META).filter(|id| !id.is_empty()) {
+                meta.insert(NS_ID_META.to_string(), id.clone());
+            }
+        }
+        Some(target) => {
+            // The stored binding alone decides; namespace assignments do not
+            // widen what an MCP token may be narrowed to.
+            let (_, child_visible) = binding_from_metadata(parent_meta);
+            if !token_may_operate(&ns_path, child_visible, &target.path) {
+                return Err(crate::bv_error_response_status!(
+                    403,
+                    "{}: a token bound to {:?}{} cannot mint an MCP token for namespace {:?}",
+                    MCP_NAMESPACE_NOT_PERMITTED,
+                    ns_path,
+                    if child_visible { "" } else { " (not child-visible)" },
+                    target.path
+                ));
+            }
+            meta.insert(NS_PATH_META.to_string(), target.path.clone());
+            if !target.id.is_empty() {
+                meta.insert(NS_ID_META.to_string(), target.id.clone());
+            }
+        }
+    }
+    meta.insert(CHILD_VISIBLE_META.to_string(), "false".to_string());
+    Ok(meta)
+}
+
 #[derive(Serialize, Deserialize)]
 struct TokenReqData {
     #[serde(default)]
@@ -1130,8 +1193,8 @@ impl TokenStore {
     /// Mint an MCP-bound child token: the only path that ever sets
     /// [`TokenEntry::mcp_binding`]. Called by the system module's
     /// `mcp/token` exchange after it has run the non-token-store checks
-    /// (spec §4 checks 1-3). Policy intersection never a superset, same
-    /// rule as `handle_create`; refuses a root or already-MCP-bound parent.
+    /// (spec §4 checks 1-3). Policy intersection never a superset; refuses a
+    /// root or already-MCP-bound parent. Namespace: [`mcp_namespace_binding`].
     pub async fn mint_mcp_token(
         &self,
         parent_token: &str,
@@ -1139,6 +1202,7 @@ impl TokenStore {
         ttl_secs: u64,
         display_name: String,
         binding: McpBinding,
+        target: Option<&McpNamespaceTarget>,
     ) -> Result<Auth, RvError> {
         let Some(parent) = self.lookup(parent_token).await? else {
             return Err(RvError::ErrRequestInvalid);
@@ -1179,6 +1243,7 @@ impl TokenStore {
             ttl: clamped_ttl,
             num_uses: 0,
             bound_cidrs: parent.bound_cidrs.clone(),
+            meta: mcp_namespace_binding(&parent.meta, target)?,
             mcp_binding: Some(binding),
             ..TokenEntry::default()
         };
@@ -1189,6 +1254,7 @@ impl TokenStore {
             client_token: te.id.clone(),
             display_name: te.display_name.clone(),
             policies: te.policies.clone(),
+            metadata: te.meta.clone(),
             mcp_binding: te.mcp_binding.clone(),
             ..Default::default()
         };
@@ -2249,6 +2315,114 @@ mod mod_token_store_tests {
         req.body = json!({ "policies": ["default"] }).as_object().cloned();
         let err = token_store.handle_create(&mock_backend, &mut req).await.unwrap_err();
         assert!(matches!(err, RvError::ErrPermissionDenied));
+    }
+
+    /// T457 Phase 1: an MCP token inherits the parent's namespace, canonical,
+    /// and is never child-visible; a parent without a binding gives a
+    /// root-bound token; a malformed binding is refused, not read as root.
+    #[test]
+    fn an_mcp_token_is_bound_to_the_parents_namespace_and_never_child_visible() {
+        let parent = |ns: Option<&str>, cv: &str| {
+            let mut m = HashMap::from([(CHILD_VISIBLE_META.to_string(), cv.to_string())]);
+            if let Some(ns) = ns {
+                m.insert(NS_PATH_META.to_string(), ns.to_string());
+                m.insert(crate::logical::NS_ID_META.to_string(), "uuid-a".to_string());
+            }
+            m.insert(USERNAME_META.to_string(), "felipe".to_string());
+            m
+        };
+        let meta = mcp_namespace_binding(&parent(Some("/dti/esi/"), "true"), None).unwrap();
+        assert_eq!(meta.get(NS_PATH_META).map(String::as_str), Some("dti/esi"));
+        assert_eq!(meta.get(CHILD_VISIBLE_META).map(String::as_str), Some("false"), "never child-visible");
+        assert_eq!(meta.get(crate::logical::NS_ID_META).map(String::as_str), Some("uuid-a"));
+        assert!(!meta.contains_key(USERNAME_META), "only the binding is carried, never an identity");
+
+        let root = mcp_namespace_binding(&parent(None, "false"), None).unwrap();
+        assert_eq!(root.get(NS_PATH_META).map(String::as_str), Some(""));
+        assert_eq!(root.get(CHILD_VISIBLE_META).map(String::as_str), Some("false"));
+
+        let err = mcp_namespace_binding(&parent(Some("a/../b"), "false"), None).unwrap_err().to_string();
+        assert!(err.contains("mcp_namespace_unavailable"), "{err}");
+    }
+
+    /// T457 Phase 2: narrowing follows `token_may_operate` over the parent's
+    /// stored binding. A descendant is allowed only from a child-visible
+    /// parent; sibling, parent and unrelated namespaces are refused, and a
+    /// refusal never falls back to the parent's own namespace.
+    #[test]
+    fn mcp_namespace_narrowing_follows_token_may_operate() {
+        let parent = |ns: &str, child_visible: bool| {
+            HashMap::from([
+                (NS_PATH_META.to_string(), ns.to_string()),
+                (CHILD_VISIBLE_META.to_string(), child_visible.to_string()),
+            ])
+        };
+        let target = |path: &str| McpNamespaceTarget { path: path.to_string(), id: format!("id-{path}") };
+        // (parent ns, child-visible, target, allowed)
+        let table = [
+            ("dti", true, "dti/esi", true),
+            ("dti", true, "dti/esi/deep", true),
+            ("", true, "dti", true),
+            ("dti", true, "dti", true),
+            ("dti", false, "dti", true),
+            ("dti", false, "dti/esi", false),
+            ("dti", true, "dtx", false),
+            ("dti", true, "dti-other", false),
+            ("dti/esi", true, "dti", false),
+            ("dti/esi", true, "", false),
+            ("dti/esi", true, "dti/ops", false),
+            ("", false, "dti", false),
+        ];
+        for (ns, cv, to, allowed) in table {
+            let got = mcp_namespace_binding(&parent(ns, cv), Some(&target(to)));
+            match (allowed, got) {
+                (true, Ok(meta)) => {
+                    assert_eq!(meta.get(NS_PATH_META).map(String::as_str), Some(to), "{ns:?}->{to:?}");
+                    assert_eq!(meta.get(crate::logical::NS_ID_META), Some(&format!("id-{to}")), "{ns:?}->{to:?}");
+                    assert_eq!(meta.get(CHILD_VISIBLE_META).map(String::as_str), Some("false"), "{ns:?}->{to:?}");
+                }
+                (false, Err(e)) => {
+                    let e = e.to_string();
+                    assert!(e.contains(MCP_NAMESPACE_NOT_PERMITTED), "{ns:?}->{to:?}: {e}");
+                }
+                (allowed, got) => panic!("{ns:?} (cv={cv}) -> {to:?}: expected allowed={allowed}, got {got:?}"),
+            }
+        }
+    }
+
+    /// T457 forgery check: a namespace-bound, non-root caller cannot write
+    /// `namespace_path` / `child_visible` through `auth/token/create`'s `meta`
+    /// (both are reserved), and a plain create stays clamped to its parent.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn token_create_cannot_forge_a_namespace_binding() {
+        let token_store = mock_token_store!();
+        let mock_backend = MockBackend(());
+        let mut parent = TokenEntry {
+            policies: vec!["default".to_string()],
+            meta: HashMap::from([
+                (NS_PATH_META.to_string(), "tenant-a".to_string()),
+                (CHILD_VISIBLE_META.to_string(), "false".to_string()),
+            ]),
+            ..TokenEntry::default()
+        };
+        token_store.create(&mut parent).await.unwrap();
+
+        for forged in
+            [json!({ NS_PATH_META: "" }), json!({ NS_PATH_META: "tenant-b" }), json!({ CHILD_VISIBLE_META: "true" })]
+        {
+            let mut req = Request::new("auth/token/create");
+            req.client_token = parent.id.clone();
+            req.body = json!({ "policies": ["default"], "meta": forged }).as_object().cloned();
+            let err = token_store.handle_create(&mock_backend, &mut req).await.unwrap_err();
+            assert!(err.to_string().contains("are reserved"), "{forged}: {err}");
+        }
+
+        let mut req = Request::new("auth/token/create");
+        req.client_token = parent.id.clone();
+        req.body = json!({ "policies": ["default"] }).as_object().cloned();
+        let child = token_store.handle_create(&mock_backend, &mut req).await.unwrap().unwrap().auth.unwrap();
+        assert_eq!(child.metadata.get(NS_PATH_META).map(String::as_str), Some("tenant-a"));
+        assert_eq!(child.metadata.get(CHILD_VISIBLE_META).map(String::as_str), Some("false"));
     }
 
     /// Every prefix in [`INHERITED_TOKEN_META_PREFIXES`] must also be

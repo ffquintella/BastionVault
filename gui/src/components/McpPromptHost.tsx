@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 
-import { Badge, Button, Input, Modal, Textarea, useToast } from "./ui";
+import { Badge, Button, Input, Modal, Select, Textarea, useToast } from "./ui";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
+import { namespaceLabel, narrowingOptions } from "../lib/mcpNamespace";
 import type {
   McpCatalogueTool,
   McpConfirmPrompt,
@@ -89,6 +90,11 @@ export function McpPairingModal({ prompt, onDone }: { prompt: McpPairingPrompt; 
   const [hours, setHours] = useState(String(Math.max(1, Math.round(prompt.default_ttl_secs / 3600))));
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Namespace narrowing (features/mcp-namespace-selection.md Phase 2): the
+  // session's own namespace by default; a descendant only when chosen.
+  const ownNamespace = typeof prompt.namespace === "string" ? prompt.namespace : null;
+  const [operable, setOperable] = useState<string[]>([]);
+  const [target, setTarget] = useState<string>(ownNamespace ?? "");
 
   useEffect(() => {
     let cancelled = false;
@@ -102,6 +108,26 @@ export function McpPairingModal({ prompt, onDone }: { prompt: McpPairingPrompt; 
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (ownNamespace === null) return;
+    let cancelled = false;
+    api
+      .namespacesSelf()
+      .then((r) => {
+        if (!cancelled) setOperable(Array.isArray(r?.namespaces) ? r.namespaces : []);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [ownNamespace]);
+
+  const namespaceOptions = useMemo(
+    () => (ownNamespace === null ? [] : narrowingOptions(ownNamespace, operable)),
+    [ownNamespace, operable],
+  );
+  const narrowed = ownNamespace !== null && target !== ownNamespace;
 
   const paths = useMemo(() => parseLines(scope), [scope]);
   const hoursNum = Number(hours);
@@ -135,6 +161,7 @@ export function McpPairingModal({ prompt, onDone }: { prompt: McpPairingPrompt; 
                 confirm_destructive: destructive && confirmDestructive,
                 connect_allowed: sessions.length > 0,
                 ttl_secs: hoursNum * 3600,
+                ...(narrowed ? { namespace: target } : {}),
               },
             }
           : { kind: "pairing", approved: false },
@@ -197,6 +224,31 @@ export function McpPairingModal({ prompt, onDone }: { prompt: McpPairingPrompt; 
         </div>
 
         <div className="grid grid-cols-2 gap-3">
+          <div className="col-span-2 min-w-0 space-y-1">
+            {namespaceOptions.length > 1 ? (
+              <Select
+                label="Namespace for its tokens"
+                value={target}
+                onChange={(e) => setTarget(e.target.value)}
+                options={namespaceOptions.map((ns) => ({
+                  value: ns,
+                  label: ns === ownNamespace ? `${namespaceLabel(ns)} (your sign-in)` : namespaceLabel(ns),
+                }))}
+              />
+            ) : (
+              <p className="min-w-0 truncate">
+                Namespace:{" "}
+                <span className="font-mono text-xs" data-testid="mcp-pairing-namespace">
+                  {ownNamespace === null ? "your sign-in's (could not be read)" : namespaceLabel(ownNamespace)}
+                </span>
+              </p>
+            )}
+            <p className="text-xs text-[var(--color-text-muted)]">
+              Its calls run in this namespace, under that namespace&apos;s policies. A namespace beneath yours is
+              accepted only when your sign-in can reach it; the vault refuses anything else rather than use another
+              namespace.
+            </p>
+          </div>
           <div className="col-span-2">
             <label className="mb-1 block text-sm text-[var(--color-text-muted)]">
               Tools it may call (preselected: read-only tools that never reveal a value)
@@ -325,6 +377,20 @@ export function McpConfirmModal({ prompt, onDone }: { prompt: McpConfirmPrompt; 
   return <McpCallConfirmModal prompt={prompt} onDone={onDone} />;
 }
 
+/** Where the call runs: the namespace the vault bound the pairing's token to.
+ *  Says nothing when the vault did not report it, rather than guess root. */
+function CallNamespace({ namespace }: { namespace?: string | null }) {
+  if (typeof namespace !== "string") return null;
+  return (
+    <p className="min-w-0 truncate text-xs text-[var(--color-text-muted)]">
+      Runs in namespace{" "}
+      <span className="font-mono text-[var(--color-text)]" data-testid="mcp-call-namespace" title={namespace}>
+        {namespaceLabel(namespace)}
+      </span>
+    </p>
+  );
+}
+
 function McpCallConfirmModal({ prompt, onDone }: { prompt: McpConfirmPrompt; onDone: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -379,6 +445,7 @@ function McpCallConfirmModal({ prompt, onDone }: { prompt: McpConfirmPrompt; onD
             <p className="text-xs text-[var(--color-text-muted)]">{prompt.tool_description}</p>
           )}
         </div>
+        <CallNamespace namespace={prompt.namespace} />
         <Countdown deadlineMs={prompt.deadline_unix_ms} />
         {error && <p className="text-sm text-[var(--color-danger)]">{error}</p>}
       </div>
@@ -585,6 +652,14 @@ function McpSessionConfirmModal({
             <p className="text-xs text-[var(--color-text-muted)]">Tool</p>
             <p className="truncate font-mono text-xs">{prompt.tool}</p>
           </div>
+          {typeof prompt.namespace === "string" && (
+            <div className="min-w-0">
+              <p className="text-xs text-[var(--color-text-muted)]">Namespace</p>
+              <p className="truncate font-mono text-xs" data-testid="mcp-call-namespace" title={prompt.namespace}>
+                {namespaceLabel(prompt.namespace)}
+              </p>
+            </div>
+          )}
           {web && (
             <div className="min-w-0">
               <p className="text-xs text-[var(--color-text-muted)]">Method</p>

@@ -58,6 +58,11 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### MCP namespace selection (Phases 2 and 3)
+
+- **Narrow an AI assistant's token to a namespace beneath your sign-in** (T457, S115)
+  -- The `/v2/mcp/token` pairing exchange takes an optional `namespace`. The vault accepts it only when your session's stored binding may operate there — your own namespace, or a descendant when your sign-in is child-visible; namespace assignments do not count — and binds the token there, never child-visible. Anything else is refused with `403 mcp_namespace_not_permitted` (a permitted descendant that does not exist, `403 mcp_namespace_unavailable`), never answered with a token for another namespace; every policy the token would carry must exist in the target namespace, else `400 mcp_policy_not_in_namespace` names the missing ones; an `app` exchange carrying it is refused. A narrowing is audited as `mcp.pairing.namespace_changed` like any other move, and the operator's MFA step-up for a narrowed pairing runs and binds in the target namespace, so MFA-gated sessions work there. `bvault mcp serve --namespace <ns>` asks for it on every exchange; the desktop app's approval dialog offers a *Namespace for its tokens* selector (your sign-in's namespace and those beneath it) and keeps a choice on the pairing record (an additive `namespace` field; older records follow the sign-in as before). The local server refuses a narrowed token the vault bound anywhere else (`mcp_namespace_mismatch`, e.g. an older vault that ignores the field) and a `--namespace` that contradicts the pairing's (`mcp_namespace_conflict`). A session signed in *to* a tenant namespace still cannot be granted `sys/mcp/token` (no tenant policy may name a `sys/` path); narrowing from a child-visible ancestor is the supported route, documented in `docs/mcp.md`.
+
 #### Self-Accounts
 
 - **Ship the `self-accounts-user` policy as a built-in baseline** -- a fresh vault, and an existing one on its next unseal, now seeds it with the other baselines instead of leaving each operator to paste it from the guide. It grants the plugin's `self-accounts/v2/accounts` and `self-accounts/v2/settings` paths and nothing else, and is still not part of `default`: the administrator attaches it to a user or group. A policy of that name an operator already created is kept as is. (T461, S107)
@@ -80,11 +85,26 @@ EXAMPLE ENTRY:
 
 ### Changed
 
+#### MCP namespace selection (Phase 3)
+
+- **Show where an assistant's calls run, as the vault bound its token** (T457, S115)
+  -- The desktop app's per-call and session confirmations name the namespace ("Runs in namespace …", root by name) read from the token exchange's answer, not from your session, and `bvault mcp serve`'s prompts do the same; the local server now mints a pairing's token before asking, so the dialog already knows. Settings → AI Assistants gains a Namespace column: the live token's namespace, else the one the pairing was narrowed to (badged *narrowed*), else "follows your sign-in". `docs/mcp.md` retires the "agent calls run in the root namespace" gap and the child-namespace clause of the `mcp_session_mfa_*` troubleshooting row, and documents the namespace codes; `docs/api.md` documents the exchange's `namespace` field and answer.
+
+#### MCP namespace selection (Phase 1)
+
+- **Run an MCP agent's calls in the namespace of the operator who paired it** (T457, S115)
+  -- the pairing exchange binds the minted token to the exchanging session's own namespace (never child-visible) and the `/v2/mcp` dispatcher routes every tool call there, so `bv_resource_list` and the session tools reach a signed-in-to-`dti/esi` operator's resources instead of root's. The namespace comes only from the token's stored binding: `X-BastionVault-Namespace` on `/v2/mcp` and a `namespace` tool argument change nothing. A token whose namespace was deleted or does not resolve is refused with `mcp_namespace_unavailable`, never run at root. Re-exchanging a pairing from a session in another namespace follows that session and records `mcp.pairing.namespace_changed`. `bv_whoami`, `bv_resource_list`, the `request.mcp` audit block, the `connect.agent.*` events, transcripts, `sys/mcp/tokens` and the exchange answer now name the namespace (absent on old records = root). `bvault mcp serve` and the desktop app send the operator session's namespace on the MFA step-up and show it in the pairing and confirmation prompts. App tokens are bound to their AppRole login's namespace the same way.
+
 #### Resource Connect RDP
 
 - Explain a refused RDP logon in plain words: when the target rejects the saved username or password (`STATUS_LOGON_FAILURE`), the error now names the account and says the password is wrong, instead of only a raw CredSSP `InvalidToken` report. The NTSTATUS stays in the message for support.
 
 ### Fixed
+
+#### Connect MFA in a child namespace
+
+- **Let an operator signed in to a child namespace complete an MFA-gated Connect** (T457, S115)
+  -- the step-up was addressed at `<namespace>/auth/<mount>/v2/step-up/...`, a mount that never exists (every auth mount lives in the root auth table), so the preflight failed with `Router mount not found` for the human Connect path and for MCP agent sessions alike. It is now addressed at the auth mount that minted the token.
 
 #### Self-Accounts
 
@@ -100,6 +120,12 @@ EXAMPLE ENTRY:
 - Keep the expiration register-and-restore benchmark's leases alive for the whole test: their 400 s TTL was shorter than the 10 000-lease registration loop on Windows (453 s alone, ~960 s in a full run), so leases expired before the count.
 
 ### Security
+
+#### MCP tokens no longer escape their operator's namespace
+
+- **Stop minting root-bound MCP tokens from namespace-bound sessions** (T457, S115)
+  -- a token exchanged by a tenant operator or a tenant AppRole carried no namespace binding, so it read as root-bound and its policy names were resolved in the root namespace's store, where a same-named root policy could grant it access its owner never had. MCP tokens now inherit the exchanging token's binding, with `child_visible` always off.
+  Upgrade note: an existing MCP app whose AppRole logs in to a tenant namespace, and whose role's policy names exist only in the root namespace, loses the access those policies gave it -- its tool calls are now denied. This is intended: create the policies in the tenant namespace (or give the role policy names that exist there) before upgrading.
 
 #### Resource Connect SSH
 

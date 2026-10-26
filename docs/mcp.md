@@ -538,6 +538,59 @@ accept an unattended reveal or write. A brokered-session call has no such
 choice: it always needs you at a terminal (or in the desktop app), so a headless
 `bvault mcp serve` refuses every one.
 
+## Namespaces
+
+An assistant acts in **one namespace**, fixed when its token is minted. By
+default that is the namespace your sign-in is bound to: sign in to `dti/esi`
+(in the desktop app, or any login sent with `X-BastionVault-Namespace:
+dti/esi` whose token `bvault mcp serve` then uses) and
+`bv_resource_list` lists `dti/esi`'s resources, `bv_whoami` says `dti/esi`,
+and every call is checked against `dti/esi`'s policies. The namespace comes
+from your own token's stored binding — never from the assistant: a
+`namespace` tool argument, a `_meta` key or an `X-BastionVault-Namespace`
+header on `/v2/mcp` changes nothing. An assistant's token is never
+child-visible, so it cannot reach a parent, a sibling or a child namespace.
+The token follows your session: sign in somewhere else and the next token for
+the same pairing is bound there, and the move is audited as
+`mcp.pairing.namespace_changed`.
+
+**Narrowing to a namespace beneath yours.** An administrator signed in to a
+child-visible namespace (for example root, or `dti` when its
+`child_visible_default` is on) may bind an assistant's tokens to a namespace
+beneath it instead:
+
+```bash
+bvault mcp serve --namespace dti/esi        # every token this server mints
+```
+
+In the desktop app, the approval dialog has a **Namespace for its tokens**
+selector listing your sign-in's namespace and the ones beneath it you can
+reach; a choice other than your own is kept with the pairing. The vault
+decides, at every exchange: it accepts your own namespace, or a descendant
+when your sign-in is child-visible, and refuses anything else with
+`mcp_namespace_not_permitted` — it never binds the token somewhere else
+instead. Every policy the token will carry must exist, by name, in the target
+namespace (`mcp_policy_not_in_namespace` names the missing ones): a
+narrowed token is evaluated against that namespace's policies, and a
+root-namespace policy name would grant nothing there. A narrowing is a
+namespace change like any other: audited, and shown in the dialogs.
+
+**Seeing it.** The approval dialog names the namespace the tokens will be
+bound to; each per-call confirmation names the namespace the vault actually
+bound the token to (read from the exchange's answer, not from your session);
+Settings → AI Assistants shows each assistant's namespace (`narrowed` when it
+was pinned at approval). The terminal prompts of `bvault mcp serve` print the
+same. MFA-gated profiles work in any namespace: your step-up runs, as you,
+in the namespace the token's call runs in.
+
+**Who may exchange.** The exchange is `update` on `sys/mcp/token`. A policy
+written inside a namespace cannot name a `sys/` path (`sys/policy` refuses
+it), so a session signed in *to* a tenant namespace has no supported way to
+be granted the exchange today. The route that works is the one above: sign
+in to a child-visible ancestor whose own policy grants `sys/mcp/token`, and
+narrow to the tenant, with the tenant's policies (tenant-authored,
+tenant-prefixed paths) named in the token.
+
 ## The limits, stated plainly
 
 **Changed by brokered sessions.** Before `bv_resource_ssh_exec` and
@@ -583,10 +636,15 @@ external/enterprise authorization (blocked on the Identity Provider feature).
 
 Brokered sessions (T136): the embedded vault in the desktop app has no
 brokered-sessions switch yet, so sessions work against a remote vault only;
-`bvault mcp serve` cannot use a security key for the MFA step; an operator
-who did not sign in with userpass cannot reach MFA-gated profiles; and an
-operator signed in to a child namespace cannot either, because agent calls
-run in the root namespace.
+`bvault mcp serve` cannot use a security key for the MFA step; and an
+operator who did not sign in with userpass cannot reach MFA-gated profiles.
+
+Namespaces (T457): a session signed in to a tenant namespace cannot be
+granted `sys/mcp/token` (no tenant policy can name a `sys/` path), so tenant
+work goes through narrowing from a child-visible ancestor (see
+[Namespaces](#namespaces)). A minted token that was refused because the vault
+bound it elsewhere (`mcp_namespace_mismatch`) is discarded locally but stays
+valid on the vault until it expires.
 
 Web fetches (T137): `GET` and `HEAD` only; `form` and `sso` login modes are
 refused (they wait on proxy mode, T106, or Rustion browser isolation, T97);
@@ -615,7 +673,12 @@ CSS, so text a page hides is returned.
 | `mcp_confirmation_required` | A session call reached the vault without a gatekeeper's confirmation: the assistant called `/v2/mcp` directly, or through a gatekeeper older than this release |
 | `mcp_brokered_sessions_disabled` / `mcp_session_protocol_disabled` | A switch is off: `mcp.brokered_sessions`, its `protocols`, the runtime switch, or a build without `mcp_sessions_ssh` / `mcp_sessions_web` |
 | `mcp_session_profile_not_agent_enabled` | The type's `agent_sessions_max` or the profile's `agent_access` is not `allow` |
-| `mcp_session_mfa_required` / `mcp_session_mfa_unavailable` | The profile requires MFA and the call carried no ticket (a gatekeeper older than this release) / you cannot complete it here: not a userpass user, no factor enrolled, only a security key at `bvault mcp serve`, or signed in to a child namespace |
+| `mcp_session_mfa_required` / `mcp_session_mfa_unavailable` | The profile requires MFA and the call carried no ticket (a gatekeeper older than this release) / you cannot complete it here: not a userpass user, no factor enrolled, or only a security key at `bvault mcp serve` |
+| `mcp_namespace_not_permitted` | The exchange asked for a namespace your sign-in may not narrow to: not your own, nor beneath it with a child-visible sign-in, or not a well-formed path. Nothing was minted |
+| `mcp_policy_not_in_namespace` | A narrowed token would carry a policy that does not exist in the target namespace (named in the message); create it there, or request policies that exist |
+| `mcp_namespace_unavailable` | The token's (or the requested) namespace was deleted or cannot be resolved; calls are refused, never run at root. Sign in again, or pair again |
+| `mcp_namespace_conflict` | `bvault mcp serve --namespace` names another namespace than the one the pairing was narrowed to in the desktop app; drop the flag or pair again |
+| `mcp_namespace_mismatch` | The vault bound a narrowed token somewhere else (a vault without narrowing ignores the field); the token was discarded |
 | `mcp_session_mfa_ticket_refused` | Your MFA ticket was for another call, expired (60 s) or already used; it is burnt, and the assistant's retry asks you again |
 | `mcp_session_mfa_check_failed` | The gatekeeper could not ask the vault whether the profile is gated (unreachable, or your session may not read the resource or profile) |
 | `mcp_session_requires_bastion` | The resource must be reached through Rustion, which cannot run an agent's command |

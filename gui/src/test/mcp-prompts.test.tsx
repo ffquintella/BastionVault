@@ -105,12 +105,14 @@ function calls(cmd: string) {
 describe("McpPromptHost", () => {
   let pending: unknown;
   let answer: (args: unknown) => Promise<unknown>;
+  let operable: unknown;
 
   beforeEach(() => {
     mockInvoke.mockReset();
     for (const k of Object.keys(handlers)) delete handlers[k];
     useAuthStore.setState({ isAuthenticated: false });
     pending = null;
+    operable = { namespaces: [], token_namespace: "", root: false };
     answer = () => Promise.resolve();
     mockInvoke.mockImplementation((cmd: string, args?: unknown) => {
       switch (cmd) {
@@ -122,6 +124,8 @@ describe("McpPromptHost", () => {
           return answer(args);
         case "mcp_server_autostart":
           return Promise.resolve({ running: true });
+        case "namespaces_self":
+          return Promise.resolve(operable);
         default:
           return Promise.resolve({});
       }
@@ -403,5 +407,85 @@ describe("McpPromptHost", () => {
     expect(calls("mcp_server_autostart")).toHaveLength(0);
     act(() => useAuthStore.setState({ isAuthenticated: true }));
     await waitFor(() => expect(calls("mcp_server_autostart")).toHaveLength(1));
+  });
+
+  // ── namespaces (features/mcp-namespace-selection.md, T457) ──────────────
+
+  async function approveWithScope(user: ReturnType<typeof userEvent.setup>) {
+    await user.type(screen.getByLabelText(/path scope/i), "secret/*");
+    await user.click(screen.getByRole("button", { name: /^approve$/i }));
+    await waitFor(() => expect(calls("mcp_prompt_answer")).toHaveLength(1));
+    return (calls("mcp_prompt_answer")[0][1] as { answer: { grant: Record<string, unknown> } }).answer.grant;
+  }
+
+  it("offers only the sign-in's namespace and those beneath it, and sends a narrowing only when chosen", async () => {
+    const user = userEvent.setup();
+    operable = { namespaces: ["", "dti", "dti/esi", "dti/ops", "dtix", "tenant-a"], token_namespace: "dti", root: false };
+    await mount();
+    send({ ...PAIRING_PROMPT, namespace: "dti" });
+
+    const selector = (await screen.findByLabelText("Namespace for its tokens")) as HTMLSelectElement;
+    const offered = Array.from(selector.options).map((o) => o.value);
+    expect(offered).toEqual(["dti", "dti/esi", "dti/ops"]);
+    expect(selector.value).toBe("dti");
+    expect(screen.getByRole("option", { name: "dti (your sign-in)" })).toBeInTheDocument();
+
+    await user.selectOptions(selector, "dti/esi");
+    const grant = await approveWithScope(user);
+    expect(grant.namespace).toBe("dti/esi");
+  });
+
+  it("sends no namespace when the operator keeps the sign-in's own", async () => {
+    const user = userEvent.setup();
+    operable = { namespaces: ["dti", "dti/esi"], token_namespace: "dti", root: false };
+    await mount();
+    send({ ...PAIRING_PROMPT, namespace: "dti" });
+    await screen.findByLabelText("Namespace for its tokens");
+    const grant = await approveWithScope(user);
+    expect("namespace" in grant).toBe(false);
+  });
+
+  it("names the namespace without a selector when nothing lies beneath it, and root as root", async () => {
+    await mount();
+    send({ ...PAIRING_PROMPT, namespace: "" });
+    expect(await screen.findByTestId("mcp-pairing-namespace")).toHaveTextContent("root");
+    expect(screen.queryByLabelText("Namespace for its tokens")).not.toBeInTheDocument();
+  });
+
+  it("does not offer narrowing when the host could not read the sign-in's namespace", async () => {
+    operable = { namespaces: ["", "dti"], token_namespace: "", root: true };
+    await mount();
+    send(PAIRING_PROMPT);
+    expect(await screen.findByTestId("mcp-pairing-namespace")).toHaveTextContent("could not be read");
+    expect(calls("namespaces_self")).toHaveLength(0);
+  });
+
+  it("shows where a confirmed call runs: the token's namespace, root by name, nothing when unknown", async () => {
+    await mount();
+    send({ ...CONFIRM_PROMPT, namespace: "dti/esi" });
+    expect(await screen.findByTestId("mcp-call-namespace")).toHaveTextContent("dti/esi");
+    act(() => handlers["mcp-prompt-closed"]({ payload: CONFIRM_PROMPT.id }));
+
+    send({ ...SESSION_PROMPT, namespace: "" });
+    expect(await screen.findByTestId("mcp-call-namespace")).toHaveTextContent("root");
+    act(() => handlers["mcp-prompt-closed"]({ payload: SESSION_PROMPT.id }));
+
+    send(CONFIRM_PROMPT);
+    await screen.findByText("Allow this AI-assistant call?");
+    expect(screen.queryByTestId("mcp-call-namespace")).not.toBeInTheDocument();
+  });
+});
+
+describe("narrowingOptions", () => {
+  it("never offers a parent, a sibling or a look-alike prefix", async () => {
+    const { narrowingOptions, namespaceLabel } = await import("../lib/mcpNamespace");
+    expect(narrowingOptions("dti", ["", "dti", "dti/esi", "dtix", "dti/esi/deep", "dti/esi"])).toEqual([
+      "dti",
+      "dti/esi",
+      "dti/esi/deep",
+    ]);
+    expect(narrowingOptions("", ["", "a", "a/b"])).toEqual(["", "a", "a/b"]);
+    expect(narrowingOptions("dti/esi", ["dti", "dti/ops"])).toEqual(["dti/esi"]);
+    expect(namespaceLabel("")).toBe("root");
   });
 });

@@ -286,7 +286,7 @@ Protocol. The operator guide is [`mcp.md`](mcp.md).
 
 ```bash
 bvault mcp pair --client-name <name> [--transport stdio|uds|loopback-http]
-bvault mcp serve [--stdio | --socket <path> | --listen 127.0.0.1:<port>]
+bvault mcp serve [--stdio | --socket <path> | --listen 127.0.0.1:<port>] [--namespace <ns>]
 bvault mcp pairings list
 bvault mcp pairings revoke <id>
 bvault mcp token --app <name> [--ttl-secs N] [--policies a,b]
@@ -306,6 +306,11 @@ bvault mcp catalogue
   `--socket` it also accepts the `initialize` handshake of clients on MCP
   2025-03-26 to 2025-11-25, such as Claude Code; see
   [Clients on earlier MCP revisions](mcp.md#clients-on-earlier-mcp-revisions).
+  Tokens are bound to your session's namespace; `--namespace <ns>` asks the
+  vault to bind every token it mints to `<ns>` instead, which it accepts only
+  for your own namespace or, from a child-visible sign-in, one beneath it
+  (`mcp_namespace_not_permitted` otherwise). A malformed path is a usage
+  error. See [Namespaces](mcp.md#namespaces).
 - `pairings revoke` removes the pairing locally and revokes its tokens on the
   vault; it exits non-zero if the vault could not be reached.
 - `token --app` exchanges the current login for an MCP-bound token for a

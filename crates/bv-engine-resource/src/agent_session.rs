@@ -112,6 +112,18 @@ pub(crate) struct SessionTool {
     pub protocol: &'static str,
 }
 
+/// The namespace an agent call is attributed to in its events: the MCP
+/// token's stored binding, where the dispatcher routes every call
+/// (`features/mcp-namespace-selection.md`). Attribution only, so a binding
+/// that does not normalize is recorded as stored rather than as root.
+pub(crate) fn agent_namespace(req: &Request) -> String {
+    let Some(auth) = req.auth.as_ref() else {
+        return String::new();
+    };
+    crate::kernel_api::namespace::bound_namespace(&auth.metadata)
+        .unwrap_or_else(|_| crate::kernel_api::namespace::binding_from_metadata(&auth.metadata).0)
+}
+
 /// `connect.agent.refused`, best effort: the call is refused whatever
 /// happens to the event, and a broker failure is logged.
 #[maybe_async::maybe_async]
@@ -131,6 +143,7 @@ pub(crate) async fn emit_refused(
         operator: call.binding.as_ref().and_then(|b| b.operator.clone()),
         pairing_id: call.pairing_id(),
         client_name: call.binding.as_ref().map(|b| b.client_name.clone()).unwrap_or_default(),
+        namespace: agent_namespace(req),
     };
     if let Err(e) = mcp_events::emit(ctx, &event, Some(req)).await {
         log::warn!(target: "security", "connect.agent.refused could not be written to the audit log: {e}");
