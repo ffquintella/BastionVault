@@ -158,8 +158,23 @@ fn arb_rule() -> impl Strategy<Value = RuleModel> {
         })
 }
 
+/// One generated policy, without the parameter constraints `Policy::init`
+/// refuses beside a SQL capability. `Policy::parse` merges the parameters of
+/// every block with the same raw path into the first one, so they are
+/// dropped from each rule sharing its raw path with a SQL rule.
+fn without_params_beside_sql(mut rules: Vec<RuleModel>) -> Vec<RuleModel> {
+    let sql_paths: Vec<String> =
+        rules.iter().filter(|r| r.caps.iter().any(|c| SQL_CAPS.contains(c))).map(|r| r.path.clone()).collect();
+    for r in rules.iter_mut().filter(|r| sql_paths.contains(&r.path)) {
+        r.required.clear();
+        r.allowed = None;
+        r.denied = None;
+    }
+    rules
+}
+
 fn arb_policy_set() -> impl Strategy<Value = Vec<Vec<RuleModel>>> {
-    prop::collection::vec(prop::collection::vec(arb_rule(), 1..=4), 1..=3)
+    prop::collection::vec(prop::collection::vec(arb_rule(), 1..=4).prop_map(without_params_beside_sql), 1..=3)
 }
 
 fn quoted(items: &[&str]) -> String {
@@ -276,8 +291,13 @@ fn arb_request() -> impl Strategy<Value = RequestModel> {
         prop::option::of(prop::option::of(prop::sample::select(&["", "u1", "u2"][..]))),
         prop::sample::subsequence(&["g1", "G1 ", "g2"][..], 0..=2),
         prop::sample::select(&["", "u1", "u2"][..]),
-        prop::sample::subsequence(&["read", "list", "update", "delete", "connect"][..], 0..=3),
-        prop::option::of(prop::sample::select(&["connect", "read", ""][..])),
+        // Shares and overrides include SQL names (T124), as a SQL probe sets
+        // the override to the probed `sql_*` capability.
+        prop::sample::subsequence(
+            &["read", "list", "update", "delete", "connect", "sql_select", "sql_drop"][..],
+            0..=3,
+        ),
+        prop::option::of(prop::sample::select(&["connect", "read", "", "sql_select", "sql_drop"][..])),
     )
         .prop_map(|(op, path, data, body, entity, asset_groups, asset_owner, shared, share_override)| {
             RequestModel { op, path, data, body, entity, asset_groups, asset_owner, shared, share_override }
@@ -479,6 +499,9 @@ fn capability_bit_layout_matches_core() {
         assert_eq!(cap.to_bits(), bit, "{cap}");
     }
     assert_eq!(Capability::iter().count(), pairs.len(), "a Capability was added without a bv-policy-core constant");
+    let sql = Capability::iter().filter(Capability::is_sql).fold(0, |acc, c| acc | c.to_bits());
+    assert_eq!(sql, bv_policy_core::CAP_SQL_ALL);
+    assert_eq!(sql | Capability::Connect.to_bits(), bv_policy_core::CAP_PROBE_ONLY);
 }
 
 fn acl_of(policies: &[&str]) -> ACL {

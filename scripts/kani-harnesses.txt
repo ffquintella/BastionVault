@@ -68,3 +68,9 @@ harness t5b_an_unfiltered_list_needs_the_governing_rule theorem fast 1      10.5
 harness t5b_a_non_governing_list_rule_keeps_the_filter theorem fast 1        6.2   T5b F7
 harness t7_root_isolation                             theorem  fast  1       14.1   T7
 harness t8_parameter_constraints                      theorem  fast  4        0.8   T8
+# T9 (T124, 2026-10-26): the probe-only capabilities, `connect` and the SQL
+# family. Measured in a full run (20 harnesses, 326 s wall): 19.1 s (fast,
+# 0.9 s under the threshold) and 29.2 s (slow, two decide runs per case like
+# the other slow pair). The fastest slow harness measured 26.8 s in that run.
+harness t9_a_probe_only_capability_needs_a_rule_that_carries_it theorem fast 3 19.1 T9
+harness t9_probe_only_capabilities_decide_nothing_but_their_own_bits theorem slow 2 29.2 T9

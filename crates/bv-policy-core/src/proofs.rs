@@ -1,8 +1,9 @@
 //! Kani harnesses for the ACL theorems of
 //! `roadmaps/formal-verification-and-type-driven-security.md` § Phase 3
-//! (T1–T8). F6 and F7 were *defect witnesses* until T119 and T120 fixed
-//! them; they are now `t1_deny_wins_on_enforcement` and
-//! `t5b_a_non_governing_list_rule_keeps_the_filter`.
+//! (T1–T8), and T9 for the probe-only capabilities (`connect` and the SQL
+//! family, features/sql-browser.md §9.1). F6 and F7 were *defect witnesses*
+//! until T119 and T120 fixed them; they are now `t1_deny_wins_on_enforcement`
+//! and `t5b_a_non_governing_list_rule_keeps_the_filter`.
 //!
 //! Run: `cargo kani -p bv-policy-core`. Every harness must report
 //! `VERIFICATION:- SUCCESSFUL` and every `cover` `SATISFIED`; an
@@ -637,6 +638,110 @@ fn t7_root_isolation() {
                     || applying(&scoped, is_list, |r| sudo(&r.cand))
             );
         }
+    }
+}
+
+// ── T9 — probe-only capabilities ───────────────────────────────────
+
+/// `c` with every probe-only bit (`connect`, the SQL family) removed.
+fn strip_cand(c: Cand) -> Cand {
+    let mut c = c;
+    c.perm.caps &= !CAP_PROBE_ONLY;
+    c
+}
+
+fn strip_index(idx: &Index) -> Index {
+    Index {
+        exact: idx.exact.map(strip_cand),
+        trimmed: idx.trimmed.map(strip_cand),
+        non_exact: idx.non_exact.map(strip_cand),
+    }
+}
+
+fn strip_rules(r: &Rules) -> Rules {
+    let mut out = *r;
+    for x in out.rules.iter_mut() {
+        x.cand = strip_cand(x.cand);
+    }
+    out
+}
+
+/// T9 (inert) — removing `connect` and every SQL bit from every candidate
+/// leaves `allowed`, `root_privs`, `is_root`, the LIST filter and every
+/// granting-policy and filter effect unchanged, in both modes, and changes
+/// the reported bitmap in exactly those bits. No operation is granted,
+/// refused, filtered or attributed because of a probe-only capability.
+#[kani::proof]
+#[kani::unwind(5)]
+fn t9_probe_only_capabilities_decide_nothing_but_their_own_bits() {
+    let (idx, gated, scoped) = (any_index(), any_rules(), any_rules());
+    let q: Query = kani::any();
+
+    let (d, fx) = run(&q, &idx, &gated, &scoped);
+    let (bare, bare_fx) = run(&q, &strip_index(&idx), &strip_rules(&gated), &strip_rules(&scoped));
+
+    kani::cover!(q.probe && d.caps & CAP_SQL_ALL != 0 && d.caps != CAP_DENY, "a probe reports a SQL capability");
+    kani::cover!(!q.probe && d.allowed && d.caps & CAP_SQL_ALL != 0, "an operation granted beside a SQL grant");
+
+    assert_eq!(d.allowed, bare.allowed, "a probe-only capability changed `allowed`");
+    assert_eq!(d.root_privs, bare.root_privs, "a probe-only capability changed `root_privs`");
+    assert_eq!(d.is_root, bare.is_root);
+    assert_eq!(d.filtered, bare.filtered, "a probe-only capability changed the LIST filter");
+    assert_eq!(d.caps & !CAP_PROBE_ONLY, bare.caps, "a probe-only capability changed another bit");
+    assert_eq!(fx, bare_fx, "a probe-only capability changed the granting policies or the filter entries");
+}
+
+/// T9 (no implication) — a probe-only bit is reported only when an evaluated
+/// permission set carries that very bit: the governing ungated rule, or a
+/// gated / scoped rule that applies. Bit by bit, so `sql_update` never
+/// reports `sql_select` and `read`, `update`, `sudo` or `connect` never
+/// report a SQL capability. A deny that governs or applies leaves none.
+#[kani::proof]
+#[kani::unwind(5)]
+fn t9_a_probe_only_capability_needs_a_rule_that_carries_it() {
+    let (idx, gated, scoped) = (any_index(), any_rules(), any_rules());
+    let q: Query = kani::any();
+    kani::assume(!q.acl_is_root);
+    let is_list = q.op == Op::List;
+
+    let gov = governing(is_list, &idx);
+    let mut carried = gov.map_or(0, |c| c.perm.caps);
+    // One loop per layer: each runs at most MAX_RULES times (the unwind bound).
+    for layer in [&gated, &scoped] {
+        for r in layer.live() {
+            if r.matches && (is_list || r.gate) {
+                carried |= r.cand.perm.caps;
+            }
+        }
+    }
+    let deny_applies = gov.is_some_and(|c| denies(&c))
+        || applying(&gated, is_list, |r| denies(&r.cand))
+        || applying(&scoped, is_list, |r| denies(&r.cand));
+
+    let (d, _) = run(&q, &idx, &gated, &scoped);
+
+    kani::cover!(
+        q.probe && d.caps & CAP_SQL_SELECT != 0 && gov.is_none_or(|c| c.perm.caps & CAP_SQL_SELECT == 0),
+        "a SQL capability granted by a layered rule alone"
+    );
+    kani::cover!(
+        q.probe
+            && gov.is_some_and(|c| c.perm.caps == CAP_READ | CAP_UPDATE | CAP_SUDO | CAP_CONNECT | CAP_SQL_UPDATE)
+            && d.caps & CAP_SQL_ALL == CAP_SQL_UPDATE,
+        "read, update, sudo, connect and sql_update govern, and only sql_update is reported"
+    );
+    kani::cover!(
+        deny_applies && applying(&scoped, is_list, |r| r.cand.perm.caps & CAP_SQL_ALL != 0),
+        "a deny competes with a scoped SQL grant"
+    );
+
+    assert_eq!(
+        d.caps & CAP_PROBE_ONLY & !carried,
+        0,
+        "a probe-only capability was reported that no evaluated rule carries"
+    );
+    if deny_applies {
+        assert_eq!(d.caps & CAP_PROBE_ONLY, 0, "a deny left a probe-only capability behind");
     }
 }
 
