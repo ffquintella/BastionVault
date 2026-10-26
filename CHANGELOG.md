@@ -56,6 +56,22 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Added
+
+#### SQL Browser — policy substrate (Phase 1, step A)
+
+- Grant SQL privileges in policies with eleven probe-only capabilities (`sql_select`, `sql_insert`, `sql_update`, `sql_delete`, `sql_alter`, `sql_create`, `sql_drop`, `sql_execute`, `sql_admin`, `sql_export`, `sql_script`) on `resources/resources/<resource>/sql/server` and `…/sql/objects/<catalog>/<schema>/<object>`, implied by no other capability, implying none and revoked by `deny` (T124, S109)
+- Share SQL privileges on resources and asset groups, conveyed by a share-scoped `resources/resources/+/sql/*` rule in `default`, `namespace-shared` and `shared-access` that never grants through ownership (T124)
+- Ask for SQL privileges through `PolicyGate::sql_privileges`, which fails closed and records each check refused for a plugin on the Audit page's denied view with `reason=sql-privilege`, the capability, the namespace and the plugin (T124)
+- Prove with theorem T9 (two Kani harnesses, docs/verification.md) and the differential suite that the SQL capabilities and `connect` decide nothing but their own bits (T124, S108)
+
+### Changed
+
+#### SQL Browser — policy substrate (Phase 1, step A)
+
+- Refuse a share that names a SQL capability on a KV secret or a file with a `400`, and refuse a policy rule that combines a SQL capability with `allowed_parameters`, `denied_parameters` or `required_parameters`, instead of ignoring either silently (T124)
+- Upgrade every node of a cluster together for this release: `default` and `shared-access` are rewritten at startup with the SQL capabilities, which an older node cannot parse, and the cluster-wide version gate the spec calls for does not exist yet (T124)
+
 ## [0.44.47] - 2026-10-19
 
 ### Added

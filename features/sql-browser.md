@@ -1,6 +1,7 @@
 # Feature: SQL Browser — query and change data on database resources (`dbms-management` plugin)
 
-**Status: Proposed (2026-10-13). Phase 0 only — no code.** Tracked as ROADMAP
+**Status: In progress (2026-10-26). Phase 1 step A (the policy substrate) is
+implemented; the rest of Phase 1 is not.** Tracked as ROADMAP
 T124–T130 under M5 (see *Tracking*). Written against the tree at 0.44.31; every
 "today" statement below was verified by reading the code on that date and
 carries a file reference.
@@ -132,13 +133,32 @@ BastionVault, is out of scope (see *Alternatives considered*).
 
 ## Current State
 
-**Status: Proposed.** Nothing is implemented. The Phase table maps each phase to
-its ROADMAP task.
+**Status: In progress.** The maintainer approved the capability model (§3,
+§9.1) as written. Phase 1 is delivered in ordered steps; step A, the policy
+substrate, is in the tree:
+
+- the eleven `sql_*` capabilities in `Capability` (bits 10–20), parsed and
+  formatted in HCL and in the policy dry-run's JSON cases, refused beside
+  parameter constraints;
+- `bv-policy-core` constants and theorem T9 (two Kani harnesses), the
+  differential suite over the new bits, and docs/verification.md;
+- the qualifier resolver's `resources/resources/<R>/sql/**` → `(resource, R)`
+  edge, pinned by a test;
+- `PolicyGate::sql_privileges` with `SqlCheck`, `SqlTarget`, `SqlVerdict` and
+  `SqlPurpose`, implemented in `PolicyStore`, with refusals in the denial
+  store;
+- the share vocabulary and the baseline rule in `default`, `namespace-shared`
+  and `shared-access`.
+
+Not yet: the rolling-upgrade gate (§13, see *Phase 0 findings*), the policy
+builder and sharing chips, ABI 1.4, the resource engine's `sql` protocol and
+`v2/sql/privileges`, and the GUI. The Phase table maps each phase to its
+ROADMAP task.
 
 | Phase | Task | Status |
 |---|---|---|
-| Phase 0 — verification spike and decisions | T124 | Todo |
-| Phase 1 — host substrate: SQL capabilities, plugin ABI 1.4, `sql` protocol | T124 | Todo |
+| Phase 0 — verification spike and decisions | T124 | In progress (items 1 and 9 answered below) |
+| Phase 1 — host substrate: SQL capabilities, plugin ABI 1.4, `sql` protocol | T124 | In progress (step A: policy substrate done) |
 | Phase 2 — `bv-sql-classify` classifier crate | T125 | Todo |
 | Phase 3 — the `dbms-management` plugin with PostgreSQL | T125 | Todo |
 | Phase 4 — GUI SQL workspace | T125 | Todo |
@@ -1311,6 +1331,48 @@ starts.
    bounds the page size.
 9. **Rolling upgrades.** Design the gate for writing `sql_*` capabilities.
 
+#### Phase 0 findings (2026-10-26)
+
+1. **Representation width and bitmask consumers.** `Capability` is
+   `#[repr(u32)]`; `Permissions::capabilities_bitmap`, `ACLResults` and
+   `bv_policy_core::Perm` are `u32`, so bits 10–20 fit with 11 to spare. The
+   bitmap is computed at policy load and never persisted (`PolicyEntry`
+   stores the HCL text). Consumers: `Policy::init` (fold, deny reduction),
+   `Permissions::merge` / `merge_caps`, `add_granting_policy_to_map` and
+   `granting_policy_names` (iterate `Capability`), `to_granting_capabilities`
+   (formats the new names), `ACL::capabilities`, `explain_capability*`
+   (probe on Read; the `_with_params` variant falls back to the bitmap for
+   them), `check_path_capability` (an explicit mask that excludes probe-only
+   bits), `bv_policy_core::check` / `decide` (read only `deny`, `list`,
+   `sudo`, `create` and the operation's bit) and the frozen differential
+   copy. One consumer does treat a SQL-only rule as non-empty: the
+   `bare_mount` heuristic in `has_mount_access` (any non-zero, non-deny
+   bitmap), so an ungated `sql_*` rule makes the `resources/` mount visible
+   in the GUI, exactly as `connect` already does. That is visibility, not
+   authorization.
+9. **Rolling upgrades.** No mechanism reports node versions across the
+   cluster today, so the §13 gate is **not implemented** and stays open
+   (*Open questions* 2). Until it lands: `default` and `shared-access` are
+   force-loaded into storage at startup, so the first node on this build
+   writes `sql_*` into them, and an older node in the same cluster then
+   fails to parse `default` (every token's ACL, and its own startup
+   force-load). Upgrade every node together, as the hiqlite 0.15 upgrade
+   already requires.
+
+Decisions taken in step A where the spec was silent:
+
+- **Resource names are canonicalized** (trimmed, lower-cased) in the
+  synthetic path, as the resource engine stores new names and as owner,
+  share and asset-group records key them. Otherwise a mixed-case request
+  could slip past a lower-case `deny` under a broad `+` grant. A name that
+  cannot address one path segment refuses the batch.
+- **Unaddressable object names** (§3.2) are checked on `…/sql/objects/`,
+  which only grants covering every object match.
+- **`SqlPurpose`** separates enforcement (refusals recorded, plugin named)
+  from the display read behind the GUI's chips (nothing recorded), so that
+  rendering chips does not fill the denial store.
+- **A named namespace that does not resolve is an error**, not root.
+
 ### Phase 1 — host substrate (T124)
 
 §9 in full:
@@ -1509,7 +1571,7 @@ and seal during a run.
 
 | Task | Phases | State |
 |---|---|---|
-| T124 Grant SQL privileges in policies and shares, and let plugins ask the host to authorize statements and release database credentials | 0, 1 | `[ ]` |
+| T124 Grant SQL privileges in policies and shares, and let plugins ask the host to authorize statements and release database credentials | 0, 1 | `[/]` |
 | T125 Browse, query and edit PostgreSQL databases in the SQL browser through the `dbms-management` plugin | 2, 3, 4 | `[ ]` |
 | T126 Export query results and run SQL scripts only with their own grants | 5 | `[ ]` |
 | T127 Add MySQL and MariaDB to the SQL browser | 6 | `[ ]` |

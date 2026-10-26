@@ -49,7 +49,25 @@ fn config() -> ProptestConfig {
 /// segment containing `+` (which moves the specificity key).
 const RULE_SEGMENTS: &[&str] = &["a", "ab", "b", "+", "", "x+y"];
 const REQUEST_SEGMENTS: &[&str] = &["a", "ab", "abc", "b", "+", "", "x+y"];
-const CAPS: &[&str] = &["deny", "create", "read", "update", "delete", "list", "sudo", "patch", "connect"];
+const CAPS: &[&str] = &[
+    "deny",
+    "create",
+    "read",
+    "update",
+    "delete",
+    "list",
+    "sudo",
+    "patch",
+    "connect",
+    "sql_select",
+    "sql_update",
+    "sql_drop",
+    "sql_admin",
+    "sql_script",
+];
+/// The SQL capabilities among [`CAPS`]. `Policy::init` refuses parameter
+/// constraints beside them; see [`without_params_beside_sql`].
+const SQL_CAPS: &[&str] = &["sql_select", "sql_update", "sql_drop", "sql_admin", "sql_script"];
 const OLD_STYLE: &[&str] = &["deny", "read", "write", "sudo"];
 const GROUPS: &[&str] = &["g1", "G2", " g1 ", "g3"];
 const SCOPES: &[&str] = &["owner", "shared", "any", "bogus", "OWNER"];
@@ -133,8 +151,23 @@ fn arb_rule() -> impl Strategy<Value = RuleModel> {
         })
 }
 
+/// One generated policy, without the parameter constraints `Policy::init`
+/// refuses beside a SQL capability. `Policy::parse` merges the parameters of
+/// every block with the same raw path into the first one, so they are
+/// dropped from each rule sharing its raw path with a SQL rule.
+fn without_params_beside_sql(mut rules: Vec<RuleModel>) -> Vec<RuleModel> {
+    let sql_paths: Vec<String> =
+        rules.iter().filter(|r| r.caps.iter().any(|c| SQL_CAPS.contains(c))).map(|r| r.path.clone()).collect();
+    for r in rules.iter_mut().filter(|r| sql_paths.contains(&r.path)) {
+        r.required.clear();
+        r.allowed = None;
+        r.denied = None;
+    }
+    rules
+}
+
 fn arb_policy_set() -> impl Strategy<Value = Vec<Vec<RuleModel>>> {
-    prop::collection::vec(prop::collection::vec(arb_rule(), 1..=4), 1..=3)
+    prop::collection::vec(prop::collection::vec(arb_rule(), 1..=4).prop_map(without_params_beside_sql), 1..=3)
 }
 
 fn quoted(items: &[&str]) -> String {
@@ -251,8 +284,11 @@ fn arb_request() -> impl Strategy<Value = RequestModel> {
         prop::option::of(prop::option::of(prop::sample::select(&["", "u1", "u2"][..]))),
         prop::sample::subsequence(&["g1", "G1 ", "g2"][..], 0..=2),
         prop::sample::select(&["", "u1", "u2"][..]),
-        prop::sample::subsequence(&["read", "list", "update", "delete", "connect"][..], 0..=3),
-        prop::option::of(prop::sample::select(&["connect", "read", ""][..])),
+        prop::sample::subsequence(
+            &["read", "list", "update", "delete", "connect", "sql_select", "sql_drop"][..],
+            0..=3,
+        ),
+        prop::option::of(prop::sample::select(&["connect", "read", "", "sql_select", "sql_drop"][..])),
     )
         .prop_map(|(op, path, data, body, entity, asset_groups, asset_owner, shared, share_override)| {
             RequestModel { op, path, data, body, entity, asset_groups, asset_owner, shared, share_override }
@@ -438,11 +474,25 @@ fn capability_bit_layout_matches_core() {
         (Capability::Patch, bv_policy_core::CAP_PATCH),
         (Capability::Root, bv_policy_core::CAP_ROOT),
         (Capability::Connect, bv_policy_core::CAP_CONNECT),
+        (Capability::SqlSelect, bv_policy_core::CAP_SQL_SELECT),
+        (Capability::SqlInsert, bv_policy_core::CAP_SQL_INSERT),
+        (Capability::SqlUpdate, bv_policy_core::CAP_SQL_UPDATE),
+        (Capability::SqlDelete, bv_policy_core::CAP_SQL_DELETE),
+        (Capability::SqlAlter, bv_policy_core::CAP_SQL_ALTER),
+        (Capability::SqlCreate, bv_policy_core::CAP_SQL_CREATE),
+        (Capability::SqlDrop, bv_policy_core::CAP_SQL_DROP),
+        (Capability::SqlExecute, bv_policy_core::CAP_SQL_EXECUTE),
+        (Capability::SqlAdmin, bv_policy_core::CAP_SQL_ADMIN),
+        (Capability::SqlExport, bv_policy_core::CAP_SQL_EXPORT),
+        (Capability::SqlScript, bv_policy_core::CAP_SQL_SCRIPT),
     ];
     for (cap, bit) in pairs {
         assert_eq!(cap.to_bits(), bit, "{cap}");
     }
     assert_eq!(Capability::iter().count(), pairs.len(), "a Capability was added without a bv-policy-core constant");
+    let sql = Capability::iter().filter(Capability::is_sql).fold(0, |acc, c| acc | c.to_bits());
+    assert_eq!(sql, bv_policy_core::CAP_SQL_ALL);
+    assert_eq!(sql | Capability::Connect.to_bits(), bv_policy_core::CAP_PROBE_ONLY);
 }
 
 fn acl_of(policies: &[&str]) -> ACL {
@@ -718,8 +768,42 @@ fn f8_a_gated_segment_wildcard_glob_refuses_other_shapes() {
     assert!(!acl_of(&[GATED_GLOB_READ]).allow_operation(&list, false).unwrap().allowed);
 }
 
+/// `set` with every SQL capability removed from every rule.
+fn without_sql(set: &[Vec<RuleModel>]) -> Vec<Vec<RuleModel>> {
+    set.iter()
+        .map(|rules| {
+            rules
+                .iter()
+                .cloned()
+                .map(|mut r| {
+                    r.caps.retain(|c| !SQL_CAPS.contains(c));
+                    r
+                })
+                .collect()
+        })
+        .collect()
+}
+
 proptest! {
     #![proptest_config(config())]
+
+    /// T9 on real strings: the SQL capabilities decide nothing but their own
+    /// bits. Removing them from every generated rule leaves every verdict,
+    /// `root_privs`, granting policy and LIST filter unchanged, in both modes,
+    /// and changes the reported bitmap in exactly the SQL bits.
+    #[test]
+    fn sql_capabilities_decide_nothing_but_their_own_bits(set in arb_policy_set(), requests in prop::collection::vec(arb_request(), 1..=4)) {
+        let with = ACL::new(&parse_set(&set)).unwrap();
+        let without = ACL::new(&parse_set(&without_sql(&set))).unwrap();
+        for m in &requests {
+            let req = request(m);
+            for check_only in [false, true] {
+                let (mut a, b) = (project(&with.allow_operation(&req, check_only).unwrap()), project(&without.allow_operation(&req, check_only).unwrap()));
+                a.3 &= !bv_policy_core::CAP_SQL_ALL;
+                prop_assert_eq!(a, b, "check_only = {}", check_only);
+            }
+        }
+    }
 
     /// F8 (T121), on every generated rule shape: one rule grants a read of
     /// a path ungated exactly when it grants it `groups`-gated (gate

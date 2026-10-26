@@ -350,6 +350,40 @@ mod tests {
         assert!(!fx.grants_live);
     }
 
+    // T9: the SQL family is probe-only. The shipped baseline grants it through
+    // a `scopes = ["shared"]` rule, so the scoped layer is the case to pin.
+
+    #[test]
+    fn a_scoped_sql_grant_is_probed_but_never_allows_an_operation() {
+        use crate::{CAP_SQL_ALL, CAP_SQL_SELECT};
+        let scoped = Rules::of(&[Rule { matches: true, gate: true, has_filter: true, cand: Cand::caps(CAP_SQL_ALL) }]);
+        let probe = decide(&q(Op::Read, true), &Index::default(), &Rules::default(), &scoped, &mut Trace::default());
+        assert_eq!(probe.caps, CAP_SQL_ALL);
+        assert!(!probe.allowed && !probe.root_privs);
+        for op in [Op::Read, Op::Write, Op::Delete, Op::Renew] {
+            let mut fx = Trace::default();
+            let d = decide(&q(op, false), &Index::default(), &Rules::default(), &scoped, &mut fx);
+            assert!(!d.allowed && d.caps == 0 && !fx.grants_live, "{op:?}");
+        }
+        // A governing grant of SQL_SELECT and a gated grant of the rest: the
+        // probe reports exactly the union, never a bit nobody granted.
+        let idx = Index { non_exact: Some(Cand::caps(CAP_SQL_SELECT)), ..Index::default() };
+        let gated = Rules::of(&[Rule { matches: true, gate: false, has_filter: true, cand: Cand::caps(CAP_SQL_ALL) }]);
+        let d = decide(&q(Op::Read, true), &idx, &gated, &Rules::default(), &mut Trace::default());
+        assert_eq!(d.caps, CAP_SQL_SELECT, "a failed group gate contributed SQL bits");
+    }
+
+    #[test]
+    fn a_governing_deny_revokes_a_shared_sql_grant() {
+        use crate::CAP_SQL_ALL;
+        let idx = Index { non_exact: Some(Cand::caps(CAP_DENY)), ..Index::default() };
+        let scoped = Rules::of(&[Rule { matches: true, gate: true, has_filter: true, cand: Cand::caps(CAP_SQL_ALL) }]);
+        for probe in [true, false] {
+            let d = decide(&q(Op::Read, probe), &idx, &Rules::default(), &scoped, &mut Trace::default());
+            assert_eq!(d.caps, CAP_DENY, "probe = {probe}");
+        }
+    }
+
     #[test]
     fn an_enforced_gated_deny_wipes_and_clears_root_privs() {
         let idx = Index { exact: Some(Cand::caps(CAP_READ | CAP_SUDO)), ..Index::default() };

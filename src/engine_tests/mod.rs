@@ -54,5 +54,6 @@ mod kernel_namespace;
 mod kernel_ns_assignment;
 mod kernel_policy_deny;
 mod kernel_policy_segment_glob;
+mod kernel_policy_sql;
 mod kernel_resource_group;
 mod kernel_token_binding;

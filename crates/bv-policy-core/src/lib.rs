@@ -22,6 +22,8 @@
 //! - [`segments_match`] — how a segment-wildcard rule (`+`) matches a path.
 //! - [`compare`] / [`MostSpecific`] — which non-exact rule is the most specific.
 //! - [`merge_caps`] — how two rules with an identical path combine.
+//! - [`CAP_PROBE_ONLY`] — `connect` and the eleven SQL capabilities, which no
+//!   operation requires and the decision treats as plain bits.
 //!
 //! The crate is `no_std`, allocation-free, `unsafe`-free and has no
 //! dependencies, so `cargo kani -p bv-policy-core` builds and verifies it in
@@ -78,8 +80,55 @@ pub const CAP_SUDO: u32 = 1 << 6;
 pub const CAP_PATCH: u32 = 1 << 7;
 /// `root`.
 pub const CAP_ROOT: u32 = 1 << 8;
-/// `connect`.
+/// `connect`. Probe-only: no [`Op`] requires it (see [`CAP_PROBE_ONLY`]).
 pub const CAP_CONNECT: u32 = 1 << 9;
+
+// The SQL capability family (features/sql-browser.md §3.1). Probe-only like
+// `connect`: no `Op` requires one, no other capability implies one, and they
+// imply nothing. The host evaluates them as capability probes on the
+// synthetic paths `resources/resources/<r>/sql/{server,objects/…}`.
+
+/// `sql_select` — read rows and metadata.
+pub const CAP_SQL_SELECT: u32 = 1 << 10;
+/// `sql_insert` — add rows.
+pub const CAP_SQL_INSERT: u32 = 1 << 11;
+/// `sql_update` — change rows, take row and table locks.
+pub const CAP_SQL_UPDATE: u32 = 1 << 12;
+/// `sql_delete` — remove rows.
+pub const CAP_SQL_DELETE: u32 = 1 << 13;
+/// `sql_alter` — change existing objects.
+pub const CAP_SQL_ALTER: u32 = 1 << 14;
+/// `sql_create` — create objects.
+pub const CAP_SQL_CREATE: u32 = 1 << 15;
+/// `sql_drop` — destroy objects, or all their rows, irreversibly.
+pub const CAP_SQL_DROP: u32 = 1 << 16;
+/// `sql_execute` — run code whose effect cannot be determined statically.
+pub const CAP_SQL_EXECUTE: u32 = 1 << 17;
+/// `sql_admin` — server-level administration.
+pub const CAP_SQL_ADMIN: u32 = 1 << 18;
+/// `sql_export` — bulk export of a result set.
+pub const CAP_SQL_EXPORT: u32 = 1 << 19;
+/// `sql_script` — multi-statement batches and script files.
+pub const CAP_SQL_SCRIPT: u32 = 1 << 20;
+
+/// Every SQL capability bit.
+pub const CAP_SQL_ALL: u32 = CAP_SQL_SELECT
+    | CAP_SQL_INSERT
+    | CAP_SQL_UPDATE
+    | CAP_SQL_DELETE
+    | CAP_SQL_ALTER
+    | CAP_SQL_CREATE
+    | CAP_SQL_DROP
+    | CAP_SQL_EXECUTE
+    | CAP_SQL_ADMIN
+    | CAP_SQL_EXPORT
+    | CAP_SQL_SCRIPT;
+
+/// The capabilities no [`Op`] requires: they are only ever asked about in a
+/// capability probe, never granted as an operation. Theorem T9
+/// (`docs/verification.md`) proves the decision core treats them as inert
+/// everywhere except in their own bit.
+pub const CAP_PROBE_ONLY: u32 = CAP_CONNECT | CAP_SQL_ALL;
 
 /// Verification bound, not a production limit: the proofs consider every
 /// group-gated layer and every scope-filtered layer of up to this many rules.

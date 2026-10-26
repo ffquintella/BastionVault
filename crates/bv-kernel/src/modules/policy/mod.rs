@@ -28,6 +28,8 @@ pub use policy_store::{PolicyHistoryEntry, PolicyStore};
 pub mod acl;
 // The ACL's index answering `bv_policy_core`'s questions (T31 Phase 3.4).
 mod core_bridge;
+// `PolicyGate::sql_privileges` (features/sql-browser.md §3.4).
+mod sql_privileges;
 // The verified core against a frozen copy of the pre-delegation evaluator
 // (T31 Phase 3.3).
 #[cfg(test)]

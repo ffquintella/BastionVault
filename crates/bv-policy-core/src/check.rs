@@ -189,6 +189,23 @@ mod tests {
         assert!(!check(&p, Op::Read, false, &some).allowed);
     }
 
+    /// `connect` and the SQL family are probe-only: on enforcement they grant
+    /// no operation, alone or all together, and a probe reports them as the
+    /// bits they are — nothing added, nothing implied.
+    #[test]
+    fn probe_only_capabilities_grant_no_operation() {
+        use crate::{CAP_PROBE_ONLY, CAP_SQL_ALL, CAP_SQL_SELECT, CAP_SQL_UPDATE};
+        for op in [Op::List, Op::Read, Op::Write, Op::Delete, Op::Renew, Op::Revoke, Op::Rollback, Op::Help] {
+            let c = check(&perm(CAP_PROBE_ONLY), op, false, &Facts::empty());
+            assert_eq!(c, Check { allowed: false, caps: 0, root_privs: false, granting: None }, "{op:?}");
+        }
+        let probed = check(&perm(CAP_SQL_UPDATE), Op::Read, true, &Facts::empty());
+        assert_eq!(probed.caps, CAP_SQL_UPDATE);
+        assert_eq!(probed.caps & CAP_SQL_SELECT, 0, "sql_update implied sql_select");
+        let read = check(&perm(CAP_READ | CAP_SUDO), Op::Read, true, &Facts::empty());
+        assert_eq!(read.caps & CAP_SQL_ALL, 0, "read or sudo implied a SQL capability");
+    }
+
     #[test]
     fn a_wildcard_allow_key_admits_unlisted_parameters() {
         let p = Perm { caps: CAP_READ, allowed_len: 2, allowed_wildcard: true, ..Perm::default() };
