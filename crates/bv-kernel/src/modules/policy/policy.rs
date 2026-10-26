@@ -244,6 +244,30 @@ impl Capability {
     pub fn to_bits(&self) -> u32 {
         *self as u32
     }
+
+    /// One of the eleven SQL capabilities (features/sql-browser.md §3.1).
+    pub fn is_sql(&self) -> bool {
+        self.to_bits() & bv_policy_core::CAP_SQL_ALL != 0
+    }
+
+    /// The policy capability for a SQL capability named in the kernel contract.
+    /// Exhaustive, so a new contract variant does not compile until mapped.
+    pub fn from_sql(cap: crate::kernel_api::policy::SqlCapability) -> Capability {
+        use crate::kernel_api::policy::SqlCapability as S;
+        match cap {
+            S::Select => Capability::SqlSelect,
+            S::Insert => Capability::SqlInsert,
+            S::Update => Capability::SqlUpdate,
+            S::Delete => Capability::SqlDelete,
+            S::Alter => Capability::SqlAlter,
+            S::Create => Capability::SqlCreate,
+            S::Drop => Capability::SqlDrop,
+            S::Execute => Capability::SqlExecute,
+            S::Admin => Capability::SqlAdmin,
+            S::Export => Capability::SqlExport,
+            S::Script => Capability::SqlScript,
+        }
+    }
 }
 
 impl FromStr for Policy {
@@ -425,6 +449,19 @@ impl Policy {
 
     fn init(&mut self, policy_config: &PolicyConfig) -> Result<(), RvError> {
         for (path, pc) in policy_config.path.iter() {
+            // A SQL capability is only ever probed, and a probe never reads
+            // request parameters, so a parameter constraint beside one would be
+            // silently ignored: refuse the rule instead (features/sql-browser.md §9.1).
+            if pc.capabilities.iter().any(Capability::is_sql)
+                && (!pc.allowed_parameters.is_empty()
+                    || !pc.denied_parameters.is_empty()
+                    || !pc.required_parameters.is_empty())
+            {
+                return Err(bv_error_string!(&format!(
+                    "path {path}: sql_* capabilities cannot be combined with allowed_parameters, \
+                     denied_parameters or required_parameters; narrow a SQL grant by its path instead"
+                )));
+            }
             let mut rules = PolicyPathRules::default();
             rules.path = ensure_no_leading_slash(path);
             rules.capabilities.clone_from(&pc.capabilities);
@@ -942,6 +979,47 @@ mod mod_policy_tests {
         );
         assert_eq!(to_granting_capabilities(CAP_READ | CAP_SQL_SELECT), vec!["read", "sql_select"]);
         assert_eq!(to_granting_capabilities(CAP_DENY | all_sql), vec!["deny"]);
+    }
+
+    /// The kernel contract's SQL names (`SqlCapability`) map onto the policy
+    /// capabilities one to one, in bit order, and `is_sql` marks exactly them.
+    #[test]
+    fn sql_contract_names_map_onto_the_policy_capabilities() {
+        use crate::kernel_api::policy::SqlCapability;
+        for (i, sql) in SqlCapability::ALL.into_iter().enumerate() {
+            let cap = Capability::from_sql(sql);
+            assert_eq!(cap.to_string(), sql.as_str());
+            assert_eq!(cap.to_bits(), 1 << (10 + i), "{cap}");
+            assert!(cap.is_sql());
+        }
+        assert_eq!(Capability::iter().filter(Capability::is_sql).count(), SqlCapability::ALL.len());
+        assert!(!Capability::Connect.is_sql() && !Capability::Read.is_sql() && !Capability::Sudo.is_sql());
+    }
+
+    /// Probes never read request parameters, so a constraint beside a SQL
+    /// capability would be silently ignored. The rule is refused instead.
+    #[test]
+    fn test_sql_capabilities_refuse_parameter_constraints() {
+        for constraint in [
+            r#"allowed_parameters = {"schema" = ["public"]}"#,
+            r#"denied_parameters = {"schema" = ["pci"]}"#,
+            r#"required_parameters = ["schema"]"#,
+        ] {
+            let text = format!(
+                "path \"resources/resources/db/sql/*\" {{\n capabilities = [\"read\", \"sql_select\"]\n {constraint}\n}}"
+            );
+            let err = Policy::from_str(&text).unwrap_err().to_string();
+            assert!(err.contains("sql_* capabilities cannot be combined"), "{constraint}: {err}");
+            // The same constraint beside ordinary capabilities is unchanged.
+            let plain = format!("path \"resources/resources/db/*\" {{\n capabilities = [\"read\"]\n {constraint}\n}}");
+            assert!(Policy::from_str(&plain).is_ok(), "{constraint}");
+        }
+        // A second block with the same raw path merges its parameters into
+        // the first, so a constraint written apart from the SQL grant is
+        // refused as well.
+        let split = "path \"resources/resources/db/sql/*\" { capabilities = [\"sql_select\"] }\n\
+                     path \"resources/resources/db/sql/*\" {\n capabilities = [\"read\"]\n required_parameters = [\"schema\"]\n}";
+        assert!(Policy::from_str(split).is_err());
     }
 
     #[test]

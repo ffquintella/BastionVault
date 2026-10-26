@@ -474,8 +474,11 @@ mod tests {
         assert_eq!(SQL_CAPS.iter().fold(0, |all, bit| all | bit), ALL_SQL);
         assert_eq!(ALL_SQL.count_ones(), 11);
         assert_eq!(ALL_SQL & ((CAP_CONNECT << 1) - 1), 0);
+        // The public masks T9 is stated over are exactly these bits.
+        assert_eq!(crate::CAP_SQL_ALL, ALL_SQL);
+        assert_eq!(crate::CAP_PROBE_ONLY, ALL_SQL | CAP_CONNECT);
         for op in PLAIN_OPS {
-            assert_eq!(op.required_capability().unwrap() & ALL_SQL, 0, "{op:?}");
+            assert_eq!(op.required_capability().unwrap() & crate::CAP_PROBE_ONLY, 0, "{op:?}");
         }
     }
 

@@ -1,6 +1,8 @@
 # Feature: SQL Browser — query and change data on database resources (`dbms-management` plugin)
 
-**Status: Proposed (2026-10-13). Phase 0 only — no code.** Tracked as ROADMAP
+**Status: In progress (2026-10-26). Phase 0 closed; Phase 1 subsystems 1–2
+(the policy substrate) implemented, the rest of Phase 1 not.** Proposed
+2026-10-13. Tracked as ROADMAP
 T124–T130 under M5 (see *Tracking*). Written against the tree at 0.44.31; every
 "today" statement below was verified by reading the code on that date and
 carries a file reference.
@@ -132,13 +134,18 @@ BastionVault, is out of scope (see *Alternatives considered*).
 
 ## Current State
 
-**Status: Proposed.** Nothing is implemented. The Phase table maps each phase to
-its ROADMAP task.
+**Status: In progress.** Phase 0 is closed (see *Phase 0 findings*). Phase 1
+subsystem 1 (the eleven `sql_*` capabilities, `ShareCap` at `u16`) and
+subsystem 2 (`PolicyGate::sql_privileges` with denial records, the qualifier
+edge, the share vocabulary and baseline rule, theorem T9) are in the tree; see
+*Phase 1, subsystem 1 validation* and *Phase 1, subsystem 2*. Nothing that a
+plugin, an HTTP route or the GUI can reach is implemented yet. The Phase table
+maps each phase to its ROADMAP task.
 
 | Phase | Task | Status |
 |---|---|---|
-| Phase 0 — verification spike and decisions | T124 | Todo |
-| Phase 1 — host substrate: SQL capabilities, plugin ABI 1.4, `sql` protocol | T124 | Todo |
+| Phase 0 — verification spike and decisions | T124 | Done (2026-10-21) |
+| Phase 1 — host substrate: SQL capabilities, plugin ABI 1.4, `sql` protocol | T124 | In progress (subsystems 1–2 of 6) |
 | Phase 2 — `bv-sql-classify` classifier crate | T125 | Todo |
 | Phase 3 — the `dbms-management` plugin with PostgreSQL | T125 | Todo |
 | Phase 4 — GUI SQL workspace | T125 | Todo |
@@ -535,6 +542,10 @@ async fn sql_privileges(
     checks: &[SqlCheck],       // (capability, SqlTarget::Server | SqlTarget::Object{catalog, schema, object})
 ) -> Result<Vec<SqlVerdict>, RvError>;   // one verdict per check; Err ⇒ refuse
 ```
+
+As implemented (subsystem 2), the call also takes a `SqlPurpose` after `req`:
+`Enforce { plugin }` records refusals naming the plugin, `Display` (the chips
+read below) records nothing. See *Phase 1, subsystem 2*.
 
 - **Same evaluator as every other check.** Each check is
   `ACL::explain_capability_for_request(path, cap)`, with the owner, share and
@@ -1772,7 +1783,7 @@ and seal during a run.
 
 | Task | Phases | State |
 |---|---|---|
-| T124 Grant SQL privileges in policies and shares, and let plugins ask the host to authorize statements and release database credentials | 0, 1 | `[ ]` |
+| T124 Grant SQL privileges in policies and shares, and let plugins ask the host to authorize statements and release database credentials | 0, 1 | `[/]` |
 | T125 Browse, query and edit PostgreSQL databases in the SQL browser through the `dbms-management` plugin | 2, 3, 4 | `[ ]` |
 | T126 Export query results and run SQL scripts only with their own grants | 5 | `[ ]` |
 | T127 Add MySQL and MariaDB to the SQL browser | 6 | `[ ]` |
@@ -1867,3 +1878,105 @@ time:
    `==> verify differential: PASS (958.2 s)`
 
 Subsystems 2–6 remain; T124 stays [ ].
+
+## Phase 1, subsystem 2
+
+Rebuilt on top of subsystem 1 (2026-10-26). Subsystem 1's representations are
+kept unchanged: the `Capability` variants and their serde names, the
+`CAP_SQL_*` constants, `ShareCap` at `u16`, and its decide, parser and listing
+tests. This subsystem adds:
+
+- **`PolicyGate::sql_privileges`** in `crates/bv-kernel-api/src/policy.rs`,
+  with the pure `policy::sql` module (`SqlCapability`, `SqlCheck`,
+  `SqlTarget`, `SqlVerdict`, `SqlPurpose`, `sql_check_path`), implemented in
+  `crates/bv-kernel/src/modules/policy/sql_privileges.rs`. Each check is one
+  `ACL::allow_operation` probe on a Read with the share override set to the
+  probed `sql_*` name, the same arms `may_connect_target` uses. Evaluator
+  errors are propagated, not defaulted to a refusal, so any error refuses the
+  whole batch (§3.4). At most `SQL_MAX_CHECKS` (1024) checks per batch.
+- **Denial records.** A refused check made with `SqlPurpose::Enforce` is
+  written to the denial store with the actor, the namespace, the synthetic
+  path, the capability and the plugin (`reason = "sql-privilege"`,
+  `operation = "sql"`). The three new `DenialAuditEntry` fields are omitted
+  when empty, so request denials serialize as before and a pre-T124 record
+  reads back with them empty. Keys are now strictly increasing within a
+  process, so several refusals appended for one statement cannot overwrite
+  each other.
+- **The qualifier edge.** `resource_name_from_path` already resolves
+  `resources/resources/<R>/sql/**` to `(resource, R)`; a test now pins it at
+  root and in a namespace, and pins that no KV, file or asset-group extractor
+  claims those paths.
+- **The share vocabulary and the baseline rule** (§3.3). The eleven names are
+  accepted for `resource` and `asset-group` targets and refused with a `400`
+  on `kv-secret` and `file` targets. A test ties the store's names to
+  `ShareCap`'s SQL variants.
+- **Parameter constraints refused** beside a SQL capability (§9.1): a probe
+  never reads request parameters, so the constraint would be silently
+  ignored.
+- **Theorem T9** (`docs/verification.md`): `CAP_SQL_ALL` and `CAP_PROBE_ONLY`
+  in `bv-policy-core` and two Kani harnesses. In the differential suite,
+  generated shares and share overrides now include SQL names.
+
+Decisions taken where the spec is silent or only sketches the interface:
+
+- **`SqlPurpose`.** §3.4's signature has no way to name the plugin that §3.4
+  requires in the denial record. The call takes `Enforce { plugin }` (an empty
+  plugin name is an error) or `Display` (the chips read; nothing recorded), so
+  rendering chips does not fill the denial store. Rejected: §3.4's
+  three-argument call, which would record chip reads as refusals and could
+  not name the plugin.
+- **Resource names are canonicalized** (trimmed, lower-cased) in the
+  synthetic path, as `OwnerStore::scope_target_name` keys owner, share and
+  asset-group records. A mixed-case name therefore cannot slip past a
+  lower-case `deny`. A name that cannot address exactly one path segment
+  refuses the batch.
+- **Unaddressable object names** (§3.2) are checked on `…/sql/objects/`. No
+  rule naming a catalog, schema or object can match there; a resource-wide
+  grant (`…/sql/*`) or a grant covering every object (`…/sql/objects/*`)
+  does. Rejected: checking them on `…/sql/` itself, which would let a
+  `…/sql/*` grant pass an object that a `…/sql/objects/*` deny covers.
+- **A named namespace that does not resolve is an error**, not root, unlike
+  `caller_namespace`.
+
+Rolling upgrades (§13, D4): the baseline rule puts `sql_*` into `default` and
+`shared-access`, which every node force-loads into storage at startup. An
+older node cannot parse either, and refuses the whole policy. Subsystem 4's
+write gate must therefore cover that force-load, not only operator writes.
+Until it lands, `main` must not be released (ROADMAP T124).
+
+### Phase 1, subsystem 2 validation
+
+Commands run on branch `feat/t124-sql-policy-substrate`, one at a time:
+
+1. `cargo clippy -p <crate> --lib` for `bv-policy-core`, `bv-kernel-api` and
+   `bv-kernel` — exit 0 each; no warning in a touched file beyond the
+   existing `maybe_async` trait pattern.
+2. `cargo nextest run -p bv-policy-core -p bv-kernel-api -p bv-kernel --lib` —
+   exit 0, `396 tests run: 396 passed` (rerun after the property below was
+   removed).
+3. `cargo nextest run -p bastion_vault --lib kernel_policy_sql` — exit 0,
+   `5 tests run: 5 passed`.
+4. `make verify-kani KANI_SET=full` — exit 0, `20 successfully verified
+   harnesses, 0 failures`, `KANI GATE: PASS` (326 s wall).
+5. `make verify-fast SEMGREP=0` — exit 0 (Semgrep is not installed locally,
+   recorded as skipped).
+6. `make test-changed` — exit 2, `1648/1660 tests run: 1646 passed, 2
+   failed`. Both failures are `bvault-cli` `policy_list` / `policy_write`,
+   whose seeded-policy fixture (`crates/bvault-cli/src/lib.rs`) predates the
+   `self-accounts-user` baseline main added in dc3b135b; they fail the same
+   way without this change. A rerun of `bvault-cli`, `bv-server` and
+   `bastion_vault` with `--no-fail-fast` shows only those two.
+
+The differential suite was skipped at the maintainer's request, and the
+1,000,000-case run was stopped before it finished. Before that request, a
+10,000-case `make verify-differential` had passed. In the stopped run, 12 of
+14 tests had passed, the main property was killed, and a T9 property on real
+strings (two ACLs built with and without the SQL capabilities) failed. Its
+shrunk counterexample contains no SQL capability, so both ACLs were built from
+identical text and still disagreed on `root_privs` in a capability probe
+(`(false, false, false, deny)` against `(false, true, false, deny)`).
+`PolicyConfig.path` is a `HashMap`, so rule order varies from one parse to the
+next. That property was removed rather than left flaky. The disagreement is
+open, does not involve SQL, and needs its own investigation: does any caller
+read probe `root_privs` past a deny? `make test-release` (L4) has not been
+run. Subsystems 3–6 remain; T124 stays `[/]`.

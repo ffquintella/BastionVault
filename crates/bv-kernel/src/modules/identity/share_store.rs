@@ -312,7 +312,7 @@ impl ShareStore {
         share.target_path = canonical.clone();
         share.grantee_kind = grantee_kind.as_str().to_string();
         share.grantee_entity_id = grantee.clone();
-        share.capabilities = normalize_capabilities(share.capabilities);
+        share.capabilities = normalize_capabilities(kind, share.capabilities)?;
         if share.capabilities.is_empty() {
             return Err(bv_error_string!(
                 "share must grant at least one capability (read, list, update, delete)"
@@ -853,28 +853,90 @@ pub struct ShareByGranteePointer {
 /// credential itself to let them use it. Until this landed the entry was
 /// silently dropped by the filter below, for API and CLI callers as much as
 /// for the GUI.
-fn normalize_capabilities(caps: Vec<String>) -> Vec<String> {
+///
+/// The eleven `sql_*` names (features/sql-browser.md §3.3) are probed the same
+/// way, and only mean something on a database: they are accepted for
+/// `resource` and `asset-group` targets and refused, with an error naming the
+/// entry, on any other kind — never dropped silently, which would turn a
+/// mistaken grant into a share that quietly grants less than it says.
+fn normalize_capabilities(kind: ShareTargetKind, caps: Vec<String>) -> Result<Vec<String>, RvError> {
     const ALLOWED: &[&str] = &["read", "list", "update", "delete", "create", "connect"];
+    let sql_target = matches!(kind, ShareTargetKind::Resource | ShareTargetKind::AssetGroup);
     let mut out: Vec<String> = Vec::new();
     for c in caps {
         let c = c.trim().to_lowercase();
-        if c.is_empty() || !ALLOWED.contains(&c.as_str()) {
+        if c.is_empty() {
+            continue;
+        }
+        if crate::kernel_api::policy::SqlCapability::parse(&c).is_some() {
+            if !sql_target {
+                return Err(crate::bv_error_response_status!(
+                    400,
+                    "share capability {c} can only be granted on resource and asset-group targets, not on a {} target",
+                    kind.as_str()
+                ));
+            }
+        } else if !ALLOWED.contains(&c.as_str()) {
             continue;
         }
         if !out.iter().any(|x| x == &c) {
             out.push(c);
         }
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
 mod normalize_capability_tests {
-    use super::{normalize_capabilities, SecretShare};
+    use super::{normalize_capabilities, SecretShare, ShareTargetKind};
+    use crate::kernel_api::policy::SqlCapability;
     use bv_policy_core::ShareCap;
 
     fn norm(caps: &[&str]) -> Vec<String> {
-        normalize_capabilities(caps.iter().map(|s| s.to_string()).collect())
+        normalize_capabilities(ShareTargetKind::Resource, caps.iter().map(|s| s.to_string()).collect()).unwrap()
+    }
+
+    fn norm_on(kind: ShareTargetKind, caps: &[&str]) -> Result<Vec<String>, crate::errors::RvError> {
+        normalize_capabilities(kind, caps.iter().map(|s| s.to_string()).collect())
+    }
+
+    /// Every SQL capability is grantable on a resource and on an asset group,
+    /// case-folded and deduplicated like the rest of the vocabulary.
+    #[test]
+    fn sql_capabilities_are_grantable_on_resources_and_asset_groups() {
+        let all: Vec<&str> = SqlCapability::ALL.iter().map(|c| c.as_str()).collect();
+        for kind in [ShareTargetKind::Resource, ShareTargetKind::AssetGroup] {
+            let got = norm_on(kind, &all).unwrap();
+            assert_eq!(got, all.iter().map(|s| s.to_string()).collect::<Vec<_>>(), "{kind:?}");
+        }
+        assert_eq!(norm(&["SQL_SELECT", " sql_select ", "connect"]), vec!["sql_select", "connect"]);
+    }
+
+    /// The share store's SQL vocabulary (the kernel contract's names) is
+    /// exactly the verified core's: every name maps onto one `ShareCap` and
+    /// back, so the scope gate sees each SQL share entry the store accepts.
+    #[test]
+    fn sql_share_names_are_the_share_cap_sql_names() {
+        let all: Vec<&str> = SqlCapability::ALL.iter().map(|c| c.as_str()).collect();
+        let caps = ShareCap::from_names(&all).expect("every SQL share name is a ShareCap");
+        assert_eq!(ShareCap::to_names(&caps), all);
+        let plain = ShareCap::from_names(&["read", "list", "update", "delete"]).unwrap();
+        assert!(caps.iter().all(|c| !plain.contains(c)));
+    }
+
+    /// On a KV secret or a file a SQL capability is refused with an error that
+    /// names it — the share is not written with the entry quietly removed.
+    #[test]
+    fn sql_capabilities_are_refused_on_other_target_kinds() {
+        for kind in [ShareTargetKind::KvSecret, ShareTargetKind::File] {
+            for caps in [&["sql_select"][..], &["read", "sql_drop"][..]] {
+                let err = norm_on(kind, caps).unwrap_err().to_string();
+                assert!(err.contains("can only be granted on resource and asset-group targets"), "{kind:?}: {err}");
+                assert!(err.contains(kind.as_str()), "{kind:?}: {err}");
+            }
+            // The ordinary vocabulary is unchanged there.
+            assert_eq!(norm_on(kind, &["read", "list"]).unwrap(), vec!["read", "list"]);
+        }
     }
 
     /// `connect` must survive normalization. It used to be silently dropped,
@@ -910,7 +972,10 @@ mod normalize_capability_tests {
     fn pre_t124_share_record_maps_onto_share_cap_unchanged() {
         let stored = br#"{"target_kind":"resource","target_path":"db-1","grantee_entity_id":"e-2","granted_by_entity_id":"e-1","capabilities":["read","list","update","delete"],"granted_at":"2026-01-01T00:00:00Z"}"#;
         let share: SecretShare = serde_json::from_slice(stored).expect("a pre-T124 share record parses");
-        assert_eq!(normalize_capabilities(share.capabilities.clone()), share.capabilities);
+        assert_eq!(
+            normalize_capabilities(ShareTargetKind::Resource, share.capabilities.clone()).unwrap(),
+            share.capabilities
+        );
         let names: Vec<&str> = share.capabilities.iter().map(String::as_str).collect();
         let caps = ShareCap::from_names(&names).expect("every pre-T124 share name is a ShareCap");
         assert_eq!(caps, [ShareCap::Read, ShareCap::List, ShareCap::Update, ShareCap::Delete]);
