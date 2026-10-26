@@ -21,7 +21,27 @@ The framework itself is built on the existing pure-Rust stack — no OpenSSL any
 
 ## Current State
 
-- **Lease manager exists** but is exercised only by KV v1 (mostly noop) and the planned PKI/SSH-OTP engines. There is no abstraction for "the secret lives in an external system that we must call out to on revoke."
+**Status: in progress (T62).** Slice 1 — the host-side lease substrate — is done; slices 2+ are not started.
+
+| Slice | Scope | State |
+|---|---|---|
+| 1 | Host lease substrate: `revoke_failed` lease state with a backoff reaper, `v2/sys/leases/revoke-failed` list + force-clear, `sys/renew` for leases whose backend really renews them (max_ttl clamp, non-renewable refused), per-lease renew/revoke guard, `OwnedLeaseRevoker` early revoke by the issuing mount, `lease.*` audit events | Done |
+| 2 | Plugin kind `secret/dynamic` + the `dynamic_lease_register` / `dynamic_audit_emit` / `dynamic_pool_checkout` capabilities | Not started |
+| 3 | Connection pool (`deadpool`, not yet a dependency) and credential cache | Not started |
+| 4 | `dynamic_secret` audit schema (engine / plugin / role / target identity) | Not started |
+| 5 | Dynamic SDK, Postgres reference plugin migration | Not started |
+| 6 | GUI (Phase 5 below) | Not started |
+
+What slice 1 delivered, and where it lives (older paths elsewhere in this spec are stale; corrections follow the list):
+
+- `crates/bv-kernel/src/modules/auth/expiration.rs` — the lease manager. A secret lease whose backend revoke fails is **kept** with a `revoke_failure` record (attempts, first/last failure, next attempt, last error cut to 256 characters, origin) instead of being deleted; the sweeper doubles as the reaper (10 s, doubling, `max_revoke_attempts` = 6, then parked and listed). Lease rows carry `version` 1 and `max_ttl_secs`; version-0 rows read unchanged. Not yet operator-configurable: `max_revoke_attempts` is the spec default.
+- `crates/bv-kernel/src/modules/auth/lease_state.rs` — the retry policy, the per-lease guard (a renew and a revoke of one lease never overlap; the loser gets a `409`) and the `lease.revoke_failed` / `lease.revoked` / `lease.revoke_failed_cleared` events, emitted through the kernel's audit-event path (`bv_kernel_api::mcp_events::emit`, broker `event` entries).
+- `crates/bv-kernel/src/modules/system/leases.rs` — `sys/renew` (now renews), `sys/revoke` (`502` + kept on backend failure), `sys/leases/revoke-failed` (`LIST`) and `sys/leases/revoke-failed/<lease_id>` (`DELETE`, force-clear), HTTP-routed under `/v2/sys` only by `crates/bv-server/src/sys/routes.rs`. See `docs/api.md` § Leases.
+- `crates/bv-kernel-api/src/leases.rs` — `OwnedLeaseRevoker`, reached as `VaultCtx::lease_revoker()`: a mount revokes a lease it issued (path must route to exactly that mount; token leases refused). No engine calls it yet.
+
+Corrections to the paths below: there is no `src/modules/dynamic/` or `src/sys/leases.rs`; the lease manager and lease endpoints are the `crates/bv-kernel/…` files above, KV v1's lease is `crates/bv-engine-kv/src/v1.rs`, and the plugin runtime is `src/plugins/…`. A plugin mount's type is `plugin:<name>` (`src/plugins/mod.rs`, `PLUGIN_MOUNT_PREFIX`), and the manifest's kind is the free-form `plugin_type` string (`crates/bv-plugin-manifest`), so "plugin kind `secret/dynamic`" means a new `plugin_type` value, not a parser change.
+
+- **Lease manager exists** but is exercised only by KV v1 (mostly noop) and the planned PKI/SSH-OTP engines. There is no abstraction for "the secret lives in an external system that we must call out to on revoke." Slice 1 gave it the revoke-failed state, renewal and early revoke such an abstraction needs; the abstraction itself is slice 2.
 - **No connection-pool layer exists.** Today a hypothetical DB plugin would have to open a fresh DB connection on every API call, which is unacceptable for both latency and target-side connection-limit reasons. The framework provides the pool; plugins consume it via a host capability rather than embedding their own.
 - **No credential-cache layer exists.** Roles like "give me read-only access to db X" are called many times a minute; we need a per-role short-lived cache so identical role calls don't multiply credentials.
 - **No central audit pipeline for credential lifecycle.** Audit today logs HTTP requests; dynamic-secret events (`generate`, `extend`, `revoke`, `revoke-failed`) deserve a richer schema (target system, target identity, credential id) so a SOC can answer "what credentials were live in this DB at 14:32 last Tuesday?" in one query.

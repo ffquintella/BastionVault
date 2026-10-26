@@ -25,6 +25,7 @@ use crate::{
 
 pub mod expiration;
 pub mod kernel_service;
+pub(crate) mod lease_state;
 pub mod token_store;
 pub use expiration::ExpirationManager;
 pub use token_store::TokenStore;

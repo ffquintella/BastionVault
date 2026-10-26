@@ -58,6 +58,11 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### Dynamic secrets: lease substrate (features/dynamic-secrets.md)
+
+- List the leases whose secret backend failed to revoke them with `LIST` (or `GET`) `/v2/sys/leases/revoke-failed`, and force-clear one after cleaning its target up by hand with `DELETE /v2/sys/leases/revoke-failed/{lease_id}`: both need `sudo`, refuse a child-namespace header or a namespace-bound token like the other lease endpoints, and show attempts, the last error (cut to 256 characters) and the next retry but never the lease's data; a clear is refused for a lease that is not `revoke_failed`, and is audited as `lease.revoke_failed_cleared` before anything is deleted. (T62, S13)
+- Let a mount end a lease it issued before its TTL runs out through the kernel contract `OwnedLeaseRevoker` (`VaultCtx::lease_revoker()`), refused for a token's lease and for a lease whose path does not route to exactly that mount; a failed revoke is kept as `revoke_failed` and reported as deferred, a successful one is audited as `lease.revoked`. No engine calls it yet. (T62, S13)
+
 #### Self-Accounts
 
 - **Ship the `self-accounts-user` policy as a built-in baseline** -- a fresh vault, and an existing one on its next unseal, now seeds it with the other baselines instead of leaving each operator to paste it from the guide. It grants the plugin's `self-accounts/v2/accounts` and `self-accounts/v2/settings` paths and nothing else, and is still not part of `default`: the administrator attaches it to a user or group. A policy of that name an operator already created is kept as is. (T461, S107)
@@ -84,6 +89,12 @@ EXAMPLE ENTRY:
 
 - Explain a refused RDP logon in plain words: when the target rejects the saved username or password (`STATUS_LOGON_FAILURE`), the error now names the account and says the password is wrong, instead of only a raw CredSSP `InvalidToken` report. The NTSTATUS stays in the message for support.
 
+#### Dynamic secrets: lease substrate (features/dynamic-secrets.md)
+
+- Renew a secret lease through `sys/renew/<lease_id>` when its backend really renews it (today the KV v1 `leased_passthrough` lease), clamped to the lease's max_ttl and answering only the lease id, duration and renewability; it still answers `501` for a token's lease and for a backend with no renew hook or that answers without a lease, `400` for an unknown, expired, non-renewable or past-max_ttl lease, and `409` for a lease being revoked. (T62, S13)
+- Refuse with a deterministic `409` a renew or revoke that overlaps another one on the same lease, instead of letting a renewal re-create a lease that was revoked while it ran. (T62, S13)
+- Store lease records as format version 1, which adds the lease's max_ttl and its revoke state: records written by earlier versions load unchanged and are rewritten on their next update, and an older server reading a new record ignores the new fields. (T62, S13)
+
 ### Fixed
 
 #### Self-Accounts
@@ -100,6 +111,11 @@ EXAMPLE ENTRY:
 - Keep the expiration register-and-restore benchmark's leases alive for the whole test: their 400 s TTL was shorter than the 10 000-lease registration loop on Windows (453 s alone, ~960 s in a full run), so leases expired before the count.
 
 ### Security
+
+#### Dynamic secrets: lease substrate (features/dynamic-secrets.md)
+
+- **Keep a lease whose secret backend fails to revoke it, instead of deleting it with the credential still live** -- expiry, `sys/revoke`, `sys/revoke-prefix` and token revocation logged the backend's error and deleted the lease anyway, silently orphaning the credential on the target; it is now kept as `revoke_failed` with its attempt count and last error, retried with exponential backoff (10 s, doubling, at most 6 attempts) and then left listed for an operator, `sys/revoke` answers `502` and `sys/revoke-prefix` reports how many failed, token revocation still completes, and each failure is audited as `lease.revoke_failed` (a later success as `lease.revoked`); a lease whose mount was removed lands in this state too. (T62, S13)
+- Stop writing a secret lease's data and owning token to the log when its backend revoke failed: the error line printed the whole lease record, and lease records now print without either. (T62, S13)
 
 #### Resource Connect SSH
 

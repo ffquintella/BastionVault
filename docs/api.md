@@ -289,7 +289,9 @@ Vault's lease paths on the system backend. The `/v1/sys` and `/v2/sys` HTTP
 scopes do not route them, so a plain `PUT /v1/sys/revoke/{lease_id}` answers
 `404`. They are served in-process (embedded vault mode, the in-process API) and
 through `POST /v2/sys/batch`, one `write` operation per call. Vault's newer
-`sys/leases/*` paths, which `vault lease revoke` uses, are not implemented.
+`sys/leases/*` paths, which `vault lease revoke` uses, are not implemented; the
+one `sys/leases/` path that exists, `revoke-failed`, is BastionVault's own and is
+served under `/v2/sys` only.
 
 ~~~json
 POST /v2/sys/batch
@@ -319,8 +321,13 @@ sys/revoke/{lease_id}            (write)
 Needs `update` on `sys/revoke/{lease_id}`. Revokes the lease and deletes its
 record. Revoking a token's lease revokes the token and its children. `400` when
 no lease has that id (nothing was revoked), or when the id is empty, absolute or
-contains `..`. A secret backend's revoke error is still logged and the lease
-record removed anyway; every secret type in the tree revokes with a no-op today.
+contains `..`. `409` while another renew or revoke of the same lease is running
+(nothing changed; retry). `502` when the secret backend that issued the lease
+fails to revoke it, including when its mount has been removed: the lease is
+**kept** in the `revoke_failed` state, retried in the background with
+exponential backoff (10 s, doubling, at most 6 attempts) and then left for an
+operator — see *Leases whose revoke failed* below. Expiry and token revocation
+handle a failed revoke the same way, without failing the token's revocation.
 
 **Revoke every lease under a prefix**
 
@@ -331,16 +338,54 @@ sys/revoke-prefix/{prefix}       (write)
 Needs `update` **and `sudo`** on `sys/revoke-prefix/{prefix}`. Revokes every
 lease under `{prefix}/`, matched on whole path segments: `kv/team-a` does not
 touch `kv/team-ab/…`. As in Vault, a prefix with no leases under it is not an
-error.
+error. Every lease under the prefix is attempted; then `409` reports how many
+were busy with another request, or `502` how many failed in their backend and
+were kept as `revoke_failed`.
 
 **Renew a lease**
 
 ~~~
-sys/renew/{lease_id}             (write)
+sys/renew/{lease_id}             (write)   {"increment": 3600}
 ~~~
 
-Not implemented: always `501`. Renew a token with `auth/token/renew-self` or
-`auth/token/renew`. Lease renewal lands with the dynamic-secrets framework.
+Needs `update` on `sys/renew/{lease_id}`. Renews a secret lease whose backend
+really renews it — today the KV v1 `leased_passthrough` lease. `increment` is
+the requested TTL in seconds (absent or `0`: the backend's own TTL), and the
+result is clamped so the lease never outlives its max_ttl from issue (the
+backend's max_ttl at issue, or 30 days). The answer is the lease id,
+`lease_duration` and `renewable`, never the secret's data. Refusals change
+nothing: `400` for an unknown, expired, non-renewable or past-max_ttl lease;
+`409` for a lease in `revoke_failed` or one another request is renewing or
+revoking; `501` for a token's lease (renew it with `auth/token/renew-self` or
+`auth/token/renew`) and for a backend with no renew hook, or one that answers
+without a lease — no renewal is reported that did not happen.
+
+**Leases whose revoke failed** (v2 only)
+
+~~~
+LIST|GET /v2/sys/leases/revoke-failed                 sys/leases/revoke-failed
+DELETE   /v2/sys/leases/revoke-failed/{lease_id}      sys/leases/revoke-failed/{lease_id}
+~~~
+
+Both need `sudo` (the system backend's `root_paths`) plus `list` or `delete`,
+and refuse a child-namespace header and a namespace-bound token like the
+endpoints above. The listing's `keys` are the lease ids; `key_info` has, per
+lease, `path`, `issue_time`, `expire_time`, `attempts`, `max_attempts`,
+`exhausted`, `first_failed_at`, `last_failed_at`, `next_attempt_at` (absent
+once exhausted), `last_error` (cut to 256 characters) and `origin` (`expiry`,
+`operator`, `prefix`, `token`, `owner`, `retry`) — never the lease's data.
+
+`DELETE` force-clears one: it drops the lease record **without** asking its
+backend, for an operator who has cleaned the target system up by hand. `400`
+for an unknown lease or one that is not `revoke_failed` (revoke that one
+instead). The `lease.revoke_failed_cleared` audit event is written first, and
+if an enabled audit device cannot take it the clear is refused.
+
+Audit events (one `security` log line each, plus an `event` entry on every
+enabled audit device; lease id, counts, origin and the bounded error only):
+`lease.revoke_failed` for every failed attempt, `lease.revoked` when a
+`revoke_failed` lease is finally revoked or a mount ends its own lease early,
+and `lease.revoke_failed_cleared`.
 
 ### Policies
 

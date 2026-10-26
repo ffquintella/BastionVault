@@ -52,6 +52,7 @@ use super::{
     auth::{AuthMountRegistry, TokenService},
     engines::{ConnectMfaGate, LoginClassPolicy, NotificationSink, PluginHost, TotpMfa},
     identity::IdentityService,
+    leases::OwnedLeaseRevoker,
     mcp_sessions::BrokeredSessionEnv,
     namespace::NamespaceRegistry,
     pipeline::{DenialAudit, NsScopeDatafix, RequestPipeline, RerootActivation, UnsealHook},
@@ -70,6 +71,7 @@ pub struct KernelServices {
     identity: ArcSwap<Option<Arc<dyn IdentityService>>>,
     tokens: ArcSwap<Option<Arc<dyn TokenService>>>,
     auth_mounts: ArcSwap<Option<Arc<dyn AuthMountRegistry>>>,
+    lease_revoker: ArcSwap<Option<Arc<dyn OwnedLeaseRevoker>>>,
     policy: ArcSwap<Option<Arc<dyn PolicyGate>>>,
     namespaces: ArcSwap<Option<Arc<dyn NamespaceRegistry>>>,
     resource_groups: ArcSwap<Option<Arc<dyn ResourceGroupIndex>>>,
@@ -120,6 +122,13 @@ impl KernelServices {
         auth_mounts,
         AuthMountRegistry,
         "auth mount registry"
+    );
+    service_slot!(
+        set_lease_revoker,
+        lease_revoker,
+        lease_revoker,
+        OwnedLeaseRevoker,
+        "owner-initiated early lease revocation"
     );
     service_slot!(set_policy, policy, policy, PolicyGate, "policy gate");
     service_slot!(

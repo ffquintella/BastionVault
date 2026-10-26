@@ -4,7 +4,8 @@
 
 use std::{
     cmp::Reverse,
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
+    fmt,
     hash::{Hash, Hasher},
     sync::{Arc, RwLock, Weak},
     thread,
@@ -17,12 +18,23 @@ use priority_queue::PriorityQueue;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use super::{token_store::TokenEntry, TokenStore};
+use super::{
+    lease_state::{
+        emit_lease_event, rfc3339, LeaseLocks, LeaseOpGuard, LeaseRevokeFailedClearedEvent, LeaseRevokeFailedEvent,
+        LeaseRevokedEvent, RevokeFailure, RevokeOrigin, RevokeRetryPolicy,
+    },
+    token_store::TokenEntry,
+    TokenStore,
+};
 use crate::{
+    bv_error_response_status, bv_error_string,
     errors::RvError,
+    kernel_api::{
+        leases::{LeaseRevocation, OwnedLeaseRevoker},
+        mcp_events::McpAuditEvent,
+    },
     logical::{lease::calculate_ttl, Auth, Request, Response, SecretData},
     router::Router,
-    bv_error_string,
     storage::{barrier_view::BarrierView, Storage, StorageEntry},
     utils::{
         deserialize_system_time, generate_uuid, serialize_system_time,
@@ -35,10 +47,18 @@ use crate::kernel_api::VaultCtx;
 pub const EXPIRATION_SUB_PATH: &str = "expire/";
 pub const LEASE_VIEW_PREFIX: &str = "id/";
 pub const TOKEN_VIEW_PREFIX: &str = "token/";
+/// Failed backend revokes after which the reaper stops retrying a lease
+/// (`max_revoke_attempts`, spec default). The lease stays listed for the operator.
 pub const MAX_REVOKE_ATTEMPTS: u32 = 6;
+/// Wait after a lease's first failed revoke; doubled after each further one.
 pub const REVOKE_RETRY_SECS: Duration = Duration::from_secs(10);
 pub const MIN_REVOKE_DELAY_SECS: Duration = Duration::from_secs(5);
 pub use crate::kernel_api::auth::{DEFAULT_LEASE_DURATION_SECS, MAX_LEASE_DURATION_SECS};
+
+/// Format of a lease row. 0 is every row written before T62 (the field is
+/// absent there); 1 added `max_ttl_secs` and `revoke_failure`, both of which
+/// default to "none" for a version-0 row, so reading one needs no rewrite.
+pub const LEASE_ENTRY_VERSION: u32 = 1;
 
 /// Represents an old lease entry that may need to be converted to the new format.
 #[derive(Eq, Debug, Default, PartialEq, Clone, Serialize, Deserialize)]
@@ -59,7 +79,10 @@ struct OldLeaseEntry {
 }
 
 /// Represents a lease entry with all the necessary information.
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+///
+/// `Debug` is written by hand: `data` holds the issued secret and
+/// `client_token` the owning token, and neither may reach a log line.
+#[derive(Default, Clone, Serialize, Deserialize)]
 struct LeaseEntry {
     #[serde(default)]
     pub lease_id: String,
@@ -74,8 +97,39 @@ struct LeaseEntry {
     #[default(SystemTime::UNIX_EPOCH)]
     #[serde(serialize_with = "serialize_system_time", deserialize_with = "deserialize_system_time")]
     pub expire_time: SystemTime,
+    /// Pre-T62 field, never written non-empty by any version; kept so old
+    /// rows round-trip. The revoke error now lives in `revoke_failure`.
     #[serde(default)]
     pub revoke_err: String,
+    /// [`LEASE_ENTRY_VERSION`] of the row; 0 (absent) before T62.
+    #[default(LEASE_ENTRY_VERSION)]
+    #[serde(default)]
+    pub version: u32,
+    /// Host-side ceiling on the lease's life from `issue_time`, in seconds;
+    /// 0 means [`MAX_LEASE_DURATION_SECS`]. Needed because `SecretData`'s own
+    /// `max_ttl` is not serialized, so it is gone by the time a renew comes.
+    #[serde(default)]
+    pub max_ttl_secs: u64,
+    /// Present while the issuing backend has failed to revoke this lease.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revoke_failure: Option<RevokeFailure>,
+}
+
+impl fmt::Debug for LeaseEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LeaseEntry")
+            .field("lease_id", &self.lease_id)
+            .field("path", &self.path)
+            .field("data_keys", &self.data.len())
+            .field("secret", &self.secret.as_ref().map(|s| (s.ttl, s.renewable)))
+            .field("auth", &self.auth.is_some())
+            .field("issue_time", &self.issue_time)
+            .field("expire_time", &self.expire_time)
+            .field("version", &self.version)
+            .field("max_ttl_secs", &self.max_ttl_secs)
+            .field("revoke_failure", &self.revoke_failure)
+            .finish_non_exhaustive()
+    }
 }
 
 /// The ExpirationManager is responsible for managing lease entries and their expiration.
@@ -89,6 +143,48 @@ pub struct ExpirationManager {
     /// Back-reference to Core for resolving per-namespace lease quotas at
     /// registration time. Weak to avoid a cycle; tolerated absent in tests.
     core: Weak<dyn VaultCtx>,
+    /// The leases a renew or revoke is running on (see [`LeaseLocks`]).
+    lease_locks: Arc<LeaseLocks>,
+    /// Retry schedule for leases whose backend revoke failed.
+    revoke_policy: RevokeRetryPolicy,
+    /// Ids of the rows in `revoke_failed`, rebuilt from storage by `restore`,
+    /// so listing them does not read every lease row.
+    revoke_failed_ids: RwLock<BTreeSet<String>>,
+}
+
+/// What a revoke did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RevokeOutcome {
+    /// Revoked and deleted; `failed_attempts` earlier tries had failed.
+    Revoked { failed_attempts: u32 },
+    /// No lease has that id.
+    Missing,
+    /// The backend failed; the row is kept as `revoke_failed`.
+    Failed { attempts: u32, exhausted: bool },
+}
+
+/// What a renewal did. Only returned when the lease really was extended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeaseRenewal {
+    pub lease_id: String,
+    /// The lease's new TTL, from now.
+    pub ttl: Duration,
+    /// Whether the backend allows a further renewal.
+    pub renewable: bool,
+    /// The TTL was cut short by the lease's max_ttl.
+    pub clamped: bool,
+}
+
+/// One `revoke_failed` lease, as `LIST v2/sys/leases/revoke-failed` shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RevokeFailedLease {
+    pub lease_id: String,
+    pub path: String,
+    pub issue_time: SystemTime,
+    pub expire_time: SystemTime,
+    pub failure: RevokeFailure,
+    pub max_attempts: u32,
+    pub exhausted: bool,
 }
 
 impl Hash for LeaseEntry {
@@ -122,14 +218,34 @@ impl LeaseEntry {
         self.auth.as_ref().map_or(false, |a| a.enabled() && a.policies.len() == 1 && a.policies[0] == "root")
     }
 
-    #[allow(dead_code)]
-    fn is_irrevocable(&self) -> bool {
-        !self.revoke_err.is_empty()
+    /// The issuing backend has failed to revoke this lease and it is still owed one.
+    fn is_revoke_failed(&self) -> bool {
+        self.revoke_failure.is_some()
     }
 
     #[allow(dead_code)]
     fn is_incorrectly_non_expiring(&self) -> bool {
         self.expire_time == SystemTime::UNIX_EPOCH && !self.is_non_expiring()
+    }
+
+    /// The longest this lease may live, counted from `issue_time`.
+    fn max_ttl(&self) -> Duration {
+        match self.max_ttl_secs {
+            0 => MAX_LEASE_DURATION_SECS,
+            secs => Duration::from_secs(secs).min(MAX_LEASE_DURATION_SECS),
+        }
+    }
+
+    /// When the sweeper must next look at this lease, in Unix milliseconds:
+    /// its expiry, or for a `revoke_failed` lease its next retry. An exhausted
+    /// one is parked at `u128::MAX`, never due, so it stays tracked (and
+    /// counted against its namespace's quota) without being retried.
+    fn queue_priority(&self, policy: &RevokeRetryPolicy) -> Result<u128, RvError> {
+        match &self.revoke_failure {
+            Some(failure) if policy.exhausted(failure) => Ok(u128::MAX),
+            Some(failure) => Ok(failure.next_attempt_at.duration_since(UNIX_EPOCH)?.as_millis()),
+            None => Ok(self.expire_time.duration_since(UNIX_EPOCH)?.as_millis()),
+        }
     }
 }
 
@@ -151,6 +267,9 @@ impl ExpirationManager {
             token_store: RwLock::new(Weak::new()),
             queue: Arc::new(RwLock::new(PriorityQueue::new())),
             core: core.weak_ctx(),
+            lease_locks: Arc::new(LeaseLocks::default()),
+            revoke_policy: RevokeRetryPolicy::default(),
+            revoke_failed_ids: RwLock::new(BTreeSet::new()),
         };
 
         Ok(expiration)
@@ -187,58 +306,105 @@ impl ExpirationManager {
                 continue;
             }
 
-            self.register_lease_entry(Arc::new(le.unwrap()))?;
+            let le = le.unwrap();
+            if le.is_revoke_failed() {
+                self.remember_revoke_failed(&le.lease_id)?;
+            }
+            self.register_lease_entry(Arc::new(le))?;
         }
 
         Ok(())
     }
 
-    /// Renews a lease entry by the given increment.
+    /// Renews a secret lease by `increment` (0: the backend's own TTL).
+    ///
+    /// Returns only when the lease really was extended. Refused, with nothing
+    /// changed: an unknown id ([`RvError::ErrLeaseNotFound`]); an expired or
+    /// non-renewable lease ([`RvError::ErrLeaseNotRenewable`]); one past its
+    /// max_ttl or whose revocation is pending (`400`/`409`); a token's lease,
+    /// or a backend that does not renew this lease or answers without a lease
+    /// (`501`). The new TTL is clamped to the lease's max_ttl.
     #[maybe_async::maybe_async]
-    pub async fn renew(&self, lease_id: &str, increment: Duration) -> Result<Option<Response>, RvError> {
-        let le = self.load_lease_entry(lease_id).await?;
-        if le.is_none() {
+    pub async fn renew(&self, lease_id: &str, increment: Duration) -> Result<LeaseRenewal, RvError> {
+        let _guard = self.lease_locks.try_acquire(lease_id)?;
+        let Some(mut le) = self.load_lease_entry(lease_id).await? else {
             return Err(RvError::ErrLeaseNotFound);
+        };
+
+        if le.auth.is_some() {
+            return Err(renew_unsupported(
+                "this is a token's lease: renew the token with auth/token/renew-self or auth/token/renew",
+            ));
         }
-
-        let mut le = le.unwrap();
-
+        if le.is_revoke_failed() {
+            return Err(bv_error_response_status!(
+                409,
+                "this lease is revoke_failed: its revocation is pending, so it cannot be renewed"
+            ));
+        }
+        if le.secret.is_none() {
+            return Err(renew_unsupported("this lease carries no secret to renew"));
+        }
         if !le.renewable() {
             return Err(RvError::ErrLeaseNotRenewable);
         }
-
-        let resp = self.renew_secret_lease_entry(&le, increment).await?;
-        if resp.is_none() {
-            return Ok(None);
+        // Checked before the backend is asked, so a lease the host will not
+        // extend is not extended on the target system either.
+        let max_ttl = le.max_ttl();
+        if le.issue_time + max_ttl <= SystemTime::now() {
+            return Err(past_max_ttl());
         }
 
-        let mut resp = resp.unwrap();
-        if resp.secret.is_none() || !resp.secret.as_ref().unwrap().enabled() {
-            return Ok(Some(resp));
+        let resp = match self.renew_secret_lease_entry(&le, increment).await {
+            Err(RvError::ErrLogicalOperationUnsupported) => {
+                return Err(renew_unsupported("the backend that issued this lease does not renew it"));
+            }
+            result => result?,
+        };
+        let Some(resp) = resp else {
+            return Err(renew_unsupported("the backend that issued this lease did not renew it"));
+        };
+        let Some(mut secret) = resp.secret else {
+            return Err(renew_unsupported("the backend answered the renewal without a lease"));
+        };
+        if secret.ttl.is_zero() {
+            return Err(renew_unsupported("the backend answered the renewal with a zero TTL"));
         }
 
-        if let Some(secret) = resp.secret.as_mut() {
-            secret.ttl = calculate_ttl(
-                MAX_LEASE_TTL,
-                DEFAULT_LEASE_TTL,
-                increment,
-                Duration::ZERO,
-                secret.ttl,
-                secret.max_ttl,
-                Duration::ZERO,
-                le.issue_time,
-            )?;
-            secret.lease_id = lease_id.into();
-        }
+        let requested = if increment.is_zero() { secret.ttl } else { increment };
+        let ttl = calculate_ttl(
+            MAX_LEASE_TTL,
+            DEFAULT_LEASE_TTL,
+            increment,
+            Duration::ZERO,
+            secret.ttl,
+            secret.max_ttl,
+            max_ttl,
+            le.issue_time,
+        )
+        .map_err(|_| past_max_ttl())?;
 
-        le.data = resp.data.clone().unwrap_or(Map::new());
-        le.expire_time = resp.secret.as_ref().unwrap().expiration_time();
-        le.secret.clone_from(&resp.secret);
+        // The backend may update the internal data it revokes with, but an
+        // answer that drops `secret_type` would make the next revoke a silent
+        // no-op, so the stored keys are kept under the backend's.
+        let previous = le.secret.take().map(|s| s.internal_data).unwrap_or_default();
+        let mut internal_data = previous;
+        internal_data.extend(std::mem::take(&mut secret.internal_data));
+        secret.internal_data = internal_data;
+        secret.ttl = ttl;
+        secret.lease_id = lease_id.to_string();
+        let renewable = secret.renewable;
+
+        if let Some(data) = resp.data {
+            le.data = data;
+        }
+        le.expire_time = SystemTime::now() + ttl;
+        le.secret = Some(secret);
 
         self.persist_lease_entry(&le).await?;
         self.register_lease_entry(Arc::new(le))?;
 
-        Ok(Some(resp))
+        Ok(LeaseRenewal { lease_id: lease_id.to_string(), ttl, renewable, clamped: ttl < requested })
     }
 
     /// Renews a token by the given increment.
@@ -343,6 +509,16 @@ impl ExpirationManager {
                 secret.ttl = MAX_LEASE_DURATION_SECS;
             }
 
+            // The backend's max_ttl, if it set one, bounds every renewal; it is
+            // kept on the row because `SecretData` does not serialize it.
+            let max_ttl = match secret.max_ttl {
+                max if max.is_zero() => MAX_LEASE_DURATION_SECS,
+                max => max.min(MAX_LEASE_DURATION_SECS),
+            };
+            if secret.ttl > max_ttl {
+                secret.ttl = max_ttl;
+            }
+
             let now = SystemTime::now();
             secret.issue_time = Some(now);
 
@@ -358,6 +534,8 @@ impl ExpirationManager {
                 secret: Some(secret.clone()),
                 issue_time: now,
                 expire_time: secret.expiration_time(),
+                // At least 1 s: a sub-second max_ttl must not read back as 0 ("none").
+                max_ttl_secs: if secret.max_ttl.is_zero() { 0 } else { max_ttl.as_secs().max(1) },
                 ..Default::default()
             };
 
@@ -417,30 +595,93 @@ impl ExpirationManager {
     }
 
     /// Revokes a lease entry by its lease ID.
+    ///
+    /// An unknown lease is [`RevokeOutcome::Missing`], not an error. A secret
+    /// backend's failed revoke is [`RevokeOutcome::Failed`]: the row is kept
+    /// as `revoke_failed` for the reaper and the operator, never deleted. A
+    /// token lease's revoke error is returned as before.
     #[maybe_async::maybe_async]
-    pub async fn revoke_lease_id(&self, lease_id: &str, register_lease_entry: bool) -> Result<(), RvError> {
-        let le = self.load_lease_entry(lease_id).await?;
-        if le.is_none() {
-            return Ok(());
+    pub async fn revoke_lease_id(&self, lease_id: &str, register_lease_entry: bool) -> Result<RevokeOutcome, RvError> {
+        let guard = self.lease_locks.try_acquire(lease_id)?;
+        self.revoke_lease_locked(&guard, lease_id, register_lease_entry, RevokeOrigin::Operator).await
+    }
+
+    /// The revoke itself; the caller holds the lease's guard.
+    #[maybe_async::maybe_async]
+    async fn revoke_lease_locked(
+        &self,
+        _guard: &LeaseOpGuard,
+        lease_id: &str,
+        register_lease_entry: bool,
+        origin: RevokeOrigin,
+    ) -> Result<RevokeOutcome, RvError> {
+        let Some(mut le) = self.load_lease_entry(lease_id).await? else {
+            return Ok(RevokeOutcome::Missing);
+        };
+
+        log::debug!("revoke lease_id: {}", le.lease_id);
+
+        if let Err(e) = self.revoke_lease_entry(&le).await {
+            if le.auth.is_some() {
+                return Err(e);
+            }
+            return self.record_revoke_failure(le, origin, &e).await;
         }
 
-        let mut le = le.unwrap();
-
-        log::debug!("revoke lease_id: {}", &le.lease_id);
-
-        self.revoke_lease_entry(&le).await?;
+        let failed_attempts = le.revoke_failure.as_ref().map_or(0, |f| f.attempts);
         self.delete_lease_entry(lease_id).await?;
 
         if le.secret.is_some() {
             self.remove_index_by_token(&le.client_token, &le.lease_id).await?;
         }
+        self.forget_revoke_failed(lease_id)?;
 
         if register_lease_entry {
             le.expire_time = SystemTime::UNIX_EPOCH;
+            le.revoke_failure = None;
             self.register_lease_entry(Arc::new(le))?;
         }
 
-        Ok(())
+        Ok(RevokeOutcome::Revoked { failed_attempts })
+    }
+
+    /// Keep a lease whose backend revoke failed, as `revoke_failed`, and
+    /// schedule its next attempt (or park it, once the attempts are spent).
+    #[maybe_async::maybe_async]
+    async fn record_revoke_failure(
+        &self,
+        mut le: LeaseEntry,
+        origin: RevokeOrigin,
+        error: &RvError,
+    ) -> Result<RevokeOutcome, RvError> {
+        let policy = self.revoke_policy;
+        let failure = policy.record(le.revoke_failure.as_ref(), origin, SystemTime::now(), error);
+        let attempts = failure.attempts;
+        let exhausted = policy.exhausted(&failure);
+        log::warn!(
+            "backend revoke of lease {} failed (attempt {attempts} of {}); kept as revoke_failed{}: {}",
+            le.lease_id,
+            policy.max_attempts,
+            if exhausted { ", retries exhausted: an operator must clear it" } else { "" },
+            failure.last_error
+        );
+        let event = LeaseRevokeFailedEvent {
+            lease_id: le.lease_id.clone(),
+            origin,
+            attempts,
+            max_attempts: policy.max_attempts,
+            exhausted,
+            next_attempt_at: (!exhausted).then(|| rfc3339(failure.next_attempt_at)),
+            error: failure.last_error.clone(),
+        };
+
+        le.revoke_failure = Some(failure);
+        self.persist_lease_entry(&le).await?;
+        self.remember_revoke_failed(&le.lease_id)?;
+        self.register_lease_entry(Arc::new(le))?;
+        self.emit_best_effort(&event).await;
+
+        Ok(RevokeOutcome::Failed { attempts, exhausted })
     }
 
     /// Revokes the lease an operator named (`sys/revoke/<lease_id>`).
@@ -449,16 +690,30 @@ impl ExpirationManager {
     /// which the sweeper and token-tree revocation rely on when they reach the
     /// same lease. An operator naming a lease that does not exist has a mistyped
     /// or stale id, and answering "revoked" would report an effect that never
-    /// happened, so this returns [`RvError::ErrLeaseNotFound`] instead.
+    /// happened, so this returns [`RvError::ErrLeaseNotFound`] instead. A
+    /// failed backend revoke is a `502`; the lease is kept as `revoke_failed`.
     #[maybe_async::maybe_async]
     pub async fn revoke_named_lease(&self, lease_id: &str) -> Result<(), RvError> {
-        if self.load_lease_entry(lease_id).await?.is_none() {
-            return Err(RvError::ErrLeaseNotFound);
+        let guard = self.lease_locks.try_acquire(lease_id)?;
+        match self.revoke_lease_locked(&guard, lease_id, true, RevokeOrigin::Operator).await? {
+            RevokeOutcome::Missing => Err(RvError::ErrLeaseNotFound),
+            RevokeOutcome::Revoked { failed_attempts } => {
+                if failed_attempts > 0 {
+                    self.emit_revoked(lease_id, RevokeOrigin::Operator, failed_attempts).await;
+                }
+                Ok(())
+            }
+            RevokeOutcome::Failed { attempts, exhausted } => {
+                Err(revoke_failed_error(attempts, self.revoke_policy.max_attempts, exhausted))
+            }
         }
-        self.revoke_lease_id(lease_id, true).await
     }
 
     /// Revokes all lease entries with a given prefix.
+    ///
+    /// Every lease under the prefix is attempted. If any was busy (`409`) or
+    /// its backend failed (`502`, kept as `revoke_failed`), the call reports
+    /// how many after the others have been revoked.
     #[maybe_async::maybe_async]
     pub async fn revoke_prefix(&self, prefix: &str) -> Result<(), RvError> {
         let mut prefix = prefix.to_string();
@@ -468,23 +723,161 @@ impl ExpirationManager {
 
         let sub = self.id_view.new_sub_view(&prefix);
         let existing = sub.get_keys().await?;
+        let (mut busy, mut failed) = (0usize, 0usize);
         for suffix in existing.iter() {
             let lease_id = format!("{prefix}{suffix}");
-            self.revoke_lease_id(&lease_id, true).await?;
+            let Ok(guard) = self.lease_locks.try_acquire(&lease_id) else {
+                busy += 1;
+                continue;
+            };
+            match self.revoke_lease_locked(&guard, &lease_id, true, RevokeOrigin::Prefix).await? {
+                RevokeOutcome::Failed { .. } => failed += 1,
+                RevokeOutcome::Revoked { failed_attempts } if failed_attempts > 0 => {
+                    self.emit_revoked(&lease_id, RevokeOrigin::Prefix, failed_attempts).await;
+                }
+                _ => {}
+            }
+        }
+
+        let total = existing.len();
+        if busy > 0 {
+            return Err(bv_error_response_status!(
+                409,
+                "{} of {} leases under this prefix were being renewed or revoked by another request and were left \
+                 in place ({} more failed in their backend and are kept as revoke_failed); retry",
+                busy,
+                total,
+                failed
+            ));
+        }
+        if failed > 0 {
+            return Err(bv_error_response_status!(
+                502,
+                "{} of {} leases under this prefix could not be revoked by their secret backend; they are kept as \
+                 revoke_failed and retried, see v2/sys/leases/revoke-failed",
+                failed,
+                total
+            ));
+        }
+        Ok(())
+    }
+
+    /// Revokes all lease entries associated with a given token.
+    ///
+    /// Never fails on one lease's account, because the token tree's
+    /// revocation stops at the first error: a failed backend revoke is kept
+    /// as `revoke_failed` (and retried), and a lease another request is
+    /// renewing or revoking is left to it, with a warning. Storage errors are
+    /// still returned.
+    #[maybe_async::maybe_async]
+    pub async fn revoke_by_token(&self, te: &TokenEntry) -> Result<(), RvError> {
+        let existing = self.lookup_by_token(&te.id).await?;
+        for lease_id in existing.iter() {
+            let Ok(guard) = self.lease_locks.try_acquire(lease_id) else {
+                log::warn!(
+                    "lease {lease_id} of a revoked token is being renewed or revoked by another request; left to \
+                     it, and revoked at its own expiry if that was a renewal"
+                );
+                continue;
+            };
+            if let RevokeOutcome::Revoked { failed_attempts } =
+                self.revoke_lease_locked(&guard, lease_id, true, RevokeOrigin::Token).await?
+            {
+                if failed_attempts > 0 {
+                    self.emit_revoked(lease_id, RevokeOrigin::Token, failed_attempts).await;
+                }
+            }
         }
 
         Ok(())
     }
 
-    /// Revokes all lease entries associated with a given token.
+    /// Drop a `revoke_failed` lease without its backend revoking it — for an
+    /// operator who has cleaned the target system up by hand. The
+    /// `lease.revoke_failed_cleared` event is written first and its failure
+    /// refuses the clear. Refused for a lease that is not `revoke_failed`.
     #[maybe_async::maybe_async]
-    pub async fn revoke_by_token(&self, te: &TokenEntry) -> Result<(), RvError> {
-        let existing = self.lookup_by_token(&te.id).await?;
-        for lease_id in existing.iter() {
-            self.revoke_lease_id(lease_id, true).await?;
-        }
+    pub async fn force_clear_revoke_failed(&self, lease_id: &str, req: Option<&Request>) -> Result<(), RvError> {
+        let _guard = self.lease_locks.try_acquire(lease_id)?;
+        let Some(mut le) = self.load_lease_entry(lease_id).await? else {
+            return Err(RvError::ErrLeaseNotFound);
+        };
+        let Some(failure) = le.revoke_failure.take() else {
+            return Err(bv_error_response_status!(
+                400,
+                "this lease is not revoke_failed, so there is nothing to clear: revoke it with sys/revoke/<lease_id>"
+            ));
+        };
 
+        let event = LeaseRevokeFailedClearedEvent {
+            lease_id: lease_id.to_string(),
+            attempts: failure.attempts,
+            last_error: failure.last_error,
+        };
+        let core = self.core.upgrade();
+        emit_lease_event(core.as_deref(), &event, req).await?;
+
+        self.delete_lease_entry(lease_id).await?;
+        if le.secret.is_some() {
+            self.remove_index_by_token(&le.client_token, &le.lease_id).await?;
+        }
+        self.forget_revoke_failed(lease_id)?;
+        le.expire_time = SystemTime::UNIX_EPOCH;
+        self.register_lease_entry(Arc::new(le))
+    }
+
+    /// Every lease in `revoke_failed`, by lease id.
+    #[maybe_async::maybe_async]
+    pub(crate) async fn list_revoke_failed(&self) -> Result<Vec<RevokeFailedLease>, RvError> {
+        let ids: Vec<String> = self.revoke_failed_ids.read()?.iter().cloned().collect();
+        let mut leases = Vec::with_capacity(ids.len());
+        for lease_id in ids {
+            let Some(le) = self.load_lease_entry(&lease_id).await? else {
+                self.forget_revoke_failed(&lease_id)?;
+                continue;
+            };
+            let Some(failure) = le.revoke_failure else {
+                self.forget_revoke_failed(&lease_id)?;
+                continue;
+            };
+            leases.push(RevokeFailedLease {
+                lease_id: le.lease_id,
+                path: le.path,
+                issue_time: le.issue_time,
+                expire_time: le.expire_time,
+                max_attempts: self.revoke_policy.max_attempts,
+                exhausted: self.revoke_policy.exhausted(&failure),
+                failure,
+            });
+        }
+        Ok(leases)
+    }
+
+    fn remember_revoke_failed(&self, lease_id: &str) -> Result<(), RvError> {
+        self.revoke_failed_ids.write()?.insert(lease_id.to_string());
         Ok(())
+    }
+
+    fn forget_revoke_failed(&self, lease_id: &str) -> Result<(), RvError> {
+        self.revoke_failed_ids.write()?.remove(lease_id);
+        Ok(())
+    }
+
+    /// `lease.revoked`, for a lease leaving `revoke_failed` or ended early by its mount.
+    #[maybe_async::maybe_async]
+    async fn emit_revoked(&self, lease_id: &str, origin: RevokeOrigin, failed_attempts: u32) {
+        let event = LeaseRevokedEvent { lease_id: lease_id.to_string(), origin, failed_attempts };
+        self.emit_best_effort(&event).await;
+    }
+
+    /// Emit a lease event for a state change no request is waiting on: the
+    /// broker's failure is logged, and the lease state is not rolled back.
+    #[maybe_async::maybe_async]
+    async fn emit_best_effort<E: McpAuditEvent + Sync>(&self, event: &E) {
+        let core = self.core.upgrade();
+        if let Err(e) = emit_lease_event(core.as_deref(), event, None).await {
+            log::warn!("lease audit event {} was not written to the audit broker: {e}", E::NAME);
+        }
     }
 
     /// Get the value of lease_count.
@@ -502,18 +895,38 @@ impl ExpirationManager {
     /// persisted expiry has moved into the future has been renewed and must be
     /// put back on the queue instead of revoked. Revoking it here would kill a
     /// live lease.
+    ///
+    /// A `revoke_failed` lease is queued at its next retry instead of its
+    /// expiry; this is the reaper's step for it. The guard is taken before the
+    /// row is read, so a renewal cannot land between the check and the revoke.
     #[maybe_async::maybe_async]
     async fn revoke_swept_lease_entry(&self, lease_id: &str) -> Result<(), RvError> {
+        let guard = self.lease_locks.try_acquire(lease_id)?;
         let Some(current) = self.load_lease_entry(lease_id).await? else {
             // Already gone from storage — nothing left to revoke.
             return Ok(());
         };
 
-        if current.expire_time > SystemTime::now() {
-            return self.register_lease_entry(Arc::new(current));
-        }
+        let now = SystemTime::now();
+        let origin = match current.revoke_failure.as_ref() {
+            // Parked: tracked and listed, never retried by the reaper again.
+            Some(failure) if self.revoke_policy.exhausted(failure) => {
+                return self.register_lease_entry(Arc::new(current));
+            }
+            Some(failure) if failure.next_attempt_at > now => return self.register_lease_entry(Arc::new(current)),
+            Some(_) => RevokeOrigin::Retry,
+            None if current.expire_time > now => return self.register_lease_entry(Arc::new(current)),
+            None => RevokeOrigin::Expiry,
+        };
 
-        self.revoke_lease_id(lease_id, false).await
+        if let RevokeOutcome::Revoked { failed_attempts } =
+            self.revoke_lease_locked(&guard, lease_id, false, origin).await?
+        {
+            if failed_attempts > 0 {
+                self.emit_revoked(lease_id, RevokeOrigin::Retry, failed_attempts).await;
+            }
+        }
+        Ok(())
     }
 
     /// Starts a background task to check for and handle expired lease entries.
@@ -624,7 +1037,7 @@ impl ExpirationManager {
 
     /// Registers a lease entry in the priority queue for expiration tracking.
     fn register_lease_entry(&self, le: Arc<LeaseEntry>) -> Result<(), RvError> {
-        let priority = le.expire_time.duration_since(UNIX_EPOCH)?.as_millis();
+        let priority = le.queue_priority(&self.revoke_policy)?;
         let mut queue_locked = self.queue.write()?;
         queue_locked.push(le, Reverse(priority));
         Ok(())
@@ -638,7 +1051,11 @@ impl ExpirationManager {
             return Ok(None);
         }
 
-        if let Ok(le) = serde_json::from_slice::<LeaseEntry>(raw.clone().unwrap().value.as_slice()) {
+        if let Ok(mut le) = serde_json::from_slice::<LeaseEntry>(raw.clone().unwrap().value.as_slice()) {
+            // Version 0 needs no transformation: its absent fields default to
+            // "no max_ttl", "not revoke_failed". The next write stores the
+            // current version (read-old, write-new).
+            le.version = LEASE_ENTRY_VERSION;
             return Ok(Some(le));
         }
 
@@ -729,6 +1146,9 @@ impl ExpirationManager {
     }
 
     /// Revokes a lease entry and handles secret or token revocation.
+    ///
+    /// A secret backend's error is returned, not swallowed: the caller keeps
+    /// the row as `revoke_failed` rather than orphan the credential.
     #[maybe_async::maybe_async]
     async fn revoke_lease_entry(&self, le: &LeaseEntry) -> Result<(), RvError> {
         let token_store = self.token_store.read()?.upgrade().ok_or(RvError::ErrBarrierSealed)?;
@@ -748,11 +1168,7 @@ impl ExpirationManager {
         }
 
         let mut req = Request::new_revoke_request(&le.path, secret, data);
-        if let Err(e) = self.router.handle_request(&mut req).await {
-            log::error!("failed to revoke entry: {le:?}, err: {e}");
-        }
-
-        Ok(())
+        self.router.handle_request(&mut req).await.map(|_| ())
     }
 
     /// Renews a secret lease entry with a specified increment duration.
@@ -815,6 +1231,72 @@ impl ExpirationManager {
         ret
     }
 }
+
+#[maybe_async::maybe_async]
+impl OwnedLeaseRevoker for ExpirationManager {
+    async fn revoke_owned_lease(&self, owner_mount: &str, lease_id: &str) -> Result<LeaseRevocation, RvError> {
+        if lease_id.is_empty() || lease_id.starts_with('/') || lease_id.contains("..") {
+            return Err(bv_error_response_status!(400, "invalid lease_id: must be a relative lease path without '..'"));
+        }
+        let mut owner = owner_mount.to_string();
+        if !owner.ends_with('/') {
+            owner.push('/');
+        }
+        if owner == "/" || owner.contains("..") {
+            return Err(RvError::ErrPermissionDenied);
+        }
+
+        let guard = self.lease_locks.try_acquire(lease_id)?;
+        let Some(le) = self.load_lease_entry(lease_id).await? else {
+            return Err(RvError::ErrLeaseNotFound);
+        };
+        // A token's lease is the token store's to end, and a lease is the
+        // mount's only if its path routes to that very mount, not a parent.
+        if le.auth.is_some() || self.router.matching_mount(&le.path)? != owner {
+            return Err(RvError::ErrPermissionDenied);
+        }
+
+        match self.revoke_lease_locked(&guard, lease_id, true, RevokeOrigin::Owner).await? {
+            RevokeOutcome::Revoked { failed_attempts } => {
+                self.emit_revoked(lease_id, RevokeOrigin::Owner, failed_attempts).await;
+                Ok(LeaseRevocation::Revoked)
+            }
+            RevokeOutcome::Failed { attempts, .. } => Ok(LeaseRevocation::Deferred { attempts }),
+            // The guard is held from the load above, so this means storage
+            // lost the row underneath us: say so rather than claim a revoke.
+            RevokeOutcome::Missing => Err(RvError::ErrLeaseNotFound),
+        }
+    }
+}
+
+/// A renewal refused because nothing renews this kind of lease here.
+fn renew_unsupported(why: &str) -> RvError {
+    bv_error_response_status!(501, "lease not renewed: {}; nothing was changed", why)
+}
+
+fn past_max_ttl() -> RvError {
+    bv_error_response_status!(400, "lease not renewed: it has reached its max_ttl and cannot be extended further")
+}
+
+/// An operator's revoke whose backend failed; the lease was kept.
+fn revoke_failed_error(attempts: u32, max_attempts: u32, exhausted: bool) -> RvError {
+    let next = if exhausted { "is no longer retried: clear it once the target is cleaned up" } else { "is retried" };
+    bv_error_response_status!(
+        502,
+        "the secret backend failed to revoke this lease (attempt {} of {}); the lease is kept as revoke_failed and {}, \
+         see v2/sys/leases/revoke-failed",
+        attempts,
+        max_attempts,
+        next
+    )
+}
+
+// The T62 lease lifecycle: revoke_failed, the reaper, renew and its clamp,
+// the per-lease guard, owner revocation and the old row format. A child
+// module, so it reaches the private row type and storage helpers.
+#[cfg(all(test, not(feature = "sync_handler")))]
+#[path = "expiration_lifecycle_tests.rs"]
+mod lifecycle_tests;
 
 #[cfg(test)]
 mod mod_expiration_tests {
@@ -1128,7 +1610,16 @@ mod mod_expiration_tests {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_expiration_total_lease_count() {
-        let (_core, expiration, _token_store) = mock_expiration_manager!();
+        let (core, expiration, _token_store) = mock_expiration_manager!();
+        // The leases below must revoke for the counts to drop: since T62 a
+        // lease whose path no mount serves is kept as revoke_failed, not
+        // deleted, so give both prefixes a backend.
+        for prefix in ["foo/", "new/"] {
+            let view = BarrierView::new(core.barrier().clone(), "logical/");
+            let entry = MountEntry { path: prefix.into(), logical_type: "noop".into(), ..Default::default() };
+            let noop = Arc::new(NoopBackend::default());
+            expiration.router.mount(noop, prefix, Arc::new(RwLock::new(entry)), view).unwrap();
+        }
 
         let n: usize = 100;
         for i in 0..n {
@@ -1782,11 +2273,10 @@ mod mod_expiration_tests {
         assert!(ret.is_ok());
         let id = ret.unwrap();
 
-        let mut resp = expiration.renew(&id, Duration::ZERO).await.unwrap().unwrap();
-        let mut secret = resp.secret.clone().unwrap();
-        secret.lease_id.clear();
-        resp.secret = Some(secret);
-        assert_eq!(Some(resp), noop.response);
+        let renewal = expiration.renew(&id, Duration::ZERO).await.unwrap();
+        assert_eq!((renewal.lease_id.as_str(), renewal.ttl), (id.as_str(), Duration::from_secs(10)));
+        let renewed = expiration.load_lease_entry(&id).await.unwrap().unwrap();
+        assert_eq!(Some(renewed.data), noop.response.as_ref().unwrap().data, "the backend's renewed data is kept");
 
         let req = noop.requests.read().unwrap();
         assert_eq!(req.len(), 1);
@@ -1967,16 +2457,12 @@ mod mod_expiration_tests {
         assert!(ret.is_ok());
         let id = ret.unwrap();
 
-        let mut le = expiration.load_lease_entry(&id).await.unwrap().unwrap();
-        le.auth = Some(Auth { lease: Lease { renewable: true, ..Default::default() }, ..Default::default() });
-
-        let result = expiration.persist_lease_entry(&le).await;
-        assert!(result.is_ok());
-
         sleep(Duration::from_millis(500));
 
+        // A secret lease renewed in its final second: the backend's 2 s
+        // max_ttl clamps it, and it stays tracked.
         let resp = expiration.renew(&id, Duration::ZERO).await;
-        assert!(resp.is_ok());
+        assert!(resp.as_ref().is_ok_and(|r| r.ttl <= Duration::from_secs(2)), "{resp:?}");
 
         assert_eq!(expiration.get_lease_count(), 1);
     }
@@ -2031,8 +2517,11 @@ mod mod_expiration_tests {
 
         sleep(Duration::from_secs(1));
 
+        // A lease carrying an auth block is a token's lease: `renew` refuses
+        // it (T62) instead of reporting a renewal, and it stays tracked.
         let resp = expiration.renew(&id, Duration::ZERO).await;
-        assert!(resp.is_ok());
+        assert!(matches!(resp, Err(RvError::ErrResponseStatus(501, _))), "{resp:?}");
+        assert!(noop.requests.read().unwrap().iter().all(|r| r.operation != Operation::Renew), "backend not asked");
 
         assert_eq!(expiration.get_lease_count(), 1);
     }

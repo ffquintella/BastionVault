@@ -382,9 +382,10 @@ Next-up list recorded before the migration, in its order:
   - source: roadmap.md feature row "OpenLDAP / AD password-rotation", status `[x]` Done
   - initiative: [OpenLDAP / AD password-rotation](features/ldap-secret-engine.md) — 5 phases incl. identity-aware check-out affinity.
   - old-notes: [spec](features/ldap-secret-engine.md) — 5 phases incl. identity-aware check-out affinity.
-- [ ] T62 Add a dynamic-secrets framework and first engine plugins (S13)
+- [/] T62 Add a dynamic-secrets framework and first engine plugins (S13)
   - source: roadmap.md feature row "Dynamic Secrets framework", status `[ ]` Todo
   - old-notes: [spec](features/dynamic-secrets.md) — host ships only the framework; engines under [`dynamic-engine-plugins/`](dynamic-engine-plugins/).
+  - note: slice 1 (host lease substrate) done — revoke_failed state with backoff reaper, `v2/sys/leases/revoke-failed` list + force-clear, `sys/renew` for leases whose backend renews them, owner early-revoke contract; plugin kind and capabilities, pool, audit schema, SDK, Postgres plugin and GUI remain.
 - [x] T63 Import XCA databases into PKI (S63)
   - source: roadmap.md feature row "XCA database import", status `[x]` Done
   - initiative: [XCA database import](features/xca-import.md) — external plugin `bastion-plugin-xca` (process runtime) reads XCA `.xdb` SQLite databases, decrypts both envelope formats (EVP_BytesToKey for XCA ≤ 2.0, PBKDF2-HMAC-SHA512 for XCA ≥ 2.4) plus per-key `ownPass`, and imports certificates / private keys / CRLs into the PKI engine via the `Settings → PKI → Import XCA` GUI wizard. Standalone keys / CSRs / templates land as KV blobs under `secret/xca-import/<batch-id>/...`. Zero host-crate code; rides on the plugin substrate alongside `bastion-plugin-pmp`.

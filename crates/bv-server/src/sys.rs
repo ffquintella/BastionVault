@@ -4339,6 +4339,33 @@ async fn sys_mcp_transcripts_list_request_handler(
     handle_request(core, &mut r).await
 }
 
+/// LIST (or GET) `/v2/sys/leases/revoke-failed` — leases whose secret backend
+/// failed to revoke them (T62). Shim over the sudo-gated logical route;
+/// deployment-wide, so no namespace header is forwarded.
+async fn sys_leases_revoke_failed_list_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, HttpError> {
+    let mut r = request_auth(&req);
+    r.path = "sys/leases/revoke-failed".to_string();
+    r.operation = Operation::List;
+    handle_request(core, &mut r).await
+}
+
+/// DELETE `/v2/sys/leases/revoke-failed/{lease_id}` — force-clear one
+/// `revoke_failed` lease. Shim over the sudo-gated logical route, which
+/// validates the id and refuses a lease that is not `revoke_failed`.
+async fn sys_leases_revoke_failed_clear_handler(
+    req: HttpRequest,
+    path: web::Path<String>,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, HttpError> {
+    let mut r = request_auth(&req);
+    r.path = format!("sys/leases/revoke-failed/{}", path.into_inner());
+    r.operation = Operation::Delete;
+    handle_request(core, &mut r).await
+}
+
 /// GET `/v2/sys/mcp/transcripts/{id}` — one MCP session transcript. Shim over
 /// the sudo-gated logical route, which validates the id.
 async fn sys_mcp_transcript_read_request_handler(

@@ -37,6 +37,7 @@
 //! | [`module`] | [`Module`] — the lifecycle hooks every engine implements |
 //! | [`identity`] | entities, group policy expansion, ownership, user audit |
 //! | [`auth`] | token lookup/revocation, auth-mount registration |
+//! | [`leases`] | early revocation of a secret lease by the mount that issued it |
 //! | [`policy`] | the three authorization questions an engine may ask |
 //! | [`namespace`] | namespace resolution, login binding, per-namespace routers |
 //! | [`resource_group`] | the asset-group reverse index |
@@ -71,6 +72,7 @@ pub mod dos;
 pub mod engines;
 pub mod provider;
 pub mod identity;
+pub mod leases;
 pub mod mcp_events;
 pub mod mcp_sessions;
 pub mod mcp_transcripts;
