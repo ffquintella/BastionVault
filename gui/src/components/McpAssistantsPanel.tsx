@@ -5,6 +5,7 @@ import { Badge, Button, Card, ConfirmModal, EmptyState, Table, useToast } from "
 import type { McpClientSetup, McpPairing, McpServerStatus } from "../lib/types";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
+import { namespaceLabel } from "../lib/mcpNamespace";
 
 /** Broadcast by the Rust host whenever the server starts or stops. */
 const MCP_SERVER_STATUS_EVENT = "mcp-server-status";
@@ -23,6 +24,28 @@ function fmtTime(unix: number | null): string {
 function stateBadge(p: McpPairing) {
   if (p.expired) return <Badge variant="error" label="Expired" />;
   return <Badge variant="success" label={`Until ${fmtTime(p.expires_at)}`} />;
+}
+
+/**
+ * Where a pairing's calls run: its live token's namespace as the vault bound
+ * it, else the namespace the operator narrowed it to, else the sign-in's
+ * (features/mcp-namespace-selection.md).
+ */
+function NamespaceCell({ p }: { p: McpPairing }) {
+  const live = typeof p.token_namespace === "string" ? p.token_namespace : null;
+  const pinned = typeof p.namespace === "string" ? p.namespace : null;
+  const shown = live ?? pinned;
+  return (
+    <div className="flex min-w-0 items-center gap-2">
+      <span
+        className="block min-w-0 truncate font-mono text-xs"
+        title={live !== null ? "the live token is bound here" : "no live token yet"}
+      >
+        {shown === null ? "follows your sign-in" : namespaceLabel(shown)}
+      </span>
+      {pinned !== null && <Badge variant="info" label="narrowed" />}
+    </div>
+  );
 }
 
 function Snippet({ text, onCopy }: { text: string; onCopy: (text: string) => void }) {
@@ -243,6 +266,11 @@ export function McpAssistantsPanel() {
                     {`${p.client_name} ${p.client_version}`.trim()}
                   </span>
                 ),
+              },
+              {
+                key: "namespace",
+                header: "Namespace",
+                render: (p: McpPairing) => <NamespaceCell p={p} />,
               },
               {
                 key: "transport",

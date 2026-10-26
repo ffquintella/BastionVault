@@ -28,10 +28,10 @@ use bv_mcp::{
     catalogue,
     local::{
         exchange_request_body, mfa_begin_body, mfa_begin_error, mfa_preflight_from_begin, mfa_verify_body,
-        minted_token_from_exchange, normalize_grant, ticket_from_verify, ConfirmRequest, ConnInfo, ConnectionSlot,
-        ForwardError, LocalServer, McpCallRef, MfaBeginError, MfaFactor, MfaPreflight, MintedToken, PairingDecision,
-        PairingGrant, PairingRequest, Prompter, VaultLink, CONNECT_MFA_BEGIN_PATH, CONNECT_MFA_VERIFY_PATH,
-        MAX_MESSAGE_BYTES,
+        minted_token_from_exchange, normalize_grant, operator_namespace_from_lookup, ticket_from_verify,
+        ConfirmRequest, ConnInfo, ConnectionSlot, ForwardError, LocalServer, McpCallRef, MfaBeginError, MfaFactor,
+        MfaPreflight, MintedToken, PairingDecision, PairingGrant, PairingRequest, Prompter, VaultLink,
+        CONNECT_MFA_BEGIN_PATH, CONNECT_MFA_VERIFY_PATH, MAX_MESSAGE_BYTES, NAMESPACE_HEADER, TOKEN_LOOKUP_SELF_PATH,
     },
     pairing::{
         self, find_by_token_hash, hash_token, now_secs, PairingRecord, Transport, DEFAULT_TOKEN_TTL_SECS,
@@ -57,11 +57,46 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 pub struct HttpVaultLink {
     client: Client,
+    /// The namespace the operator's session is bound to, once asked. The
+    /// session's token is fixed for the life of the process and its binding
+    /// is immutable, so one answer holds; a failed lookup is not cached.
+    operator_namespace: Mutex<Option<String>>,
 }
 
 impl HttpVaultLink {
     pub fn new(client: Client) -> Self {
-        Self { client }
+        Self { client, operator_namespace: Mutex::new(None) }
+    }
+
+    /// The operator session's namespace (`""` = root), from the vault's own
+    /// record of the session's token (`auth/token/lookup-self`), never from
+    /// the MCP client (`features/mcp-namespace-selection.md` Phase 1).
+    fn session_namespace(&self) -> Result<String, String> {
+        if let Some(ns) = lock(&self.operator_namespace).clone() {
+            return Ok(ns);
+        }
+        let resp = self
+            .client
+            .logical()
+            .read(TOKEN_LOOKUP_SELF_PATH)
+            .map_err(|e| format!("could not ask the vault which namespace your session is in: {e}"))?;
+        if resp.response_status != 200 {
+            return Err(vault_error_text(&resp.response_data, resp.response_status));
+        }
+        let ns = operator_namespace_from_lookup(&resp.response_data.unwrap_or(Value::Null))?;
+        *lock(&self.operator_namespace) = Some(ns.clone());
+        Ok(ns)
+    }
+
+    /// The operator's client, aimed at `namespace` -- where the pairing's
+    /// token runs, as the exchange reported it -- or, when that is unknown,
+    /// at their session's: the MFA ticket must bind where the call runs.
+    fn operator_client(&self, namespace: Option<&str>) -> Result<Client, String> {
+        let ns = match namespace {
+            Some(ns) => ns.to_string(),
+            None => self.session_namespace()?,
+        };
+        Ok(if ns.is_empty() { self.client.clone() } else { self.client.clone().add_header(NAMESPACE_HEADER, &ns) })
     }
 }
 
@@ -80,10 +115,15 @@ pub(super) fn delete_status(client: &Client, path: &str) -> Result<u16, String> 
 }
 
 impl VaultLink for HttpVaultLink {
-    fn exchange_pairing(&self, record: &PairingRecord, ttl_secs: u64) -> Result<MintedToken, String> {
+    fn exchange_pairing(
+        &self,
+        record: &PairingRecord,
+        ttl_secs: u64,
+        namespace: Option<&str>,
+    ) -> Result<MintedToken, String> {
         let resp = self
             .client
-            .request_write("v2/mcp/token", Some(exchange_request_body(record, ttl_secs)))
+            .request_write("v2/mcp/token", Some(exchange_request_body(record, ttl_secs, namespace)))
             .map_err(|e| format!("could not reach the vault: {e}"))?;
         if resp.response_status != 200 {
             return Err(vault_error_text(&resp.response_data, resp.response_status));
@@ -112,9 +152,14 @@ impl VaultLink for HttpVaultLink {
 
     /// Asked with the operator's own login -- the client this server mints
     /// pairing tokens from -- never with an MCP token.
-    fn connect_mfa_begin(&self, resource: &str, profile_id: &str) -> Result<MfaPreflight, MfaBeginError> {
-        let resp = self
-            .client
+    fn connect_mfa_begin(
+        &self,
+        namespace: Option<&str>,
+        resource: &str,
+        profile_id: &str,
+    ) -> Result<MfaPreflight, MfaBeginError> {
+        let client = self.operator_client(namespace).map_err(MfaBeginError::Other)?;
+        let resp = client
             .logical()
             .write(CONNECT_MFA_BEGIN_PATH, Some(mfa_begin_body(resource, profile_id)))
             .map_err(|e| MfaBeginError::Other(format!("could not reach the vault: {e}")))?;
@@ -126,13 +171,14 @@ impl VaultLink for HttpVaultLink {
 
     fn connect_mfa_verify(
         &self,
+        namespace: Option<&str>,
         resource: &str,
         profile_id: &str,
         factor: &MfaFactor,
         call: &McpCallRef,
     ) -> Result<Zeroizing<String>, String> {
-        let resp = self
-            .client
+        let client = self.operator_client(namespace)?;
+        let resp = client
             .logical()
             .write(CONNECT_MFA_VERIFY_PATH, Some(mfa_verify_body(resource, profile_id, factor, call)))
             .map_err(|e| format!("could not reach the vault: {e}"))?;
@@ -140,6 +186,10 @@ impl VaultLink for HttpVaultLink {
             return Err(vault_error_text(&resp.response_data, resp.response_status));
         }
         ticket_from_verify(&resp.response_data.unwrap_or(Value::Null))
+    }
+
+    fn operator_namespace(&self) -> Option<String> {
+        self.session_namespace().ok()
     }
 }
 
@@ -301,6 +351,9 @@ impl<R: BufRead, W: Write> Tty<R, W> {
             sanitize_for_model(request.client_version)
         ));
         self.say(&format!("  Transport:  {}", request.transport.as_str()));
+        if let Some(ns) = request.namespace {
+            self.say(&format!("  Namespace:  {}", namespace_label(ns)));
+        }
         if let Some(uid) = request.peer_uid {
             self.say(&format!("  Peer uid:   {uid}"));
         }
@@ -386,6 +439,9 @@ impl<R: BufRead, W: Write> Tty<R, W> {
             connect_allowed,
             confirm_connect: connect_allowed,
             ttl_secs,
+            // The terminal narrows with `--namespace`, a server setting; a
+            // terminal approval never pins one on the pairing.
+            namespace: None,
         };
         match normalize_grant(grant) {
             Ok(grant) => Some(PairingDecision::Approved(grant)),
@@ -408,6 +464,9 @@ impl<R: BufRead, W: Write> Tty<R, W> {
             let web = request.session.is_some_and(|c| c.protocol == "web");
             let what = if web { "fetch a page from" } else { "run a command on" };
             self.say(&format!("MCP client `{client}` wants to {what} `{resource}` ({}):", request.tool));
+            if let Some(ns) = request.namespace {
+                self.say(&format!("    Namespace: {}", namespace_label(ns)));
+            }
             for line in detail.split('\n') {
                 self.say(&format!("    {line}"));
             }
@@ -448,8 +507,20 @@ impl<R: BufRead, W: Write> Tty<R, W> {
         };
         self.say(&format!("MCP client `{client}` wants to {what}:"));
         self.say(&format!("  {}  {}", sanitize_for_model(request.tool), sanitize_for_model(request.summary)));
+        if let Some(ns) = request.namespace {
+            self.say(&format!("  in namespace {}", namespace_label(ns)));
+        }
         // Default deny: anything but an explicit yes refuses the call.
         self.yes_no("Allow this one call?", false)
+    }
+}
+
+/// How a namespace is named to the operator: `root` for the root namespace.
+fn namespace_label(ns: &str) -> String {
+    if ns.is_empty() {
+        "root".to_string()
+    } else {
+        sanitize_for_model(ns)
     }
 }
 
@@ -784,9 +855,14 @@ mod tests {
     struct SharedLink(Arc<FakeLink>);
 
     impl VaultLink for SharedLink {
-        fn exchange_pairing(&self, _record: &PairingRecord, ttl_secs: u64) -> Result<MintedToken, String> {
+        fn exchange_pairing(
+            &self,
+            _record: &PairingRecord,
+            ttl_secs: u64,
+            _namespace: Option<&str>,
+        ) -> Result<MintedToken, String> {
             self.0.exchanges.fetch_add(1, Ordering::SeqCst);
-            Ok(MintedToken { token: MINTED.to_string(), expires_at: now_secs() + ttl_secs })
+            Ok(MintedToken { token: MINTED.to_string(), expires_at: now_secs() + ttl_secs, namespace: None })
         }
 
         fn forward(&self, token: &str, message: &Value) -> Result<Value, ForwardError> {
@@ -820,6 +896,7 @@ mod tests {
             connect_allowed: false,
             confirm_connect: false,
             ttl_secs: 3600,
+            namespace: None,
         }
     }
 
@@ -859,6 +936,7 @@ mod tests {
             session: Some(call),
             open_world: true,
             mfa,
+            namespace: Some("dti/esi"),
         }
     }
 
@@ -876,6 +954,7 @@ mod tests {
             assert!(shown.contains("Profile:   p_agent") && shown.contains("Protocol:  ssh"), "{shown}");
             assert!(shown.contains("  | journalctl -u nginx | tail -n 20") && shown.contains("  | uptime"), "{shown}");
             assert!(shown.contains("Run this command once? [y/N]"), "{shown}");
+            assert!(shown.contains("Namespace: dti/esi"), "the call names the namespace it runs in: {shown}");
         }
     }
 
@@ -968,6 +1047,7 @@ mod tests {
             client_version: "2.1",
             transport: Transport::Stdio,
             peer_uid: None,
+            namespace: Some(""),
         };
         // approve, scope, default tools, no reveal, no writes, sessions yes, default TTL.
         let mut t = tty("y\nresources/secrets/web-01/\n\nn\nn\ny\n\n");
@@ -975,6 +1055,7 @@ mod tests {
         assert!(g.connect_allowed && g.confirm_connect);
         assert!(g.tool_allowlist.iter().any(|t| t == "bv_resource_ssh_exec"));
         assert!(screen(&t).contains("every call is shown to you for approval"));
+        assert!(screen(&t).contains("Namespace:  root"), "the approval names the namespace: {}", screen(&t));
 
         // Sessions declined: a session tool typed into the list is dropped.
         let mut t = tty("y\nsecret/*\nbv_whoami,bv_resource_ssh_exec\nn\nn\nn\n\n");
@@ -1019,6 +1100,7 @@ mod tests {
                 client_version: "1",
                 transport: Transport::LoopbackHttp,
                 peer_uid: None,
+                namespace: None,
             },
             &grant(),
             now_secs(),
@@ -1071,6 +1153,194 @@ mod tests {
             "params": { "_meta": { "io.modelcontextprotocol/clientInfo": { "name": "web-client", "version": "1" } } },
         })
         .to_string()
+    }
+
+    // ── the operator's MFA calls (T457) ──────────────────────────────────
+
+    type Seen = Arc<Mutex<Vec<(String, String, Vec<(String, String)>)>>>;
+
+    /// A stand-in vault on loopback: answers each request with
+    /// `answer(method, path)` and records `(method, path, headers)`.
+    fn fake_vault(answer: impl Fn(&str, &str, &Value) -> Value + Send + 'static) -> (String, Seen) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen: Seen = Arc::default();
+        let log = seen.clone();
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let Some((buf, head_len)) = read_head(&mut stream) else { continue };
+                let mut headers = [httparse::EMPTY_HEADER; 32];
+                let mut req = httparse::Request::new(&mut headers);
+                if req.parse(&buf[..head_len]).is_err() {
+                    continue;
+                }
+                let (method, path) = (req.method.unwrap_or("").to_string(), req.path.unwrap_or("").to_string());
+                let heads: Vec<(String, String)> = req
+                    .headers
+                    .iter()
+                    .map(|h| (h.name.to_ascii_lowercase(), String::from_utf8_lossy(h.value).to_string()))
+                    .collect();
+                let length = heads
+                    .iter()
+                    .find(|(k, _)| k == "content-length")
+                    .and_then(|(_, v)| v.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                let (mut received, mut chunk) = (buf[head_len..].to_vec(), [0u8; 4096]);
+                while received.len() < length {
+                    match stream.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => received.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                let sent: Value = serde_json::from_slice(&received).unwrap_or(Value::Null);
+                let body = serde_json::to_vec(&answer(&method, &path, &sent)).unwrap();
+                lock(&log).push((method, path, heads));
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(&body);
+            }
+        });
+        (format!("http://{addr}"), seen)
+    }
+
+    /// `namespace: None` answers the lookup as a root token does: no
+    /// `namespace_path` in its metadata at all.
+    fn vault_answering(namespace: Option<&'static str>) -> impl Fn(&str, &str, &Value) -> Value + Send + 'static {
+        move |_method, path, sent| {
+            if path.ends_with("/auth/token/lookup-self") {
+                let mut meta = json!({ "username": "felipe" });
+                if let Some(ns) = namespace {
+                    meta["namespace_path"] = json!(ns);
+                }
+                json!({ "data": { "meta": meta } })
+            } else if path.ends_with("/connect/mfa/begin") {
+                json!({ "data": { "required": true, "methods": ["totp"] } })
+            } else if path.ends_with("/connect/mfa/verify") {
+                json!({ "data": { "connect_ticket": "ticket-1" } })
+            } else if path.ends_with("/v2/mcp/token") {
+                // Bound where it was asked to narrow to, else the session's.
+                let bound = sent.get("namespace").cloned().unwrap_or_else(|| json!(namespace.unwrap_or("")));
+                json!({ "auth": { "client_token": "minted", "lease_duration": 60, "metadata": { "namespace": bound } } })
+            } else {
+                json!({})
+            }
+        }
+    }
+
+    fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+        headers.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+    }
+
+    fn mfa_round(link: &HttpVaultLink) -> Result<String, String> {
+        mfa_round_in(link, None)
+    }
+
+    /// One begin + verify, in the token's namespace when the server knows it.
+    fn mfa_round_in(link: &HttpVaultLink, namespace: Option<&str>) -> Result<String, String> {
+        link.connect_mfa_begin(namespace, "web-01", "p_agent").map_err(|e| format!("{e:?}"))?;
+        let call =
+            McpCallRef { pairing_id: "p1".into(), tool: "bv_resource_ssh_exec".into(), args_hash: "ab".repeat(32) };
+        let factor = MfaFactor::Totp(Zeroizing::new("123456".into()));
+        link.connect_mfa_verify(namespace, "web-01", "p_agent", &factor, &call).map(|t| t.to_string())
+    }
+
+    /// The step-up preflight and verify run as the operator, in the
+    /// namespace their own session is bound to (asked of the vault once),
+    /// so the ticket binds where the pairing's token runs.
+    #[test]
+    fn the_operator_mfa_calls_carry_the_sessions_namespace() {
+        let (addr, seen) = fake_vault(vault_answering(Some("tenant-a")));
+        let client = Client::new().with_addr(&addr).with_token("operator-session-token").build();
+        let link = HttpVaultLink::new(client);
+        assert_eq!(mfa_round(&link).unwrap(), "ticket-1");
+        assert_eq!(mfa_round(&link).unwrap(), "ticket-1");
+        assert_eq!(link.operator_namespace().as_deref(), Some("tenant-a"));
+
+        let seen = lock(&seen);
+        assert_eq!(seen.iter().filter(|(_, p, _)| p.ends_with("lookup-self")).count(), 1, "asked once: {seen:?}");
+        let mfa: Vec<_> = seen.iter().filter(|(_, p, _)| p.contains("/connect/mfa/")).collect();
+        assert_eq!(mfa.len(), 4);
+        for (_, path, headers) in mfa {
+            assert_eq!(header(headers, "x-bastionvault-namespace"), Some("tenant-a"), "{path}");
+            assert_eq!(header(headers, "x-bastionvault-token"), Some("operator-session-token"), "{path}");
+        }
+    }
+
+    /// A root-bound session sends no namespace header, as before.
+    #[test]
+    fn a_root_session_sends_no_namespace_header() {
+        let (addr, seen) = fake_vault(vault_answering(None));
+        let link = HttpVaultLink::new(Client::new().with_addr(&addr).with_token("root-session").build());
+        assert_eq!(mfa_round(&link).unwrap(), "ticket-1");
+        assert_eq!(link.operator_namespace().as_deref(), Some(""));
+        for (_, path, headers) in lock(&seen).iter() {
+            assert_eq!(header(headers, "x-bastionvault-namespace"), None, "{path}");
+        }
+    }
+
+    /// A namespace binding that does not normalize stops the step-up before
+    /// anything is sent without it: never a silent fall back to root.
+    #[test]
+    fn a_malformed_session_namespace_refuses_the_step_up() {
+        let (addr, seen) = fake_vault(vault_answering(Some("a/../b")));
+        let link = HttpVaultLink::new(Client::new().with_addr(&addr).with_token("op").build());
+        assert!(matches!(link.connect_mfa_begin(None, "web-01", "p_agent"), Err(MfaBeginError::Other(_))));
+        assert_eq!(link.operator_namespace(), None);
+        assert!(lock(&seen).iter().all(|(_, p, _)| !p.contains("/connect/mfa/")), "nothing sent without the header");
+    }
+
+    /// T457 Phase 2: the exchange asks for the server's narrowing (and only
+    /// then names a namespace), the answer's binding is read back, and the
+    /// operator's step-up then runs in the token's namespace, not the
+    /// session's, without asking the vault where the session is.
+    #[test]
+    fn a_narrowed_exchange_and_its_step_up_name_the_tokens_namespace() {
+        let (addr, seen) = fake_vault(vault_answering(Some("dti")));
+        let link = HttpVaultLink::new(Client::new().with_addr(&addr).with_token("operator-session-token").build());
+        let record = pairing_record_for_tests();
+        let minted = link.exchange_pairing(&record, 60, Some("dti/esi")).unwrap();
+        assert_eq!(minted.namespace.as_deref(), Some("dti/esi"));
+        let plain = link.exchange_pairing(&record, 60, None).unwrap();
+        assert_eq!(plain.namespace.as_deref(), Some("dti"), "no narrowing: the session's namespace");
+        assert_eq!(mfa_round_in(&link, minted.namespace.as_deref()).unwrap(), "ticket-1");
+
+        let seen = lock(&seen);
+        assert!(seen.iter().all(|(_, p, _)| !p.ends_with("lookup-self")), "the token's namespace was known: {seen:?}");
+        for (_, path, headers) in seen.iter().filter(|(_, p, _)| p.contains("/connect/mfa/")) {
+            assert_eq!(header(headers, "x-bastionvault-namespace"), Some("dti/esi"), "{path}");
+        }
+        for (_, path, headers) in seen.iter().filter(|(_, p, _)| p.ends_with("/v2/mcp/token")) {
+            assert_eq!(header(headers, "x-bastionvault-namespace"), None, "the exchange is not header-routed: {path}");
+        }
+    }
+
+    fn pairing_record_for_tests() -> PairingRecord {
+        PairingRecord {
+            version: 1,
+            id: "0123456789abcdef0123456789abcdef".into(),
+            client_name: "claude-code".into(),
+            client_version: "2.1".into(),
+            peer_uid: None,
+            transport: "stdio".into(),
+            pairing_token_hash: None,
+            tool_allowlist: vec!["bv_whoami".into()],
+            path_scope: vec!["secret/*".into()],
+            reveal_allowed: false,
+            destructive_allowed: false,
+            confirm_reveal: true,
+            confirm_destructive: true,
+            connect_allowed: false,
+            confirm_connect: false,
+            ttl_secs: 60,
+            approved_at: 0,
+            expires_at: None,
+            last_used_at: 0,
+            namespace: None,
+        }
     }
 
     #[test]

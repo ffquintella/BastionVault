@@ -31,8 +31,9 @@ use bv_client::{Backend, Operation};
 use bv_mcp::{
     local::{
         exchange_request_body, mfa_begin_body, mfa_begin_error, mfa_preflight_from_begin, mfa_verify_body,
-        minted_token_from_exchange, ticket_from_verify, vault_error_text, ForwardError, McpCallRef, MfaBeginError,
-        MfaFactor, MfaPreflight, MintedToken, VaultLink, CONNECT_MFA_BEGIN_PATH, CONNECT_MFA_VERIFY_PATH,
+        minted_token_from_exchange, operator_namespace_from_lookup, ticket_from_verify, vault_error_text, ForwardError,
+        McpCallRef, MfaBeginError, MfaFactor, MfaPreflight, MintedToken, VaultLink, CONNECT_MFA_BEGIN_PATH,
+        CONNECT_MFA_VERIFY_PATH, NAMESPACE_HEADER, TOKEN_LOOKUP_SELF_PATH,
     },
     pairing::{hash_token, new_pairing_token, now_secs, PairingRecord},
     request_state::SingleUseGuard,
@@ -148,6 +149,10 @@ fn server_version() -> &'static str {
 
 pub struct GuiVaultLink {
     pub session: Arc<SessionGuard>,
+    /// The namespace the session's token is bound to, once asked. A server
+    /// serves one session (same token, see [`SessionGuard`]) and a token's
+    /// binding never changes, so one answer holds; a failure is not cached.
+    pub operator_namespace: Mutex<Option<String>>,
     /// The last failure an operator should see in Settings. Sanitized vault
     /// messages only; never a token.
     pub last_error: Arc<Mutex<Option<String>>>,
@@ -167,45 +172,111 @@ impl GuiVaultLink {
         result
     }
 
-    /// A logical write as the operator -- the session the server was
-    /// started under, never an MCP token -- in the root namespace, as the
-    /// pairing exchange is. Used for the operator's MFA step-up
-    /// (`features/mcp-brokered-sessions.md` §3.1), whose ticket this
-    /// returns to the gatekeeper only: nothing here reaches the window.
-    fn operator_write(&self, path: &str, body: Map<String, Value>) -> Result<Value, String> {
-        let session = self.session()?;
-        match session.route {
-            VaultRoute::Remote(client) => {
-                let mut client = client.with_token(&session.token);
-                let answer = client.logical().write(path, Some(body));
-                client.token.zeroize();
-                let resp = answer.map_err(|e| format!("could not reach the vault: {e}"))?;
-                if resp.response_status != 200 {
-                    return Err(vault_error_text(&resp.response_data, resp.response_status));
-                }
-                Ok(resp.response_data.unwrap_or(Value::Null))
-            }
-            VaultRoute::Embedded { backend, .. } => {
-                let answer = tauri::async_runtime::block_on(backend.handle_with_namespace(
-                    Operation::Write,
-                    path,
-                    Some(body),
-                    &session.token,
-                    None,
-                ));
-                match answer {
-                    Err(e) => Err(sanitize_for_model(&e.to_string())),
-                    Ok(resp) => Ok(Value::Object(resp.and_then(|r| r.data).unwrap_or_default())),
-                }
-            }
+    /// The namespace the operator's session is bound to (`""` = root), from
+    /// the vault's own record of the session's token, never from the MCP
+    /// client (`features/mcp-namespace-selection.md` Phase 1). Not the
+    /// window's namespace picker: pairing tokens follow the token's binding.
+    fn session_namespace(&self) -> Result<String, String> {
+        if let Some(ns) = self.operator_namespace.lock().unwrap_or_else(|p| p.into_inner()).clone() {
+            return Ok(ns);
         }
+        let session = self.session()?;
+        let ns = operator_namespace_from_lookup(&operator_call(
+            &session,
+            Operation::Read,
+            TOKEN_LOOKUP_SELF_PATH,
+            None,
+            "",
+        )?)?;
+        *self.operator_namespace.lock().unwrap_or_else(|p| p.into_inner()) = Some(ns.clone());
+        Ok(ns)
+    }
+
+    /// A logical write as the operator -- the session the server was
+    /// started under, never an MCP token -- in `namespace`: where the
+    /// pairing's token runs, as its exchange reported, else the session's
+    /// own. Used for the operator's MFA step-up (§3.1 of
+    /// `features/mcp-brokered-sessions.md`); the ticket goes to the gatekeeper.
+    fn operator_write(&self, namespace: Option<&str>, path: &str, body: Map<String, Value>) -> Result<Value, String> {
+        let namespace = match namespace {
+            Some(ns) => ns.to_string(),
+            None => self.session_namespace()?,
+        };
+        let session = self.session()?;
+        operator_call(&session, Operation::Write, path, Some(body), &namespace)
+    }
+}
+
+/// One logical call as the session's operator, in `namespace` (`""` = root,
+/// sent without a header).
+fn operator_call(
+    session: &SessionSnapshot,
+    operation: Operation,
+    path: &str,
+    body: Option<Map<String, Value>>,
+    namespace: &str,
+) -> Result<Value, String> {
+    match &session.route {
+        VaultRoute::Remote(client) => operator_call_remote(client, &session.token, operation, path, body, namespace),
+        VaultRoute::Embedded { backend, .. } => tauri::async_runtime::block_on(operator_call_embedded(
+            backend.as_ref(),
+            &session.token,
+            operation,
+            path,
+            body,
+            namespace,
+        )),
+    }
+}
+
+fn operator_call_remote(
+    client: &bastion_vault::api::Client,
+    token: &str,
+    operation: Operation,
+    path: &str,
+    body: Option<Map<String, Value>>,
+    namespace: &str,
+) -> Result<Value, String> {
+    let mut client = client.clone().with_token(token);
+    if !namespace.is_empty() {
+        client = client.add_header(NAMESPACE_HEADER, namespace);
+    }
+    let answer = match operation {
+        Operation::Read => client.logical().read(path),
+        _ => client.logical().write(path, body),
+    };
+    client.token.zeroize();
+    let resp = answer.map_err(|e| format!("could not reach the vault: {e}"))?;
+    if resp.response_status != 200 {
+        return Err(vault_error_text(&resp.response_data, resp.response_status));
+    }
+    Ok(resp.response_data.unwrap_or(Value::Null))
+}
+
+async fn operator_call_embedded(
+    backend: &dyn Backend,
+    token: &str,
+    operation: Operation,
+    path: &str,
+    body: Option<Map<String, Value>>,
+    namespace: &str,
+) -> Result<Value, String> {
+    let namespace = (!namespace.is_empty()).then_some(namespace);
+    match backend.handle_with_namespace(operation, path, body, token, namespace).await {
+        Err(e) => Err(sanitize_for_model(&e.to_string())),
+        Ok(resp) => Ok(Value::Object(resp.and_then(|r| r.data).unwrap_or_default())),
     }
 }
 
 impl VaultLink for GuiVaultLink {
-    fn exchange_pairing(&self, record: &PairingRecord, ttl_secs: u64) -> Result<MintedToken, String> {
+    fn exchange_pairing(
+        &self,
+        record: &PairingRecord,
+        ttl_secs: u64,
+        namespace: Option<&str>,
+    ) -> Result<MintedToken, String> {
         let session = self.session()?;
-        let body = exchange_request_body(record, ttl_secs);
+        let body = exchange_request_body(record, ttl_secs, namespace);
         let result = match session.route {
             VaultRoute::Remote(client) => {
                 let mut client = client.with_token(&session.token);
@@ -270,21 +341,34 @@ impl VaultLink for GuiVaultLink {
         result
     }
 
-    fn connect_mfa_begin(&self, resource: &str, profile_id: &str) -> Result<MfaPreflight, MfaBeginError> {
-        let answer = self.operator_write(CONNECT_MFA_BEGIN_PATH, mfa_begin_body(resource, profile_id));
+    fn connect_mfa_begin(
+        &self,
+        namespace: Option<&str>,
+        resource: &str,
+        profile_id: &str,
+    ) -> Result<MfaPreflight, MfaBeginError> {
+        let answer = self.operator_write(namespace, CONNECT_MFA_BEGIN_PATH, mfa_begin_body(resource, profile_id));
         mfa_preflight_from_begin(&answer.map_err(mfa_begin_error)?)
     }
 
     fn connect_mfa_verify(
         &self,
+        namespace: Option<&str>,
         resource: &str,
         profile_id: &str,
         factor: &MfaFactor,
         call: &McpCallRef,
     ) -> Result<Zeroizing<String>, String> {
-        let answer =
-            self.operator_write(CONNECT_MFA_VERIFY_PATH, mfa_verify_body(resource, profile_id, factor, call))?;
+        let answer = self.operator_write(
+            namespace,
+            CONNECT_MFA_VERIFY_PATH,
+            mfa_verify_body(resource, profile_id, factor, call),
+        )?;
         ticket_from_verify(&answer)
+    }
+
+    fn operator_namespace(&self) -> Option<String> {
+        self.session_namespace().ok()
     }
 }
 
@@ -311,5 +395,77 @@ fn forward_in_process(core: &Arc<Core>, token: &str, message: &Value) -> Result<
         // is the in-process 403; the gatekeeper drops it and re-mints.
         Err(RvError::ErrPermissionDenied) => Err(ForwardError::Refused(403)),
         Err(e) => Err(ForwardError::Other(format!("the vault could not answer: {e}"))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! T457: the operator's step-up calls carry the namespace the operator's
+    //! own session is bound to. The embedded half, against a fake backend
+    //! that records what it was asked; the remote half sends the same value
+    //! through `api::Client::add_header`, exercised by the CLI's link tests.
+
+    use bv_client::{ClientError, JsonResponse};
+    use serde_json::json;
+
+    use super::*;
+
+    type Call = (Operation, String, Option<String>, String);
+
+    #[derive(Default)]
+    struct Recording {
+        calls: Mutex<Vec<Call>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Backend for Recording {
+        async fn handle(
+            &self,
+            operation: Operation,
+            path: &str,
+            body: Option<Map<String, Value>>,
+            token: &str,
+        ) -> Result<Option<JsonResponse>, ClientError> {
+            self.handle_with_namespace(operation, path, body, token, None).await
+        }
+
+        async fn handle_with_namespace(
+            &self,
+            operation: Operation,
+            path: &str,
+            _body: Option<Map<String, Value>>,
+            token: &str,
+            namespace: Option<&str>,
+        ) -> Result<Option<JsonResponse>, ClientError> {
+            self.calls.lock().unwrap().push((operation, path.to_string(), namespace.map(str::to_string), token.into()));
+            let data = if path == TOKEN_LOOKUP_SELF_PATH {
+                json!({ "meta": { "namespace_path": "tenant-a" } })
+            } else {
+                json!({ "required": false, "methods": [] })
+            };
+            Ok(Some(JsonResponse { data: data.as_object().cloned(), ..Default::default() }))
+        }
+    }
+
+    #[tokio::test]
+    async fn an_embedded_step_up_is_sent_in_the_sessions_namespace() {
+        let backend = Recording::default();
+        let lookup = operator_call_embedded(&backend, "op-token", Operation::Read, TOKEN_LOOKUP_SELF_PATH, None, "")
+            .await
+            .unwrap();
+        let ns = operator_namespace_from_lookup(&lookup).unwrap();
+        assert_eq!(ns, "tenant-a");
+        operator_call_embedded(&backend, "op-token", Operation::Write, CONNECT_MFA_BEGIN_PATH, Some(Map::new()), &ns)
+            .await
+            .unwrap();
+        operator_call_embedded(&backend, "op-token", Operation::Write, CONNECT_MFA_BEGIN_PATH, Some(Map::new()), "")
+            .await
+            .unwrap();
+
+        let calls = backend.calls.lock().unwrap();
+        assert_eq!(calls[0].2, None, "the lookup itself is not namespaced");
+        assert_eq!((calls[1].1.as_str(), calls[1].2.as_deref()), (CONNECT_MFA_BEGIN_PATH, Some("tenant-a")));
+        assert_eq!(calls[2].2, None, "a root session sends no namespace");
+        assert!(calls.iter().all(|c| c.3 == "op-token"), "always as the operator");
     }
 }

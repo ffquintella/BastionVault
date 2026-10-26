@@ -365,6 +365,7 @@ pub(crate) async fn prepare_and_run(
         scrubber,
         session_id,
         started_at_ms: now_ms(),
+        namespace: ns,
         _permit: permit,
     };
     // The session runs in its own task: when the MCP endpoint's timeout
@@ -402,6 +403,8 @@ struct SessionTask {
     scrubber: CredentialScrubber,
     session_id: String,
     started_at_ms: u64,
+    /// The namespace the session ran in and resolved its credential from.
+    namespace: String,
     /// Held for the life of the session; dropping it frees the slot.
     _permit: SessionPermit,
 }
@@ -498,6 +501,7 @@ impl SessionTask {
             operator: self.binding.operator.clone(),
             pairing_id: self.pairing_id(),
             client_name: self.binding.client_name.clone(),
+            namespace: self.namespace.clone(),
         };
         if let Err(e) = mcp_events::emit(self.ctx.as_ref(), &event, Some(&self.who)).await {
             log::warn!(target: "security", "connect.agent.refused could not be written to the audit log: {e}");
@@ -513,6 +517,7 @@ impl SessionTask {
             profile_id: self.profile_id.clone(),
             operator: self.binding.operator.clone(),
             pairing_id: self.pairing_id(),
+            namespace: self.namespace.clone(),
         };
         if let Err(e) = mcp_events::emit(self.ctx.as_ref(), &event, Some(&self.who)).await {
             log::warn!(target: "security", "connect.agent.aborted could not be written to the audit log: {e}");
@@ -539,6 +544,7 @@ impl SessionTask {
                 operator: self.binding.operator.clone(),
                 pairing_id: self.pairing_id().unwrap_or_default(),
                 client_name: self.binding.client_name.clone(),
+                namespace: self.namespace.clone(),
                 binding_reveal_allowed: self.binding.reveal_allowed,
                 operator_confirmation: self.operator_confirmation.clone(),
                 mfa_method: self.mfa_method.clone(),
@@ -592,6 +598,7 @@ impl SessionTask {
             operator: self.binding.operator.clone(),
             pairing_id: self.pairing_id(),
             client_name: self.binding.client_name.clone(),
+            namespace: self.namespace.clone(),
             binding_reveal_allowed: self.binding.reveal_allowed,
             resource: self.resource.clone(),
             profile_id: self.profile_id.clone(),

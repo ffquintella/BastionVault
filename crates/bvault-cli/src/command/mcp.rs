@@ -140,7 +140,11 @@ Transports (pick one; stdio is the default):
 
 A client that is not yet paired can only be approved at a terminal. With no
 terminal (an assistant launching this headlessly), pairing and per-call
-confirmations fail closed -- run `bvault mcp pair` first."#
+confirmations fail closed -- run `bvault mcp pair` first.
+
+Tokens are bound to the namespace your session is in. --namespace asks for a
+descendant instead (a child-visible session only); the vault refuses any other
+namespace with mcp_namespace_not_permitted rather than falling back."#
 )]
 #[command(group(ArgGroup::new("transport").multiple(false).args(["stdio", "socket", "listen"])))]
 pub struct Serve {
@@ -165,9 +169,20 @@ pub struct Serve {
     #[arg(long, value_name = "PATH", env = "BVAULT_MCP_PAIRINGS_FILE")]
     pairings_file: Option<PathBuf>,
 
+    /// Bind every MCP token this server mints to NAMESPACE instead of your
+    /// session's own: your session's namespace, or a descendant of it when
+    /// your session is child-visible. The vault refuses anything else.
+    #[arg(long, value_name = "NAMESPACE", value_parser = parse_namespace_arg)]
+    namespace: Option<String>,
+
     #[deref]
     #[command(flatten, next_help_heading = "HTTP Options")]
     http_options: command::HttpOptions,
+}
+
+/// `--namespace`, canonical (`""` = root); a malformed path is a usage error.
+fn parse_namespace_arg(raw: &str) -> Result<String, String> {
+    bv_mcp::local::normalize_namespace(raw)
 }
 
 impl CommandExecutor for Serve {
@@ -179,10 +194,13 @@ impl CommandExecutor for Serve {
             ));
         }
         let store = pairing_store(&self.pairings_file)?;
-        let server = Arc::new(
+        let mut server =
             LocalServer::new(Box::new(HttpVaultLink::new(client)), Box::new(TtyPrompter::default()), store)
-                .with_server_version(env!("CARGO_PKG_VERSION")),
-        );
+                .with_server_version(env!("CARGO_PKG_VERSION"));
+        if let Some(namespace) = &self.namespace {
+            server = server.with_requested_namespace(namespace).map_err(|e| bv_error_string!(e))?;
+        }
+        let server = Arc::new(server);
 
         if let Some(addr) = self.listen {
             let bound = bind_http(addr)?;
@@ -262,8 +280,15 @@ impl CommandExecutor for Pair {
             _ => None,
         };
         let store = pairing_store(&self.pairings_file)?;
-        let request =
-            PairingRequest { client_name: name, client_version: self.client_version.trim(), transport, peer_uid };
+        // Offline pairing: no vault session is asked, so the dialog cannot
+        // name the namespace; `mcp serve`'s per-call confirmations do.
+        let request = PairingRequest {
+            client_name: name,
+            client_version: self.client_version.trim(),
+            transport,
+            peer_uid,
+            namespace: None,
+        };
 
         let decision = TtyPrompter::default().approve(&request).ok_or_else(|| {
             bv_error_string!("pairing needs an interactive terminal, and none is available; run this from a terminal")
@@ -567,6 +592,19 @@ mod tests {
     #[test]
     fn serve_transports_are_mutually_exclusive() {
         assert!(Serve::try_parse_from(["serve", "--stdio", "--socket", "/tmp/x"]).is_err());
+    }
+
+    /// T457 Phase 2: `--namespace` is canonicalized at parse time, and a
+    /// malformed one is a usage error, not something sent to the vault.
+    #[test]
+    fn serve_takes_a_canonical_namespace() {
+        let serve = Serve::try_parse_from(["serve", "--namespace", "/dti/esi/"]).unwrap();
+        assert_eq!(serve.namespace.as_deref(), Some("dti/esi"));
+        assert_eq!(Serve::try_parse_from(["serve"]).unwrap().namespace, None, "absent: follow the session");
+        assert_eq!(Serve::try_parse_from(["serve", "--namespace", ""]).unwrap().namespace.as_deref(), Some(""));
+        for bad in ["a/../b", "a//b", "a/*"] {
+            assert!(Serve::try_parse_from(["serve", "--namespace", bad]).is_err(), "{bad:?}");
+        }
         assert!(Serve::try_parse_from(["serve", "--socket", "/tmp/x", "--listen", "127.0.0.1:1"]).is_err());
         assert!(Serve::try_parse_from(["serve"]).is_ok(), "stdio is the default");
     }
@@ -659,6 +697,7 @@ mod tests {
             connect_allowed: false,
             confirm_connect: false,
             ttl_secs: 3600,
+            namespace: None,
         };
         let operator_present = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let local = LocalServer::new(

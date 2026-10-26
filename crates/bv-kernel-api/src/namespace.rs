@@ -65,6 +65,14 @@ pub fn binding_from_metadata(meta: &HashMap<String, String>) -> (String, bool) {
     (ns_path, child_visible)
 }
 
+/// The namespace a token is bound to, canonical (`""` = root): its stored
+/// binding ([`binding_from_metadata`]) through [`normalize_path`]. `Err` when
+/// the stored value does not normalize, which every caller must treat as a
+/// refusal rather than read as root.
+pub fn bound_namespace(meta: &HashMap<String, String>) -> Result<String, RvError> {
+    normalize_path(&binding_from_metadata(meta).0)
+}
+
 /// Stamp a namespace binding into a token metadata map at create time.
 pub fn stamp_binding(
     meta: &mut HashMap<String, String>,

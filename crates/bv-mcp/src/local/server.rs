@@ -80,6 +80,9 @@ pub struct LocalServer {
     /// Set by [`Self::shutdown`]: from then on every message is refused and
     /// nothing is minted.
     closed: AtomicBool,
+    /// The host's narrowing request for every exchange (`bvault mcp serve
+    /// --namespace`, T457 Phase 2), canonical. The vault validates it.
+    requested_namespace: Option<String>,
 }
 
 /// What one line-transport connection has established about its client.
@@ -302,7 +305,22 @@ impl LocalServer {
             server_version: major_minor(env!("CARGO_PKG_VERSION")),
             notice: default_notice,
             closed: AtomicBool::new(false),
+            requested_namespace: None,
         }
+    }
+
+    /// Asks the vault to bind every token this server mints to `namespace`
+    /// (`""` = root) rather than to the operator session's own. Refused when
+    /// it is not a namespace path; whether it is permitted is the vault's call.
+    pub fn with_requested_namespace(mut self, namespace: &str) -> Result<Self, String> {
+        self.requested_namespace = Some(super::link::normalize_namespace(namespace)?);
+        Ok(self)
+    }
+
+    /// The namespace of each live minted token, by pairing id (`None`: the
+    /// vault did not say). For a host's settings view; never a token.
+    pub fn token_namespaces(&self) -> HashMap<String, Option<String>> {
+        lock(&self.tokens).iter().map(|(id, t)| (id.clone(), t.namespace.clone())).collect()
     }
 
     /// The host's version (a full `x.y.z` is fine; only `major.minor` is
@@ -407,12 +425,14 @@ impl LocalServer {
             Ok(r) => r,
             Err(refusal) => return Some(refusal.into_response(id)),
         };
-        let assertion = match self.confirm_if_needed(&record, object) {
-            Ok(assertion) => assertion,
+        // Minted before any confirmation, so the dialog names the namespace
+        // the vault actually bound the token to (T457), not a guess.
+        let (token, namespace) = match self.token_for(&record) {
+            Ok(t) => t,
             Err(refusal) => return Some(refusal.into_response(id)),
         };
-        let token = match self.token_for(&record) {
-            Ok(t) => t,
+        let assertion = match self.confirm_if_needed(&record, object, namespace.as_deref()) {
+            Ok(assertion) => assertion,
             Err(refusal) => return Some(refusal.into_response(id)),
         };
 
@@ -514,11 +534,15 @@ impl LocalServer {
             return Err(Refusal::new(-32001, "mcp_pairing_required", "pair this client with `bvault mcp pair`"));
         }
 
+        // Before any exchange, the best statement of where the tokens will be
+        // bound: the narrowing this host asks for, else the session's own.
+        let namespace = self.requested_namespace.clone().or_else(|| self.link.operator_namespace());
         let request = PairingRequest {
             client_name: &client_name,
             client_version: &client_version,
             transport: conn.transport,
             peer_uid: conn.peer_uid,
+            namespace: namespace.as_deref(),
         };
         let decision = self.prompter.approve(&request);
         if self.is_shut_down() {
@@ -553,6 +577,7 @@ impl LocalServer {
         &self,
         record: &PairingRecord,
         message: &Map<String, Value>,
+        namespace: Option<&str>,
     ) -> Result<Option<Assertion>, Refusal> {
         if message.get("method").and_then(Value::as_str) != Some("tools/call") {
             return Ok(None);
@@ -566,7 +591,7 @@ impl LocalServer {
         };
         let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
         if meta.open_world {
-            return self.confirm_session(record, meta, &arguments);
+            return self.confirm_session(record, meta, &arguments, namespace);
         }
         let reveal_requested = arguments.get("reveal").and_then(Value::as_bool).unwrap_or(false);
 
@@ -591,6 +616,7 @@ impl LocalServer {
             session: None,
             open_world: false,
             mfa: None,
+            namespace,
         };
         let answer = self.prompter.confirm(&request);
         self.judge_answer(answer)?;
@@ -626,6 +652,7 @@ impl LocalServer {
         record: &PairingRecord,
         meta: &ToolMeta,
         arguments: &Value,
+        namespace: Option<&str>,
     ) -> Result<Option<Assertion>, Refusal> {
         if !record.tool_allowlist.iter().any(|t| t == meta.name) || !record.connect_allowed {
             return Ok(None);
@@ -643,8 +670,9 @@ impl LocalServer {
             return Ok(None);
         }
 
-        // Is the profile gated? The vault decides, asked as the operator.
-        let challenge = match self.link.connect_mfa_begin(&call.resource, &call.profile) {
+        // Is the profile gated? The vault decides, asked as the operator in
+        // the namespace the token's call runs in, where its ticket must bind.
+        let challenge = match self.link.connect_mfa_begin(namespace, &call.resource, &call.profile) {
             Ok(MfaPreflight::NotRequired) => None,
             Ok(MfaPreflight::Required(challenge)) => Some(challenge),
             Err(MfaBeginError::Unavailable(reason)) => {
@@ -679,7 +707,7 @@ impl LocalServer {
         };
         let ticket: Mutex<Option<Zeroizing<String>>> = Mutex::new(None);
         let verify = |factor: MfaFactor| -> Result<(), String> {
-            let minted = self.link.connect_mfa_verify(&call.resource, &call.profile, &factor, &bound_to)?;
+            let minted = self.link.connect_mfa_verify(namespace, &call.resource, &call.profile, &factor, &bound_to)?;
             *lock(&ticket) = Some(minted);
             Ok(())
         };
@@ -694,6 +722,7 @@ impl LocalServer {
             session: Some(&call),
             open_world: true,
             mfa: challenge.as_ref().map(|challenge| MfaStep { challenge, verify: &verify }),
+            namespace,
         };
         let answer = self.prompter.confirm(&request);
         self.judge_answer(answer)?;
@@ -709,7 +738,30 @@ impl LocalServer {
         Ok(Some(Assertion { at: (self.clock)(), mfa: ticket.is_some(), ticket }))
     }
 
-    fn token_for(&self, record: &PairingRecord) -> Result<Zeroizing<String>, Refusal> {
+    /// The narrowing an exchange for `record` asks for: the pairing's own
+    /// (chosen at approval) or this host's. Two different ones are refused
+    /// rather than one picked.
+    fn exchange_namespace(&self, record: &PairingRecord) -> Result<Option<String>, Refusal> {
+        match (&record.namespace, &self.requested_namespace) {
+            (Some(pinned), Some(host)) if pinned != host => Err(Refusal::new(
+                -32001,
+                "mcp_namespace_conflict",
+                format!(
+                    "this pairing was approved for namespace {}, but this server was started with --namespace {}; \
+                     start it without --namespace, or pair the client again",
+                    namespace_label(pinned),
+                    namespace_label(host)
+                ),
+            )),
+            (Some(ns), _) | (None, Some(ns)) => Ok(Some(ns.clone())),
+            (None, None) => Ok(None),
+        }
+    }
+
+    /// The pairing's token and the namespace the vault bound it to, minted
+    /// when there is none fresh. A narrowed exchange whose answer names any
+    /// other namespace is refused and the token dropped, never used.
+    fn token_for(&self, record: &PairingRecord) -> Result<(Zeroizing<String>, Option<String>), Refusal> {
         let now = (self.clock)();
         // One mint at a time, so two first calls from one client mint once.
         // Held across the vault round trip; `tokens` is not, so a
@@ -722,15 +774,32 @@ impl LocalServer {
             }
             if let Some(t) = tokens.get(&record.id) {
                 if t.expires_at > now + TOKEN_REFRESH_MARGIN_SECS {
-                    return Ok(Zeroizing::new(t.token.clone()));
+                    return Ok((Zeroizing::new(t.token.clone()), t.namespace.clone()));
                 }
             }
         }
+        let requested = self.exchange_namespace(record)?;
         let ttl = exchange_ttl(record, now);
         let minted = self
             .link
-            .exchange_pairing(record, ttl)
+            .exchange_pairing(record, ttl, requested.as_deref())
             .map_err(|e| Refusal::new(-32603, "mcp_exchange_failed", format!("could not mint an MCP token: {e}")))?;
+        if let Some(requested) = requested.as_deref() {
+            if minted.namespace.as_deref() != Some(requested) {
+                let bound =
+                    minted.namespace.as_deref().map_or_else(|| "an unstated namespace".to_string(), namespace_label);
+                return Err(Refusal::new(
+                    -32603,
+                    "mcp_namespace_mismatch",
+                    format!(
+                        "asked the vault for a token in namespace {} and it bound one to {bound}; the token was \
+                         discarded (does this vault support namespace narrowing?)",
+                        namespace_label(requested)
+                    ),
+                ));
+            }
+        }
+        let namespace = minted.namespace.clone();
         let token = {
             let mut tokens = lock(&self.tokens);
             // Judged under the lock `shutdown` drains under: either the drain
@@ -746,7 +815,16 @@ impl LocalServer {
         };
         // Best effort, once per mint rather than per message.
         let _ = self.store.touch(&record.id, now);
-        Ok(token)
+        Ok((token, namespace))
+    }
+}
+
+/// How a namespace is named to an operator or a client: `root` for `""`.
+fn namespace_label(ns: &str) -> String {
+    if ns.is_empty() {
+        "root".to_string()
+    } else {
+        format!("`{}`", sanitize_for_model(ns))
     }
 }
 
@@ -841,13 +919,32 @@ pub(super) mod tests {
         pub(crate) verify: Mutex<Option<Result<String, String>>>,
         /// `(resource, profile, method, factor, call)` per verify.
         pub(crate) verifies: Mutex<Vec<VerifyCall>>,
+        /// What `operator_namespace` reports; `None` is "cannot tell".
+        pub(crate) namespace: Mutex<Option<String>>,
+        /// The narrowing each exchange asked for.
+        pub(crate) exchange_namespaces: Mutex<Vec<Option<String>>>,
+        /// Overrides where the fake vault says it bound a token; by default
+        /// the request, else the session's namespace, as the vault does.
+        pub(crate) answer_namespace: Mutex<Option<Option<String>>>,
+        /// The namespace each MFA begin and verify was sent in.
+        pub(crate) mfa_namespaces: Mutex<Vec<Option<String>>>,
     }
 
     impl VaultLink for Arc<FakeLink> {
-        fn exchange_pairing(&self, _record: &PairingRecord, ttl_secs: u64) -> Result<MintedToken, String> {
+        fn exchange_pairing(
+            &self,
+            _record: &PairingRecord,
+            ttl_secs: u64,
+            namespace: Option<&str>,
+        ) -> Result<MintedToken, String> {
             self.exchanges.fetch_add(1, Ordering::SeqCst);
             lock(&self.minted_ttls).push(ttl_secs);
-            Ok(MintedToken { token: MINTED.to_string(), expires_at: now_secs() + ttl_secs })
+            lock(&self.exchange_namespaces).push(namespace.map(str::to_string));
+            let bound = match lock(&self.answer_namespace).clone() {
+                Some(answer) => answer,
+                None => namespace.map(str::to_string).or_else(|| lock(&self.namespace).clone()),
+            };
+            Ok(MintedToken { token: MINTED.to_string(), expires_at: now_secs() + ttl_secs, namespace: bound })
         }
 
         fn forward(&self, token: &str, message: &Value) -> Result<Value, ForwardError> {
@@ -858,18 +955,26 @@ pub(super) mod tests {
             Ok(json!({ "jsonrpc": "2.0", "id": message["id"], "result": { "relayed": true } }))
         }
 
-        fn connect_mfa_begin(&self, resource: &str, profile_id: &str) -> Result<MfaPreflight, MfaBeginError> {
+        fn connect_mfa_begin(
+            &self,
+            namespace: Option<&str>,
+            resource: &str,
+            profile_id: &str,
+        ) -> Result<MfaPreflight, MfaBeginError> {
+            lock(&self.mfa_namespaces).push(namespace.map(str::to_string));
             lock(&self.begins).push((resource.to_string(), profile_id.to_string()));
             lock(&self.begin).clone().unwrap_or(Ok(MfaPreflight::NotRequired))
         }
 
         fn connect_mfa_verify(
             &self,
+            namespace: Option<&str>,
             resource: &str,
             profile_id: &str,
             factor: &MfaFactor,
             call: &McpCallRef,
         ) -> Result<Zeroizing<String>, String> {
+            lock(&self.mfa_namespaces).push(namespace.map(str::to_string));
             let shown = match factor {
                 MfaFactor::Totp(code) => code.to_string(),
                 MfaFactor::Fido2(credential) => credential.to_string(),
@@ -883,6 +988,10 @@ pub(super) mod tests {
             ));
             lock(&self.verify).clone().unwrap_or(Ok(TICKET.to_string())).map(Zeroizing::new)
         }
+
+        fn operator_namespace(&self) -> Option<String> {
+            lock(&self.namespace).clone()
+        }
     }
 
     /// What a confirmation showed the operator.
@@ -894,6 +1003,7 @@ pub(super) mod tests {
         pub(crate) open_world: bool,
         pub(crate) mfa_methods: Option<Vec<String>>,
         pub(crate) verified: Option<Result<(), String>>,
+        pub(crate) namespace: Option<String>,
     }
 
     #[derive(Default)]
@@ -905,11 +1015,14 @@ pub(super) mod tests {
         pub(crate) approvals_asked: AtomicUsize,
         pub(crate) confirms_asked: AtomicUsize,
         pub(crate) shown: Mutex<Vec<Shown>>,
+        /// The namespace each pairing request named.
+        pub(crate) approval_namespaces: Mutex<Vec<Option<String>>>,
     }
 
     impl Prompter for Arc<Scripted> {
-        fn approve(&self, _request: &PairingRequest<'_>) -> Option<PairingDecision> {
+        fn approve(&self, request: &PairingRequest<'_>) -> Option<PairingDecision> {
             self.approvals_asked.fetch_add(1, Ordering::SeqCst);
+            lock(&self.approval_namespaces).push(request.namespace.map(str::to_string));
             lock(&self.approve).clone().unwrap_or(None)
         }
 
@@ -922,6 +1035,7 @@ pub(super) mod tests {
                 open_world: request.open_world,
                 mfa_methods: request.mfa.as_ref().map(|m| m.challenge.methods.clone()),
                 verified: None,
+                namespace: request.namespace.map(str::to_string),
             };
             let answer = (*lock(&self.confirm)).unwrap_or(None);
             if let (Some(step), Some(true), Some(code)) = (&request.mfa, answer, lock(&self.totp).clone()) {
@@ -952,6 +1066,7 @@ pub(super) mod tests {
             connect_allowed: false,
             confirm_connect: false,
             ttl_secs: 3600,
+            namespace: None,
         }
     }
 
@@ -969,14 +1084,19 @@ pub(super) mod tests {
     }
 
     pub(crate) fn rig(name: &str) -> Rig {
+        rig_with(name, |server| server)
+    }
+
+    /// [`rig`], with the server configured by `configure` before it runs.
+    pub(crate) fn rig_with(name: &str, configure: impl FnOnce(LocalServer) -> LocalServer) -> Rig {
         let dir = std::env::temp_dir().join(format!("bv-mcp-local-{name}-{}", new_pairing_id()));
         let link = Arc::new(FakeLink::default());
         let prompt = Arc::new(Scripted::default());
-        let server = Arc::new(LocalServer::new(
+        let server = Arc::new(configure(LocalServer::new(
             Box::new(link.clone()),
             Box::new(prompt.clone()),
             PairingStore::at(dir.join("mcp-pairings.json")),
-        ));
+        )));
         Rig { server, link, prompt, dir }
     }
 
@@ -1404,6 +1524,133 @@ pub(super) mod tests {
         assert_eq!(rig.server.handle_message(&stdio(), &del).unwrap()["result"]["relayed"], json!(true));
     }
 
+    /// T457: the pairing and per-call dialogs name the namespace the
+    /// pairing's tokens are bound to, as the host's link reports it from the
+    /// operator's own session -- never from anything the client sent.
+    #[test]
+    fn the_dialogs_carry_the_operator_sessions_namespace() {
+        let rig = rig("dialog-namespace");
+        *lock(&rig.link.namespace) = Some("dti/esi".into());
+        let mut g = grant();
+        g.tool_allowlist.push("bv_kv_delete".into());
+        g.destructive_allowed = true;
+        *lock(&rig.prompt.approve) = Some(Some(PairingDecision::Approved(g)));
+        *lock(&rig.prompt.confirm) = Some(Some(true));
+        let resp = rig.server.handle_message(&stdio(), &injected_delete()).unwrap();
+        assert_eq!(resp["result"]["relayed"], json!(true));
+        assert_eq!(*lock(&rig.prompt.approval_namespaces), vec![Some("dti/esi".to_string())]);
+        assert_eq!(lock(&rig.prompt.shown)[0].namespace.as_deref(), Some("dti/esi"));
+        assert_eq!(*lock(&rig.link.exchange_namespaces), vec![None], "nothing narrowed: no namespace sent");
+    }
+
+    /// A delete whose arguments and `_meta` both try to name a namespace.
+    fn injected_delete() -> Vec<u8> {
+        let mut call: Value = serde_json::from_slice(&request(
+            1,
+            "tools/call",
+            json!({ "name": "bv_kv_delete", "arguments": { "mount": "secret", "path": "x", "namespace": "other" } }),
+        ))
+        .unwrap();
+        call["params"]["_meta"]["namespace"] = json!("other");
+        serde_json::to_vec(&call).unwrap()
+    }
+
+    /// T457 Phase 1 deviation 5, fixed: a per-call dialog names where the
+    /// vault bound the token (the exchange answer), not the operator's
+    /// session; an answer that does not say leaves it unnamed.
+    #[test]
+    fn a_confirmation_names_the_tokens_namespace_from_the_exchange() {
+        for (answer, shown) in [(Some("dti/ops"), Some("dti/ops")), (None, None)] {
+            let rig = rig("dialog-token-namespace");
+            *lock(&rig.link.namespace) = Some("dti".into());
+            *lock(&rig.link.answer_namespace) = Some(answer.map(str::to_string));
+            let mut g = grant();
+            g.reveal_allowed = true;
+            *lock(&rig.prompt.approve) = Some(Some(PairingDecision::Approved(g)));
+            *lock(&rig.prompt.confirm) = Some(Some(true));
+            // The first call mints, then asks: the dialog already knows.
+            rig.server.handle_message(&stdio(), &reveal_call(1)).unwrap();
+            assert_eq!(*lock(&rig.prompt.approval_namespaces), vec![Some("dti".to_string())], "{answer:?}");
+            assert_eq!(lock(&rig.prompt.shown)[0].namespace.as_deref(), shown, "{answer:?}");
+        }
+    }
+
+    /// A fresh server over `rig`'s link, prompter and store: nothing cached.
+    fn rebuilt(rig: &Rig) -> LocalServer {
+        LocalServer::new(
+            Box::new(rig.link.clone()),
+            Box::new(rig.prompt.clone()),
+            PairingStore::at(rig.dir.join("mcp-pairings.json")),
+        )
+    }
+
+    /// T457 Phase 2, host narrowing (`bvault mcp serve --namespace`): every
+    /// exchange asks for it, the pairing dialog names it, and the per-call
+    /// dialog names what the vault bound. A client's `namespace` argument or
+    /// `_meta` key is never an input.
+    #[test]
+    fn a_host_narrowing_is_requested_at_every_exchange() {
+        let rig = rig_with("host-narrowing", |s| s.with_requested_namespace("/dti/esi/").unwrap());
+        *lock(&rig.link.namespace) = Some("dti".into());
+        let mut g = grant();
+        g.tool_allowlist.push("bv_kv_delete".into());
+        g.destructive_allowed = true;
+        *lock(&rig.prompt.approve) = Some(Some(PairingDecision::Approved(g)));
+        *lock(&rig.prompt.confirm) = Some(Some(true));
+        let resp = rig.server.handle_message(&stdio(), &injected_delete()).unwrap();
+        assert_eq!(resp["result"]["relayed"], json!(true), "{resp}");
+        assert_eq!(*lock(&rig.prompt.approval_namespaces), vec![Some("dti/esi".to_string())]);
+        assert_eq!(*lock(&rig.link.exchange_namespaces), vec![Some("dti/esi".to_string())]);
+        assert_eq!(lock(&rig.prompt.shown)[0].namespace.as_deref(), Some("dti/esi"));
+        assert_eq!(rig.server.store().load().unwrap()[0].namespace, None, "a host setting, not the pairing's");
+        let pairing_id = rig.server.store().load().unwrap()[0].id.clone();
+        assert_eq!(rig.server.token_namespaces().get(&pairing_id), Some(&Some("dti/esi".to_string())));
+
+        assert!(rebuilt(&rig).with_requested_namespace("a/../b").is_err());
+    }
+
+    /// T457 Phase 2, pairing narrowing (the desktop dialog's selector): the
+    /// approved record carries it and every exchange asks for it; a host
+    /// asking for another namespace is refused, not resolved by picking one.
+    #[test]
+    fn a_pairing_narrowing_is_requested_and_a_conflict_is_refused() {
+        let rig = rig("pairing-narrowing");
+        *lock(&rig.link.namespace) = Some("dti".into());
+        let mut g = grant();
+        g.namespace = Some("dti/esi".into());
+        *lock(&rig.prompt.approve) = Some(Some(PairingDecision::Approved(g)));
+        rig.server.handle_message(&stdio(), &request(1, "tools/list", json!({}))).unwrap();
+        assert_eq!(rig.server.store().load().unwrap()[0].namespace.as_deref(), Some("dti/esi"));
+        assert_eq!(*lock(&rig.link.exchange_namespaces), vec![Some("dti/esi".to_string())]);
+
+        rig.server.shutdown();
+        let conflicting = rebuilt(&rig).with_requested_namespace("dti/ops").unwrap();
+        let resp = conflicting.handle_message(&stdio(), &request(2, "tools/list", json!({}))).unwrap();
+        assert_eq!(data_code(&resp), "mcp_namespace_conflict", "{resp}");
+        assert_eq!(rig.link.exchanges.load(Ordering::SeqCst), 1, "refused before the vault is asked");
+        let same = rebuilt(&rig).with_requested_namespace("dti/esi").unwrap();
+        let resp = same.handle_message(&stdio(), &request(3, "tools/list", json!({}))).unwrap();
+        assert_eq!(resp["result"]["relayed"], json!(true), "the same namespace twice is no conflict: {resp}");
+    }
+
+    /// A vault that binds a narrowed token anywhere else -- including one
+    /// that does not report where -- has its token discarded, not used, and
+    /// the next call asks again.
+    #[test]
+    fn a_narrowed_token_bound_elsewhere_is_discarded() {
+        for answer in [Some("dti"), Some(""), None] {
+            let rig = rig_with("narrowing-mismatch", |s| s.with_requested_namespace("dti/esi").unwrap());
+            *lock(&rig.prompt.approve) = Some(Some(PairingDecision::Approved(grant())));
+            *lock(&rig.link.answer_namespace) = Some(answer.map(str::to_string));
+            let resp = rig.server.handle_message(&stdio(), &request(1, "tools/list", json!({}))).unwrap();
+            assert_eq!(data_code(&resp), "mcp_namespace_mismatch", "{answer:?}: {resp}");
+            assert!(lock(&rig.link.forwards).is_empty(), "{answer:?}: nothing relayed");
+            assert!(rig.server.token_namespaces().is_empty(), "{answer:?}: nothing cached");
+            rig.server.handle_message(&stdio(), &request(2, "tools/list", json!({}))).unwrap();
+            assert_eq!(rig.link.exchanges.load(Ordering::SeqCst), 2, "{answer:?}");
+        }
+    }
+
     #[test]
     fn a_token_the_vault_refuses_is_dropped_and_reminted() {
         let rig = paired_rig("refused", false);
@@ -1444,10 +1691,15 @@ pub(super) mod tests {
             release: Mutex<mpsc::Receiver<()>>,
         }
         impl VaultLink for SlowLink {
-            fn exchange_pairing(&self, _record: &PairingRecord, ttl: u64) -> Result<MintedToken, String> {
+            fn exchange_pairing(
+                &self,
+                _record: &PairingRecord,
+                ttl: u64,
+                _namespace: Option<&str>,
+            ) -> Result<MintedToken, String> {
                 lock(&self.entered).send(()).ok();
                 lock(&self.release).recv().ok();
-                Ok(MintedToken { token: MINTED.to_string(), expires_at: now_secs() + ttl })
+                Ok(MintedToken { token: MINTED.to_string(), expires_at: now_secs() + ttl, namespace: None })
             }
             fn forward(&self, _token: &str, _message: &Value) -> Result<Value, ForwardError> {
                 panic!("a call refused at shutdown must never be forwarded");
@@ -1659,6 +1911,28 @@ pub(super) mod tests {
         })))
     }
 
+    /// T457 Phase 2: the operator's step-up runs where the token's call runs
+    /// -- the namespace the vault bound it to -- so a narrowed pairing's
+    /// ticket binds there, not to the operator session's namespace.
+    #[test]
+    fn the_operators_step_up_runs_in_the_tokens_namespace() {
+        let rig = rig_with("session-mfa-ns", |s| s.with_requested_namespace("dti/esi").unwrap());
+        *lock(&rig.link.namespace) = Some("dti".into());
+        let mut g = grant();
+        g.tool_allowlist.push(SSH.into());
+        g.path_scope = vec!["resources/secrets/web-01/".into()];
+        g.connect_allowed = true;
+        *lock(&rig.prompt.approve) = Some(Some(PairingDecision::Approved(g)));
+        *lock(&rig.link.begin) = gated(&["totp"]);
+        *lock(&rig.prompt.confirm) = Some(Some(true));
+        *lock(&rig.prompt.totp) = Some("123456".into());
+        let resp = rig.server.handle_message(&stdio(), &ssh_call(2, ssh_args("uptime"))).unwrap();
+        assert_eq!(resp["result"]["relayed"], json!(true), "{resp}");
+        let sent = lock(&rig.link.mfa_namespaces).clone();
+        assert_eq!(sent, vec![Some("dti/esi".to_string()); 2], "begin and verify, in the token's namespace");
+        assert_eq!(lock(&rig.prompt.shown)[0].namespace.as_deref(), Some("dti/esi"));
+    }
+
     /// A gated profile: the operator completes MFA in the same prompt, the
     /// ticket is bound to this pairing, tool and argument hash, and it rides
     /// only in the relayed `_meta`.
@@ -1751,8 +2025,13 @@ pub(super) mod tests {
     fn a_host_without_the_mfa_step_fails_closed() {
         struct Minimal(Arc<FakeLink>);
         impl VaultLink for Minimal {
-            fn exchange_pairing(&self, r: &PairingRecord, ttl: u64) -> Result<MintedToken, String> {
-                self.0.exchange_pairing(r, ttl)
+            fn exchange_pairing(
+                &self,
+                r: &PairingRecord,
+                ttl: u64,
+                namespace: Option<&str>,
+            ) -> Result<MintedToken, String> {
+                self.0.exchange_pairing(r, ttl, namespace)
             }
             fn forward(&self, token: &str, message: &Value) -> Result<Value, ForwardError> {
                 self.0.forward(token, message)
@@ -1815,6 +2094,7 @@ pub(super) mod tests {
             approved_at: 0,
             expires_at: Some(1_000 + 600),
             last_used_at: 0,
+            namespace: None,
         };
         assert_eq!(exchange_ttl(&record, 1_000), 600);
         record.expires_at = None;

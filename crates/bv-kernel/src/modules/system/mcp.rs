@@ -233,7 +233,35 @@ pub struct McpTokenIndexEntry {
     /// existed, which are all app tokens.
     #[serde(default = "default_token_kind")]
     pub kind: String,
+    /// The namespace the token is bound to (`""` = root). `None` on entries
+    /// written before MCP tokens carried a binding: those tokens are
+    /// root-bound (`features/mcp-namespace-selection.md`).
+    #[serde(default)]
+    pub namespace: Option<String>,
 }
+
+/// Where a pairing's last exchange was bound, stored under
+/// `mcp/pairing-namespaces/<id>` so the next exchange can tell that the
+/// pairing moved and record it (`mcp.pairing.namespace_changed`). One small
+/// record per pairing, deleted with the pairing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpPairingNamespace {
+    #[serde(default = "default_version")]
+    pub version: u32,
+    pub namespace: String,
+    pub recorded_at: u64,
+}
+
+pub const MCP_PAIRING_NAMESPACE_PREFIX: &str = "mcp/pairing-namespaces/";
+
+/// The stable refusal for an MCP token whose namespace cannot be used: a
+/// binding that does not normalize, a namespace that was deleted or that the
+/// vault cannot resolve. Never answered by falling back to root.
+pub const MCP_NAMESPACE_UNAVAILABLE: &str = "mcp_namespace_unavailable";
+
+/// The stable refusal for a narrowed exchange whose policies do not exist
+/// in the target namespace (T457 Phase 2).
+pub const MCP_POLICY_NOT_IN_NAMESPACE: &str = "mcp_policy_not_in_namespace";
 
 fn default_token_kind() -> String {
     "app".to_string()
@@ -357,6 +385,113 @@ fn operator_ref_from_auth(auth: &Auth) -> Result<McpOperatorRef, RvError> {
         mount_path: meta("mount_path"),
         namespace,
     })
+}
+
+/// The token store binds an MCP token from the parent's stored entry, and
+/// the exchange resolved the same binding; both must agree. A disagreement
+/// is a bug: the token is revoked and the exchange refused, never answered
+/// with either value.
+#[maybe_async::maybe_async]
+async fn check_minted_namespace(
+    token_store: &crate::modules::auth::token_store::TokenStore,
+    minted: &Auth,
+    expected: &str,
+) -> Result<(), RvError> {
+    let bound =
+        crate::kernel_api::namespace::bound_namespace(&minted.metadata).unwrap_or_else(|_| "<malformed>".into());
+    if bound == expected {
+        return Ok(());
+    }
+    token_store.revoke(&minted.client_token).await?;
+    Err(namespace_unavailable(&format!("the minted token was bound to {bound:?}, not {expected:?}")))
+}
+
+fn namespace_unavailable(why: &str) -> RvError {
+    crate::bv_error_response_status!(
+        403,
+        "{}: {}; refusing rather than binding the MCP token to root",
+        MCP_NAMESPACE_UNAVAILABLE,
+        why
+    )
+}
+
+/// The namespace an MCP token minted for `auth` will be bound to: the
+/// exchanging session's own stored binding, canonical, and still resolvable
+/// now (`features/mcp-namespace-selection.md` Phase 1). Never read from a
+/// header, the body or a tool argument. Root needs no lookup.
+#[maybe_async::maybe_async]
+async fn exchange_namespace(core: &crate::core::Core, auth: &Auth) -> Result<String, RvError> {
+    use crate::modules::namespace::{NamespaceModule, NAMESPACE_MODULE_NAME};
+    let ns = crate::kernel_api::namespace::bound_namespace(&auth.metadata)
+        .map_err(|_| namespace_unavailable("the session's namespace binding is malformed"))?;
+    if ns.is_empty() {
+        return Ok(ns);
+    }
+    let store =
+        core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME).and_then(|m| m.store()).ok_or_else(
+            || namespace_unavailable(&format!("namespace {ns:?} cannot be resolved: no namespace store")),
+        )?;
+    match store.get_by_path(&ns).await {
+        Ok(Some(found)) => Ok(found.path),
+        Ok(None) => Err(namespace_unavailable(&format!("namespace {ns:?} no longer exists"))),
+        Err(e) => Err(namespace_unavailable(&format!("namespace {ns:?} could not be resolved ({e})"))),
+    }
+}
+
+fn namespace_not_permitted(why: &str) -> RvError {
+    crate::bv_error_response_status!(
+        403,
+        "{}: {}; no MCP token is minted for another namespace instead",
+        crate::modules::auth::token_store::MCP_NAMESPACE_NOT_PERMITTED,
+        why
+    )
+}
+
+/// The namespace a pairing exchange asked to narrow its token to (T457
+/// Phase 2): well-formed, covered by `token_may_operate` over the session's
+/// stored binding, then resolved. Permission is judged before existence, so
+/// a refusal says nothing about namespaces the session cannot reach.
+#[maybe_async::maybe_async]
+async fn narrowing_target(
+    core: &crate::core::Core,
+    auth: &Auth,
+    raw: &str,
+) -> Result<crate::modules::auth::token_store::McpNamespaceTarget, RvError> {
+    use crate::modules::auth::token_store::McpNamespaceTarget;
+    use crate::modules::namespace::{token_binding, NamespaceModule, NAMESPACE_MODULE_NAME};
+    let requested = crate::kernel_api::namespace::normalize_path(raw)
+        .map_err(|_| namespace_not_permitted(&format!("{raw:?} is not a well-formed namespace path")))?;
+    let session = crate::kernel_api::namespace::bound_namespace(&auth.metadata)
+        .map_err(|_| namespace_unavailable("the session's namespace binding is malformed"))?;
+    let (_, child_visible) = token_binding::binding_from_metadata(&auth.metadata);
+    if !token_binding::token_may_operate(&session, child_visible, &requested) {
+        let reach = if child_visible { "its own namespace and its descendants" } else { "only its own namespace" };
+        return Err(namespace_not_permitted(&format!(
+            "the session is bound to {session:?} and may narrow to {reach}, not {requested:?}"
+        )));
+    }
+    if requested.is_empty() {
+        return Ok(McpNamespaceTarget { path: String::new(), id: String::new() });
+    }
+    let store =
+        core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME).and_then(|m| m.store()).ok_or_else(
+            || namespace_unavailable(&format!("namespace {requested:?} cannot be resolved: no namespace store")),
+        )?;
+    match store.get_by_path(&requested).await {
+        Ok(Some(found)) => Ok(McpNamespaceTarget { path: found.path, id: found.uuid }),
+        Ok(None) => Err(namespace_unavailable(&format!("namespace {requested:?} does not exist"))),
+        Err(e) => Err(namespace_unavailable(&format!("namespace {requested:?} could not be resolved ({e})"))),
+    }
+}
+
+/// The optional `namespace` of an exchange body: `None` when absent, the raw
+/// string otherwise. Any other shape is refused rather than ignored.
+fn requested_namespace(req: &Request) -> Result<Option<String>, RvError> {
+    match req.get_data("namespace") {
+        Ok(Value::String(raw)) => Ok(Some(raw)),
+        Err(RvError::ErrRequestFieldNotFound | RvError::ErrRequestNoData) => Ok(None),
+        Ok(_) | Err(_) => Err(crate::bv_error_response_status!(400, "`namespace` must be a namespace path string")),
+    }
 }
 
 /// The first open-world tool in an app's allow-list, if any. Network-mode
@@ -775,6 +910,9 @@ impl SystemBackend {
                             "client_version": indexed.client_version,
                             "issued_at": indexed.issued_at,
                             "expires_at": indexed.expires_at,
+                            // `null` for a token minted before MCP tokens
+                            // carried a binding (root-bound).
+                            "namespace": indexed.namespace,
                         }));
                     }
                 }
@@ -839,10 +977,17 @@ impl SystemBackend {
             req.get_data("policies").ok().and_then(|v| v.as_comma_string_slice()).unwrap_or_default();
         let requested_ttl_secs = req.get_data("ttl_secs").ok().and_then(|v| v.as_u64());
         let catalogue_hash = req.get_data_as_str("catalogue_hash").unwrap_or_default();
+        let namespace = requested_namespace(req)?;
 
         match (app_name, pairing) {
             (Some(_), Some(_)) => Err(crate::bv_error_response!("`app` and `pairing` are mutually exclusive")),
             (None, None) => Err(crate::bv_error_response!("one of `app` or `pairing` is required")),
+            // An app token is bound where its AppRole login is; narrowing is
+            // a pairing (operator) decision. Refused, never ignored.
+            (Some(_), None) if namespace.is_some() => Err(crate::bv_error_response_status!(
+                400,
+                "`namespace` applies to pairing exchanges only; an app token is bound to its AppRole login's namespace"
+            )),
             (Some(app_name), None) => {
                 self.exchange_app(
                     req,
@@ -864,6 +1009,7 @@ impl SystemBackend {
                     requested_policies,
                     requested_ttl_secs,
                     catalogue_hash,
+                    namespace,
                 )
                 .await
             }
@@ -886,6 +1032,7 @@ impl SystemBackend {
         requested_policies: Vec<String>,
         requested_ttl_secs: Option<u64>,
         catalogue_hash: String,
+        requested_namespace: Option<String>,
     ) -> Result<Option<Response>, RvError> {
         // A human login stamps `entity_id` and/or `username`; tokens issued
         // before entity resolution was wired through login carry only the
@@ -922,7 +1069,24 @@ impl SystemBackend {
         // beside `reveal_allowed` (owner decision): such a grant holds the
         // whole lethal trifecta, and per-call confirmation is what bounds it.
         let connect_allowed = check_pairing_connect_grant(&pairing, &tool_allowlist)?;
-        let operator = operator_ref_from_auth(auth)?;
+        let mut operator = operator_ref_from_auth(auth)?;
+        // Follow the operator's session (T457): the token is bound where the
+        // exchanging session is, or where it asked to narrow to (Phase 2),
+        // and a move from the previous exchange is audited before minting.
+        let session_namespace = exchange_namespace(self.core.as_ref(), auth).await?;
+        let target = match requested_namespace.as_deref() {
+            Some(raw) => Some(narrowing_target(self.core.as_ref(), auth, raw).await?),
+            None => None,
+        };
+        let namespace = target.as_ref().map_or(session_namespace, |t| t.path.clone());
+        if target.is_some() {
+            self.check_policies_resolve_in(auth, &requested_policies, &namespace).await?;
+            // The operator's MFA ticket must be bound where this token's
+            // calls run (`connect_mfa`): the narrowed namespace, which the
+            // session may operate in.
+            operator.namespace.clone_from(&namespace);
+        }
+        let record_namespace = self.note_pairing_namespace(req, &id, &client_name, &namespace, &operator).await?;
 
         let ttl_secs = requested_ttl_secs.or(pairing_ttl).unwrap_or(28_800).clamp(1, 86_400);
         let binding = McpBinding {
@@ -947,8 +1111,16 @@ impl SystemBackend {
             return Err(RvError::ErrPermissionDenied);
         };
         let minted = token_store
-            .mint_mcp_token(&caller_token, &requested_policies, ttl_secs, format!("mcp-pairing-{id}"), binding)
+            .mint_mcp_token(
+                &caller_token,
+                &requested_policies,
+                ttl_secs,
+                format!("mcp-pairing-{id}"),
+                binding,
+                target.as_ref(),
+            )
             .await?;
+        check_minted_namespace(&token_store, &minted, &namespace).await?;
 
         index_token(
             req,
@@ -960,9 +1132,14 @@ impl SystemBackend {
                 issued_at: now_secs(),
                 expires_at: now_secs() + ttl_secs,
                 kind: "pairing".to_string(),
+                namespace: Some(namespace.clone()),
             },
         )
         .await?;
+        if record_namespace {
+            let record = McpPairingNamespace { version: 1, namespace: namespace.clone(), recorded_at: now_secs() };
+            req.storage_put(&StorageEntry::new(&format!("{MCP_PAIRING_NAMESPACE_PREFIX}{id}"), &record)?).await?;
+        }
 
         let mut data = Map::new();
         data.insert(
@@ -972,10 +1149,72 @@ impl SystemBackend {
                 "accessor": token_accessor(&minted.client_token),
                 "policies": minted.policies,
                 "lease_duration": ttl_secs,
-                "metadata": { "mcp_kind": "pairing", "mcp_name": id },
+                "metadata": { "mcp_kind": "pairing", "mcp_name": id, "namespace": namespace },
             }),
         );
         Ok(Some(Response::data_response(Some(data))))
+    }
+
+    /// T457 Phase 2: every policy the narrowed token would carry (the
+    /// requested set, else the session's) must exist in `namespace`'s store,
+    /// or the token's grants would evaluate to nothing there.
+    async fn check_policies_resolve_in(
+        &self,
+        auth: &Auth,
+        requested_policies: &[String],
+        namespace: &str,
+    ) -> Result<(), RvError> {
+        let mut names = if requested_policies.is_empty() { auth.policies.clone() } else { requested_policies.to_vec() };
+        crate::utils::policy::sanitize_policies(&mut names, false);
+        let policy_module = self.get_module::<PolicyModule>("policy")?;
+        let missing = policy_module.policy_store.load().unresolved_in_namespace(&names, namespace).await?;
+        if missing.is_empty() {
+            return Ok(());
+        }
+        Err(crate::bv_error_response_status!(
+            400,
+            "{}: {} {:?} {} not exist in namespace {:?}; create {} there or request policies that do",
+            MCP_POLICY_NOT_IN_NAMESPACE,
+            if missing.len() == 1 { "policy" } else { "policies" },
+            missing,
+            if missing.len() == 1 { "does" } else { "do" },
+            namespace,
+            if missing.len() == 1 { "it" } else { "them" }
+        ))
+    }
+
+    /// Compares the pairing's previous exchange with this one's `namespace`
+    /// and, when they differ, emits `mcp.pairing.namespace_changed`. Fails
+    /// closed: an event an enabled audit device cannot take refuses the
+    /// exchange. Returns whether the pairing's namespace record needs writing.
+    async fn note_pairing_namespace(
+        &self,
+        req: &Request,
+        id: &str,
+        client_name: &str,
+        namespace: &str,
+        operator: &McpOperatorRef,
+    ) -> Result<bool, RvError> {
+        let previous = match req.storage_get(&format!("{MCP_PAIRING_NAMESPACE_PREFIX}{id}")).await? {
+            Some(entry) => Some(serde_json::from_slice::<McpPairingNamespace>(&entry.value)?.namespace),
+            // No record: a first exchange, or tokens minted before MCP tokens
+            // carried a binding -- every one of which was root-bound.
+            None => {
+                let index = format!("{MCP_APP_TOKEN_PREFIX}{}/", pairing_index_dir(id));
+                (!req.storage_list(&index).await?.is_empty()).then(String::new)
+            }
+        };
+        if let Some(previous) = previous.as_deref().filter(|p| *p != namespace) {
+            let event = crate::kernel_api::mcp_events::PairingNamespaceChanged {
+                pairing_id: id.to_string(),
+                client_name: client_name.to_string(),
+                previous_namespace: previous.to_string(),
+                namespace: namespace.to_string(),
+                operator: Some(operator.clone()),
+            };
+            crate::kernel_api::mcp_events::emit(self.core.as_ref(), &event, Some(req)).await?;
+        }
+        Ok(previous.as_deref() != Some(namespace))
     }
 
     /// Revokes every outstanding token minted for one pairing id, via the
@@ -1008,6 +1247,7 @@ impl SystemBackend {
             }
             req.storage_delete(&key).await?;
         }
+        req.storage_delete(&format!("{MCP_PAIRING_NAMESPACE_PREFIX}{id}")).await?;
         Ok(None)
     }
 
@@ -1048,6 +1288,10 @@ impl SystemBackend {
             ));
         }
 
+        // The app's token is bound where its AppRole login is, as a pairing's
+        // is where the operator's session is (T457); never widened to root.
+        let namespace = exchange_namespace(self.core.as_ref(), auth).await?;
+
         // Check 4: effective policies = caller ∩ requested, never a
         // superset (mint_mcp_token enforces the subset rule again).
         let ttl_secs = requested_ttl_secs.unwrap_or(app.ttl_secs).min(app.ttl_secs).min(86400);
@@ -1078,8 +1322,10 @@ impl SystemBackend {
                 ttl_secs,
                 format!("mcp-app-{}", app.name),
                 binding,
+                None,
             )
             .await?;
+        check_minted_namespace(&token_store, &minted, &namespace).await?;
 
         index_token(
             req,
@@ -1091,6 +1337,7 @@ impl SystemBackend {
                 issued_at: now_secs(),
                 expires_at: now_secs() + ttl_secs,
                 kind: "app".to_string(),
+                namespace: Some(namespace.clone()),
             },
         )
         .await?;
@@ -1110,7 +1357,7 @@ impl SystemBackend {
                 "accessor": token_accessor(&minted.client_token),
                 "policies": minted.policies,
                 "lease_duration": ttl_secs,
-                "metadata": { "mcp_kind": "app", "mcp_name": app.name },
+                "metadata": { "mcp_kind": "app", "mcp_name": app.name, "namespace": namespace },
             }),
         );
         Ok(Some(Response::data_response(Some(data))))
@@ -1290,6 +1537,26 @@ mod brokered_session_tests {
         );
         let err = app_open_world_refusal("a", "bv_resource_rdp_act").to_string();
         assert!(err.contains("mcp_connect_requires_local_operator") && err.contains("bv_resource_rdp_act"), "{err}");
+    }
+
+    /// T457 "Persisted formats": an index entry written before MCP tokens
+    /// carried a binding has no namespace (its token is root-bound); a new
+    /// one and the per-pairing record round-trip.
+    #[test]
+    fn token_index_entries_read_old_and_write_the_namespace() {
+        let old = r#"{"id":"t","app_name":"pairing_p","client_name":"c","client_version":"1",
+            "issued_at":1,"expires_at":2,"kind":"pairing"}"#;
+        let entry: McpTokenIndexEntry = serde_json::from_str(old).unwrap();
+        assert_eq!(entry.namespace, None);
+        let new = McpTokenIndexEntry { namespace: Some("dti/esi".into()), ..entry };
+        let back: McpTokenIndexEntry = serde_json::from_str(&serde_json::to_string(&new).unwrap()).unwrap();
+        assert_eq!(back.namespace.as_deref(), Some("dti/esi"));
+
+        let record: McpPairingNamespace = serde_json::from_str(r#"{"namespace":"","recorded_at":5}"#).unwrap();
+        assert_eq!((record.version, record.namespace.as_str()), (1, ""));
+        let err = namespace_unavailable("namespace \"gone\" no longer exists").to_string();
+        assert!(err.contains("mcp_namespace_unavailable: namespace \"gone\" no longer exists"), "{err}");
+        assert!(err.contains("rather than binding the MCP token to root"), "{err}");
     }
 
     /// A runtime config record written before the brokered-session keys

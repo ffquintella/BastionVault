@@ -131,6 +131,25 @@ describe("McpAssistantsPanel", () => {
     expect(screen.getByText(/mcp-pairings\.json/)).toBeInTheDocument();
   });
 
+  it("shows where each assistant's calls run: the live token's namespace, a narrowing, or the sign-in's", async () => {
+    pairings = [
+      { ...PAIRING, id: "a".repeat(32), client_name: "narrowed-live", namespace: "dti/esi", token_namespace: "dti/esi" },
+      { ...PAIRING, id: "b".repeat(32), client_name: "follows-live", namespace: null, token_namespace: "" },
+      { ...PAIRING, id: "c".repeat(32), client_name: "narrowed-idle", namespace: "dti/ops", token_namespace: null },
+      { ...PAIRING, id: "d".repeat(32), client_name: "idle" },
+    ];
+    await mount();
+    expect(await screen.findByRole("columnheader", { name: "Namespace" })).toBeInTheDocument();
+    const row = (name: string) => screen.getByText(`${name} 1.2.3`).closest("tr") as HTMLElement;
+    await screen.findByText("narrowed-live 1.2.3");
+    expect(row("narrowed-live")).toHaveTextContent("dti/esi");
+    expect(row("narrowed-live")).toHaveTextContent("narrowed");
+    expect(row("follows-live")).toHaveTextContent("root");
+    expect(row("follows-live")).not.toHaveTextContent("narrowed");
+    expect(row("narrowed-idle")).toHaveTextContent("dti/ops");
+    expect(row("idle")).toHaveTextContent("follows your sign-in");
+  });
+
   it("offers no button that approves a client: that happens only in the consent dialog", async () => {
     await mount();
     await screen.findByText("claude-desktop 1.2.3");

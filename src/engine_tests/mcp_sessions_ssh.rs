@@ -25,9 +25,10 @@ mod mod_test {
     use bv_mcp::{
         local::{
             exchange_request_body, mfa_begin_body, mfa_begin_error, mfa_preflight_from_begin, mfa_verify_body,
-            minted_token_from_exchange, ticket_from_verify, ConfirmRequest, ConnInfo, ForwardError, LocalServer,
-            McpCallRef, MfaBeginError, MfaFactor, MfaPreflight, MintedToken, PairingDecision, PairingGrant,
-            PairingRequest, Prompter, VaultLink, CONNECT_MFA_BEGIN_PATH, CONNECT_MFA_VERIFY_PATH,
+            minted_token_from_exchange, operator_namespace_from_lookup, ticket_from_verify, ConfirmRequest, ConnInfo,
+            ForwardError, LocalServer, McpCallRef, MfaBeginError, MfaFactor, MfaPreflight, MintedToken,
+            PairingDecision, PairingGrant, PairingRequest, Prompter, VaultLink, CONNECT_MFA_BEGIN_PATH,
+            CONNECT_MFA_VERIFY_PATH, NAMESPACE_HEADER, TOKEN_LOOKUP_SELF_PATH,
         },
         pairing::{PairingRecord, PairingStore, Transport},
         request_state::SingleUseGuard,
@@ -143,6 +144,9 @@ mod mod_test {
         _bvault: BastionVault,
         core: Arc<Core>,
         root: String,
+        /// The namespace the operator signed in to and web-01 lives in (`""`
+        /// = root).
+        ns: String,
         op: String,
         token: String,
         server: TestSshServer,
@@ -158,7 +162,9 @@ mod mod_test {
         }
     }
 
-    async fn audit_file(core: &Core, name: &str) -> (PathBuf, PathBuf) {
+    /// A root file audit device. `mirror` also gives it every namespace's
+    /// entries, which a tenant rig's events are.
+    async fn audit_file(core: &Core, name: &str, mirror: bool) -> (PathBuf, PathBuf) {
         let dir = std::env::temp_dir()
             .join(format!("bv-mcp-ssh-{name}-{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -173,7 +179,7 @@ mod mod_test {
                 description: String::new(),
                 options,
                 namespace: String::new(),
-                mirror: false,
+                mirror,
             })
             .await
             .unwrap();
@@ -211,8 +217,21 @@ mod mod_test {
         }
 
         async fn with_target(name: &str, target: TestServerConfig) -> Self {
+            Self::with_target_in(name, target, "").await
+        }
+
+        /// The rig with the operator signed in to namespace `ns`, and web-01,
+        /// its stored login and the operator's policy in that namespace
+        /// (`features/mcp-namespace-selection.md`). `""` is the root rig.
+        async fn with_target_in(name: &str, target: TestServerConfig, ns: &str) -> Self {
             let (bvault, core, root) = new_unseal_test_bastion_vault(name).await;
-            let (audit_dir, audit_log) = audit_file(&core, name).await;
+            // Each ancestor first: `dti/esi` needs `dti`.
+            let mut created = String::new();
+            for segment in ns.split('/').filter(|s| !s.is_empty()) {
+                created = if created.is_empty() { segment.to_string() } else { format!("{created}/{segment}") };
+                ns_write(&core, &root, "", &format!("sys/namespaces/{created}"), json!({})).await;
+            }
+            let (audit_dir, audit_log) = audit_file(&core, name, !ns.is_empty()).await;
             let server = TestSshServer::start(target).await;
             let real_env = core.kernel_services.brokered_sessions().expect("the assembly registers the environment");
 
@@ -233,41 +252,44 @@ mod mod_test {
                 "ip_address": "127.0.0.1",
                 "connection_profiles": [profile(&server.host_key_fingerprint(), server.addr().port())],
             });
-            let _ = test_write_api(core.as_ref(), &root, "resources/resources/web-01", true, obj(resource)).await;
+            ns_write(&core, &root, ns, "resources/resources/web-01", resource).await;
             let login = json!({ "username": "ops", "password": PASSWORD });
-            let _ = test_write_api(core.as_ref(), &root, "resources/secrets/web-01/login", true, obj(login)).await;
+            ns_write(&core, &root, ns, "resources/secrets/web-01/login", login).await;
 
             // The operator: may pair, may call the agent route, may connect
             // to web-01 (a policy grant: an MCP token has no entity).
             test_mount_auth_api(core.as_ref(), &root, "userpass", "userpass").await;
-            let policy = r#"
-                path "sys/mcp/token"                        { capabilities = ["update"] }
-                path "sys/mcp/pairings/*"                   { capabilities = ["delete"] }
-                path "resources/v2/connect/agent/ssh/exec"  { capabilities = ["update"] }
-                path "resources/v2/connect/mfa/begin"       { capabilities = ["update"] }
-                path "resources/v2/connect/mfa/verify"      { capabilities = ["update"] }
-                path "resources/v2/connect/authorize"       { capabilities = ["update"] }
-                path "resources/secrets/web-01/*"           { capabilities = ["connect"] }
-            "#;
-            let _ = test_write_api(
-                core.as_ref(),
-                &root,
-                "sys/policy/agent-operator",
-                true,
-                obj(json!({ "policy": policy })),
-            )
-            .await;
+            let policy = OPERATOR_POLICY;
+            if ns.is_empty() {
+                let _ = test_write_api(
+                    core.as_ref(),
+                    &root,
+                    "sys/policy/agent-operator",
+                    true,
+                    obj(json!({ "policy": policy })),
+                )
+                .await;
+            } else {
+                // In the namespace's own store, its paths prefixed: `sys/policy`
+                // refuses a tenant policy naming `sys/mcp/token`, so it is
+                // written through the store (see `tenant_policy`).
+                tenant_policy(&core, ns, &tenant_scoped(policy, ns)).await;
+            }
             let user = json!({ "password": "pw", "policies": "agent-operator" });
             let _ = test_write_api(core.as_ref(), &root, "auth/userpass/users/felipe", true, obj(user)).await;
             let mut req = crate::logical::Request::new("auth/userpass/login/felipe");
             req.operation = crate::logical::Operation::Write;
             req.body = obj(json!({ "password": "pw" }));
+            if !ns.is_empty() {
+                req.headers = Some(std::collections::HashMap::from([("x-bastionvault-namespace".into(), ns.into())]));
+            }
             let op = core.handle_request(&mut req).await.unwrap().unwrap().auth.unwrap().client_token;
 
             let mut rig = Rig {
                 _bvault: bvault,
                 core,
                 root,
+                ns: ns.to_string(),
                 op,
                 token: String::new(),
                 server,
@@ -309,7 +331,13 @@ mod mod_test {
         /// succeed.
         async fn write_profile(&self, profile: Value, ok: bool) -> Result<Option<crate::logical::Response>, RvError> {
             let resource = json!({ "type": "server", "ip_address": "127.0.0.1", "connection_profiles": [profile] });
-            test_write_api(self.core.as_ref(), &self.root, "resources/resources/web-01", ok, obj(resource)).await
+            if self.ns.is_empty() {
+                return test_write_api(self.core.as_ref(), &self.root, "resources/resources/web-01", ok, obj(resource))
+                    .await;
+            }
+            let result = ns_call(&self.core, &self.root, &self.ns, "resources/resources/web-01", resource).await;
+            assert_eq!(result.is_ok(), ok, "{:?}", result.as_ref().err());
+            result
         }
 
         fn default_profile(&self) -> Value {
@@ -354,6 +382,56 @@ mod mod_test {
             }
             out
         }
+    }
+
+    /// A write as `token` addressed to namespace `ns` (the header; `""` is
+    /// root).
+    async fn ns_call(
+        core: &Core,
+        token: &str,
+        ns: &str,
+        path: &str,
+        body: Value,
+    ) -> Result<Option<crate::logical::Response>, RvError> {
+        let mut req = crate::logical::Request::new(path);
+        req.operation = crate::logical::Operation::Write;
+        req.client_token = token.to_string();
+        req.body = obj(body);
+        if !ns.is_empty() {
+            req.headers = Some(std::collections::HashMap::from([("x-bastionvault-namespace".into(), ns.into())]));
+        }
+        core.handle_request(&mut req).await
+    }
+
+    async fn ns_write(core: &Core, token: &str, ns: &str, path: &str, body: Value) {
+        ns_call(core, token, ns, path, body).await.unwrap_or_else(|e| panic!("{path} in {ns:?}: {e}"));
+    }
+
+    /// `agent-operator`: may pair, may call the agent route, may connect to
+    /// web-01 (a policy grant: an MCP token has no entity).
+    const OPERATOR_POLICY: &str = r#"
+        path "sys/mcp/token"                        { capabilities = ["update"] }
+        path "sys/mcp/pairings/*"                   { capabilities = ["delete"] }
+        path "resources/v2/connect/agent/ssh/exec"  { capabilities = ["update"] }
+        path "resources/v2/connect/mfa/begin"       { capabilities = ["update"] }
+        path "resources/v2/connect/mfa/verify"      { capabilities = ["update"] }
+        path "resources/v2/connect/authorize"       { capabilities = ["update"] }
+        path "resources/secrets/web-01/*"           { capabilities = ["connect"] }
+    "#;
+
+    /// `hcl` as `agent-operator` in namespace `ns`'s own policy store.
+    async fn tenant_policy(core: &Core, ns: &str, hcl: &str) {
+        use std::str::FromStr as _;
+        let mut policy = crate::modules::policy::Policy::from_str(hcl).unwrap();
+        policy.name = "agent-operator".into();
+        let module = core.module_manager().get_module::<crate::modules::policy::PolicyModule>("policy").unwrap();
+        module.policy_store.load().set_policy_ns(policy, ns).await.unwrap();
+    }
+
+    /// The root policy's rules as a tenant writes them: every path the
+    /// router rewrites is prefixed with the namespace; `sys/` is not.
+    fn tenant_scoped(policy: &str, ns: &str) -> String {
+        policy.replace("path \"resources/", &format!("path \"{ns}/resources/"))
     }
 
     fn code(answer: &Value) -> &str {
@@ -844,10 +922,15 @@ mod mod_test {
         /// A ticket minted as `connect/mfa/verify` would mint it, for
         /// felipe on web-01/p_agent, bound to `mcp_call` (or human, `None`).
         async fn ticket(&self, mcp_call: Option<McpCallBinding>) -> String {
+            self.ticket_in("", mcp_call).await
+        }
+
+        /// [`Self::ticket`], bound to namespace `ns`.
+        async fn ticket_in(&self, ns: &str, mcp_call: Option<McpCallBinding>) -> String {
             let binding = TicketBinding {
                 mount: "userpass/".into(),
                 principal: "felipe".into(),
-                namespace: String::new(),
+                namespace: ns.to_string(),
                 resource: "web-01".into(),
                 profile_id: "p_agent".into(),
                 mcp_call,
@@ -1024,6 +1107,9 @@ mod mod_test {
     struct InProcessLink {
         core: Arc<Core>,
         operator: String,
+        /// The operator session's namespace, once asked (`lookup-self`), as
+        /// the desktop app's link reads it; the MFA step runs there.
+        namespace: std::sync::Mutex<Option<String>>,
         /// The session the MFA preflight and verify run under, when a test
         /// needs it to differ from the one the pairing tokens are minted from.
         mfa_as: Arc<std::sync::Mutex<Option<String>>>,
@@ -1033,27 +1119,68 @@ mod mod_test {
 
     impl InProcessLink {
         fn write_as(&self, token: &str, path: &str, body: Map<String, Value>) -> Result<Value, String> {
+            self.call_as(token, crate::logical::Operation::Write, path, Some(body), "")
+        }
+
+        fn call_as(
+            &self,
+            token: &str,
+            operation: crate::logical::Operation,
+            path: &str,
+            body: Option<Map<String, Value>>,
+            ns: &str,
+        ) -> Result<Value, String> {
             let mut req = crate::logical::Request::new(path);
-            req.operation = crate::logical::Operation::Write;
+            req.operation = operation;
             req.client_token = token.to_string();
-            req.body = Some(body);
+            req.body = body;
+            if !ns.is_empty() {
+                req.headers = Some(std::collections::HashMap::from([(NAMESPACE_HEADER.to_string(), ns.to_string())]));
+            }
             let resp = self.rt.block_on(self.core.handle_request(&mut req)).map_err(|e| e.to_string())?;
             Ok(Value::Object(resp.and_then(|r| r.data).unwrap_or_default()))
+        }
+
+        fn session_namespace(&self) -> Result<String, String> {
+            if let Some(ns) = self.namespace.lock().unwrap().clone() {
+                return Ok(ns);
+            }
+            let token = self.mfa_as.lock().unwrap().clone().unwrap_or_else(|| self.operator.clone());
+            let answer = self.call_as(&token, crate::logical::Operation::Read, TOKEN_LOOKUP_SELF_PATH, None, "")?;
+            let ns = operator_namespace_from_lookup(&answer)?;
+            *self.namespace.lock().unwrap() = Some(ns.clone());
+            Ok(ns)
         }
 
         fn write_as_operator(&self, path: &str, body: Map<String, Value>) -> Result<Value, String> {
             self.write_as(&self.operator, path, body)
         }
 
-        fn write_for_mfa(&self, path: &str, body: Map<String, Value>) -> Result<Value, String> {
+        /// As the operator, in `namespace` (the token's, when the
+        /// gatekeeper knows it) or else the session's own.
+        fn write_for_mfa(
+            &self,
+            namespace: Option<&str>,
+            path: &str,
+            body: Map<String, Value>,
+        ) -> Result<Value, String> {
+            let ns = match namespace {
+                Some(ns) => ns.to_string(),
+                None => self.session_namespace()?,
+            };
             let token = self.mfa_as.lock().unwrap().clone().unwrap_or_else(|| self.operator.clone());
-            self.write_as(&token, path, body)
+            self.call_as(&token, crate::logical::Operation::Write, path, Some(body), &ns)
         }
     }
 
     impl VaultLink for InProcessLink {
-        fn exchange_pairing(&self, record: &PairingRecord, ttl_secs: u64) -> Result<MintedToken, String> {
-            let data = self.write_as_operator("sys/mcp/token", exchange_request_body(record, ttl_secs))?;
+        fn exchange_pairing(
+            &self,
+            record: &PairingRecord,
+            ttl_secs: u64,
+            namespace: Option<&str>,
+        ) -> Result<MintedToken, String> {
+            let data = self.write_as_operator("sys/mcp/token", exchange_request_body(record, ttl_secs, namespace))?;
             minted_token_from_exchange(&data, ttl_secs, now_secs())
         }
 
@@ -1074,21 +1201,33 @@ mod mod_test {
             }
         }
 
-        fn connect_mfa_begin(&self, resource: &str, profile_id: &str) -> Result<MfaPreflight, MfaBeginError> {
-            let data = self.write_for_mfa(CONNECT_MFA_BEGIN_PATH, mfa_begin_body(resource, profile_id));
+        fn connect_mfa_begin(
+            &self,
+            namespace: Option<&str>,
+            resource: &str,
+            profile_id: &str,
+        ) -> Result<MfaPreflight, MfaBeginError> {
+            let data = self.write_for_mfa(namespace, CONNECT_MFA_BEGIN_PATH, mfa_begin_body(resource, profile_id));
             mfa_preflight_from_begin(&data.map_err(mfa_begin_error)?)
         }
 
         fn connect_mfa_verify(
             &self,
+            namespace: Option<&str>,
             resource: &str,
             profile_id: &str,
             factor: &MfaFactor,
             call: &McpCallRef,
         ) -> Result<Zeroizing<String>, String> {
-            ticket_from_verify(
-                &self.write_for_mfa(CONNECT_MFA_VERIFY_PATH, mfa_verify_body(resource, profile_id, factor, call))?,
-            )
+            ticket_from_verify(&self.write_for_mfa(
+                namespace,
+                CONNECT_MFA_VERIFY_PATH,
+                mfa_verify_body(resource, profile_id, factor, call),
+            )?)
+        }
+
+        fn operator_namespace(&self) -> Option<String> {
+            self.session_namespace().ok()
         }
     }
 
@@ -1098,6 +1237,8 @@ mod mod_test {
         grant: PairingGrant,
         allow: std::sync::Mutex<bool>,
         shown: std::sync::Mutex<Vec<(String, String, bool)>>,
+        /// The namespace each confirmation named.
+        namespaces: std::sync::Mutex<Vec<Option<String>>>,
     }
 
     /// The trait is `bv-mcp`'s, so the shared handle needs a local type.
@@ -1110,6 +1251,7 @@ mod mod_test {
 
         fn confirm(&self, request: &ConfirmRequest<'_>) -> Option<bool> {
             let command = request.session.map(|c| c.command.clone()).unwrap_or_default();
+            self.0.namespaces.lock().unwrap().push(request.namespace.map(str::to_string));
             self.0.shown.lock().unwrap().push((
                 request.detail.unwrap_or_default().to_string(),
                 command,
@@ -1136,6 +1278,11 @@ mod mod_test {
     }
 
     fn gatekeeper(rig: &Rig, operator_token: &str, name: &str) -> Gatekeeper {
+        gatekeeper_narrowed(rig, operator_token, name, None)
+    }
+
+    /// [`gatekeeper`], started with `--namespace narrow_to` when given.
+    fn gatekeeper_narrowed(rig: &Rig, operator_token: &str, name: &str, narrow_to: Option<&str>) -> Gatekeeper {
         let dir = rig.audit_dir.join(format!("pairings-{name}"));
         let operator = Arc::new(Operator {
             grant: PairingGrant {
@@ -1148,24 +1295,30 @@ mod mod_test {
                 connect_allowed: true,
                 confirm_connect: true,
                 ttl_secs: 600,
+                namespace: None,
             },
             allow: std::sync::Mutex::new(true),
             shown: std::sync::Mutex::new(Vec::new()),
+            namespaces: std::sync::Mutex::new(Vec::new()),
         });
         let mfa_as = Arc::new(std::sync::Mutex::new(None));
         let link = InProcessLink {
             core: rig.core.clone(),
             operator: operator_token.to_string(),
+            namespace: std::sync::Mutex::new(None),
             mfa_as: mfa_as.clone(),
             guard: Arc::new(SingleUseGuard::new()),
             rt: tokio::runtime::Handle::current(),
         };
-        let server = Arc::new(LocalServer::new(
+        let mut server = LocalServer::new(
             Box::new(link),
             Box::new(OperatorAt(operator.clone())),
             PairingStore::at(dir.join("mcp-pairings.json")),
-        ));
-        Gatekeeper { server, operator, mfa_as }
+        );
+        if let Some(ns) = narrow_to {
+            server = server.with_requested_namespace(ns).unwrap();
+        }
+        Gatekeeper { server: Arc::new(server), operator, mfa_as }
     }
 
     /// What the assistant sends: a stateless `tools/call` naming itself.
@@ -1279,5 +1432,78 @@ mod mod_test {
         let direct = rig.call_with_ticket(ssh_args("uptime"), &ticket).await;
         assert_eq!(code(&direct), "mcp_session_mfa_unavailable", "{direct}");
         assert_eq!(rig.server.events().iter().filter(|e| e.starts_with("exec:")).count(), 1);
+    }
+
+    // ── MCP namespace selection, Phase 1 (features/mcp-namespace-selection.md) ──
+
+    /// Decision 1: a userpass operator with TOTP, signed in to a child
+    /// namespace, pairs an assistant whose MFA-gated session to a resource in
+    /// that namespace completes -- the gatekeeper's step-up runs in the
+    /// operator session's namespace -- and the session, its events and its
+    /// transcript are in that namespace. A ticket bound to another namespace
+    /// is refused there.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_a_child_namespace_operator_completes_mfa_and_the_session_runs_there() {
+        let rig = Rig::with_target_in("ssh_exec_mfa_tenant", target_config(), "tenant-a").await;
+        rig.enroll_totp().await;
+
+        // Ungated: the call runs in the tenant, where web-01 is.
+        let answer = rig.call("uptime").await;
+        assert_eq!(structured(&answer)["exit_status"], json!(0), "{answer}");
+        let exec = events(&rig.audit_log, "connect.agent.ssh.exec");
+        assert_eq!(exec[0]["namespace"], json!("tenant-a"), "{exec:?}");
+        assert_eq!(exec[0]["operator"]["namespace"], json!("tenant-a"));
+        assert_eq!(rig.transcripts().await[0].summary.namespace, "tenant-a");
+
+        // Gated: the gatekeeper's step-up, as the operator, in their namespace.
+        rig.gate_profile().await;
+        let Gatekeeper { server, operator, .. } = gatekeeper(&rig, &rig.op, "felipe-tenant");
+        let answer = assistant_call(&server, 1, ssh_args("uptime")).await;
+        assert_eq!(structured(&answer)["stdout"], json!(" 10:00 up 3 days\n"), "{answer}");
+        assert!(operator.shown.lock().unwrap().last().unwrap().2, "the prompt asked for MFA");
+        assert_eq!(operator.namespaces.lock().unwrap().last().unwrap().as_deref(), Some("tenant-a"));
+        let exec = events(&rig.audit_log, "connect.agent.ssh.exec");
+        let last = exec.last().unwrap();
+        assert_eq!((last["mfa_method"].clone(), last["namespace"].clone()), (json!("totp"), json!("tenant-a")));
+
+        // A ticket minted for another namespace is refused in this one.
+        for elsewhere in ["", "tenant-b"] {
+            let ticket = rig.ticket_in(elsewhere, bound(&ssh_args("uptime"), "agent-1")).await;
+            let refused = rig.call_with_ticket(ssh_args("uptime"), &ticket).await;
+            assert_eq!(code(&refused), "mcp_session_mfa_ticket_refused", "{elsewhere:?}: {refused}");
+        }
+        let ticket = rig.ticket_in("tenant-a", bound(&ssh_args("uptime"), "agent-1")).await;
+        let answer = rig.call_with_ticket(ssh_args("uptime"), &ticket).await;
+        assert_eq!(structured(&answer)["exit_status"], json!(0), "{answer}");
+        assert_eq!(count(&rig.server.events(), "exec:"), 3, "{:?}", rig.server.events());
+    }
+
+    /// T457 Phase 2 with MFA: an operator signed in to a child-visible `dti`
+    /// runs a gatekeeper narrowed to `dti/esi`. The token is bound there, the
+    /// operator's step-up runs there (the token's namespace, not the
+    /// session's), the ticket binds there, and the gated session completes
+    /// in `dti/esi` -- the binding's operator namespace follows the token.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_a_narrowed_pairing_completes_mfa_in_the_narrowed_namespace() {
+        let rig = Rig::with_target_in("ssh_exec_mfa_narrowed", target_config(), "dti/esi").await;
+        rig.enroll_totp().await;
+        rig.gate_profile().await;
+        ns_write(&rig.core, &rig.root, "", "sys/namespaces/dti", json!({ "child_visible_default": true })).await;
+        tenant_policy(&rig.core, "dti", &tenant_scoped(OPERATOR_POLICY, "dti/esi")).await;
+        let mut login = crate::logical::Request::new("auth/userpass/login/felipe");
+        login.operation = crate::logical::Operation::Write;
+        login.body = obj(json!({ "password": "pw" }));
+        login.headers = Some(std::collections::HashMap::from([("x-bastionvault-namespace".into(), "dti".into())]));
+        let in_dti = rig.core.handle_request(&mut login).await.unwrap().unwrap().auth.unwrap().client_token;
+
+        let Gatekeeper { server, operator, .. } = gatekeeper_narrowed(&rig, &in_dti, "felipe-dti", Some("dti/esi"));
+        let answer = assistant_call(&server, 1, ssh_args("uptime")).await;
+        assert_eq!(structured(&answer)["stdout"], json!(" 10:00 up 3 days\n"), "{answer}");
+        assert!(operator.shown.lock().unwrap().last().unwrap().2, "the prompt asked for MFA");
+        assert_eq!(operator.namespaces.lock().unwrap().last().unwrap().as_deref(), Some("dti/esi"));
+        let exec = events(&rig.audit_log, "connect.agent.ssh.exec");
+        let last = exec.last().unwrap();
+        assert_eq!((last["mfa_method"].clone(), last["namespace"].clone()), (json!("totp"), json!("dti/esi")));
+        assert_eq!(last["operator"]["namespace"], json!("dti/esi"), "{last}");
     }
 }

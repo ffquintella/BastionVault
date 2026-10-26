@@ -12,6 +12,14 @@ use crate::{catalogue, pairing::PairingRecord, sanitize::sanitize_for_model};
 pub const CONNECT_MFA_BEGIN_PATH: &str = "resources/v2/connect/mfa/begin";
 /// `resources/v2/connect/mfa/verify`, which mints the call-bound ticket.
 pub const CONNECT_MFA_VERIFY_PATH: &str = "resources/v2/connect/mfa/verify";
+/// `auth/token/lookup-self`: how a host learns which namespace the operator's
+/// own session is bound to (`features/mcp-namespace-selection.md` Phase 1).
+pub const TOKEN_LOOKUP_SELF_PATH: &str = "auth/token/lookup-self";
+/// The request header naming the namespace an operator call targets.
+pub const NAMESPACE_HEADER: &str = "X-BastionVault-Namespace";
+/// The token-metadata key a lookup answer carries the binding under
+/// (`bv_logical::NS_PATH_META`).
+const NS_PATH_META: &str = bv_logical::NS_PATH_META;
 
 /// The one call an operator MFA ticket is for (§3.1 step 3): the vault binds
 /// the ticket to these three and refuses it for anything else.
@@ -47,11 +55,18 @@ pub enum MfaBeginError {
 pub struct MintedToken {
     pub token: String,
     pub expires_at: u64,
+    /// The namespace the vault bound the token to, from the exchange answer
+    /// (`""` = root). `None` from a vault that does not report it.
+    pub namespace: Option<String>,
 }
 
 impl std::fmt::Debug for MintedToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MintedToken").field("token", &"<redacted>").field("expires_at", &self.expires_at).finish()
+        f.debug_struct("MintedToken")
+            .field("token", &"<redacted>")
+            .field("expires_at", &self.expires_at)
+            .field("namespace", &self.namespace)
+            .finish()
     }
 }
 
@@ -72,32 +87,90 @@ pub enum ForwardError {
 /// logic is testable without a server, and so each host (the CLI over HTTP,
 /// the desktop app over its own connection) supplies its own.
 pub trait VaultLink: Send + Sync {
-    fn exchange_pairing(&self, record: &PairingRecord, ttl_secs: u64) -> Result<MintedToken, String>;
+    /// The `mcp/token` exchange ([`exchange_request_body`]). `namespace` is
+    /// a narrowing *request* the vault validates (T457 Phase 2); `None`
+    /// binds the token to the operator session's own namespace.
+    fn exchange_pairing(
+        &self,
+        record: &PairingRecord,
+        ttl_secs: u64,
+        namespace: Option<&str>,
+    ) -> Result<MintedToken, String>;
     fn forward(&self, token: &str, message: &Value) -> Result<Value, ForwardError>;
 
     /// [`CONNECT_MFA_BEGIN_PATH`] for one profile, as the **operator** --
     /// with the session the pairing tokens are minted from, never an MCP
-    /// token. Use [`mfa_begin_body`], [`mfa_preflight_from_begin`] and
-    /// [`mfa_begin_error`]. The default cannot ask, so a host that does not
-    /// implement it has every session call refused before any prompt.
-    fn connect_mfa_begin(&self, resource: &str, profile_id: &str) -> Result<MfaPreflight, MfaBeginError> {
-        let _ = (resource, profile_id);
+    /// token -- in `namespace`: where the pairing's token runs (`None`: the
+    /// session's own). The default cannot ask, so every session call is
+    /// refused before any prompt.
+    fn connect_mfa_begin(
+        &self,
+        namespace: Option<&str>,
+        resource: &str,
+        profile_id: &str,
+    ) -> Result<MfaPreflight, MfaBeginError> {
+        let _ = (namespace, resource, profile_id);
         Err(MfaBeginError::Other("this host cannot ask the vault about the operator's MFA".to_string()))
     }
 
-    /// [`CONNECT_MFA_VERIFY_PATH`] as the operator, with the factor and the
-    /// call the ticket is bound to ([`mfa_verify_body`]). Returns the ticket
-    /// ([`ticket_from_verify`]), which only the gatekeeper ever holds.
+    /// [`CONNECT_MFA_VERIFY_PATH`] as the operator, in `namespace` as for
+    /// begin, with the factor and the call the ticket is bound to
+    /// ([`mfa_verify_body`]). Returns the ticket, held only by the gatekeeper.
     fn connect_mfa_verify(
         &self,
+        namespace: Option<&str>,
         resource: &str,
         profile_id: &str,
         factor: &MfaFactor,
         call: &McpCallRef,
     ) -> Result<Zeroizing<String>, String> {
-        let _ = (resource, profile_id, factor, call);
+        let _ = (namespace, resource, profile_id, factor, call);
         Err("this host cannot verify the operator's MFA".to_string())
     }
+
+    /// The namespace the operator's own session is bound to (`""` = root),
+    /// which is where every pairing token minted from it is bound too and
+    /// where its MFA step-up runs. Shown in the pairing and confirmation
+    /// dialogs. `None` when this host cannot tell; the default.
+    fn operator_namespace(&self) -> Option<String> {
+        None
+    }
+}
+
+/// The operator session's namespace out of a [`TOKEN_LOOKUP_SELF_PATH`]
+/// answer: its `meta.namespace_path`, canonical (`""` = root, also when the
+/// key is absent, which is how a root-bound token reads). A value that is
+/// not a well-formed namespace path is refused, never read as root.
+pub fn operator_namespace_from_lookup(answer: &Value) -> Result<String, String> {
+    let data = response_data(answer);
+    let Some(raw) = data.get("meta").and_then(|m| m.get(NS_PATH_META)) else {
+        return Ok(String::new());
+    };
+    let raw = raw.as_str().ok_or_else(|| "the session's namespace binding is not a string".to_string())?;
+    normalize_namespace(raw)
+        .map_err(|_| format!("the session's namespace binding {:?} is malformed", sanitize_for_model(raw)))
+}
+
+/// A namespace path in canonical form (`""` = root, no surrounding `/`), or
+/// `Err` when it is not well formed: an empty, `..`, `*`, padded or
+/// control-character segment. The vault's own normalization is the
+/// authority; this refuses early what it would refuse.
+pub fn normalize_namespace(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim().trim_matches('/');
+    if trimmed.is_empty() {
+        return Ok(String::new());
+    }
+    let well_formed = trimmed.split('/').all(|seg| {
+        !seg.is_empty()
+            && !seg.contains("..")
+            && !seg.contains('*')
+            && seg.trim() == seg
+            && !seg.chars().any(char::is_control)
+    });
+    if !well_formed {
+        return Err(format!("{:?} is not a well-formed namespace path", sanitize_for_model(raw)));
+    }
+    Ok(trimmed.to_string())
 }
 
 /// The body of [`CONNECT_MFA_BEGIN_PATH`].
@@ -182,7 +255,8 @@ pub fn ticket_from_verify(answer: &Value) -> Result<Zeroizing<String>, String> {
 /// may open sessions asserts `confirm_connect: true` -- always, whatever the
 /// record says, because confirmation of session calls has no off switch;
 /// one that may not sends neither key, as before sessions existed.
-pub fn exchange_request_body(record: &PairingRecord, ttl_secs: u64) -> Map<String, Value> {
+/// `namespace` is sent only when the exchange asks to narrow (Phase 2).
+pub fn exchange_request_body(record: &PairingRecord, ttl_secs: u64, namespace: Option<&str>) -> Map<String, Value> {
     let mut pairing = json!({
         "id": record.id,
         "client_name": record.client_name,
@@ -201,12 +275,17 @@ pub fn exchange_request_body(record: &PairingRecord, ttl_secs: u64) -> Map<Strin
     body.insert("pairing".into(), pairing);
     body.insert("catalogue_hash".into(), Value::String(catalogue::catalogue_hash()));
     body.insert("ttl_secs".into(), json!(ttl_secs));
+    if let Some(namespace) = namespace {
+        body.insert("namespace".into(), Value::String(namespace.to_string()));
+    }
     body
 }
 
 /// Reads the minted token out of a successful exchange answer. The vault
 /// returns it under `auth` (HTTP) or `data.auth` (a logical response); the
 /// lease falls back to the requested TTL when the answer does not state one.
+/// `auth.metadata.namespace` names where the token is bound; a value that is
+/// not a namespace path refuses the answer rather than being shown.
 pub fn minted_token_from_exchange(data: &Value, ttl_secs: u64, now: u64) -> Result<MintedToken, String> {
     let auth = data.get("auth").or_else(|| data.get("data").and_then(|d| d.get("auth")));
     let auth = auth.ok_or_else(|| "vault exchange response carried no auth block".to_string())?;
@@ -217,7 +296,14 @@ pub fn minted_token_from_exchange(data: &Value, ttl_secs: u64, now: u64) -> Resu
         .ok_or_else(|| "vault exchange response carried no token".to_string())?
         .to_string();
     let lease = auth.get("lease_duration").and_then(Value::as_u64).unwrap_or(ttl_secs);
-    Ok(MintedToken { token, expires_at: now + lease })
+    let namespace = match auth.get("metadata").and_then(|m| m.get("namespace")) {
+        None | Some(Value::Null) => None,
+        Some(Value::String(ns)) => Some(
+            normalize_namespace(ns).map_err(|e| format!("vault exchange response named a malformed namespace: {e}"))?,
+        ),
+        Some(_) => return Err("vault exchange response named its namespace in an unexpected shape".to_string()),
+    };
+    Ok(MintedToken { token, expires_at: now + lease, namespace })
 }
 
 /// An operator-readable account of a vault error answer. The vault's own
@@ -259,12 +345,13 @@ mod tests {
             approved_at: 0,
             expires_at: None,
             last_used_at: 0,
+            namespace: None,
         }
     }
 
     #[test]
     fn the_exchange_body_carries_the_grant_and_the_catalogue_hash() {
-        let body = exchange_request_body(&record(), 600);
+        let body = exchange_request_body(&record(), 600, None);
         assert_eq!(body["pairing"]["id"], json!("0123456789abcdef0123456789abcdef"));
         assert_eq!(body["pairing"]["tool_allowlist"], json!(["bv_kv_read_metadata"]));
         assert_eq!(body["pairing"]["destructive_allowed"], json!(true));
@@ -275,6 +362,27 @@ mod tests {
         assert!(body["pairing"].get("confirm_reveal").is_none());
         assert!(body["pairing"].get("connect_allowed").is_none(), "no session keys without sessions");
         assert!(body["pairing"].get("confirm_connect").is_none());
+        assert!(body.get("namespace").is_none(), "no narrowing asked: the vault binds the session's namespace");
+    }
+
+    /// T457 Phase 2: a narrowing request is one top-level field, outside the
+    /// grant; root is asked for explicitly, as `""`.
+    #[test]
+    fn the_exchange_body_carries_a_narrowing_request() {
+        let body = exchange_request_body(&record(), 600, Some("dti/esi"));
+        assert_eq!(body["namespace"], json!("dti/esi"));
+        assert!(body["pairing"].get("namespace").is_none(), "not part of the grant");
+        assert_eq!(exchange_request_body(&record(), 600, Some(""))["namespace"], json!(""));
+    }
+
+    #[test]
+    fn namespaces_are_normalized_or_refused() {
+        for (raw, want) in [("", ""), ("/", ""), ("dti/esi", "dti/esi"), ("/dti/esi/", "dti/esi"), (" a ", "a")] {
+            assert_eq!(normalize_namespace(raw).unwrap(), want, "{raw:?}");
+        }
+        for bad in ["a/../b", "a//b", "a/*", "a/ b", "a/\u{7}b", ".."] {
+            assert!(normalize_namespace(bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]
@@ -283,7 +391,7 @@ mod tests {
         r.connect_allowed = true;
         // Even a record edited to say otherwise cannot turn confirmation off.
         r.confirm_connect = false;
-        let body = exchange_request_body(&r, 600);
+        let body = exchange_request_body(&r, 600, None);
         assert_eq!(body["pairing"]["connect_allowed"], json!(true));
         assert_eq!(body["pairing"]["confirm_connect"], json!(true));
     }
@@ -347,17 +455,49 @@ mod tests {
         let logical = json!({ "data": { "auth": { "client_token": "t2" } } });
         let minted = minted_token_from_exchange(&logical, 600, 1_000).unwrap();
         assert_eq!((minted.token.as_str(), minted.expires_at), ("t2", 1_600), "falls back to the requested TTL");
+        assert_eq!(minted.namespace, None, "an answer that does not say is not read as root");
 
         assert!(minted_token_from_exchange(&json!({}), 600, 0).is_err());
         assert!(minted_token_from_exchange(&json!({ "auth": { "client_token": "" } }), 600, 0).is_err());
     }
 
+    /// T457: the dialogs show the namespace the vault bound the token to, so
+    /// it is read from the answer; a malformed one refuses the answer.
+    #[test]
+    fn the_minted_tokens_namespace_is_read_from_the_answer() {
+        let answer = |ns: Value| json!({ "auth": { "client_token": "t", "metadata": { "namespace": ns } } });
+        let read = |ns: Value| minted_token_from_exchange(&answer(ns), 60, 0);
+        assert_eq!(read(json!("dti/esi")).unwrap().namespace.as_deref(), Some("dti/esi"));
+        assert_eq!(read(json!("")).unwrap().namespace.as_deref(), Some(""), "root is named");
+        assert_eq!(read(Value::Null).unwrap().namespace, None);
+        assert!(read(json!("a/../b")).is_err());
+        assert!(read(json!(7)).is_err());
+    }
+
     #[test]
     fn a_minted_token_never_prints() {
-        let minted = MintedToken { token: "SECRET-0123456789".into(), expires_at: 7 };
+        let minted = MintedToken { token: "SECRET-0123456789".into(), expires_at: 7, namespace: None };
         let shown = format!("{minted:?}");
         assert!(!shown.contains("SECRET"), "{shown}");
         assert!(shown.contains("expires_at: 7"));
+    }
+
+    /// T457: the operator session's namespace is read from its own token's
+    /// stored binding; absent is root, and a malformed one is refused.
+    #[test]
+    fn the_operator_namespace_is_read_from_the_lookup_answer() {
+        let http = json!({ "data": { "meta": { "namespace_path": "/dti/esi/", "username": "felipe" } } });
+        assert_eq!(operator_namespace_from_lookup(&http).unwrap(), "dti/esi");
+        let logical = json!({ "meta": { "namespace_path": "tenant-a" } });
+        assert_eq!(operator_namespace_from_lookup(&logical).unwrap(), "tenant-a");
+        for root in [json!({ "data": { "meta": {} } }), json!({ "meta": { "namespace_path": "" } }), json!({})] {
+            assert_eq!(operator_namespace_from_lookup(&root).unwrap(), "", "{root}");
+        }
+        for bad in ["a/../b", "a//b", "a/*", "a/ b", "a/\u{7}b"] {
+            let answer = json!({ "meta": { "namespace_path": bad } });
+            assert!(operator_namespace_from_lookup(&answer).is_err(), "{bad:?}");
+        }
+        assert!(operator_namespace_from_lookup(&json!({ "meta": { "namespace_path": 7 } })).is_err());
     }
 
     #[test]
