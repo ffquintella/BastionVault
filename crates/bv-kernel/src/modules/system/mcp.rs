@@ -463,22 +463,33 @@ async fn narrowing_target(
         .map_err(|_| namespace_not_permitted(&format!("{raw:?} is not a well-formed namespace path")))?;
     let session = crate::kernel_api::namespace::bound_namespace(&auth.metadata)
         .map_err(|_| namespace_unavailable("the session's namespace binding is malformed"))?;
+    // The stored binding first; failing that, the explicit namespace
+    // assignment every other request honours (the route the GUI's namespace
+    // picker takes). A store error is not "no assignment": it is reported as
+    // unavailable, never as a refusal claiming the session lacks reach.
     let (_, child_visible) = token_binding::binding_from_metadata(&auth.metadata);
-    if !token_binding::token_may_operate(&session, child_visible, &requested) {
-        let reach = if child_visible { "its own namespace and its descendants" } else { "only its own namespace" };
-        return Err(namespace_not_permitted(&format!(
-            "the session is bound to {session:?} and may narrow to {reach}, not {requested:?}"
-        )));
+    let by_binding = token_binding::token_may_operate(&session, child_visible, &requested);
+    if !by_binding {
+        let assigned = token_binding::token_operable_checked(core, auth, &requested)
+            .await
+            .map_err(|e| namespace_unavailable(&format!("the namespace assignment could not be read ({e})")))?;
+        if !assigned {
+            let reach = if child_visible { "its own namespace and its descendants" } else { "only its own namespace" };
+            return Err(namespace_not_permitted(&format!(
+                "the session is bound to {session:?} and may narrow to {reach} or to a namespace assigned to it, not {requested:?}"
+            )));
+        }
     }
+    let assignment_granted = !by_binding;
     if requested.is_empty() {
-        return Ok(McpNamespaceTarget { path: String::new(), id: String::new() });
+        return Ok(McpNamespaceTarget { path: String::new(), id: String::new(), assignment_granted });
     }
     let store =
         core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME).and_then(|m| m.store()).ok_or_else(
             || namespace_unavailable(&format!("namespace {requested:?} cannot be resolved: no namespace store")),
         )?;
     match store.get_by_path(&requested).await {
-        Ok(Some(found)) => Ok(McpNamespaceTarget { path: found.path, id: found.uuid }),
+        Ok(Some(found)) => Ok(McpNamespaceTarget { path: found.path, id: found.uuid, assignment_granted }),
         Ok(None) => Err(namespace_unavailable(&format!("namespace {requested:?} does not exist"))),
         Err(e) => Err(namespace_unavailable(&format!("namespace {requested:?} could not be resolved ({e})"))),
     }

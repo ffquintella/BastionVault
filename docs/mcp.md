@@ -577,8 +577,10 @@ bvault mcp serve --namespace dti/esi        # every token this server mints
 In the desktop app, the approval dialog has a **Namespace for its tokens**
 selector listing your sign-in's namespace and the ones beneath it you can
 reach; a choice other than your own is kept with the pairing. The vault
-decides, at every exchange: it accepts your own namespace, or a descendant
-when your sign-in is child-visible, and refuses anything else with
+decides, at every exchange: it accepts your own namespace, a descendant
+when your sign-in is child-visible, or a namespace an administrator has
+assigned to you (the route the namespace picker takes when you sign in at
+root), and refuses anything else with
 `mcp_namespace_not_permitted` — it never binds the token somewhere else
 instead. Every policy the token will carry must exist, by name, in the target
 namespace (`mcp_policy_not_in_namespace` names the missing ones): a
@@ -685,7 +687,7 @@ CSS, so text a page hides is returned.
 | `mcp_brokered_sessions_disabled` / `mcp_session_protocol_disabled` | A switch is off: `mcp.brokered_sessions`, its `protocols`, the runtime switch, or a build without `mcp_sessions_ssh` / `mcp_sessions_web` |
 | `mcp_session_profile_not_agent_enabled` | The type's `agent_sessions_max` or the profile's `agent_access` is not `allow` |
 | `mcp_session_mfa_required` / `mcp_session_mfa_unavailable` | The profile requires MFA and the call carried no ticket (a gatekeeper older than this release) / you cannot complete it here: not a userpass user, no factor enrolled, or only a security key at `bvault mcp serve` |
-| `mcp_namespace_not_permitted` | The exchange asked for a namespace your sign-in may not narrow to: not your own, nor beneath it with a child-visible sign-in, or not a well-formed path. Nothing was minted |
+| `mcp_namespace_not_permitted` | The exchange asked for a namespace your sign-in may not narrow to: not your own, nor beneath it with a child-visible sign-in, nor one assigned to you, or not a well-formed path. Nothing was minted |
 | `mcp_policy_not_in_namespace` | A narrowed token would carry a policy that does not exist in the target namespace (named in the message); create it there, or request policies that exist |
 | `mcp_namespace_unavailable` | The token's (or the requested) namespace was deleted or cannot be resolved; calls are refused, never run at root. Sign in again, or pair again |
 | `mcp_namespace_conflict` | `bvault mcp serve --namespace` names another namespace than the one the pairing was narrowed to in the desktop app; drop the flag or pair again |

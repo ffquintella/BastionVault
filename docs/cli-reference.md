@@ -308,8 +308,8 @@ bvault mcp catalogue
   [Clients on earlier MCP revisions](mcp.md#clients-on-earlier-mcp-revisions).
   Tokens are bound to your session's namespace; `--namespace <ns>` asks the
   vault to bind every token it mints to `<ns>` instead, which it accepts only
-  for your own namespace or, from a child-visible sign-in, one beneath it
-  (`mcp_namespace_not_permitted` otherwise). A malformed path is a usage
+  for your own namespace, one beneath it from a child-visible sign-in, or one
+  assigned to you (`mcp_namespace_not_permitted` otherwise). A malformed path is a usage
   error. See [Namespaces](mcp.md#namespaces).
 - `pairings revoke` removes the pairing locally and revokes its tokens on the
   vault; it exits non-zero if the vault could not be reached.

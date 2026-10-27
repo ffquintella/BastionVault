@@ -1856,6 +1856,48 @@ mod mod_test {
         }
     }
 
+    /// T457 Phase 2: a root-bound, non-child-visible session (an operator who
+    /// works in a tenant through the namespace picker) may narrow a pairing to
+    /// what an explicit assignment grants, as every other request may.
+    /// No record keeps the strict verdict; a revoked one grants nothing.
+    #[tokio::test]
+    async fn test_mcp_narrowing_honors_a_namespace_assignment() {
+        use crate::modules::namespace::{ns_assignment::NsAssignmentStore, NamespaceModule, NAMESPACE_MODULE_NAME};
+
+        let (_bvault, core_arc, root) = new_unseal_test_bastion_vault("test_mcp_ns_narrow_assigned").await;
+        let core: &crate::core::Core = &core_arc;
+        dti_tree(core, &root).await;
+        tenant_policy(core, "dti/esi", "mcp-root", &tenant_operator_policy("dti/esi")).await;
+        // Signed in before the assignment exists: a record also limits login.
+        let felipe = login_in(core, "felipe", "").await;
+
+        let err = narrow_as(core, &felipe, "assigned", "dti/esi").await.unwrap_err();
+        assert!(err.contains("mcp_namespace_not_permitted"), "no record, strict binding verdict: {err}");
+
+        let ns_store =
+            core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME).and_then(|m| m.store()).unwrap();
+        let assignments = NsAssignmentStore::new(core).unwrap();
+        assignments.set(&ns_store, "userpass/", "felipe", vec!["dti/esi".into()]).await.unwrap().unwrap();
+
+        let data = narrow_as(core, &felipe, "assigned", "dti/esi").await.unwrap();
+        assert_eq!(data["auth"]["metadata"]["namespace"], json!("dti/esi"));
+        let token = data["auth"]["client_token"].as_str().unwrap().to_string();
+        let auth_module = core.module_manager().get_module::<crate::modules::auth::AuthModule>("auth").unwrap();
+        let store = auth_module.token_store.load_full().unwrap();
+        let auth = store.check_token("mcp/dispatch", &token, "", true).await.unwrap().unwrap();
+        assert_eq!(auth.metadata.get(NS_PATH_META).map(String::as_str), Some("dti/esi"));
+        assert_eq!(auth.metadata.get(CHILD_VISIBLE_META).map(String::as_str), Some("false"));
+
+        for target in ["dti", "dti/ops", "tenant-a"] {
+            let err = narrow_as(core, &felipe, "assigned-out", target).await.unwrap_err();
+            assert!(err.contains("mcp_namespace_not_permitted"), "{target:?} is outside the assignment: {err}");
+        }
+
+        assignments.delete("userpass/", "felipe").await.unwrap();
+        let err = narrow_as(core, &felipe, "assigned-revoked", "dti/esi").await.unwrap_err();
+        assert!(err.contains("mcp_namespace_not_permitted"), "a revoked assignment grants nothing: {err}");
+    }
+
     // ── MCP namespace selection: app tokens ───────────────────────────────
 
     /// A login as AppRole `tenant-app-role`, bound to namespace `ns` by the

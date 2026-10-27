@@ -2407,8 +2407,9 @@ Send the login token in `X-BastionVault-Token`, `X-Vault-Token` or
 - **`namespace`** (optional string, pairing mode only; T457 Phase 2) asks to
   bind the token to that namespace instead. It is accepted only when the
   caller's binding may operate there: the caller's own namespace, or a
-  descendant of it when the caller's login is child-visible. Namespace
-  assignments do not count. Anything else — a parent, a sibling, an unrelated
+  descendant of it when the caller's login is child-visible, or a namespace
+  (or descendant) assigned to the caller by an explicit assignment record,
+  read live; an unreadable record is `403 mcp_namespace_unavailable`. Anything else — a parent, a sibling, an unrelated
   or malformed path — is refused with `403 mcp_namespace_not_permitted`; a
   permitted descendant that does not exist with `403 mcp_namespace_unavailable`.
   Nothing is minted in another namespace instead. Every policy the token would

@@ -140,6 +140,10 @@ EXAMPLE ENTRY:
 
 ### Changed
 
+#### MCP namespace selection
+
+- **Narrow an AI assistant's pairing to a namespace assigned to you, not only to one beneath a child-visible sign-in** (T457, S115) -- An operator who signs in at root and works in a tenant through the namespace picker could not pair an assistant there: the exchange judged the namespace by the session's stored binding alone and refused it with `mcp_namespace_not_permitted`, while every other request honoured the assignment. The exchange now accepts a namespace that an explicit assignment covers (the assigned namespace and its descendants), read live at every exchange. No record keeps the previous verdict, a revoked record grants nothing, and a record the vault cannot read answers `mcp_namespace_unavailable` instead of a misleading refusal. The token is still bound to the target and never child-visible, and its policies must still exist there.
+
 #### AI assistants page
 
 - **Pair AI assistants from their own menu entry, available to any signed-in non-root user, instead of Settings → AI Assistants** (S115) -- The pairing, serve-toggle and connect-snippet panel moved to a new *AI Assistants* page (`/ai-assistants`) in the workspace menu. It is hidden for root sessions, which the vault refuses to exchange for an assistant token; the vault still authorizes every call with the user's own policies. The Settings tab is gone.
