@@ -1,10 +1,10 @@
-//! Host-owned connection pool, keyed by `(connection, root_credential_version)`.
-//!
-//! The pool is the chokepoint for three rules: a target never has more than
+//! Host-owned connection pool, keyed by `(connection, root_credential_version,
+//! config_generation)`. It enforces three rules: a target never has more than
 //! `max_size` connections checked out; a connection opened under an old root
-//! credential is never handed out after `rotate` (idle ones are dropped,
-//! checked-out ones are dropped on return); and the factory receives the TLS
-//! policy the host configured, which verifies certificates unless told not to.
+//! credential, an older `config/<name>` write or another TLS policy is never
+//! handed out again (idle ones drop when the target changes, checked-out ones
+//! on return, by the target's *epoch*); and the factory gets the host's TLS
+//! policy, which verifies certificates unless the operator said otherwise.
 
 use std::{
     collections::HashMap,
@@ -60,6 +60,19 @@ impl TlsPolicy {
 pub struct PoolKey {
     pub connection: String,
     pub root_credential_version: u64,
+    /// Bumped by the host on every `config/<name>` write (the operator may
+    /// have changed the target or its root credential without `rotate-root`).
+    #[serde(default)]
+    pub config_generation: u64,
+}
+
+/// What the host knows about a target, from its connection record. Any change
+/// drains the target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetSettings {
+    pub root_credential_version: u64,
+    pub config_generation: u64,
+    pub tls: TlsPolicy,
 }
 
 /// Opens and checks connections. It is handed the pool's TLS policy and has no
@@ -87,10 +100,28 @@ impl Default for PoolConfig {
 }
 
 struct Target<C> {
-    version: u64,
-    tls: TlsPolicy,
+    settings: TargetSettings,
+    /// Bumped whenever the settings change or the target rotates: a
+    /// connection checked out under an older epoch is not returned.
+    epoch: u64,
     permits: Arc<Semaphore>,
     idle: Vec<C>,
+}
+
+impl<C> Target<C> {
+    fn key(&self, connection: &str) -> PoolKey {
+        PoolKey {
+            connection: connection.to_string(),
+            root_credential_version: self.settings.root_credential_version,
+            config_generation: self.settings.config_generation,
+        }
+    }
+
+    /// Drop the idle connections and start a new epoch.
+    fn drain(&mut self) -> usize {
+        self.epoch += 1;
+        std::mem::take(&mut self.idle).len()
+    }
 }
 
 type Targets<C> = Mutex<HashMap<String, Target<C>>>;
@@ -113,25 +144,21 @@ impl<F: ConnectionFactory> ConnectionPool<F> {
         Self { factory, config, targets: Arc::new(Mutex::new(HashMap::new())) }
     }
 
-    /// Declare a target, or update it. A different root credential version
-    /// drains it (see [`Self::rotate`]); a changed TLS policy drops its idle
-    /// connections. Returns how many idle connections were dropped.
-    pub fn configure(&self, connection: &str, root_credential_version: u64, tls: TlsPolicy) -> usize {
+    /// Declare a target, or update it. Any change of root credential version,
+    /// config generation or TLS policy drains it: idle connections are
+    /// dropped and checked-out ones are dropped on return. Returns how many
+    /// idle connections were dropped.
+    pub fn configure(&self, connection: &str, settings: TargetSettings) -> usize {
         let mut targets = lock(&self.targets);
         match targets.get_mut(connection) {
+            Some(t) if t.settings == settings => 0,
             Some(t) => {
-                let changed = t.version != root_credential_version || t.tls != tls;
-                let drained = if changed { std::mem::take(&mut t.idle).len() } else { 0 };
-                t.version = root_credential_version;
-                t.tls = tls;
-                drained
+                t.settings = settings;
+                t.drain()
             }
             None => {
                 let permits = Arc::new(Semaphore::new(self.config.max_size));
-                targets.insert(
-                    connection.to_string(),
-                    Target { version: root_credential_version, tls, permits, idle: Vec::new() },
-                );
+                targets.insert(connection.to_string(), Target { settings, epoch: 0, permits, idle: Vec::new() });
                 0
             }
         }
@@ -143,10 +170,8 @@ impl<F: ConnectionFactory> ConnectionPool<F> {
     pub fn rotate(&self, connection: &str, new_version: u64) -> Result<usize, DynamicError> {
         let mut targets = lock(&self.targets);
         let t = targets.get_mut(connection).ok_or_else(|| DynamicError::UnknownConnection(connection.to_string()))?;
-        let drained = t.idle.len();
-        t.idle.clear();
-        t.version = new_version;
-        Ok(drained)
+        t.settings.root_credential_version = new_version;
+        Ok(t.drain())
     }
 
     /// Forget a target. Connections still checked out are dropped on return.
@@ -155,13 +180,11 @@ impl<F: ConnectionFactory> ConnectionPool<F> {
     }
 
     pub fn current_key(&self, connection: &str) -> Option<PoolKey> {
-        lock(&self.targets)
-            .get(connection)
-            .map(|t| PoolKey { connection: connection.to_string(), root_credential_version: t.version })
+        lock(&self.targets).get(connection).map(|t| t.key(connection))
     }
 
     pub fn tls_policy(&self, connection: &str) -> Option<TlsPolicy> {
-        lock(&self.targets).get(connection).map(|t| t.tls.clone())
+        lock(&self.targets).get(connection).map(|t| t.settings.tls.clone())
     }
 
     pub fn idle_count(&self, connection: &str) -> usize {
@@ -197,13 +220,12 @@ impl<F: ConnectionFactory> ConnectionPool<F> {
         let permit = self.acquire(connection, permits).await?;
         loop {
             // Re-read under the lock: the target may have rotated while we waited.
-            let (key, tls, candidate) = {
+            let (key, epoch, tls, candidate) = {
                 let mut targets = lock(&self.targets);
                 let t = targets
                     .get_mut(connection)
                     .ok_or_else(|| DynamicError::UnknownConnection(connection.to_string()))?;
-                let key = PoolKey { connection: connection.to_string(), root_credential_version: t.version };
-                (key, t.tls.clone(), t.idle.pop())
+                (t.key(connection), t.epoch, t.settings.tls.clone(), t.idle.pop())
             };
             let conn = match candidate {
                 Some(mut conn) => match self.factory.validate(&mut conn).await {
@@ -223,16 +245,24 @@ impl<F: ConnectionFactory> ConnectionPool<F> {
                     self.factory.connect(&key, &tls).await?
                 }
             };
-            return Ok(Pooled { conn: Some(conn), key, targets: Arc::downgrade(&self.targets), _permit: permit });
+            return Ok(Pooled {
+                conn: Some(conn),
+                key,
+                epoch,
+                targets: Arc::downgrade(&self.targets),
+                _permit: permit,
+            });
         }
     }
 }
 
 /// A checked-out connection. Returned to the pool on drop, unless its target
-/// rotated or was removed meanwhile, or [`Pooled::discard`] was called.
+/// changed (new epoch) or was removed meanwhile, or [`Pooled::discard`] was
+/// called.
 pub struct Pooled<C: Send + 'static> {
     conn: Option<C>,
     key: PoolKey,
+    epoch: u64,
     targets: Weak<Targets<C>>,
     _permit: OwnedSemaphorePermit,
 }
@@ -268,7 +298,7 @@ impl<C: Send + 'static> Drop for Pooled<C> {
         };
         let mut targets = lock(&targets);
         if let Some(t) = targets.get_mut(&self.key.connection) {
-            if t.version == self.key.root_credential_version {
+            if t.epoch == self.epoch {
                 t.idle.push(conn);
             }
         }
@@ -311,10 +341,14 @@ mod tests {
         }
     }
 
+    fn settings(version: u64, tls: TlsPolicy) -> TargetSettings {
+        TargetSettings { root_credential_version: version, config_generation: 0, tls }
+    }
+
     fn pool(max_size: usize) -> (ConnectionPool<Arc<FakeFactory>>, Arc<FakeFactory>) {
         let factory = Arc::new(FakeFactory::default());
         let pool = ConnectionPool::new(factory.clone(), PoolConfig { max_size, checkout_timeout: Duration::ZERO });
-        pool.configure("pg", 1, TlsPolicy::default());
+        pool.configure("pg", settings(1, TlsPolicy::default()));
         (pool, factory)
     }
 
@@ -333,7 +367,7 @@ mod tests {
         let factory = Arc::new(FakeFactory::default());
         let pool =
             ConnectionPool::new(factory, PoolConfig { max_size: 1, checkout_timeout: Duration::from_millis(20) });
-        pool.configure("pg", 1, TlsPolicy::default());
+        pool.configure("pg", settings(1, TlsPolicy::default()));
         let _held = pool.checkout("pg").await.unwrap();
         assert!(matches!(pool.checkout("pg").await, Err(DynamicError::PoolExhausted(_))));
     }
@@ -373,9 +407,32 @@ mod tests {
         assert_eq!(pool.idle_count("pg"), 0, "a connection opened under the old root is not returned");
         let fresh = pool.checkout("pg").await.unwrap();
         assert_eq!(fresh.key().root_credential_version, 2);
-        assert_eq!(fresh.key, PoolKey { connection: "pg".into(), root_credential_version: 2 });
+        assert_eq!(fresh.key, PoolKey { connection: "pg".into(), root_credential_version: 2, config_generation: 0 });
         assert_eq!(factory.opened.load(Ordering::SeqCst), 3);
         assert!(matches!(pool.rotate("nope", 1), Err(DynamicError::UnknownConnection(_))));
+    }
+
+    /// A `config/<name>` write (new generation) or a TLS change drains the
+    /// target like a rotation: a connection checked out before it, and opened
+    /// under the old settings, is not handed out again.
+    #[tokio::test]
+    async fn a_config_or_tls_change_drains_checked_out_connections_too() {
+        let (pool, factory) = pool(4);
+        let held = pool.checkout("pg").await.unwrap();
+        let regenerated = TargetSettings { config_generation: 1, ..settings(1, TlsPolicy::default()) };
+        assert_eq!(pool.configure("pg", regenerated.clone()), 0);
+        assert_eq!(pool.configure("pg", regenerated.clone()), 0, "unchanged settings drain nothing");
+        drop(held);
+        assert_eq!(pool.idle_count("pg"), 0, "opened under the previous config: not returned");
+
+        let held = pool.checkout("pg").await.unwrap();
+        assert_eq!(held.key().config_generation, 1);
+        let insecure = TargetSettings { tls: TlsPolicy::insecure_skip_verify(), ..regenerated };
+        pool.configure("pg", insecure);
+        drop(held);
+        assert_eq!(pool.idle_count("pg"), 0, "opened under the verifying policy: not returned");
+        assert!(!pool.checkout("pg").await.unwrap().tls.verifies());
+        assert_eq!(factory.opened.load(Ordering::SeqCst), 3);
     }
 
     #[tokio::test]
@@ -387,7 +444,7 @@ mod tests {
         assert_eq!(c.tls, TlsPolicy::default());
         drop(c);
 
-        pool.configure("pg-ca", 1, TlsPolicy::verify_with_ca("-----BEGIN CERTIFICATE-----".into()));
+        pool.configure("pg-ca", settings(1, TlsPolicy::verify_with_ca("-----BEGIN CERTIFICATE-----".into())));
         let c = pool.checkout("pg-ca").await.unwrap();
         assert!(c.tls.verifies());
         assert_eq!(c.tls.ca_pem(), Some("-----BEGIN CERTIFICATE-----"));
@@ -395,7 +452,7 @@ mod tests {
 
         // Insecure is an explicit policy, and changing the policy drops idle
         // connections opened under the old one.
-        assert_eq!(pool.configure("pg", 1, TlsPolicy::insecure_skip_verify()), 1);
+        assert_eq!(pool.configure("pg", settings(1, TlsPolicy::insecure_skip_verify())), 1);
         let c = pool.checkout("pg").await.unwrap();
         assert!(!c.tls.verifies());
     }

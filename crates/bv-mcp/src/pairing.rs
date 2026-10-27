@@ -135,7 +135,7 @@ struct StoreFile {
 pub fn default_tool_allowlist() -> Vec<String> {
     crate::catalogue::catalogue()
         .iter()
-        .filter(|t| t.read_only && !t.is_reveal && !t.open_world)
+        .filter(|t| t.read_only && !t.is_reveal && !t.open_world && !crate::catalogue::OPT_IN_TOOLS.contains(&t.name))
         .map(|t| t.name.to_string())
         .collect()
 }
@@ -551,6 +551,10 @@ mod tests {
         assert!(tools.contains(&"bv_kv_read_metadata".to_string()));
         for forbidden in ["bv_kv_read", "bv_transit_decrypt", "bv_totp_code", "bv_kv_write", "bv_pki_issue"] {
             assert!(!tools.contains(&forbidden.to_string()), "{forbidden} must not be in the default grant");
+        }
+        // Opt-in tools are read-only but granted only by ticking them.
+        for opt_in in crate::catalogue::OPT_IN_TOOLS {
+            assert!(!tools.contains(&opt_in.to_string()), "{opt_in} must not be in the default grant");
         }
         // Session tools are never in it, the read-only web fetch included.
         for session_tool in ["bv_resource_ssh_exec", "bv_resource_web_fetch"] {

@@ -24,7 +24,8 @@ normal vault token presented to `/v2/mcp` is refused too. There is no way to
 `bvault mcp catalogue` prints every tool. The read tools: `bv_whoami`,
 `bv_capabilities`, `bv_kv_list`, `bv_kv_read_metadata`, `bv_kv_read`,
 `bv_resource_list`, `bv_resource_describe`, `bv_transit_encrypt|decrypt|sign|verify`,
-`bv_totp_code`, `bv_pki_list_certs`, `bv_pki_read_cert`. The write tools:
+`bv_totp_code`, `bv_pki_list_certs`, `bv_pki_read_cert`, and the opt-in `bv_policy_read`
+(see [Reading a policy](#reading-a-policy)). The write tools:
 `bv_kv_write`, `bv_kv_delete` (soft-delete only), `bv_pki_issue`, `bv_ssh_sign`.
 The session tools: `bv_resource_ssh_exec`, which runs one command on a server
 over an SSH session the vault opens (see
@@ -43,8 +44,19 @@ prefix ending in `*`:
 | `bv_resource_list` (no arguments) | `resources/resources/` |
 | `bv_resource_describe` (`name`) | `resources/resources/<name>` |
 | `bv_capabilities` (`path`) | the `path` asked about, not `sys/capabilities-self` |
+| `bv_policy_read` (`name`) | `sys/policies/acl/<name>` |
 | `bv_resource_ssh_exec` (`resource`, `profile`, `command`) | `resources/secrets/<resource>/`, the path the `connect` capability is checked on |
 | `bv_resource_web_fetch` (`resource`, `profile`, `path`, optional `method`) | `resources/secrets/<resource>/`, likewise |
+
+### Reading a policy
+
+`bv_policy_read` returns the rules of one ACL policy by name, so an assistant can help you debug why a user is allowed or refused. It is read-only: it cannot list, write or delete a policy.
+
+- **Opt-in.** It is not in the default tool list. Tick it when you approve a pairing (or name it in `bvault mcp pair`), and give the pairing a path scope that names `sys/policies/acl/*`. No other scope covers it.
+- **Your own permissions apply.** The call runs on the assistant's token, which carries your policies. If your sign-in may not read the policy, the vault refuses and the assistant gets the refusal.
+- **Every namespace you could operate in.** When you approve the pairing, the vault records, on the token, the namespaces you can operate in at that moment: your own, a descendant from a child-visible sign-in, and the ones assigned to you. The tool looks the policy up in each of them and answers with the namespaces where it exists. There is no namespace argument. The list is fixed when the token is minted, so a namespace assigned or revoked later applies from the next pairing exchange. The token itself carries no identity: nothing about you is looked up when it reads.
+- **Per namespace consent.** Each namespace must be covered by the path scope as `<namespace>/sys/policies/acl/<name>` (your own namespace and root as `sys/policies/acl/<name>`); `*` covers all. A namespace outside the scope is reported as `out_of_scope` and never read, and one where the vault refuses you is reported as `denied`. A pairing without the tool records no list, and a token without one reads only its own namespace.
+- **One plain name.** A name with `/`, `..`, a leading space or an invisible character is refused before the vault is asked.
 
 So `secret/*` covers every KV tool on the `secret` mount, and `resources/*`
 covers both resource tools.
@@ -566,8 +578,10 @@ bvault mcp serve --namespace dti/esi        # every token this server mints
 In the desktop app, the approval dialog has a **Namespace for its tokens**
 selector listing your sign-in's namespace and the ones beneath it you can
 reach; a choice other than your own is kept with the pairing. The vault
-decides, at every exchange: it accepts your own namespace, or a descendant
-when your sign-in is child-visible, and refuses anything else with
+decides, at every exchange: it accepts your own namespace, a descendant
+when your sign-in is child-visible, or a namespace an administrator has
+assigned to you (the route the namespace picker takes when you sign in at
+root), and refuses anything else with
 `mcp_namespace_not_permitted` — it never binds the token somewhere else
 instead. Every policy the token will carry must exist, by name, in the target
 namespace (`mcp_policy_not_in_namespace` names the missing ones): a
@@ -674,7 +688,7 @@ CSS, so text a page hides is returned.
 | `mcp_brokered_sessions_disabled` / `mcp_session_protocol_disabled` | A switch is off: `mcp.brokered_sessions`, its `protocols`, the runtime switch, or a build without `mcp_sessions_ssh` / `mcp_sessions_web` |
 | `mcp_session_profile_not_agent_enabled` | The type's `agent_sessions_max` or the profile's `agent_access` is not `allow` |
 | `mcp_session_mfa_required` / `mcp_session_mfa_unavailable` | The profile requires MFA and the call carried no ticket (a gatekeeper older than this release) / you cannot complete it here: not a userpass user, no factor enrolled, or only a security key at `bvault mcp serve` |
-| `mcp_namespace_not_permitted` | The exchange asked for a namespace your sign-in may not narrow to: not your own, nor beneath it with a child-visible sign-in, or not a well-formed path. Nothing was minted |
+| `mcp_namespace_not_permitted` | The exchange asked for a namespace your sign-in may not narrow to: not your own, nor beneath it with a child-visible sign-in, nor one assigned to you, or not a well-formed path. Nothing was minted |
 | `mcp_policy_not_in_namespace` | A narrowed token would carry a policy that does not exist in the target namespace (named in the message); create it there, or request policies that exist |
 | `mcp_namespace_unavailable` | The token's (or the requested) namespace was deleted or cannot be resolved; calls are refused, never run at root. Sign in again, or pair again |
 | `mcp_namespace_conflict` | `bvault mcp serve --namespace` names another namespace than the one the pairing was narrowed to in the desktop app; drop the flag or pair again |

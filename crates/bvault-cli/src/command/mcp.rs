@@ -143,7 +143,7 @@ terminal (an assistant launching this headlessly), pairing and per-call
 confirmations fail closed -- run `bvault mcp pair` first.
 
 Tokens are bound to the namespace your session is in. --namespace asks for a
-descendant instead (a child-visible session only); the vault refuses any other
+descendant instead (a child-visible session, or a namespace assigned to you); the vault refuses any other
 namespace with mcp_namespace_not_permitted rather than falling back."#
 )]
 #[command(group(ArgGroup::new("transport").multiple(false).args(["stdio", "socket", "listen"])))]
@@ -170,8 +170,9 @@ pub struct Serve {
     pairings_file: Option<PathBuf>,
 
     /// Bind every MCP token this server mints to NAMESPACE instead of your
-    /// session's own: your session's namespace, or a descendant of it when
-    /// your session is child-visible. The vault refuses anything else.
+    /// session's own: your session's namespace, a descendant of it when your
+    /// session is child-visible, or a namespace assigned to you. The vault
+    /// refuses anything else.
     #[arg(long, value_name = "NAMESPACE", value_parser = parse_namespace_arg)]
     namespace: Option<String>,
 

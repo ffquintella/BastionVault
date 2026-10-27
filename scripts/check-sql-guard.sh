@@ -10,8 +10,11 @@ cd "$(dirname "$0")/.."
 fail=0
 
 # DoD from roadmaps/formal-verification-and-type-driven-security.md § Phase 2.
+# Test code is out of scope: its fixtures assert on statement text, not run it
+# against a database with untrusted input.
 if grep -rnE 'format!\(\s*"\s*(SELECT|INSERT|DELETE|UPDATE|CREATE|DROP|ALTER|TRUNCATE)\b' \
-     --include='*.rs' src crates gui/src-tauri/src 2>/dev/null; then
+     --include='*.rs' --exclude='tests.rs' --exclude='test_support.rs' --exclude-dir=tests \
+     src crates gui/src-tauri/src 2>/dev/null; then
   echo "error: SQL statement built with format! — use bv_sql_guard::sql!" >&2
   fail=1
 fi

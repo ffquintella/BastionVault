@@ -2544,8 +2544,9 @@ Send the login token in `X-BastionVault-Token`, `X-Vault-Token` or
 - **`namespace`** (optional string, pairing mode only; T457 Phase 2) asks to
   bind the token to that namespace instead. It is accepted only when the
   caller's binding may operate there: the caller's own namespace, or a
-  descendant of it when the caller's login is child-visible. Namespace
-  assignments do not count. Anything else — a parent, a sibling, an unrelated
+  descendant of it when the caller's login is child-visible, or a namespace
+  (or descendant) assigned to the caller by an explicit assignment record,
+  read live; an unreadable record is `403 mcp_namespace_unavailable`. Anything else — a parent, a sibling, an unrelated
   or malformed path — is refused with `403 mcp_namespace_not_permitted`; a
   permitted descendant that does not exist with `403 mcp_namespace_unavailable`.
   Nothing is minted in another namespace instead. Every policy the token would
@@ -2616,9 +2617,11 @@ from a remote system. A shaped result over 1 MiB + 64 KiB is refused
 (`mcp_result_too_large`).
 
 The catalogue hash is
-`2ef9b8149ea89aa2d509d204988414450bd12658223299e7ee77eb8a48bf5262`
-(`bv_resource_web_fetch` appended to the 0.44.40 catalogue,
-`3f24b819…bd173`); a `catalogue_pin` set to an earlier value must be updated.
+`248f5409e32dfaacc148dec68abca7c5a2dd63ebcb796894487bbeab39011ffc`
+(`bv_policy_read` appended to the catalogue whose hash was
+`2ef9b814…bf5262`, then reworded twice to search the namespaces the issuer
+could operate in; the earlier forms were `968c50ae…47221a` and
+`449ebd4a…321c79`); a `catalogue_pin` set to an earlier value must be updated.
 
 **Audit.** Every request a `tools/call` routes is recorded with an `mcp`
 block beside `request.data` (`request.mcp`), in the clear:
@@ -3255,9 +3258,10 @@ The same catalog listing, narrowed to one `plugin_type`.
 | Path | Operation | What happens |
 |------|-----------|--------------|
 | `creds/{role}` | `read` | Generate a credential, or serve a cached one (below). `507` when the request's namespace is at its `max_leases` quota, checked before the plugin is called; `404` for an unknown role, `400` for a role whose statements use a token outside the allowlist (or `{{password}}` outside its creation statements), `502` when the plugin fails |
-| `config/{connection}` | any | Proxied to the plugin, except `insecure_skip_tls_verify` and `tls_ca_pem`, which the host keeps and strips from what the plugin receives; a `read` adds them and `root_credential_version` |
-| `roles/…` | any | Proxied to the plugin; a write or delete of `roles/{role}` drops that role's cached credentials |
-| `rotate-root/{connection}` | `write` | The host generates a new root credential (same generator as `creds/`) and hands it to the plugin, which sets it on the target and stores it; the host then bumps `root_credential_version` and drains the connection's pool. Answers only `connection` and `root_credential_version`, never the credential |
+| `config/{connection}` | any | A `read` also shows a pending rotation (`rotation_pending`, with a warning when it may be stranded), and a `delete` is `409` while one stands. Proxied to the plugin, except `insecure_skip_tls_verify`, `tls_ca_pem` and `root_rotation_statements` (a list of templates naming only `{{name}}` and `{{password}}`; `null` clears it), which the host keeps and strips from what the plugin receives; a `read` adds them and `root_credential_version`. On an accepted write the host also pins `connection_url` and `username` (the endpoint its connector may dial), drains the connection's pool on every node and drops cached credentials of the mount (also on a delete) |
+| `roles/…` | any | Proxied to the plugin; a write or delete of `roles/{role}` drops cached credentials of the mount on every node |
+| `rotate-root/{connection}` | `write` | The host generates a new root credential (same generator as `creds/`). With the endpoint pinned and a plugin that asks for host execution, the host sets it on the target (`root_rotation_statements`, or the connector's own statement), verifies it with a fresh login and puts the old one back if that login fails; the plugin stores it. The host undoes its change only when the plugin says it did not store it (`502`, "was undone"); any other failure after the change answers `502` saying a new root secret may be on the target and not stored (logged at ERROR, audited) and leaves a marker. Otherwise the plugin sets and stores it itself. `409` while another rotation of the connection is in progress or a previous one may be stranded. On success the host bumps `root_credential_version` and drains the connection's pool. Answers only `connection` and `root_credential_version`, never the credential |
+| `rotate-root/{connection}` | `delete` | Clears the connection's rotation marker after an operator checked the target (`400` when there is none); audited. The only way a stranded marker goes |
 
 Any other path is `404`. A proxied answer never creates a lease.
 
@@ -3299,11 +3303,13 @@ registers no lease: it carries no top-level lease, names the shared lease in
 id, role, connection, target identity, actor; never the credential). Callers
 without an identity entity (the root token, for one) are never served from the
 cache, and two entities never share an entry. Entries are dropped on any revoke
-or renew of their lease, on `rotate-root` of the mount, when the plugin is
-deleted, re-activated or quarantined, and on expiry; at most 4096 live per
-node, oldest dropped first. The cache is per node: a revoke handled by another
-node does not reach this node's entries, which is why they end well before
-their lease does.
+or renew of their lease, on a role or connection write or delete and on
+`rotate-root` of the mount, when the plugin is deleted, re-activated or
+quarantined, and on expiry; at most 4096 live per node, oldest dropped first.
+Entries live per node, but every hit re-checks records in the mount's
+replicated storage, so these hold on every node; storage that cannot be read
+is a miss. During a rolling upgrade from a version without those records keep
+`cache_ttl_secs` at 0 (see `features/dynamic-secrets.md`).
 
 Every step is audited as a `dynamic_secret` event (`generate`, `renew`,
 `revoke`, `revoke_failed`, `rotate_root`, and the host-only `cache_hit`, which

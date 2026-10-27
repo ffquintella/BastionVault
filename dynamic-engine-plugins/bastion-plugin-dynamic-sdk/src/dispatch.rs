@@ -47,7 +47,11 @@ impl Reply {
     }
 
     pub(crate) fn error(err: &DynamicError, secrets: &[&str]) -> Self {
-        let body = json!({ "error": redact(&err.to_string(), secrets) });
+        let mut body = json!({ "error": redact(&err.to_string(), secrets) });
+        if matches!(err, DynamicError::RootNotStored(_)) {
+            // The host undoes its target-side rotation only on this.
+            body["root_stored"] = json!(false);
+        }
         Self { status: err.status(), body: Zeroizing::new(body.to_string().into_bytes()) }
     }
 

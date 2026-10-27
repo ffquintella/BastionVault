@@ -189,6 +189,11 @@ fn reject_reserved_meta(meta: &HashMap<String, String>, display_name: &str) -> R
 pub struct McpNamespaceTarget {
     pub path: String,
     pub id: String,
+    /// Set only by the exchange handler, when the exchanging token's stored
+    /// binding does not cover `path` but an explicit namespace assignment
+    /// does. It is the handler's verdict, read from the live assignment
+    /// store; this module has no store access to re-derive it.
+    pub assignment_granted: bool,
 }
 
 /// The stable refusal for a narrowing the exchanging token may not make.
@@ -222,10 +227,10 @@ fn mcp_namespace_binding(
             }
         }
         Some(target) => {
-            // The stored binding alone decides; namespace assignments do not
-            // widen what an MCP token may be narrowed to.
+            // The stored binding, or an assignment the exchange handler
+            // verified (`assignment_granted`), covers the target.
             let (_, child_visible) = binding_from_metadata(parent_meta);
-            if !token_may_operate(&ns_path, child_visible, &target.path) {
+            if !target.assignment_granted && !token_may_operate(&ns_path, child_visible, &target.path) {
                 return Err(crate::bv_error_response_status!(
                     403,
                     "{}: a token bound to {:?}{} cannot mint an MCP token for namespace {:?}",
@@ -2219,6 +2224,7 @@ mod mod_token_store_tests {
 
     fn test_mcp_binding() -> McpBinding {
         McpBinding {
+            policy_namespaces: Vec::new(),
             kind: crate::logical::McpBindingKind::App("ci-secrets-reader".into()),
             catalogue_hash: "test-hash".into(),
             tool_allowlist: vec!["bv_kv_read_metadata".into()],
@@ -2363,7 +2369,11 @@ mod mod_token_store_tests {
                 (CHILD_VISIBLE_META.to_string(), child_visible.to_string()),
             ])
         };
-        let target = |path: &str| McpNamespaceTarget { path: path.to_string(), id: format!("id-{path}") };
+        let target = |path: &str| McpNamespaceTarget {
+            path: path.to_string(),
+            id: format!("id-{path}"),
+            assignment_granted: false,
+        };
         // (parent ns, child-visible, target, allowed)
         let table = [
             ("dti", true, "dti/esi", true),
@@ -2394,6 +2404,34 @@ mod mod_token_store_tests {
                 (allowed, got) => panic!("{ns:?} (cv={cv}) -> {to:?}: expected allowed={allowed}, got {got:?}"),
             }
         }
+    }
+
+    /// A target the exchange handler verified through an assignment is
+    /// minted bound there and never child-visible; the same target without
+    /// that verdict is still refused, and a malformed binding is refused
+    /// whatever the verdict says.
+    #[test]
+    fn mcp_namespace_binding_accepts_an_assignment_verified_target_only() {
+        let root = HashMap::from([
+            (NS_PATH_META.to_string(), String::new()),
+            (CHILD_VISIBLE_META.to_string(), "false".to_string()),
+        ]);
+        let target = |assignment_granted| McpNamespaceTarget {
+            path: "dti/esi".to_string(),
+            id: "id-dti/esi".to_string(),
+            assignment_granted,
+        };
+
+        let meta = mcp_namespace_binding(&root, Some(&target(true))).unwrap();
+        assert_eq!(meta.get(NS_PATH_META).map(String::as_str), Some("dti/esi"));
+        assert_eq!(meta.get(CHILD_VISIBLE_META).map(String::as_str), Some("false"));
+
+        let err = mcp_namespace_binding(&root, Some(&target(false))).unwrap_err().to_string();
+        assert!(err.contains(MCP_NAMESPACE_NOT_PERMITTED), "{err}");
+
+        let malformed = HashMap::from([(NS_PATH_META.to_string(), "a/../b".to_string())]);
+        let err = mcp_namespace_binding(&malformed, Some(&target(true))).unwrap_err().to_string();
+        assert!(err.contains("mcp_namespace_unavailable"), "{err}");
     }
 
     /// T457 forgery check: a namespace-bound, non-root caller cannot write

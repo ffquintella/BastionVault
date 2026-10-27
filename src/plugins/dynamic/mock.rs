@@ -91,7 +91,15 @@ impl Registered {
         let host = MockHost { manifest, core, caller, session };
         let (outcome, body) = match self.0.handle(envelope, &host).await {
             Ok(v) => (InvokeOutcome::Success, v),
-            Err((code, msg)) => (InvokeOutcome::PluginError(code), json!({ "error": msg })),
+            // A message that is a JSON object is the whole error body (a
+            // plugin adding fields such as `root_stored`).
+            Err((code, msg)) => {
+                let body = serde_json::from_str::<Value>(&msg)
+                    .ok()
+                    .filter(Value::is_object)
+                    .unwrap_or_else(|| json!({ "error": msg }));
+                (InvokeOutcome::PluginError(code), body)
+            }
         };
         Ok(InvokeOutput { outcome, response: serde_json::to_vec(&body)?, fuel_consumed: 0 })
     }

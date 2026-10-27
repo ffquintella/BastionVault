@@ -43,7 +43,7 @@ pub use connection::{Connection, ConnectionSchema};
 pub use ctx::DynamicCtx;
 pub use error::{status, DynamicError};
 pub use lease::LeaseTerms;
-pub use pool::{PoolGrant, TlsPolicy};
+pub use pool::{HostConnector, HostExecution, PoolGrant, TlsPolicy};
 pub use role::RoleRecipe;
 pub use secret::SecretString;
 

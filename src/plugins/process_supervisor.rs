@@ -370,7 +370,8 @@ async fn drive_invoke(
 
     let outcome = tokio::time::timeout(timeout, async {
         loop {
-            let mut buf = String::new();
+            // A host call's line can carry a credential (a connection's root secret).
+            let mut buf = zeroize::Zeroizing::new(String::new());
             let read = worker.stdout.read_line(&mut buf).await.map_err(|e| SupervisorError::Io(format!("{e}")))?;
             if read == 0 {
                 return Err(SupervisorError::Io("stdout closed before invoke_done".into()));
@@ -388,9 +389,10 @@ async fn drive_invoke(
                     // protocol — force a teardown.
                     return Err(SupervisorError::Protocol("unexpected hello mid-invoke"));
                 }
-                PluginMessage::HostCall { id: hid, method, params } => {
+                PluginMessage::HostCall { id: hid, method, mut params } => {
                     let result =
                         handle_host_call(manifest, core.as_ref(), config, &method, &params, caller, session).await;
+                    scrub(&mut params);
                     let mut reply = match result {
                         Ok(v) => HostMessage::HostReply { id: hid, result: v },
                         Err(e) => HostMessage::HostReplyError { id: hid, error: e },
@@ -815,7 +817,9 @@ mod tests {
         for (i, t) in tasks.into_iter().enumerate() {
             assert_eq!(t.await.unwrap()["echo"], format!("n{i}"));
         }
-        assert!(started.elapsed() < Duration::from_millis(8 * 600 / 2), "serialized: {:?}", started.elapsed());
+        // Fully serial would take 8 * 600 ms; the bound sits below that with
+        // headroom for a loaded CI runner (3.1 s observed against a 2.4 s limit).
+        assert!(started.elapsed() < Duration::from_millis(8 * 600 * 3 / 4), "serialized: {:?}", started.elapsed());
         assert_eq!(crash_count(&m.name).await, 0);
         shutdown_for(&m.name).await;
     }
@@ -903,6 +907,59 @@ mod tests {
         shutdown_for(&m.name).await;
     }
 
+    /// T62 host connectors on the multiplexed child: a checkout in one
+    /// invocation and `execute` on that slot in the next, on one session; the
+    /// host runs the session's rendered statements through its connector.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn host_execution_reaches_its_session_on_the_multiplexed_child() {
+        use bv_dynamic::{connector::ExecPlan, records::ConnectionRecord};
+        use zeroize::Zeroizing;
+
+        use crate::plugins::dynamic::{test_support, DynamicSession, DynamicVerb};
+        let target = test_support::fake_target("fake://mux-child");
+        let mut m = mux_manifest("test-mux-host-exec", None);
+        m.capabilities.dynamic_pool_checkout = true;
+        let bin = test_binary();
+        let storage = Arc::new(test_support::MemStorage::default());
+        let record = ConnectionRecord {
+            connection_url: Some("fake://mux-child".into()),
+            username: Some("root".into()),
+            ..Default::default()
+        };
+        let record = serde_json::to_vec(&record).unwrap();
+        let entry = crate::storage::StorageEntry { key: "bv-dynamic/connections/prod".into(), value: record };
+        crate::storage::Storage::put(storage.as_ref(), &entry).await.unwrap();
+        let plan = ExecPlan::Create { statements: vec![Zeroizing::new("CREATE \"v-mux\"".to_string())] };
+        let mut s = DynamicSession::new(DynamicVerb::Generate, "0a1c", Some(storage)).with_plan(plan);
+        s.connection = Some("prod".into());
+        let session = Arc::new(s);
+
+        let run = |host_call: serde_json::Value| {
+            let (m, bin, session) = (&m, &bin, session.clone());
+            async move {
+                let input = json!({ "host_call": host_call }).to_string();
+                let out = invoke_bound(m, bin, input.as_bytes(), None, BTreeMap::new(), None, Some(session), LONG)
+                    .await
+                    .unwrap();
+                serde_json::from_slice::<serde_json::Value>(&out.response).unwrap()
+            }
+        };
+        let checkout = json!({"method": "dynamic_pool_checkout", "params": {"connection": "prod"}});
+        let grant = run(checkout).await;
+        let slot = grant["reply"]["result"]["slot"].clone();
+        assert!(grant["reply"]["result"]["host_execute"].as_array().unwrap().contains(&json!("fake")), "{grant}");
+        let connector =
+            json!({"kind": "fake", "url": "fake://mux-child", "username": "root", "password": "mux-root-secret"});
+        let execute = json!({"method": "dynamic_pool_checkout",
+            "params": {"connection": "prod", "execute": {"slot": slot, "connector": connector}}});
+        let done = run(execute).await;
+        assert_eq!(done["reply"]["result"]["executed"], 1, "{done}");
+        assert_eq!(*target.committed.lock().unwrap(), vec![vec!["CREATE \"v-mux\"".to_string()]]);
+        assert!(!session.violated());
+        shutdown_for(&m.name).await;
+    }
+
     /// A response over the line cap fails that invocation; the child lives.
     #[tokio::test]
     #[serial_test::serial]
@@ -943,13 +1000,16 @@ mod tests {
     async fn a_missed_heartbeat_kills_the_child() {
         set_timings_for_tests(MuxTimings {
             heartbeat_interval: Duration::from_millis(100),
-            heartbeat_timeout: Duration::from_millis(400),
+            // The warm-up call below must finish inside this window or the
+            // child is already declared dead mid-call; 400 ms was too tight
+            // for a cold spawn on a loaded CI runner.
+            heartbeat_timeout: Duration::from_millis(1500),
         });
         let m = mux_manifest("test-mux-nopong", None);
         let bin = test_binary();
         call(&m, &bin, json!({}), None, LONG).await.unwrap();
         let w = mux_worker(&m.name).await.unwrap();
-        let cause = tokio::time::timeout(Duration::from_secs(5), w.wait_dead()).await.unwrap();
+        let cause = tokio::time::timeout(Duration::from_secs(15), w.wait_dead()).await.unwrap();
         set_timings_for_tests(MuxTimings::default());
         assert_eq!(cause, DeathCause::MissedHeartbeat);
         tokio::time::sleep(Duration::from_millis(100)).await;

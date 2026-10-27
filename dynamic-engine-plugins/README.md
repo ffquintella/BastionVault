@@ -26,8 +26,8 @@ Planned, each its own crate and artefact: MySQL, MSSQL, MongoDB, Redis (Phase 2)
 ## Status
 
 - `bastion-plugin-dynamic-sdk` 0.1.0 and `bastion-plugin-postgres` 0.2.0 are in place (`publish = false` until ABI 1.5 ships in a stable host release).
-- The Postgres plugin is the Phase 4 reference plugin `plugins-ext/bastion-plugin-postgres` (0.1.x), rebased on the dynamic SDK. **Follow-up for the `plugins-ext` submodule owner:** remove `bastion-plugin-postgres` from `plugins-ext/` (its workspace members, `make plugins-process` / `plugins-pack` / `plugins-sign`), so the old non-dynamic plugin is no longer built. Nothing under `plugins-ext/` was changed here.
-- The live-database test is ignored by default (see *Testing*).
+- The Postgres plugin is the Phase 4 reference plugin, rebased on the dynamic SDK. The old non-dynamic copy was removed from the `plugins-ext` submodule (commit `85168b8`); this crate is the only Postgres plugin.
+- The live-database test is ignored by default and starts its own container (see *Building, testing, packing and signing*).
 
 ## How a dynamic plugin works
 
@@ -60,14 +60,14 @@ cargo build --release -p bastion-plugin-postgres
 # artifact: target/release/bastion-plugin-postgres(.exe)
 ```
 
-Live PostgreSQL test (development only, plaintext through the host's insecure policy):
+Live PostgreSQL test (development only, plaintext through the host's insecure policy). It starts its own `postgres:16` container through `docker` or `podman` (random port on 127.0.0.1, random root password, always removed afterwards, also on a panic), so no server or env vars are needed:
 
 ```bash
-docker run -d --rm -p 55432:5432 -e POSTGRES_PASSWORD=devroot postgres:16
-BV_TEST_POSTGRES_URL='host=127.0.0.1 port=55432 dbname=postgres sslmode=disable' \
-BV_TEST_POSTGRES_USER=postgres BV_TEST_POSTGRES_PASSWORD=devroot \
-  cargo test -p bastion-plugin-postgres --test live -- --ignored
+make dynamic-plugins-live     # not part of dynamic-plugins-test: it pulls and runs an image
+# or: cd dynamic-engine-plugins && cargo test -p bastion-plugin-postgres --test live -- --ignored
 ```
+
+`BV_TEST_CONTAINER_ENGINE=docker|podman` forces an engine. With no usable engine the test is skipped with a message; `BV_TEST_REQUIRE_CONTAINER=1` makes that a failure instead. To use an external server, set `BV_TEST_POSTGRES_URL`, `BV_TEST_POSTGRES_USER` and `BV_TEST_POSTGRES_PASSWORD`. The container helper is `bastion-plugin-postgres/tests/support/container.rs`, reusable by other engines' live tests. CI does not run this test: it would need a runner with a container engine (e.g. `ubuntu-latest`, which ships Docker) and a job calling `make dynamic-plugins-live` with `BV_TEST_REQUIRE_CONTAINER=1`.
 
 Pack and sign with the same tool and keys as `plugins-ext` (`crates/bv-plugin-pack`; `make plugins-keygen` mints a dev ML-DSA-65 key):
 

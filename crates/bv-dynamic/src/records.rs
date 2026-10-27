@@ -62,6 +62,12 @@ pub struct DynamicLeaseInternal {
     /// Opaque to the host; handed back to the plugin on renew and revoke.
     #[serde(default)]
     pub plugin_internal: Value,
+    /// The credential was put in the credential cache, so a cluster-wide
+    /// cache marker exists for it until its lease is renewed or revoked.
+    /// Added without a format bump: absent (every older lease) reads `false`,
+    /// which is right, since no older node wrote a marker.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cached: bool,
 }
 
 impl DynamicLeaseInternal {
@@ -96,6 +102,59 @@ pub struct ConnectionRecord {
     pub insecure_skip_tls_verify: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_ca_pem: Option<String>,
+    /// A fresh random value on every `config/<name>` write (never an
+    /// increment, so two nodes writing at once cannot repeat one), so every
+    /// node's pool drains connections opened under the previous settings.
+    /// Additive: a record without it reads 0; an older node ignores it.
+    #[serde(default)]
+    pub config_generation: u64,
+    /// The non-secret target of the last accepted `config/<name>` write
+    /// (`connection_url`, `username`), pinned by the host: a host execution
+    /// dials only this endpoint. Absent on older records, and then the host
+    /// offers no host execution for the connection (the plugin dials).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    /// Operator templates for a host rotate-root (`{{name}}`: the root user,
+    /// `{{password}}`: the secret to set); empty uses the connector's own
+    /// statement. Host-owned like the TLS policy. Additive (absent: empty).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub root_rotation_statements: Vec<String>,
+    /// A rotate-root in progress, or one that ended with the target and the
+    /// stored root secret possibly different. Never cleared automatically:
+    /// only its own rotation or an operator (`DELETE rotate-root/<name>`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation_pending: Option<RotationPending>,
+}
+
+/// After this many seconds a pending rotation is reported as possibly
+/// stranded (its node may have died mid-rotation) instead of in progress; it
+/// is still not cleared without an operator. Twice the plugin call budget.
+pub const ROTATION_STALE_AFTER_SECS: u64 = 120;
+
+/// The marker of a rotate-root on a connection. Holds no secret.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RotationPending {
+    /// Unix seconds.
+    pub started_at: u64,
+    /// The node that started it (Raft id or host name).
+    pub node: String,
+    /// Identifies this rotation, so only it clears its own marker.
+    pub nonce: String,
+    /// The rotation ended and the target may hold a new root secret that was
+    /// not stored: an operator must check, then clear it.
+    #[serde(default)]
+    pub stranded: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl RotationPending {
+    /// Stranded, or running for longer than any rotation can.
+    pub fn possibly_stranded(&self, now_unix: u64) -> bool {
+        self.stranded || now_unix.saturating_sub(self.started_at) > ROTATION_STALE_AFTER_SECS
+    }
 }
 
 fn version_one_u64() -> u64 {
@@ -109,6 +168,11 @@ impl Default for ConnectionRecord {
             root_credential_version: 1,
             insecure_skip_tls_verify: false,
             tls_ca_pem: None,
+            config_generation: 0,
+            connection_url: None,
+            username: None,
+            root_rotation_statements: Vec::new(),
+            rotation_pending: None,
         }
     }
 }
@@ -128,6 +192,32 @@ impl ConnectionRecord {
             (_, true) => crate::pool::TlsPolicy::insecure_skip_verify(),
             (Some(pem), false) => crate::pool::TlsPolicy::verify_with_ca(pem.clone()),
             (None, false) => crate::pool::TlsPolicy::default(),
+        }
+    }
+
+    /// Check operator root-rotation templates: at most [`MAX_STATEMENTS`],
+    /// each naming only `{{name}}` and `{{password}}`.
+    pub fn check_root_rotation(statements: &[String]) -> Result<(), DynamicError> {
+        if statements.len() > MAX_STATEMENTS {
+            return Err(DynamicError::invalid("root_rotation_statements", format!("at most {MAX_STATEMENTS}")));
+        }
+        for s in statements {
+            template::validate_only(s, &["name", "password"])?;
+        }
+        Ok(())
+    }
+
+    /// The pinned `(connection_url, username)`, when both were configured.
+    pub fn pinned_endpoint(&self) -> Option<(&str, &str)> {
+        Some((self.connection_url.as_deref()?, self.username.as_deref()?))
+    }
+
+    /// What the pool keys and drains this connection's target by.
+    pub fn target_settings(&self) -> crate::pool::TargetSettings {
+        crate::pool::TargetSettings {
+            root_credential_version: self.root_credential_version,
+            config_generation: self.config_generation,
+            tls: self.tls_policy(),
         }
     }
 }
@@ -257,7 +347,46 @@ mod tests {
             renew_statements: vec!["ALTER ROLE \"{{name}}\" VALID UNTIL '{{expiration}}'".into()],
             max_ttl_secs: 3600,
             plugin_internal: json!({"oid": 42}),
+            cached: false,
         }
+    }
+
+    /// Read-old/write-new for the two fields added with host connectors and
+    /// cluster-wide cache invalidation: rows written before them read with
+    /// the safe default, and a row that does not need one does not write it.
+    #[test]
+    fn records_written_before_cached_and_config_generation_still_read() {
+        let old_lease = json!({"v":1,"plugin":"pg","plugin_version":"0.2.0","engine_type":"database",
+            "role":"r","connection":"c","username":"u","revocation_statements":[],"renew_statements":[],
+            "max_ttl_secs":0,"plugin_internal":null});
+        let mut data = Map::new();
+        data.insert(LEASE_INTERNAL_KEY.into(), old_lease);
+        assert!(!DynamicLeaseInternal::from_internal_data(&data).unwrap().cached, "no marker was ever written");
+        assert!(internal().to_value().get("cached").is_none(), "an uncached lease row is unchanged");
+        let cached = DynamicLeaseInternal { cached: true, ..internal() };
+        data.insert(LEASE_INTERNAL_KEY.into(), cached.to_value());
+        assert!(DynamicLeaseInternal::from_internal_data(&data).unwrap().cached);
+
+        let old_conn = br#"{"v":1,"root_credential_version":3,"insecure_skip_tls_verify":false}"#;
+        let rec = ConnectionRecord::decode(old_conn).unwrap();
+        assert_eq!(rec.config_generation, 0);
+        assert_eq!(rec.pinned_endpoint(), None, "an older record pins nothing: no host execution");
+        let pinned = ConnectionRecord { connection_url: Some("host=db".into()), ..rec.clone() };
+        assert_eq!(pinned.pinned_endpoint(), None, "both halves are needed");
+        let pinned = ConnectionRecord { username: Some("vault".into()), ..pinned };
+        assert_eq!(pinned.pinned_endpoint(), Some(("host=db", "vault")));
+        assert!(rec.root_rotation_statements.is_empty(), "older records rotate with the connector's statement");
+        let ok = vec!["ALTER USER \"{{name}}\" WITH PASSWORD '{{password}}'".to_string()];
+        ConnectionRecord::check_root_rotation(&ok).unwrap();
+        let bad = vec!["ALTER USER \"{{name}}\" VALID UNTIL '{{expiration}}'".to_string()];
+        assert!(ConnectionRecord::check_root_rotation(&bad).is_err(), "only name and password");
+        let numeric = br#"{"v":1,"config_generation":7}"#;
+        assert_eq!(ConnectionRecord::decode(numeric).unwrap().config_generation, 7, "older counters still read");
+        assert_eq!(rec.target_settings().root_credential_version, 3);
+        let bumped = ConnectionRecord { config_generation: 4, ..rec };
+        let back = ConnectionRecord::decode(&serde_json::to_vec(&bumped).unwrap()).unwrap();
+        assert_eq!(back.v, CONNECTION_RECORD_VERSION, "additive: still format 1, readable by older nodes");
+        assert_eq!(back.target_settings().config_generation, 4);
     }
 
     #[test]

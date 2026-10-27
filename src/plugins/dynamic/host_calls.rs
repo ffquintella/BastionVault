@@ -8,14 +8,15 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use bv_dynamic::{
     audit::{DynamicEventKind, DynamicSecretEvent, EventOrigin},
+    connector::{rotate_root, ConnectorParams, ExecPlan, RotateError, MAX_EXECUTE_TIME, MAX_ROTATE_TIME},
     records::{check_name, LeaseRequest},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::{
-    pool::{host_pool, target_key},
-    session::{DynamicSession, DynamicVerb},
+    pool::{connectors, host_pool, target_key},
+    session::{DynamicSession, DynamicVerb, RotationState},
     state,
 };
 use crate::{
@@ -242,7 +243,8 @@ async fn audit_emit(
         return Err(DynamicCallError::Invalid("too many plugin events for one call".into()));
     }
     let m = ctx.manifest;
-    let secrets = session.secrets();
+    let owned = session.secrets();
+    let secrets = owned.refs();
     let mut event = DynamicSecretEvent::new(
         input.event,
         EventOrigin::Plugin,
@@ -264,16 +266,47 @@ async fn audit_emit(
     Ok(json!({ "emitted": true }))
 }
 
+/// `dynamic_pool_checkout`. Without `execute` (every ABI 1.5 plugin so far)
+/// it checks out a slot, as before; the reply now also names the host's
+/// connectors (`host_execute`), which an older plugin ignores. With
+/// `execute` it runs this call's host-rendered statements on a held slot.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PoolCheckoutInput {
     connection: String,
+    #[serde(default)]
+    execute: Option<Value>,
+}
+
+/// What a host execution names: the slot it holds and the stored connection
+/// to dial. Deliberately no statements: what runs is the session's plan.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExecuteInput {
+    slot: u64,
+    connector: Value,
+}
+
+fn wipe(value: &mut Value) {
+    use zeroize::Zeroize;
+    match value {
+        Value::String(s) => s.zeroize(),
+        Value::Array(items) => items.iter_mut().for_each(wipe),
+        Value::Object(map) => map.values_mut().for_each(wipe),
+        _ => {}
+    }
 }
 
 async fn pool_checkout(session: &DynamicSession, params: &Value) -> Result<Value, DynamicCallError> {
-    let input: PoolCheckoutInput = serde_json::from_value(params.clone())
-        .map_err(|e| DynamicCallError::Invalid(format!("dynamic_pool_checkout request: {e}")))?;
+    let mut input: PoolCheckoutInput = serde_json::from_value(params.clone()).map_err(|_| {
+        DynamicCallError::Invalid("dynamic_pool_checkout request must be {connection[, execute]}".into())
+    })?;
     check_name("connection", &input.connection)?;
+    if let Some(mut execute) = input.execute.take() {
+        let result = pool_execute(session, &input.connection, &execute).await;
+        wipe(&mut execute);
+        return result;
+    }
     // One call cannot starve the shared pool by hoarding slots.
     if session.held_grants() >= MAX_GRANTS_PER_CALL {
         return Err(DynamicCallError::Invalid(format!("at most {MAX_GRANTS_PER_CALL} pooled connections per call")));
@@ -290,7 +323,9 @@ async fn pool_checkout(session: &DynamicSession, params: &Value) -> Result<Value
         })?;
     let pool = host_pool();
     let key = target_key(&session.mount_id, &input.connection);
-    pool.configure(&key, record.root_credential_version, record.tls_policy());
+    // Read from the replicated record on every checkout, so a rotate-root or
+    // config write on another node drains this node's connections too.
+    pool.configure(&key, record.target_settings());
     let grant = pool.checkout(&key).await?;
     if !grant.tls.verifies() {
         log::warn!(
@@ -299,13 +334,123 @@ async fn pool_checkout(session: &DynamicSession, params: &Value) -> Result<Value
             input.connection
         );
     }
-    let reply = json!({
+    let mut reply = json!({
         "connection": input.connection,
         "root_credential_version": grant.key().root_credential_version,
         "tls": grant.tls,
         "slot": grant.id,
         "max_connections": pool.max_size(),
     });
+    // Host execution is offered only for a connection whose endpoint the host
+    // pinned when the operator wrote it; otherwise the plugin dials, as before.
+    if record.pinned_endpoint().is_some() {
+        reply["host_execute"] = json!(connectors().kinds());
+    }
     session.hold_grant(grant);
     Ok(reply)
+}
+
+/// Run this call's host-rendered statements ([`DynamicSession::take_plan`])
+/// on the held slot, through the host's connector of the presented kind.
+///
+/// Statement authority: the request carries no statement text. What runs is
+/// the plan the dynamic backend built from the role's templates (or the
+/// connector's own defaults), once per call, on the connection it was
+/// rendered for. Rotate-root and proxied calls have no plan. Egress: the
+/// host dials only the `connection_url` and `username` it pinned from the
+/// operator's `config/<name>` write; any other endpoint is refused.
+async fn pool_execute(session: &DynamicSession, connection: &str, execute: &Value) -> Result<Value, DynamicCallError> {
+    let mut input: ExecuteInput = serde_json::from_value(execute.clone())
+        .map_err(|_| DynamicCallError::Invalid("execute must be {slot, connector}".into()))?;
+    let parsed = ConnectorParams::parse(&input.connector);
+    wipe(&mut input.connector);
+    let params = parsed?;
+    // From here on the root secret is redacted from every error and event.
+    session.add_secret(params.password());
+    if session.connection.as_deref() != Some(connection) {
+        return Err(DynamicCallError::Invalid(
+            "host execution runs only on the connection this call's statements were rendered for".into(),
+        ));
+    }
+    let storage = session.storage.as_ref().ok_or(DynamicCallError::NoSession)?;
+    let record = state::load_connection(storage.as_ref(), connection)
+        .await
+        .map_err(|e| DynamicCallError::Unavailable(e.to_string()))?
+        .ok_or_else(|| {
+            DynamicCallError::Invalid(format!("connection `{connection}` is not configured on this mount"))
+        })?;
+    let presented = params.endpoint();
+    match record.pinned_endpoint() {
+        Some((url, username)) if presented.url == url && presented.username == username => {}
+        Some(_) => {
+            return Err(DynamicCallError::Invalid(format!(
+                "the presented endpoint is not the one configured on config/{connection}; the host dials only that"
+            )))
+        }
+        None => {
+            return Err(DynamicCallError::Invalid(format!(
+                "config/{connection} has no endpoint pinned by the host (write it again); no host execution"
+            )))
+        }
+    }
+    let connector = connectors()
+        .get(params.kind())
+        .ok_or_else(|| DynamicCallError::Invalid(format!("this host has no `{}` connector", params.kind())))?;
+    let mut grant = session
+        .take_grant(input.slot)
+        .ok_or_else(|| DynamicCallError::Invalid(format!("slot {} is not held by this call", input.slot)))?;
+    if grant.key().connection != target_key(&session.mount_id, connection) {
+        session.hold_grant(grant);
+        return Err(DynamicCallError::Invalid(format!("slot {} belongs to another connection", input.slot)));
+    }
+    let Some(plan) = session.take_plan() else {
+        session.hold_grant(grant);
+        return Err(DynamicCallError::Invalid(format!(
+            "{} has no host-rendered statements to execute, or they already ran",
+            session.verb.op()
+        )));
+    };
+    let secrets = session.secrets();
+    if matches!(plan, ExecPlan::RotateRoot { .. }) {
+        // Recorded before the target is touched: if the runtime drops this
+        // call part-way (its own timeout), the backend still finds it and
+        // treats the rotation as possibly stranded. The host's own budget
+        // (MAX_ROTATE_TIME, 18 s) stays well inside the plugin call's 30 s.
+        session.set_rotation(RotationState::InFlight);
+        let result =
+            rotate_root(&mut grant, connector.as_ref(), &params, &plan, &secrets.refs(), MAX_ROTATE_TIME).await;
+        session.hold_grant(grant);
+        return match result {
+            Ok(restore) => {
+                let executed = restore.statement_count();
+                session.set_rotation(RotationState::Applied(restore));
+                Ok(json!({ "executed": executed, "identity_absent": false, "rotated": true }))
+            }
+            Err(e) => {
+                match &e {
+                    RotateError::NotApplied(_) => session.clear_rotation(),
+                    RotateError::RolledBack(_) => session.set_rotation(RotationState::RolledBack),
+                    RotateError::Stranded(why) => session.set_rotation(RotationState::Stranded(why.to_string())),
+                }
+                log::debug!("host root rotation on `{connection}` failed: {}", e.error());
+                Err(DynamicCallError::from(e.error().clone()))
+            }
+        };
+    }
+    let result = bv_dynamic::connector::execute(
+        &mut grant,
+        connector.as_ref(),
+        &params,
+        &plan,
+        &secrets.refs(),
+        MAX_EXECUTE_TIME,
+    )
+    .await;
+    session.hold_grant(grant);
+    let outcome = result.map_err(|e| {
+        // Already redacted of the call's secrets and the root secret.
+        log::debug!("host execution for {} on `{connection}` failed: {e}", session.verb.op());
+        DynamicCallError::from(e)
+    })?;
+    Ok(json!({ "executed": outcome.executed, "identity_absent": outcome.identity_absent }))
 }

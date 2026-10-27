@@ -46,6 +46,20 @@ fn os_fill(buf: &mut [u8]) -> Result<(), DynamicError> {
     SysRng.try_fill_bytes(buf).map_err(|e| DynamicError::Entropy(e.to_string()))
 }
 
+/// A random `u64` from the OS random source (a nonce, not a key).
+pub fn random_u64() -> Result<u64, DynamicError> {
+    let mut buf = [0u8; 8];
+    os_fill(&mut buf)?;
+    Ok(u64::from_le_bytes(buf))
+}
+
+/// `bytes` from the OS random source, as lowercase hex (nonces, not keys).
+pub fn random_hex(bytes: usize) -> Result<String, DynamicError> {
+    let mut buf = vec![0u8; bytes];
+    os_fill(&mut buf)?;
+    Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
+}
+
 /// A fresh password from the OS random source.
 pub fn generate_password() -> Result<GeneratedPassword, DynamicError> {
     generate_password_with(os_fill)

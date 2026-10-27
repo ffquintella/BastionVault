@@ -1,9 +1,24 @@
-//! Against a real PostgreSQL. Ignored by default: a server is not guaranteed
-//! where the suite runs. To run it (development only, plaintext):
-//!   docker run -d --rm -p 55432:5432 -e POSTGRES_PASSWORD=devroot postgres:16
-//!   BV_TEST_POSTGRES_URL='host=127.0.0.1 port=55432 dbname=postgres sslmode=disable' \
-//!   BV_TEST_POSTGRES_USER=postgres BV_TEST_POSTGRES_PASSWORD=devroot \
-//!   cargo test -p bastion-plugin-postgres --test live -- --ignored
+//! Against a real PostgreSQL, started by the test itself in a container.
+//!
+//! Ignored by default (`cargo test` / `make dynamic-plugins-test` stay
+//! container-free: the first run pulls `postgres:16`). Run it with no other setup:
+//!
+//!   make dynamic-plugins-live
+//!   # or: cd dynamic-engine-plugins && cargo test -p bastion-plugin-postgres --test live -- --ignored
+//!
+//! The container comes from `docker` or `podman` on PATH (`BV_TEST_CONTAINER_ENGINE`
+//! forces one), listens on 127.0.0.1 on a random port with a random root password,
+//! and is always removed, also when the test panics (tests/support/container.rs).
+//! With no usable engine the test is skipped with a message, unless
+//! `BV_TEST_REQUIRE_CONTAINER` is set, in which case it fails.
+//!
+//! To use an external server instead (development only, plaintext), set
+//! `BV_TEST_POSTGRES_URL` (e.g. 'host=127.0.0.1 port=5432 dbname=postgres sslmode=disable'),
+//! `BV_TEST_POSTGRES_USER` and `BV_TEST_POSTGRES_PASSWORD`.
+
+mod support;
+
+use std::time::Duration;
 
 use bastion_plugin_dynamic_sdk::testing::{invoke, MockHost};
 use bastion_plugin_postgres::{target::PgConnector, PostgresBackend};
@@ -11,6 +26,51 @@ use serde_json::{json, Value};
 
 fn env(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| panic!("{name} is not set; see the header of tests/live.rs"))
+}
+
+/// Where the test runs: the external override, or a container (kept alive by
+/// the guard until the end of the test).
+struct Target {
+    url: String,
+    user: String,
+    password: String,
+    _container: Option<support::container::PgContainer>,
+}
+
+/// `None` means skip (no container engine); `BV_TEST_REQUIRE_CONTAINER` turns
+/// that into a failure.
+fn target(rt: &tokio::runtime::Runtime) -> Option<Target> {
+    if std::env::var("BV_TEST_POSTGRES_URL").is_ok() {
+        return Some(Target {
+            url: env("BV_TEST_POSTGRES_URL"),
+            user: env("BV_TEST_POSTGRES_USER"),
+            password: env("BV_TEST_POSTGRES_PASSWORD"),
+            _container: None,
+        });
+    }
+    let container = match support::container::PgContainer::start() {
+        Ok(c) => c,
+        Err(support::container::ContainerError::Unavailable(why)) => {
+            if std::env::var_os("BV_TEST_REQUIRE_CONTAINER").is_some() {
+                panic!("BV_TEST_REQUIRE_CONTAINER is set but no container engine is usable: {why}");
+            }
+            eprintln!("SKIPPED live postgres test: no usable container engine ({why}); set BV_TEST_REQUIRE_CONTAINER to fail instead");
+            return None;
+        }
+        Err(e) => panic!("could not start the postgres container: {e}"),
+    };
+    let (url, user, password) = (container.url(), container.user.to_string(), container.password().to_string());
+    container
+        .wait_ready(Duration::from_secs(90), || {
+            rt.block_on(async {
+                tokio::time::timeout(Duration::from_secs(5), login(&url, &user, &password))
+                    .await
+                    .map(|r| r.is_ok())
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or_else(|e| panic!("{e}"));
+    Some(Target { url, user, password, _container: Some(container) })
 }
 
 async fn login(url: &str, user: &str, password: &str) -> Result<(), tokio_postgres::Error> {
@@ -22,12 +82,13 @@ async fn login(url: &str, user: &str, password: &str) -> Result<(), tokio_postgr
 }
 
 #[test]
-#[ignore = "needs a PostgreSQL server: set BV_TEST_POSTGRES_URL/_USER/_PASSWORD (see the file header)"]
+#[ignore = "starts a postgres container (docker/podman); run with `make dynamic-plugins-live` or `-- --ignored`"]
 fn generate_login_renew_revoke_and_rotate_root() {
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    // Declared before the async body so the container outlives it and is
+    // removed on every exit path, including a panic.
+    let Some(Target { url, user: root_user, password: root_password, _container }) = target(&rt) else { return };
     rt.block_on(async {
-        let (url, root_user, root_password) =
-            (env("BV_TEST_POSTGRES_URL"), env("BV_TEST_POSTGRES_USER"), env("BV_TEST_POSTGRES_PASSWORD"));
         let engine = PostgresBackend::new(PgConnector::default());
         // A plaintext test server: the explicit development path, as the host
         // grants it when the operator set insecure_skip_tls_verify.

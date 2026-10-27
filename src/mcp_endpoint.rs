@@ -149,7 +149,8 @@ async fn handle_tools_call(
 
     let mut mcp_audit = mcp_audit_context(ep, &tool, &args, binding, params.get("_meta"));
     mcp_audit.namespace = namespace.clone();
-    let backend = InProcessMcpBackend { core: ep.core.clone(), mcp_audit, namespace: namespace.clone() };
+    let backend =
+        InProcessMcpBackend { core: ep.core.clone(), mcp_audit, namespace: namespace.clone(), auth: auth.clone() };
     let principal = PrincipalInfo {
         accessor: mcp_accessor(token),
         display_name: meta.client_info.as_ref().map(|c| c.name.clone()).unwrap_or_default(),
@@ -366,7 +367,15 @@ struct InProcessMcpBackend {
     /// The namespace every routed request targets (`""` = root): the MCP
     /// token's own binding, resolved by [`call_namespace`].
     namespace: String,
+    /// The MCP token's own entry, for the one per-call namespace route
+    /// ([`InProcessMcpBackend::handle_with_namespace`]).
+    auth: Auth,
 }
+
+/// The only path a per-call namespace may be used for: reading one ACL
+/// policy (`bv_policy_read`). Every other tool runs in the token's own
+/// namespace and never names another.
+const POLICY_READ_PREFIX: &str = "sys/policies/acl/";
 
 #[async_trait::async_trait]
 impl Backend for InProcessMcpBackend {
@@ -376,6 +385,47 @@ impl Backend for InProcessMcpBackend {
         path: &str,
         body: Option<Map<String, Value>>,
         token: &str,
+    ) -> Result<Option<JsonResponse>, ClientError> {
+        self.route(operation, path, body, token, &self.namespace).await
+    }
+
+    /// Reads one policy in a namespace other than the token's own, and only
+    /// if the binding lists it (`policy_namespaces`, recorded at mint from
+    /// where the issuer could operate). The token carries no identity, so
+    /// nothing is looked up about the operator here. Refused for any other
+    /// operation or path, so no tool but `bv_policy_read` can use it. The
+    /// vault's ACL then decides on the token's own policies.
+    async fn handle_with_namespace(
+        &self,
+        operation: ClientOp,
+        path: &str,
+        body: Option<Map<String, Value>>,
+        token: &str,
+        namespace: Option<&str>,
+    ) -> Result<Option<JsonResponse>, ClientError> {
+        let namespace = namespace.unwrap_or("");
+        if namespace == self.namespace {
+            return self.route(operation, path, body, token, namespace).await;
+        }
+        if operation != ClientOp::Read || !path.starts_with(POLICY_READ_PREFIX) || body.is_some() {
+            return Err(ClientError::backend("Permission denied: a namespace may be named only to read a policy"));
+        }
+        let listed = self.auth.mcp_binding.as_ref().is_some_and(|b| b.policy_namespaces.iter().any(|n| n == namespace));
+        if !listed {
+            return Err(ClientError::backend("Permission denied: that namespace is not recorded on this token"));
+        }
+        self.route(operation, path, body, token, namespace).await
+    }
+}
+
+impl InProcessMcpBackend {
+    async fn route(
+        &self,
+        operation: ClientOp,
+        path: &str,
+        body: Option<Map<String, Value>>,
+        token: &str,
+        namespace: &str,
     ) -> Result<Option<JsonResponse>, ClientError> {
         let mut req = Request::new(path);
         req.operation = match operation {
@@ -390,8 +440,8 @@ impl Backend for InProcessMcpBackend {
         // request is built here, so no client header reaches it. Re-resolved
         // per request, so a namespace deleted mid-call is refused, not
         // silently read as root by a header-scoped path.
-        if !self.namespace.is_empty() {
-            let ns = resolve_namespace(&self.core, &self.namespace).await.map_err(ClientError::backend)?;
+        if !namespace.is_empty() {
+            let ns = resolve_namespace(&self.core, namespace).await.map_err(ClientError::backend)?;
             req.headers = Some(HashMap::from([(NAMESPACE_HEADER.to_string(), ns.clone())]));
             req.namespace_path = Some(ns);
         }

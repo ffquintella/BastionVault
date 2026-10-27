@@ -25,6 +25,9 @@ pub enum DynamicError {
     /// Opening or validating a target connection failed.
     #[error("connection to `{connection}` failed: {reason}")]
     Connect { connection: String, reason: String },
+    /// A host connector's statement execution on the target failed.
+    #[error("host execution on the target failed: {0}")]
+    Execute(String),
     /// A persisted record has a format this host does not read.
     #[error("unsupported {record} format version {version}")]
     UnsupportedVersion { record: &'static str, version: u32 },
@@ -41,7 +44,7 @@ impl DynamicError {
             Self::Template(_) | Self::Invalid { .. } => 400,
             Self::UnknownConnection(_) => 404,
             Self::PoolExhausted(_) => 503,
-            Self::Connect { .. } => 502,
+            Self::Connect { .. } | Self::Execute(_) => 502,
             Self::Entropy(_) | Self::UnsupportedVersion { .. } => 500,
         }
     }

@@ -463,25 +463,60 @@ async fn narrowing_target(
         .map_err(|_| namespace_not_permitted(&format!("{raw:?} is not a well-formed namespace path")))?;
     let session = crate::kernel_api::namespace::bound_namespace(&auth.metadata)
         .map_err(|_| namespace_unavailable("the session's namespace binding is malformed"))?;
+    // The stored binding first; failing that, the explicit namespace
+    // assignment every other request honours (the route the GUI's namespace
+    // picker takes). A store error is not "no assignment": it is reported as
+    // unavailable, never as a refusal claiming the session lacks reach.
     let (_, child_visible) = token_binding::binding_from_metadata(&auth.metadata);
-    if !token_binding::token_may_operate(&session, child_visible, &requested) {
-        let reach = if child_visible { "its own namespace and its descendants" } else { "only its own namespace" };
-        return Err(namespace_not_permitted(&format!(
-            "the session is bound to {session:?} and may narrow to {reach}, not {requested:?}"
-        )));
+    let by_binding = token_binding::token_may_operate(&session, child_visible, &requested);
+    if !by_binding {
+        let assigned = token_binding::token_operable_checked(core, auth, &requested)
+            .await
+            .map_err(|e| namespace_unavailable(&format!("the namespace assignment could not be read ({e})")))?;
+        if !assigned {
+            let reach = if child_visible { "its own namespace and its descendants" } else { "only its own namespace" };
+            return Err(namespace_not_permitted(&format!(
+                "the session is bound to {session:?} and may narrow to {reach} or to a namespace assigned to it, not {requested:?}"
+            )));
+        }
     }
+    let assignment_granted = !by_binding;
     if requested.is_empty() {
-        return Ok(McpNamespaceTarget { path: String::new(), id: String::new() });
+        return Ok(McpNamespaceTarget { path: String::new(), id: String::new(), assignment_granted });
     }
     let store =
         core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME).and_then(|m| m.store()).ok_or_else(
             || namespace_unavailable(&format!("namespace {requested:?} cannot be resolved: no namespace store")),
         )?;
     match store.get_by_path(&requested).await {
-        Ok(Some(found)) => Ok(McpNamespaceTarget { path: found.path, id: found.uuid }),
+        Ok(Some(found)) => Ok(McpNamespaceTarget { path: found.path, id: found.uuid, assignment_granted }),
         Ok(None) => Err(namespace_unavailable(&format!("namespace {requested:?} does not exist"))),
         Err(e) => Err(namespace_unavailable(&format!("namespace {requested:?} could not be resolved ({e})"))),
     }
+}
+
+/// The namespaces the exchanging session may operate in right now -- its
+/// binding or an explicit assignment, the answer `sys/namespaces-self` gives
+/// it -- sorted and capped. Recorded on the binding of a pairing that carries
+/// `bv_policy_read` ([`McpBinding::policy_namespaces`]). A store error fails
+/// the exchange: a shorter list would silently narrow what was approved.
+#[maybe_async::maybe_async]
+async fn issuer_operable_namespaces(core: &crate::core::Core, auth: &Auth) -> Result<Vec<String>, RvError> {
+    use crate::modules::namespace::{token_binding, NamespaceModule, NAMESPACE_MODULE_NAME};
+    let store = core
+        .module_manager()
+        .get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
+        .and_then(|m| m.store())
+        .ok_or_else(|| namespace_unavailable("the namespace store is not available to list the issuer's namespaces"))?;
+    let mut operable = Vec::new();
+    for ns in store.list_all().await? {
+        if token_binding::token_operable_checked(core, auth, &ns.path).await? {
+            operable.push(ns.path);
+        }
+    }
+    operable.sort();
+    operable.truncate(crate::logical::MCP_POLICY_NAMESPACES_MAX);
+    Ok(operable)
 }
 
 /// The optional `namespace` of an exchange body: `None` when absent, the raw
@@ -1089,7 +1124,15 @@ impl SystemBackend {
         let record_namespace = self.note_pairing_namespace(req, &id, &client_name, &namespace, &operator).await?;
 
         let ttl_secs = requested_ttl_secs.or(pairing_ttl).unwrap_or(28_800).clamp(1, 86_400);
+        // Only a pairing that lists `bv_policy_read` records where it may
+        // read; nothing else consults the list.
+        let policy_namespaces = if tool_allowlist.iter().any(|t| t == "bv_policy_read") {
+            issuer_operable_namespaces(self.core.as_ref(), auth).await?
+        } else {
+            Vec::new()
+        };
         let binding = McpBinding {
+            policy_namespaces,
             kind: McpBindingKind::Pairing(id.clone()),
             catalogue_hash,
             tool_allowlist,
@@ -1296,6 +1339,7 @@ impl SystemBackend {
         // superset (mint_mcp_token enforces the subset rule again).
         let ttl_secs = requested_ttl_secs.unwrap_or(app.ttl_secs).min(app.ttl_secs).min(86400);
         let binding = McpBinding {
+            policy_namespaces: Vec::new(),
             kind: McpBindingKind::App(app.name.clone()),
             catalogue_hash,
             tool_allowlist: app.tool_allowlist.clone(),

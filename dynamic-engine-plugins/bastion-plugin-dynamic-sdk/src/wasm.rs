@@ -81,8 +81,11 @@ impl Default for WasmHost {
 
 #[async_trait::async_trait(?Send)]
 impl HostCalls for WasmHost {
-    async fn dynamic_call(&mut self, method: DynamicMethod, params: Value) -> Result<Value, DynamicError> {
-        let input = Zeroizing::new(serde_json::to_vec(&params).map_err(|e| DynamicError::invalid(e.to_string()))?);
+    async fn dynamic_call(&mut self, method: DynamicMethod, mut params: Value) -> Result<Value, DynamicError> {
+        // A host execution's params carry the connection's root secret.
+        let input = serde_json::to_vec(&params).map(Zeroizing::new);
+        crate::secret::wipe_value(&mut params);
+        let input = input.map_err(|e| DynamicError::invalid(e.to_string()))?;
         let mut out = vec![0u8; reply_capacity(method)];
         let rc = call_import(method, &input, &mut out);
         if rc < 0 {

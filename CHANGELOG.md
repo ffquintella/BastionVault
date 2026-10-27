@@ -58,6 +58,12 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### MCP policy read
+
+- **Let a paired AI assistant read one ACL policy, only when you grant it and only if your own sign-in may read it** (T463, S26, S115) -- The opt-in `bv_policy_read` tool (`name`) reads `sys/policies/acl/<name>` in the token's namespace. It is read-only, takes one plain name (no `/`, `..`, extra arguments or namespace), is left out of a pairing's default tools, and is refused unless the grant's path scope names `sys/policies/acl/...`. The vault applies your policies to the call, so a policy you cannot read stays unreadable to the assistant. The catalogue hash is now `968c50ae6a800915fcf0b6e5506b54e3b95192ff0d50789a0491bb034f47221a`; an operator who pinned the previous hash in `sys/mcp/config` must pin this one.
+
+- **Read a policy from every namespace you could operate in, with the same permissions as you** (T463, S26, S115) -- `bv_policy_read` still takes only a policy name. When you approve a pairing that includes it, the vault records on the token the namespaces you can operate in at that moment (your own, descendants from a child-visible sign-in, and assigned ones), and the tool looks the policy up in each and reports where it exists, where the vault refused you (`denied`) and what your path scope left out (`out_of_scope`). The token carries no identity and nothing else reads the list; an assignment granted or revoked later applies from the next pairing. The catalogue hash is now `248f5409e32dfaacc148dec68abca7c5a2dd63ebcb796894487bbeab39011ffc`; an operator who pinned the previous hash in `sys/mcp/config` must pin this one.
+
 #### MCP namespace selection (Phases 2 and 3)
 
 - **Narrow an AI assistant's token to a namespace beneath your sign-in** (T457, S115)
@@ -87,6 +93,13 @@ EXAMPLE ENTRY:
 - Mint short-lived PostgreSQL roles with `bastion-plugin-postgres` 0.2.0 (`plugin_type = "secret/dynamic"`, `engine_type = "database"`, process runtime, only the three dynamic capabilities and plugin storage): creation statements run in one transaction, revoke drops owned objects and the role and succeeds when it is already gone, renew extends `VALID UNTIL`, and `rotate-root` sets the host's new root password and restores the old one if it cannot be stored. It replaces the Phase 4 reference plugin in `plugins-ext/`, whose removal is left to that submodule. (T62, S13)
 - Verify the PostgreSQL server's certificate by default, against the connection's `tls_ca_pem` or the OS trust store, with rustls on the `ring` provider (no `openssl-sys`, no `aws-lc-sys`); TLS is required and `sslmode=disable` refused unless the operator set `insecure_skip_tls_verify`, and a `connection_url` carrying a user or password is refused. (T62, S13)
 - Run the SDK, the PostgreSQL plugin and a fake engine through the plugin testkit as real processes and as WASM, and check the plugin graph for `openssl-sys` / `aws-lc-sys`, with `make dynamic-plugins-test`. (T62, S13)
+
+#### Dynamic secrets: host connectors and cluster-wide cache (features/dynamic-secrets.md)
+
+- Run dynamic-secret statements on host-owned connections: `dynamic_pool_checkout` advertises `host_execute` and accepts an additive `execute` that has the host dial its PostgreSQL connector (rustls on `ring`) under the operator's TLS policy (verified by default, `sslmode=disable` refused, no Unix sockets), and run only the statements the host rendered for that call, once, on that call's connection; the pool keeps validated connections keyed by root credential version and config generation and drains them on rotate-root, `config/` writes and TLS changes on every node. Older plugins keep dialling themselves; the SDK and `bastion-plugin-postgres` use the host when it offers; host execution is offered only for a connection whose `config/<name>` write pinned its `connection_url` and `username`, and the host refuses any other endpoint, so re-write the connection to opt in. (T62, S13)
+- Rotate a dynamic connection's root secret on the target through the host connector: with a pinned endpoint the host sets the new secret (from the connection's `root_rotation_statements` templates, `{{name}}` and `{{password}}` only, or the connector's quoted default), proves it with a fresh login and puts the old one back if that fails; the plugin only stores it, and if storing fails the host puts the old secret back and says so; when it cannot, rotate-root answers 502 naming the connection and stating that the target holds a new root secret that was not stored (logged at ERROR, audited). The host undoes its change only when the plugin answers `root_stored: false`; a second rotate-root gets 409 while one is pending, and `DELETE <mount>/rotate-root/<connection>` clears a stranded marker after the operator has fixed the target. Plugins not offered host execution keep setting the secret themselves. (T62, S13)
+- Invalidate the dynamic credential cache across the cluster: a per-credential marker and a per-mount epoch in the mount's storage are checked on every hit, a renew, revoke, role write or rotate-root on one node ends the entries on every node, and unreadable storage is a cache miss. (T62, S13)
+- Start the live PostgreSQL tests in a throwaway docker or podman container (random loopback port, random root password, always removed) with `make dynamic-plugins-live` and the `bv-dynamic` `postgres_live` test; they skip with a message when no engine is usable and fail under `BV_TEST_REQUIRE_CONTAINER=1`. (T62, S13)
 
 #### Dynamic secrets: desktop GUI (features/dynamic-secrets.md)
 
@@ -186,6 +199,14 @@ EXAMPLE ENTRY:
 #### HSM pool HA (phase 7, prepared)
 
 - Include the device attestation certificate in every YubiHSM 2 attestation `operator hsm provision` writes: it is read with the factory key before the first write, and appended to each key certificate in the bundle. Re-provision a device whose bundle came from an earlier build, which is now refused as truncated; `--adopt` on a provisioned pool device cannot read the certificate and is refused instead of writing a bundle that could never be attested (T454, S114)
+
+#### MCP namespace selection
+
+- **Narrow an AI assistant's pairing to a namespace assigned to you, not only to one beneath a child-visible sign-in** (T457, S115) -- An operator who signs in at root and works in a tenant through the namespace picker could not pair an assistant there: the exchange judged the namespace by the session's stored binding alone and refused it with `mcp_namespace_not_permitted`, while every other request honoured the assignment. The exchange now accepts a namespace that an explicit assignment covers (the assigned namespace and its descendants), read live at every exchange. No record keeps the previous verdict, a revoked record grants nothing, and a record the vault cannot read answers `mcp_namespace_unavailable` instead of a misleading refusal. The token is still bound to the target and never child-visible, and its policies must still exist there.
+
+#### AI assistants page
+
+- **Pair AI assistants from their own menu entry, available to any signed-in non-root user, instead of Settings → AI Assistants** (S115) -- The pairing, serve-toggle and connect-snippet panel moved to a new *AI Assistants* page (`/ai-assistants`) in the workspace menu. It is hidden for root sessions, which the vault refuses to exchange for an assistant token; the vault still authorizes every call with the user's own policies. The Settings tab is gone.
 
 #### MCP namespace selection (Phase 3)
 

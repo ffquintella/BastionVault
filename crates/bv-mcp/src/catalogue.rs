@@ -427,8 +427,33 @@ pub fn catalogue() -> &'static [ToolMeta] {
                 },
             }),
         },
+        // Appended, never reordered (`catalogue_hash`). Opt-in: see
+        // [`OPT_IN_TOOLS`].
+        ToolMeta {
+            name: "bv_policy_read",
+            description: "Read one ACL policy's rules, by name, in every namespace the signed-in user who issued this token could operate in when it was issued. Read-only: it can neither list nor change policies. The vault answers only where that user may read the policy; other namespaces are reported as denied or out of scope.",
+            read_only: true,
+            destructive: false,
+            idempotent: true,
+            is_reveal: false,
+            open_world: false,
+            input_schema: || json!({
+                "type": "object",
+                "properties": { "name": { "type": "string" } },
+                "required": ["name"],
+                "additionalProperties": false,
+            }),
+            output_schema: empty_output_schema,
+        },
     ]
 }
+
+/// Read-only tools that are never in a pairing's default allow-list: the
+/// operator must tick them. `bv_policy_read` reveals authorization
+/// structure (which paths a role reaches), not a secret, but it is the one
+/// tool that reads under `sys/`, so it is granted deliberately, with a
+/// `path_scope` naming `sys/policies/acl/...`.
+pub const OPT_IN_TOOLS: &[&str] = &["bv_policy_read"];
 
 pub fn find(name: &str) -> Option<&'static ToolMeta> {
     catalogue().iter().find(|t| t.name == name)
@@ -519,12 +544,22 @@ mod tests {
     /// (`f900f6c593f9cbe6552ef5e5b8ff43e74829cc522aa2dabb770ff01f73dc6209`,
     /// unchanged by the `open_world` field and the extended sanitizer) to
     /// `3f24b819102aa4d50d194b3a1959232faed5a06777c654a7de20a2ae6fcbd173`;
-    /// Phase 2 appended `bv_resource_web_fetch`. Every later change to a tool
+    /// Phase 2 appended `bv_resource_web_fetch` (`2ef9b814…bf5262`);
+    /// `bv_policy_read` followed (`968c50ae…47221a`), then its description
+    /// changed twice (`449ebd4a…321c79`) as it began to search the namespaces the issuer could operate in. Every later change to a tool
     /// updates this value, and its CHANGELOG entry quotes it: operators with
     /// a pin must re-pin.
     #[test]
     fn catalogue_hash_is_pinned() {
-        assert_eq!(catalogue_hash(), "2ef9b8149ea89aa2d509d204988414450bd12658223299e7ee77eb8a48bf5262");
+        assert_eq!(catalogue_hash(), "248f5409e32dfaacc148dec68abca7c5a2dd63ebcb796894487bbeab39011ffc");
+    }
+
+    #[test]
+    fn policy_read_is_read_only_opt_in_and_never_a_reveal_or_session_tool() {
+        let t = find("bv_policy_read").unwrap();
+        assert!(t.read_only && t.idempotent && !t.destructive && !t.is_reveal && !t.open_world);
+        assert!(OPT_IN_TOOLS.contains(&t.name));
+        assert_eq!((t.input_schema)()["additionalProperties"], json!(false));
     }
 
     /// The session tool's flags match the spec's table (§4): destructive and
