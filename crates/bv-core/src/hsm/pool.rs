@@ -71,6 +71,13 @@ pub enum PoolEventKind {
     MemberFaulted,
     CryptoFailure,
     SetUnderReplicated,
+    SetRepaired,
+    NodeEnrolled,
+    NodeRevoked,
+    RevocationPending,
+    MemberAdded,
+    MemberRetired,
+    MemberPromoted,
 }
 
 impl PoolEventKind {
@@ -82,6 +89,13 @@ impl PoolEventKind {
             PoolEventKind::MemberFaulted => "hsm.member_faulted",
             PoolEventKind::CryptoFailure => "hsm.crypto_failure",
             PoolEventKind::SetUnderReplicated => "hsm.set_under_replicated",
+            PoolEventKind::SetRepaired => "hsm.set_repaired",
+            PoolEventKind::NodeEnrolled => "hsm.node_enrolled",
+            PoolEventKind::NodeRevoked => "hsm.node_revoked",
+            PoolEventKind::RevocationPending => "hsm.revocation_pending",
+            PoolEventKind::MemberAdded => "hsm.member_added",
+            PoolEventKind::MemberRetired => "hsm.member_retired",
+            PoolEventKind::MemberPromoted => "hsm.member_promoted",
         }
     }
 }
@@ -103,14 +117,22 @@ pub trait PoolEventSink: Send + Sync {
     fn emit(&self, event: &PoolEvent);
 }
 
+#[derive(Default)]
 pub struct LogEventSink;
 
 impl PoolEventSink for LogEventSink {
     fn emit(&self, e: &PoolEvent) {
         let (name, member, hsm_id, detail) = (e.kind.name(), &e.member, &e.hsm_id, &e.detail);
         match e.kind {
-            PoolEventKind::MemberUp => {
+            PoolEventKind::MemberUp
+            | PoolEventKind::SetRepaired
+            | PoolEventKind::NodeEnrolled
+            | PoolEventKind::MemberAdded
+            | PoolEventKind::MemberPromoted => {
                 log::info!(target: "security", "{name}: member={member} hsm_id={hsm_id} {detail}")
+            }
+            PoolEventKind::NodeRevoked | PoolEventKind::MemberRetired | PoolEventKind::RevocationPending => {
+                log::warn!(target: "security", "{name}: member={member} hsm_id={hsm_id} {detail}")
             }
             PoolEventKind::SetUnderReplicated => {
                 log::warn!(target: "security", "{name}: {detail} has no copy on {hsm_id}")

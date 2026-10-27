@@ -5,6 +5,7 @@
 //! Either way release is a signed, audited, replay-resistant unwrap, and a node
 //! that cannot reach a device stays sealed (spec rule 6; never a fallback).
 
+pub mod hooks;
 mod pool_admin;
 pub mod record;
 
@@ -32,7 +33,7 @@ use crate::{
         clock::{self, Clock},
         context,
         node_creds::{self, NodeCredentialStore},
-        pool::{check_pool_storage_backend, HsmPool, LogEventSink, PoolEventSink, PoolMember, PoolMemberSpec},
+        pool::{check_pool_storage_backend, HsmPool, PoolEventSink, PoolMember, PoolMemberSpec},
         repair::RepairReport,
         validate_node_id, ConfigMemberOpener, HsmBackend, MemberOpener, MemberTarget, RecoveryMode, ResolvedHsmConfig,
         ResolvedPoolConfig,
@@ -300,12 +301,14 @@ pub struct HsmSealProvider {
     config: ResolvedHsmConfig,
     /// The last repair run on this node (pool only), for `v2/sys/hsm/repair`.
     repair_state: Mutex<Option<RepairReport>>,
+    /// Audit delivery and the repair tick (pool, from `open`).
+    hooks: Option<Arc<hooks::ProviderHooks>>,
 }
 
 impl HsmSealProvider {
     /// The per-node topology over this node's own device.
     pub fn new(backend: Arc<dyn HsmBackend>, physical: Arc<dyn PhysicalBackend>, config: ResolvedHsmConfig) -> Self {
-        Self { devices: Devices::PerNode(backend), physical, config, repair_state: Mutex::new(None) }
+        Self { devices: Devices::PerNode(backend), physical, config, repair_state: Mutex::new(None), hooks: None }
     }
 
     /// The pool topology over pre-opened member clients (`opened`, by member
@@ -361,7 +364,7 @@ impl HsmSealProvider {
         let specs = cache.specs_for(pool_cfg, bootstrap);
         let current = build_pool(&config.node_id, pool_cfg, specs, 0, &clock, &events)?;
         let devices = PoolDevices { cache, clock, events, current: Mutex::new(current), probing: AtomicBool::new(false) };
-        Ok(Self { devices: Devices::Pool(devices), physical, config, repair_state: Mutex::new(None) })
+        Ok(Self { devices: Devices::Pool(devices), physical, config, repair_state: Mutex::new(None), hooks: None })
     }
 
     /// Open the configured topology: per node, the device; for a pool, the
@@ -383,14 +386,11 @@ impl HsmSealProvider {
             store.ensure_transport_key()?;
             Some(store)
         };
-        let provider = Arc::new(Self::new_pool_with(
-            opener,
-            credentials,
-            physical,
-            config.clone(),
-            clock,
-            Arc::new(LogEventSink),
-        )?);
+        let hooks = hooks::ProviderHooks::new();
+        let mut provider =
+            Self::new_pool_with(opener, credentials, physical, config.clone(), clock, hooks.clone())?;
+        provider.hooks = Some(hooks);
+        let provider = Arc::new(provider);
         if let Err(e) = provider.refresh_membership().await {
             log::error!(target: "security", "HSM pool membership refresh failed at startup: {e}");
         }
@@ -603,32 +603,68 @@ impl HsmSealProvider {
         let epoch = 0u64;
         let ctx = self.barrier_context(&cluster_uuid, epoch);
 
-        // Node enrollment (per-node credentials on each member) is phase 4;
-        // here the node wraps through the session its client already has.
-        let outcome = pool.wrap_on_every_member(self.config.objects.wrap_barrier, &ctx, kek).await?;
-
+        // Spec § Bootstrap, step 1: a node that authenticates with node
+        // credentials (provisioned devices) initializes only members its
+        // bootstrap attested, and the device must still hold the attested keys.
+        let attested = crate::hsm::ceremony::read_bootstrap(self.physical.as_ref()).await?;
+        let needs_attestation = match &devices.cache.credentials {
+            Some(store) => !store.members()?.is_empty(),
+            None => false,
+        };
         let mut members = BTreeMap::new();
         for member in pool.members() {
             let backend = member.backend()?;
             let block = pool_cfg.members.iter().find(|m| m.name == member.name());
+            // A YubiHSM 2 node key cannot read the domain-2 identity; then the
+            // attested identity stands, and the authz key is still compared.
+            let read_identity = backend.identity_public_key().ok();
+            let authz_pub = backend.authz_public_key()?;
+            let pinned = attested.as_ref().and_then(|a| a.members.get(member.hsm_id()));
+            let identity_matches = |p: &crate::hsm::ceremony::BootstrapMember| {
+                read_identity.as_ref().is_none_or(|read| *read == p.identity_pub)
+            };
+            let (identity_pub, seed_ecdh_pub, attestation_fps) = match pinned {
+                Some(p) if identity_matches(p) && p.authz_pub == authz_pub => {
+                    (p.identity_pub.clone(), p.seed_ecdh_pub.clone(), p.attestation_fps.clone())
+                }
+                Some(_) => {
+                    log::error!(target: "security", "pool init refused: {} no longer holds its attested keys", member.name());
+                    return Err(RvError::ErrHsmAttestationInvalid(format!(
+                        "member {} reports keys other than the ones its bootstrap attested",
+                        member.name()
+                    )));
+                }
+                None if needs_attestation => {
+                    return Err(RvError::ErrHsmAttestationInvalid(format!(
+                        "member {} was not attested by `operator hsm bootstrap`; run it before init",
+                        member.name()
+                    )))
+                }
+                // A pre-phase-4 (unprovisioned mock) pool: no attestation,
+                // and `bv-identity` is also the seed-ECDH contributor.
+                None => {
+                    let identity_pub = backend.identity_public_key()?;
+                    (identity_pub.clone(), identity_pub, Vec::new())
+                }
+            };
             members.insert(
                 member.hsm_id().clone(),
                 HsmMember {
                     name: member.name().to_string(),
                     gateway: block.map(|b| b.gateway.clone()).unwrap_or_default(),
                     serial: backend.device_serial(),
-                    identity_pub: backend.identity_public_key()?,
-                    // The seed-ECDH contributor. The mock and today's layout
-                    // use `bv-identity`; `bv-seed-ecdh` arrives with phase 4.
-                    seed_ecdh_pub: backend.identity_public_key()?,
-                    authz_pub: backend.authz_public_key()?,
+                    identity_pub,
+                    seed_ecdh_pub,
+                    authz_pub,
                     authz_alg: backend.authz_alg(),
-                    attestation_fps: Vec::new(),
+                    attestation_fps,
                     state: MemberState::Active,
                     pending_revocations: Vec::new(),
                 },
             );
         }
+
+        let outcome = pool.wrap_on_every_member(self.config.objects.wrap_barrier, &ctx, kek).await?;
         let mut copies = outcome.copies.into_values();
         let first = copies.next().ok_or_else(|| RvError::ErrHsm("pool wrap produced no copy".into()))?;
         let mut kek_set = BvHsmBlobSet::new(Purpose::BarrierKek, epoch, first, &self.config.node_id, unix_now_secs()?)?;
@@ -643,6 +679,10 @@ impl HsmSealProvider {
                 return Err(RvError::ErrHsm("an HSM seal record already exists; refusing to overwrite it".into()));
             }
             self.store_record(&record).await?;
+            // The attestation now lives in the record's member entries.
+            if attested.is_some() {
+                self.physical.delete(crate::hsm::ceremony::BOOTSTRAP_RECORD_PATH).await?;
+            }
         }
         hsm_metrics().set_under_replicated(UnderReplicatedScope::SealRecord, 0);
         log::warn!(

@@ -274,7 +274,9 @@ pub async fn verify_layout(session: &dyn HsmAdminSession, objects: &HsmObjectIds
             return Err(refuse(format!("{label} delegates {:?}", info.delegated)));
         }
     }
-    for (label, id) in [("bv-identity", objects.identity), ("bv-authz", objects.authz)] {
+    let asymmetric =
+        [("bv-identity", objects.identity), ("bv-authz", objects.authz), ("bv-seed-ecdh", objects.seed_ecdh)];
+    for (label, id) in asymmetric {
         let info = session
             .object_info(ObjectKind::AsymmetricKey, id)
             .await?

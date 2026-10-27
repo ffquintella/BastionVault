@@ -127,6 +127,13 @@ EXAMPLE ENTRY:
 - Add the `sql` Connect protocol to `database` resources with strict profile parsing, endpoint-bound credential release from a secret's `sql_endpoint`, MFA for `sql` profiles, and `resources/v2/sql/privileges/<resource>`. (T124, S109)
 - Offer the SQL capabilities in the GUI: chips and validator messages in the policy builder, chips and presets on resource and asset-group shares, a SQL profile editor on database resources, and a consent panel for the two plugin grants. (T124, S109)
 
+#### HSM pool HA (phase 4 of 7, part 2: bootstrap, provisioning, YubiHSM 2 wiring)
+
+- Initialize a pool of provisioned devices: `bvault operator hsm provision --mock-state-path … --serial … --out bundle.json` (or `--connector` on the YubiHSM 2 host) turns a factory-state device into the pool layout and writes its attestation bundle; then, on the init node, `bvault operator hsm bootstrap --bundle hsm-a=a.json --bundle hsm-b=b.json --admin hsm-a --admin hsm-b` (`POST /v2/sys/hsm/bootstrap`, loopback only, refused once the vault is initialized) attests both devices and enrolls the node, and `operator init` pins the attested keys and fingerprints in the seal record, refusing a member that was not attested or whose keys changed since (T454, S114)
+- Raise HSM pool events in the audit log as well as the `security` log: member up / down / faulted, crypto failures, under-replicated and repaired sets, node enrolled / revoked, pending revocations, member added / retired / promoted, at `sys/hsm/events/<event>/<member>` once the audit broker is up (T454, S114)
+- Run the HSM pool repair job in the background every 5 minutes and within 10 seconds of a member coming back up, while the vault is unsealed (T454, S114)
+- Reach YubiHSM 2 pool members through one loopback relay per member to its mTLS gateway (or a local `connector`), with node credentials and `bv-admin` ceremonies on the device; a `yubihsm2` pool is no longer refused at startup, but attesting a YubiHSM 2 as a member is refused until the Yubico attestation chain is pinned, and none of the device path is verified on hardware yet (T454 phase 7) (T454, S114)
+
 #### HSM pool HA (phase 4 of 7, part 1: ceremonies and repair)
 
 - Enroll and revoke HSM pool nodes with per-node, per-device credentials: a pool node with `credential_dir` creates an ML-KEM-768 transport key (files 0600, refused when group- or world-readable), logs its fingerprint and publishes the public half; `bvault operator hsm node add <node> --fingerprint <fp> --admin <member>…` (`POST /v2/sys/hsm/nodes/{node_id}`) refuses a fingerprint that does not match, a 13th node, or a missing admin credential for any live member, then creates `bv-node-<node>` on every live member, seals each random credential to the node's transport key and signs the enrollment with each member's identity; the node installs its credentials on its next unseal or 30 s membership refresh. `node revoke` (`DELETE /v2/sys/hsm/nodes/{node_id}`) deletes the node's key on every member it reaches, discards undelivered credentials, and records a pending revocation for any other member, which every node then treats as down until a ceremony with that member's admin credential applies it; `node list` and `GET /v2/sys/hsm/nodes` show enrolled and pending nodes with their signature check (T454, S114)
@@ -189,6 +196,10 @@ EXAMPLE ENTRY:
 - Keep the expiration register-and-restore benchmark's leases alive for the whole test: their 400 s TTL was shorter than the 10 000-lease registration loop on Windows (453 s alone, ~960 s in a full run), so leases expired before the count.
 
 ### Security
+
+#### HSM pool HA: admin-only identity key and attested init (T454 phase 4, part 2)
+
+- Keep `bv-identity` admin-only on a provisioned pool device (domain 2): node sessions can no longer sign or run ECDH with it, and seed derivation uses the new `bv-seed-ecdh` key; pool init on provisioned devices requires the bootstrap attestation, the bootstrap route answers only a loopback peer before init, and a YubiHSM 2 is never accepted on a leaf certificate alone (T454, S114)
 
 #### HSM pool HA: device-enforced node credentials (T454 phase 4)
 

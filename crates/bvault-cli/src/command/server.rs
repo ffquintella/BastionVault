@@ -421,6 +421,9 @@ impl Server {
                     // client for each member, plus the 10 s health probe.
                     let provider = crate::seal::hsm::HsmSealProvider::open(&hsm_cfg, physical).await?;
                     log::info!(target: "security", "HSM seal online: {}", provider.describe());
+                    // Pool events to the audit broker once it is up, and the
+                    // 5-minute / member-up repair tick (T454 phase 4).
+                    provider.attach(&hsm_core);
                     hsm_core.set_seal_provider(provider);
                     if hsm_core.inited().await? {
                         hsm_core.auto_unseal().await

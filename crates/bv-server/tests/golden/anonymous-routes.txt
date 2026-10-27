@@ -23,6 +23,7 @@ PUT    /v2/sys/unseal [public-probe] -- the unseal key share is the credential: 
 GET    /v2/sys/internal/ui/mounts [routed-unauthenticated] -> sys/internal/ui/mounts -- Vault-compatible UI bootstrap in the system backend's unauth_paths; the handler judges any token itself and lists no mount to an anonymous caller
 GET    /v2/sys/internal/ui/mounts/{name:.*} [routed-unauthenticated] -> sys/internal/ui/mounts/{name} -- Vault-compatible UI bootstrap in the system backend's unauth_paths; the handler refuses an anonymous caller and checks mount access for a token
 POST   /v2/sys/batch [dispatch] -- carries caller-chosen logical operations; each is judged by pre_route on its own path through Core::handle_request
+POST   /v2/sys/hsm/bootstrap [cluster-local] -- HSM pool init bootstrap before any token can exist: loopback peer only, refused once initialized, needs every member's bv-admin credential
 POST   /v1/rustion/webhooks/recording-ready [signature-verified] -- Rustion recording.ready delivery: no token; the hybrid Ed25519 + ML-DSA-65 signature over the raw body must verify against an enrolled bastion's pinned key, or the request is refused
 POST   /v2/mcp [dispatch] -- JSON-RPC transport: 401 without a bearer token after the TLS, origin and size gates; each tools/call is a logical request judged by pre_route
 GET    /.well-known/oauth-protected-resource/v2/mcp [public-probe] -- RFC 9728 protected-resource metadata: an MCP client reads it before it can hold a token; names only the resource URL and its authorization servers

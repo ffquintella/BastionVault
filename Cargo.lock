@@ -1781,6 +1781,7 @@ dependencies = [
  "better_default",
  "bv-audit",
  "bv-errors",
+ "bv-hsm-link",
  "bv-kernel-api",
  "bv-logical",
  "bv-metrics",

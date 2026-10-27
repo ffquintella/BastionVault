@@ -139,7 +139,7 @@ bvault operator seal
 
 Inspect the HSM seal and run the HSM pool ceremonies (see
 [docs/hsm.md](hsm.md) and [features/hsm-pool-ha.md](../features/hsm-pool-ha.md)).
-Every verb but `status` needs a `sudo` token; they call the `v2/sys/hsm/*` routes.
+Every verb but `status`, `provision` (local) and `bootstrap` (loopback, before init) needs a `sudo` token; they call the `v2/sys/hsm/*` routes.
 
 ~~~bash
 bvault operator hsm status
@@ -150,6 +150,10 @@ bvault operator hsm node add <node_id> --fingerprint <fp> --admin <member> [--ad
 bvault operator hsm node revoke <node_id> --admin <member> [--admin <member>…]
 bvault operator hsm node list
 bvault operator hsm repair [--run [--admin <member>…]]
+# Pool setup: provision runs on the HSM host against the device; bootstrap runs
+# on the init node (loopback) before `operator init`.
+bvault operator hsm provision (--mock-state-path <file> --serial <s> | --connector <url>) --out <bundle.json> [--adopt] [--admin-password env:VAR] [--factory-password env:VAR]
+bvault operator hsm bootstrap --bundle <member>=<file> [--bundle …] --admin <member> [--admin <member>…]
 ~~~
 
 | Option | Description |

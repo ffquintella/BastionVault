@@ -82,6 +82,11 @@ rusb = { version = "0.9", optional = true, features = ["vendored"] }
 # into the seal path. Optional, and reached only through `hsm_yubihsm2`.
 # `make check-hsm` is what compiles this -- no default build does.
 x509-cert = { version = "0.2", default-features = false, features = ["std"], optional = true }
+# The HSM pool's node-side loopback relay (T454 phase 4): `yubihsm` 0.42 speaks
+# only plain HTTP, so each pool member client talks to a relay that carries its
+# requests over mTLS to the member's gateway. Tier 0, `bv-errors` only; reached
+# only through `hsm_yubihsm2`, so the stock build does not compile it.
+bv-hsm-link = { path = "../bv-hsm-link", version = "0.41.0", registry = "uox-bastionvault", optional = true }
 serde_bytes = "0.11"
 sha2 = "0.11"
 # The HSM pool's 10 s health probe runs as a background task (`rt`, `time`).
@@ -118,7 +123,7 @@ storage_hiqlite = ["bv-storage/storage_hiqlite"]
 # provides NO hardware protection and REFUSES TO START in production. See
 # features/hsm-support.md.
 hsm_mock = []
-hsm_yubihsm2 = ["dep:yubihsm", "dep:rusb", "dep:x509-cert"]
+hsm_yubihsm2 = ["dep:yubihsm", "dep:rusb", "dep:x509-cert", "dep:bv-hsm-link"]
 
 # Lints this crate's code trips, all of which the root crate already allows.
 [lints.clippy]

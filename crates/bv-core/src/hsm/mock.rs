@@ -61,6 +61,8 @@ enum MockKind {
     Identity,
     /// Ed25519: `sign-eddsa` only (unwrap authorizations).
     Authz,
+    /// ECC P-256 `bv-seed-ecdh`: `derive-ecdh` only (T454 phase 4 layout).
+    SeedEcdh,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -271,6 +273,7 @@ impl MockHsmDevice {
                 let key = mock_password_key(admin_password);
                 state.auth_keys.insert(ADMIN_AUTH_KEY_ID, MockAuthKey { label: "bv-admin".into(), role: AuthKeyRole::Admin, key });
                 ensure_all(&mut state, objects);
+                ensure_object(&mut state, objects.seed_ecdh, MockKind::SeedEcdh);
                 state.auth_keys.remove(&FACTORY_AUTH_KEY_ID);
                 persist_state(&self.state_path, &state)?;
                 log::info!(target: "security", "mock HSM {} provisioned; factory key 1 deleted", state.serial);
@@ -288,7 +291,8 @@ impl MockHsmDevice {
             let state = self.state.read().map_err(|_| RvError::ErrRwLockReadPoison)?;
             let identity = mock_attestation(&state, objects.identity, objects.identity)?;
             let authz = mock_attestation(&state, objects.authz, objects.identity)?;
-            Ok(AttestationBundle::new("mock", &state.serial, "mock", &identity, &authz))
+            let seed_ecdh = mock_attestation(&state, objects.seed_ecdh, objects.identity)?;
+            Ok(AttestationBundle::new("mock", &state.serial, "mock", &identity, &authz).with_seed_ecdh(&seed_ecdh))
         });
         session.close().await?;
         bundle
@@ -364,6 +368,7 @@ impl HsmAdminSession for MockAdminSession {
             ObjectKind::AsymmetricKey => state.objects.get(&id).and_then(|o| match o.kind {
                 MockKind::Identity => Some(info("bv-identity", &["derive-ecdh", "sign-ecdsa"], &o.extra_capabilities)),
                 MockKind::Authz => Some(info("bv-authz", &["sign-eddsa"], &o.extra_capabilities)),
+                MockKind::SeedEcdh => Some(info("bv-seed-ecdh", &["derive-ecdh"], &o.extra_capabilities)),
                 MockKind::Wrap => None,
             }),
         })
@@ -403,7 +408,7 @@ impl HsmAdminSession for MockAdminSession {
         self.device.session(ADMIN_SESSION_OWNER)?;
         let state = self.device.state.read().map_err(|_| RvError::ErrRwLockReadPoison)?;
         match state.objects.get(&key).map(|o| o.kind) {
-            Some(MockKind::Identity) => identity_public(&state, key),
+            Some(MockKind::Identity | MockKind::SeedEcdh) => identity_public(&state, key),
             Some(MockKind::Authz) => authz_public(&state, key),
             _ => Err(RvError::ErrHsm(format!("object {key} is not an asymmetric key"))),
         }
@@ -580,12 +585,12 @@ impl HsmBackend for MockHsmBackend {
                 Ok(sk.sign(&signed).to_bytes().to_vec())
             }
             MockKind::Identity => {
-                use p256::ecdsa::{signature::Signer, Signature, SigningKey as EcSigningKey};
-                let sk = EcSigningKey::from_slice(&obj.material).map_err(|_| RvError::ErrHsm("bad identity key".into()))?;
-                let sig: Signature = sk.sign(&signed);
-                Ok(sig.to_bytes().to_vec())
+                if self.credential.is_some() {
+                    return Err(RvError::ErrHsm("bv-identity is in domain 2; a node session cannot use it".into()));
+                }
+                ecdsa_sign(&obj.material, &signed)
             }
-            MockKind::Wrap => Err(RvError::ErrHsm("wrap key cannot sign".into())),
+            MockKind::Wrap | MockKind::SeedEcdh => Err(RvError::ErrHsm("object cannot sign".into())),
         }
     }
 
@@ -603,8 +608,15 @@ impl HsmBackend for MockHsmBackend {
         self.open_session()?;
         let state = self.device.state.read().map_err(|_| RvError::ErrRwLockReadPoison)?;
         let obj = state.objects.get(&key).ok_or(RvError::ErrHsmUnavailable)?;
-        if obj.kind != MockKind::Identity {
-            return Err(RvError::ErrHsm("object cannot derive ECDH".into()));
+        // On a provisioned device `bv-identity` is domain 2 (admin only); the
+        // node's ECDH key is `bv-seed-ecdh`. A pre-phase-4 device has no split.
+        let allowed = match obj.kind {
+            MockKind::SeedEcdh => true,
+            MockKind::Identity => self.credential.is_none(),
+            MockKind::Wrap | MockKind::Authz => false,
+        };
+        if !allowed {
+            return Err(RvError::ErrHsm("object cannot derive ECDH from this session".into()));
         }
         let secret = p256::SecretKey::from_slice(&obj.material).map_err(|_| RvError::ErrHsm("bad identity key".into()))?;
         let peer = p256::PublicKey::from_sec1_bytes(peer_pub).map_err(|_| RvError::ErrHsm("bad ECDH peer key".into()))?;
@@ -635,6 +647,7 @@ fn mock_attestation(state: &MockState, key: HsmObjectId, signer: HsmObjectId) ->
     let obj = state.objects.get(&key).ok_or(RvError::ErrHsmUnavailable)?;
     let (label, public_key) = match obj.kind {
         MockKind::Identity => ("bv-identity", identity_public(state, key)?),
+        MockKind::SeedEcdh => ("bv-seed-ecdh", identity_public(state, key)?),
         MockKind::Authz => ("bv-authz", authz_public(state, key)?),
         MockKind::Wrap => return Err(RvError::ErrHsm("wrap key is not attestable".into())),
     };
@@ -722,7 +735,7 @@ fn ensure_object(state: &mut MockState, id: u16, kind: MockKind) -> bool {
     }
     let material = match kind {
         MockKind::Wrap => random_bytes(32),
-        MockKind::Identity => random_p256_scalar(),
+        MockKind::Identity | MockKind::SeedEcdh => random_p256_scalar(),
         MockKind::Authz => random_bytes(32),
     };
     state.objects.insert(id, StoredObject { kind, material, extra_capabilities: Vec::new() });

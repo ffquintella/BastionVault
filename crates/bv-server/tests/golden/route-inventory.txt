@@ -277,6 +277,7 @@ DELETE /v2/sys/plugins/{name}/grants/resource-credentials [privileged] delete sy
 GET    /v2/sys/plugins/{name}/entity-data [privileged] read sys/plugins/{name}/entity-data (SysPluginEntityDataUsage)
 DELETE /v2/sys/plugins/{name}/entity-data/{entity_id} [privileged] delete sys/plugins/{name}/entity-data/{entity_id} (SysPluginEntityDataPurge)
 GET    /v2/sys/hsm/status [routed] -> sys/hsm/status
+POST   /v2/sys/hsm/bootstrap [cluster-local] -- HSM pool init bootstrap before any token can exist: loopback peer only, refused once initialized, needs every member's bv-admin credential
 GET    /v2/sys/hsm/members [routed] -> sys/hsm/members
 POST   /v2/sys/hsm/members/{name}/retire [routed] -> sys/hsm/members/{name}/retire
 POST   /v2/sys/hsm/members/{name} [routed] -> sys/hsm/members/{name}

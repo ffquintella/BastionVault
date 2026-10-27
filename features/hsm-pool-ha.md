@@ -2,7 +2,8 @@
 
 > Status: **in progress** (T454) — phases 1–2 of 7 (formats and custody core;
 > pool backend) done 2026-10-19, phase 3 (HSM link) done 2026-10-27, phase 4
-> part 1 (ceremonies and repair, mock) done 2026-10-27; see
+> parts 1–2 (ceremonies, repair, bootstrap, provisioning, YubiHSM 2 wiring)
+> done 2026-10-27 except `rotate-epoch` and `migrate-to-pool`; see
 > [Current state](#current-state). Spec
 > written 2026-10-19. Extends
 > [HSM Support (YubiHSM 2)](hsm-support.md) (S17), whose non-negotiable security
@@ -982,20 +983,72 @@ Decisions made in phase 4 part 1 where this spec left room:
 - Custody sets are repaired in the seal record's cluster scope
   (`record.cluster_uuid`).
 
-Not done in phase 4 part 1 (part 2, unless marked):
+Phase 4, part 2:
 
-- The `yubihsm2` side: one `bv-hsm-link` relay per `yubihsm::Client`, admin
-  sessions and `provision` on the device, `spawn_blocking`, lifting the
-  refusal; Yubico attestation-chain pinning (step 1 of attestation; the mock's
-  attestation proves only self-consistency).
-- An HTTP / CLI surface for the init bootstrap (`bootstrap_enroll` is a provider
-  method; a provisioned pool cannot yet be initialized over the API), and
-  attestation of the two initial members at init.
-- Epoch rotation (`rotate-epoch`) and `migrate-to-pool`.
-- The 5-minute background repair tick and the member-up trigger (repair runs
-  on demand and after `member add` / `retire` only when asked).
-- `bv-seed-ecdh`, `bv-identity` in domain 2, and `bv-auditor` in the layout.
-- Audit-broker events (phase 6): ceremony events go to the `security` log.
+- **Bootstrap and attested init.** `bootstrap_enroll(admin, bundles)` runs
+  `verify_member` on both configured members before anything changes, enrolls
+  the node, and writes `core/hsm/bootstrap` (each member's identity, authz and
+  seed-ECDH keys and attestation fingerprints). Pool init by a node that holds
+  node credentials needs that record for every member, refuses one whose device
+  reports other keys, pins the keys and fingerprints in the member entries, and
+  deletes the record. `POST /v2/sys/hsm/bootstrap` (route class
+  `cluster-local`, but the handler accepts **only a loopback peer**, and only
+  while uninitialized) and `bvault operator hsm bootstrap --bundle
+  NAME=FILE --admin …` expose it.
+- **Provisioning.** `bvault operator hsm provision --mock-state-path P --serial
+  S` (builds with `hsm_mock`) or `--connector URL` (YubiHSM 2, local to the HSM
+  host), `--adopt`, `--admin-password env:VAR` or a TTY prompt,
+  `--factory-password env:VAR` (default: the published one), `--out
+  bundle.json`. Runs against the device; the vault is not involved.
+- **Layout.** `HsmObjectIds.seed_ecdh` (default 6, `seed_ecdh_key_id`).
+  Provisioning creates `bv-seed-ecdh` (domain 1, `derive-ecdh`) and puts
+  `bv-identity` in domain 2 (`sign-ecdsa`, admin only); the bundle carries a
+  third attestation and `verify_layout` checks it. On a provisioned mock a node
+  session can neither sign nor run ECDH with `bv-identity`; pool custody scopes
+  use `seed_ecdh`. Pre-phase-4 mock state files keep the old four objects.
+- **Events and the repair tick** (`seal/hsm/hooks.rs`). `ProviderHooks` is the
+  pool's event sink: the `security` log always, and after
+  `HsmSealProvider::attach(core)` (called by `bvault server`) an audit entry at
+  `sys/hsm/events/<event>/<member>` (details HMAC-redacted like any body). New
+  events: `hsm.set_repaired`, `hsm.node_enrolled`, `hsm.node_revoked`,
+  `hsm.revocation_pending`, `hsm.member_added`, `hsm.member_retired`,
+  `hsm.member_promoted`. The tick runs repair every 5 minutes, or within 10 s
+  of `hsm.member_up`, while unsealed.
+- **YubiHSM 2 wiring** (`hsm/yubihsm2.rs`, compiled by `make check-hsm`,
+  unverified on hardware). A pool member client opens with the node's
+  credential through its local `connector`, or through a `bv-hsm-link` relay
+  started for that client to the record's gateway (the `link` block's
+  certificates). `YubiHsm2AdminSession` implements the ceremonies with
+  `bv-admin`; `provision` creates the layout from factory state with the
+  capability masks of § HSM object layout and deletes key 1. The startup gate
+  is lifted. `verify_attestation` on the admin session **refuses**, because no
+  Yubico root or intermediate is pinned, so bootstrap and `member add` on a
+  YubiHSM 2 stop there with an error naming phase 7.
+
+Decisions made in phase 4 part 2:
+
+- The repair tick runs on every node, serialized by `hsm-repair`, not on the
+  Raft leader only: `Core` exposes no leadership signal. Each write still
+  re-checks its set, so concurrent runs cannot clobber each other.
+- Bootstrap is loopback-only rather than any cluster node: before init it is a
+  `bv-admin` password oracle for whoever can reach it.
+- `bv-auditor` is left to phase 6 with the drain: its credential has nowhere to
+  go until the drain exists.
+- YubiHSM 2 calls stay synchronous on the calling task (as per node); the relay
+  runs on its own thread, so this cannot deadlock. `spawn_blocking` waits for
+  phase 7 latency measurements.
+
+Not done in phase 4 (still open):
+
+- Epoch rotation (`rotate-epoch`) and `migrate-to-pool`, with their routes and
+  CLI. Rotation needs the record to carry each member's wrap-key ids per epoch
+  (a format change); migration needs a node that holds both the per-node device
+  and pool clients (a `migrate_from` block in the pool config is the intended
+  shape).
+
+Phase 7 (needs hardware): pin the Yubico attestation root and intermediate
+and walk the chain (serial, capability and origin extensions); run
+`provision`, bootstrap, enrollment and the relay against two devices.
 
 Phase 3:
 
@@ -1208,10 +1261,10 @@ Not done in phase 2, deliberately:
 | 1. Formats and custody core | `BvHsmBlob` v2, `BvHsmBlobSet`, seal record v2 + v1 reader, per-node authz counters, custody store and handles. Mock only. | `crates/bv-core/src/hsm/{blob,blobset,custody_store}.rs`, `crates/bv-core/src/seal/hsm.rs`, `crates/bv-core/src/seal/hsm/record.rs` | Done |
 | 2. Pool backend | `HsmPool`: members, preference, failover, health probe, circuit breaker, parallel wrap, `min_wrap_copies`. Mock enforces the 16-session limit and `SESSIONS_FULL`. Pool init and unseal, storage gate, status, metrics. | `crates/bv-core/src/hsm/{pool,clock,mock,yubihsm2,mod}.rs`, `crates/bv-core/src/seal/hsm.rs`, `crates/bv-metrics/src/hsm_metrics.rs` | Done |
 | 3. HSM link | `bv-hsm-link` crate (gateway + relay), `bvault hsm-gateway` | `crates/bv-hsm-link/`, `crates/bvault-cli` | Done |
-| 4. Ceremonies and repair | `provision`, attestation chain pinning, node enroll/revoke with credential delivery, member add/retire, repair job, epoch rotation, `migrate-to-pool`, v2 routes, CLI | `crates/bv-core/src/hsm/{admin,ceremony,node_creds,repair}.rs`, `crates/bv-core/src/seal/hsm/pool_admin.rs`, `crates/bv-kernel/src/modules/system/`, `crates/bvault-cli` | In progress (part 1 done: mock ceremonies, delivery, repair, routes, CLI) |
+| 4. Ceremonies and repair | `provision`, attestation chain pinning, node enroll/revoke with credential delivery, member add/retire, repair job, epoch rotation, `migrate-to-pool`, v2 routes, CLI | `crates/bv-core/src/hsm/{admin,ceremony,node_creds,repair}.rs`, `crates/bv-core/src/seal/hsm/pool_admin.rs`, `crates/bv-kernel/src/modules/system/`, `crates/bvault-cli` | In progress (parts 1–2 done; `rotate-epoch` and `migrate-to-pool` open; attestation pinning moved to phase 7) |
 | 5. Recovery | Recovery keypair, Shamir split, recovery copies, `recover` route | `crates/bv-core/src/hsm/recovery.rs` | Planned |
 | 6. Audit and observability | Device-log drain, events, metrics, status, GUI page, `docs/hsm.md`, `docs/api.md` | `crates/bv-core/src/hsm/device_audit.rs`, `gui/src/routes/HsmStatusPage.tsx` | Planned |
-| 7. Hardware validation | Two physical devices plus three nodes; measure latencies; confirm the FIPS Ed25519 question | `tests/` behind `BVAULT_TEST_YUBIHSM_POOL=1` | Planned |
+| 7. Hardware validation | Two physical devices plus three nodes; pin the Yubico attestation chain and lift the YubiHSM 2 attestation refusal; validate `provision`, bootstrap, enrollment and the relay; measure latencies; confirm the FIPS Ed25519 question | `tests/` behind `BVAULT_TEST_YUBIHSM_POOL=1` | Planned |
 
 **What happens to the existing modules:**
 

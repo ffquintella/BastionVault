@@ -384,6 +384,10 @@ pub(crate) const V2_ONLY: &[ResourceSpec] = &[
     // HSM pool ceremonies (features/hsm-pool-ha.md, T454 phase 4). Sudo via
     // the sys backend's `root_paths`; admin credentials ride in the body for
     // one request. `retire` precedes `{name}` so the literal wins.
+    resource!("/hsm/bootstrap" => [
+        route!(cluster_local Post => sys_hsm_bootstrap_request_handler,
+            "HSM pool init bootstrap before any token can exist: loopback peer only, refused once initialized, needs every member's bv-admin credential"),
+    ]),
     resource!("/hsm/members" => [route!(routed Get => sys_hsm_pool_request_handler, "sys/hsm/members")]),
     resource!("/hsm/members/{name}/retire" => [
         route!(routed Post => sys_hsm_pool_request_handler, "sys/hsm/members/{name}/retire"),

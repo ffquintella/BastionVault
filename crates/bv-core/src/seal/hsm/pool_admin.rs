@@ -28,15 +28,16 @@ use crate::{
         blob::{AuthzAlg, BvHsmBlob, Context, HsmId, Purpose},
         blobset::{unix_now_secs, BvHsmBlobSet},
         ceremony::{
-            list_enrollments, read_enrollment, verify_member, write_enrollment, write_promotion, AttestationBundle,
-            NodeEnrollment, PromotionTranscript, Revocation, ENROLLMENT_CONTEXT, PROMOTION_CONTEXT,
+            list_enrollments, read_enrollment, verify_member, write_bootstrap, write_enrollment, write_promotion,
+            AttestationBundle, BootstrapRecord, NodeEnrollment, PromotionTranscript, Revocation, ENROLLMENT_CONTEXT,
+            PROMOTION_CONTEXT,
         },
         custody_store::{is_key_id, CustodyRecord, CUSTODY_STORE_PREFIX, HSM_CUSTODY_LOCK},
         node_creds::{
             self, discard_node_entries, list_pending, read_delivery, read_pending, seal_credential, write_delivery,
             CredentialDelivery,
         },
-        pool::{HsmPool, PoolMember, MAX_LIVE_MEMBERS},
+        pool::{HsmPool, PoolEvent, PoolEventKind, PoolMember, MAX_LIVE_MEMBERS},
         repair::{drop_retired, plan, Pacer, RepairReport, SetPlan, HSM_REPAIR_LOCK, REPAIR_INTERVAL},
         validate_member_name, validate_node_id, verify_identity_signature, HsmObjectId, MemberTarget,
     },
@@ -67,6 +68,15 @@ fn member_named<'r>(record: &'r HsmSealRecord, name: &str) -> Result<(&'r HsmId,
 }
 
 impl HsmSealProvider {
+    /// Raise a pool event: the security log, and the audit log once attached.
+    fn event(&self, kind: PoolEventKind, member: &str, hsm_id: &str, detail: &str) {
+        if let Devices::Pool(devices) = &self.devices {
+            let event =
+                PoolEvent { kind, member: member.to_string(), hsm_id: hsm_id.to_string(), detail: detail.to_string() };
+            devices.events.emit(&event);
+        }
+    }
+
     fn pool_devices(&self) -> Result<&PoolDevices, RvError> {
         match &self.devices {
             Devices::Pool(devices) => Ok(devices),
@@ -145,7 +155,8 @@ impl HsmSealProvider {
                 };
                 match session.delete_node_auth_key(*key_id).await {
                     Ok(_) => {
-                        log::warn!(target: "security", "hsm.node_revoked: node={node} member={} (pending revocation applied)", target.name);
+                        let detail = format!("node={node} (pending revocation applied)");
+                        self.event(PoolEventKind::NodeRevoked, &target.name, target.hsm_id.as_str(), &detail);
                         applied.push(format!("{node} on {}", target.name));
                     }
                     Err(e) => {
@@ -339,10 +350,10 @@ impl HsmSealProvider {
             return Err(e);
         }
         let members: Vec<&str> = sessions.iter().map(|(t, _)| t.name.as_str()).collect();
-        log::warn!(
-            target: "security",
-            "hsm.node_enrolled: node={node_id} auth_key={auth_key_id:#06x} members={members:?} by={actor}"
-        );
+        for (target, _) in sessions {
+            let detail = format!("node={node_id} auth_key={auth_key_id:#06x} by={actor}");
+            self.event(PoolEventKind::NodeEnrolled, &target.name, target.hsm_id.as_str(), &detail);
+        }
         Ok(json!({
             "node_id": node_id,
             "auth_key_id": format!("{auth_key_id:#06x}"),
@@ -358,7 +369,12 @@ impl HsmSealProvider {
     /// configured member with the admin credentials, store the credentials
     /// locally (never in storage), and write the enrollment record.
     #[maybe_async::maybe_async]
-    pub async fn bootstrap_enroll(&self, admin: &AdminCredentials, actor: &str) -> Result<Value, RvError> {
+    pub async fn bootstrap_enroll(
+        &self,
+        admin: &AdminCredentials,
+        bundles: &BTreeMap<String, AttestationBundle>,
+        actor: &str,
+    ) -> Result<Value, RvError> {
         let devices = self.pool_devices()?;
         let pool_cfg = self.config.pool.as_ref().ok_or_else(|| RvError::ErrHsm("not a pool provider".into()))?;
         let store = devices.cache.credentials.as_ref().ok_or_else(|| {
@@ -387,6 +403,15 @@ impl HsmSealProvider {
             .collect::<Result<Vec<_>, RvError>>()?;
         let sessions = self.open_admin_sessions(targets, admin).await?;
         let result: Result<Value, RvError> = async {
+            // Spec § Bootstrap, step 1: attest both devices before anything changes.
+            let mut attested = BootstrapRecord::new(node_id);
+            for (target, session) in &sessions {
+                let bundle = bundles.get(&target.name).ok_or_else(|| {
+                    RvError::ErrHsmAttestationInvalid(format!("no attestation bundle for member {}", target.name))
+                })?;
+                let verified = verify_member(session.as_ref(), bundle, &self.config.objects).await?;
+                attested.insert(&target.name, &verified);
+            }
             let auth_key_id = node_auth_key_id(self.free_slot(&sessions, &BTreeSet::new(), &enrollments).await?)?;
             let mut enrollment =
                 NodeEnrollment::new(node_id, pending.transport_pub.clone(), pending.transport_fp.clone(), unix_now_secs()?, actor);
@@ -402,6 +427,7 @@ impl HsmSealProvider {
                     enrollment.signatures.insert(target.hsm_id.clone(), hex::encode(sig));
                 }
                 store.install_direct(&made)?;
+                write_bootstrap(physical, &attested).await?;
                 write_enrollment(physical, &enrollment).await
             }
             .await;
@@ -416,7 +442,10 @@ impl HsmSealProvider {
             let ids: Vec<HsmId> = made.iter().map(|(id, _)| id.clone()).collect();
             devices.cache.forget_clients(&ids);
             devices.rebuild_bootstrap(&self.config)?;
-            log::warn!(target: "security", "hsm.node_enrolled: node={node_id} auth_key={auth_key_id:#06x} (init bootstrap) by={actor}");
+            for (target, _) in &sessions {
+                let detail = format!("node={node_id} auth_key={auth_key_id:#06x} (init bootstrap) by={actor}");
+                self.event(PoolEventKind::NodeEnrolled, &target.name, target.hsm_id.as_str(), &detail);
+            }
             Ok(json!({ "node_id": node_id, "auth_key_id": format!("{auth_key_id:#06x}"), "members": ids }))
         }
         .await;
@@ -512,12 +541,13 @@ impl HsmSealProvider {
         if let Err(e) = devices.pool_for_record(&self.config, &record) {
             log::warn!(target: "security", "rebuilding this node's HSM pool after the revocation failed: {e}");
         }
-        log::warn!(
-            target: "security",
-            "hsm.node_revoked: node={node_id} revoked_on={:?} pending={:?} by={actor}",
-            revoked_on.iter().map(|(_, n)| n).collect::<Vec<_>>(),
-            pending.iter().map(|(_, n, _)| n).collect::<Vec<_>>()
-        );
+        for (hsm_id, name) in &revoked_on {
+            self.event(PoolEventKind::NodeRevoked, name, hsm_id.as_str(), &format!("node={node_id} by={actor}"));
+        }
+        for (hsm_id, name, why) in &pending {
+            let detail = format!("node={node_id} by={actor}: {why}");
+            self.event(PoolEventKind::RevocationPending, name, hsm_id.as_str(), &detail);
+        }
         Ok(json!({
             "node_id": node_id,
             "revoked_on": revoked_on.iter().map(|(_, n)| n).collect::<Vec<_>>(),
@@ -621,7 +651,7 @@ impl HsmSealProvider {
                     name: target.name.clone(),
                     gateway: target.gateway.clone(),
                     serial: bundle.serial.clone(),
-                    seed_ecdh_pub: verified.identity_pub.clone(),
+                    seed_ecdh_pub: verified.seed_ecdh_pub.clone(),
                     identity_pub: verified.identity_pub.clone(),
                     authz_pub: verified.authz_pub.clone(),
                     // Both backends sign authorizations with Ed25519 (phase 7
@@ -652,12 +682,8 @@ impl HsmSealProvider {
             return Err(e);
         }
         let nodes: Vec<&str> = enrollments.iter().filter(|e| !e.is_revoked()).map(|e| e.node_id.as_str()).collect();
-        log::warn!(
-            target: "security",
-            "hsm.member_added: member={} hsm_id={} state=joining nodes_enrolled={nodes:?} by={actor}",
-            target.name,
-            target.hsm_id
-        );
+        let detail = format!("state=joining nodes_enrolled={nodes:?} by={actor}");
+        self.event(PoolEventKind::MemberAdded, &target.name, target.hsm_id.as_str(), &detail);
         Ok(json!({
             "name": target.name,
             "hsm_id": target.hsm_id,
@@ -726,7 +752,7 @@ impl HsmSealProvider {
             m.state = MemberState::Retired;
         }
         self.store_record(&record).await?;
-        log::warn!(target: "security", "hsm.member_retired: member={name} hsm_id={hsm_id} by={actor}");
+        self.event(PoolEventKind::MemberRetired, name, hsm_id.as_str(), &format!("by={actor}"));
         Ok(json!({
             "name": name,
             "hsm_id": hsm_id,
@@ -957,7 +983,8 @@ impl HsmSealProvider {
                     Ok(blob) => {
                         new_set.insert_copy(blob)?;
                         added += 1;
-                        log::info!(target: "security", "hsm.set_repaired: {} copy added on {target}", set.purpose.as_token());
+                        let detail = format!("{} copy added", set.purpose.as_token());
+                        self.event(PoolEventKind::SetRepaired, "", target.as_str(), &detail);
                     }
                     Err(e) => failures.push(format!("{target}: {e}")),
                 }
@@ -1075,7 +1102,13 @@ impl HsmSealProvider {
             m.state = MemberState::Active;
         }
         self.store_record(&record).await?;
-        log::warn!(target: "security", "hsm.member_promoted: hsm_id={hsm_id} sets={sets_checked} (joining -> active)");
+        let name = record.members.get(hsm_id).map(|m| m.name.clone()).unwrap_or_default();
+        self.event(
+            PoolEventKind::MemberPromoted,
+            &name,
+            hsm_id.as_str(),
+            &format!("sets={sets_checked} joining -> active"),
+        );
         Ok(())
     }
 }
@@ -1096,7 +1129,6 @@ mod tests {
             derive::PqcKeyKind,
             mock::{MockHsmBackend, MockHsmDevice},
             node_creds::NodeCredentialStore,
-            pool::LogEventSink,
             HsmBackend, HsmObjectIds, MemberOpener, RecoveryMode, ResolvedHsmConfig, ResolvedPoolConfig,
             ResolvedPoolMember,
         },
@@ -1108,6 +1140,21 @@ mod tests {
     };
 
     const KEK: [u8; 32] = [42u8; 32];
+
+    #[derive(Default)]
+    struct Recorder(Mutex<Vec<PoolEvent>>);
+
+    impl crate::hsm::pool::PoolEventSink for Recorder {
+        fn emit(&self, event: &PoolEvent) {
+            self.0.lock().unwrap().push(event.clone());
+        }
+    }
+
+    impl Recorder {
+        fn count(&self, kind: PoolEventKind) -> usize {
+            self.0.lock().unwrap().iter().filter(|e| e.kind == kind).count()
+        }
+    }
 
     type Registry = Arc<Mutex<BTreeMap<HsmId, Arc<MockHsmDevice>>>>;
 
@@ -1185,7 +1232,10 @@ mod tests {
         physical: Arc<dyn PhysicalBackend>,
         a: Arc<MockHsmDevice>,
         b: Arc<MockHsmDevice>,
+        bundles: BTreeMap<String, AttestationBundle>,
         dirs: Mutex<HashMap<String, String>>,
+        hooks: Arc<crate::seal::hsm::hooks::ProviderHooks>,
+        seen: Arc<Recorder>,
         min_wrap_copies: usize,
     }
 
@@ -1193,18 +1243,26 @@ mod tests {
         async fn new(min_wrap_copies: usize) -> Self {
             let tag = rand_tag();
             let clock = ManualClock::new();
-            let (a, _) = provisioned(&format!("A{tag}"), "admin-a", &clock).await;
-            let (b, _) = provisioned(&format!("B{tag}"), "admin-b", &clock).await;
+            let seen = Arc::new(Recorder::default());
+            let (a, bundle_a) = provisioned(&format!("A{tag}"), "admin-a", &clock).await;
+            let (b, bundle_b) = provisioned(&format!("B{tag}"), "admin-b", &clock).await;
             let registry: Registry =
                 Arc::new(Mutex::new(BTreeMap::from([(id_of(&a), a.clone()), (id_of(&b), b.clone())])));
             Self {
-                tag,
+                tag: tag.clone(),
                 clock,
                 registry,
                 physical: temp_file_backend(),
                 a,
                 b,
+                bundles: BTreeMap::from([(format!("a-{tag}"), bundle_a), (format!("b-{tag}"), bundle_b)]),
                 dirs: Mutex::new(HashMap::new()),
+                hooks: {
+                    let hooks = crate::seal::hsm::hooks::ProviderHooks::new();
+                    hooks.add_sink(seen.clone());
+                    hooks
+                },
+                seen,
                 min_wrap_copies,
             }
         }
@@ -1276,14 +1334,14 @@ mod tests {
                 self.physical.clone(),
                 self.config(node),
                 self.clock.clone(),
-                Arc::new(LogEventSink),
+                self.hooks.clone(),
             )
             .unwrap()
         }
 
         async fn init(&self) -> HsmSealProvider {
             let p = self.provider("n1");
-            p.bootstrap_enroll(&self.both(), "root").await.unwrap();
+            p.bootstrap_enroll(&self.both(), &self.bundles, "root").await.unwrap();
             p.check_init(&seal_config()).await.unwrap();
             p.init_kek(&KEK, &seal_config()).await.unwrap();
             p
@@ -1316,7 +1374,7 @@ mod tests {
             let scope = CustodyScope {
                 cluster_uuid: record.cluster_uuid.clone(),
                 epoch: record.epoch,
-                ecdh_key: HsmObjectIds::default().identity,
+                ecdh_key: HsmObjectIds::default().seed_ecdh,
                 binding_pub,
             };
             CustodyStore::with_pool(barrier, pool, provider.config.clone(), scope)
@@ -1406,6 +1464,8 @@ mod tests {
         p.b.set_offline(true);
         let out = n1.revoke_node("n3", &p.both(), "root").await.unwrap();
         assert_eq!(out["revocation_pending"][0]["member"], p.name("b"), "{out}");
+        assert_eq!(p.seen.count(PoolEventKind::RevocationPending), 1);
+        assert!(p.seen.count(PoolEventKind::NodeRevoked) >= 3, "n2 on both, n3 on A");
         assert!(out["residual_risk"].is_string());
         assert!(n3.recover_kek().await.is_err(), "deleted on A, B is down for everyone");
         p.b.set_offline(false);
@@ -1490,6 +1550,15 @@ mod tests {
         p.a.set_offline(true);
         n2.refresh_membership().await.unwrap();
         assert_eq!(n2.recover_kek().await.unwrap().as_slice(), &KEK, "n2 unseals through the replacement");
+        for kind in [
+            PoolEventKind::NodeEnrolled,
+            PoolEventKind::MemberAdded,
+            PoolEventKind::SetRepaired,
+            PoolEventKind::MemberPromoted,
+            PoolEventKind::MemberRetired,
+        ] {
+            assert!(p.seen.count(kind) > 0, "{} raised", kind.name());
+        }
     }
 
     #[tokio::test]
@@ -1543,9 +1612,48 @@ mod tests {
         let n1 = p.provider("n1");
         let err = n1.enroll_node("n2", "fp", &p.both(), "root").await.unwrap_err();
         assert!(err.to_string().contains("not initialized"), "{err}");
-        n1.bootstrap_enroll(&p.both(), "root").await.unwrap();
-        assert!(n1.bootstrap_enroll(&p.both(), "root").await.is_err(), "once");
+        n1.bootstrap_enroll(&p.both(), &p.bundles, "root").await.unwrap();
+        assert!(n1.bootstrap_enroll(&p.both(), &p.bundles, "root").await.is_err(), "once");
         n1.init_kek(&KEK, &seal_config()).await.unwrap();
-        assert!(n1.bootstrap_enroll(&p.both(), "root").await.is_err(), "not after init");
+        assert!(n1.bootstrap_enroll(&p.both(), &p.bundles, "root").await.is_err(), "not after init");
+    }
+
+    #[tokio::test]
+    async fn init_pins_the_bootstrap_attestation_and_nodes_never_reach_bv_identity() {
+        let p = Pool::new(1).await;
+        let mut partial = p.bundles.clone();
+        partial.remove(&p.name("b"));
+        let err = p.provider("n1").bootstrap_enroll(&p.both(), &partial, "root").await.unwrap_err();
+        assert!(err.to_string().contains("no attestation bundle"), "{err}");
+
+        let n1 = p.init().await;
+        let record = n1.pool_record().await.unwrap();
+        for m in record.members.values() {
+            assert_eq!(m.attestation_fps.len(), 3, "identity, authz and seed-ecdh attested");
+            assert_ne!(m.seed_ecdh_pub, m.identity_pub, "bv-seed-ecdh is its own key");
+        }
+        let bootstrap = crate::hsm::ceremony::read_bootstrap(p.physical.as_ref()).await.unwrap();
+        assert!(bootstrap.is_none(), "consumed by init");
+
+        let pool = n1.pool().unwrap();
+        let node = pool.members()[0].backend().unwrap();
+        let objects = HsmObjectIds::default();
+        let peer = record.members.values().next().unwrap().identity_pub.clone();
+        assert!(node.sign(objects.identity, "c", b"m").await.is_err(), "bv-identity is domain 2");
+        assert!(node.derive_ecdh(objects.identity, &peer).await.is_err());
+        assert!(node.derive_ecdh(objects.seed_ecdh, &peer).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn init_refuses_a_member_whose_keys_differ_from_its_attestation() {
+        let p = Pool::new(1).await;
+        let n1 = p.provider("n1");
+        n1.bootstrap_enroll(&p.both(), &p.bundles, "root").await.unwrap();
+        let mut rec = crate::hsm::ceremony::read_bootstrap(p.physical.as_ref()).await.unwrap().unwrap();
+        rec.members.values_mut().next().unwrap().authz_pub = vec![9; 32];
+        crate::hsm::ceremony::write_bootstrap(p.physical.as_ref(), &rec).await.unwrap();
+        let err = n1.init_kek(&KEK, &seal_config()).await.unwrap_err();
+        assert!(matches!(err, RvError::ErrHsmAttestationInvalid(_)), "{err}");
+        assert!(n1.load_record().await.unwrap().is_none(), "nothing initialized");
     }
 }

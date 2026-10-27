@@ -313,6 +313,58 @@ async fn sys_hsm_pool_request_handler(
     handle_request(core, &mut r).await
 }
 
+/// POST `/v2/sys/hsm/bootstrap` — the HSM pool init bootstrap (T454 phase 4):
+/// attest both members and enroll this node before `sys/init`. No token can
+/// exist yet, so it is accepted only from a loopback peer on the init node,
+/// only while the vault is uninitialized, and it needs every member's
+/// `bv-admin` credential; nothing in the body is logged or returned.
+async fn sys_hsm_bootstrap_request_handler(
+    req: HttpRequest,
+    mut body: web::Bytes,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, HttpError> {
+    let peer = req.conn_data::<crate::Connection>().map(|c| c.peer).or_else(|| req.peer_addr());
+    if !peer.is_some_and(|p| p.ip().is_loopback()) {
+        return Ok(response_error(StatusCode::FORBIDDEN, "HSM pool bootstrap is accepted only from loopback on the init node"));
+    }
+    #[cfg(not(feature = "sync_handler"))]
+    let initialized = core.inited().await?;
+    #[cfg(feature = "sync_handler")]
+    let initialized = core.inited()?;
+    if initialized {
+        return Ok(response_error(StatusCode::BAD_REQUEST, "the vault is already initialized"));
+    }
+    let provider = core.seal_provider();
+    let Some(hsm) = provider.as_hsm() else {
+        return Ok(response_error(StatusCode::BAD_REQUEST, "this vault's seal is not an HSM seal"));
+    };
+    let payload: serde_json::Value = serde_json::from_slice(&body)?;
+    body.clear();
+    let parsed = (|| {
+        let admin = bastion_vault::hsm::admin::AdminCredentials::from_json(payload.get("admin_credentials"))?;
+        let mut bundles = std::collections::BTreeMap::new();
+        if let Some(serde_json::Value::Object(map)) = payload.get("bundles") {
+            for (name, raw) in map {
+                let raw = raw.as_str().ok_or_else(|| RvError::ErrHsm(format!("bundle for {name:?} must be a string")))?;
+                bundles.insert(name.clone(), bastion_vault::hsm::ceremony::AttestationBundle::decode(raw.as_bytes())?);
+            }
+        }
+        Ok::<_, RvError>((admin, bundles))
+    })();
+    let (admin, bundles) = match parsed {
+        Ok(p) => p,
+        Err(e) => return Ok(response_error(StatusCode::BAD_REQUEST, &e.to_string())),
+    };
+    #[cfg(not(feature = "sync_handler"))]
+    let outcome = hsm.bootstrap_enroll(&admin, &bundles, "bootstrap").await;
+    #[cfg(feature = "sync_handler")]
+    let outcome = hsm.bootstrap_enroll(&admin, &bundles, "bootstrap");
+    match outcome {
+        Ok(data) => Ok(response_json_ok(None, json!({ "data": data }))),
+        Err(e) => Ok(response_error(StatusCode::BAD_REQUEST, &e.to_string())),
+    }
+}
+
 /// GET `/v2/sys/policy-schema` — the `sql_*` write gate (read-only).
 async fn sys_policy_schema_request_handler(
     req: HttpRequest,

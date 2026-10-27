@@ -49,6 +49,9 @@ pub struct AttestationBundle {
     pub identity_attestation: String,
     /// Hex attestation of `bv-authz`.
     pub authz_attestation: String,
+    /// Hex attestation of `bv-seed-ecdh`.
+    #[serde(default)]
+    pub seed_ecdh_attestation: String,
 }
 
 impl AttestationBundle {
@@ -60,7 +63,13 @@ impl AttestationBundle {
             firmware: firmware.to_string(),
             identity_attestation: hex::encode(identity),
             authz_attestation: hex::encode(authz),
+            seed_ecdh_attestation: String::new(),
         }
+    }
+
+    pub fn with_seed_ecdh(mut self, attestation: &[u8]) -> Self {
+        self.seed_ecdh_attestation = hex::encode(attestation);
+        self
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, RvError> {
@@ -84,8 +93,9 @@ impl AttestationBundle {
 
     /// Hex SHA-256 of each attestation, as the seal record keeps them.
     pub fn fingerprints(&self) -> Vec<String> {
-        [&self.identity_attestation, &self.authz_attestation]
+        [&self.identity_attestation, &self.authz_attestation, &self.seed_ecdh_attestation]
             .iter()
+            .filter(|a| !a.is_empty())
             .map(|a| hex::encode(Sha256::digest(a.as_bytes())))
             .collect()
     }
@@ -97,6 +107,7 @@ pub struct VerifiedMember {
     pub hsm_id: HsmId,
     pub identity_pub: Vec<u8>,
     pub authz_pub: Vec<u8>,
+    pub seed_ecdh_pub: Vec<u8>,
     pub attestation_fps: Vec<String>,
 }
 
@@ -122,7 +133,11 @@ pub async fn verify_member(
     for (what, hex_value, id, label) in [
         ("identity", &bundle.identity_attestation, objects.identity, "bv-identity"),
         ("authz", &bundle.authz_attestation, objects.authz, "bv-authz"),
+        ("seed-ecdh", &bundle.seed_ecdh_attestation, objects.seed_ecdh, "bv-seed-ecdh"),
     ] {
+        if hex_value.is_empty() {
+            return Err(refuse(format!("the bundle has no {what} attestation")));
+        }
         let attested = session.verify_attestation(&AttestationBundle::attestation(hex_value, what)?).await?;
         if attested.serial != bundle.serial || attested.object_id != id || attested.label != label {
             return Err(refuse(format!(
@@ -144,9 +159,10 @@ pub async fn verify_member(
     verify_identity_signature(&keys[0], CHALLENGE_CONTEXT, &challenge, &signature)
         .map_err(|_| refuse("bv-identity did not answer the challenge in this session".into()))?;
     verify_layout(session, objects).await?;
+    let seed_ecdh_pub = keys.pop().unwrap_or_default();
     let authz_pub = keys.pop().unwrap_or_default();
     let identity_pub = keys.pop().unwrap_or_default();
-    Ok(VerifiedMember { hsm_id, identity_pub, authz_pub, attestation_fps: bundle.fingerprints() })
+    Ok(VerifiedMember { hsm_id, identity_pub, authz_pub, seed_ecdh_pub, attestation_fps: bundle.fingerprints() })
 }
 
 /// Who revoked a node, and when.
@@ -278,6 +294,67 @@ pub async fn list_enrollments(physical: &dyn PhysicalBackend) -> Result<Vec<Node
 pub async fn write_enrollment(physical: &dyn PhysicalBackend, rec: &NodeEnrollment) -> Result<(), RvError> {
     let key = enrollment_key(&rec.node_id)?;
     physical.put(&BackendEntry { key, value: rec.encode()? }).await
+}
+
+/// Physical key of the members init's bootstrap attested.
+pub const BOOTSTRAP_RECORD_PATH: &str = "core/hsm/bootstrap";
+
+/// What `bootstrap` attested about each initial member, for `init` to pin
+/// into the seal record. Init compares it with what the device reports.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BootstrapRecord {
+    pub version: u8,
+    pub node_id: String,
+    #[serde(deserialize_with = "deserialize_unique_map")]
+    pub members: BTreeMap<HsmId, BootstrapMember>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BootstrapMember {
+    pub name: String,
+    #[serde(with = "serde_bytes")]
+    pub identity_pub: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    pub authz_pub: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    pub seed_ecdh_pub: Vec<u8>,
+    pub attestation_fps: Vec<String>,
+}
+
+impl BootstrapRecord {
+    pub fn new(node_id: &str) -> Self {
+        Self { version: RECORD_VERSION, node_id: node_id.to_string(), members: BTreeMap::new() }
+    }
+
+    pub fn insert(&mut self, name: &str, verified: &VerifiedMember) {
+        self.members.insert(
+            verified.hsm_id.clone(),
+            BootstrapMember {
+                name: name.to_string(),
+                identity_pub: verified.identity_pub.clone(),
+                authz_pub: verified.authz_pub.clone(),
+                seed_ecdh_pub: verified.seed_ecdh_pub.clone(),
+                attestation_fps: verified.attestation_fps.clone(),
+            },
+        );
+    }
+}
+
+#[maybe_async::maybe_async]
+pub async fn read_bootstrap(physical: &dyn PhysicalBackend) -> Result<Option<BootstrapRecord>, RvError> {
+    let Some(entry) = physical.get(BOOTSTRAP_RECORD_PATH).await? else { return Ok(None) };
+    let rec: BootstrapRecord = serde_json::from_slice(&entry.value)
+        .map_err(|e| RvError::ErrHsm(format!("invalid HSM bootstrap record: {e}")))?;
+    if rec.version != RECORD_VERSION {
+        return Err(RvError::ErrHsm(format!("unsupported HSM bootstrap record version {}", rec.version)));
+    }
+    Ok(Some(rec))
+}
+
+#[maybe_async::maybe_async]
+pub async fn write_bootstrap(physical: &dyn PhysicalBackend, rec: &BootstrapRecord) -> Result<(), RvError> {
+    let value = serde_json::to_vec(rec).map_err(|e| RvError::ErrHsm(format!("bootstrap record encode: {e}")))?;
+    physical.put(&BackendEntry { key: BOOTSTRAP_RECORD_PATH.to_string(), value }).await
 }
 
 /// A member's promotion from `joining` to `active`, signed by its identity

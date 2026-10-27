@@ -33,6 +33,10 @@ pub enum HsmCommands {
     Node(NodeCommands),
     /// Show the last repair run, or run the repair job now with `--run`.
     Repair(HsmRepair),
+    /// Before `operator init` on a pool: attest both members and enroll this node (loopback only).
+    Bootstrap(HsmBootstrap),
+    /// Provision a factory-state device into the pool layout and write its attestation bundle (local, no server).
+    Provision(HsmProvision),
 }
 
 #[derive(Subcommand)]
@@ -65,6 +69,8 @@ impl Hsm {
             HsmCommands::Node(NodeCommands::Revoke(c)) => c.execute(),
             HsmCommands::Node(NodeCommands::List(c)) => c.run("/v2/sys/hsm/nodes"),
             HsmCommands::Repair(c) => c.execute(),
+            HsmCommands::Bootstrap(c) => c.execute(),
+            HsmCommands::Provision(c) => exit_code(c.run()),
         }
     }
 }
@@ -85,6 +91,36 @@ impl AdminArgs {
                 .map_err(|e| RvError::ErrString(format!("reading the admin credential for {member}: {e}")))
         })
     }
+}
+
+/// One secret from `env:VAR`, or the TTY when `source` is empty. A literal
+/// value is refused, as for `--admin`.
+fn read_secret(what: &str, source: &str) -> Result<String, RvError> {
+    let value = if source.is_empty() {
+        rpassword::prompt_password(format!("{what} (will not echo): "))
+            .map_err(|e| RvError::ErrString(format!("reading {what}: {e}")))?
+    } else {
+        let var = source.strip_prefix("env:").ok_or_else(|| {
+            RvError::ErrString(format!("{what} comes from a TTY prompt or `env:VAR`, never from an argument"))
+        })?;
+        std::env::var(var).map_err(|_| RvError::ErrString(format!("env var {var} is not set")))?
+    };
+    if value.is_empty() {
+        return Err(RvError::ErrString(format!("{what} is empty")));
+    }
+    Ok(value)
+}
+
+/// `NAME=FILE` bundle arguments, read into `{name: bundle JSON}`.
+fn read_bundles(specs: &[String]) -> Result<Map<String, Value>, RvError> {
+    let mut out = Map::new();
+    for spec in specs {
+        let (name, file) =
+            spec.split_once('=').ok_or_else(|| RvError::ErrString(format!("--bundle {spec:?}: expected NAME=FILE")))?;
+        let text = std::fs::read_to_string(file).map_err(|e| RvError::ErrString(format!("reading {file}: {e}")))?;
+        out.insert(name.to_string(), Value::String(text));
+    }
+    Ok(out)
 }
 
 /// Resolve `--admin` specs. A literal value is refused: an argument is
@@ -307,9 +343,138 @@ impl CommandExecutor for HsmRepair {
     }
 }
 
+#[derive(Parser, Deref)]
+pub struct HsmBootstrap {
+    /// `MEMBER=FILE`: the attestation bundle `provision` wrote for each member.
+    #[arg(long = "bundle", value_name = "MEMBER=FILE")]
+    bundles: Vec<String>,
+    #[command(flatten)]
+    admin: AdminArgs,
+    #[deref]
+    #[command(flatten, next_help_heading = "HTTP Options")]
+    http_options: command::HttpOptions,
+}
+
+impl CommandExecutor for HsmBootstrap {
+    fn execute(&mut self) -> ExitCode {
+        exit_code(self.main())
+    }
+
+    fn main(&self) -> Result<(), RvError> {
+        let mut data = Map::new();
+        data.insert("bundles".into(), Value::Object(read_bundles(&self.bundles)?));
+        data.insert("admin_credentials".into(), Value::Object(self.admin.credentials()?));
+        let resp = self.client()?.request_write("/v2/sys/hsm/bootstrap".to_string(), Some(data))?;
+        print_response(&resp);
+        Ok(())
+    }
+}
+
+/// Runs on the HSM host, against the device directly; the vault is not involved.
+#[derive(Parser)]
+pub struct HsmProvision {
+    /// Mock device state file (dev and homolog builds with `hsm_mock`).
+    #[arg(long, conflicts_with = "connector")]
+    mock_state_path: Option<String>,
+    /// Serial a new mock device takes.
+    #[arg(long, requires = "mock_state_path")]
+    serial: Option<String>,
+    /// `yubihsm-connector` URL on this host (`http://127.0.0.1:12345`) or `usb`.
+    #[arg(long)]
+    connector: Option<String>,
+    /// Accept a device that is not in factory state if its layout verifies.
+    #[arg(long)]
+    adopt: bool,
+    /// `env:VAR` for the factory key's password; the published default if absent.
+    #[arg(long, default_value = "")]
+    factory_password: String,
+    /// `env:VAR` for the new `bv-admin` password; prompted on the TTY if absent.
+    #[arg(long, default_value = "")]
+    admin_password: String,
+    /// Where to write the attestation bundle (JSON, no secrets).
+    #[arg(long)]
+    out: std::path::PathBuf,
+}
+
+impl HsmProvision {
+    fn run(&self) -> Result<(), RvError> {
+        let factory = if self.factory_password.is_empty() {
+            bastion_vault::hsm::admin::FACTORY_PASSWORD.to_string()
+        } else {
+            read_secret("the factory key password", &self.factory_password)?
+        };
+        let admin = zeroize::Zeroizing::new(read_secret("the new bv-admin password", &self.admin_password)?);
+        let objects = bastion_vault::hsm::HsmObjectIds::default();
+        let bundle = match (&self.mock_state_path, &self.connector) {
+            (Some(path), None) => provision_mock(path, self.serial.as_deref(), &factory, &admin, &objects, self.adopt)?,
+            (None, Some(connector)) => provision_yubihsm2(connector, &factory, &admin, &objects, self.adopt)?,
+            _ => return Err(RvError::ErrString("give exactly one of --mock-state-path and --connector".into())),
+        };
+        let json = serde_json::to_string_pretty(&bundle).map_err(|e| RvError::ErrString(e.to_string()))?;
+        std::fs::write(&self.out, json)
+            .map_err(|e| RvError::ErrString(format!("writing {}: {e}", self.out.display())))?;
+        println!("provisioned {}; attestation bundle written to {}", bundle.serial, self.out.display());
+        Ok(())
+    }
+}
+
+#[cfg(feature = "hsm_mock")]
+fn provision_mock(
+    path: &str,
+    serial: Option<&str>,
+    factory: &str,
+    admin: &str,
+    objects: &bastion_vault::hsm::HsmObjectIds,
+    adopt: bool,
+) -> Result<bastion_vault::hsm::ceremony::AttestationBundle, RvError> {
+    bastion_vault::hsm::refuse_mock_in_production()?;
+    let serial = serial.ok_or_else(|| RvError::ErrString("--serial is required for a mock device".into()))?;
+    let device =
+        bastion_vault::hsm::mock::MockHsmDevice::open_factory(path, serial, bastion_vault::hsm::clock::monotonic())?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| RvError::ErrString(e.to_string()))?;
+    runtime.block_on(device.provision(factory, admin, objects, adopt))
+}
+
+#[cfg(not(feature = "hsm_mock"))]
+fn provision_mock(
+    _: &str,
+    _: Option<&str>,
+    _: &str,
+    _: &str,
+    _: &bastion_vault::hsm::HsmObjectIds,
+    _: bool,
+) -> Result<bastion_vault::hsm::ceremony::AttestationBundle, RvError> {
+    Err(RvError::ErrString("this build has no mock HSM (feature `hsm_mock`)".into()))
+}
+
+#[cfg(feature = "hsm_yubihsm2")]
+fn provision_yubihsm2(
+    connector: &str,
+    factory: &str,
+    admin: &str,
+    objects: &bastion_vault::hsm::HsmObjectIds,
+    adopt: bool,
+) -> Result<bastion_vault::hsm::ceremony::AttestationBundle, RvError> {
+    bastion_vault::hsm::yubihsm2::provision(connector, factory, admin, objects, adopt)
+}
+
+#[cfg(not(feature = "hsm_yubihsm2"))]
+fn provision_yubihsm2(
+    _: &str,
+    _: &str,
+    _: &str,
+    _: &bastion_vault::hsm::HsmObjectIds,
+    _: bool,
+) -> Result<bastion_vault::hsm::ceremony::AttestationBundle, RvError> {
+    Err(RvError::ErrString("this build has no YubiHSM 2 support (feature `hsm_yubihsm2`)".into()))
+}
+
 #[cfg(test)]
 mod test {
-    use super::read_admin_credentials;
+    use super::{read_admin_credentials, read_bundles, read_secret};
     use crate::{errors::RvError, test_utils::TestHttpServer};
 
     /// With no `hsm` seal configured, the status endpoint reports the classic
@@ -355,5 +520,29 @@ mod test {
         assert_eq!(prompted["hsm-b"], "typed-for-hsm-b");
         assert!(read_admin_credentials(&["hsm-b".into()], |_| Ok(String::new())).is_err(), "empty refused");
         assert!(read_admin_credentials(&["hsm-c=env:BV_TEST_HSM_UNSET_VAR".into()], refuse).is_err());
+    }
+
+    #[test]
+    fn provision_and_bootstrap_inputs_are_strict() {
+        let err = read_secret("the new bv-admin password", "hunter2").unwrap_err();
+        assert!(err.to_string().contains("never from an argument") && !err.to_string().contains("hunter2"));
+        std::env::set_var("BV_TEST_HSM_ADMIN_PW", "pw");
+        assert_eq!(read_secret("x", "env:BV_TEST_HSM_ADMIN_PW").unwrap(), "pw");
+        assert!(read_bundles(&["no-equals-sign".into()]).is_err());
+        assert!(read_bundles(&["hsm-a=/nonexistent/bundle.json".into()]).is_err());
+    }
+
+    /// Bootstrap needs an HSM seal and an uninitialized vault; this test
+    /// server is initialized with the Shamir seal, so it is refused.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_hsm_bootstrap_is_refused_once_initialized() {
+        let server = TestHttpServer::new_with_prometheus("test_hsm_bootstrap_refused", true).await;
+        let body = serde_json::json!({ "admin_credentials": { "hsm-a": "x" }, "bundles": {} });
+        let out = server.write("v2/sys/hsm/bootstrap", body.as_object().cloned(), None);
+        let status = out.as_ref().map(|(s, _)| *s).unwrap_or(0);
+        assert!(status == 400 || status == 403 || out.is_err(), "{out:?}");
+        if let Ok((_, body)) = &out {
+            assert!(!body.to_string().contains("\"x\""), "credentials are never echoed");
+        }
     }
 }

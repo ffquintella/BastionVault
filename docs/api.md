@@ -216,6 +216,7 @@ request; they are never stored, logged by the server or returned.
 
 | Method | Path | Body | Purpose |
 |---|---|---|---|
+| POST | `/v2/sys/hsm/bootstrap` | `bundles` (`{member: bundle JSON}`), `admin_credentials` (both members) | Before init, **loopback peer only, no token**: attest both members and enroll this node; refused once initialized |
 | GET | `/v2/sys/hsm/members` | — | Members from the seal record: `state` (`joining`/`active`/`retired`/`faulted`), `pending_revocations`, `attestation_fps`, `holds_kek_copy`, this node's `up` / `last_error` |
 | POST | `/v2/sys/hsm/members/{name}` | `bundle` (the JSON `provision` wrote), `gateway`, `admin_credentials` (for `{name}`) | Attest the device and add it as `joining`; every enrolled node gets a key on it |
 | POST | `/v2/sys/hsm/members/{name}/retire` | — | Retire a member; refused below `min_wrap_copies` active members or when a set has no copy elsewhere |

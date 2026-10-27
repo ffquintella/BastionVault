@@ -211,13 +211,16 @@ pub struct HsmObjectIds {
     pub wrap_pqc: HsmObjectId,
     pub identity: HsmObjectId,
     pub authz: HsmObjectId,
+    /// `bv-seed-ecdh` (pool layout, T454 phase 4): the node-usable ECDH key,
+    /// so `bv-identity` can stay admin-only. Per-node devices do not have it.
+    pub seed_ecdh: HsmObjectId,
 }
 
 impl Default for HsmObjectIds {
     fn default() -> Self {
         // Object 1 is the device's default auth key; BastionVault provisions
         // its own objects at fixed, minimal-capability ids from there.
-        Self { auth_key: 1, wrap_barrier: 2, wrap_pqc: 3, identity: 4, authz: 5 }
+        Self { auth_key: 1, wrap_barrier: 2, wrap_pqc: 3, identity: 4, authz: 5, seed_ecdh: 6 }
     }
 }
 
@@ -373,6 +376,8 @@ pub struct HsmConfigBlock {
     pub identity_key_id: u16,
     #[serde(default)]
     pub authz_key_id: u16,
+    #[serde(default)]
+    pub seed_ecdh_key_id: u16,
 }
 
 /// Parse a `"60s"` / `"500ms"` / `"0"` duration string. Empty ⇒ the default.
@@ -435,6 +440,7 @@ pub fn resolve_config(label: &str, raw: &HsmConfigBlock) -> Result<ResolvedHsmCo
         wrap_pqc: if raw.wrap_pqc_key_id != 0 { raw.wrap_pqc_key_id } else { defaults.wrap_pqc },
         identity: if raw.identity_key_id != 0 { raw.identity_key_id } else { defaults.identity },
         authz: if raw.authz_key_id != 0 { raw.authz_key_id } else { defaults.authz },
+        seed_ecdh: if raw.seed_ecdh_key_id != 0 { raw.seed_ecdh_key_id } else { defaults.seed_ecdh },
     };
 
     // A pool node authenticates with per-node credentials (resolve_pool
@@ -731,12 +737,11 @@ impl ConfigMemberOpener {
                 }
             }
             "yubihsm2" => {
-                return Err(RvError::ErrHsmConfigInvalid(
-                    "topology = \"pool\" with the yubihsm2 backend needs the HSM link wired into the YubiHSM 2 \
-                     client, which this build does not have yet (T454 phase 4, part 2); this build only validates \
-                     the configuration"
-                        .into(),
-                ))
+                if cfg!(not(feature = "hsm_yubihsm2")) {
+                    return Err(RvError::ErrHsmConfigInvalid(
+                        "yubihsm2 backend requested but this build lacks the `hsm_yubihsm2` feature".into(),
+                    ));
+                }
             }
             other => return Err(RvError::ErrHsmConfigInvalid(format!("unknown HSM backend {other:?}"))),
         }
@@ -769,12 +774,49 @@ impl ConfigMemberOpener {
     }
 }
 
+impl ConfigMemberOpener {
+    /// Where this node reaches `target` on a YubiHSM 2 pool: its own block's
+    /// `connector` (local device), else the record's gateway through the link.
+    #[cfg(feature = "hsm_yubihsm2")]
+    fn yubihsm2_route(
+        &self,
+        target: &MemberTarget,
+    ) -> Result<(yubihsm::Connector, Option<bv_hsm_link::Relay>), RvError> {
+        let pool = self.config.pool.as_ref().ok_or_else(|| config_err("not a pool configuration"))?;
+        let block = pool.members.iter().find(|m| m.name == target.name);
+        let local = block.map(|b| b.connector.as_str()).unwrap_or_default();
+        let gateway = if target.gateway.is_empty() { block.map(|b| b.gateway.as_str()).unwrap_or_default() } else { &target.gateway };
+        if local.is_empty() && gateway.is_empty() {
+            return Err(RvError::ErrHsmTransport(format!("no connector or gateway for HSM pool member {}", target.name)));
+        }
+        yubihsm2::member_connector(local, gateway, pool.link.as_ref())
+    }
+}
+
 impl MemberOpener for ConfigMemberOpener {
     fn open_client(
         &self,
         target: &MemberTarget,
         credential: Option<admin::NodeCredential>,
     ) -> Result<Arc<dyn HsmBackend>, RvError> {
+        if self.config.backend_type == "yubihsm2" {
+            #[cfg(feature = "hsm_yubihsm2")]
+            {
+                // A YubiHSM 2 pool never uses a password: no credential, no session.
+                let credential = credential.ok_or_else(|| {
+                    RvError::ErrHsm(format!(
+                        "this node holds no credential for HSM pool member {}; enroll it (`operator hsm bootstrap` \
+                         before init, `operator hsm node add` after)",
+                        target.name
+                    ))
+                })?;
+                let (connector, relay) = self.yubihsm2_route(target)?;
+                let client = yubihsm2::YubiHsm2Backend::open_pool_member(connector, relay, &credential, self.config.objects)?;
+                return Ok(Arc::new(client));
+            }
+            #[cfg(not(feature = "hsm_yubihsm2"))]
+            return Err(RvError::ErrHsmConfigInvalid("this build lacks the `hsm_yubihsm2` feature".into()));
+        }
         #[cfg(feature = "hsm_mock")]
         {
             let device = self.mock_device(target)?;
@@ -788,11 +830,21 @@ impl MemberOpener for ConfigMemberOpener {
         #[cfg(not(feature = "hsm_mock"))]
         {
             let _ = (target, credential);
-            Err(RvError::ErrHsmConfigInvalid("this build has no HSM pool backend".into()))
+            Err(RvError::ErrHsmConfigInvalid("this build has no mock HSM backend".into()))
         }
     }
 
     fn open_admin(&self, target: &MemberTarget, password: &str) -> Result<Box<dyn admin::HsmAdminSession>, RvError> {
+        if self.config.backend_type == "yubihsm2" {
+            #[cfg(feature = "hsm_yubihsm2")]
+            {
+                let (connector, relay) = self.yubihsm2_route(target)?;
+                let session = yubihsm2::YubiHsm2AdminSession::open(connector, relay, password, self.config.objects)?;
+                return Ok(Box::new(session));
+            }
+            #[cfg(not(feature = "hsm_yubihsm2"))]
+            return Err(RvError::ErrHsmConfigInvalid("this build lacks the `hsm_yubihsm2` feature".into()));
+        }
         #[cfg(feature = "hsm_mock")]
         {
             let device = self.mock_device(target)?;
@@ -801,7 +853,7 @@ impl MemberOpener for ConfigMemberOpener {
         #[cfg(not(feature = "hsm_mock"))]
         {
             let _ = (target, password);
-            Err(RvError::ErrHsmConfigInvalid("this build has no HSM pool backend".into()))
+            Err(RvError::ErrHsmConfigInvalid("this build has no mock HSM backend".into()))
         }
     }
 }

@@ -278,6 +278,12 @@ the `bv-admin` credential of each member they touch, given per request with
 literal value is refused, and nothing stores, logs or returns it.
 
 ~~~bash
+# On each HSM host (mock: a state file), from factory state:
+bvault operator hsm provision --mock-state-path /var/lib/bv/hsm-a.json --serial MOCK-A --out a.json
+# On the init node, before `operator init`: attest both devices, enroll this node.
+bvault operator hsm bootstrap --bundle hsm-a=a.json --bundle hsm-b=b.json --admin hsm-a --admin hsm-b
+bvault operator init
+
 # A node with `credential_dir` logs its transport key fingerprint at startup.
 # Confirm it out of band, then enroll it on every member:
 bvault operator hsm node add vault-2 --fingerprint <fp> --admin hsm-a --admin hsm-b
@@ -301,11 +307,19 @@ bvault operator hsm repair --run                                # drops hsm-b's 
   before it comes back: a revoked node that reaches it first through a gateway
   that still allows it can use it until the key is deleted.
 - **Repair** re-wraps at most `repair_rate` sets per second (default 2) and
-  never drops the last copy of a set. It runs on demand in this build; the
-  5-minute background tick arrives with phase 4 part 2.
-- **Not yet:** the `yubihsm2` pool (relay wiring, on-device admin and
-  `provision`, Yubico chain pinning), initializing a provisioned pool over the
-  API, epoch rotation and `migrate-to-pool` (phase 4 part 2).
+  never drops the last copy of a set. It runs every 5 minutes, within 10 s of
+  a member coming back, and on demand.
+- **Bootstrap** answers only a loopback peer and only before init; init then
+  refuses a member that was not attested or whose keys changed.
+- **Layout:** `bv-identity` is admin-only (domain 2); nodes derive seeds with
+  `bv-seed-ecdh` (object 6 by default, `seed_ecdh_key_id`).
+- **Audit:** pool events reach the audit log at
+  `sys/hsm/events/<event>/<member>` once it is up, and the `security` log always.
+- **YubiHSM 2 pools** start and reach members through the link, but attesting a
+  YubiHSM 2 is refused until the Yubico attestation chain is pinned, so
+  bootstrap and `member add` stop there; nothing on the device path is
+  verified on hardware yet (phase 7).
+- **Not yet:** epoch rotation and `migrate-to-pool`.
 
 ### Failure behavior (fail-closed)
 
