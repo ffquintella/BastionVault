@@ -1,14 +1,13 @@
 # Feature: HSM Pool HA — an N-node cluster served by two YubiHSM 2 devices
 
-> Status: **in progress** (T454) — phases 1–2 of 7 (formats and custody core;
-> pool backend) done 2026-10-19, phase 3 (HSM link) done 2026-10-27, phase 4
-> (ceremonies, repair, bootstrap, provisioning, YubiHSM 2 wiring, rotation,
-> migration) done 2026-10-27 on the mock, phase 5 (recovery) done 2026-10-27
-> on the mock, phase 6 (audit and observability) done 2026-10-27 on the mock,
-> phase 7 (hardware validation) prepared 2026-10-27, its first read-only run
-> done the same day on one device (device log layout and digest chain
-> confirmed), the write steps still awaiting the operator; the run can validate a pool of one on a single device; the [pool of one](#pool-of-one-a-single-member-pool) (operator decision
-> 2026-10-27) done on the mock the same day; see [Current state](#current-state). Spec
+> Status: **complete** (T454), declared by the operator on 2026-10-27 — phases
+> 1–6 done on the mock; phase 7 (hardware validation) run on one YubiHSM 2
+> (36470559) as a pool of one, see
+> [Phase 7 results](#phase-7-results-pool-of-one-on-36470559). The
+> [pool of one](#pool-of-one-a-single-member-pool) is a supported start. Not
+> validated on hardware, and listed there: a second device, a three-node
+> run, the forced-audit option and the YubiHSM 2 device-log drain (still
+> refused). See [Current state](#current-state). Spec
 > written 2026-10-19. Extends
 > [HSM Support (YubiHSM 2)](hsm-support.md) (S17), whose non-negotiable security
 > rules apply here unchanged unless a section below says otherwise and why.
