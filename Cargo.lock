@@ -984,7 +984,7 @@ dependencies = [
 
 [[package]]
 name = "bastion-plugin-sdk"
-version = "0.41.2"
+version = "0.41.3"
 dependencies = [
  "base64 0.22.1",
  "bv_plugin_surface",
@@ -996,7 +996,7 @@ dependencies = [
 
 [[package]]
 name = "bastion-plugin-testkit"
-version = "0.41.2"
+version = "0.41.3"
 dependencies = [
  "base64 0.22.1",
  "serde_json",
@@ -2007,7 +2007,7 @@ dependencies = [
 
 [[package]]
 name = "bv-engine-resource"
-version = "0.43.1"
+version = "0.43.2"
 dependencies = [
  "async-trait",
  "base32",
@@ -2205,7 +2205,7 @@ dependencies = [
 
 [[package]]
 name = "bv-kernel"
-version = "0.42.2"
+version = "0.42.3"
 dependencies = [
  "actix-rt",
  "arc-swap",
@@ -2256,7 +2256,7 @@ dependencies = [
 
 [[package]]
 name = "bv-kernel-api"
-version = "0.42.0"
+version = "0.42.1"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -2281,7 +2281,7 @@ dependencies = [
 
 [[package]]
 name = "bv-logical"
-version = "0.42.0"
+version = "0.42.1"
 dependencies = [
  "actix-rt",
  "async-trait",
@@ -2305,7 +2305,7 @@ dependencies = [
 
 [[package]]
 name = "bv-mcp"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2350,7 +2350,7 @@ dependencies = [
 
 [[package]]
 name = "bv-policy-core"
-version = "0.42.1"
+version = "0.42.2"
 
 [[package]]
 name = "bv-server"
@@ -2494,7 +2494,7 @@ dependencies = [
 
 [[package]]
 name = "bv_plugin_manifest"
-version = "0.41.2"
+version = "0.41.3"
 dependencies = [
  "bv_plugin_surface",
  "serde",

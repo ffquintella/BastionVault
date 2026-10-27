@@ -1,6 +1,6 @@
 [package]
 name = "bastion-plugin-sdk"
-version = "0.41.2"
+version = "0.41.3"
 edition = "2021"
 description = "SDK for authoring BastionVault WASM plugins. See features/plugin-system.md."
 license = "Apache-2.0"

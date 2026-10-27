@@ -2531,7 +2531,7 @@ plugins-pack: plugins-wasm plugins-process plugins-pack-build ## Pack each plugi
 		--out      $(PLUGINS_OUT)/bastion-plugin-totp.bvplugin
 	@echo "==> packing bastion-plugin-postgres (process) into .bvplugin"
 	$(BV_PLUGIN_PACK) \
-		--manifest $(PLUGINS_DIR)/bastion-plugin-postgres/plugin.toml \
+		--manifest $(DYNAMIC_PLUGINS_DIR)/bastion-plugin-postgres/plugin.toml \
 		--binary   $(PLUGINS_OUT)/bastion-plugin-postgres$(_exe) \
 		--out      $(PLUGINS_OUT)/bastion-plugin-postgres.bvplugin
 	@echo "==> packing bastion-plugin-xca (process) into .bvplugin"
@@ -2591,7 +2591,7 @@ plugins-sign: plugins-wasm plugins-process plugins-pack-build ## Repack each plu
 		--signing-key-name  $(PLUGINS_SIGNING_KEY_NAME)
 	@echo "==> signing bastion-plugin-postgres (process)"
 	$(BV_PLUGIN_PACK) \
-		--manifest          $(PLUGINS_DIR)/bastion-plugin-postgres/plugin.toml \
+		--manifest          $(DYNAMIC_PLUGINS_DIR)/bastion-plugin-postgres/plugin.toml \
 		--binary            $(PLUGINS_OUT)/bastion-plugin-postgres$(_exe) \
 		--out               $(PLUGINS_OUT)/bastion-plugin-postgres.bvplugin \
 		--signing-seed-file $(PLUGINS_SIGNING_KEY).seed \
@@ -2656,7 +2656,7 @@ plugins-process: plugins-init plugins-process-target ## Compile the process-runt
 		echo ""; \
 	fi
 	@echo "==> building bastion-plugin-postgres ($(if $(PLUGINS_PROCESS_TARGET),$(PLUGINS_PROCESS_TARGET),native)) via $(PLUGINS_CARGO)"
-	cd $(PLUGINS_DIR) && $(_plugins_cross_env) $(PLUGINS_CARGO) build --release $(_target_arg) -p bastion-plugin-postgres
+	cd $(DYNAMIC_PLUGINS_DIR) && $(_plugins_cross_env) $(PLUGINS_CARGO) build --release $(_target_arg) -p bastion-plugin-postgres
 	@echo "==> building bastion-plugin-xca ($(if $(PLUGINS_PROCESS_TARGET),$(PLUGINS_PROCESS_TARGET),native)) via $(PLUGINS_CARGO)"
 	cd $(PLUGINS_DIR) && $(_plugins_cross_env) $(PLUGINS_CARGO) build --release $(_target_arg) -p bastion-plugin-xca
 	@echo "==> building bastion-plugin-pmp ($(if $(PLUGINS_PROCESS_TARGET),$(PLUGINS_PROCESS_TARGET),native)) via $(PLUGINS_CARGO)"
@@ -2664,7 +2664,7 @@ plugins-process: plugins-init plugins-process-target ## Compile the process-runt
 	@echo "==> building bastion-plugin-email ($(if $(PLUGINS_PROCESS_TARGET),$(PLUGINS_PROCESS_TARGET),native)) via $(PLUGINS_CARGO)"
 	cd $(PLUGINS_DIR) && $(_plugins_cross_env) $(PLUGINS_CARGO) build --release $(_target_arg) -p bastion-plugin-email
 	@mkdir -p $(PLUGINS_OUT)
-	@cp $(PLUGINS_DIR)/$(_target_dir)/bastion-plugin-postgres$(_exe) $(PLUGINS_OUT)/
+	@cp $(DYNAMIC_PLUGINS_DIR)/$(_target_dir)/bastion-plugin-postgres$(_exe) $(PLUGINS_OUT)/
 	@cp $(PLUGINS_DIR)/$(_target_dir)/bastion-plugin-xca$(_exe)      $(PLUGINS_OUT)/
 	@cp $(PLUGINS_DIR)/$(_target_dir)/bastion-plugin-pmp$(_exe)      $(PLUGINS_OUT)/
 	@cp $(PLUGINS_DIR)/$(_target_dir)/bastion-plugin-email$(_exe)    $(PLUGINS_OUT)/
@@ -2698,14 +2698,15 @@ type ?= patch
 plugin-bump: ## Bump plugin versions across plugins-ext (type=major|minor|patch, default patch)
 	@case "$(type)" in major|minor|patch) ;; *) echo "Invalid type=$(type) (use major|minor|patch)"; exit 1;; esac; \
 	for p in $(PLUGIN_NAMES); do \
-		CUR=$$(grep '^version' $(PLUGINS_DIR)/$$p/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/'); \
+		D=$(PLUGINS_DIR); [ "$$p" = bastion-plugin-postgres ] && D=$(DYNAMIC_PLUGINS_DIR); \
+		CUR=$$(grep '^version' $$D/$$p/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/'); \
 		case "$(type)" in \
 			major) NEW=$$(echo $$CUR | awk -F. '{printf "%d.0.0", $$1+1}');; \
 			minor) NEW=$$(echo $$CUR | awk -F. '{printf "%d.%d.0", $$1, $$2+1}');; \
 			patch) NEW=$$(echo $$CUR | awk -F. '{printf "%d.%d.%d", $$1, $$2, $$3+1}');; \
 		esac; \
-		sed -i.bak "s/^version = \"$$CUR\"/version = \"$$NEW\"/" $(PLUGINS_DIR)/$$p/Cargo.toml && rm -f $(PLUGINS_DIR)/$$p/Cargo.toml.bak; \
-		sed -i.bak "s/^version     = \"$$CUR\"/version     = \"$$NEW\"/" $(PLUGINS_DIR)/$$p/plugin.toml && rm -f $(PLUGINS_DIR)/$$p/plugin.toml.bak; \
+		sed -i.bak "s/^version = \"$$CUR\"/version = \"$$NEW\"/" $$D/$$p/Cargo.toml && rm -f $$D/$$p/Cargo.toml.bak; \
+		sed -i.bak "s/^version     = \"$$CUR\"/version     = \"$$NEW\"/" $$D/$$p/plugin.toml && rm -f $$D/$$p/plugin.toml.bak; \
 		echo "Bumped $$p: $$CUR -> $$NEW"; \
 	done
 
