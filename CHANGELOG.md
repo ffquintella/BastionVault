@@ -238,6 +238,10 @@ EXAMPLE ENTRY:
 
 ### Fixed
 
+#### GUI navigation
+
+- **Show the PKI menu to a user whose custom policy grants PKI access** (T466, S113) -- The PKI and Cert Lifecycle sidebar entries appeared only for a fixed list of policy names, so a user holding an operator-authored policy such as `esi-pki-issue` could issue certificates through the API but never saw the menu. They now also appear when the server lists the mount for that token, which it does only if the token's ACL reaches it. A failed mount lookup still does not widen the menu.
+
 #### Policy cache
 
 - **Stop a cluster node from enforcing an edited policy's old text indefinitely** (T465, S5) -- On a multi-node cluster a policy written through one node was refreshed in that node's cache only, and cached ACL policies never expired, so the other node kept serving, and enforcing, the previous document until it restarted: an operator who added a rule to a namespace policy saw it in the GUI while the affected user kept being denied. Cached policies now expire after 30 seconds, so every node reads the stored document again within that time. Operators who cannot wait can still call `sys/cache/flush` on the node.

@@ -48,6 +48,17 @@ type NavItem = {
    */
   requiresMountType?: string;
   /**
+   * Show the item whenever `requiresMountType` is satisfied by a mount the
+   * server listed for this token, even when none of `requires` matches.
+   * `sys/internal/ui/mounts` only lists a mount the token's ACL reaches, so
+   * for engines whose mount is invisible without a rule of its own (PKI) it
+   * is a better signal than a policy *name*: an operator-authored policy
+   * such as `esi-pki-issue` grants the paths without carrying a name in
+   * `requires`. Not applied to the permissive fallback used when the mount
+   * list could not be read, so a failed lookup never widens the nav.
+   */
+  visibleWhenMountVisible?: boolean;
+  /**
    * Hide this item unless the active namespace is root (the empty
    * string). Use for features whose backend is global / not
    * namespace-aware and whose admin paths are registered as root
@@ -90,6 +101,7 @@ const userNav: NavItem[] = [
     label: "PKI",
     requires: [...SUPER_ADMIN, "pki-admin", "pki-user", ...modulePolicies("pki")],
     requiresMountType: "pki",
+    visibleWhenMountVisible: true,
   },
   // SSH engine. Same gating shape as PKI: hidden when no `ssh/` mount
   // exists or when the token has no SSH-relevant policy.
@@ -128,6 +140,7 @@ const userNav: NavItem[] = [
     label: "Cert Lifecycle",
     requires: [...SUPER_ADMIN, "pki-admin", "pki-user", ...modulePolicies("pki")],
     requiresMountType: "cert-lifecycle",
+    visibleWhenMountVisible: true,
   },
   // AI assistants (MCP) act with the user's own permissions, so any
   // non-root user may pair one. Desktop-hosted: the page itself explains
@@ -329,9 +342,13 @@ export function Layout({ children }: LayoutProps) {
   // gates work. We only ever need the set of types, not the full
   // mount records, so collapse to a Set on receive.
   const [mountTypes, setMountTypes] = useState<Set<string>>(new Set());
+  // True only when `mountTypes` came from the server's ACL-filtered list,
+  // not from the permissive fallback below.
+  const [mountsFromServer, setMountsFromServer] = useState(false);
   useEffect(() => {
     if (!isAuthenticated) {
       setMountTypes(new Set());
+      setMountsFromServer(false);
       return;
     }
     let cancelled = false;
@@ -340,6 +357,7 @@ export function Layout({ children }: LayoutProps) {
       .then((mounts) => {
         if (cancelled) return;
         setMountTypes(new Set(mounts.map((m) => m.mount_type)));
+        setMountsFromServer(true);
       })
       .catch(() => {
         // Non-fatal: a token without `sys/mounts` read access falls
@@ -351,6 +369,7 @@ export function Layout({ children }: LayoutProps) {
         // Permissive fallback: pretend all known engine types are
         // enabled so the user sees the links and gets a meaningful
         // error from the route handler instead of a silent hide.
+        setMountsFromServer(false);
         setMountTypes(
           new Set(["kv-v2", "kv", "resource", "files", "pki"]),
         );
@@ -365,7 +384,12 @@ export function Layout({ children }: LayoutProps) {
   // authenticated users; an item with no `requiresMountType` is
   // unaffected by the mount table.
   function itemVisible(item: NavItem): boolean {
-    if (item.requires && item.requires.length > 0) {
+    const mountListedByServer =
+      !!item.visibleWhenMountVisible &&
+      mountsFromServer &&
+      !!item.requiresMountType &&
+      mountTypeMatches(item.requiresMountType, mountTypes);
+    if (item.requires && item.requires.length > 0 && !mountListedByServer) {
       const ok = item.requires.some((p) => policySet.has(p));
       if (!ok) return false;
     }
