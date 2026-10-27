@@ -156,4 +156,15 @@ fn on_an_executing_host_the_binary_never_dials_and_the_host_runs_the_statements(
     assert!(out.is_success(), "{:?}", out.response_json());
     assert_eq!(out.dynamic_executions.len(), 1);
     assert_clean(&h, &out.response);
+
+    // Rotate-root too: the host changes the target, the binary stores it.
+    let new_root = "Zq9-host-generated-root-secret";
+    let rotate = json!({ "op": "dynamic.rotate_root", "connection": "prod", "credential": { "password": new_root } });
+    let out = h.invoke_process_dynamic(exe(), &rotate).unwrap();
+    assert!(out.is_success(), "{:?}", out.response_json());
+    assert_eq!(out.dynamic_executions.len(), 1);
+    assert_eq!(out.dynamic_executions[0]["op"], "dynamic.rotate_root");
+    assert_clean(&h, &out.response);
+    assert!(!String::from_utf8_lossy(&out.response).contains(new_root));
+    assert!(h.process_stderr().iter().all(|l| !l.contains(new_root)));
 }

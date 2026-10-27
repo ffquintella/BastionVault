@@ -841,11 +841,21 @@ struct HostExecDb {
     mode: Mutex<&'static str>,
     /// The host's answer to each `execute`, or its error.
     answers: Mutex<Vec<Result<Value, String>>>,
+    /// The root secret the plugin has stored (what it presents).
+    stored_root: Mutex<String>,
+    /// The new secret of the last rotate-root envelope.
+    rotated_to: Mutex<String>,
 }
 
 impl HostExecDb {
     fn new(url: &str) -> Arc<Self> {
-        Arc::new(Self { url: url.to_string(), mode: Mutex::new("normal"), answers: Mutex::default() })
+        Arc::new(Self {
+            url: url.to_string(),
+            mode: Mutex::new("normal"),
+            answers: Mutex::default(),
+            stored_root: Mutex::new(ROOT_SECRET.to_string()),
+            rotated_to: Mutex::default(),
+        })
     }
 
     async fn execute(&self, host: &MockHost<'_>, connection: &Value) -> Result<Value, (i32, String)> {
@@ -858,7 +868,9 @@ impl HostExecDb {
         let slot = if mode == "unheld_slot" { json!(999_999) } else { grant["slot"].clone() };
         let mut execute = json!({
             "slot": slot,
-            "connector": { "kind": "fake", "url": self.url, "username": "vault-root", "password": ROOT_SECRET },
+            "connector": {
+                "kind": "fake", "url": self.url, "username": "vault-root", "password": *self.stored_root.lock().unwrap()
+            },
         });
         if mode == "smuggle_statements" {
             execute["statements"] = json!(["DROP DATABASE app"]);
@@ -892,9 +904,47 @@ impl MockPlugin for HostExecDb {
                 host.call("dynamic_lease_register", lease).await.map_err(host_err)?;
                 Ok(json!({ "data": {} }))
             }
-            "dynamic.renew" | "dynamic.revoke" | "dynamic.rotate_root" => {
+            "dynamic.renew" | "dynamic.revoke" => {
                 self.execute(host, &env["connection"]).await?;
                 Ok(json!({}))
+            }
+            "dynamic.rotate_root" => {
+                let new = env["credential"]["password"].as_str().unwrap_or_default().to_string();
+                *self.rotated_to.lock().unwrap() = new.clone();
+                let mode = *self.mode.lock().unwrap();
+                match mode {
+                    // The runtime cuts the call short while the host still runs.
+                    "abandon_execute" => {
+                        let limit = std::time::Duration::from_millis(300);
+                        if tokio::time::timeout(limit, self.execute(host, &env["connection"])).await.is_err() {
+                            return Err((5, "the plugin call was cut short".into()));
+                        }
+                    }
+                    "ignore_execute_error" => {
+                        let _ = self.execute(host, &env["connection"]).await;
+                    }
+                    _ => {
+                        self.execute(host, &env["connection"]).await?;
+                    }
+                }
+                match mode {
+                    // Ran to the end and says it did not store (the SDK's RootNotStored).
+                    "fail_store" => Err((5, r#"{"error":"storage_put failed","root_stored":false}"#.into())),
+                    // Stored, then failed without saying so.
+                    "store_then_fail" => {
+                        *self.stored_root.lock().unwrap() = new;
+                        Err((5, "lost the host connection after storing".into()))
+                    }
+                    _ => {
+                        *self.stored_root.lock().unwrap() = new;
+                        Ok(json!({}))
+                    }
+                }
+            }
+            // A proxied call has no plan: an `execute` from it is refused.
+            "write" if *self.mode.lock().unwrap() == "execute_on_proxy" => {
+                self.execute(host, &json!("prod")).await?;
+                Ok(json!({ "data": null }))
             }
             _ => Ok(json!({ "data": null })),
         }
@@ -1009,14 +1059,16 @@ async fn a_plugin_cannot_widen_what_the_host_executes() {
     // through the host too (the compensation revoke has its own plan).
     assert!(target.identities.lock().unwrap().is_empty(), "no orphaned identity");
 
-    *plugin.mode.lock().unwrap() = "normal";
-    let rotate = root_call(&core, &root, Operation::Write, "database/rotate-root/prod").await;
-    assert_eq!(status_of(&rotate), Some(502), "{rotate:?}");
+    // A proxied call (here a role write) has no plan: refused.
+    *plugin.mode.lock().unwrap() = "execute_on_proxy";
+    let mut req = Request::new("database/roles/other");
+    req.operation = Operation::Write;
+    req.client_token = root.clone();
+    req.body = json!({ "connection": "prod" }).as_object().cloned();
+    assert!(core.handle_request(&mut req).await.is_err());
     let answer = plugin.answers.lock().unwrap().last().cloned().unwrap();
-    assert!(
-        matches!(&answer, Err(e) if e.contains("dynamic.rotate_root has no host-rendered statements")),
-        "{answer:?}"
-    );
+    assert!(matches!(&answer, Err(e) if e.starts_with("invalid:")), "{answer:?}");
+    *plugin.mode.lock().unwrap() = "normal";
 
     // Revoking an identity the target no longer has runs nothing and succeeds.
     let resp = root_call(&core, &root, Operation::Read, "database/creds/readonly").await.unwrap().unwrap();
@@ -1221,4 +1273,273 @@ async fn a_config_write_drops_cached_credentials_everywhere() {
     let after = barrier.as_storage().get(&epoch_key).await.unwrap().map(|e| e.value);
     assert!(after.is_some() && after != before, "a new epoch for every node");
     assert_ne!(data_str(&fx.creds_as(&alice, "cached").await, "username"), first, "not served after the write");
+}
+
+// ── Rotate-root through the host connector ──────────────────────────────
+
+/// A vault whose fake target's root secret is ROOT_SECRET, as the plugin stored it.
+async fn rooted_vault(
+    name: &str,
+) -> (crate::BastionVault, Arc<dyn VaultCtx>, String, Arc<HostExecDb>, Arc<super::test_support::FakeTarget>) {
+    let url = format!("fake://{name}");
+    let target = fake_target(&url);
+    *target.root.lock().unwrap() = Some(ROOT_SECRET.to_string());
+    let plugin = HostExecDb::new(&url);
+    let (bv, core, root) = host_exec_vault(name, plugin.clone()).await;
+    (bv, core, root, plugin, target)
+}
+
+/// The host's own record of `config/prod`, read from the mount's storage.
+async fn root_version(core: &Arc<dyn VaultCtx>, _root: &str) -> Value {
+    let prefix = dynamic_mount_prefix(core).await;
+    let barrier = core.barrier();
+    let entry = barrier.as_storage().get(&format!("{prefix}bv-dynamic/connections/prod")).await.unwrap().unwrap();
+    let record = bv_dynamic::records::ConnectionRecord::decode(&entry.value).unwrap();
+    Value::from(record.root_credential_version)
+}
+
+/// The host sets the new secret over the old-secret connection, proves it by
+/// a fresh login, the plugin stores it, and the next call dials with it.
+#[tokio::test]
+async fn the_host_rotates_the_root_and_the_plugin_stores_it() {
+    assert!(capture::install(), "this test needs the process logger");
+    let (_bv, core, root, plugin, target) = rooted_vault("dyn_host_rotate").await;
+    let rotated = root_call(&core, &root, Operation::Write, "database/rotate-root/prod").await.unwrap().unwrap();
+    assert_eq!(rotated.data.unwrap()["root_credential_version"], 2);
+    let new = plugin.rotated_to.lock().unwrap().clone();
+    assert_eq!(target.root.lock().unwrap().as_deref(), Some(new.as_str()), "the target has the host's new secret");
+    assert_eq!(*plugin.stored_root.lock().unwrap(), new, "and the plugin stored it");
+    assert_eq!(target.dials.lock().unwrap().last().unwrap().1, new, "verified by a login with it");
+    assert_eq!(plugin.answers.lock().unwrap().last().unwrap().as_ref().unwrap()["rotated"], true);
+    // A credential afterwards: dialled with the new root.
+    root_call(&core, &root, Operation::Read, "database/creds/readonly").await.unwrap().unwrap();
+    assert!(capture::lines().iter().all(|l| !l.contains(&new) && !l.contains(ROOT_SECRET)));
+}
+
+/// The new secret does not log in: the host puts the old one back over the
+/// still-open old connection; nothing changed.
+#[tokio::test]
+async fn a_rotation_whose_new_secret_cannot_log_in_is_rolled_back() {
+    let (_bv, core, root, plugin, target) = rooted_vault("dyn_host_rotate_verify").await;
+    *target.only_login.lock().unwrap() = Some(ROOT_SECRET.to_string());
+    let refused = root_call(&core, &root, Operation::Write, "database/rotate-root/prod").await;
+    assert_eq!(status_of(&refused), Some(502), "{refused:?}");
+    assert!(format!("{refused:?}").contains("put back"), "{refused:?}");
+    assert_eq!(target.root.lock().unwrap().as_deref(), Some(ROOT_SECRET), "the target change was rolled back");
+    assert_eq!(*plugin.stored_root.lock().unwrap(), ROOT_SECRET, "and nothing new was stored");
+    assert_eq!(root_version(&core, &root).await, 1);
+}
+
+/// The plugin cannot store the new secret: the host undoes the target change
+/// over a login with the new secret and says so.
+#[tokio::test]
+async fn a_rotation_the_plugin_cannot_store_is_undone_by_the_host() {
+    let (_bv, core, root, plugin, target) = rooted_vault("dyn_host_rotate_store").await;
+    *plugin.mode.lock().unwrap() = "fail_store";
+    let refused = root_call(&core, &root, Operation::Write, "database/rotate-root/prod").await;
+    assert_eq!(status_of(&refused), Some(502), "{refused:?}");
+    let text = format!("{refused:?}");
+    assert!(text.contains("was undone") && text.contains("put the previous secret back"), "{text}");
+    assert_eq!(target.root.lock().unwrap().as_deref(), Some(ROOT_SECRET), "target and stored secret agree");
+    assert_eq!(*plugin.stored_root.lock().unwrap(), ROOT_SECRET);
+    assert_eq!(root_version(&core, &root).await, 1);
+    let new = plugin.rotated_to.lock().unwrap().clone();
+    assert!(!text.contains(&new) && !text.contains(ROOT_SECRET));
+}
+
+/// ... and when undoing it fails too: an explicit error naming the connection
+/// and saying the target holds the new secret, logged at ERROR and audited.
+#[tokio::test]
+async fn a_failed_undo_after_a_failed_store_is_an_explicit_audited_error() {
+    assert!(capture::install(), "this test needs the process logger");
+    let (_bv, core, root, plugin, target) = rooted_vault("dyn_host_rotate_stranded").await;
+    *plugin.mode.lock().unwrap() = "fail_store";
+    // The undo statement names the old secret: make it fail, echoing it.
+    *target.fail_on.lock().unwrap() = Some(ROOT_SECRET.to_string());
+    let refused = root_call(&core, &root, Operation::Write, "database/rotate-root/prod").await;
+    assert_eq!(status_of(&refused), Some(502), "{refused:?}");
+    let text = format!("{refused:?}");
+    assert!(text.contains("`prod`") && text.contains("may be on the target and not stored"), "{text}");
+    let again = root_call(&core, &root, Operation::Write, "database/rotate-root/prod").await;
+    assert_eq!(status_of(&again), Some(409), "a stranded rotation blocks the next: {again:?}");
+    let new = plugin.rotated_to.lock().unwrap().clone();
+    assert_eq!(target.root.lock().unwrap().as_deref(), Some(new.as_str()));
+    let lines = capture::lines();
+    assert!(
+        lines.iter().any(|l| l.starts_with("ERROR") && l.contains("`prod`") && l.contains("not stored")),
+        "{lines:#?}"
+    );
+    let audited =
+        |l: &&String| l.contains("dynamic_secret") && l.contains("\"rotate_root\"") && l.contains("not stored");
+    assert!(lines.iter().any(|l| audited(&l)), "{lines:#?}");
+    assert!(!lines.iter().chain([&text]).any(|l| l.contains(&new) || l.contains(ROOT_SECRET)), "a secret leaked");
+}
+
+/// A rotation presenting an endpoint other than the pinned one is refused
+/// before anything is dialled.
+#[tokio::test]
+async fn a_rotation_to_a_foreign_endpoint_is_refused() {
+    let (_bv, core, root, plugin, target) = rooted_vault("dyn_host_rotate_foreign").await;
+    *plugin.mode.lock().unwrap() = "other_url";
+    let refused = root_call(&core, &root, Operation::Write, "database/rotate-root/prod").await;
+    assert_eq!(status_of(&refused), Some(502), "{refused:?}");
+    let answer = plugin.answers.lock().unwrap().last().cloned().unwrap();
+    assert!(matches!(&answer, Err(e) if e.contains("not the one configured")), "{answer:?}");
+    assert!(target.dials.lock().unwrap().is_empty());
+    assert_eq!(target.root.lock().unwrap().as_deref(), Some(ROOT_SECRET));
+}
+
+// ── Rotate-root hardening: cut-short calls, unknown stores, concurrency ──
+
+async fn host_record(core: &Arc<dyn VaultCtx>) -> bv_dynamic::records::ConnectionRecord {
+    let prefix = dynamic_mount_prefix(core).await;
+    let barrier = core.barrier();
+    let entry = barrier.as_storage().get(&format!("{prefix}bv-dynamic/connections/prod")).await.unwrap().unwrap();
+    bv_dynamic::records::ConnectionRecord::decode(&entry.value).unwrap()
+}
+
+async fn put_host_record(core: &Arc<dyn VaultCtx>, record: &bv_dynamic::records::ConnectionRecord) {
+    let prefix = dynamic_mount_prefix(core).await;
+    let entry = crate::storage::StorageEntry {
+        key: format!("{prefix}bv-dynamic/connections/prod"),
+        value: serde_json::to_vec(record).unwrap(),
+    };
+    core.barrier().as_storage().put(&entry).await.unwrap();
+}
+
+fn unix_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
+}
+
+/// The runtime drops the plugin call (its timeout) after the host set the new
+/// secret: the in-flight record makes it stranded, not a plain timeout.
+#[tokio::test]
+async fn a_rotation_cut_short_mid_flight_is_stranded() {
+    assert!(capture::install(), "this test needs the process logger");
+    let (_bv, core, root, plugin, target) = rooted_vault("dyn_host_rotate_cut").await;
+    target.hang_after_rotate.store(true, Ordering::SeqCst);
+    *plugin.mode.lock().unwrap() = "abandon_execute";
+    let refused = root_call(&core, &root, Operation::Write, "database/rotate-root/prod").await;
+    assert_eq!(status_of(&refused), Some(502), "{refused:?}");
+    assert!(format!("{refused:?}").contains("cut short"), "{refused:?}");
+    let new = plugin.rotated_to.lock().unwrap().clone();
+    assert_eq!(target.root.lock().unwrap().as_deref(), Some(new.as_str()), "the target did change");
+    let lines = capture::lines();
+    assert!(lines.iter().any(|l| l.starts_with("ERROR") && l.contains("`prod`")), "{lines:#?}");
+    assert!(host_record(&core).await.rotation_pending.unwrap().stranded);
+}
+
+/// The plugin stored the new secret and then failed without saying whether:
+/// the host does not undo (that would leave the target old and the store new).
+#[tokio::test]
+async fn a_plugin_that_stored_then_failed_is_stranded_not_undone() {
+    let (_bv, core, root, plugin, target) = rooted_vault("dyn_host_rotate_stored").await;
+    *plugin.mode.lock().unwrap() = "store_then_fail";
+    let refused = root_call(&core, &root, Operation::Write, "database/rotate-root/prod").await;
+    assert_eq!(status_of(&refused), Some(502), "{refused:?}");
+    assert!(format!("{refused:?}").contains("unknown which root secret the plugin stored"), "{refused:?}");
+    let new = plugin.rotated_to.lock().unwrap().clone();
+    assert_eq!(target.root.lock().unwrap().as_deref(), Some(new.as_str()), "not undone");
+    assert_eq!(*plugin.stored_root.lock().unwrap(), new, "target and store agree");
+}
+
+/// A plugin that ignores a failed host execution and reports success: the
+/// host had rolled back, so it is unknown what the plugin stored.
+#[tokio::test]
+async fn a_plugin_ignoring_a_failed_host_execution_is_stranded_and_audited() {
+    assert!(capture::install(), "this test needs the process logger");
+    let (_bv, core, root, plugin, target) = rooted_vault("dyn_host_rotate_ignored").await;
+    *target.only_login.lock().unwrap() = Some(ROOT_SECRET.to_string());
+    *plugin.mode.lock().unwrap() = "ignore_execute_error";
+    let refused = root_call(&core, &root, Operation::Write, "database/rotate-root/prod").await;
+    assert_eq!(status_of(&refused), Some(502), "{refused:?}");
+    assert!(format!("{refused:?}").contains("reported success although"), "{refused:?}");
+    let lines = capture::lines();
+    let audited =
+        |l: &String| l.contains("dynamic_secret") && l.contains("\"rotate_root\"") && l.contains("not stored");
+    assert!(lines.iter().any(|l| audited(l) && l.contains("reported success")), "{lines:#?}");
+    assert!(lines.iter().any(|l| l.starts_with("ERROR") && l.contains("`prod`")), "{lines:#?}");
+}
+
+/// Two rotate-roots at once: one is refused with a conflict, the other
+/// completes, and its version bump is not lost.
+#[tokio::test]
+async fn concurrent_rotations_conflict_and_no_update_is_lost() {
+    let (_bv, core, root, _plugin, target) = rooted_vault("dyn_host_rotate_race").await;
+    target.delay_ms.store(300, Ordering::SeqCst);
+    let (a, b) = tokio::join!(
+        root_call(&core, &root, Operation::Write, "database/rotate-root/prod"),
+        root_call(&core, &root, Operation::Write, "database/rotate-root/prod"),
+    );
+    let statuses = [status_of(&a), status_of(&b)];
+    assert!(statuses.contains(&Some(409)) && (a.is_ok() || b.is_ok()), "{a:?} / {b:?}");
+    let conflict = if a.is_err() { &a } else { &b };
+    assert!(format!("{conflict:?}").contains("in progress"), "{conflict:?}");
+    let record = host_record(&core).await;
+    assert_eq!(record.root_credential_version, 2);
+    assert!(record.rotation_pending.is_none());
+}
+
+/// A config write during a rotation is kept: the rotation's write-back merges
+/// only its own change into the record it re-reads.
+#[tokio::test]
+async fn a_config_write_during_a_rotation_is_not_reverted() {
+    let (_bv, core, root, _plugin, target) = rooted_vault("dyn_host_rotate_config").await;
+    target.delay_ms.store(400, Ordering::SeqCst);
+    let pem = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----";
+    let write = async {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let mut req = Request::new("database/config/prod");
+        req.operation = Operation::Write;
+        req.client_token = root.clone();
+        req.body = json!({ "tls_ca_pem": pem }).as_object().cloned();
+        core.handle_request(&mut req).await
+    };
+    let (rotated, written) =
+        tokio::join!(root_call(&core, &root, Operation::Write, "database/rotate-root/prod"), write);
+    rotated.unwrap();
+    written.unwrap();
+    let record = host_record(&core).await;
+    assert_eq!(record.tls_ca_pem.as_deref(), Some(pem), "the config write survived");
+    assert_eq!(record.root_credential_version, 2, "and so did the rotation");
+}
+
+/// A marker left by a node that died mid-rotation: rotate-root refuses with
+/// a clear message, a config read shows it, deleting the connection is
+/// refused, and only an operator's DELETE rotate-root clears it.
+#[tokio::test]
+async fn a_leftover_marker_is_surfaced_and_only_an_operator_clears_it() {
+    let (_bv, core, root, _plugin, _target) = rooted_vault("dyn_host_rotate_marker").await;
+    let mut record = host_record(&core).await;
+    let fresh = bv_dynamic::records::RotationPending {
+        started_at: unix_secs(),
+        node: "raft node 7".into(),
+        nonce: "n".into(),
+        stranded: false,
+        reason: None,
+    };
+    record.rotation_pending = Some(fresh.clone());
+    put_host_record(&core, &record).await;
+    let busy = root_call(&core, &root, Operation::Write, "database/rotate-root/prod").await;
+    assert_eq!(status_of(&busy), Some(409));
+    assert!(format!("{busy:?}").contains("in progress") && format!("{busy:?}").contains("raft node 7"), "{busy:?}");
+
+    record.rotation_pending = Some(bv_dynamic::records::RotationPending { started_at: 1, ..fresh });
+    put_host_record(&core, &record).await;
+    let stale = root_call(&core, &root, Operation::Write, "database/rotate-root/prod").await;
+    let text = format!("{stale:?}");
+    assert!(
+        text.contains("`prod`") && text.contains("never finished") && text.contains("DELETE rotate-root/prod"),
+        "{text}"
+    );
+    let read = root_call(&core, &root, Operation::Read, "database/config/prod").await.unwrap().unwrap();
+    assert_eq!(read.data.as_ref().unwrap()["rotation_pending"]["possibly_stranded"], true);
+    assert!(read.warnings.iter().any(|w| w.contains("`prod`")), "{:?}", read.warnings);
+    assert_eq!(status_of(&root_call(&core, &root, Operation::Delete, "database/config/prod").await), Some(409));
+
+    let cleared = root_call(&core, &root, Operation::Delete, "database/rotate-root/prod").await.unwrap().unwrap();
+    assert_eq!(cleared.data.unwrap()["cleared"]["node"], "raft node 7");
+    assert!(host_record(&core).await.rotation_pending.is_none());
+    assert_eq!(status_of(&root_call(&core, &root, Operation::Delete, "database/rotate-root/prod").await), Some(400));
+    root_call(&core, &root, Operation::Write, "database/rotate-root/prod").await.unwrap();
 }

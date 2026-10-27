@@ -61,8 +61,9 @@ impl DynamicState {
     }
 }
 
-/// The ops whose statements the host rendered, and so may run for a plugin.
-const PLANNED_OPS: [&str; 3] = ["dynamic.generate", "dynamic.renew", "dynamic.revoke"];
+/// The ops whose statements the host rendered, and so may run for a plugin
+/// (rotate-root: the host sets, verifies and, if need be, undoes the secret).
+const PLANNED_OPS: [&str; 4] = ["dynamic.generate", "dynamic.renew", "dynamic.revoke", "dynamic.rotate_root"];
 const CONNECTOR_FIELDS: [&str; 5] = ["kind", "url", "username", "password", "connect_timeout_secs"];
 
 /// `dynamic_pool_checkout` with `execute`, refused in the server's order and
@@ -103,6 +104,9 @@ fn execute(state: &mut DynamicState, connection: &str, execute: &Value) -> Resul
         "op": op, "connection": connection, "slot": slot, "kind": kind,
         "url": text("url"), "username": text("username"),
     }));
+    if op == "dynamic.rotate_root" {
+        return Ok(json!({ "executed": 1, "identity_absent": false, "rotated": true }));
+    }
     Ok(json!({ "executed": state.session_statements, "identity_absent": false }))
 }
 
@@ -252,6 +256,13 @@ mod tests {
         assert!(!st.executions[0].to_string().contains("root-secret"), "the root secret is not recorded");
 
         st.open_session(&json!({ "op": "dynamic.rotate_root", "connection": "prod" }));
+        let slot =
+            call(CAPS, &mut st, "dynamic_pool_checkout", &json!({ "connection": "prod" })).unwrap()["slot"].clone();
+        let rotated = call(CAPS, &mut st, "dynamic_pool_checkout", &exec(slot, "postgres")).unwrap();
+        assert_eq!(rotated["rotated"], true, "the host rotates the root itself");
+
+        // A proxied call has no plan.
+        st.open_session(&json!({ "op": "read", "connection": "prod" }));
         let slot =
             call(CAPS, &mut st, "dynamic_pool_checkout", &json!({ "connection": "prod" })).unwrap()["slot"].clone();
         assert!(refused(&mut st, exec(slot, "postgres")).contains("no host-rendered statements"));

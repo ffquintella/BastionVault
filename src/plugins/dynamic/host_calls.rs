@@ -8,7 +8,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use bv_dynamic::{
     audit::{DynamicEventKind, DynamicSecretEvent, EventOrigin},
-    connector::{ConnectorParams, MAX_EXECUTE_TIME},
+    connector::{rotate_root, ConnectorParams, ExecPlan, RotateError, MAX_EXECUTE_TIME, MAX_ROTATE_TIME},
     records::{check_name, LeaseRequest},
 };
 use serde::{Deserialize, Serialize};
@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 
 use super::{
     pool::{connectors, host_pool, target_key},
-    session::{DynamicSession, DynamicVerb},
+    session::{DynamicSession, DynamicVerb, RotationState},
     state,
 };
 use crate::{
@@ -411,6 +411,32 @@ async fn pool_execute(session: &DynamicSession, connection: &str, execute: &Valu
         )));
     };
     let secrets = session.secrets();
+    if matches!(plan, ExecPlan::RotateRoot { .. }) {
+        // Recorded before the target is touched: if the runtime drops this
+        // call part-way (its own timeout), the backend still finds it and
+        // treats the rotation as possibly stranded. The host's own budget
+        // (MAX_ROTATE_TIME, 18 s) stays well inside the plugin call's 30 s.
+        session.set_rotation(RotationState::InFlight);
+        let result =
+            rotate_root(&mut grant, connector.as_ref(), &params, &plan, &secrets.refs(), MAX_ROTATE_TIME).await;
+        session.hold_grant(grant);
+        return match result {
+            Ok(restore) => {
+                let executed = restore.statement_count();
+                session.set_rotation(RotationState::Applied(restore));
+                Ok(json!({ "executed": executed, "identity_absent": false, "rotated": true }))
+            }
+            Err(e) => {
+                match &e {
+                    RotateError::NotApplied(_) => session.clear_rotation(),
+                    RotateError::RolledBack(_) => session.set_rotation(RotationState::RolledBack),
+                    RotateError::Stranded(why) => session.set_rotation(RotationState::Stranded(why.to_string())),
+                }
+                log::debug!("host root rotation on `{connection}` failed: {}", e.error());
+                Err(DynamicCallError::from(e.error().clone()))
+            }
+        };
+    }
     let result = bv_dynamic::connector::execute(
         &mut grant,
         connector.as_ref(),

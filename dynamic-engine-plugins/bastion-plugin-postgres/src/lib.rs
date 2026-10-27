@@ -63,20 +63,8 @@ impl<C: Connector> PostgresBackend<C> {
         Self { connector }
     }
 
-    /// Check out a pool slot for the connection and dial it with the slot's
-    /// TLS policy (rotate-root, which the host does not execute, and every
-    /// call on a host without a `postgres` connector).
-    async fn open(
-        &self,
-        ctx: &mut DynamicCtx<'_>,
-        conn: &Connection,
-    ) -> Result<(Target, Box<dyn Session>), DynamicError> {
-        let target = Target::from_connection(conn)?;
-        let grant = ctx.pool_checkout(&conn.name).await?;
-        let session = self.dial(ctx, conn, &target, &grant).await?;
-        Ok((target, session))
-    }
-
+    /// Dial with the grant's TLS policy (a host without a `postgres`
+    /// connector, or a connection whose endpoint it has not pinned).
     async fn dial(
         &self,
         ctx: &mut DynamicCtx<'_>,
@@ -219,9 +207,27 @@ impl<C: Connector> DynamicCredentialBackend for PostgresBackend<C> {
     }
 
     async fn rotate_root(&self, ctx: &mut DynamicCtx<'_>, req: RotateRootRequest) -> Result<(), DynamicError> {
-        // The host renders no statement for rotate-root (yet), so it has none
-        // to execute: this one dials, with the grant's TLS policy.
-        let (target, mut session) = self.open(ctx, &req.connection).await?;
+        let mut session = match self.route(ctx, &req.connection).await? {
+            // The host sets the new secret over its old-secret connection and
+            // proves it with a fresh login; this engine only stores it. If
+            // storing fails the call fails, and the host puts the previous
+            // secret back on the target itself.
+            Route::Host(grant, connector) => {
+                ctx.host_execute(&grant, &connector).await?;
+                let mut conn = req.connection;
+                conn.set_secret("password", req.new_secret.clone());
+                // Anything after the store must not fail the call: from here
+                // the host assumes the new secret is stored.
+                ctx.save_connection(&conn).await.map_err(|stored| {
+                    DynamicError::RootNotStored(format!("{stored}; the host restores the previous one"))
+                })?;
+                emit(ctx, event(EventKind::RotateRoot)).await;
+                return Ok(());
+            }
+            Route::Dial(session) => session,
+        };
+        // An older host, or a connection it has not pinned: dial, as before.
+        let target = Target::from_connection(&req.connection)?;
         let alter = SecretString::new(alter_password(&target.username, req.new_secret.expose())?);
         session.execute_in_transaction(&[alter.expose()]).await?;
         let mut conn = req.connection;

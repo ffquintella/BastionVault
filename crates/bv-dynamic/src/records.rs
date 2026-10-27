@@ -116,6 +116,45 @@ pub struct ConnectionRecord {
     pub connection_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
+    /// Operator templates for a host rotate-root (`{{name}}`: the root user,
+    /// `{{password}}`: the secret to set); empty uses the connector's own
+    /// statement. Host-owned like the TLS policy. Additive (absent: empty).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub root_rotation_statements: Vec<String>,
+    /// A rotate-root in progress, or one that ended with the target and the
+    /// stored root secret possibly different. Never cleared automatically:
+    /// only its own rotation or an operator (`DELETE rotate-root/<name>`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation_pending: Option<RotationPending>,
+}
+
+/// After this many seconds a pending rotation is reported as possibly
+/// stranded (its node may have died mid-rotation) instead of in progress; it
+/// is still not cleared without an operator. Twice the plugin call budget.
+pub const ROTATION_STALE_AFTER_SECS: u64 = 120;
+
+/// The marker of a rotate-root on a connection. Holds no secret.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RotationPending {
+    /// Unix seconds.
+    pub started_at: u64,
+    /// The node that started it (Raft id or host name).
+    pub node: String,
+    /// Identifies this rotation, so only it clears its own marker.
+    pub nonce: String,
+    /// The rotation ended and the target may hold a new root secret that was
+    /// not stored: an operator must check, then clear it.
+    #[serde(default)]
+    pub stranded: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl RotationPending {
+    /// Stranded, or running for longer than any rotation can.
+    pub fn possibly_stranded(&self, now_unix: u64) -> bool {
+        self.stranded || now_unix.saturating_sub(self.started_at) > ROTATION_STALE_AFTER_SECS
+    }
 }
 
 fn version_one_u64() -> u64 {
@@ -132,6 +171,8 @@ impl Default for ConnectionRecord {
             config_generation: 0,
             connection_url: None,
             username: None,
+            root_rotation_statements: Vec::new(),
+            rotation_pending: None,
         }
     }
 }
@@ -152,6 +193,18 @@ impl ConnectionRecord {
             (Some(pem), false) => crate::pool::TlsPolicy::verify_with_ca(pem.clone()),
             (None, false) => crate::pool::TlsPolicy::default(),
         }
+    }
+
+    /// Check operator root-rotation templates: at most [`MAX_STATEMENTS`],
+    /// each naming only `{{name}}` and `{{password}}`.
+    pub fn check_root_rotation(statements: &[String]) -> Result<(), DynamicError> {
+        if statements.len() > MAX_STATEMENTS {
+            return Err(DynamicError::invalid("root_rotation_statements", format!("at most {MAX_STATEMENTS}")));
+        }
+        for s in statements {
+            template::validate_only(s, &["name", "password"])?;
+        }
+        Ok(())
     }
 
     /// The pinned `(connection_url, username)`, when both were configured.
@@ -322,6 +375,11 @@ mod tests {
         assert_eq!(pinned.pinned_endpoint(), None, "both halves are needed");
         let pinned = ConnectionRecord { username: Some("vault".into()), ..pinned };
         assert_eq!(pinned.pinned_endpoint(), Some(("host=db", "vault")));
+        assert!(rec.root_rotation_statements.is_empty(), "older records rotate with the connector's statement");
+        let ok = vec!["ALTER USER \"{{name}}\" WITH PASSWORD '{{password}}'".to_string()];
+        ConnectionRecord::check_root_rotation(&ok).unwrap();
+        let bad = vec!["ALTER USER \"{{name}}\" VALID UNTIL '{{expiration}}'".to_string()];
+        assert!(ConnectionRecord::check_root_rotation(&bad).is_err(), "only name and password");
         let numeric = br#"{"v":1,"config_generation":7}"#;
         assert_eq!(ConnectionRecord::decode(numeric).unwrap().config_generation, 7, "older counters still read");
         assert_eq!(rec.target_settings().root_credential_version, 3);

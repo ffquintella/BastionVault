@@ -382,19 +382,31 @@ fn an_executing_host_reports_an_absent_role_and_its_refusal_is_final() {
 }
 
 #[test]
-fn rotate_root_dials_even_on_an_executing_host() {
+fn an_executing_host_rotates_the_root_and_the_plugin_only_stores_it() {
     rt().block_on(async {
         let (engine, db) = engine();
         let mut host = configured_on_executing_host(&engine).await;
         let new_root = "Zq9-host-generated-root-secret";
         let rotate =
             json!({ "op": "dynamic.rotate_root", "connection": "prod", "credential": { "password": new_root } });
-        let (r, _) = invoke(&engine, &mut host, &rotate).await;
+        let (r, diag) = invoke(&engine, &mut host, &rotate).await;
         assert_eq!(r.status, 0, "{}", body(&r));
-        assert_eq!(db.dials.borrow().len(), 1);
-        assert!(host.executions.is_empty(), "the host renders no rotate-root statement to execute");
-        // The next generate goes through the host with the new root secret.
-        invoke(&engine, &mut host, &generate()).await;
-        assert_eq!(host.executions.len(), 1);
+        assert!(db.dials.borrow().is_empty() && db.committed.borrow().is_empty(), "the host changed the target");
+        assert_eq!(host.executions.last().unwrap()["op"], "dynamic.rotate_root");
+        let stored = String::from_utf8_lossy(&host.storage["config/prod"]).to_string();
+        assert!(stored.contains(new_root) && !stored.contains(ROOT), "the new secret is stored");
+        assert!(!body(&r).contains(new_root) && diag.iter().all(|l| !l.contains(new_root)));
+        assert_eq!(host.events.last().unwrap()["event"], "rotate_root");
+
+        // Storing fails: the call fails (the host then undoes the target
+        // change) and the plugin does not dial to undo it itself.
+        let mut host = configured_on_executing_host(&engine).await;
+        host.fail_storage_put = true;
+        let (r, _) = invoke(&engine, &mut host, &rotate).await;
+        assert_eq!(r.status, status::UNAVAILABLE, "{}", body(&r));
+        assert!(body(&r).contains("the host restores the previous one"), "{}", body(&r));
+        assert_eq!(r.json().unwrap()["root_stored"], false, "the marker the host undoes on");
+        assert!(!body(&r).contains(new_root) && !body(&r).contains(ROOT));
+        assert!(db.dials.borrow().is_empty());
     });
 }

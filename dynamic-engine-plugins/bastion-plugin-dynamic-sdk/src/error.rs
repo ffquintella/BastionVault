@@ -46,6 +46,11 @@ pub enum DynamicError {
     Unsupported(&'static str),
     /// A malformed message from the host.
     Protocol(String),
+    /// Rotate-root on a host that set the new secret: this plugin ran to the
+    /// end and did not store it. The reply says so (`root_stored: false`), the
+    /// only answer on which the host puts the previous secret back; any other
+    /// failure leaves it unknown which secret was stored.
+    RootNotStored(String),
 }
 
 impl DynamicError {
@@ -64,7 +69,7 @@ impl DynamicError {
             Self::NotFound(_) => status::NOT_FOUND,
             Self::Invalid(_) => status::INVALID,
             Self::Forbidden(_) | Self::NoSession(_) | Self::HostRefused(_) => status::HOST_REFUSED,
-            Self::Unavailable(_) => status::UNAVAILABLE,
+            Self::Unavailable(_) | Self::RootNotStored(_) => status::UNAVAILABLE,
             Self::Unsupported(_) => status::UNSUPPORTED,
             Self::Protocol(_) => status::PROTOCOL,
         }
@@ -82,6 +87,7 @@ impl DynamicError {
             Self::Unavailable(_) => "unavailable",
             Self::Unsupported(_) => "unsupported",
             Self::Protocol(_) => "protocol",
+            Self::RootNotStored(_) => "root_not_stored",
         }
     }
 
@@ -129,6 +135,7 @@ impl fmt::Display for DynamicError {
             Self::Unavailable(m) => write!(f, "host unavailable: {m}"),
             Self::Unsupported(m) => write!(f, "{m} is not supported by this plugin"),
             Self::Protocol(m) => write!(f, "protocol error: {m}"),
+            Self::RootNotStored(m) => write!(f, "the new root secret was not stored: {m}"),
         }
     }
 }
@@ -176,6 +183,7 @@ mod tests {
             DynamicError::Unavailable("x".into()),
             DynamicError::Unsupported("op"),
             DynamicError::Protocol("x".into()),
+            DynamicError::RootNotStored("x".into()),
         ] {
             assert_ne!(e.status(), 0, "{e}");
         }

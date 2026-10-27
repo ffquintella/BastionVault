@@ -25,6 +25,14 @@ struct FakeTarget {
     fail_on: Mutex<Option<String>>,
     /// Refuse to dial in plaintext under a verifying policy, like a real one.
     plaintext_target: AtomicBool,
+    /// The root user's current secret; a dial with another one fails.
+    root: Mutex<Option<String>>,
+    /// Logins with this secret fail even when it is the root's.
+    refuse_login: Mutex<Option<String>>,
+    /// Rotations after the first "succeed" without changing the root (an
+    /// undo that does not take).
+    freeze_after_first_rotation: AtomicBool,
+    rotations: std::sync::atomic::AtomicU32,
 }
 
 struct FakeConnector(Arc<FakeTarget>);
@@ -48,6 +56,14 @@ impl ConnectorSession for FakeSession {
             if let Some(bad) = self.0.fail_on.lock().unwrap().as_deref() {
                 if let Some(s) = statements.iter().find(|s| s.contains(bad)) {
                     return Err(DynamicError::Execute(format!("syntax error in {s}")));
+                }
+            }
+            for s in statements {
+                if let Some(secret) = s.strip_prefix("ROTATE root TO ") {
+                    let n = self.0.rotations.fetch_add(1, Ordering::SeqCst);
+                    if n == 0 || !self.0.freeze_after_first_rotation.load(Ordering::SeqCst) {
+                        *self.0.root.lock().unwrap() = Some(secret.to_string());
+                    }
                 }
             }
             self.0.committed.lock().unwrap().push(statements.iter().map(|s| s.to_string()).collect());
@@ -81,6 +97,14 @@ impl Connector for FakeConnector {
                     ),
                 });
             }
+            let wrong = self.0.root.lock().unwrap().as_deref().is_some_and(|r| r != params.password());
+            let refused = self.0.refuse_login.lock().unwrap().as_deref() == Some(params.password());
+            if wrong || refused {
+                return Err(DynamicError::Connect {
+                    connection: params.endpoint().url.clone(),
+                    reason: format!("password authentication failed (tried {})", params.password()),
+                });
+            }
             let e = params.endpoint();
             self.0.dials.lock().unwrap().push((
                 e.url.clone(),
@@ -98,6 +122,10 @@ impl Connector for FakeConnector {
 
     fn default_renew(&self, username: &str, expiration: &str) -> Result<Vec<String>, DynamicError> {
         Ok(vec![format!("DEFAULT EXTEND {username} {expiration}")])
+    }
+
+    fn default_root_rotation(&self, username: &str, password: &str) -> Result<Vec<String>, DynamicError> {
+        Ok(vec![format!("ROTATE {username} TO {password}")])
     }
 }
 
@@ -307,4 +335,155 @@ fn params_are_bounded_and_never_debug_the_secret() {
     let e = ConnectorParams::parse(&wrong_type).unwrap_err();
     assert!(!e.to_string().contains("12345678901"), "values are never echoed: {e}");
     assert_eq!(Connectors::default().with(Arc::new(FakeConnector(Arc::default()))).kinds(), ["fake"]);
+}
+
+// ── Root rotation ────────────────────────────────────────────────────────
+
+const NEW_ROOT: &str = "NewRootSecretFromTheHost-0123456789";
+
+fn rotation(templates: Vec<String>) -> ExecPlan {
+    ExecPlan::RotateRoot { templates, username: "root".into(), new_password: Zeroizing::new(NEW_ROOT.into()) }
+}
+
+fn rooted() -> Arc<FakeTarget> {
+    let target = Arc::new(FakeTarget::default());
+    *target.root.lock().unwrap() = Some(ROOT_SECRET.into());
+    target
+}
+
+/// Set over the old-secret connection, verified by a fresh login with the new
+/// one, and undoable (the plugin could not store it) over a new-secret login.
+#[tokio::test]
+async fn a_root_rotation_is_set_verified_and_can_be_undone() {
+    let target = rooted();
+    let fake = FakeConnector(target.clone());
+    let pool = pool(1, TlsPolicy::default());
+    let mut slot = pool.checkout("m/prod").await.unwrap();
+    let restore = rotate_root(&mut slot, &fake, &params("fake://db"), &rotation(vec![]), &[], LIMIT).await.unwrap();
+    assert_eq!(target.root.lock().unwrap().as_deref(), Some(NEW_ROOT));
+    assert_eq!(target.dials.lock().unwrap().last().unwrap().2, NEW_ROOT, "verified by a fresh login");
+    assert!(slot.is_live(), "the slot keeps the new-secret connection");
+    assert!(!format!("{restore:?}").contains(ROOT_SECRET) && !format!("{restore:?}").contains(NEW_ROOT));
+
+    restore_root(&fake, &restore, &TlsPolicy::default(), &[], LIMIT).await.unwrap();
+    assert_eq!(target.root.lock().unwrap().as_deref(), Some(ROOT_SECRET), "the old secret is back");
+    assert_eq!(target.dials.lock().unwrap().last().unwrap().2, ROOT_SECRET, "and checked by a login");
+    // `execute` never runs a rotation plan.
+    drop(slot);
+    let mut slot = pool.checkout("m/prod").await.unwrap();
+    assert!(execute(&mut slot, &fake, &params("fake://db"), &rotation(vec![]), &[], LIMIT).await.is_err());
+}
+
+#[tokio::test]
+async fn a_new_secret_that_does_not_log_in_is_rolled_back() {
+    let target = rooted();
+    *target.refuse_login.lock().unwrap() = Some(NEW_ROOT.into());
+    let fake = FakeConnector(target.clone());
+    let pool = pool(1, TlsPolicy::default());
+    let mut slot = pool.checkout("m/prod").await.unwrap();
+    let err = rotate_root(&mut slot, &fake, &params("fake://db"), &rotation(vec![]), &[], LIMIT).await.unwrap_err();
+    assert!(matches!(err, RotateError::RolledBack(_)), "{err:?}");
+    assert_eq!(target.root.lock().unwrap().as_deref(), Some(ROOT_SECRET), "the target change was undone");
+    let text = err.error().to_string();
+    assert!(text.contains("put back") && !text.contains(NEW_ROOT) && !text.contains(ROOT_SECRET), "{text}");
+    assert!(!slot.is_live());
+}
+
+#[tokio::test]
+async fn a_failed_undo_is_reported_as_stranded_and_redacted() {
+    let target = rooted();
+    *target.refuse_login.lock().unwrap() = Some(NEW_ROOT.into());
+    // The undo statement names the old secret: make it fail (echoing it).
+    *target.fail_on.lock().unwrap() = Some(ROOT_SECRET.into());
+    let fake = FakeConnector(target.clone());
+    let pool = pool(1, TlsPolicy::default());
+    let mut slot = pool.checkout("m/prod").await.unwrap();
+    let err = rotate_root(&mut slot, &fake, &params("fake://db"), &rotation(vec![]), &[], LIMIT).await.unwrap_err();
+    assert!(matches!(err, RotateError::Stranded(_)), "{err:?}");
+    let text = err.error().to_string();
+    assert!(text.contains("the target may hold the new root secret"), "{text}");
+    assert!(!text.contains(NEW_ROOT) && !text.contains(ROOT_SECRET), "{text}");
+    assert_eq!(target.root.lock().unwrap().as_deref(), Some(NEW_ROOT));
+    drop(slot);
+
+    // A restore that cannot run is an error, redacted too.
+    *target.refuse_login.lock().unwrap() = None;
+    *target.root.lock().unwrap() = Some(ROOT_SECRET.into());
+    *target.fail_on.lock().unwrap() = None;
+    let mut slot = pool.checkout("m/prod").await.unwrap();
+    let restore = rotate_root(&mut slot, &fake, &params("fake://db"), &rotation(vec![]), &[], LIMIT).await.unwrap();
+    *target.fail_on.lock().unwrap() = Some(ROOT_SECRET.into());
+    let err = restore_root(&fake, &restore, &TlsPolicy::default(), &[], LIMIT).await.unwrap_err();
+    assert!(!err.to_string().contains(ROOT_SECRET) && !err.to_string().contains(NEW_ROOT), "{err}");
+}
+
+/// Operator templates render with the pinned root user and the new secret; a
+/// current secret the templates could not put back refuses the rotation
+/// before the target is touched; a foreign root user is refused.
+#[tokio::test]
+async fn rotation_templates_and_up_front_refusals() {
+    let target = rooted();
+    let fake = FakeConnector(target.clone());
+    let pool = pool(1, TlsPolicy::default());
+    let templates = vec!["ROTATE {{name}} TO {{password}}".to_string()];
+    let mut slot = pool.checkout("m/prod").await.unwrap();
+    rotate_root(&mut slot, &fake, &params("fake://db"), &rotation(templates.clone()), &[], LIMIT).await.unwrap();
+    assert_eq!(target.committed.lock().unwrap().last().unwrap(), &[format!("ROTATE root TO {NEW_ROOT}")]);
+    drop(slot);
+
+    *target.root.lock().unwrap() = Some("old p@ss word!".into());
+    let odd = params("fake://db").with_password("old p@ss word!");
+    let before = target.committed.lock().unwrap().len();
+    let mut slot = pool.checkout("m/prod").await.unwrap();
+    let err = rotate_root(&mut slot, &fake, &odd, &rotation(templates), &[], LIMIT).await.unwrap_err();
+    assert!(matches!(err, RotateError::NotApplied(_)), "{err:?}");
+    assert!(err.error().to_string().contains("could not be put back"), "{err:?}");
+    assert_eq!(target.committed.lock().unwrap().len(), before, "nothing ran");
+
+    let other = ConnectorParams::parse(
+        &json!({ "kind": "fake", "url": "fake://db", "username": "someone", "password": ROOT_SECRET }),
+    )
+    .unwrap();
+    assert!(matches!(
+        rotate_root(&mut slot, &fake, &other, &rotation(vec![]), &[], LIMIT).await,
+        Err(RotateError::NotApplied(_))
+    ));
+}
+
+/// The undo "succeeds" but the old secret still does not log in: stranded,
+/// never reported as rolled back.
+#[tokio::test]
+async fn an_undo_that_does_not_bring_the_old_secret_back_is_stranded() {
+    let target = rooted();
+    *target.refuse_login.lock().unwrap() = Some(NEW_ROOT.into());
+    target.freeze_after_first_rotation.store(true, Ordering::SeqCst);
+    let fake = FakeConnector(target.clone());
+    let pool = pool(1, TlsPolicy::default());
+    let mut slot = pool.checkout("m/prod").await.unwrap();
+    let err = rotate_root(&mut slot, &fake, &params("fake://db"), &rotation(vec![]), &[], LIMIT).await.unwrap_err();
+    assert!(matches!(err, RotateError::Stranded(_)), "{err:?}");
+    assert!(!err.error().to_string().contains(ROOT_SECRET) && !err.error().to_string().contains(NEW_ROOT));
+}
+
+/// The presented old secret is proven by a fresh login even when a pooled
+/// connection to the endpoint exists: a wrong one changes nothing.
+#[tokio::test]
+async fn a_wrong_old_secret_is_caught_before_the_target_changes() {
+    let target = rooted();
+    let fake = FakeConnector(target.clone());
+    let pool = pool(1, TlsPolicy::default());
+    let mut slot = pool.checkout("m/prod").await.unwrap();
+    execute(&mut slot, &fake, &params("fake://db"), &create(), &[], LIMIT).await.unwrap();
+    assert!(slot.is_live(), "a pooled connection to the endpoint exists");
+    let wrong = params("fake://db").with_password("not-the-root-secret-at-all");
+    let err = rotate_root(&mut slot, &fake, &wrong, &rotation(vec![]), &[], LIMIT).await.unwrap_err();
+    assert!(matches!(err, RotateError::NotApplied(_)), "{err:?}");
+    assert_eq!(target.root.lock().unwrap().as_deref(), Some(ROOT_SECRET), "nothing changed");
+    assert!(!err.error().to_string().contains("not-the-root-secret-at-all"), "{err:?}");
+}
+
+#[test]
+fn quote_doubled_secrets_are_redaction_needles_too() {
+    let [plain, quoted] = secret_needles("it's-a-secret-value");
+    assert_eq!((plain.as_str(), quoted.as_str()), ("it's-a-secret-value", "it''s-a-secret-value"));
 }

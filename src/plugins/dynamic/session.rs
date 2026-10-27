@@ -9,7 +9,11 @@ use std::sync::{
     Arc, Mutex,
 };
 
-use bv_dynamic::{audit::Actor, connector::ExecPlan, records::LeaseRequest};
+use bv_dynamic::{
+    audit::Actor,
+    connector::{ExecPlan, RootRestore},
+    records::LeaseRequest,
+};
 use zeroize::Zeroizing;
 
 use crate::storage::Storage;
@@ -60,6 +64,8 @@ pub struct DynamicSession {
     /// The statements the host rendered for this call, which a plugin may ask
     /// the host to run once (`dynamic_pool_checkout` with `execute`).
     plan: Mutex<Option<ExecPlan>>,
+    /// What a host root rotation of this call left on the target.
+    rotation: Mutex<Option<RotationState>>,
     lease_request: Mutex<Option<LeaseRequest>>,
     grants: Mutex<Vec<super::pool::HeldGrant>>,
     plugin_events: AtomicU32,
@@ -80,6 +86,7 @@ impl DynamicSession {
             request_id: None,
             secrets: Mutex::new(Vec::new()),
             plan: Mutex::new(None),
+            rotation: Mutex::new(None),
             lease_request: Mutex::new(None),
             grants: Mutex::new(Vec::new()),
             plugin_events: AtomicU32::new(0),
@@ -118,6 +125,18 @@ impl DynamicSession {
 
     pub fn has_plan(&self) -> bool {
         self.plan.lock().unwrap_or_else(|p| p.into_inner()).is_some()
+    }
+
+    pub fn set_rotation(&self, state: RotationState) {
+        *self.rotation.lock().unwrap_or_else(|p| p.into_inner()) = Some(state);
+    }
+
+    pub fn clear_rotation(&self) {
+        self.rotation.lock().unwrap_or_else(|p| p.into_inner()).take();
+    }
+
+    pub fn take_rotation(&self) -> Option<RotationState> {
+        self.rotation.lock().unwrap_or_else(|p| p.into_inner()).take()
     }
 
     /// Record the plugin's lease request. Only one per session.
@@ -179,6 +198,21 @@ impl std::fmt::Debug for DynamicSession {
             .field("plan", &self.has_plan())
             .finish_non_exhaustive()
     }
+}
+
+/// What a host root rotation left on the target, for the backend to settle
+/// once the plugin has (or has not) stored the new secret.
+#[derive(Debug)]
+pub enum RotationState {
+    /// Set before the host touches the target; still there if the call was
+    /// cut short (the runtime dropped it), which the backend treats as stranded.
+    InFlight,
+    /// The new secret is set and verified; undo it if the plugin fails.
+    Applied(RootRestore),
+    /// It did not log in and the old secret was put back: nothing changed.
+    RolledBack,
+    /// The target holds the new secret and putting the old one back failed.
+    Stranded(String),
 }
 
 /// A copy of a session's secrets. Wiped on drop; no `Debug`.

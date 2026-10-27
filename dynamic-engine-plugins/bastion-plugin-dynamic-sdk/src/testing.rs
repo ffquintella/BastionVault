@@ -98,7 +98,8 @@ impl MockHost {
             return Err(refused(method, &format!("invalid: slot {slot} is not held by this call")));
         }
         let op = self.session.clone().unwrap_or_default();
-        let planned = ["dynamic.generate", "dynamic.renew", "dynamic.revoke"].contains(&op.as_str());
+        let planned =
+            ["dynamic.generate", "dynamic.renew", "dynamic.revoke", "dynamic.rotate_root"].contains(&op.as_str());
         if !planned || self.executed_in_session {
             return Err(refused(method, &format!("invalid: {op} has no host-rendered statements to execute")));
         }
@@ -108,7 +109,11 @@ impl MockHost {
         }
         self.executions.push(json!({ "op": op, "connection": connection, "slot": slot, "kind": kind,
             "url": text("url"), "username": text("username") }));
-        let default = json!({ "executed": self.session_statements, "identity_absent": false });
+        let default = if op == "dynamic.rotate_root" {
+            json!({ "executed": 1, "identity_absent": false, "rotated": true })
+        } else {
+            json!({ "executed": self.session_statements, "identity_absent": false })
+        };
         Ok(self.execution_reply.take().unwrap_or(default))
     }
 

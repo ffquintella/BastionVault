@@ -189,6 +189,28 @@ impl Connector for PostgresConnector {
         check_expiration(expiration)?;
         Ok(vec![format!("ALTER ROLE {} VALID UNTIL {}", quote_ident(username)?, quote_literal(expiration)?)])
     }
+
+    fn default_root_rotation(&self, username: &str, password: &str) -> Result<Vec<String>, DynamicError> {
+        if password.contains('\0') || password.contains('\\') {
+            return Err(DynamicError::invalid("postgres literal", "may not contain NUL or backslash"));
+        }
+        let ident = quote_ident(username)?;
+        // Built in place with room for the worst case (every character a
+        // doubled `'`), so no reallocation leaves a copy of the secret behind.
+        let mut out = String::with_capacity(ident.len() + 2 * password.len() + 32);
+        out.push_str("ALTER ROLE ");
+        out.push_str(&ident);
+        out.push_str(" WITH PASSWORD '");
+        for c in password.chars() {
+            if c == '\'' {
+                out.push_str("''");
+            } else {
+                out.push(c);
+            }
+        }
+        out.push('\'');
+        Ok(vec![out])
+    }
 }
 
 struct PgSession {
@@ -361,6 +383,11 @@ mod tests {
         assert!(pg.default_revocation(&"a".repeat(64)).is_err(), "would be truncated to another name");
         assert_eq!(quote_ident("a\"; DROP TABLE x; --").unwrap(), "\"a\"\"; DROP TABLE x; --\"");
         assert!(quote_literal("a\\'; DROP").is_err());
+        assert_eq!(
+            pg.default_root_rotation("vault", "it's-Ab1").unwrap(),
+            ["ALTER ROLE \"vault\" WITH PASSWORD 'it''s-Ab1'"]
+        );
+        assert!(pg.default_root_rotation("vault", "back\\slash").is_err(), "refused, never mis-quoted");
     }
 
     /// Against a closed local port: the dial fails as a connect error, with
