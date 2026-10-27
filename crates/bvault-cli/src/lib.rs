@@ -66,7 +66,7 @@ mod test_utils {
             "secret-author", "shared-access", "standard-user", "standard-user-readonly",
             "totp-admin", "totp-user", "transit-admin", "transit-user",
             // Per-module baselines (features/module-policies.md).
-            "secrets-full", "secrets-read", "secrets-shared",
+            "secrets-full", "secrets-read", "secrets-shared", "self-accounts-user",
             "resource-full", "resource-read", "resource-connect", "resource-shared",
             "files-full", "files-read", "files-shared",
             "ssh-full", "ssh-read", "ssh-connect",
