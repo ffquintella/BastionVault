@@ -30,6 +30,8 @@ pub mod acl;
 mod core_bridge;
 // `PolicyGate::sql_privileges` (features/sql-browser.md §3.4).
 mod sql_privileges;
+// The rolling-upgrade write gate for `sql_*` (features/sql-browser.md §13).
+pub mod sql_write_gate;
 // The verified core against a frozen copy of the pre-delegation evaluator
 // (T31 Phase 3.3).
 #[cfg(test)]
@@ -41,16 +43,42 @@ pub struct PolicyModule {
     pub name: String,
     pub core: Arc<Core>,
     pub policy_store: ArcSwap<PolicyStore>,
+    /// The `sql_*` write-gate heartbeat survives a seal (it skips while
+    /// sealed), so it is started once per module instance.
+    sql_gate_heartbeat_started: std::sync::atomic::AtomicBool,
 }
 
 #[maybe_async::maybe_async]
 impl PolicyModule {
     pub fn new(core: Arc<Core>) -> Self {
-        Self { name: "policy".into(), core, policy_store: ArcSwap::new(Arc::new(PolicyStore::default())) }
+        Self {
+            name: "policy".into(),
+            core,
+            policy_store: ArcSwap::new(Arc::new(PolicyStore::default())),
+            sql_gate_heartbeat_started: std::sync::atomic::AtomicBool::new(false),
+        }
     }
 
     pub async fn setup_policy(&self) -> Result<(), RvError> {
-        self.policy_store.load().load_default_acl_policy().await
+        let store = self.policy_store.load();
+        // Report this build before deciding the `sql_*` gate. A failed write
+        // does not fail the unseal: other nodes then see no record and keep
+        // the gate closed, which is the safe direction.
+        if let Err(e) = store.record_this_node().await {
+            log::warn!("policy schema: this node's version record could not be written ({e})");
+        }
+        store.load_default_acl_policy().await
+    }
+
+    /// `GET v2/sys/policy-schema`: the `sql_*` write gate and each node's
+    /// report (features/sql-browser.md §13). Read-only.
+    pub async fn handle_policy_schema_status(
+        &self,
+        _backend: &dyn Backend,
+        _req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let status = self.policy_store.load().sql_gate_status().await;
+        Ok(Some(Response::data_response(Some(status))))
     }
 
     pub async fn handle_policy_list(
@@ -853,6 +881,14 @@ impl Module for PolicyModule {
 
     fn setup(&self, _core: &dyn VaultCtx) -> Result<(), RvError> {
         Ok(())
+    }
+
+    /// Refreshes this node's policy-schema record and opens the `sql_*`
+    /// write gate once every member qualifies (`sql_write_gate`).
+    fn start_background(&self, _core: Arc<dyn VaultCtx>) {
+        if !self.sql_gate_heartbeat_started.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            drop(sql_write_gate::start_heartbeat(Arc::downgrade(&self.core)));
+        }
     }
 
     async fn init(&self, core: &dyn VaultCtx) -> Result<(), RvError> {

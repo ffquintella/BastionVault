@@ -1589,6 +1589,15 @@ impl IdentityBackendInner {
 
         self.require_share_admin(req, kind, &target_path).await?;
 
+        // `sql_*` entries wait for the rolling-upgrade gate, like `sql_*` in
+        // policy HCL (features/sql-browser.md §13). Checked after the admin
+        // check, so a caller who may not share learns nothing about the gate.
+        let policy_module =
+            self.core.module_manager().get_module::<crate::modules::policy::PolicyModule>("policy");
+        let policy_store = policy_module.as_ref().map(|m| m.policy_store.load_full());
+        crate::modules::policy::sql_write_gate::require_sql_share_writable(policy_store.as_deref(), &capabilities)
+            .await?;
+
         // The picker hands us whichever keyspace's row the operator clicked;
         // key the share on the entity that will authenticate where the object
         // lives. Grant-path only -- `handle_share_delete` deliberately uses

@@ -20,7 +20,7 @@
 
 use std::{
     str::FromStr,
-    sync::{Arc, Weak},
+    sync::{atomic::AtomicBool, Arc, Weak},
 };
 
 use better_default::Default;
@@ -335,6 +335,7 @@ path "resources/*" {
     scopes       = ["shared"]
 }
 
+# >>> gated: sql capabilities (stored only once every node parses sql_*)
 # SQL privileges shared on a database resource (features/sql-browser.md §3.3).
 # Inert without a share: the scope gate demands the probed `sql_*` entry on
 # the share itself, so each capability is conveyed only by a share naming it.
@@ -345,6 +346,7 @@ path "resources/resources/+/sql/*" {
                     "sql_export", "sql_script"]
     scopes       = ["shared"]
 }
+# <<< gated: sql capabilities
 
 # Asset groups shared with the caller. `groups` (list) is ungated like
 # `standard-user`; the handler narrows the response set to groups the caller
@@ -458,6 +460,13 @@ path "resources/v2/connect/web/totp"   { capabilities = ["update"] }
 path "resources/v2/connect/web/result" { capabilities = ["update"] }
 path "resources/v2/connect/web/close"  { capabilities = ["update"] }
 path "resources/v2/connect/clipboard/audit" { capabilities = ["update"] }
+
+# The SQL browser's privilege chips (features/sql-browser.md §3.4, §9.5): the
+# caller's own effective SQL capabilities on the named resource, read with
+# `SqlPurpose::Display` (nothing recorded, nothing enforced). Endpoint-level,
+# like the connect gates, and outside the gated block: it names no `sql_*`
+# capability, so a node older than the SQL write gate parses it.
+path "resources/v2/sql/privileges/+" { capabilities = ["read"] }
 "#;
 
 // Implicit self-service policy for namespace-bound tokens.
@@ -646,7 +655,7 @@ path "cubbyhole/*" {
 // authorization. `apply_templates` substitutes the token's bound namespace, so
 // the rules can never reach another tenant's path space.
 const NAMESPACE_SHARED_POLICY_NAME: &str = "namespace-shared";
-static NAMESPACE_SHARED_POLICY: &str = r#"
+pub(crate) static NAMESPACE_SHARED_POLICY: &str = r#"
 # KV secrets in this namespace shared with the caller.
 path "{{namespace.path}}/secret/*" {
     capabilities = ["read", "list", "update"]
@@ -713,6 +722,10 @@ path "{{namespace.path}}/resources/v2/connect/web/totp"   { capabilities = ["upd
 path "{{namespace.path}}/resources/v2/connect/web/result" { capabilities = ["update"] }
 path "{{namespace.path}}/resources/v2/connect/web/close"  { capabilities = ["update"] }
 path "{{namespace.path}}/resources/v2/connect/clipboard/audit" { capabilities = ["update"] }
+
+# The SQL browser's privilege chips, tenant side: the caller's own SQL
+# capabilities only, so endpoint-level like the connect gates above.
+path "{{namespace.path}}/resources/v2/sql/privileges/+" { capabilities = ["read"] }
 "#;
 
 // Cross-namespace share access. Assignable, opt-in, share-scoped.
@@ -752,8 +765,8 @@ path "{{namespace.path}}/resources/v2/connect/clipboard/audit" { capabilities = 
 // covers `secret/*` and `dti/esi/secret/*` alike. The caller still has to be
 // allowed into the namespace at all — `token_operable_resolved` gates that
 // independently, and this policy does not confer it.
-static SHARED_ACCESS_POLICY_NAME: &str = "shared-access";
-static SHARED_ACCESS_POLICY: &str = r#"
+pub static SHARED_ACCESS_POLICY_NAME: &str = "shared-access";
+pub static SHARED_ACCESS_POLICY: &str = r#"
 # KV secrets shared with the caller, in the namespace being addressed.
 path "{{request.namespace}}/secret/*" {
     capabilities = ["read", "list", "update"]
@@ -779,6 +792,7 @@ path "{{request.namespace}}/resources/*" {
     scopes       = ["shared"]
 }
 
+# >>> gated: sql capabilities (stored only once every node parses sql_*)
 # SQL privileges shared on a database resource, in the namespace being
 # addressed. As in `default`: inert without a share naming the probed `sql_*`
 # entry, and no `owner` rule.
@@ -788,6 +802,7 @@ path "{{request.namespace}}/resources/resources/+/sql/*" {
                     "sql_export", "sql_script"]
     scopes       = ["shared"]
 }
+# <<< gated: sql capabilities
 
 # Asset groups. The `groups` list is ungated -- the handler narrows the
 # response to groups the caller owns or has been shared on -- while reading an
@@ -816,6 +831,11 @@ path "{{request.namespace}}/resources/v2/connect/web/totp"   { capabilities = ["
 path "{{request.namespace}}/resources/v2/connect/web/result" { capabilities = ["update"] }
 path "{{request.namespace}}/resources/v2/connect/web/close"  { capabilities = ["update"] }
 path "{{request.namespace}}/resources/v2/connect/clipboard/audit" { capabilities = ["update"] }
+
+# The SQL browser's privilege chips: the caller's own SQL capabilities on the
+# named resource, endpoint-level like the connect gates. Outside the gated
+# block because it names no `sql_*` capability.
+path "{{request.namespace}}/resources/v2/sql/privileges/+" { capabilities = ["read"] }
 "#;
 
 // Administrator baseline. Full access to every path with every
@@ -903,6 +923,7 @@ path "resources/v2/connect/web/totp"      { capabilities = ["create", "read", "u
 path "resources/v2/connect/web/result"    { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
 path "resources/v2/connect/web/close"     { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
 path "resources/v2/connect/clipboard/audit" { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+path "resources/v2/sql/privileges/+"      { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
 "#;
 
 static RESPONSE_WRAPPING_POLICY_NAME: &str = "response-wrapping";
@@ -1622,6 +1643,15 @@ pub struct PolicyStore {
     // Stores whether a token policy is ACL or RGP
     pub policy_type_map: DashMap<String, PolicyType>,
     pub self_ptr: Weak<PolicyStore>,
+    /// The `sql_*` write gate was found open (latched) by this store. Only
+    /// ever goes false -> true; a new store (next unseal) reads the latch.
+    pub(crate) sql_gate_open: AtomicBool,
+    /// The gated baselines were loaded with their SQL rule.
+    pub(crate) sql_baselines_full: AtomicBool,
+    /// Test seam for the cluster topology (this node, membership).
+    #[cfg(test)]
+    pub(crate) sql_gate_test_topology:
+        std::sync::Mutex<Option<(String, Result<super::sql_write_gate::Membership, String>)>>,
 }
 
 #[maybe_async::maybe_async]
@@ -1992,6 +2022,9 @@ impl PolicyStore {
         if IMMUTABLE_POLICIES.contains(&name.as_str()) {
             return Err(bv_error_string!(format!("cannot update {} policy", name)));
         }
+        if super::sql_write_gate::policy_names_sql_capabilities(&policy) {
+            self.require_sql_writable(&format!("policy {name:?}")).await?;
+        }
         let pe = PolicyEntry {
             version: 2,
             templated: policy.templated,
@@ -2124,10 +2157,24 @@ impl PolicyStore {
 
     /// Load default ACL policies into the policy store.
     pub async fn load_default_acl_policy(&self) -> Result<(), RvError> {
+        // `default` and `shared-access` carry a SQL rule that a node older
+        // than policy schema 2 cannot parse; while any member is such a node
+        // they are stored without it (features/sql-browser.md §13).
+        let gate = self.sql_gate_check().await;
+        if let Some(reason) = &gate.closed_reason {
+            log::warn!(
+                target: "security",
+                "policy schema: sql_* capabilities are not writable yet: {reason}. The `default` and \
+                 `shared-access` baselines are loaded without their SQL rule until every node reports policy \
+                 schema {} and plugin host ABI 1.{}; see `v2/sys/policy-schema`",
+                super::sql_write_gate::SQL_POLICY_SCHEMA,
+                super::sql_write_gate::SQL_MIN_HOST_ABI_MINOR,
+            );
+        }
         // `default` is server-managed: re-seeded on every startup so
         // upgrades that add new self-service grants take effect on
         // existing vaults without operator intervention.
-        self.force_load_acl_policy(DEFAULT_POLICY_NAME, DEFAULT_POLICY).await?;
+        self.force_load_gated_baseline(DEFAULT_POLICY_NAME, DEFAULT_POLICY, gate.is_open()).await?;
         self.load_acl_policy(ADMINISTRATOR_POLICY_NAME, ADMINISTRATOR_POLICY).await?;
         self.load_acl_policy(RESPONSE_WRAPPING_POLICY_NAME, RESPONSE_WRAPPING_POLICY).await?;
         self.load_acl_policy(CONTROL_GROUP_POLICY_NAME, CONTROL_GROUP_POLICY).await?;
@@ -2144,8 +2191,11 @@ impl PolicyStore {
         // its text is server-managed, so a vault seeded under an older build
         // picks up later rules without operator intervention. It is inert
         // until an operator attaches it, and inert on any target the holder
-        // has no share on.
-        self.force_load_acl_policy(SHARED_ACCESS_POLICY_NAME, SHARED_ACCESS_POLICY).await?;
+        // has no share on. Gated like `default`.
+        self.force_load_gated_baseline(SHARED_ACCESS_POLICY_NAME, SHARED_ACCESS_POLICY, gate.is_open()).await?;
+        if gate.is_open() {
+            self.sql_baselines_full.store(true, std::sync::atomic::Ordering::Release);
+        }
         // Ownership-aware baselines. See `features/per-user-scoping.md`.
         self.load_acl_policy(STANDARD_USER_READONLY_POLICY_NAME, STANDARD_USER_READONLY_POLICY)
             .await?;
@@ -2520,7 +2570,20 @@ impl PolicyStore {
         ACL::new(&materialized)
     }
 
+    /// Every write of a policy document goes through here or
+    /// [`Self::set_policy_ns`]; both refuse `sql_*` while the rolling-upgrade
+    /// gate is closed (features/sql-browser.md §13).
     async fn set_policy_internal(&self, policy: Arc<Policy>) -> Result<(), RvError> {
+        if super::sql_write_gate::policy_names_sql_capabilities(&policy) {
+            self.require_sql_writable(&format!("policy {:?}", policy.name)).await?;
+        }
+        self.put_policy_unchecked(policy).await
+    }
+
+    /// The write itself. Callers outside [`Self::set_policy_internal`] must
+    /// have decided the `sql_*` gate already: only the gated baseline loader
+    /// does, and it writes `sql_*` only when the gate is open.
+    pub(crate) async fn put_policy_unchecked(&self, policy: Arc<Policy>) -> Result<(), RvError> {
         let view = self.get_barrier_view(policy.policy_type)?;
         let pe = PolicyEntry {
             version: 2,
@@ -2577,7 +2640,7 @@ impl PolicyStore {
         self.get_acl_view()
     }
 
-    fn get_acl_view(&self) -> Result<Arc<BarrierView>, RvError> {
+    pub(crate) fn get_acl_view(&self) -> Result<Arc<BarrierView>, RvError> {
         match &self.acl_view {
             Some(view) => Ok(view.clone()),
             None => Err(bv_error_string!("unable to get the barrier subview for policy type acl")),
@@ -2668,7 +2731,7 @@ impl PolicyStore {
     }
 
     /// Sanitize a policy name by converting it to lowercase.
-    fn sanitize_name(&self, name: &str) -> String {
+    pub(crate) fn sanitize_name(&self, name: &str) -> String {
         name.to_lowercase().to_string()
     }
 
@@ -4516,6 +4579,44 @@ mod implicit_rustion_grant_tests {
         assert_eq!(r.capabilities, vec![Capability::Read]);
     }
 
+    /// `resources/v2/sql/privileges/<resource>` (features/sql-browser.md
+    /// §9.5) is a read of the caller's own SQL capabilities: `read` and
+    /// nothing else in every baseline, templated on the tenant side, and
+    /// outside the gated SQL block so the closed-gate text still grants it
+    /// and still names no `sql_*` capability.
+    #[test]
+    fn the_baselines_grant_the_sql_privileges_read_outside_the_gate() {
+        const PRIVILEGES: &str = "resources/v2/sql/privileges/+";
+        let default = Policy::from_str(DEFAULT_POLICY).expect("default policy must parse");
+        let r = rule(&default, PRIVILEGES).unwrap_or_else(|| panic!("{PRIVILEGES} must be granted"));
+        assert_eq!(r.capabilities, vec![Capability::Read]);
+        assert!(r.scopes.is_empty() && r.groups.is_empty(), "endpoint-level, like the connect gates");
+
+        let shared = &*NAMESPACE_SHARED_POLICY_PARSED;
+        assert!(rule(shared, PRIVILEGES).is_none(), "the tenant rule must be templated");
+        let r = rule(shared, &format!("{{{{namespace.path}}}}/{PRIVILEGES}")).expect("tenant privileges rule");
+        assert_eq!(r.capabilities, vec![Capability::Read]);
+
+        let access = Policy::from_str(SHARED_ACCESS_POLICY).expect("shared-access must parse");
+        let r = rule(&access, &format!("{{{{request.namespace}}}}/{PRIVILEGES}")).expect("shared-access rule");
+        assert_eq!(r.capabilities, vec![Capability::Read]);
+
+        for (name, text) in [("default", DEFAULT_POLICY), ("shared-access", SHARED_ACCESS_POLICY)] {
+            let closed = super::super::sql_write_gate::without_gated_sql_rules(text).expect("markers");
+            let closed_policy = Policy::from_str(&closed).expect("the closed-gate text parses");
+            assert!(
+                !super::super::sql_write_gate::policy_names_sql_capabilities(&closed_policy),
+                "{name}: the closed-gate text must name no sql_* capability"
+            );
+            assert!(
+                closed_policy.paths.iter().any(|r| r.path.ends_with("resources/v2/sql/privileges/+")
+                    && r.capabilities == vec![Capability::Read]),
+                "{name}: the privileges read survives a closed gate"
+            );
+            assert_eq!(closed.matches("v2/sql/privileges/+").count(), 1, "{name}");
+        }
+    }
+
     /// Every baseline rule that reaches `resources/` must carry `connect`, or
     /// the capability is unreachable through it — including for an owner,
     /// whose access never involved a share at all.
@@ -4589,6 +4690,8 @@ mod implicit_rustion_grant_tests {
             "{{request.namespace}}/resources/v2/connect/web/result",
             "{{request.namespace}}/resources/v2/connect/web/close",
             "{{request.namespace}}/resources/v2/connect/clipboard/audit",
+            // Not an object path: the caller's own SQL capabilities.
+            "{{request.namespace}}/resources/v2/sql/privileges/+",
         ];
         for r in p.paths.iter() {
             if ungated_by_design.contains(&r.path.as_str()) {

@@ -189,6 +189,7 @@ impl SystemBackend {
         let sys_backend_policy_tests_write = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_dashboard_summary = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_hsm_status = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_policy_schema = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_owner_backfill = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_sso_settings_read = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_sso_settings_write = self.self_ptr.upgrade().unwrap().clone();
@@ -734,6 +735,16 @@ impl SystemBackend {
                     pattern: "hsm/status$",
                     operations: [
                         {op: Operation::Read, handler: sys_backend_hsm_status.handle_hsm_status}
+                    ]
+                },
+                {
+                    // The `sql_*` rolling-upgrade write gate: open or
+                    // closed and why, each node's policy schema and ABI,
+                    // the gated baselines. Read-only, no secret material.
+                    // HTTP shim under /v2/sys (features/sql-browser.md §13).
+                    pattern: "policy-schema$",
+                    operations: [
+                        {op: Operation::Read, handler: sys_backend_policy_schema.handle_policy_schema_status}
                     ]
                 },
                 {
@@ -1762,6 +1773,17 @@ impl SystemBackend {
         let policy_module = self.get_module::<PolicyModule>("policy")?;
 
         policy_module.handle_policy_read(backend, req).await
+    }
+
+    /// `GET v2/sys/policy-schema` — the `sql_*` write gate.
+    pub async fn handle_policy_schema_status(
+        &self,
+        backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let policy_module = self.get_module::<PolicyModule>("policy")?;
+
+        policy_module.handle_policy_schema_status(backend, req).await
     }
 
     pub async fn handle_policy_write(
