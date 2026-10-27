@@ -2199,6 +2199,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "bv-hsm-link"
+version = "0.41.0"
+dependencies = [
+ "bv-errors",
+ "hcl-rs",
+ "httparse",
+ "log",
+ "rcgen",
+ "rustls",
+ "serde",
+ "tokio",
+ "tokio-rustls",
+ "url",
+ "x509-parser",
+ "zeroize",
+]
+
+[[package]]
 name = "bv-kernel"
 version = "0.42.2"
 dependencies = [
@@ -2521,6 +2539,7 @@ dependencies = [
  "better_default",
  "blake3",
  "bv-client",
+ "bv-hsm-link",
  "bv-mcp",
  "bv-server",
  "bv_crypto",

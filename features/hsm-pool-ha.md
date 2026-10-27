@@ -1,7 +1,8 @@
 # Feature: HSM Pool HA — an N-node cluster served by two YubiHSM 2 devices
 
 > Status: **in progress** (T454) — phases 1–2 of 7 (formats and custody core;
-> pool backend) done 2026-10-19; see [Current state](#current-state). Spec
+> pool backend) done 2026-10-19, phase 3 (HSM link) done 2026-10-27; see
+> [Current state](#current-state). Spec
 > written 2026-10-19. Extends
 > [HSM Support (YubiHSM 2)](hsm-support.md) (S17), whose non-negotiable security
 > rules apply here unchanged unless a section below says otherwise and why.
@@ -869,8 +870,81 @@ Phases 1 (formats and custody core) and 2 (pool backend) are implemented in
 `bv-core` and tested with the mock backend. A cluster can run `topology = "pool"`
 on two **mock** devices: init dual-wraps the KEK, every node unseals through the
 preferred reachable member, and custody keys are created and used through the
-pool. There is no network link, enrollment, repair or recovery yet (phases 3–5),
-and a `yubihsm2` pool is validated but refused at startup.
+pool. Phase 3 adds the network link as a standalone crate, `bv-hsm-link`, and the
+`bvault hsm-gateway` command; `bv-core` does not use the relay yet. There is no
+enrollment, repair or recovery yet (phases 4–5), and a `yubihsm2` pool is
+validated but refused at startup until phase 4 wires the relay in.
+
+Phase 3:
+
+- **`bv-hsm-link`** (`crates/bv-hsm-link`, Tier 0: `bv-errors` only). Both
+  halves frame HTTP/1.1 strictly (`src/http.rs`, httparse for tokenizing):
+  exactly one `Content-Length`, `Transfer-Encoding` refused (501), `Expect`
+  refused (417), exactly one `Host`, no bare CR or LF, an 8 KiB head and 32
+  headers at most, HTTP/1.1 only, and no pipelining (bytes after a body are a
+  400, before anything is forwarded). The API body is 3–3139 bytes (400 / 413);
+  the status request takes no body. Every refusal closes the connection.
+- **Gateway** (`src/gateway.rs`). TLS 1.3 only, aws-lc-rs, client certificate
+  mandatory and verified against `client_ca_file`. The client identity is the one
+  DNS SAN that equals an `allowed_clients` entry byte for byte; none or two
+  different ones refuse the connection. Per client: one request in flight across
+  all its connections (a second gets 429, not a queue) and a token bucket of
+  `max_rps_per_client` (default 50, burst one second). Each request opens a fresh
+  loopback connection to the connector, carries only `Host` and framing, and has
+  5 s end to end (504; other upstream failures are 502). Logs: connection open
+  and close with peer, client, request and error counts, and rejections with
+  their reason; bodies never (a test captures every log record and asserts it).
+- **Relay** (`src/relay.rs`). `Relay::start(RelayConfig)` returns once
+  `127.0.0.1:<ephemeral>` is bound; `local_addr()` is what the `yubihsm` HTTP
+  connector points at, `stats()` feeds future metrics, and `shutdown()` / drop
+  stop it. It runs on its own thread and current-thread runtime, so blocking
+  and async callers use it the same way. It forwards over one pooled mTLS
+  connection, verified against the link CA and the gateway URL's host.
+- **`bvault hsm-gateway --config gateway.hcl`** (`crates/bvault-cli`). Parses the
+  [Gateway](#configuration) block with unknown fields refused, validates it
+  before anything listens (exit code `Config` on failure) and stops on Ctrl-C or
+  SIGTERM.
+
+Decisions made in phase 3 where this spec left room:
+
+- The gateway writes to the connector as **HTTP/1.0**, so Go's `net/http` frames
+  the reply by `Content-Length` or by closing, never chunked; the gateway accepts
+  those two and refuses chunked (502). Rejected: a chunked decoder.
+- "One in flight per client certificate" is enforced per client **identity**:
+  two certificates for the same node id share the slot. Stricter, and a relay
+  never sends two at once.
+- The relay serves one local connection at a time and has no idle timeout on
+  it. A new local connection replaces an idle one at once, and waits for the
+  answer if a request is in progress (at most the 10 s request timeout). A
+  local process can therefore make the node's requests fail, which is the DoS
+  the spec accepts, but cannot park an idle connection and block the node's
+  client forever. Rejected: an idle timeout, which would also fail the node's
+  first command after every quiet period. Use one relay per `yubihsm::Client`.
+- The relay never retries a failed exchange: a command the device may have run
+  must not be replayed. It replaces a pooled connection the gateway has closed
+  (checked without blocking before each send) or one idle for 30 s, below the
+  gateway's 60 s idle timeout.
+- The relay answers the local client with the whole response in one write and
+  the exact `HTTP/1.1 200 OK` / `Content-Length: ` lines: `yubihsm` 0.42's reader
+  assumes one read and matches those strings literally.
+- The connector URL must be `http://` on a loopback **IP literal**;
+  `localhost` and names are refused, since DNS could repoint them.
+- No CRL: a node's link certificate is revoked by removing it from
+  `allowed_clients` (with its device auth keys, phase 4).
+- The flag is `--config`, as for `bvault server`; clap has no single-dash long
+  options.
+
+Not done in phase 3, deliberately:
+
+- `bv-core` does not start relays, so a `yubihsm2` pool is still refused. Phase 4
+  wires one relay per member client and adds `spawn_blocking` around the
+  blocking `yubihsm` client.
+- The "real `yubihsm` MockHsm exchange over mTLS" link test needs a
+  `yubihsm::Client` and belongs with that wiring; the crate's tests drive the
+  gateway and relay with a fake connector and the exact client wire format.
+  The connector's real reply framing is confirmed on hardware in phase 7.
+- `bv_hsm_link_requests_total{member,code}` is not exported yet; `GatewayStats`
+  and `RelayStats` hold the counters (phase 6).
 
 Phase 2:
 
@@ -1011,7 +1085,7 @@ Not done in phase 2, deliberately:
 |---|---|---|---|
 | 1. Formats and custody core | `BvHsmBlob` v2, `BvHsmBlobSet`, seal record v2 + v1 reader, per-node authz counters, custody store and handles. Mock only. | `crates/bv-core/src/hsm/{blob,blobset,custody_store}.rs`, `crates/bv-core/src/seal/hsm.rs`, `crates/bv-core/src/seal/hsm/record.rs` | Done |
 | 2. Pool backend | `HsmPool`: members, preference, failover, health probe, circuit breaker, parallel wrap, `min_wrap_copies`. Mock enforces the 16-session limit and `SESSIONS_FULL`. Pool init and unseal, storage gate, status, metrics. | `crates/bv-core/src/hsm/{pool,clock,mock,yubihsm2,mod}.rs`, `crates/bv-core/src/seal/hsm.rs`, `crates/bv-metrics/src/hsm_metrics.rs` | Done |
-| 3. HSM link | `bv-hsm-link` crate (gateway + relay), `bvault hsm-gateway` | `crates/bv-hsm-link/`, `crates/bvault-cli` | Planned |
+| 3. HSM link | `bv-hsm-link` crate (gateway + relay), `bvault hsm-gateway` | `crates/bv-hsm-link/`, `crates/bvault-cli` | Done |
 | 4. Ceremonies and repair | `provision`, attestation chain pinning, node enroll/revoke with credential delivery, member add/retire, repair job, epoch rotation, `migrate-to-pool`, v2 routes, CLI | `crates/bv-core/src/hsm/{enroll,ceremony,repair,attest}.rs`, `crates/bv-kernel/src/modules/system/`, `crates/bvault-cli` | Planned |
 | 5. Recovery | Recovery keypair, Shamir split, recovery copies, `recover` route | `crates/bv-core/src/hsm/recovery.rs` | Planned |
 | 6. Audit and observability | Device-log drain, events, metrics, status, GUI page, `docs/hsm.md`, `docs/api.md` | `crates/bv-core/src/hsm/device_audit.rs`, `gui/src/routes/HsmStatusPage.tsx` | Planned |

@@ -176,6 +176,7 @@ it.
 | `bv_plugin_surface` | `crates/bv_plugin_surface` | Plugin ABI types shared host↔plugin | — |
 | `bv-context` | `crates/bv-context` | Task/cancellation context | `bv-errors` |
 | `bv-shamir` | `crates/bv-shamir` | Shamir secret sharing (unseal keys) | `bv-errors` |
+| `bv-hsm-link` | `crates/bv-hsm-link` | mTLS HSM gateway and loopback relay for the HSM pool topology (T454) | `bv-errors` |
 | `bv-storage` | `crates/bv-storage` | Barriers, physical backends (file/hiqlite/mysql/cloud), read caches | `bv-errors` `bv-metrics` `bv_crypto` |
 | `bv-logical` | `crates/bv-logical` | `Request`/`Response`/`Backend`/`Path`/`Field` + `Handler` | `bv-context` `bv-errors` `bv-storage` |
 | `bv-audit` | `crates/bv-audit` | Audit entries, hash chain, file device, broker fan-out | `bv-errors` `bv-logical` `bv-storage` |

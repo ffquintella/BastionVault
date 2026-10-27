@@ -47,6 +47,9 @@ members = [
     # dependency-free, like bv-sql-guard, so `cargo kani -p bv-policy-core`
     # verifies it in isolation.
     "crates/bv-policy-core",
+    # Tier 0: the HSM link's mTLS gateway and node-side relay (T454 phase 3);
+    # bv-errors only. features/hsm-pool-ha.md § HSM link.
+    "crates/bv-hsm-link",
     "crates/bv-storage",
     "crates/bv-logical",
     "crates/bv-utils",

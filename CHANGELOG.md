@@ -127,6 +127,10 @@ EXAMPLE ENTRY:
 - Add the `sql` Connect protocol to `database` resources with strict profile parsing, endpoint-bound credential release from a secret's `sql_endpoint`, MFA for `sql` profiles, and `resources/v2/sql/privileges/<resource>`. (T124, S109)
 - Offer the SQL capabilities in the GUI: chips and validator messages in the policy builder, chips and presets on resource and asset-group shares, a SQL profile editor on database resources, and a consent panel for the two plugin grants. (T124, S109)
 
+#### HSM pool HA (phase 3 of 7)
+
+- Run `bvault hsm-gateway --config gateway.hcl` on a host with a YubiHSM 2 to expose its localhost `yubihsm-connector` to vault nodes over mutual TLS: only TLS 1.3 clients whose certificate chains to `client_ca_file` and carries a DNS SAN exactly equal to one of `allowed_clients` get through; each client may have one request in flight and `max_rps_per_client` requests per second (default 50); only `POST /connector/api` (3–3139-byte body) and `GET /connector/status` are forwarded, bodies verbatim and client headers dropped, with a 5 s connector timeout; chunked, duplicated-length, pipelined and other malformed requests are refused before reaching the connector; a non-loopback `connector`, an empty or invalid `allowed_clients` or an unknown field stops the command at startup; logs name the peer and client and never contain a request or response body. The node-side loopback relay ships in the new `bv-hsm-link` crate but is not used by the HSM seal yet, so a `yubihsm2` pool is still refused (T454, S114)
+
 ### Changed
 
 #### MCP namespace selection (Phase 3)

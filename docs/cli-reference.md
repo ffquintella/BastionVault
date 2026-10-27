@@ -33,6 +33,51 @@ bvault server --config /path/to/config.hcl
 | `--log-file` | Path to log file |
 | `--log-level` | Log verbosity (default: `warn`) |
 
+## hsm-gateway
+
+Run the HSM pool gateway on a host with a YubiHSM 2 (see
+[features/hsm-pool-ha.md](../features/hsm-pool-ha.md)). It is not a vault: it has no
+storage and no tokens. It listens with mutual TLS and forwards `POST /connector/api`
+and `GET /connector/status` bodies verbatim to the `yubihsm-connector` on loopback,
+which must never be exposed itself.
+
+~~~bash
+bvault hsm-gateway --config /etc/bastionvault/hsm-gateway.hcl
+~~~
+
+| Option | Env Variable | Description |
+|--------|-------------|-------------|
+| `--config` | | Path to the gateway's HCL file (required) |
+| `--log-level` | `BVAULT_HSM_GATEWAY_LOG_LEVEL` | Log filter, e.g. `info` (default) or `info,bv_hsm_link=debug`; logs go to stderr |
+
+~~~hcl
+hsm_gateway {
+  listen             = "0.0.0.0:8250"
+  connector          = "http://127.0.0.1:12345"   # loopback IP literal only
+  tls_cert_file      = "/etc/bastionvault/hsm-link/hsm-a.pem"
+  tls_key_file       = "/etc/bastionvault/hsm-link/hsm-a.key"
+  client_ca_file     = "/etc/bastionvault/hsm-link/ca.pem"
+  allowed_clients    = ["vault-1", "vault-2", "vault-3"]   # node ids, DNS SAN match, exact
+  max_rps_per_client = 50                                    # optional, 1-10000, default 50
+}
+~~~
+
+| Field | Rule |
+|-------|------|
+| `listen` | `ip:port` to bind. |
+| `connector` | `http://` on `127.0.0.1` (or another `127.x` / `[::1]`) with a port. Names, including `localhost`, are refused. |
+| `tls_cert_file`, `tls_key_file` | The gateway's server certificate (chain) and key, PEM. Nodes verify it against their link CA and the gateway URL's host. |
+| `client_ca_file` | CA that node link certificates must chain to. |
+| `allowed_clients` | Non-empty, unique node ids (1–128 of `[A-Za-z0-9._-]`). A client certificate must carry exactly one of them as a DNS SAN; a certificate naming two is refused. |
+| `max_rps_per_client` | Token bucket per client, burst of one second. |
+
+Unknown fields, missing fields and a second `hsm_gateway` block are errors; the
+command exits with the configuration-failure code before listening. Fixed limits: TLS
+1.3 only, one request in flight per client (a second gets `429`), request body
+3–3139 bytes, 5 s per connector exchange (`504`; other connector failures are `502`),
+60 s idle connections, 128 open connections. It stops on Ctrl-C or SIGTERM. To revoke
+a node, remove it from `allowed_clients` and restart the gateway.
+
 ## status
 
 Print the seal status of the vault.

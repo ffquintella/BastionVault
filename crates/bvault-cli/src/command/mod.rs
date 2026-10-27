@@ -29,6 +29,7 @@ pub mod auth_list;
 pub mod auth_move;
 pub mod delete;
 pub mod format;
+pub mod hsm_gateway;
 pub mod list;
 pub mod login;
 pub mod login_handlers;

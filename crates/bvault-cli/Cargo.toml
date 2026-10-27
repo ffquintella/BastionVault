@@ -43,6 +43,10 @@ bv-client = { path = "../bv-client", version = "0.42.0", registry = "uox-bastion
 # second one.
 bv-mcp = { path = "../bv-mcp", version = "0.3.0", registry = "uox-bastionvault" }
 bv_crypto = { path = "../bv_crypto", version = "0.41.0", registry = "uox-bastionvault" }
+# `bvault hsm-gateway` (features/hsm-pool-ha.md § HSM link, T454 phase 3):
+# the gateway, its config block and its validation all live in this Tier 0
+# crate; the command only loads the file, starts logging and runs it.
+bv-hsm-link = { path = "../bv-hsm-link", version = "0.41.0", registry = "uox-bastionvault" }
 
 actix-web ={ version = "4.13", features = ["rustls-0_23"] }
 actix-rt = "2.11"
@@ -86,7 +90,8 @@ serde_yaml = "0.9"
 # `bvault mcp`'s pairing store, see above.)
 sha2 = "0.11"
 sysexits = { version = "0.13", features = ["std"] }
-tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "process", "time", "io-util"] }
+# `signal`: `bvault hsm-gateway` stops on Ctrl-C and SIGTERM.
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "process", "time", "io-util", "signal"] }
 zeroize = { version = "1.8.2", features = ["zeroize_derive"] }
 
 # `bvault server --daemon`, which only exists on unix -- the call site in

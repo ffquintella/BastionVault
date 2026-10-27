@@ -1,0 +1,63 @@
+[package]
+name = "bv-hsm-link"
+version = "0.41.0"
+edition = "2021"
+description = "BastionVault's HSM link: the mTLS gateway in front of a localhost yubihsm-connector, and the node-side loopback relay"
+license = "Apache-2.0"
+repository = "https://github.com/ffquintella/BastionVault"
+
+publish = ["uox-bastionvault"]
+
+# Tier 0 (features/hsm-pool-ha.md § "HSM link: gateway and relay", T454
+# phase 3). It depends on `bv-errors` and on nothing else in the workspace:
+# `bv-core` uses the relay, `bvault-cli` runs the gateway. It never parses
+# YubiHSM commands -- the SCP03 channel is end to end -- so it carries no
+# `yubihsm` dependency either. Every crate below is already in the lockfile.
+[dependencies]
+bv-errors = { path = "../bv-errors", version = "0.41.0", registry = "uox-bastionvault" }
+
+# mTLS on both halves, TLS 1.3 only. Same declaration as the rest of the
+# workspace: the aws-lc-rs provider, no second crypto backend.
+rustls = { version = "0.23.37", features = ["aws_lc_rs"] }
+# rustls over tokio sockets. Already in the lockfile through
+# bv-engine-resource and the GUI host; same feature set as the former.
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs"] }
+# `rt` and `time` for the relay's own current-thread runtime; `net`,
+# `io-util`, `sync` and `macros` for the listeners and their limits.
+tokio = { version = "1.52", features = ["net", "io-util", "time", "sync", "rt", "macros"] }
+# Tokenizes request and response heads, so a listener that faces the network
+# does not carry a hand-rolled parser. The framing rules on top (one
+# Content-Length, no Transfer-Encoding, no pipelining, bare-LF refusal) are
+# this crate's and strict. Already in the lockfile via hyper/actix, and used
+# the same way by `bvault mcp serve`'s loopback listener.
+httparse = "1.10"
+# Reads the DNS SANs of a client certificate rustls has already verified, for
+# the exact `allowed_clients` match (rustls exposes only the DER). Parsing
+# only: no `verify` feature, so no extra crypto backend.
+x509-parser = "0.18"
+# Connector and gateway URL parsing: scheme, IPv6 literals, the loopback
+# check. Already in the lockfile via bv-errors.
+url = "2.5"
+# The `hsm_gateway { ... }` config block. Same crates and versions as the
+# server's config loader in bv-core.
+hcl-rs = "0.19"
+serde = { version = "^1.0", features = ["derive"] }
+# The link private-key PEM is wiped on drop.
+zeroize = "1.8.2"
+log = "0.4"
+
+[dev-dependencies]
+# Throwaway CA, gateway and node certificates for the mTLS tests.
+rcgen = "0.14"
+tokio = { version = "1.52", features = ["net", "io-util", "time", "sync", "rt", "rt-multi-thread", "macros"] }
+
+[package.metadata.cargo-machete]
+ignored = [
+    # Package name != lib name: the crate is `hcl-rs`, the lib is `hcl`.
+    "hcl-rs",
+]
+
+[lints.clippy]
+# Public functions return `RvError`, a wide enum by construction; matches the
+# allow in bv-errors and the root crate.
+result_large_err = "allow"

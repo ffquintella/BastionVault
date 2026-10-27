@@ -124,6 +124,7 @@ pub enum Commands {
     #[cfg(unix)]
     Ferrogate(command::ferrogate::Ferrogate),
     Mcp(command::mcp::Mcp),
+    HsmGateway(command::hsm_gateway::HsmGateway),
 }
 
 impl Commands {
@@ -147,6 +148,7 @@ impl Commands {
             #[cfg(unix)]
             Commands::Ferrogate(ferrogate) => ferrogate.execute(),
             Commands::Mcp(mcp) => mcp.execute(),
+            Commands::HsmGateway(gateway) => gateway.execute(),
         }
     }
 }
