@@ -34,6 +34,7 @@ pub mod context;
 pub mod custody;
 pub mod custody_store;
 pub mod derive;
+pub mod device_audit;
 pub mod enroll;
 pub mod node_creds;
 pub mod pool;
@@ -150,6 +151,13 @@ pub trait HsmBackend: Send + Sync {
     /// Release this client's session slot, if it holds one.
     async fn close_session(&self) -> Result<(), RvError> {
         Ok(())
+    }
+
+    /// Requests this client's HSM link relay forwarded and failed so far
+    /// (running totals, for `bv_hsm_link_requests_total`). `None` without a
+    /// relay: a local connector or the mock.
+    fn link_totals(&self) -> Option<(u64, u64)> {
+        None
     }
 }
 
@@ -327,6 +335,8 @@ pub struct ResolvedPoolConfig {
     pub members: Vec<ResolvedPoolMember>,
     /// The per-node device to migrate the KEK from (`migrate-to-pool`).
     pub migrate_from: Option<ResolvedMigrateFrom>,
+    /// The device-log drain (T454 phase 6); `drain` by default.
+    pub device_audit: device_audit::DeviceAuditMode,
 }
 
 /// Raw `migrate_from { ... }` block inside a pool `hsm` block.
@@ -388,7 +398,8 @@ pub struct HsmConfigBlock {
     /// Pool only: the per-node device `migrate-to-pool` reads the KEK from.
     #[serde(default)]
     pub migrate_from: Option<HsmMigrateFromBlock>,
-    /// Device-log drain mode (T454 phase 6). Refused until it is implemented.
+    /// Pool only: device-log drain mode, `drain` (default), `forced` or `off`
+    /// (refused in production).
     #[serde(default)]
     pub device_audit: String,
     /// Pool only: repair job rate, sets per second (default 2).
@@ -461,7 +472,6 @@ pub fn resolve_config(label: &str, raw: &HsmConfigBlock) -> Result<ResolvedHsmCo
         other => return Err(RvError::ErrHsmConfigInvalid(format!("unknown HSM backend {other:?}"))),
     };
 
-    refuse_unimplemented_settings(raw)?;
     let pool = match raw.topology.trim() {
         "" | "per-node" => {
             refuse_pool_only_settings(raw)?;
@@ -527,15 +537,6 @@ fn config_err(msg: impl Into<String>) -> RvError {
     RvError::ErrHsmConfigInvalid(msg.into())
 }
 
-/// `device_audit` configures a job that does not exist yet. An accepted but
-/// ignored audit setting would be a silent gap, so it fails.
-fn refuse_unimplemented_settings(raw: &HsmConfigBlock) -> Result<(), RvError> {
-    if !raw.device_audit.trim().is_empty() {
-        return Err(config_err("`device_audit` is not implemented yet (device-log drain, T454 phase 6); remove it"));
-    }
-    Ok(())
-}
-
 /// Pool settings in a per-node block are almost certainly a missing
 /// `topology = "pool"`; refusing them beats silently running per-node.
 fn refuse_pool_only_settings(raw: &HsmConfigBlock) -> Result<(), RvError> {
@@ -551,6 +552,11 @@ fn refuse_pool_only_settings(raw: &HsmConfigBlock) -> Result<(), RvError> {
     }
     if raw.repair_rate.is_some() {
         stray.push("repair_rate");
+    }
+    // The drain reads a pool member's log with `bv-auditor`; a per-node device
+    // has no such key, so the setting would configure nothing.
+    if !raw.device_audit.trim().is_empty() {
+        stray.push("device_audit");
     }
     if raw.migrate_from.is_some() {
         stray.push("migrate_from");
@@ -722,7 +728,9 @@ fn resolve_pool(backend_type: &str, raw: &HsmConfigBlock) -> Result<ResolvedPool
         }
     };
 
-    Ok(ResolvedPoolConfig { min_wrap_copies, repair_rate, credential_dir, link, members, migrate_from })
+    let device_audit = device_audit::DeviceAuditMode::parse(&raw.device_audit, is_production_env())?;
+
+    Ok(ResolvedPoolConfig { min_wrap_copies, repair_rate, credential_dir, link, members, migrate_from, device_audit })
 }
 
 /// Longest node id accepted; generous for FQDN-style ids.
@@ -778,6 +786,15 @@ pub trait MemberOpener: Send + Sync {
     ) -> Result<Arc<dyn HsmBackend>, RvError>;
 
     fn open_admin(&self, target: &MemberTarget, password: &str) -> Result<Box<dyn admin::HsmAdminSession>, RvError>;
+
+    /// A `bv-auditor` session for the device-log drain (T454 phase 6).
+    fn open_auditor(
+        &self,
+        target: &MemberTarget,
+        _credential: &device_audit::AuditorCredential,
+    ) -> Result<Box<dyn device_audit::HsmAuditSession>, RvError> {
+        Err(RvError::ErrHsm(format!("no bv-auditor access to HSM pool member {} from this node", target.name)))
+    }
 }
 
 /// The production opener: a member is reached through this node's `member`
@@ -923,6 +940,32 @@ impl MemberOpener for ConfigMemberOpener {
         #[cfg(not(feature = "hsm_mock"))]
         {
             let _ = (target, password);
+            Err(RvError::ErrHsmConfigInvalid("this build has no mock HSM backend".into()))
+        }
+    }
+
+    fn open_auditor(
+        &self,
+        target: &MemberTarget,
+        credential: &device_audit::AuditorCredential,
+    ) -> Result<Box<dyn device_audit::HsmAuditSession>, RvError> {
+        if self.config.backend_type == "yubihsm2" {
+            // Explicit until phase 7: the entry layout and digest chain the
+            // drain verifies must be confirmed on a real device first.
+            return Err(RvError::ErrHsm(
+                "the device-log drain on a YubiHSM 2 is not validated yet (T454 phase 7: confirm the log entry \
+                 layout and digest chain on hardware)"
+                    .into(),
+            ));
+        }
+        #[cfg(feature = "hsm_mock")]
+        {
+            let device = self.mock_device(target)?;
+            Ok(Box::new(device.auditor_session(credential)?))
+        }
+        #[cfg(not(feature = "hsm_mock"))]
+        {
+            let _ = (target, credential);
             Err(RvError::ErrHsmConfigInvalid("this build has no mock HSM backend".into()))
         }
     }
@@ -1159,13 +1202,14 @@ mod tests {
     }
 
     #[test]
-    fn per_node_refuses_pool_settings_and_unbuilt_jobs() {
+    fn per_node_refuses_pool_settings() {
         let mut stray = mock_pool();
         stray.topology.clear();
         rejects("mock", &stray, "require topology = \"pool\"");
 
+        // The drain is pool-only: a per-node device has no `bv-auditor`.
         let audit = HsmConfigBlock { device_audit: "forced".into(), ..Default::default() };
-        rejects("mock", &audit, "device_audit");
+        rejects("mock", &audit, "device_audit require topology = \"pool\"");
         let mut rate = mock_pool();
         rate.topology.clear();
         rate.member.clear();
@@ -1198,6 +1242,23 @@ mod tests {
         let mut per_node = HsmConfigBlock { node_id: "n".into(), ..Default::default() };
         per_node.migrate_from = Some(HsmMigrateFromBlock::default());
         rejects("mock", &per_node, "migrate_from");
+    }
+
+    #[test]
+    fn device_audit_is_accepted_in_pool_mode_and_defaults_to_drain() {
+        use device_audit::DeviceAuditMode;
+        let mut pool = mock_pool();
+        assert_eq!(resolve_config("mock", &pool).unwrap().pool.unwrap().device_audit, DeviceAuditMode::Drain);
+        for (raw, mode) in [("drain", DeviceAuditMode::Drain), ("forced", DeviceAuditMode::Forced)] {
+            pool.device_audit = raw.into();
+            assert_eq!(resolve_config("mock", &pool).unwrap().pool.unwrap().device_audit, mode);
+        }
+        // `off` outside production (BVAULT_ENV unset in tests); refused in
+        // production by `DeviceAuditMode::parse`, tested in `device_audit`.
+        pool.device_audit = "off".into();
+        assert_eq!(resolve_config("mock", &pool).unwrap().pool.unwrap().device_audit, DeviceAuditMode::Off);
+        pool.device_audit = "sometimes".into();
+        rejects("mock", &pool, "`device_audit` must be");
     }
 
     #[test]

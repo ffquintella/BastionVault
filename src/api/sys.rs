@@ -27,7 +27,8 @@ pub struct InitRequest {
     #[serde(default)]
     pub secret_threshold: Option<u8>,
     /// Recovery shares of an HSM pool with `recovery = "shamir-ceremony"`
-    /// (Vault's field names; default 5 / 3). Any other seal refuses them.
+    /// (default 5 / 3), on `v2/sys/init` only: `v1/sys/init` is frozen and
+    /// ignores them, as before T454 phase 5. Any other seal refuses them on v2.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery_shares: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -103,7 +104,26 @@ impl Client {
 }
 
 impl Sys<'_> {
+    /// `sys/init` under this client's API version. The recovery-share fields
+    /// exist only in `v2` (`v1` is frozen), so a request carrying them goes to
+    /// `/v2/sys/init` whatever the client's version.
     pub fn init(&self, init_req: &InitRequest) -> Result<HttpResponse, RvError> {
+        let prefix = if init_req.recovery_shares.is_some() || init_req.recovery_threshold.is_some() {
+            "/v2"
+        } else {
+            self.api_prefix()
+        };
+        self.init_at(prefix, init_req)
+    }
+
+    /// `/v2/sys/init`: what `bvault operator init` uses, so an HSM pool that
+    /// returns recovery shares is initialized through the route that carries
+    /// them.
+    pub fn init_v2(&self, init_req: &InitRequest) -> Result<HttpResponse, RvError> {
+        self.init_at("/v2", init_req)
+    }
+
+    fn init_at(&self, prefix: &str, init_req: &InitRequest) -> Result<HttpResponse, RvError> {
         // Omit unset share parameters so the server can apply its seal-aware
         // defaults (HSM auto-unseal needs no shares).
         let mut data = Map::new();
@@ -120,7 +140,7 @@ impl Sys<'_> {
             data.insert("recovery_threshold".to_string(), threshold.into());
         }
 
-        self.request_put(format!("{}/sys/init", self.api_prefix()), Some(data))
+        self.request_put(format!("{prefix}/sys/init"), Some(data))
     }
 
     pub fn seal_status(&self) -> Result<HttpResponse, RvError> {

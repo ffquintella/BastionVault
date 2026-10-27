@@ -127,9 +127,16 @@ EXAMPLE ENTRY:
 - Add the `sql` Connect protocol to `database` resources with strict profile parsing, endpoint-bound credential release from a secret's `sql_endpoint`, MFA for `sql` profiles, and `resources/v2/sql/privileges/<resource>`. (T124, S109)
 - Offer the SQL capabilities in the GUI: chips and validator messages in the policy builder, chips and presets on resource and asset-group shares, a SQL profile editor on database resources, and a consent panel for the two plugin grants. (T124, S109)
 
+#### HSM pool HA (phase 6 of 7: audit and observability)
+
+- Drain every HSM pool member's device audit log every 5 seconds while unsealed: the `bv-auditor` key (auth key 8: read and acknowledge the log, nothing else) reads it, the digest chain is verified from the cursor at `core/hsm/audit-cursor/<hsm_id>`, each command becomes an `hsm.device_log` audit event naming the auth key and the node it belongs to, and the log is acknowledged only after the cursor is stored; an index jump (overflow), a chain break, a reset log or new unlogged events raise `hsm.device_log_gap` and `bv_hsm_device_log_gap_total{member}`, and the entries after a gap are still drained. A member drained by another node less than 5 s ago is skipped. `device_audit` is now accepted in a pool `hsm` block: `drain` (default), `forced`, or `off` (refused in production) (T454, S114)
+- Install the drain's key with `bvault operator hsm repair --run --admin hsm-a --admin hsm-b`: an admin-credentialed repair gives each live member a random `bv-auditor` credential, stored behind the barrier and never shown, when it has none that still authenticates (`auditors_installed` in the report), and sets the device's forced-audit option to match `device_audit`; with `forced` a member refuses commands (`LOG_FULL`) while its log is full, until the drain acknowledges it. Mock only: on a YubiHSM 2 the key, the option and the drain are refused until the log format is confirmed on hardware (phase 7) (T454, S114)
+- Export `bv_hsm_command_duration_seconds{member,op}`, `bv_hsm_repair_total{result}`, `bv_hsm_device_log_gap_total{member}` and `bv_hsm_link_requests_total{member,code}` (the totals of each member's HSM link relay) (T454, S114)
+- Report per-member `latency_ms` and `pending_revocations`, the pool's `pending_revocations`, the last `repair` run and each member's `device_audit` drain in `v2/sys/hsm/status`, and show them on the GUI's HSM / Seal page: a members table, an under-replicated warning, pending revocations, and repair and device-audit cards (T454, S114)
+
 #### HSM pool HA (phase 5 of 7: recovery)
 
-- Initialize an HSM pool with `recovery = "shamir-ceremony"`: init creates an ML-KEM-768 recovery key, splits its seed with Shamir (`bvault operator init --recovery-shares 5 --recovery-threshold 3`, Vault's `recovery_shares` / `recovery_threshold` on `sys/init`, default 5 / 3) and returns the shares once as `recovery_keys`, apart from the unseal `keys`; only the public key, its fingerprint and the split are stored. Any seal without a recovery key refuses the two fields instead of ignoring them (T454, S114)
+- Initialize an HSM pool with `recovery = "shamir-ceremony"`: init creates an ML-KEM-768 recovery key, splits its seed with Shamir (`bvault operator init --recovery-shares 5 --recovery-threshold 3`, `recovery_shares` / `recovery_threshold` on `v2/sys/init` only, default 5 / 3; `v1/sys/init` is frozen: it ignores the two fields as it always did and refuses to initialize a pool that would return recovery shares) and returns the shares once as `recovery_keys`, apart from the unseal `keys`; only the public key, its fingerprint and the split are stored. On `v2/sys/init`, any seal without a recovery key refuses the two fields instead of ignoring them (T454, S114)
 - Keep a recovery copy of the barrier KEK and of every HSM custody key, sealed to the recovery public key and bound to its set, purpose, epoch and key id; custody key creation adds it, `repair` adds a missing one (`recovery_copies_added`), and `rotate-epoch` re-seals it at the new epoch instead of refusing; unseal never reads it (T454, S114)
 - Recover a pool after losing both devices with `bvault operator hsm recover --member hsm-a2=a2.json --member hsm-b2=b2.json --admin hsm-a2 --admin hsm-b2` (`POST /v2/sys/hsm/recover`, no token, shares from hidden prompts or `--share env:VAR`): accepted only on a sealed node while every pool member is unreachable; once the threshold of shares is in it opens the KEK and every custody key from their recovery copies, attests the new devices, enrolls every node on them, re-wraps and verifies each copy, retires the lost members, bumps the epoch and auto-unseals through the new devices; `hsm.recovery_ceremony` records the share indexes used, and `v2/sys/hsm/status` reports the recovery fingerprint, split and ceremony progress (T454, S114)
 
@@ -207,6 +214,10 @@ EXAMPLE ENTRY:
 - Keep the expiration register-and-restore benchmark's leases alive for the whole test: their 400 s TTL was shorter than the 10 000-lease registration loop on Windows (453 s alone, ~960 s in a full run), so leases expired before the count.
 
 ### Security
+
+#### HSM pool HA: device audit log (T454 phase 6)
+
+- Verify each HSM pool device's audit log as a digest chain and never skip a gap: an overwritten, changed or reset log is raised as `hsm.device_log_gap` and every entry the device still holds is drained; the `bv-auditor` credential lives only behind the barrier, is zeroized after use and never appears in status, events or logs (T454, S114)
 
 #### HSM pool HA: recovery is gated and verified (T454 phase 5)
 

@@ -119,6 +119,14 @@ impl HsmBackend for YubiHsm2Backend {
         "yubihsm2"
     }
 
+    /// The relay's forwarded / failed totals (`bv_hsm_link_requests_total`).
+    fn link_totals(&self) -> Option<(u64, u64)> {
+        self._relay.as_ref().map(|relay| {
+            let stats = relay.stats();
+            (stats.requests_forwarded, stats.requests_failed)
+        })
+    }
+
     fn device_serial(&self) -> String {
         self.serial.clone()
     }

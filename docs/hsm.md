@@ -251,9 +251,9 @@ devices, node enrollment, repair and recovery come in later phases.
   each member; it never uses a recovery copy, a cache or a software path.
 - **Tampering is not an outage.** An AAD, authorization or MAC mismatch stops
   the operation on that member and is **not** retried on the other one. It
-  raises `hsm.crypto_failure` on the `security` log target (the audit broker
-  is not up before unseal; audit delivery is phase 6) and counts in
-  `bv_hsm_session_errors_total{kind="crypto"}`.
+  raises `hsm.crypto_failure` on the `security` log target (and in the audit
+  log once the audit broker is up, which it is not before unseal) and counts
+  in `bv_hsm_session_errors_total{kind="crypto"}`.
 - **Circuit breaker.** Three consecutive transport failures mark a member down
   (`hsm.member_down`, `bv_hsm_member_up{member}=0`). Operations skip it; it is
   retried after 1 s, then 2, 4, … up to 60 s. A health probe (`device-info`)
@@ -335,6 +335,63 @@ bvault operator hsm repair --run                                # drops hsm-b's 
   node (loopback). The cluster keeps its id and epoch; the change is one-way.
   A migrated pool has no recovery key (it is made at init only), so the node
   must run `recovery = "none"` for the migration.
+
+#### Device audit log and observability (phase 6, mock)
+
+Each pool device keeps its own audit log: the last 62 commands, each with the
+auth key that ran it and a digest chained from the entry before. BastionVault
+drains it so the record of what every node did on the device ends up in the
+audit log, and a gap in it is never silent.
+
+~~~bash
+# Once, after init (and after a member is added or replaced): give each member
+# the `bv-auditor` key the drain reads the log with. Also sets the device's
+# forced-audit option to match `device_audit`.
+bvault operator hsm repair --run --admin hsm-a --admin hsm-b
+bvault operator hsm status        # device_audit.members[].enrolled = true
+~~~
+
+- **Drain.** Every 5 s while unsealed, each member's log is read with
+  `bv-auditor` (auth key 8: `get-log-entries` and `set-log-index` only), the
+  chain is verified from the member's cursor (`core/hsm/audit-cursor/<hsm_id>`),
+  every new command becomes an `hsm.device_log` audit event (command, auth key,
+  the node the key belongs to, target object, result), and the log is
+  acknowledged once the cursor is stored. Every node runs the drain; a member
+  another node drained less than 5 s ago is skipped.
+- **Gaps.** An index jump (the drain lagged and the 62-entry buffer wrapped), a
+  chain break (an entry changed), a log that restarted or was rewritten, and
+  unlogged events the device reports each raise `hsm.device_log_gap` and
+  `bv_hsm_device_log_gap_total{member}`. The entries after a gap are still
+  verified and drained.
+- **`device_audit`.** `drain` (default) as above. `forced` also turns on the
+  device's forced-audit option: a member then refuses commands with `LOG_FULL`
+  while its log is full, so no command ever runs unlogged, at the price that a
+  stalled drain stops that member (the pool fails over to the other one, then
+  stops). `off` drains nothing and is refused when `BVAULT_ENV=production`; use
+  it for a mock pool whose nodes run in separate processes (the mock keeps one
+  log per process and would report restarts).
+- **The credential** is random, made by BastionVault during an admin repair,
+  stored behind the barrier at `core/hsm/auditor/<hsm_id>` and never shown. A
+  repair replaces it when it no longer authenticates (device reset).
+- **YubiHSM 2:** installing `bv-auditor`, the forced-audit option and the drain
+  are refused, naming phase 7, until the log layout is confirmed on a device.
+  `v2/sys/hsm/status` then shows each member with `enrolled: false`.
+
+Metrics (`/metrics`):
+
+| Metric | Labels | Meaning |
+|---|---|---|
+| `bv_hsm_member_up` | `member` | 1 while the member answers from this node |
+| `bv_hsm_command_duration_seconds` | `member`, `op` (`wrap`, `read`, `probe`, `get_log_entries`) | Wall time of a member operation; a high tail means device or link saturation |
+| `bv_hsm_session_errors_total` | `member`, `kind` (`transport`, `sessions_full`, `device`, `crypto`) | Failed member operations |
+| `bv_hsm_under_replicated_sets` | — | Sets missing a copy on an active or joining member |
+| `bv_hsm_repair_total` | `result` (`added`, `removed`, `recovery_added`, `failed`) | Repair outcomes |
+| `bv_hsm_device_log_gap_total` | `member` | Device-log gaps found by the drain |
+| `bv_hsm_link_requests_total` | `member`, `code` (`ok`, `failed`) | Requests this node's HSM link relay sent to the member's gateway (YubiHSM 2 through a gateway only) |
+
+`v2/sys/hsm/status` (and the GUI's **HSM / Seal** page) adds, for a pool, each
+member's `latency_ms` and pending revocations, the last repair run and each
+member's drain (see `docs/api.md`).
 
 #### Recovery (pool topology, `shamir-ceremony`)
 

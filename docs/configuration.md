@@ -287,6 +287,8 @@ hsm "mock" {
 | `min_wrap_copies` | `1` | Copies a new key needs before it is stored. `2` refuses key creation while a member is down. |
 | `link { ca_file, cert_file, key_file }` | | (yubihsm2) This node's mTLS identity for the gateways; required when any member uses `gateway`. |
 | `credential_dir` | | (yubihsm2, required) Where this node's per-member credentials live. |
+| `repair_rate` | `2` | Blob sets the repair job re-wraps per second, 1–100. |
+| `device_audit` | `"drain"` | Device audit log drain (T454 phase 6): `"drain"` reads every member's log every 5 s and raises each command as `hsm.device_log`; `"forced"` also turns on the device's forced-audit option, so a member refuses commands (`LOG_FULL`) while its log is full until the drain catches up; `"off"` drains nothing and is refused when `BVAULT_ENV=production`. The drain needs the `bv-auditor` key, installed by `bvault operator hsm repair --run --admin …`. Mock only until T454 phase 7. |
 
 Validation, all at startup:
 
@@ -299,8 +301,8 @@ Validation, all at startup:
   disagrees with it (for example a different `serial`) is ignored with a `warn`
   naming the field; only where this node reaches the device (`connector`,
   `state_path`) is taken from config.
-- `device_audit` and `repair_rate` are refused until the jobs they configure
-  exist (T454 phases 6 and 4). Pool-only settings in a per-node block are
+- Pool-only settings (`member`, `link`, `min_wrap_copies`, `repair_rate`,
+  `device_audit`, `migrate_from`, `credential_dir`) in a per-node block are
   refused rather than ignored.
 
 ## Metrics Access (optional)

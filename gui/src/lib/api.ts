@@ -351,6 +351,81 @@ export interface HsmStatus {
   this_node_enrolled?: boolean;
   recovery?: string;
   pqc_key_cache_ttl_secs?: number;
+  // HSM pool HA (features/hsm-pool-ha.md). Every field below is absent on
+  // older servers and on per-node topologies; render defensively.
+  topology?: "per-node" | "pool" | string;
+  seal_record_version?: number;
+  min_wrap_copies?: number;
+  under_replicated_sets?: number;
+  kek_under_replicated?: boolean;
+  members?: HsmPoolMember[];
+  pending_revocations?: HsmPendingRevocation[];
+  repair?: HsmRepairStatus;
+  device_audit?: HsmDeviceAuditStatus;
+  recovery_configured?: boolean;
+  recovery_requested?: boolean;
+  recovery_fingerprint?: string;
+  recovery_threshold?: number;
+  recovery_shares?: number;
+  kek_recovery_copy?: boolean;
+  recovery_progress?: number;
+}
+export interface HsmPoolMember {
+  name: string;
+  hsm_id?: string;
+  serial?: string;
+  state?: "active" | "joining" | "retired" | "faulted" | "bootstrap" | string;
+  up?: boolean;
+  faulted?: boolean;
+  prefer?: boolean;
+  holds_kek_copy?: boolean;
+  last_error?: string | null;
+  /** Wall time of the last successful command from this node, in ms. */
+  latency_ms?: number | null;
+  pending_revocations?: string[];
+}
+export interface HsmPendingRevocation {
+  member: string;
+  node: string;
+}
+export interface HsmRepairRun {
+  started_at?: number | string;
+  finished_at?: number | string;
+  sets_scanned?: number;
+  copies_added?: number;
+  copies_removed?: number;
+  recovery_copies_added?: number;
+  under_replicated?: number;
+  failures?: string[];
+  ready_to_promote?: string[];
+  promoted?: string[];
+  revocations_pending?: string[];
+  revocations_applied?: string[];
+  /** Members given a new `bv-auditor` key by an admin-credentialed run. */
+  auditors_installed?: string[];
+  custody_scanned?: boolean;
+}
+export interface HsmRepairStatus {
+  repair_rate?: number | null;
+  interval_secs?: number;
+  last_run?: HsmRepairRun | null;
+}
+export interface HsmDeviceAuditMember {
+  name: string;
+  hsm_id?: string;
+  /** Whether a `bv-auditor` credential exists; null until this node drained. */
+  enrolled?: boolean | null;
+  last_index?: number | null;
+  last_drain_at?: number | null;
+  drained_by?: string | null;
+  entries_drained?: number;
+  gaps?: number;
+  last_error?: string | null;
+}
+export interface HsmDeviceAuditStatus {
+  mode?: "drain" | "forced" | "off" | string;
+  interval_secs?: number;
+  members?: HsmDeviceAuditMember[];
 }
 export const hsmStatus = () => invoke<HsmStatus>("hsm_status");
 export const listAuditEvents = (from: string, to: string, limit?: number) =>

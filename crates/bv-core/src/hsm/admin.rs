@@ -13,7 +13,7 @@ use zeroize::Zeroizing;
 
 use crate::{
     errors::RvError,
-    hsm::{blob::HsmId, AttestedKey, HsmObjectId, HsmObjectIds},
+    hsm::{blob::HsmId, device_audit::AuditorCredential, AttestedKey, HsmObjectId, HsmObjectIds},
 };
 
 /// The YubiHSM 2 factory authentication key. `provision` deletes it, and a
@@ -47,6 +47,8 @@ pub enum AuthKeyRole {
     Admin,
     /// `bv-node-<node_id>`: use, never create, delete or export.
     Node,
+    /// `bv-auditor` (T454 phase 6): read and acknowledge the device log only.
+    Auditor,
 }
 
 impl AuthKeyRole {
@@ -68,6 +70,9 @@ impl AuthKeyRole {
             AuthKeyRole::Node => {
                 &["derive-ecdh", "get-object-info", "get-pseudo-random", "sign-eddsa", "unwrap-data", "wrap-data"]
             }
+            // The device capability that `set-log-index` needs is confirmed
+            // on hardware in phase 7; the mock models these two.
+            AuthKeyRole::Auditor => &["get-log-entries", "set-log-index"],
         }
     }
 }
@@ -248,6 +253,25 @@ pub trait HsmAdminSession: Send + Sync {
 
     /// Release the session slot.
     async fn close(&self) -> Result<(), RvError>;
+
+    /// Replace `bv-auditor` (auth key 8, `get-log-entries` / `set-log-index`,
+    /// domain 1, nothing delegated) with `credential` (T454 phase 6). Refused
+    /// by a backend that does not implement the drain yet.
+    async fn put_auditor_auth_key(&self, _credential: &AuditorCredential) -> Result<(), RvError> {
+        Err(RvError::ErrHsm(format!(
+            "{}: bv-auditor provisioning is not validated on this device type yet (T454 phase 7)",
+            self.hsm_id()?
+        )))
+    }
+
+    /// Turn the device's forced-audit option on or off (`device_audit =
+    /// "forced"`). Refused where the drain is not implemented yet.
+    async fn set_forced_audit(&self, _on: bool) -> Result<(), RvError> {
+        Err(RvError::ErrHsm(format!(
+            "{}: the forced-audit option is not validated on this device type yet (T454 phase 7)",
+            self.hsm_id()?
+        )))
+    }
 }
 
 /// What a pool member must look like (spec § attestation step 5): no factory

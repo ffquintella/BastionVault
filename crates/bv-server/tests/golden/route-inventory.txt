@@ -127,8 +127,8 @@ LIST   /v1/sys/mcp/tokens [routed] -> sys/mcp/tokens
 GET    /v1/sys/mcp/tokens [routed] -> sys/mcp/tokens
 DELETE /v1/sys/mcp/tokens/{accessor} [routed] -> sys/mcp/tokens/{accessor}
 GET    /v2/sys/init [public-probe] -- bootstrap: whether the vault is initialized is needed before any token can exist
-POST   /v2/sys/init [public-probe] -- one-time bootstrap that mints the root token and unseal shares; no token can exist before it, and Core::init refuses an initialized vault
-PUT    /v2/sys/init [public-probe] -- one-time bootstrap that mints the root token and unseal shares; no token can exist before it, and Core::init refuses an initialized vault
+POST   /v2/sys/init [public-probe] -- one-time bootstrap that mints the root token and unseal shares (and an HSM pool's recovery shares); no token can exist before it, and Core::init refuses an initialized vault
+PUT    /v2/sys/init [public-probe] -- one-time bootstrap that mints the root token and unseal shares (and an HSM pool's recovery shares); no token can exist before it, and Core::init refuses an initialized vault
 GET    /v2/sys/seal-status [public-probe] -- unseal workflow: sealed, share counts and unseal progress are needed while no token can be validated; no secret material
 GET    /v2/sys/health [public-probe] -- load-balancer probe; exposes only initialized, sealed, standby and cluster_healthy
 GET    /v2/sys/info [tiered] -- initialized and sealed are needed before a token can exist; version, started_at, uptime_seconds and storage_type require a live token (v0.37.6)

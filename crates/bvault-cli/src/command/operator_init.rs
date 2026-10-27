@@ -124,7 +124,9 @@ impl CommandExecutor for Init {
             recovery_threshold: self.recovery_threshold,
         };
 
-        match sys.init(&init_req) {
+        // Always `/v2/sys/init`: only `v2` carries an HSM pool's recovery
+        // shares (`v1` is frozen), and it behaves as `v1` for every other seal.
+        match sys.init_v2(&init_req) {
             Ok(ret) => {
                 if ret.response_status == 200 {
                     self.output.print_value(ret.response_data.as_ref().unwrap(), true)?;

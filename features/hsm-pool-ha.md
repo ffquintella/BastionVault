@@ -881,7 +881,105 @@ part 1 adds the ceremonies (node enroll and revoke, member add, retire and
 promotion), credential delivery and the repair job, all on the **mock**; a
 `yubihsm2` pool is still validated but refused at startup until part 2 wires
 the relay and the device's admin commands in. Phase 5 adds the recovery key,
-recovery copies and the recovery ceremony, also on the mock.
+recovery copies and the recovery ceremony, also on the mock. Phase 6 adds the
+device-log drain, the remaining metrics, the extended status and the GUI pool
+sections; the drain runs on the mock and is refused on a YubiHSM 2 until
+phase 7.
+
+Phase 6 (audit and observability, mock):
+
+- **Device log** (`hsm/device_audit.rs`). `DeviceLogEntry` is the device's
+  16 data bytes plus `SHA-256(data ‖ previous digest)[..16]`. `verify_log`
+  checks a `get-log-entries` answer against the member's cursor
+  (`core/hsm/audit-cursor/<hsm_id>`, physical, no secret: last index and
+  digest, unlogged-event counters, `drained_at`, `drained_by`): the cursor's
+  entry still present resumes after it; an entry missing from a buffer whose
+  entries are all later is overflow (an index jump unless the oldest chains
+  from the cursor); anything else is a reset or rewrite and every entry is
+  treated as new. Each jump, chain break, reset and unlogged-event change is a
+  gap; the chain re-anchors and later entries are still drained.
+- **Mock device log** (`hsm/mock.rs`). 62 entries in memory per device object
+  (per process, like the session table), every node, admin and failed command
+  logged under the auth key that ran it; `forced_audit` persisted in the state
+  file (absent = off, written only when on, so earlier files read unchanged)
+  makes a loggable command fail with `LOG_FULL` while 62 entries are
+  unacknowledged. `bv-auditor` (auth key 8) authenticates on every command and
+  may only `get-log-entries` / `set-log-index`; the mock does not log those two.
+- **Drain** (`seal/hsm/device_drain.rs`, tick in `hooks.rs`). Every 5 s while
+  unsealed, on every node, under `hsm-device-audit`: for each member that is
+  not retired, read its `bv-auditor` credential from the barrier
+  (`core/hsm/auditor/<hsm_id>`), skip it when another node's cursor is younger
+  than 5 s, read the log (`bv_hsm_command_duration_seconds{op="get_log_entries"}`),
+  verify, raise `hsm.device_log` per entry (command, auth key, the node the
+  enrollment maps it to, target, result, systick; the drain's own reads are not
+  raised) and `hsm.device_log_gap` per gap (`bv_hsm_device_log_gap_total`),
+  store the cursor, then `set-log-index`. A failure between the two re-reads
+  entries (duplicates, never a loss). A member with no credential or a failure
+  is logged once when it appears, and reported in status.
+- **`bv-auditor` install.** A repair run with admin credentials and the barrier
+  (`bvault operator hsm repair --run --admin …`) gives each live member it has
+  a credential for a random 32-byte `bv-auditor` when the stored one is missing
+  or no longer authenticates: replace key 8 on the device first, store second.
+  It then sets the forced-audit option to `device_audit = "forced"`.
+  `auditors_installed` is in the report. `device_audit = "off"` installs and
+  drains nothing.
+- **Metrics** (`bv-metrics`). `bv_hsm_command_duration_seconds{member,op}`
+  (`wrap`, `read`, `probe`, `get_log_entries`; 5 ms to ~10 s buckets),
+  `bv_hsm_repair_total{result}` (`added`, `removed`, `recovery_added`,
+  `failed`), `bv_hsm_device_log_gap_total{member}` and
+  `bv_hsm_link_requests_total{member,code}` (`ok`, `failed`), fed from each
+  member client's relay totals by the 10 s probe (a reopened relay counts from
+  zero again, never negative).
+- **Status.** Per member `latency_ms` (last successful command from this node)
+  and `pending_revocations`; the pool's `pending_revocations`
+  (`[{member, node}]`), `repair` (as `GET v2/sys/hsm/repair`) and
+  `device_audit` (`mode`, `interval_secs`, and per member `enrolled`,
+  `last_index`, `last_drain_at`, `drained_by`, `entries_drained`, `gaps`,
+  `last_error`, from this node's drains). Never a credential.
+- **GUI** (`gui/src/routes/HsmStatusPage.tsx`). For `topology = "pool"`: the
+  under-replicated warning, a members table (state, link, latency, serial, KEK
+  copy, pending revocations, last error), pending revocations with the repair
+  command, the repair card and the device-audit card (a missing auditor key
+  names the repair command). Read-only.
+- **`v1/sys/init`** (correction owed from phase 5). `/init` is registered per
+  version. `v1` is exactly what it was before phase 5: the recovery fields are
+  not part of its request and are ignored, and an init that would return
+  recovery shares (a pool with `shamir-ceremony`, which could not be
+  initialized before phase 5) is refused; `v2` takes the fields. Regression
+  tests: `bv-server` `sys_init_version_tests`.
+
+Decisions made in phase 6 where this spec left room:
+
+- `v1/sys/init` ignores the recovery fields rather than refusing them: that
+  is its behaviour before phase 5 and what a Vault client that always sends
+  them expects; the only case where ignoring would lose something (a
+  shamir-ceremony pool) is refused. Rejected: a `400` on `v1` (changes a frozen
+  route for old clients).
+- The drain runs on every node like the repair tick (no leadership signal);
+  the lock and the cursor's `drained_by` / `drained_at` keep it to about one
+  drain per member per interval. The cursor gains `drained_by` (new record,
+  `serde(default)`).
+- The `bv-auditor` credential is created by BastionVault (an admin repair), not
+  by `provision`: it has to live behind the barrier, which does not exist when
+  a device is provisioned. Rejected: a dedicated `device-audit` route and
+  command (one more admin surface for what repair already reaches).
+- `hsm.device_log` goes to the `security` log at `debug` only; the audit
+  device is its record. Gaps are `error`.
+- `bv-admin`'s capability list is unchanged: the `set-option` and
+  `put-authentication-key` delegation the device needs for forced audit and
+  `bv-auditor` are confirmed with the log layout in phase 7.
+
+Not done in phase 6, deliberately (phase 7, hardware):
+
+- The YubiHSM 2 side: `put_auditor_auth_key`, `set_forced_audit` and
+  `open_auditor` refuse on a YubiHSM 2, naming phase 7, until the entry layout,
+  the digest chain, whether the device logs `get-log-entries` /
+  `set-log-index`, and `LOG_FULL` behaviour are confirmed on a device.
+- Gateway-side counters (`GatewayStats`) stay in the gateway's log; the metric
+  is the node's relay view.
+- The mock's log is per process: a mock pool whose nodes run in separate
+  processes sees a different log per process and reports restarts; run such a
+  dev cluster with `device_audit = "off"` (allowed outside production).
 
 Phase 5 (recovery, mock):
 
@@ -890,7 +988,7 @@ Phase 5 (recovery, mock):
   ML-KEM-768 keypair, Shamir-splits the seed with `bv-shamir` (`RecoverySplit`,
   default 5 / 3, `2 <= threshold <= shares <= 254`) and returns the shares
   once; the seal record keeps the public key, its fingerprint and the split.
-  `sys/init` takes Vault's `recovery_shares` / `recovery_threshold` (both or
+  `v2/sys/init` (only; `v1` is frozen) takes `recovery_shares` / `recovery_threshold` (both or
   neither) and returns `recovery_keys` apart from `keys`; `bvault operator
   init --recovery-shares --recovery-threshold`. Per-node, a pool with
   `recovery = "none"` and every non-HSM seal refuse the fields
@@ -929,11 +1027,14 @@ Phase 5 (recovery, mock):
 
 Decisions made in phase 5 where this spec left room:
 
-- The shares come back as `recovery_keys` (Vault's name) on the shared
-  `sys/init` handler, which therefore accepts the two fields under `v1` too:
-  they are Vault's own `v1` fields, and refusing them on `v1` would turn the
-  default 5 / 3 into a silent loss for a `v1` client. Rejected: a `v2`-only
-  init and HSM-config split parameters.
+- The recovery-share fields and `recovery_keys` exist on `v2/sys/init` only
+  (AGENTS.md §7: `v1` is frozen, no new operations; corrected in phase 6).
+  `/init` is registered per version (`V1_INIT`, `V2_INIT`); `v1` ignores the
+  fields as it did before phase 5, refuses an init that would return recovery
+  shares (a pool with `shamir-ceremony`), because its response cannot carry
+  them, and otherwise runs the same logic. `bvault operator init` always calls
+  `v2`. Rejected: accepting the fields on the shared handler (the first phase
+  5 commit), and split parameters in the HSM config.
 - The ceremony adds copies at each set's own epoch, commits, and then bumps
   the epoch through `rotate-epoch` (which drops the retired copies and
   re-seals the recovery copies). A failed bump leaves a complete recovery at
@@ -1243,7 +1344,7 @@ Not done in phase 3, deliberately:
   `yubihsm::Client` and belongs with that wiring; the crate's tests drive the
   gateway and relay with a fake connector and the exact client wire format.
   The connector's real reply framing is confirmed on hardware in phase 7.
-- `bv_hsm_link_requests_total{member,code}` is not exported yet; `GatewayStats`
+- `bv_hsm_link_requests_total{member,code}` was not exported in phase 3 (phase 6 exports it from the relay totals); `GatewayStats`
   and `RelayStats` hold the counters (phase 6).
 
 Phase 2:
@@ -1360,7 +1461,8 @@ Decisions made in phase 2 where this spec left room:
 - Mock members are reached by `state_path` and take no `gateway` / `connector`;
   `serial` is required for both backends because it forms the member's `hsm_id`
   even while the device is unreachable.
-- `device_audit` and `repair_rate` are refused, not ignored, until phases 6 and 4.
+- `device_audit` and `repair_rate` were refused, not ignored, until phases 6 and 4
+  (both are accepted now).
 - The record's `seed_ecdh_pub` holds the member's `bv-identity` key, which is what
   the mock and today's layout use for the seed ECDH; `bv-seed-ecdh` is phase 4.
 - Pool init uses the session the node's member client already has; per-node
@@ -1388,8 +1490,8 @@ Not done in phase 2, deliberately:
 | 3. HSM link | `bv-hsm-link` crate (gateway + relay), `bvault hsm-gateway` | `crates/bv-hsm-link/`, `crates/bvault-cli` | Done |
 | 4. Ceremonies and repair | `provision`, attestation chain pinning, node enroll/revoke with credential delivery, member add/retire, repair job, epoch rotation, `migrate-to-pool`, v2 routes, CLI | `crates/bv-core/src/hsm/{admin,ceremony,node_creds,repair}.rs`, `crates/bv-core/src/seal/hsm/pool_admin.rs`, `crates/bv-kernel/src/modules/system/`, `crates/bvault-cli` | Done (mock; Yubico attestation pinning and device validation moved to phase 7) |
 | 5. Recovery | Recovery keypair, Shamir split, recovery copies, `recover` route | `crates/bv-core/src/hsm/recovery.rs`, `crates/bv-core/src/seal/hsm/recovery_ceremony.rs`, `crates/bv-server/src/sys.rs`, `crates/bvault-cli` | Done (mock; the YubiHSM 2 ceremony waits on phase 7 attestation) |
-| 6. Audit and observability | Device-log drain, events, metrics, status, GUI page, `docs/hsm.md`, `docs/api.md` | `crates/bv-core/src/hsm/device_audit.rs`, `gui/src/routes/HsmStatusPage.tsx` | Planned |
-| 7. Hardware validation | Two physical devices plus three nodes; pin the Yubico attestation chain and lift the YubiHSM 2 attestation refusal; validate `provision`, bootstrap, enrollment and the relay; measure latencies; confirm the FIPS Ed25519 question | `tests/` behind `BVAULT_TEST_YUBIHSM_POOL=1` | Planned |
+| 6. Audit and observability | Device-log drain, events, metrics, status, GUI page, `docs/hsm.md`, `docs/api.md` | `crates/bv-core/src/hsm/device_audit.rs`, `crates/bv-core/src/seal/hsm/device_drain.rs`, `gui/src/routes/HsmStatusPage.tsx` | Done (mock; the YubiHSM 2 drain waits on phase 7) |
+| 7. Hardware validation | Two physical devices plus three nodes; pin the Yubico attestation chain and lift the YubiHSM 2 attestation refusal; validate `provision`, bootstrap, enrollment and the relay; confirm the device log layout, digest chain and forced audit, and lift the YubiHSM 2 drain refusal; measure latencies; confirm the FIPS Ed25519 question | `tests/` behind `BVAULT_TEST_YUBIHSM_POOL=1` | Planned |
 
 **What happens to the existing modules:**
 

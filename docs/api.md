@@ -42,14 +42,18 @@ Response:
 }
 ~~~
 
-With an HSM pool seal configured `recovery = "shamir-ceremony"`
-([HSM pool HA](../features/hsm-pool-ha.md#recovery-shamir-ceremony), T454),
-the request may also carry Vault's `recovery_shares` / `recovery_threshold`
+**`PUT /v2/sys/init` only:** with an HSM pool seal configured `recovery =
+"shamir-ceremony"` ([HSM pool HA](../features/hsm-pool-ha.md#recovery-shamir-ceremony),
+T454), the request may also carry `recovery_shares` / `recovery_threshold`
 (both or neither; default 5 / 3, `2 <= threshold <= shares <= 254`). The
 response then has `keys: []` and `recovery_keys` (hex): the recovery shares,
 shown once and stored nowhere, never usable as unseal keys. Any other seal, or
 a pool with `recovery = "none"`, refuses the two fields rather than ignoring
-them; `recovery_keys` is absent from every other response.
+them; `recovery_keys` is absent from every other response. `v1/sys/init` is
+frozen and behaves as it did before T454 phase 5: the two fields are not part
+of its request and are ignored, and it refuses (`400`, naming `/v2/sys/init`)
+to initialize a pool that would return recovery shares, since its response
+has no field for them.
 
 ### Seal Status
 
@@ -175,7 +179,9 @@ HSM pool response (`topology = "pool"`; T454 phase 2). There is no single
       "faulted": false,
       "prefer": false,
       "holds_kek_copy": true,
-      "last_error": null
+      "last_error": null,
+      "latency_ms": 12,
+      "pending_revocations": []
     },
     {
       "name": "hsm-b",
@@ -186,11 +192,26 @@ HSM pool response (`topology = "pool"`; T454 phase 2). There is no single
       "faulted": false,
       "prefer": false,
       "holds_kek_copy": true,
-      "last_error": "probe: HSM transport or session failure: mock HSM MOCK-B is unreachable"
+      "last_error": "probe: HSM transport or session failure: mock HSM MOCK-B is unreachable",
+      "latency_ms": 9,
+      "pending_revocations": ["vault-4"]
     }
   ],
   "under_replicated_sets": 0,
   "kek_under_replicated": false,
+  "pending_revocations": [{ "member": "hsm-b", "node": "vault-4" }],
+  "repair": { "repair_rate": 2, "interval_secs": 300, "last_run": { "copies_added": 0, "…": "…" } },
+  "device_audit": {
+    "mode": "drain",
+    "interval_secs": 5,
+    "members": [
+      { "name": "hsm-a", "hsm_id": "mock:MOCK-A", "enrolled": true, "last_index": 412,
+        "last_drain_at": 1790000100, "drained_by": "vault-1", "entries_drained": 377,
+        "gaps": 0, "last_error": null },
+      { "name": "hsm-b", "hsm_id": "mock:MOCK-B", "enrolled": false, "last_index": null,
+        "last_drain_at": null, "drained_by": null, "entries_drained": 0, "gaps": 0, "last_error": null }
+    ]
+  },
   "cluster_uuid": "…",
   "epoch": 0,
   "seal_record_version": 2,
@@ -212,6 +233,17 @@ HSM pool response (`topology = "pool"`; T454 phase 2). There is no single
   the custody store and exported as `bv_hsm_under_replicated_sets`.
 - `last_error` is the member's last failure (operation and error class); it
   never carries key material.
+- `latency_ms` is the wall time of the member's last successful command from
+  this node; `pending_revocations` lists the revoked nodes whose key is still
+  on that member (every node treats it as down until an admin repair applies
+  them), and the top-level `pending_revocations` flattens them.
+- `repair` is `GET /v2/sys/hsm/repair` (the last run on this node).
+- `device_audit` (T454 phase 6): the drain `mode` (`drain`, `forced`, `off`)
+  and, per member that is not retired, what this node's drains last saw:
+  `enrolled` (a `bv-auditor` credential exists; `null` before this node's first
+  drain), the last drained `last_index`, `last_drain_at` / `drained_by` (the
+  node that wrote the cursor), `entries_drained` and `gaps` since this node
+  started, and `last_error`. The credential itself never appears.
 - With a recovery key (T454 phase 5) the status adds `recovery_fingerprint`,
   `recovery_threshold`, `recovery_shares` (the split), `kek_recovery_copy` and
   `recovery_progress` (shares a running recovery ceremony holds on this node;
@@ -237,7 +269,7 @@ request; they are never stored, logged by the server or returned.
 | POST | `/v2/sys/hsm/nodes/{node_id}` | `transport_fp`, `admin_credentials` (every live member) | Enroll a node |
 | DELETE | `/v2/sys/hsm/nodes/{node_id}` | `admin_credentials` | Revoke a node; unreachable members get a pending revocation |
 | GET | `/v2/sys/hsm/repair` | — | `repair_rate`, `interval_secs`, `last_run` (the report below) |
-| POST | `/v2/sys/hsm/repair` | `admin_credentials` (optional) | Run repair now; with credentials it also applies pending revocations and promotes joining members |
+| POST | `/v2/sys/hsm/repair` | `admin_credentials` (optional) | Run repair now; with credentials it also applies pending revocations, promotes joining members and installs a `bv-auditor` key on each member it has a credential for (T454 phase 6) |
 | POST | `/v2/sys/hsm/rotate-epoch` | `admin_credentials` (every active member) | New wrap keys and every set re-wrapped to the next epoch; resumes an interrupted rotation |
 | POST | `/v2/sys/hsm/migrate-to-pool` | — | **Loopback peer only, node sealed, no token**: move the per-node seal record onto the pool (needs `migrate_from` and a bootstrap), then auto-unseal |
 
@@ -254,6 +286,7 @@ A repair report: `sets_scanned`, `copies_added`, `copies_removed`,
 `recovery_copies_added` (sets that lacked a recovery copy under a recovery key),
 `under_replicated` (still missing a copy), `failures`, `invalid_custody_entries`,
 `ready_to_promote`, `promoted`, `revocations_applied`, `revocations_pending`,
+`auditors_installed` (members given a new `bv-auditor` credential),
 `custody_scanned`, `started_at`, `finished_at`. A revoke response adds
 `revoked_on`, `revocation_pending` (`member`, `reason`), `operator_steps` and,
 when a revocation is pending, `residual_risk`.

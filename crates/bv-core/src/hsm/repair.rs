@@ -95,6 +95,9 @@ pub struct RepairReport {
     pub promoted: Vec<String>,
     pub revocations_applied: Vec<String>,
     pub revocations_pending: Vec<String>,
+    /// Members given a new `bv-auditor` credential by an admin-credentialed
+    /// run (T454 phase 6: the device-log drain needs one per member).
+    pub auditors_installed: Vec<String>,
     /// False when the barrier was not available (custody sets not scanned).
     pub custody_scanned: bool,
 }

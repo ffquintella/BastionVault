@@ -5,11 +5,13 @@
 //! Either way release is a signed, audited, replay-resistant unwrap, and a node
 //! that cannot reach a device stays sealed (spec rule 6; never a fallback).
 
+mod device_drain;
 pub mod hooks;
 mod pool_admin;
 pub mod record;
 mod recovery_ceremony;
 
+pub use device_drain::{DrainMemberStatus, DrainReport};
 pub use recovery_ceremony::{RecoveryMember, RecoverySubmission};
 
 use std::{
@@ -313,6 +315,8 @@ pub struct HsmSealProvider {
     /// phase 5). Memory only; zeroized on reset, on every ceremony attempt
     /// and on drop.
     recovery_shares: Mutex<ShareSet>,
+    /// What this node's device-log drains last saw, per member (phase 6).
+    device_audit_state: Mutex<device_drain::DrainState>,
 }
 
 impl HsmSealProvider {
@@ -326,6 +330,7 @@ impl HsmSealProvider {
             hooks: None,
             migration_source: None,
             recovery_shares: Mutex::new(ShareSet::default()),
+            device_audit_state: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -390,6 +395,7 @@ impl HsmSealProvider {
             hooks: None,
             migration_source: None,
             recovery_shares: Mutex::new(ShareSet::default()),
+            device_audit_state: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -614,6 +620,13 @@ impl HsmSealProvider {
                 Ok(Some(split))
             }
         }
+    }
+
+    /// Whether init on this provider makes a recovery key and returns its
+    /// shares (a pool with `recovery = "shamir-ceremony"`): `v1/sys/init`,
+    /// which has no field for them, refuses such an init.
+    pub fn init_returns_recovery_shares(&self) -> bool {
+        matches!(self.devices, Devices::Pool(_)) && self.config.recovery == RecoveryMode::ShamirCeremony
     }
 
     fn recovery_requested(&self) -> &'static str {
@@ -974,9 +987,14 @@ impl HsmSealProvider {
             .into_iter()
             .map(|m| {
                 let id = HsmId::parse(&m.hsm_id).ok();
-                let state = match (pool_record, &id) {
-                    (Some(r), Some(id)) => r.members.get(id).map(|rm| json!(rm.state)),
-                    _ => Some(json!("bootstrap")),
+                let recorded = match (pool_record, &id) {
+                    (Some(r), Some(id)) => r.members.get(id),
+                    _ => None,
+                };
+                let state = match (pool_record, recorded) {
+                    (Some(_), Some(rm)) => Some(json!(rm.state)),
+                    (Some(_), None) => None,
+                    (None, _) => Some(json!("bootstrap")),
                 };
                 json!({
                     "name": m.name,
@@ -988,18 +1006,33 @@ impl HsmSealProvider {
                     "prefer": m.prefer,
                     "holds_kek_copy": id.as_ref().is_some_and(|id| kek.is_some_and(|k| k.copy_for(id).is_some())),
                     "last_error": m.last_error,
+                    "latency_ms": m.latency_ms,
+                    "pending_revocations": recorded.map(|rm| rm.pending_revocations.clone()).unwrap_or_default(),
                 })
             })
             .collect();
         // Only the KEK set is cheap to count here; custody sets are counted by
         // `CustodyStore::replication_report`, which reads the barrier.
         let kek_under = kek.is_some_and(|k| k.is_under_replicated(&pool.active_ids()));
+        // Every pending revocation, including those on members this node's
+        // pool leaves out (a member with one is down for every node).
+        let pending: Vec<Value> = pool_record
+            .map(|r| {
+                r.members
+                    .values()
+                    .flat_map(|m| m.pending_revocations.iter().map(move |node| json!({ "member": m.name, "node": node })))
+                    .collect()
+            })
+            .unwrap_or_default();
         let mut out = json!({
             "topology": Topology::Pool.as_str(),
             "min_wrap_copies": pool.min_wrap_copies(),
             "members": members,
             "under_replicated_sets": usize::from(kek_under),
             "kek_under_replicated": kek_under,
+            "pending_revocations": pending,
+            "repair": self.repair_status(),
+            "device_audit": self.device_audit_status(pool_record),
         });
         if let (Some(stored), Some(obj)) = (stored, out.as_object_mut()) {
             obj.insert("cluster_uuid".into(), json!(stored.record.cluster_uuid));
@@ -1579,6 +1612,7 @@ mod tests {
                     link: None,
                     migrate_from: None,
                     members: vec![member(&self.name_a, &self.a, true), member(&self.name_b, &self.b, false)],
+                    device_audit: crate::hsm::device_audit::DeviceAuditMode::Drain,
                 }),
                 recovery_explicit: true,
                 ..cfg(node)
@@ -1672,6 +1706,10 @@ mod tests {
         provider.check_init_recovery(split).await.unwrap();
         assert!(provider.check_init_recovery(Some(RecoverySplit { shares: 5, threshold: 1 })).await.is_err());
         assert_eq!(raw(&c.physical, HSM_SEAL_RECORD_PATH).await, None, "nothing is written by the checks");
+        // Only this pool returns recovery shares, so only it is refused by the
+        // frozen `v1/sys/init` (whose response has no field for them).
+        assert!(provider.init_returns_recovery_shares());
+        assert!(!none.init_returns_recovery_shares());
 
         c.b.set_offline(true);
         let provider = c.provider("n1");

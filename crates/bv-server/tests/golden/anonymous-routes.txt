@@ -12,8 +12,8 @@ PUT    /v1/sys/unseal [public-probe] -- the unseal key share is the credential: 
 GET    /v1/sys/internal/ui/mounts [routed-unauthenticated] -> sys/internal/ui/mounts -- Vault-compatible UI bootstrap in the system backend's unauth_paths; the handler judges any token itself and lists no mount to an anonymous caller
 GET    /v1/sys/internal/ui/mounts/{name:.*} [routed-unauthenticated] -> sys/internal/ui/mounts/{name} -- Vault-compatible UI bootstrap in the system backend's unauth_paths; the handler refuses an anonymous caller and checks mount access for a token
 GET    /v2/sys/init [public-probe] -- bootstrap: whether the vault is initialized is needed before any token can exist
-POST   /v2/sys/init [public-probe] -- one-time bootstrap that mints the root token and unseal shares; no token can exist before it, and Core::init refuses an initialized vault
-PUT    /v2/sys/init [public-probe] -- one-time bootstrap that mints the root token and unseal shares; no token can exist before it, and Core::init refuses an initialized vault
+POST   /v2/sys/init [public-probe] -- one-time bootstrap that mints the root token and unseal shares (and an HSM pool's recovery shares); no token can exist before it, and Core::init refuses an initialized vault
+PUT    /v2/sys/init [public-probe] -- one-time bootstrap that mints the root token and unseal shares (and an HSM pool's recovery shares); no token can exist before it, and Core::init refuses an initialized vault
 GET    /v2/sys/seal-status [public-probe] -- unseal workflow: sealed, share counts and unseal progress are needed while no token can be validated; no secret material
 GET    /v2/sys/health [public-probe] -- load-balancer probe; exposes only initialized, sealed, standby and cluster_healthy
 GET    /v2/sys/info [tiered] -- initialized and sealed are needed before a token can exist; version, started_at, uptime_seconds and storage_type require a live token (v0.37.6)

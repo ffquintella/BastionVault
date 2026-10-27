@@ -135,14 +135,45 @@ async fn sys_init_get_request_handler(_req: HttpRequest, core: web::Data<Arc<Cor
     ))
 }
 
+/// `POST|PUT /v1/sys/init` — frozen for Vault compatibility (AGENTS.md §7),
+/// and exactly what it was before T454 phase 5: `recovery_shares` /
+/// `recovery_threshold` are not part of its request and are ignored, as any
+/// unknown field always was (a Vault client may send them). They reach the
+/// provider only through `/v2/sys/init`. An HSM pool that makes a recovery key
+/// at init is refused here, because a `v1` response has no field for its
+/// shares; it could not be initialized before phase 5 either.
 async fn sys_init_put_request_handler(
+    _req: HttpRequest,
+    mut body: web::Bytes,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, HttpError> {
+    let mut payload = serde_json::from_slice::<InitRequest>(&body)?;
+    body.clear();
+    payload.recovery_shares = None;
+    payload.recovery_threshold = None;
+    if core.seal_provider().as_hsm().is_some_and(|hsm| hsm.init_returns_recovery_shares()) {
+        return Ok(response_error(
+            StatusCode::BAD_REQUEST,
+            "this HSM pool creates a recovery key at init and its shares are returned only by /v2/sys/init; \
+             initialize through /v2/sys/init",
+        ));
+    }
+    sys_init(core, payload).await
+}
+
+/// `POST|PUT /v2/sys/init` — `v1`'s init plus the recovery-share fields of an
+/// HSM pool with `recovery = "shamir-ceremony"` and `recovery_keys` back.
+async fn sys_init_v2_put_request_handler(
     _req: HttpRequest,
     mut body: web::Bytes,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
     let payload = serde_json::from_slice::<InitRequest>(&body)?;
     body.clear();
+    sys_init(core, payload).await
+}
 
+async fn sys_init(core: web::Data<Arc<Core>>, payload: InitRequest) -> Result<HttpResponse, HttpError> {
     // The share parameters only mean something for a share-based (Shamir)
     // seal. An auto-unseal seal (HSM) hands the KEK to the device and returns
     // no operator shares, so a bare `operator init` must work: default to a
@@ -6227,5 +6258,58 @@ mod exchange_export_route_tests {
             resp["size_bytes"].as_u64().unwrap_or(0) > 0,
             "export must produce bytes: {resp:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod sys_init_version_tests {
+    //! `v1/sys/init` is frozen (AGENTS.md §7): T454 phase 5 added the HSM
+    //! pool recovery-share fields on `v2/sys/init` only. A `v1` request that
+    //! carries them behaves exactly as before phase 5 (the fields are ignored
+    //! and never reach the seal provider); `v2` passes them on.
+
+    use serde_json::json;
+
+    use crate::test_utils::TestHttpServer;
+
+    fn uninitialized(name: &str) -> TestHttpServer {
+        let mut server = TestHttpServer::new_without_init(name, true);
+        // Address `v1/…` and `v2/…` explicitly.
+        server.url_prefix = format!("http://{}", server.listen_addr);
+        server
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn v1_init_never_takes_the_recovery_fields_and_v2_does() {
+        let server = uninitialized("test_sys_init_v1_v2_recovery_fields");
+        let body = json!({
+            "secret_shares": 1,
+            "secret_threshold": 1,
+            "recovery_shares": 5,
+            "recovery_threshold": 3,
+        });
+
+        // v2 hands them to the provider, which refuses them on a Shamir seal
+        // (no recovery key) before anything is written.
+        let (status, resp) = server.write("v2/sys/init", body.as_object().cloned(), None).unwrap();
+        assert_ne!(status, 200, "a Shamir seal refuses recovery fields on v2: {resp}");
+        let (_, state) = server.read("v1/sys/init", None).unwrap();
+        assert_eq!(state["initialized"], false, "refused before anything was written");
+
+        // v1 never sees them: the same body initializes as it did before
+        // phase 5, and the response has no `recovery_keys`.
+        let (status, resp) = server.write("v1/sys/init", body.as_object().cloned(), None).unwrap();
+        assert_eq!(status, 200, "{resp}");
+        assert_eq!(resp["keys"].as_array().map(Vec::len), Some(1), "{resp}");
+        assert!(resp.get("recovery_keys").is_none(), "v1 never returns recovery shares: {resp}");
+        assert!(resp["root_token"].is_string());
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn v1_init_ignores_one_recovery_field_as_it_always_did() {
+        let server = uninitialized("test_sys_init_v1_one_recovery_field");
+        let body = json!({ "secret_shares": 1, "secret_threshold": 1, "recovery_shares": 5 });
+        let (status, resp) = server.write("v1/sys/init", body.as_object().cloned(), None).unwrap();
+        assert_eq!(status, 200, "v1 does not validate a field it does not have: {resp}");
     }
 }

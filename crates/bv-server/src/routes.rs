@@ -229,8 +229,11 @@ pub enum Surface {
 
 /// `/v1/sys` and `/v2/sys` — [`crate::sys::init_sys_service`].
 pub const SYS: &[Surface] = &[
-    Surface::Sys { prefix: "/v1/sys", groups: &[crate::sys::routes::SHARED] },
-    Surface::Sys { prefix: "/v2/sys", groups: &[crate::sys::routes::SHARED, crate::sys::routes::V2_ONLY] },
+    Surface::Sys { prefix: "/v1/sys", groups: &[crate::sys::routes::V1_INIT, crate::sys::routes::SHARED] },
+    Surface::Sys {
+        prefix: "/v2/sys",
+        groups: &[crate::sys::routes::V2_INIT, crate::sys::routes::SHARED, crate::sys::routes::V2_ONLY],
+    },
 ];
 
 /// The signed Rustion webhook — [`crate::rustion_webhook::init_rustion_webhook_service`].

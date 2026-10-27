@@ -117,7 +117,8 @@ bvault operator init --key-shares=5 --key-threshold=3 # Shamir-sealed vault
 | `--recovery-threshold` | Recovery shares the recovery ceremony needs (default 3); give it with `--recovery-shares` |
 
 Returns a list of unseal keys (empty for an HSM seal) and a root token. Store these securely.
-An HSM pool with `recovery = "shamir-ceremony"` also returns `recovery_keys`: the recovery
+The command calls `/v2/sys/init` whatever `--api-version` says (`v1/sys/init` is frozen and
+cannot return recovery shares). An HSM pool with `recovery = "shamir-ceremony"` also returns `recovery_keys`: the recovery
 shares, printed once and stored nowhere. They are not unseal keys; hand one to each holder
 (see `operator hsm recover`).
 
@@ -178,7 +179,7 @@ unreachable.
 | `--admin <member>=env:VAR` | Read it from the environment variable `VAR` instead. Any other `=value` is refused: an argument would sit in the process list and the shell history |
 | `--fingerprint` | The node's transport key fingerprint, as its log shows it; confirm it out of band |
 | `--bundle` | The attestation bundle (JSON) that provisioning the device produced |
-| `--run` | Run the repair job now instead of showing the last run |
+| `--run` | Run the repair job now instead of showing the last run. With `--admin`, it also applies pending revocations, promotes joining members and installs the `bv-auditor` key the device-log drain needs on each named member (`auditors_installed` in the report) |
 | `--member <name>=<file>` | `recover`: a new device and its attestation bundle |
 | `--share env:VAR` | `recover`: read one recovery share (hex) from `VAR`; repeat per share |
 | `--reset` | `recover`: discard the shares this node holds for a running ceremony |

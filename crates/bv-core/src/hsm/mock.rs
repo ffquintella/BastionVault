@@ -13,10 +13,12 @@
 
 // A `MockHsmDevice` is the device and a `MockHsmBackend` one client of it (one
 // session owner). Like the YubiHSM 2 it holds 16 sessions, expires one after
-// 30 s idle, answers SESSIONS_FULL past that, and can be set offline.
+// 30 s idle, answers SESSIONS_FULL past that, and can be set offline. It keeps
+// a 62-entry device log in memory (T454 phase 6), per process like its
+// session table, so a restart or a second process starts a new log.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, RwLock,
@@ -40,9 +42,50 @@ use crate::{
         blob::{open_blob, seal_blob, Context, HsmId},
         ceremony::AttestationBundle,
         clock::{self, Clock},
+        device_audit::{
+            AuditorCredential, DeviceLog, DeviceLogEntry, HsmAuditSession, AUDITOR_AUTH_KEY_ID, DEVICE_LOG_CAPACITY,
+        },
         domain_separated, AttestedKey, HsmBackend, HsmObjectId, HsmObjectIds, ResolvedHsmConfig,
     },
 };
+
+/// YubiHSM 2 command codes the mock writes to its device log.
+mod cmd {
+    pub const PUT_AUTHENTICATION_KEY: u8 = 0x44;
+    pub const GET_OBJECT_INFO: u8 = 0x4e;
+    pub const SET_OPTION: u8 = 0x4f;
+    pub const GET_PSEUDO_RANDOM: u8 = 0x51;
+    pub const GET_PUBLIC_KEY: u8 = 0x54;
+    pub const SIGN_ECDSA: u8 = 0x56;
+    pub const DERIVE_ECDH: u8 = 0x57;
+    pub const DELETE_OBJECT: u8 = 0x58;
+    pub const GENERATE_WRAP_KEY: u8 = 0x5b;
+    pub const SIGN_ATTESTATION_CERTIFICATE: u8 = 0x64;
+    pub const WRAP_DATA: u8 = 0x68;
+    pub const UNWRAP_DATA: u8 = 0x69;
+    pub const SIGN_EDDSA: u8 = 0x6a;
+}
+
+/// No second key in a log entry.
+const NO_KEY: u16 = 0xffff;
+
+/// The device log: the last [`DEVICE_LOG_CAPACITY`] entries, each chaining
+/// the digest of the one before, and the index the auditor acknowledged.
+#[derive(Default)]
+struct MockLog {
+    entries: VecDeque<DeviceLogEntry>,
+    last_index: u16,
+    last_digest: [u8; 16],
+    acked: u16,
+    unlogged_boot: u16,
+    unlogged_auth: u16,
+}
+
+impl MockLog {
+    fn unacknowledged(&self) -> usize {
+        usize::from(self.last_index.wrapping_sub(self.acked))
+    }
+}
 
 const AES_NONCE_LEN: usize = 12;
 /// Concurrent sessions per device (YubiHSM 2 limit).
@@ -96,6 +139,10 @@ struct MockState {
     /// sessions, as before. A device with `bv-admin` is provisioned.
     #[serde(default)]
     auth_keys: BTreeMap<u16, MockAuthKey>,
+    /// The forced-audit option (T454 phase 6). Absent, as in every earlier
+    /// state file, means off; written only when on.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    forced_audit: bool,
 }
 
 impl MockState {
@@ -139,9 +186,130 @@ pub struct MockHsmDevice {
     sessions: Mutex<BTreeMap<String, Duration>>,
     offline: AtomicBool,
     clock: Arc<dyn Clock>,
+    log: Mutex<MockLog>,
 }
 
 impl MockHsmDevice {
+    fn from_state(state_path: &str, state: MockState, clock: Arc<dyn Clock>) -> Arc<Self> {
+        Arc::new(Self {
+            state_path: state_path.to_string(),
+            state: RwLock::new(state),
+            sessions: Mutex::new(BTreeMap::new()),
+            offline: AtomicBool::new(false),
+            clock,
+            log: Mutex::new(MockLog::default()),
+        })
+    }
+
+    fn device_log(&self) -> std::sync::MutexGuard<'_, MockLog> {
+        // Bookkeeping only; a panic elsewhere must not wedge the device.
+        self.log.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn forced_audit(&self) -> bool {
+        self.state.read().map(|s| s.forced_audit).unwrap_or(true)
+    }
+
+    /// Forced audit: a loggable command is refused while the log holds
+    /// [`DEVICE_LOG_CAPACITY`] unacknowledged entries (`LOG_FULL`), so no
+    /// command ever runs unlogged.
+    fn admit(&self) -> Result<(), RvError> {
+        self.reachable()?;
+        if self.forced_audit() && self.device_log().unacknowledged() >= DEVICE_LOG_CAPACITY {
+            return Err(RvError::ErrHsm(format!(
+                "mock HSM {}: LOG_FULL (forced audit is on and the device log is full until the drain acknowledges it)",
+                self.serial()
+            )));
+        }
+        Ok(())
+    }
+
+    /// Append one entry, chained to the one before; the oldest is overwritten
+    /// once the buffer is full (only possible with forced audit off).
+    fn record(&self, command: u8, session_key: u16, target_key: u16, ok: bool) {
+        let systick = u32::try_from(self.clock.now().as_millis() & u128::from(u32::MAX)).unwrap_or(0);
+        let mut log = self.device_log();
+        let mut entry = DeviceLogEntry {
+            index: log.last_index.wrapping_add(1),
+            command,
+            length: 0,
+            session_key,
+            target_key,
+            second_key: NO_KEY,
+            result: if ok { 0x80 | command } else { 0x7f },
+            systick,
+            digest: [0; 16],
+        };
+        entry.digest = entry.chained_digest(&log.last_digest);
+        log.last_index = entry.index;
+        log.last_digest = entry.digest;
+        if log.entries.len() == DEVICE_LOG_CAPACITY {
+            log.entries.pop_front();
+        }
+        log.entries.push_back(entry);
+    }
+
+    /// Run `command` as the device does: admitted, executed, logged.
+    fn logged<T>(
+        &self,
+        command: u8,
+        session_key: u16,
+        target_key: u16,
+        run: impl FnOnce() -> Result<T, RvError>,
+    ) -> Result<T, RvError> {
+        self.admit()?;
+        let out = run();
+        // An unreachable device logs nothing; it never saw the command.
+        if !matches!(out, Err(RvError::ErrHsmTransport(_))) {
+            self.record(command, session_key, target_key, out.is_ok());
+        }
+        out
+    }
+
+    /// A session authenticated with `bv-auditor` (T454 phase 6).
+    pub fn auditor_session(self: &Arc<Self>, credential: &AuditorCredential) -> Result<MockAuditSession, RvError> {
+        self.authenticate_auditor(credential)?;
+        self.session(AUDITOR_SESSION_OWNER)?;
+        Ok(MockAuditSession { device: self.clone(), credential: credential.clone() })
+    }
+
+    fn authenticate_auditor(&self, credential: &AuditorCredential) -> Result<(), RvError> {
+        self.reachable()?;
+        let state = self.state.read().map_err(|_| RvError::ErrRwLockReadPoison)?;
+        match state.auth_keys.get(&AUDITOR_AUTH_KEY_ID) {
+            Some(k) if k.role == AuthKeyRole::Auditor && k.key.as_slice() == credential.key() => Ok(()),
+            _ => Err(auth_failed(AUDITOR_AUTH_KEY_ID, &state.serial)),
+        }
+    }
+
+    /// Whether the forced-audit option is on (tests, status).
+    pub fn forced_audit_on(&self) -> bool {
+        self.forced_audit()
+    }
+
+    /// Change entry `index` in place, as tampering with the log would.
+    #[cfg(test)]
+    pub(crate) fn tamper_log_entry(&self, index: u16) {
+        let mut log = self.device_log();
+        if let Some(e) = log.entries.iter_mut().find(|e| e.index == index) {
+            e.target_key ^= 1;
+        }
+    }
+
+    /// The newest entry's index (0 before any command).
+    #[cfg(test)]
+    pub(crate) fn newest_log_index(&self) -> u16 {
+        self.device_log().last_index
+    }
+
+    /// A power cycle that lost the log: it restarts at index 1, and the
+    /// device counts one boot it could not log.
+    #[cfg(test)]
+    pub(crate) fn restart_log(&self) {
+        let mut log = self.device_log();
+        let unlogged_boot = log.unlogged_boot.saturating_add(1);
+        *log = MockLog { unlogged_boot, ..MockLog::default() };
+    }
     /// Open the device at `state_path`. A new device takes `serial_if_new`
     /// (a random `MOCK-…` serial when `None`); an existing one keeps its own,
     /// so a wrong file is caught by the caller's serial check, not hidden.
@@ -154,13 +322,7 @@ impl MockHsmDevice {
             };
             persist_state(state_path, &state)?;
         }
-        Ok(Arc::new(Self {
-            state_path: state_path.to_string(),
-            state: RwLock::new(state),
-            sessions: Mutex::new(BTreeMap::new()),
-            offline: AtomicBool::new(false),
-            clock,
-        }))
+        Ok(Self::from_state(state_path, state, clock))
     }
 
     pub fn serial(&self) -> String {
@@ -228,13 +390,7 @@ impl MockHsmDevice {
             state.auth_keys.insert(FACTORY_AUTH_KEY_ID, MockAuthKey { label: "factory".into(), role: AuthKeyRole::Factory, key });
             persist_state(state_path, &state)?;
         }
-        Ok(Arc::new(Self {
-            state_path: state_path.to_string(),
-            state: RwLock::new(state),
-            sessions: Mutex::new(BTreeMap::new()),
-            offline: AtomicBool::new(false),
-            clock,
-        }))
+        Ok(Self::from_state(state_path, state, clock))
     }
 
     /// Whether `bv-admin` exists: such a device only takes authenticated sessions.
@@ -333,11 +489,22 @@ impl MockHsmDevice {
 }
 
 const ADMIN_SESSION_OWNER: &str = "bv-admin";
+const AUDITOR_SESSION_OWNER: &str = "bv-auditor";
 
-/// A `bv-admin` session on a mock device.
+/// A `bv-admin` session on a mock device. Every command is logged under
+/// auth key 2, as the device logs the key behind each command.
 pub struct MockAdminSession {
     device: Arc<MockHsmDevice>,
     objects: HsmObjectIds,
+}
+
+impl MockAdminSession {
+    fn logged<T>(&self, command: u8, target: u16, run: impl FnOnce() -> Result<T, RvError>) -> Result<T, RvError> {
+        self.device.logged(command, ADMIN_AUTH_KEY_ID, target, || {
+            self.device.session(ADMIN_SESSION_OWNER)?;
+            run()
+        })
+    }
 }
 
 #[maybe_async::maybe_async]
@@ -347,30 +514,33 @@ impl HsmAdminSession for MockAdminSession {
     }
 
     async fn object_info(&self, kind: ObjectKind, id: u16) -> Result<Option<ObjectInfo>, RvError> {
-        self.device.session(ADMIN_SESSION_OWNER)?;
-        let state = self.device.state.read().map_err(|_| RvError::ErrRwLockReadPoison)?;
-        let info = |label: &str, base: &[&str], extra: &[String]| ObjectInfo {
-            id,
-            kind,
-            label: label.to_string(),
-            capabilities: base.iter().map(|c| c.to_string()).chain(extra.iter().cloned()).collect(),
-            delegated: Vec::new(),
-        };
-        Ok(match kind {
-            ObjectKind::AuthenticationKey => {
-                state.auth_keys.get(&id).map(|k| info(&k.label, k.role.capabilities(), &[]))
-            }
-            ObjectKind::WrapKey => state
-                .objects
-                .get(&id)
-                .filter(|o| o.kind == MockKind::Wrap)
-                .map(|o| info("bv-wrap", WRAP_KEY_CAPABILITIES, &o.extra_capabilities)),
-            ObjectKind::AsymmetricKey => state.objects.get(&id).and_then(|o| match o.kind {
-                MockKind::Identity => Some(info("bv-identity", &["derive-ecdh", "sign-ecdsa"], &o.extra_capabilities)),
-                MockKind::Authz => Some(info("bv-authz", &["sign-eddsa"], &o.extra_capabilities)),
-                MockKind::SeedEcdh => Some(info("bv-seed-ecdh", &["derive-ecdh"], &o.extra_capabilities)),
-                MockKind::Wrap => None,
-            }),
+        self.logged(cmd::GET_OBJECT_INFO, id, || {
+            let state = self.device.state.read().map_err(|_| RvError::ErrRwLockReadPoison)?;
+            let info = |label: &str, base: &[&str], extra: &[String]| ObjectInfo {
+                id,
+                kind,
+                label: label.to_string(),
+                capabilities: base.iter().map(|c| c.to_string()).chain(extra.iter().cloned()).collect(),
+                delegated: Vec::new(),
+            };
+            Ok(match kind {
+                ObjectKind::AuthenticationKey => {
+                    state.auth_keys.get(&id).map(|k| info(&k.label, k.role.capabilities(), &[]))
+                }
+                ObjectKind::WrapKey => state
+                    .objects
+                    .get(&id)
+                    .filter(|o| o.kind == MockKind::Wrap)
+                    .map(|o| info("bv-wrap", WRAP_KEY_CAPABILITIES, &o.extra_capabilities)),
+                ObjectKind::AsymmetricKey => state.objects.get(&id).and_then(|o| match o.kind {
+                    MockKind::Identity => {
+                        Some(info("bv-identity", &["derive-ecdh", "sign-ecdsa"], &o.extra_capabilities))
+                    }
+                    MockKind::Authz => Some(info("bv-authz", &["sign-eddsa"], &o.extra_capabilities)),
+                    MockKind::SeedEcdh => Some(info("bv-seed-ecdh", &["derive-ecdh"], &o.extra_capabilities)),
+                    MockKind::Wrap => None,
+                }),
+            })
         })
     }
 
@@ -381,71 +551,78 @@ impl HsmAdminSession for MockAdminSession {
     }
 
     async fn put_node_auth_key(&self, label: &str, credential: &NodeCredential) -> Result<(), RvError> {
-        self.device.session(ADMIN_SESSION_OWNER)?;
         let id = credential.auth_key_id();
         node_slot_of(id)?;
-        let mut state = self.device.state.write().map_err(|_| RvError::ErrRwLockWritePoison)?;
-        if state.auth_keys.contains_key(&id) {
-            return Err(RvError::ErrHsm(format!("auth key {id:#06x} already exists on mock HSM {}", state.serial)));
-        }
-        let key = MockAuthKey { label: label.to_string(), role: AuthKeyRole::Node, key: credential.key().to_vec() };
-        state.auth_keys.insert(id, key);
-        persist_state(&self.device.state_path, &state)
+        self.logged(cmd::PUT_AUTHENTICATION_KEY, id, || {
+            let mut state = self.device.state.write().map_err(|_| RvError::ErrRwLockWritePoison)?;
+            if state.auth_keys.contains_key(&id) {
+                return Err(RvError::ErrHsm(format!("auth key {id:#06x} already exists on mock HSM {}", state.serial)));
+            }
+            let key = MockAuthKey { label: label.to_string(), role: AuthKeyRole::Node, key: credential.key().to_vec() };
+            state.auth_keys.insert(id, key);
+            persist_state(&self.device.state_path, &state)
+        })
     }
 
     async fn generate_wrap_key(&self, id: HsmObjectId, _label: &str) -> Result<(), RvError> {
-        self.device.session(ADMIN_SESSION_OWNER)?;
-        let mut state = self.device.state.write().map_err(|_| RvError::ErrRwLockWritePoison)?;
-        if state.objects.contains_key(&id) {
-            return Err(RvError::ErrHsm(format!("object {id} already exists on mock HSM {}", state.serial)));
-        }
-        ensure_object(&mut state, id, MockKind::Wrap);
-        persist_state(&self.device.state_path, &state)
+        self.logged(cmd::GENERATE_WRAP_KEY, id, || {
+            let mut state = self.device.state.write().map_err(|_| RvError::ErrRwLockWritePoison)?;
+            if state.objects.contains_key(&id) {
+                return Err(RvError::ErrHsm(format!("object {id} already exists on mock HSM {}", state.serial)));
+            }
+            ensure_object(&mut state, id, MockKind::Wrap);
+            persist_state(&self.device.state_path, &state)
+        })
     }
 
     async fn delete_wrap_key(&self, id: HsmObjectId) -> Result<bool, RvError> {
-        self.device.session(ADMIN_SESSION_OWNER)?;
-        let mut state = self.device.state.write().map_err(|_| RvError::ErrRwLockWritePoison)?;
-        match state.objects.get(&id).map(|o| o.kind) {
-            None => Ok(false),
-            Some(MockKind::Wrap) => {
-                state.objects.remove(&id);
-                persist_state(&self.device.state_path, &state)?;
-                Ok(true)
+        self.logged(cmd::DELETE_OBJECT, id, || {
+            let mut state = self.device.state.write().map_err(|_| RvError::ErrRwLockWritePoison)?;
+            match state.objects.get(&id).map(|o| o.kind) {
+                None => Ok(false),
+                Some(MockKind::Wrap) => {
+                    state.objects.remove(&id);
+                    persist_state(&self.device.state_path, &state)?;
+                    Ok(true)
+                }
+                Some(_) => Err(RvError::ErrHsm(format!("object {id} is not a wrap key"))),
             }
-            Some(_) => Err(RvError::ErrHsm(format!("object {id} is not a wrap key"))),
-        }
+        })
     }
 
     async fn delete_node_auth_key(&self, auth_key_id: u16) -> Result<bool, RvError> {
-        self.device.session(ADMIN_SESSION_OWNER)?;
         node_slot_of(auth_key_id)?;
-        let mut state = self.device.state.write().map_err(|_| RvError::ErrRwLockWritePoison)?;
-        let existed = state.auth_keys.remove(&auth_key_id).is_some();
-        if existed {
-            persist_state(&self.device.state_path, &state)?;
-        }
-        Ok(existed)
+        self.logged(cmd::DELETE_OBJECT, auth_key_id, || {
+            let mut state = self.device.state.write().map_err(|_| RvError::ErrRwLockWritePoison)?;
+            let existed = state.auth_keys.remove(&auth_key_id).is_some();
+            if existed {
+                persist_state(&self.device.state_path, &state)?;
+            }
+            Ok(existed)
+        })
     }
 
     async fn public_key(&self, key: HsmObjectId) -> Result<Vec<u8>, RvError> {
-        self.device.session(ADMIN_SESSION_OWNER)?;
-        let state = self.device.state.read().map_err(|_| RvError::ErrRwLockReadPoison)?;
-        match state.objects.get(&key).map(|o| o.kind) {
-            Some(MockKind::Identity | MockKind::SeedEcdh) => identity_public(&state, key),
-            Some(MockKind::Authz) => authz_public(&state, key),
-            _ => Err(RvError::ErrHsm(format!("object {key} is not an asymmetric key"))),
-        }
+        self.logged(cmd::GET_PUBLIC_KEY, key, || {
+            let state = self.device.state.read().map_err(|_| RvError::ErrRwLockReadPoison)?;
+            match state.objects.get(&key).map(|o| o.kind) {
+                Some(MockKind::Identity | MockKind::SeedEcdh) => identity_public(&state, key),
+                Some(MockKind::Authz) => authz_public(&state, key),
+                _ => Err(RvError::ErrHsm(format!("object {key} is not an asymmetric key"))),
+            }
+        })
     }
 
     async fn identity_sign(&self, key: HsmObjectId, ctx: &str, msg: &[u8]) -> Result<Vec<u8>, RvError> {
         if key != self.objects.identity {
             return Err(RvError::ErrHsm(format!("an admin session signs only with bv-identity, not object {key}")));
         }
-        self.device.session(ADMIN_SESSION_OWNER)?;
-        let state = self.device.state.read().map_err(|_| RvError::ErrRwLockReadPoison)?;
-        let obj = state.objects.get(&key).filter(|o| o.kind == MockKind::Identity).ok_or(RvError::ErrHsmUnavailable)?;
-        ecdsa_sign(&obj.material, &domain_separated(ctx, msg))
+        self.logged(cmd::SIGN_ECDSA, key, || {
+            let state = self.device.state.read().map_err(|_| RvError::ErrRwLockReadPoison)?;
+            let obj =
+                state.objects.get(&key).filter(|o| o.kind == MockKind::Identity).ok_or(RvError::ErrHsmUnavailable)?;
+            ecdsa_sign(&obj.material, &domain_separated(ctx, msg))
+        })
     }
 
     async fn verify_attestation(&self, attestation: &[u8]) -> Result<AttestedKey, RvError> {
@@ -454,6 +631,80 @@ impl HsmAdminSession for MockAdminSession {
 
     async fn close(&self) -> Result<(), RvError> {
         self.device.close_session(ADMIN_SESSION_OWNER);
+        Ok(())
+    }
+
+    /// Replace auth key 8 with `credential`, role `bv-auditor`.
+    async fn put_auditor_auth_key(&self, credential: &AuditorCredential) -> Result<(), RvError> {
+        self.logged(cmd::PUT_AUTHENTICATION_KEY, AUDITOR_AUTH_KEY_ID, || {
+            let mut state = self.device.state.write().map_err(|_| RvError::ErrRwLockWritePoison)?;
+            let key =
+                MockAuthKey { label: "bv-auditor".into(), role: AuthKeyRole::Auditor, key: credential.key().to_vec() };
+            state.auth_keys.insert(AUDITOR_AUTH_KEY_ID, key);
+            persist_state(&self.device.state_path, &state)
+        })
+    }
+
+    async fn set_forced_audit(&self, on: bool) -> Result<(), RvError> {
+        self.logged(cmd::SET_OPTION, NO_KEY, || {
+            let mut state = self.device.state.write().map_err(|_| RvError::ErrRwLockWritePoison)?;
+            if state.forced_audit != on {
+                state.forced_audit = on;
+                persist_state(&self.device.state_path, &state)?;
+            }
+            Ok(())
+        })
+    }
+}
+
+/// A `bv-auditor` session on a mock device. It authenticates on every
+/// command, so replacing or deleting key 8 cuts it off at once. The mock does
+/// not log the auditor's own two commands (to be confirmed on hardware).
+pub struct MockAuditSession {
+    device: Arc<MockHsmDevice>,
+    credential: AuditorCredential,
+}
+
+impl MockAuditSession {
+    fn open(&self) -> Result<(), RvError> {
+        self.device.authenticate_auditor(&self.credential)?;
+        self.device.session(AUDITOR_SESSION_OWNER)
+    }
+}
+
+#[maybe_async::maybe_async]
+impl HsmAuditSession for MockAuditSession {
+    fn hsm_id(&self) -> Result<HsmId, RvError> {
+        HsmId::from_parts("mock", &self.device.serial())
+    }
+
+    async fn get_log_entries(&self) -> Result<DeviceLog, RvError> {
+        self.open()?;
+        let log = self.device.device_log();
+        Ok(DeviceLog {
+            unlogged_boot: log.unlogged_boot,
+            unlogged_auth: log.unlogged_auth,
+            entries: log.entries.iter().copied().collect(),
+        })
+    }
+
+    async fn set_log_index(&self, index: u16) -> Result<(), RvError> {
+        self.open()?;
+        let mut log = self.device.device_log();
+        let ahead = index.wrapping_sub(log.last_index);
+        if ahead != 0 && ahead < 0x8000 {
+            return Err(RvError::ErrHsm(format!(
+                "set-log-index {index} is past the newest entry {} on mock HSM {}",
+                log.last_index,
+                self.device.serial()
+            )));
+        }
+        log.acked = index;
+        Ok(())
+    }
+
+    async fn close(&self) -> Result<(), RvError> {
+        self.device.close_session(AUDITOR_SESSION_OWNER);
         Ok(())
     }
 }
@@ -554,6 +805,19 @@ impl MockHsmBackend {
         self.device.session(&self.owner)
     }
 
+    /// The auth key the device logs for this client's commands.
+    fn session_key(&self) -> u16 {
+        self.credential.as_ref().map(NodeCredential::auth_key_id).unwrap_or(self.objects.auth_key)
+    }
+
+    /// Authenticate, use the session and run `command`, logged as the device does.
+    fn command<T>(&self, command: u8, target: u16, run: impl FnOnce() -> Result<T, RvError>) -> Result<T, RvError> {
+        self.device.logged(command, self.session_key(), target, || {
+            self.open_session()?;
+            run()
+        })
+    }
+
     fn wrap_material(&self, key: HsmObjectId) -> Result<Zeroizing<Vec<u8>>, RvError> {
         let state = self.device.state.read().map_err(|_| RvError::ErrRwLockReadPoison)?;
         let obj = state.objects.get(&key).ok_or(RvError::ErrHsmUnavailable)?;
@@ -584,44 +848,50 @@ impl HsmBackend for MockHsmBackend {
     }
 
     async fn wrap_data(&self, key: HsmObjectId, ctx: &Context, plaintext: &[u8]) -> Result<Vec<u8>, RvError> {
-        self.open_session()?;
-        let material = self.wrap_material(key)?;
-        let device = self.device_binding()?;
-        seal_blob("mock", key, ctx, &device, plaintext, |inner| aes256_gcm_seal(&material, inner))
+        self.command(cmd::WRAP_DATA, key, || {
+            let material = self.wrap_material(key)?;
+            let device = self.device_binding()?;
+            seal_blob("mock", key, ctx, &device, plaintext, |inner| aes256_gcm_seal(&material, inner))
+        })
     }
 
     async fn unwrap_data(&self, key: HsmObjectId, ctx: &Context, wrapped: &[u8]) -> Result<Zeroizing<Vec<u8>>, RvError> {
-        self.open_session()?;
-        let material = self.wrap_material(key)?;
-        let device = self.device_binding()?;
-        open_blob(wrapped, ctx, &device, |w| aes256_gcm_open(&material, w))
+        self.command(cmd::UNWRAP_DATA, key, || {
+            let material = self.wrap_material(key)?;
+            let device = self.device_binding()?;
+            open_blob(wrapped, ctx, &device, |w| aes256_gcm_open(&material, w))
+        })
     }
 
     async fn sign(&self, key: HsmObjectId, ctx: &str, msg: &[u8]) -> Result<Vec<u8>, RvError> {
-        self.open_session()?;
-        let state = self.device.state.read().map_err(|_| RvError::ErrRwLockReadPoison)?;
-        let obj = state.objects.get(&key).ok_or(RvError::ErrHsmUnavailable)?;
-        let signed = domain_separated(ctx, msg);
-        match obj.kind {
-            MockKind::Authz => {
-                let seed: [u8; 32] = obj.material.as_slice().try_into().map_err(|_| RvError::ErrHsmBlobInvalid)?;
-                let sk = SigningKey::from_bytes(&seed);
-                Ok(sk.sign(&signed).to_bytes().to_vec())
-            }
-            MockKind::Identity => {
-                if self.credential.is_some() {
-                    return Err(RvError::ErrHsm("bv-identity is in domain 2; a node session cannot use it".into()));
+        let kind = self.device.state.read().map_err(|_| RvError::ErrRwLockReadPoison)?.objects.get(&key).map(|o| o.kind);
+        let command = if kind == Some(MockKind::Authz) { cmd::SIGN_EDDSA } else { cmd::SIGN_ECDSA };
+        self.command(command, key, || {
+            let state = self.device.state.read().map_err(|_| RvError::ErrRwLockReadPoison)?;
+            let obj = state.objects.get(&key).ok_or(RvError::ErrHsmUnavailable)?;
+            let signed = domain_separated(ctx, msg);
+            match obj.kind {
+                MockKind::Authz => {
+                    let seed: [u8; 32] = obj.material.as_slice().try_into().map_err(|_| RvError::ErrHsmBlobInvalid)?;
+                    let sk = SigningKey::from_bytes(&seed);
+                    Ok(sk.sign(&signed).to_bytes().to_vec())
                 }
-                ecdsa_sign(&obj.material, &signed)
+                MockKind::Identity => {
+                    if self.credential.is_some() {
+                        return Err(RvError::ErrHsm("bv-identity is in domain 2; a node session cannot use it".into()));
+                    }
+                    ecdsa_sign(&obj.material, &signed)
+                }
+                MockKind::Wrap | MockKind::SeedEcdh => Err(RvError::ErrHsm("object cannot sign".into())),
             }
-            MockKind::Wrap | MockKind::SeedEcdh => Err(RvError::ErrHsm("object cannot sign".into())),
-        }
+        })
     }
 
     async fn attest(&self, key: HsmObjectId) -> Result<Vec<u8>, RvError> {
-        self.open_session()?;
-        let state = self.device.state.read().map_err(|_| RvError::ErrRwLockReadPoison)?;
-        mock_attestation(&state, key, self.objects.identity)
+        self.command(cmd::SIGN_ATTESTATION_CERTIFICATE, key, || {
+            let state = self.device.state.read().map_err(|_| RvError::ErrRwLockReadPoison)?;
+            mock_attestation(&state, key, self.objects.identity)
+        })
     }
 
     async fn verify_attestation(&self, cert_chain: &[u8]) -> Result<AttestedKey, RvError> {
@@ -629,28 +899,30 @@ impl HsmBackend for MockHsmBackend {
     }
 
     async fn derive_ecdh(&self, key: HsmObjectId, peer_pub: &[u8]) -> Result<Zeroizing<Vec<u8>>, RvError> {
-        self.open_session()?;
-        let state = self.device.state.read().map_err(|_| RvError::ErrRwLockReadPoison)?;
-        let obj = state.objects.get(&key).ok_or(RvError::ErrHsmUnavailable)?;
-        // On a provisioned device `bv-identity` is domain 2 (admin only); the
-        // node's ECDH key is `bv-seed-ecdh`. A pre-phase-4 device has no split.
-        let allowed = match obj.kind {
-            MockKind::SeedEcdh => true,
-            MockKind::Identity => self.credential.is_none(),
-            MockKind::Wrap | MockKind::Authz => false,
-        };
-        if !allowed {
-            return Err(RvError::ErrHsm("object cannot derive ECDH from this session".into()));
-        }
-        let secret = p256::SecretKey::from_slice(&obj.material).map_err(|_| RvError::ErrHsm("bad identity key".into()))?;
-        let peer = p256::PublicKey::from_sec1_bytes(peer_pub).map_err(|_| RvError::ErrHsm("bad ECDH peer key".into()))?;
-        let shared = p256::ecdh::diffie_hellman(secret.to_nonzero_scalar(), peer.as_affine());
-        Ok(Zeroizing::new(shared.raw_secret_bytes().to_vec()))
+        self.command(cmd::DERIVE_ECDH, key, || {
+            let state = self.device.state.read().map_err(|_| RvError::ErrRwLockReadPoison)?;
+            let obj = state.objects.get(&key).ok_or(RvError::ErrHsmUnavailable)?;
+            // On a provisioned device `bv-identity` is domain 2 (admin only); the
+            // node's ECDH key is `bv-seed-ecdh`. A pre-phase-4 device has no split.
+            let allowed = match obj.kind {
+                MockKind::SeedEcdh => true,
+                MockKind::Identity => self.credential.is_none(),
+                MockKind::Wrap | MockKind::Authz => false,
+            };
+            if !allowed {
+                return Err(RvError::ErrHsm("object cannot derive ECDH from this session".into()));
+            }
+            let secret =
+                p256::SecretKey::from_slice(&obj.material).map_err(|_| RvError::ErrHsm("bad identity key".into()))?;
+            let peer =
+                p256::PublicKey::from_sec1_bytes(peer_pub).map_err(|_| RvError::ErrHsm("bad ECDH peer key".into()))?;
+            let shared = p256::ecdh::diffie_hellman(secret.to_nonzero_scalar(), peer.as_affine());
+            Ok(Zeroizing::new(shared.raw_secret_bytes().to_vec()))
+        })
     }
 
     async fn get_random(&self, len: usize) -> Result<Zeroizing<Vec<u8>>, RvError> {
-        self.open_session()?;
-        Ok(Zeroizing::new(random_bytes(len)))
+        self.command(cmd::GET_PSEUDO_RANDOM, NO_KEY, || Ok(Zeroizing::new(random_bytes(len))))
     }
 
     /// `device-info` holds no session, so it answers even at `SESSIONS_FULL`.
@@ -1132,5 +1404,74 @@ mod tests {
         let out = hsm2.unwrap_data(hsm2.objects.wrap_barrier, &ctx, &blob).await.unwrap();
         assert_eq!(out.as_slice(), b"kek");
         let _ = std::fs::remove_file(&path);
+    }
+
+    async fn provisioned_with_auditor(serial: &str) -> (Arc<MockHsmDevice>, MockAdminSession, AuditorCredential) {
+        let device = MockHsmDevice::open_factory("", serial, crate::hsm::clock::ManualClock::new()).unwrap();
+        let objects = HsmObjectIds::default();
+        device.provision(crate::hsm::admin::FACTORY_PASSWORD, "admin", &objects, false).await.unwrap();
+        let admin = device.admin_session("admin", objects).unwrap();
+        let credential = AuditorCredential::generate();
+        admin.put_auditor_auth_key(&credential).await.unwrap();
+        (device, admin, credential)
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn the_device_log_chains_every_command_and_names_its_key() {
+        use crate::hsm::device_audit::verify_log;
+        let (device, admin, credential) = provisioned_with_auditor("LOG1").await;
+        let audit = device.auditor_session(&credential).unwrap();
+        let wrong = AuditorCredential::generate();
+        assert!(device.auditor_session(&wrong).is_err(), "bv-auditor authenticates");
+
+        let node = crate::hsm::admin::NodeCredential::generate(0x100).unwrap();
+        admin.put_node_auth_key("bv-node-n1", &node).await.unwrap();
+        let client = MockHsmBackend::connect_with_credential(device.clone(), "n1", HsmObjectIds::default(), node).unwrap();
+        client.get_random(8).await.unwrap();
+        let log = audit.get_log_entries().await.unwrap();
+        let (verified, last) = verify_log(None, &log).unwrap();
+        assert!(verified.gaps.is_empty(), "{:?}", verified.gaps);
+        let newest = log.entries.last().unwrap();
+        assert_eq!((newest.command, newest.session_key), (cmd::GET_PSEUDO_RANDOM, 0x100), "logged under the node key");
+        assert!(log.entries.iter().any(|e| e.command == cmd::PUT_AUTHENTICATION_KEY && e.session_key == 2));
+        assert!(log.entries.iter().all(|e| e.session_key != AUDITOR_AUTH_KEY_ID), "the drain's own reads are not logged");
+        assert_eq!(last.unwrap().0, newest.index);
+        assert!(audit.set_log_index(newest.index.wrapping_add(1)).await.is_err(), "never past the newest entry");
+
+        device.tamper_log_entry(newest.index);
+        let (tampered, _) = verify_log(None, &audit.get_log_entries().await.unwrap()).unwrap();
+        assert!(!tampered.gaps.is_empty(), "a changed entry breaks the chain");
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn forced_audit_refuses_commands_until_the_log_is_acknowledged() {
+        let (device, admin, credential) = provisioned_with_auditor("LOG2").await;
+        let audit = device.auditor_session(&credential).unwrap();
+        let node = crate::hsm::admin::NodeCredential::generate(0x100).unwrap();
+        admin.put_node_auth_key("bv-node-n1", &node).await.unwrap();
+        let client = MockHsmBackend::connect_with_credential(device.clone(), "n1", HsmObjectIds::default(), node).unwrap();
+
+        // Off: the buffer wraps, holding the newest entries only.
+        for _ in 0..(DEVICE_LOG_CAPACITY + 5) {
+            client.get_random(1).await.unwrap();
+        }
+        assert_eq!(audit.get_log_entries().await.unwrap().entries.len(), DEVICE_LOG_CAPACITY);
+
+        admin.set_forced_audit(true).await.unwrap();
+        assert!(device.forced_audit_on());
+        let err = client.get_random(1).await.unwrap_err();
+        assert!(err.to_string().contains("LOG_FULL"), "{err}");
+        let newest = audit.get_log_entries().await.unwrap().entries.last().unwrap().index;
+        audit.set_log_index(newest).await.unwrap();
+        client.get_random(1).await.unwrap();
+    }
+
+    #[test]
+    fn a_state_file_without_the_audit_fields_still_loads() {
+        let old = serde_json::json!({ "serial": "OLD", "objects": {} });
+        let state: MockState = serde_json::from_value(old).unwrap();
+        assert!(!state.forced_audit && state.auth_keys.is_empty());
+        let written = serde_json::to_value(&state).unwrap();
+        assert!(written.get("forced_audit").is_none(), "off is not written: old readers see the same file");
     }
 }

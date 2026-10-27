@@ -80,6 +80,10 @@ pub enum PoolEventKind {
     MemberPromoted,
     EpochRotated,
     RecoveryCeremony,
+    /// One drained device-log entry (T454 phase 6).
+    DeviceLog,
+    /// An index jump, chain break, reset or unlogged events in a device log.
+    DeviceLogGap,
 }
 
 impl PoolEventKind {
@@ -100,6 +104,8 @@ impl PoolEventKind {
             PoolEventKind::MemberPromoted => "hsm.member_promoted",
             PoolEventKind::EpochRotated => "hsm.epoch_rotated",
             PoolEventKind::RecoveryCeremony => "hsm.recovery_ceremony",
+            PoolEventKind::DeviceLog => "hsm.device_log",
+            PoolEventKind::DeviceLogGap => "hsm.device_log_gap",
         }
     }
 }
@@ -145,6 +151,11 @@ impl PoolEventSink for LogEventSink {
             PoolEventKind::SetUnderReplicated => {
                 log::warn!(target: "security", "{name}: {detail} has no copy on {hsm_id}")
             }
+            // One per device command: the audit device is its record, the
+            // security log only at debug.
+            PoolEventKind::DeviceLog => {
+                log::debug!(target: "security", "{name}: member={member} hsm_id={hsm_id} {detail}")
+            }
             _ => log::error!(target: "security", "{name}: member={member} hsm_id={hsm_id} {detail}"),
         }
     }
@@ -170,6 +181,8 @@ struct Health {
     sessions_full_backoff: Duration,
     sessions_full_until: Duration,
     last_error: Option<String>,
+    /// Wall time of the last command that succeeded (status `latency_ms`).
+    last_latency: Option<Duration>,
 }
 
 pub struct PoolMember {
@@ -240,6 +253,8 @@ pub struct MemberStatus {
     pub faulted: bool,
     pub prefer: bool,
     pub last_error: Option<String>,
+    /// Wall time of the last successful command on this node, in ms.
+    pub latency_ms: Option<u64>,
 }
 
 /// What a pool-wide wrap produced.
@@ -403,7 +418,18 @@ impl HsmPool {
                 failures.push(format!("{}: holds no copy", m.label()));
             }
         }
-        ReadAttempt { pool: self, order: order.into_iter(), failures }
+        ReadAttempt { pool: self, order: order.into_iter(), failures, started: Duration::ZERO }
+    }
+
+    /// `bv_hsm_command_duration_seconds{member,op}` for a command that
+    /// started at `started` (this pool's clock), and the member's latency
+    /// when it succeeded.
+    fn observe(&self, m: &PoolMember, op: &str, started: Duration, ok: bool) {
+        let took = self.clock.now().saturating_sub(started);
+        hsm_metrics().observe_command(&m.name, op, took.as_secs_f64());
+        if ok {
+            m.health().last_latency = Some(took);
+        }
     }
 
     fn record_success(&self, m: &PoolMember, reset_sessions_full: bool) {
@@ -528,10 +554,10 @@ impl HsmPool {
         }
 
         #[cfg(not(feature = "sync_handler"))]
-        let results = join_all(targets.iter().map(|m| wrap_one(m, key, ctx, plaintext)).collect()).await;
+        let results = join_all(targets.iter().map(|m| self.wrap_one(m, key, ctx, plaintext)).collect()).await;
         #[cfg(feature = "sync_handler")]
         let results: Vec<Result<BvHsmBlob, RvError>> =
-            targets.iter().map(|m| wrap_one(m, key, ctx, plaintext)).collect();
+            targets.iter().map(|m| self.wrap_one(m, key, ctx, plaintext)).collect();
 
         let mut copies = BTreeMap::new();
         for (m, result) in targets.into_iter().zip(results) {
@@ -573,7 +599,7 @@ impl HsmPool {
     ) -> Result<BvHsmBlob, RvError> {
         let m = self.member(hsm_id).ok_or_else(|| RvError::ErrHsm(format!("{hsm_id} is not in this pool")))?;
         m.usable(self.clock.now()).map_err(|why| RvError::ErrHsmTransport(format!("{}: {why}", m.label())))?;
-        match wrap_one(m, key, ctx, plaintext).await {
+        match self.wrap_one(m, key, ctx, plaintext).await {
             Ok(blob) => {
                 self.record_success(m, true);
                 Ok(blob)
@@ -595,10 +621,16 @@ impl HsmPool {
                 let h = m.health();
                 h.faulted.is_some() || (h.down && self.clock.now() < h.retry_at)
             };
+            if let Some((ok, failed)) = backend.link_totals() {
+                hsm_metrics().record_link_totals(&m.name, ok, failed);
+            }
             if skip {
                 continue;
             }
-            match backend.probe().await {
+            let started = self.clock.now();
+            let probed = backend.probe().await;
+            self.observe(m, "probe", started, probed.is_ok());
+            match probed {
                 Ok(serial) => match HsmId::from_parts(m.hsm_id.backend_type(), &serial) {
                     Ok(id) if id == m.hsm_id => self.record_success(m, false),
                     _ => self.fault(m, format!("device-info reports serial {serial:?}; expected {}", m.hsm_id)),
@@ -653,6 +685,7 @@ impl HsmPool {
                     faulted: h.faulted.is_some(),
                     prefer: m.prefer,
                     last_error: h.last_error.clone().or_else(|| m.device.as_ref().err().cloned()),
+                    latency_ms: h.last_latency.map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
                 }
             })
             .collect()
@@ -666,6 +699,8 @@ pub struct ReadAttempt<'p> {
     pool: &'p HsmPool,
     order: std::vec::IntoIter<&'p PoolMember>,
     failures: Vec<String>,
+    /// When the current member was handed out (command duration).
+    started: Duration,
 }
 
 impl<'p> ReadAttempt<'p> {
@@ -674,7 +709,10 @@ impl<'p> ReadAttempt<'p> {
         let now = self.pool.clock.now();
         for m in self.order.by_ref() {
             match m.usable(now) {
-                Ok(()) => return Some(m),
+                Ok(()) => {
+                    self.started = now;
+                    return Some(m);
+                }
                 Err(why) => self.failures.push(format!("{}: {why}", m.label())),
             }
         }
@@ -682,12 +720,14 @@ impl<'p> ReadAttempt<'p> {
     }
 
     pub fn succeeded(&self, m: &PoolMember) {
+        self.pool.observe(m, "read", self.started, true);
         self.pool.record_success(m, true);
     }
 
     /// `Ok(())`: try the next member. `Err`: a cryptographic failure, which is
     /// returned as it is and never retried elsewhere as if it were an outage.
     pub fn failed(&mut self, m: &PoolMember, op: &str, err: RvError) -> Result<(), RvError> {
+        self.pool.observe(m, "read", self.started, false);
         if self.pool.record_failure(m, op, &err) == FailureClass::Crypto {
             return Err(err);
         }
@@ -703,15 +743,25 @@ impl<'p> ReadAttempt<'p> {
     }
 }
 
-#[maybe_async::maybe_async]
-async fn wrap_one(m: &PoolMember, key: HsmObjectId, ctx: &Context, plaintext: &[u8]) -> Result<BvHsmBlob, RvError> {
-    let bytes = m.backend()?.wrap_data(key, ctx, plaintext).await?;
-    let blob = BvHsmBlob::from_bytes(&bytes)?;
-    if blob.aad.hsm_id() != Some(&m.hsm_id) {
-        log::error!(target: "security", "hsm pool member {} returned a copy bound to another device", m.label());
-        return Err(RvError::ErrHsmContextMismatch);
+impl HsmPool {
+    #[maybe_async::maybe_async]
+    async fn wrap_one(
+        &self,
+        m: &PoolMember,
+        key: HsmObjectId,
+        ctx: &Context,
+        plaintext: &[u8],
+    ) -> Result<BvHsmBlob, RvError> {
+        let started = self.clock.now();
+        let wrapped = m.backend()?.wrap_data(key, ctx, plaintext).await;
+        self.observe(m, "wrap", started, wrapped.is_ok());
+        let blob = BvHsmBlob::from_bytes(&wrapped?)?;
+        if blob.aad.hsm_id() != Some(&m.hsm_id) {
+            log::error!(target: "security", "hsm pool member {} returned a copy bound to another device", m.label());
+            return Err(RvError::ErrHsmContextMismatch);
+        }
+        Ok(blob)
     }
-    Ok(blob)
 }
 
 /// Drive every future to completion concurrently on the current task.

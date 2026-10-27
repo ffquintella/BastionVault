@@ -36,6 +36,7 @@ use crate::{
             PROMOTION_CONTEXT,
         },
         custody_store::{is_key_id, CustodyRecord, CUSTODY_STORE_PREFIX, HSM_CUSTODY_LOCK},
+        device_audit::{DeviceAuditMode, HSM_DEVICE_AUDIT_LOCK},
         node_creds::{
             self, discard_node_entries, list_pending, read_delivery, read_pending, seal_credential, write_delivery,
             CredentialDelivery,
@@ -92,7 +93,7 @@ impl HsmSealProvider {
 
     /// The pool seal record; ceremonies need an initialized pool.
     #[maybe_async::maybe_async]
-    async fn pool_record(&self) -> Result<HsmSealRecord, RvError> {
+    pub(super) async fn pool_record(&self) -> Result<HsmSealRecord, RvError> {
         let stored = self.load_record().await?.ok_or_else(|| {
             RvError::ErrHsm("the HSM pool is not initialized (no seal record); run `operator init` first".into())
         })?;
@@ -1120,6 +1121,31 @@ impl HsmSealProvider {
             }
         }
 
+        // Phase 6: a working `bv-auditor` on every live member this run has an
+        // admin credential for. Its credential goes behind the barrier.
+        if let (Some(admin), Some(barrier)) = (admin, &barrier) {
+            if self.device_audit_mode() != DeviceAuditMode::Off {
+                let record = self.pool_record().await?;
+                let targets: Vec<MemberTarget> =
+                    targets_of(record.members.iter().filter(|(_, m)| live(m) && admin.has(&m.name)))
+                        .into_iter()
+                        .map(|(t, _)| t)
+                        .collect();
+                if !targets.is_empty() {
+                    let _audit_lock = physical.lock(HSM_DEVICE_AUDIT_LOCK).await?;
+                    match self.open_admin_sessions(targets, admin).await {
+                        Ok(sessions) => {
+                            let (installed, failures) = self.ensure_auditors(&sessions, barrier.as_ref()).await;
+                            close_all(sessions).await;
+                            report.auditors_installed = installed;
+                            report.failures.extend(failures);
+                        }
+                        Err(e) => report.failures.push(format!("bv-auditor: {e}")),
+                    }
+                }
+            }
+        }
+
         let record = self.pool_record().await?;
         let targets: BTreeSet<HsmId> =
             record.members.iter().filter(|(_, m)| live(m)).map(|(id, _)| id.clone()).collect();
@@ -1269,6 +1295,11 @@ impl HsmSealProvider {
         }
 
         report.finished_at = unix_now_secs()?;
+        let metrics = hsm_metrics();
+        metrics.record_repair("added", report.copies_added);
+        metrics.record_repair("removed", report.copies_removed);
+        metrics.record_repair("recovery_added", report.recovery_copies_added);
+        metrics.record_repair("failed", report.failures.len());
         log::info!(
             target: "security",
             "hsm repair: scanned={} added={} removed={} under_replicated={} failures={} promoted={:?}",
@@ -1520,6 +1551,14 @@ mod tests {
         fn open_admin(&self, target: &MemberTarget, password: &str) -> Result<Box<dyn HsmAdminSession>, RvError> {
             Ok(Box::new(self.device(target)?.admin_session(password, HsmObjectIds::default())?))
         }
+
+        fn open_auditor(
+            &self,
+            target: &MemberTarget,
+            credential: &crate::hsm::device_audit::AuditorCredential,
+        ) -> Result<Box<dyn crate::hsm::device_audit::HsmAuditSession>, RvError> {
+            Ok(Box::new(self.device(target)?.auditor_session(credential)?))
+        }
     }
 
     fn rand_tag() -> String {
@@ -1568,6 +1607,7 @@ mod tests {
         seen: Arc<Recorder>,
         min_wrap_copies: usize,
         recovery: RecoveryMode,
+        device_audit: DeviceAuditMode,
     }
 
     impl Pool {
@@ -1601,6 +1641,7 @@ mod tests {
                 seen,
                 min_wrap_copies,
                 recovery: RecoveryMode::None,
+                device_audit: DeviceAuditMode::Drain,
             }
         }
 
@@ -1658,6 +1699,7 @@ mod tests {
                     link: None,
                     migrate_from: None,
                     members: vec![member("a", &self.a), member("b", &self.b)],
+                    device_audit: self.device_audit,
                 }),
                 recovery_explicit: true,
             }
@@ -2470,5 +2512,136 @@ mod tests {
         assert!(err.to_string().contains("per-node"), "{err}");
         let err = provider.recover_submit(RecoverySubmission::default(), sealed(&kek_barrier("pn").await), "t");
         assert!(err.await.is_err(), "no ceremony per node");
+    }
+
+    // ---- T454 phase 6: device-log drain ----------------------------------
+
+    fn device_log_events(p: &Pool, kind: PoolEventKind) -> Vec<PoolEvent> {
+        p.seen.0.lock().unwrap().iter().filter(|e| e.kind == kind).cloned().collect()
+    }
+
+    #[tokio::test]
+    async fn the_drain_needs_an_auditor_installed_by_an_admin_repair() {
+        let p = Pool::new(1).await;
+        let n1 = p.init().await;
+        let barrier = p.barrier().await;
+
+        let report = n1.drain_device_logs(barrier.as_ref()).await.unwrap();
+        assert_eq!((report.members, report.without_auditor, report.drained), (2, 2, 0), "{report:?}");
+        let status = n1.status().await.unwrap();
+        assert_eq!(status["device_audit"]["mode"], "drain");
+        assert!(status["device_audit"]["members"].as_array().unwrap().iter().all(|m| m["enrolled"] == false));
+
+        let report = n1.repair(Some(barrier.clone()), Some(&p.both())).await.unwrap();
+        let mut installed = report.auditors_installed.clone();
+        installed.sort();
+        assert_eq!(installed, vec![p.name("a"), p.name("b")], "{report:?}");
+        assert!(report.failures.is_empty(), "{report:?}");
+        assert!(!p.a.forced_audit_on(), "drain mode leaves forced audit off");
+        let again = n1.repair(Some(barrier.clone()), Some(&p.both())).await.unwrap();
+        assert!(again.auditors_installed.is_empty(), "a working credential is kept: {again:?}");
+
+        // The credential lives behind the barrier and never reaches status.
+        let id_a = id_of(&p.a);
+        let credential = crate::hsm::device_audit::read_auditor(barrier.as_ref(), &id_a).await.unwrap().unwrap();
+        n1.drain_device_logs(barrier.as_ref()).await.unwrap();
+        let status = serde_json::to_string(&n1.status().await.unwrap()).unwrap();
+        assert!(!status.contains(&hex::encode(credential.key())), "no credential in status");
+    }
+
+    #[tokio::test]
+    async fn the_drain_raises_every_command_and_every_gap() {
+        let p = Pool::new(1).await;
+        let n1 = p.init().await;
+        let barrier = p.barrier().await;
+        n1.repair(Some(barrier.clone()), Some(&p.both())).await.unwrap();
+
+        let first = n1.drain_device_logs(barrier.as_ref()).await.unwrap();
+        assert_eq!((first.drained, first.gaps), (2, 0), "{first:?}");
+        assert!(first.entries > 0);
+        let unwraps_before = device_log_events(&p, PoolEventKind::DeviceLog).len();
+        n1.recover_kek().await.unwrap();
+        let next = n1.drain_device_logs(barrier.as_ref()).await.unwrap();
+        assert_eq!(next.gaps, 0, "{next:?}");
+        let events = device_log_events(&p, PoolEventKind::DeviceLog);
+        let unwrap = events[unwraps_before..]
+            .iter()
+            .find(|e| e.detail.contains("command=unwrap-data"))
+            .expect("the unseal's unwrap is in the device log");
+        assert!(unwrap.detail.contains("actor=node n1") && unwrap.detail.contains("result=ok"), "{unwrap:?}");
+        assert!(events.iter().all(|e| !e.detail.contains("actor=bv-auditor")), "the drain's own reads are not raised");
+        let quiet = n1.drain_device_logs(barrier.as_ref()).await.unwrap();
+        assert_eq!((quiet.entries, quiet.gaps), (0, 0), "nothing new: {quiet:?}");
+
+        // A changed entry after the cursor breaks the chain.
+        n1.recover_kek().await.unwrap();
+        p.a.tamper_log_entry(p.a.newest_log_index());
+        let gaps_before = bv_metrics::hsm_metrics::hsm_metrics().device_log_gaps(&p.name("a"));
+        let tampered = n1.drain_device_logs(barrier.as_ref()).await.unwrap();
+        assert!(tampered.gaps >= 1, "{tampered:?}");
+        let gap = device_log_events(&p, PoolEventKind::DeviceLogGap);
+        assert!(gap.iter().any(|e| e.member == p.name("a") && e.detail.contains("digest chain break")), "{gap:?}");
+        assert!(bv_metrics::hsm_metrics::hsm_metrics().device_log_gaps(&p.name("a")) > gaps_before);
+
+        // A device that lost its log is a gap too, and nothing is skipped.
+        p.b.restart_log();
+        p.a.set_offline(true);
+        n1.recover_kek().await.unwrap();
+        p.a.set_offline(false);
+        let restarted = n1.drain_device_logs(barrier.as_ref()).await.unwrap();
+        let gap = device_log_events(&p, PoolEventKind::DeviceLogGap);
+        assert!(gap.iter().any(|e| e.member == p.name("b") && e.detail.contains("restarted")), "{gap:?}");
+        assert!(restarted.entries > 0, "the new log's entries are drained: {restarted:?}");
+        let status = n1.status().await.unwrap();
+        let rows = status["device_audit"]["members"].as_array().unwrap();
+        assert!(rows.iter().all(|m| m["enrolled"] == true && m["last_index"].is_u64()), "{status}");
+        assert!(rows.iter().any(|m| m["gaps"].as_u64().unwrap() >= 1), "{status}");
+    }
+
+    #[tokio::test]
+    async fn another_node_skips_a_member_drained_moments_ago() {
+        let p = Pool::new(1).await;
+        let n1 = p.init().await;
+        let n2 = p.join("n2", &n1).await;
+        let barrier = p.barrier().await;
+        n1.repair(Some(barrier.clone()), Some(&p.both())).await.unwrap();
+        assert_eq!(n1.drain_device_logs(barrier.as_ref()).await.unwrap().drained, 2);
+        let second = n2.drain_device_logs(barrier.as_ref()).await.unwrap();
+        assert_eq!((second.skipped, second.drained), (2, 0), "{second:?}");
+        assert_eq!(n1.drain_device_logs(barrier.as_ref()).await.unwrap().drained, 2, "never its own");
+    }
+
+    #[tokio::test]
+    async fn forced_audit_blocks_the_pool_until_the_drain_frees_the_log() {
+        let p = Pool { device_audit: DeviceAuditMode::Forced, ..Pool::new(1).await };
+        let n1 = p.init().await;
+        let barrier = p.barrier().await;
+        let report = n1.repair(Some(barrier.clone()), Some(&p.both())).await.unwrap();
+        assert!(report.failures.is_empty(), "{report:?}");
+        assert!(p.a.forced_audit_on() && p.b.forced_audit_on());
+        n1.drain_device_logs(barrier.as_ref()).await.unwrap();
+
+        let mut refused = None;
+        for _ in 0..200 {
+            if let Err(e) = n1.recover_kek().await {
+                refused = Some(e.to_string());
+                break;
+            }
+        }
+        let refused = refused.expect("a full log stops the pool");
+        assert!(refused.contains("LOG_FULL"), "{refused}");
+        n1.drain_device_logs(barrier.as_ref()).await.unwrap();
+        assert_eq!(n1.recover_kek().await.unwrap().as_slice(), &KEK, "acknowledged: the pool serves again");
+    }
+
+    #[tokio::test]
+    async fn device_audit_off_drains_nothing_and_installs_nothing() {
+        let p = Pool { device_audit: DeviceAuditMode::Off, ..Pool::new(1).await };
+        let n1 = p.init().await;
+        let barrier = p.barrier().await;
+        let report = n1.repair(Some(barrier.clone()), Some(&p.both())).await.unwrap();
+        assert!(report.auditors_installed.is_empty());
+        assert_eq!(n1.drain_device_logs(barrier.as_ref()).await.unwrap(), crate::seal::hsm::DrainReport::default());
+        assert_eq!(n1.status().await.unwrap()["device_audit"]["mode"], "off");
     }
 }

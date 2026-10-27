@@ -31,7 +31,9 @@ pub enum HsmCommands {
     /// Enroll, revoke or list pool nodes.
     #[command(subcommand)]
     Node(NodeCommands),
-    /// Show the last repair run, or run the repair job now with `--run`.
+    /// Show the last repair run, or run the repair job now with `--run`. With
+    /// `--admin`, the run also applies pending revocations, promotes joining
+    /// members and installs the `bv-auditor` key the device-log drain needs.
     Repair(HsmRepair),
     /// New wrap keys on every active member and every set re-wrapped to the next epoch.
     RotateEpoch(HsmRotateEpoch),

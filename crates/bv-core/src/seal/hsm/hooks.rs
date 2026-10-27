@@ -3,7 +3,8 @@
 //! Every event is written to the `security` log. Once the provider is
 //! attached to a `Core` whose audit broker is up, it also becomes an audit
 //! entry at `sys/hsm/events/<event>/<member>`. A `member up` event wakes the
-//! repair tick, which otherwise runs every [`REPAIR_INTERVAL`].
+//! repair tick, which otherwise runs every [`REPAIR_INTERVAL`]. The device-log
+//! drain (phase 6) ticks every 5 s (`device_audit::DEVICE_AUDIT_INTERVAL`).
 
 use std::{
     sync::{
@@ -120,7 +121,48 @@ impl HsmSealProvider {
             return;
         }
         #[cfg(not(feature = "sync_handler"))]
-        self.start_repair_tick();
+        {
+            self.start_repair_tick();
+            self.start_device_audit_tick();
+        }
+    }
+
+    /// Drain the device logs every `DEVICE_AUDIT_INTERVAL` while unsealed
+    /// (pool, `device_audit` not `off`). Every node runs it; the
+    /// `hsm-device-audit` lock and the cursor's `drained_by` keep the cluster
+    /// to about one drain per member per interval.
+    #[cfg(not(feature = "sync_handler"))]
+    fn start_device_audit_tick(self: &Arc<Self>) {
+        use crate::hsm::device_audit::{DeviceAuditMode, DEVICE_AUDIT_INTERVAL};
+        if self.pool().is_none() || self.device_audit_mode() == DeviceAuditMode::Off {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            log::error!(target: "security", "no async runtime: the HSM device-log drain is not running");
+            return;
+        };
+        let provider = Arc::downgrade(self);
+        runtime.spawn(async move {
+            loop {
+                tokio::time::sleep(DEVICE_AUDIT_INTERVAL).await;
+                let Some(p) = provider.upgrade() else { return };
+                p.device_audit_tick().await;
+            }
+        });
+    }
+
+    /// One drain: skipped while sealed (the credentials are behind the
+    /// barrier). Per-member failures are logged by the drain when they change.
+    #[maybe_async::maybe_async]
+    pub async fn device_audit_tick(&self) {
+        let Some(core) = self.hooks.as_ref().and_then(|h| h.core()) else { return };
+        if core.sealed() {
+            return;
+        }
+        let barrier: Arc<dyn crate::storage::Storage> = core.barrier.clone();
+        if let Err(e) = self.drain_device_logs(barrier.as_ref()).await {
+            log::warn!(target: "security", "hsm device-log drain failed: {e}");
+        }
     }
 
     /// Run the repair job every [`REPAIR_INTERVAL`], or within

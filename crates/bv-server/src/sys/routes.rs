@@ -13,17 +13,31 @@
 use super::*;
 use crate::routes::{resource, route, BodyLimit, ResourceSpec};
 
+/// `/v1/sys/init`, registered first under `/v1/sys`. Frozen: it refuses the
+/// `v2`-only recovery-share fields (T454 phase 5) and delegates the rest.
+pub(crate) const V1_INIT: &[ResourceSpec] = &[resource!("/init" => [
+    route!(public_probe Get => sys_init_get_request_handler,
+        "bootstrap: whether the vault is initialized is needed before any token can exist"),
+    route!(public_probe Post => sys_init_put_request_handler,
+        "one-time bootstrap that mints the root token and unseal shares; no token can exist before it, and Core::init refuses an initialized vault"),
+    route!(public_probe Put => sys_init_put_request_handler,
+        "one-time bootstrap that mints the root token and unseal shares; no token can exist before it, and Core::init refuses an initialized vault"),
+])];
+
+/// `/v2/sys/init`, registered first under `/v2/sys`: `v1`'s init plus the HSM
+/// pool recovery-share fields and `recovery_keys`.
+pub(crate) const V2_INIT: &[ResourceSpec] = &[resource!("/init" => [
+    route!(public_probe Get => sys_init_get_request_handler,
+        "bootstrap: whether the vault is initialized is needed before any token can exist"),
+    route!(public_probe Post => sys_init_v2_put_request_handler,
+        "one-time bootstrap that mints the root token and unseal shares (and an HSM pool's recovery shares); no token can exist before it, and Core::init refuses an initialized vault"),
+    route!(public_probe Put => sys_init_v2_put_request_handler,
+        "one-time bootstrap that mints the root token and unseal shares (and an HSM pool's recovery shares); no token can exist before it, and Core::init refuses an initialized vault"),
+])];
+
 /// Served under both `/v1/sys` and `/v2/sys`. `v1` is frozen for Vault
 /// compatibility: nothing new goes here.
 pub(crate) const SHARED: &[ResourceSpec] = &[
-    resource!("/init" => [
-        route!(public_probe Get => sys_init_get_request_handler,
-            "bootstrap: whether the vault is initialized is needed before any token can exist"),
-        route!(public_probe Post => sys_init_put_request_handler,
-            "one-time bootstrap that mints the root token and unseal shares; no token can exist before it, and Core::init refuses an initialized vault"),
-        route!(public_probe Put => sys_init_put_request_handler,
-            "one-time bootstrap that mints the root token and unseal shares; no token can exist before it, and Core::init refuses an initialized vault"),
-    ]),
     resource!("/seal-status" => [
         route!(public_probe Get => sys_seal_status_request_handler,
             "unseal workflow: sealed, share counts and unseal progress are needed while no token can be validated; no secret material"),
