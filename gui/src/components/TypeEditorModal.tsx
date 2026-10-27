@@ -10,6 +10,7 @@ import {
   type HeuristicChoice,
   type WebExposureChoice,
 } from "../lib/resourceTypes";
+import { SQL_PROTOCOL, sqlOfferedByType } from "../lib/sqlProfile";
 
 // ── Type Editor Modal ──────────────────────────────────────────────
 
@@ -75,6 +76,19 @@ export function TypeEditorModal({ typeDef, onSave, onClose }: {
       : [],
   );
 
+  // The SQL browser (T124): only the `database` type is offered it, and it is
+  // not a launchable protocol, so it is tracked apart from `protocols`. Seeded
+  // from the backend's own rule (no saved list offers it on `database`), so
+  // saving an unrelated change can never turn it off by writing a list that
+  // lacks it.
+  const [sqlOn, setSqlOn] = useState<boolean>(() => {
+    const saved = typeDef?.connect?.protocols;
+    if (typeDef?.id === "database") return sqlOfferedByType({ connect: { ...typeDef.connect, enabled: true } }).offered;
+    return Array.isArray(saved) && saved.includes(SQL_PROTOCOL);
+  });
+  const typeIdNow = (isNew ? id.toLowerCase().replace(/[^a-z0-9_]/g, "_") : id);
+  const isDatabaseType = typeIdNow === "database";
+
   // Web exposure policy (T96 §6). The server denies a credential-releasing
   // web login unless the resource's *saved* type sets a cap, so this is where
   // an administrator opts a type in. Unset keeps today's deny.
@@ -115,11 +129,14 @@ export function TypeEditorModal({ typeDef, onSave, onClose }: {
     const legacyDefault = connectProtocols({ id: resolvedId, label: "", color: "neutral", fields: [] });
     const sameAsLegacy =
       legacyDefault.length === protocols.length && legacyDefault.every((p) => protocols.includes(p));
+    // No saved list offers `sql` on `database` and on nothing else.
+    const sqlIsDefault = sqlOn === isDatabaseType;
+    const written: Array<ConnectProtocol | "sql"> = [...protocols, ...(sqlOn ? (["sql"] as const) : [])];
     const connect: NonNullable<ResourceTypeDef["connect"]> = withWebPolicy(
       {
         ...rest,
         ...(connectEnabled ? {} : { enabled: false }),
-        ...(savedProtocols !== undefined || !sameAsLegacy ? { protocols } : {}),
+        ...(savedProtocols !== undefined || !sameAsLegacy || !sqlIsDefault ? { protocols: written } : {}),
       },
       webExposure,
       webHeuristic,
@@ -207,6 +224,17 @@ export function TypeEditorModal({ typeDef, onSave, onClose }: {
                 <span>{p === "web" ? "Web" : p.toUpperCase()}</span>
               </label>
             ))}
+            {isDatabaseType && (
+              <label className="flex items-center gap-2" title="The SQL browser (features/sql-browser.md)">
+                <input
+                  type="checkbox"
+                  disabled={!connectEnabled}
+                  checked={sqlOn}
+                  onChange={(e) => setSqlOn(e.target.checked)}
+                />
+                <span>SQL</span>
+              </label>
+            )}
           </div>
           <p className="text-xs text-[var(--color-text-muted)] mt-1 pl-6">
             Protocols resources of this type can be connected with. SSH and

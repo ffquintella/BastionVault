@@ -795,6 +795,157 @@ pub async fn plugins_delete_provider_grant(state: State<'_, AppState>, name: Str
     outcome
 }
 
+// ── SQL browser: ABI 1.4 grants and the `sql_*` write gate (v2 only) ──
+//
+// Proxies GET/PUT/DELETE /v2/sys/plugins/<name>/grants/{sql-gate,
+// resource-credentials} (features/sql-browser.md §9.2) and reads
+// GET /v2/sys/policy-schema (§13). Both live on the v2 surface only, so the
+// remote path pins the prefix. The approval is pinned to the manifest's whole
+// capability block; the server (or this embedded path) decides, never the GUI.
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SqlGrantResult {
+    /// Whether the active manifest requests this capability.
+    pub requested: bool,
+    /// SHA-256 of the manifest's `[capabilities]` block, which approvals pin.
+    pub capability_sha256: String,
+    /// The stored approval (null when never granted).
+    pub grant: Option<Value>,
+    /// Whether the approval still matches the active manifest.
+    pub live: bool,
+}
+
+/// `sql-gate` or `resource-credentials`: the route segment, nothing else.
+fn parse_sql_grant_kind(kind: &str) -> Result<bastion_vault::plugins::sql_grants::SqlGrantKind, CommandError> {
+    bastion_vault::plugins::sql_grants::SqlGrantKind::ALL
+        .into_iter()
+        .find(|k| k.segment() == kind)
+        .ok_or_else(|| CommandError::from(format!("unknown SQL grant `{kind}`")))
+}
+
+#[tauri::command]
+pub async fn plugins_get_sql_grant(
+    state: State<'_, AppState>,
+    name: String,
+    kind: String,
+) -> CmdResult<SqlGrantResult> {
+    let grant_kind = parse_sql_grant_kind(&kind)?;
+    if is_remote(&state).await {
+        let json =
+            remote_call_v2(&state, "GET", &format!("sys/plugins/{name}/grants/{}", grant_kind.segment()), None).await?;
+        return decode_json(json, "SQL grant");
+    }
+    let vault_guard = state.vault.lock().await;
+    let vault = vault_guard.as_ref().ok_or("Vault not open")?;
+    let core = vault.core.load();
+    let storage = core.barrier.as_storage();
+    let manifest = PluginCatalog::new()
+        .get_manifest(storage, &name)
+        .await
+        .map_err(CommandError::from)?
+        .ok_or("plugin not found")?;
+    let record =
+        bastion_vault::plugins::sql_grants::get(storage, grant_kind, &name).await.map_err(CommandError::from)?;
+    let live = bastion_vault::plugins::sql_grants::is_live(storage, grant_kind, &manifest).await;
+    Ok(SqlGrantResult {
+        requested: grant_kind.requested_by(&manifest),
+        capability_sha256: manifest.capabilities.canonical_sha256(),
+        grant: record.and_then(|g| serde_json::to_value(g).ok()),
+        live,
+    })
+}
+
+#[tauri::command]
+pub async fn plugins_set_sql_grant(state: State<'_, AppState>, name: String, kind: String) -> CmdResult<()> {
+    let grant_kind = parse_sql_grant_kind(&kind)?;
+    if is_remote(&state).await {
+        remote_call_v2(&state, "PUT", &format!("sys/plugins/{name}/grants/{}", grant_kind.segment()), None).await?;
+        return Ok(());
+    }
+    let vault_guard = state.vault.lock().await;
+    let vault = vault_guard.as_ref().ok_or("Vault not open")?;
+    let core = vault.core.load();
+    let core_arc: std::sync::Arc<bastion_vault::core::Core> = std::sync::Arc::clone(&*core);
+    drop(vault_guard);
+
+    let manifest = PluginCatalog::new()
+        .get_manifest(core_arc.barrier.as_storage(), &name)
+        .await
+        .map_err(CommandError::from)?
+        .ok_or("plugin not found")?;
+    let token = state.token.lock().await.clone().unwrap_or_default();
+    let actor = resolve_grant_actor(&core_arc, &token).await;
+    let outcome = bastion_vault::plugins::sql_grants::put(
+        core_arc.barrier.as_storage(),
+        grant_kind,
+        &manifest,
+        &actor,
+        chrono::Utc::now().to_rfc3339(),
+    )
+    .await
+    .map(|_| ())
+    .map_err(CommandError::from);
+
+    let mut audit_body = serde_json::Map::new();
+    audit_body.insert("name".into(), Value::String(name.clone()));
+    let err_str = outcome.as_ref().err().map(|e| format!("{e:?}"));
+    bastion_vault::audit::emit_sys_audit(
+        core_arc.as_ref(),
+        &token,
+        &format!("sys/plugins/{name}/grants/{}", grant_kind.segment()),
+        bastion_vault::logical::Operation::Write,
+        Some(audit_body),
+        err_str.as_deref(),
+    )
+    .await;
+    outcome
+}
+
+#[tauri::command]
+pub async fn plugins_delete_sql_grant(state: State<'_, AppState>, name: String, kind: String) -> CmdResult<()> {
+    let grant_kind = parse_sql_grant_kind(&kind)?;
+    if is_remote(&state).await {
+        remote_call_v2(&state, "DELETE", &format!("sys/plugins/{name}/grants/{}", grant_kind.segment()), None).await?;
+        return Ok(());
+    }
+    let vault_guard = state.vault.lock().await;
+    let vault = vault_guard.as_ref().ok_or("Vault not open")?;
+    let core = vault.core.load();
+    let core_arc: std::sync::Arc<bastion_vault::core::Core> = std::sync::Arc::clone(&*core);
+    drop(vault_guard);
+
+    let outcome = bastion_vault::plugins::sql_grants::delete(core_arc.barrier.as_storage(), grant_kind, &name)
+        .await
+        .map_err(CommandError::from);
+    let token = state.token.lock().await.clone().unwrap_or_default();
+    let mut audit_body = serde_json::Map::new();
+    audit_body.insert("name".into(), Value::String(name.clone()));
+    let err_str = outcome.as_ref().err().map(|e| format!("{e:?}"));
+    bastion_vault::audit::emit_sys_audit(
+        core_arc.as_ref(),
+        &token,
+        &format!("sys/plugins/{name}/grants/{}", grant_kind.segment()),
+        bastion_vault::logical::Operation::Delete,
+        Some(audit_body),
+        err_str.as_deref(),
+    )
+    .await;
+    outcome
+}
+
+/// `GET /v2/sys/policy-schema`: whether `sql_*` may be written yet, and which
+/// node keeps the gate closed (features/sql-browser.md §13). Read-only; it
+/// never opens the gate. The body is passed through as the server shaped it
+/// (docs/api.md), so the GUI reads `sql_capabilities_writable` and `reason`.
+#[tauri::command]
+pub async fn policy_schema_status(state: State<'_, AppState>) -> CmdResult<Value> {
+    if is_remote(&state).await {
+        return Ok(remote_call_v2(&state, "GET", "sys/policy-schema", None).await?);
+    }
+    let resp = super::make_request(&state, bv_client::Operation::Read, "sys/policy-schema".into(), None).await?;
+    Ok(Value::Object(resp.and_then(|r| r.data).unwrap_or_default()))
+}
+
 // ── Entity-scoped plugin data: counts and purge (v2 only) ──
 //
 // Proxies GET /v2/sys/plugins/<name>/entity-data and

@@ -14,6 +14,8 @@ import {
 } from "../components/ui";
 import { PolicyBlockEditor } from "../components/PolicyBlockEditor";
 import { PolicyValidatorPanel } from "../components/PolicyValidatorPanel";
+import { PolicySqlGateNotice } from "../components/PolicySqlGateNotice";
+import { describeSqlWriteError } from "../lib/sqlPrivileges";
 import type { PolicyHistoryEntry, PolicyTestCase } from "../lib/types";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
@@ -110,7 +112,7 @@ export function PoliciesPage() {
       setDirty(false);
       await loadHistory(selected);
     } catch (e: unknown) {
-      toast("error", extractError(e));
+      toast("error", describeSqlWriteError(e));
     }
   }
 
@@ -152,7 +154,9 @@ export function PoliciesPage() {
       toast("success", `Policy ${selected} saved`);
       setDirty(false);
     } catch (e: unknown) {
-      toast("error", extractError(e));
+      // A write naming sql_* is refused with a 409 while a cluster node
+      // cannot parse it yet; say so instead of echoing the raw refusal.
+      toast("error", describeSqlWriteError(e));
     }
   }
 
@@ -184,7 +188,7 @@ export function PoliciesPage() {
       loadPolicies();
       selectPolicy(newName);
     } catch (e: unknown) {
-      toast("error", extractError(e));
+      toast("error", describeSqlWriteError(e));
     }
   }
 
@@ -275,6 +279,10 @@ export function PoliciesPage() {
                   />
                 </Card>
 
+                {(tab === "builder" || tab === "editor" || tab === "validate") && (
+                  <PolicySqlGateNotice hcl={policyContent} />
+                )}
+
                 {tab === "builder" && (
                   <PolicyBlockEditor
                     value={policyContent}
@@ -353,6 +361,7 @@ export function PoliciesPage() {
               onChange={(e) => setNewName(e.target.value)}
               placeholder="my-policy"
             />
+            <PolicySqlGateNotice hcl={newContent} />
             <Tabs
               tabs={[
                 { id: "builder", label: "Visual builder" },

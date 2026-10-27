@@ -2,6 +2,8 @@ import { useState, useEffect, useMemo, useRef, useCallback, type MouseEvent as R
 import { Link } from "react-router";
 import { Layout } from "../components/Layout";
 import { ObjectSharingCard } from "../components/ObjectSharingCard";
+import { SqlProfilesCard } from "../components/SqlProfilesCard";
+import { isSqlProfileEntry } from "../lib/sqlProfile";
 import {
   Button,
   Card,
@@ -910,6 +912,7 @@ export function ResourcesPage() {
   // ── Detail view ──────────────────────────────────────────────────
   if (selected && resourceInfo) {
     const typeDef = getTypeDef(typeConfig, String(resourceInfo.type || ""));
+    const isDatabase = String(resourceInfo.type || "") === "database";
     return (
       <Layout>
         <div className="space-y-4">
@@ -953,7 +956,9 @@ export function ResourcesPage() {
                 // SSH/RDP on `server` only, as before). Also hidden
                 // when the operator disabled Connect for this type via
                 // Settings (Phase 7 per-type policy).
-                ...(typeSupportsConnect(typeDef)
+                // A database resource gets it for the SQL browser's
+                // profiles even where the type offers no launchable protocol.
+                ...(typeSupportsConnect(typeDef) || isDatabase
                   ? [{ id: "connection", label: "Connection" }]
                   : []),
                 { id: "sharing", label: "Sharing" },
@@ -993,42 +998,58 @@ export function ResourcesPage() {
 
           {detailTab === "connection" && (
             <>
-              <ConnectionProfilesPanel
-                resource={resourceInfo}
-                protocols={connectProtocols(typeDef)}
-                assetGroupIds={
-                  assetGroups.map.byResource[String(resourceInfo.name)] || []
-                }
-                onUpdated={() => {
-                  // The resource's profile set just changed, so its cached
-                  // connect verdict is stale in a way the TTL shouldn't
-                  // outlive.
-                  invalidateConnectAccess(selected);
-                  void selectResource(selected);
-                }}
-                toast={toast}
-              />
-              {/* Phase 7.3 — per-resource Rustion policy override.
-                  Gated to the resource owner on the API side. */}
-              <RustionPolicyTierEditor
-                tier="resource"
-                id={String(resourceInfo.name)}
-              />
-              {/* Phase 9.3 — live preview of the dispatcher's bastion
-                  candidate ordering for this resource. */}
-              <RustionDispatcherPreview
-                resourceId={String(resourceInfo.name)}
-                resourceType={String(resourceInfo.type || "")}
-                assetGroupIds={
-                  assetGroups.map.byResource[String(resourceInfo.name)] || []
-                }
-              />
+              {typeSupportsConnect(typeDef) && (
+                <ConnectionProfilesPanel
+                  resource={resourceInfo}
+                  protocols={connectProtocols(typeDef)}
+                  assetGroupIds={
+                    assetGroups.map.byResource[String(resourceInfo.name)] || []
+                  }
+                  onUpdated={() => {
+                    // The resource's profile set just changed, so its cached
+                    // connect verdict is stale in a way the TTL shouldn't
+                    // outlive.
+                    invalidateConnectAccess(selected);
+                    void selectResource(selected);
+                  }}
+                  toast={toast}
+                />
+              )}
+              {isDatabase && (
+                <SqlProfilesCard
+                  resource={resourceInfo}
+                  typeDef={typeDef}
+                  onUpdated={() => void selectResource(selected)}
+                  onTypeUpdated={() => void loadTypeConfig()}
+                  toast={toast}
+                />
+              )}
+              {typeSupportsConnect(typeDef) && (
+                <>
+                  {/* Phase 7.3 — per-resource Rustion policy override.
+                      Gated to the resource owner on the API side. */}
+                  <RustionPolicyTierEditor
+                    tier="resource"
+                    id={String(resourceInfo.name)}
+                  />
+                  {/* Phase 9.3 — live preview of the dispatcher's bastion
+                      candidate ordering for this resource. */}
+                  <RustionDispatcherPreview
+                    resourceId={String(resourceInfo.name)}
+                    resourceType={String(resourceInfo.type || "")}
+                    assetGroupIds={
+                      assetGroups.map.byResource[String(resourceInfo.name)] || []
+                    }
+                  />
+                </>
+              )}
             </>
           )}
 
           {detailTab === "sharing" && (
             <ResourceSharingCard
               resourceName={String(resourceInfo.name)}
+              sqlPrivileges={String(resourceInfo.type || "") === "database"}
               toast={toast}
               openGrant={shareRequested}
               onGrantHandled={() => setShareRequested(false)}
@@ -1695,6 +1716,9 @@ function ConnectionProfilesPanel({
   // here, but written back untouched so editing a known profile can't
   // delete them.
   const unknownProfiles = readUnknownProfiles(resource as Record<string, unknown>);
+  // `sql` profiles are this build's own (the SQL browser card lists them), so
+  // they are not "from a newer version"; they are still kept on every save.
+  const unsupportedProfiles = unknownProfiles.filter((p) => !isSqlProfileEntry(p));
   const osType = String(resource["os_type"] ?? "");
   const osTypeProtocol = protocolForOsType(osType);
   // The OS-type hints only concern SSH/RDP; a web-only type has no os_type.
@@ -1972,20 +1996,20 @@ function ConnectionProfilesPanel({
             source, written by a newer client): never listed or launched, but
             kept on every save (`profilesForWrite`). Said once, so their
             absence from the list is not a mystery. */}
-        {unknownProfiles.length > 0 && (
+        {unsupportedProfiles.length > 0 && (
           <div
             className="rounded border border-[var(--color-border)] bg-[var(--color-surface-hover)] text-[var(--color-text-muted)] px-3 py-2 text-sm"
             role="note"
           >
             <strong className="text-[var(--color-text)]">
-              {unknownProfiles.length === 1
+              {unsupportedProfiles.length === 1
                 ? "1 profile uses an unsupported protocol or credential source."
-                : `${unknownProfiles.length} profiles use an unsupported protocol or credential source.`}
+                : `${unsupportedProfiles.length} profiles use an unsupported protocol or credential source.`}
             </strong>{" "}
-            {unknownProfiles.length === 1 ? "It was" : "They were"} saved by a newer
-            version of this app. {unknownProfiles.length === 1 ? "It is" : "They are"} kept
+            {unsupportedProfiles.length === 1 ? "It was" : "They were"} saved by a newer
+            version of this app. {unsupportedProfiles.length === 1 ? "It is" : "They are"} kept
             unchanged when you edit this list, but cannot be shown or launched here
-            — update the desktop app to use {unknownProfiles.length === 1 ? "it" : "them"}.
+            — update the desktop app to use {unsupportedProfiles.length === 1 ? "it" : "them"}.
           </div>
         )}
 
@@ -4338,11 +4362,14 @@ export function ResourceSharingCard({
   toast,
   openGrant = false,
   onGrantHandled,
+  sqlPrivileges = false,
 }: {
   resourceName: string;
   toast: (type: "success" | "error" | "info", msg: string) => void;
   openGrant?: boolean;
   onGrantHandled?: () => void;
+  /** A database resource: offer the SQL chips and presets (features/sql-browser.md §3.3). */
+  sqlPrivileges?: boolean;
 }) {
   return (
     <ObjectSharingCard
@@ -4368,6 +4395,10 @@ export function ResourceSharingCard({
           them connect without exposing the credential.
         </>
       }
+      sqlPrivileges={sqlPrivileges}
+      // A database resource's share starts on the Read only SQL preset, not on
+      // `read`: that would reveal the resource's stored secrets.
+      defaultCapabilities={sqlPrivileges ? ["sql_select"] : ["read"]}
       toast={toast}
       openGrant={openGrant}
       onGrantHandled={onGrantHandled}

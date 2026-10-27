@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Button, Card, Input, Select, Badge, CollapsibleSection } from "./ui";
-import { parsePolicyHcl, lintPolicyModel, CAPABILITIES, type LintFinding } from "../lib/policyHcl";
+import { parsePolicyHcl, lintPolicyModel, ALL_CAPABILITIES, type LintFinding } from "../lib/policyHcl";
+import { explainSqlCheck } from "../lib/sqlPrivileges";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
 import type { PolicyTestCase, PolicyTestResultRow } from "../lib/types";
@@ -286,7 +287,7 @@ export function PolicyValidatorPanel({ name, hcl, savedCases, onSavedCasesChange
                     label={i === 0 ? "Capability" : undefined}
                     value={r.capability}
                     onChange={(e) => update(i, { capability: e.target.value })}
-                    options={CAPABILITIES.map((c) => ({ value: c, label: c }))}
+                    options={ALL_CAPABILITIES.map((c) => ({ value: c, label: c }))}
                   />
                 </div>
                 <div className="col-span-2 min-w-0">
@@ -352,6 +353,7 @@ export function PolicyValidatorPanel({ name, hcl, savedCases, onSavedCasesChange
                   )}
                 </div>
               </div>
+              <SqlCheckNote path={r.path} capability={r.capability} />
             </div>
           ))}
         </div>
@@ -378,6 +380,26 @@ export function PolicyValidatorPanel({ name, hcl, savedCases, onSavedCasesChange
           rule in <code>default</code>.
         </p>
       </CollapsibleSection>
+    </div>
+  );
+}
+
+/**
+ * For a `sql_*` case: which synthetic path the check is evaluated on and what
+ * that means (features/sql-browser.md §3.2), or why the path never carries one.
+ * An explanation only; the verdict beside it is the server's dry-run.
+ */
+function SqlCheckNote({ path, capability }: { path: string; capability: string }) {
+  const e = path.trim() ? explainSqlCheck(path, capability) : null;
+  if (!e) return null;
+  return (
+    <div className="space-y-0.5 text-xs text-[var(--color-text-muted)]" data-testid="sql-check-note">
+      {e.lines.map((l, i) => (
+        <p key={i} className="min-w-0 break-words">
+          {l}
+        </p>
+      ))}
+      {e.warning && <p className="min-w-0 break-words text-yellow-400">{e.warning}</p>}
     </div>
   );
 }

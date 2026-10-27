@@ -5,10 +5,19 @@ import {
   serializePolicyModel,
   envRestrictionOf,
   withEnvRestriction,
+  lintSqlRules,
   CAPABILITIES,
   type PolicyModel,
   type PolicyBlock,
 } from "../lib/policyHcl";
+import {
+  SQL_CAPABILITIES,
+  SQL_CAPABILITY_HINTS,
+  SQL_NO_IMPLICATION_NOTE,
+  isResourcePolicyPath,
+  namesSql,
+} from "../lib/sqlPrivileges";
+import { useNamespaceStore } from "../stores/namespaceStore";
 
 interface Props {
   /** Current policy HCL (the source of truth). */
@@ -61,6 +70,9 @@ export function PolicyBlockEditor({ value, onChange, onParseError }: Props) {
   // The last HCL we emitted, so an external edit (source tab) is
   // distinguishable from our own round-trip and we don't fight the parent.
   const lastSerialized = useRef<string>("");
+  // SQL findings depend on the namespace the policy is authored in (the
+  // rule must carry its prefix), exactly like the validator's.
+  const activeNamespace = useNamespaceStore((s) => s.active);
 
   useEffect(() => {
     if (value === lastSerialized.current) return;
@@ -135,6 +147,7 @@ export function PolicyBlockEditor({ value, onChange, onParseError }: Props) {
   }
 
   const preview = serializePolicyModel(model);
+  const sqlFindings = lintSqlRules(model, activeNamespace);
 
   return (
     <div className="space-y-4">
@@ -158,6 +171,14 @@ export function PolicyBlockEditor({ value, onChange, onParseError }: Props) {
       {model.blocks.map((b, i) => {
         const lint = globLint(b.path);
         const denied = b.capabilities.includes("deny");
+        // The SQL chips belong to resource rules; a rule that already names
+        // one keeps showing them wherever its path points, so they can be
+        // seen and removed.
+        const hasSql = namesSql(b.capabilities);
+        const showSql = isResourcePolicyPath(b.path) || hasSql;
+        const blockSqlFindings = sqlFindings.filter(
+          (f, k, all) => f.path === b.path && all.findIndex((g) => g.path === f.path && g.message === f.message) === k,
+        );
         return (
           <Card key={i}>
             <div className="space-y-3">
@@ -215,6 +236,38 @@ export function PolicyBlockEditor({ value, onChange, onParseError }: Props) {
                 ))}
                 <CapChip label="root" active={b.capabilities.includes("root")} disabled />
               </div>
+              {showSql && (
+                <div className="space-y-1.5" data-testid="sql-capabilities">
+                  <p className="text-xs font-medium text-[var(--color-text-muted)]">SQL privileges</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {SQL_CAPABILITIES.map((c) => (
+                      <CapChip
+                        key={c}
+                        label={c}
+                        hint={SQL_CAPABILITY_HINTS[c]}
+                        active={b.capabilities.includes(c)}
+                        muted={denied}
+                        onClick={() => toggleCap(i, c)}
+                      />
+                    ))}
+                  </div>
+                  <p className="text-xs text-[var(--color-text-muted)]">
+                    Checked on <code>resources/resources/&lt;resource&gt;/sql/server</code> and{" "}
+                    <code>…/sql/objects/&lt;catalog&gt;/&lt;schema&gt;/&lt;object&gt;</code>; write the rule as{" "}
+                    <code>resources/resources/&lt;resource&gt;/sql/*</code> for the whole resource.{" "}
+                    {SQL_NO_IMPLICATION_NOTE}
+                  </p>
+                </div>
+              )}
+              {blockSqlFindings.map((f, k) => (
+                <p
+                  key={k}
+                  role={f.severity === "error" ? "alert" : "note"}
+                  className={`text-xs ${f.severity === "error" ? "text-red-400" : "text-yellow-400"}`}
+                >
+                  {f.message}
+                </p>
+              ))}
               {denied && (
                 <p className="text-xs text-[var(--color-text-muted)]">
                   deny overrides every other capability and always wins on merge.
@@ -226,8 +279,10 @@ export function PolicyBlockEditor({ value, onChange, onParseError }: Props) {
                 </p>
               )}
 
-              {/* Environment restriction (KV v2 per-env values) */}
-              {!denied && (
+              {/* Environment restriction (KV v2 per-env values). Not offered on a
+                  SQL rule: the server refuses parameter constraints beside a
+                  SQL capability. */}
+              {!denied && !hasSql && (
                 <div>
                   <Input
                     label="Restrict to environments (comma-separated)"
@@ -318,6 +373,7 @@ function CapChip({
   warn,
   muted,
   disabled,
+  hint,
 }: {
   label: string;
   active: boolean;
@@ -326,6 +382,8 @@ function CapChip({
   warn?: boolean;
   muted?: boolean;
   disabled?: boolean;
+  /** Tooltip for a chip whose name is not self-explanatory. */
+  hint?: string;
 }) {
   const base = "rounded-full border px-2.5 py-0.5 text-xs font-medium transition-colors";
   let style: string;
@@ -347,11 +405,12 @@ function CapChip({
       onClick={onClick}
       className={`${base} ${style} ${muted && !active ? "opacity-40" : ""}`}
       title={
-        warn
+        hint ??
+        (warn
           ? "sudo is root-equivalent on the matched path"
           : label === "root"
             ? "root is a policy-level concept, not a per-path grant"
-            : undefined
+            : undefined)
       }
     >
       {label}

@@ -1886,6 +1886,12 @@ export interface PluginCapabilities {
   storage_scope?: "plugin" | "entity";
   /** ABI 1.3: declares the plugin a connect-time credential provider. */
   credential_provider?: PluginCredentialProviderCap | null;
+  /** ABI 1.4: the caller-bound SQL target / authorize / MFA-ticket host calls (needs the `sql-gate` grant). */
+  sql_gate?: boolean;
+  /** ABI 1.4: credential kinds the plugin may ask the host to release (needs the `resource-credentials` grant). */
+  resource_credentials?: string[];
+  /** ABI 1.4: the GUI renders its SQL workspace against this plugin; grants no authority. */
+  sql_console?: boolean;
   /** Extensibility v2 app-module capabilities (absent for v1 plugins). */
   app?: {
     dynamic_menus?: boolean;
@@ -2416,6 +2422,38 @@ export const pluginSetProviderGrant = (name: string) =>
 
 export const pluginDeleteProviderGrant = (name: string) =>
   invoke<void>("plugins_delete_provider_grant", { name });
+
+// ── SQL browser: ABI 1.4 grants, write gate, privileges (features/sql-browser.md) ──
+
+/** The two ABI 1.4 grants, by their route segment under `grants/`. */
+export type PluginSqlGrantKind = "sql-gate" | "resource-credentials";
+
+export interface PluginSqlGrantInfo {
+  /** The active manifest requests this capability. */
+  requested: boolean;
+  /** SHA-256 of the manifest's whole `[capabilities]` block; approvals are pinned to it. */
+  capability_sha256: string;
+  grant: { v: number; granted_by: string; granted_at: string; capability_sha256: string } | null;
+  /** The stored approval still matches the active manifest. */
+  live: boolean;
+}
+
+export const pluginGetSqlGrant = (name: string, kind: PluginSqlGrantKind) =>
+  invoke<PluginSqlGrantInfo>("plugins_get_sql_grant", { name, kind });
+
+export const pluginSetSqlGrant = (name: string, kind: PluginSqlGrantKind) =>
+  invoke<void>("plugins_set_sql_grant", { name, kind });
+
+export const pluginDeleteSqlGrant = (name: string, kind: PluginSqlGrantKind) =>
+  invoke<void>("plugins_delete_sql_grant", { name, kind });
+
+/** `GET v2/sys/policy-schema`: may `sql_*` be written yet, and which node says no. */
+export const policySchemaStatus = () =>
+  invoke<import("./sqlPrivileges").PolicySchemaStatus>("policy_schema_status");
+
+/** The caller's own effective SQL capabilities on a database resource (display only). */
+export const resourceSqlPrivileges = (resource: string, objects?: string[]) =>
+  invoke<import("./sqlPrivileges").SqlPrivileges>("resource_sql_privileges", { resource, objects });
 
 // ── Entity-scoped plugin data: counts only (features/self-accounts.md Phase 5) ──
 

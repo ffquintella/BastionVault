@@ -36,6 +36,7 @@ export function PluginsPage() {
   const [versioning, setVersioning] = useState<PluginManifest | null>(null);
   const [networking, setNetworking] = useState<PluginManifest | null>(null);
   const [providerGranting, setProviderGranting] = useState<PluginManifest | null>(null);
+  const [sqlGranting, setSqlGranting] = useState<PluginManifest | null>(null);
   const [entityData, setEntityData] = useState<PluginManifest | null>(null);
   const [reloading, setReloading] = useState<string | null>(null);
   const [acceptUnsigned, setAcceptUnsigned] = useState<boolean | null>(null);
@@ -287,6 +288,7 @@ export function PluginsPage() {
                   onVersions={() => setVersioning(p)}
                   onNetwork={() => setNetworking(p)}
                   onProvider={() => setProviderGranting(p)}
+                  onSql={() => setSqlGranting(p)}
                   onEntityData={() => setEntityData(p)}
                   onReload={async () => {
                     setReloading(p.name);
@@ -371,6 +373,13 @@ export function PluginsPage() {
         />
       )}
 
+      {sqlGranting && (
+        <SqlGrantsModal
+          plugin={sqlGranting}
+          onClose={() => setSqlGranting(null)}
+        />
+      )}
+
       {entityData && (
         <EntityDataModal
           plugin={entityData}
@@ -400,6 +409,7 @@ function PluginRow({
   onDelete,
   onNetwork,
   onProvider,
+  onSql,
   onEntityData,
 }: {
   plugin: PluginManifest;
@@ -411,11 +421,13 @@ function PluginRow({
   onDelete: () => void;
   onNetwork: () => void;
   onProvider: () => void;
+  onSql: () => void;
   onEntityData: () => void;
 }) {
   const hasConfig = (plugin.config_schema?.length ?? 0) > 0;
   const requestsNet = (plugin.capabilities.app?.net?.hosts?.length ?? 0) > 0;
   const isProvider = !!plugin.capabilities.credential_provider;
+  const requestsSql = requestsSqlGrants(plugin.capabilities);
   const keepsPerUserData = plugin.capabilities.storage_scope === "entity";
   return (
     <div className="flex items-start justify-between p-3 border border-[var(--color-border)] rounded-md gap-3">
@@ -448,6 +460,9 @@ function PluginRow({
         )}
         {isProvider && (
           <Button size="sm" variant="secondary" onClick={onProvider}>Credentials</Button>
+        )}
+        {requestsSql && (
+          <Button size="sm" variant="secondary" onClick={onSql}>SQL access</Button>
         )}
         {keepsPerUserData && (
           <Button size="sm" variant="ghost" onClick={onEntityData}>Per-user data</Button>
@@ -1629,6 +1644,154 @@ function ProviderGrantModal({
         </label>
       </div>
     </Modal>
+  );
+}
+
+/** Does the manifest ask for either ABI 1.4 SQL grant? */
+function requestsSqlGrants(c: PluginManifest["capabilities"]): boolean {
+  return c.sql_gate === true || (c.resource_credentials ?? []).includes("sql");
+}
+
+const SQL_GRANT_COPY: Record<
+  api.PluginSqlGrantKind,
+  { title: string; consent: string; warning: string; effect: string }
+> = {
+  "sql-gate": {
+    title: "SQL gate",
+    consent: "Approve this plugin to use the SQL gate host calls",
+    effect:
+      "Lets the plugin ask BastionVault which SQL privileges the signed-in caller holds on a database resource, have refused checks recorded in the denial log, and redeem the caller's connect-MFA ticket.",
+    warning:
+      "The calls run against the caller's own token, which the plugin never sees, but the plugin decides what to ask. Without this approval every one of them fails with not_granted.",
+  },
+  "resource-credentials": {
+    title: "Resource credentials",
+    consent: "Approve this plugin to receive the database logins of SQL profiles",
+    effect:
+      "Lets the plugin ask BastionVault to release the login (user name and password) of a resource's sql profile, in clear, to open the database connection for a caller who may use that resource.",
+    warning:
+      "A released login is released only to an endpoint its secret names in sql_endpoint, never for a profile on a rustion-required transport, and only after a redeemed ticket when the profile requires MFA. The plugin still holds the password while the session lives: approve only a publisher you trust.",
+  },
+};
+
+/**
+ * ABI 1.4: consent for the two SQL browser grants. A plugin declaring
+ * `sql_gate = true` or `resource_credentials = ["sql"]` may call the matching
+ * caller-bound host calls only after an administrator approves them here. Each
+ * approval is pinned to the SHA-256 of the manifest's whole capability block,
+ * so any later change to that block voids it until it is approved again.
+ */
+function SqlGrantsModal({ plugin, onClose }: { plugin: PluginManifest; onClose: () => void }) {
+  const kinds: api.PluginSqlGrantKind[] = [
+    ...(plugin.capabilities.sql_gate ? (["sql-gate"] as const) : []),
+    ...((plugin.capabilities.resource_credentials ?? []).includes("sql") ? (["resource-credentials"] as const) : []),
+  ];
+  return (
+    <Modal
+      open={true}
+      onClose={onClose}
+      title={`SQL access — ${plugin.name}`}
+      size="lg"
+      actions={<Button variant="ghost" onClick={onClose}>Close</Button>}
+    >
+      <div className="space-y-4 text-sm">
+        <p className="text-[var(--color-text-muted)]">
+          The SQL browser plugin runs the database session; these approvals decide which host calls it may make. An
+          approval covers exactly the capability block the manifest declares now, so a changed manifest needs a new
+          one. Approval and revocation are recorded in the audit log.
+        </p>
+        {kinds.map((kind) => (
+          <SqlGrantSection key={kind} plugin={plugin} kind={kind} />
+        ))}
+      </div>
+    </Modal>
+  );
+}
+
+function SqlGrantSection({ plugin, kind }: { plugin: PluginManifest; kind: api.PluginSqlGrantKind }) {
+  const { toast } = useToast();
+  const copy = SQL_GRANT_COPY[kind];
+  const [info, setInfo] = useState<api.PluginSqlGrantInfo | null>(null);
+  const [consent, setConsent] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const load = React.useCallback(async () => {
+    try {
+      setInfo(await api.pluginGetSqlGrant(plugin.name, kind));
+    } catch (e) {
+      toast("error", extractError(e));
+    }
+  }, [plugin.name, kind, toast]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const run = async (fn: () => Promise<void>, ok: string) => {
+    setBusy(true);
+    try {
+      await fn();
+      toast("success", ok);
+      setConsent(false);
+      await load();
+    } catch (e) {
+      toast("error", extractError(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="rounded-md border border-[var(--color-border)] p-3 space-y-2" data-testid={`sql-grant-${kind}`}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="font-medium">{copy.title}</p>
+        {info &&
+          (info.grant ? (
+            info.live ? (
+              <Badge label="approved" variant="success" />
+            ) : (
+              <Badge label="stale — re-approve" variant="warning" />
+            )
+          ) : (
+            <Badge label="not approved" variant="neutral" />
+          ))}
+      </div>
+      <p className="text-xs">{copy.effect}</p>
+      <p role="note" className="rounded-md border border-[var(--color-warning)] p-2 text-xs">{copy.warning}</p>
+      {info?.grant && (
+        <p className="text-xs text-[var(--color-text-muted)] min-w-0 truncate">
+          Approved by {info.grant.granted_by || "—"} at {info.grant.granted_at}
+        </p>
+      )}
+      {info && (
+        <p className="text-xs text-[var(--color-text-muted)] font-mono min-w-0 truncate">
+          capability block sha256: {info.capability_sha256.slice(0, 16)}…
+        </p>
+      )}
+      <label className="flex items-center gap-2">
+        <input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} />
+        <span>{copy.consent}</span>
+      </label>
+      <div className="flex flex-wrap gap-2">
+        <Button
+          variant="primary"
+          loading={busy}
+          disabled={!consent || !info?.requested}
+          onClick={() => run(() => api.pluginSetSqlGrant(plugin.name, kind), `${copy.title} approved for ${plugin.name}.`)}
+        >
+          Approve
+        </Button>
+        {info?.grant && (
+          <Button
+            variant="danger"
+            loading={busy}
+            onClick={() => run(() => api.pluginDeleteSqlGrant(plugin.name, kind), `${copy.title} approval revoked.`)}
+          >
+            Revoke
+          </Button>
+        )}
+      </div>
+    </section>
   );
 }
 

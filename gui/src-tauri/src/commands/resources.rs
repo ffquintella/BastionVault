@@ -175,6 +175,30 @@ pub async fn read_resource(
     }
 }
 
+/// The caller's own effective SQL capabilities on a database resource
+/// (`resources/v2/sql/privileges/<resource>`, features/sql-browser.md §9.5):
+/// `server`, `resource_wide` and, for `objects` (`catalog/schema/object`
+/// triples), per-object lists. A display read: nothing is enforced from it.
+#[tauri::command]
+pub async fn resource_sql_privileges(
+    state: State<'_, AppState>,
+    resource: String,
+    objects: Option<Vec<String>>,
+) -> CmdResult<Value> {
+    // The name is one path segment and the objects ride in the query string:
+    // refuse anything that would change either.
+    if resource.is_empty() || resource.contains(['/', '?', '#']) {
+        return Err("resource name must be a single path segment".into());
+    }
+    let mut path = format!("{RESOURCE_MOUNT}v2/sql/privileges/{resource}");
+    if let Some(triples) = objects.filter(|o| !o.is_empty()) {
+        path.push_str("?objects=");
+        path.push_str(&triples.join(","));
+    }
+    let resp = make_request(&state, Operation::Read, path, None).await?;
+    Ok(Value::Object(resp.and_then(|r| r.data).unwrap_or_default()))
+}
+
 #[tauri::command]
 pub async fn write_resource(
     state: State<'_, AppState>,

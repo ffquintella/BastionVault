@@ -18,6 +18,18 @@ import type {
   ShareGranteeKind,
   ShareTargetKind,
 } from "../lib/types";
+import { SqlGateNotice } from "./PolicySqlGateNotice";
+import {
+  SQL_CAPABILITIES,
+  SQL_CAPABILITY_HINTS,
+  SQL_NO_IMPLICATION_NOTE,
+  SQL_PRESETS,
+  SQL_SHARE_READ_HINT,
+  activeSqlPreset,
+  applySqlPreset,
+  describeSqlWriteError,
+  namesSql,
+} from "../lib/sqlPrivileges";
 import { isAdminUser } from "../lib/access";
 import { useAuthStore } from "../stores/authStore";
 import * as api from "../lib/api";
@@ -98,6 +110,19 @@ export interface ObjectSharingCardProps {
   capabilities: readonly string[];
   /** Explanatory copy under the capability chips, when a kind needs it. */
   capabilityHint?: ReactNode;
+  /**
+   * Offer the eleven `sql_*` chips and the presets (features/sql-browser.md
+   * §3.3). Honoured for `resource` and `asset-group` targets only: the server
+   * refuses a SQL capability on a KV secret or a file with a 400, so the
+   * chips are never shown there whatever is passed.
+   */
+  sqlPrivileges?: boolean;
+  /**
+   * The capabilities a fresh grant form starts with. Defaults to `["read"]`.
+   * A database resource starts on the *Read only* SQL preset instead: `read`
+   * on the resource reveals its stored secrets and the SQL browser needs none.
+   */
+  defaultCapabilities?: readonly string[];
   /**
    * Grantee kinds offered on grant, in the order they are listed. The
    * default offers a direct entity and both identity-group kinds; a
@@ -199,6 +224,8 @@ export function ObjectSharingCard({
   onOwnerChange,
   capabilities,
   capabilityHint,
+  sqlPrivileges = false,
+  defaultCapabilities = ["read"],
   granteeKinds = ALL_SHARE_GRANTEE_KINDS,
   unownedDescription: unownedDescriptionOverride,
   toast,
@@ -232,7 +259,8 @@ export function ObjectSharingCard({
     granteeKinds[0] ?? "entity",
   );
   const [grantee, setGrantee] = useState("");
-  const [caps, setCaps] = useState<string[]>(["read"]);
+  const showSql = sqlPrivileges && (kind === "resource" || kind === "asset-group");
+  const [caps, setCaps] = useState<string[]>([...defaultCapabilities]);
   const [expires, setExpires] = useState("");
 
   const [showTransfer, setShowTransfer] = useState(false);
@@ -275,7 +303,7 @@ export function ObjectSharingCard({
   function resetGrantForm() {
     setGranteeKind(granteeKinds[0] ?? "entity");
     setGrantee("");
-    setCaps(["read"]);
+    setCaps([...defaultCapabilities]);
     setExpires("");
   }
 
@@ -294,7 +322,9 @@ export function ObjectSharingCard({
       resetGrantForm();
       load();
     } catch (e: unknown) {
-      toast("error", extractError(e));
+      // A grant naming sql_* is refused with a 409 while a cluster node
+      // cannot parse it yet; say so rather than echoing the raw refusal.
+      toast("error", describeSqlWriteError(e));
     }
   }
 
@@ -599,6 +629,7 @@ export function ObjectSharingCard({
                   <button
                     key={c}
                     type="button"
+                    aria-pressed={selected}
                     onClick={() => toggleCap(c)}
                     className={`px-2.5 py-1 rounded-full text-xs border transition-colors ${
                       selected
@@ -617,6 +648,61 @@ export function ObjectSharingCard({
               </p>
             )}
           </div>
+          {showSql && (
+            <div data-testid="sql-share-capabilities">
+              <label className="block text-xs font-medium text-[var(--color-text-muted)] mb-1">
+                SQL privileges
+              </label>
+              <div className="flex flex-wrap gap-2 mb-2" role="group" aria-label="SQL presets">
+                {SQL_PRESETS.map((p) => {
+                  const on = activeSqlPreset(caps) === p.id;
+                  return (
+                    <button
+                      key={p.id}
+                      type="button"
+                      aria-pressed={on}
+                      title={p.caps.join(", ")}
+                      onClick={() => setCaps((prev) => applySqlPreset(prev, p))}
+                      className={`px-2.5 py-1 rounded-md text-xs border transition-colors ${
+                        on
+                          ? "border-[var(--color-primary)] text-[var(--color-primary)]"
+                          : "border-[var(--color-border)] text-[var(--color-text-muted)] hover:border-[var(--color-text-muted)]"
+                      }`}
+                    >
+                      {p.label}
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {SQL_CAPABILITIES.map((c) => {
+                  const selected = caps.includes(c);
+                  return (
+                    <button
+                      key={c}
+                      type="button"
+                      title={SQL_CAPABILITY_HINTS[c]}
+                      aria-pressed={selected}
+                      onClick={() => toggleCap(c)}
+                      className={`px-2.5 py-1 rounded-full text-xs border transition-colors ${
+                        selected
+                          ? "bg-[var(--color-primary)] border-[var(--color-primary)] text-white"
+                          : "bg-[var(--color-bg)] border-[var(--color-border)] text-[var(--color-text-muted)] hover:border-[var(--color-text-muted)]"
+                      }`}
+                    >
+                      {c}
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="text-xs text-[var(--color-text-muted)] mt-1.5">
+                A share is resource-wide: it grants these on every object of the {noun === "group" ? "group's resources" : "resource"}.{" "}
+                <code className="font-mono">sql_export</code> and <code className="font-mono">sql_script</code> are
+                always separate choices. {SQL_NO_IMPLICATION_NOTE} {SQL_SHARE_READ_HINT}
+              </p>
+              <SqlGateNotice active={namesSql(caps)} />
+            </div>
+          )}
           <Input
             label="Expires at (optional)"
             value={expires}

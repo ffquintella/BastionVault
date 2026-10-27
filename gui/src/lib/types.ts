@@ -478,7 +478,10 @@ export interface ResourceTypeDef {
      * for every other type. Read it through `connectProtocols()`, never
      * directly. See features/web-application-connect.md §1.
      */
-    protocols?: ConnectProtocol[];
+    /** `sql` is the database type's SQL browser (features/sql-browser.md
+     *  §9.5): saved and read here, but not a launchable protocol, so it is
+     *  not a `ConnectProtocol` and `connectProtocols` never returns it. */
+    protocols?: Array<ConnectProtocol | "sql">;
     default_ports?: { ssh?: number; rdp?: number };
     default_users?: { linux?: string; macos?: string; windows?: string };
     /** Exposure cap for `web` profiles (spec §6), enforced server-side.

@@ -22,6 +22,8 @@
  * CodeMirror, no HCL library.
  */
 
+import { SQL_CAPABILITIES, SQL_PARAMETERS_NOTE, isSqlCapability, namesSql } from "./sqlPrivileges";
+
 /** The ten ACL capabilities recognized by the backend `Capability` enum. */
 export const CAPABILITIES = [
   "deny",
@@ -38,7 +40,14 @@ export const CAPABILITIES = [
 
 export type Capability = (typeof CAPABILITIES)[number];
 
-const CAPABILITY_SET = new Set<string>(CAPABILITIES);
+/**
+ * Every capability the server parses: the ten above plus the eleven `sql_*`
+ * ones (features/sql-browser.md §3.1). `CAPABILITIES` stays the ten, which
+ * are the generic chips; the SQL ones are offered only on resource paths.
+ */
+export const ALL_CAPABILITIES: readonly string[] = [...CAPABILITIES, ...SQL_CAPABILITIES];
+
+const CAPABILITY_SET = new Set<string>(ALL_CAPABILITIES);
 
 /** One `path "..." { ... }` rule. */
 export interface PolicyBlock {
@@ -536,6 +545,8 @@ export interface LintFinding {
   message: string;
   /** The offending rule's path, when the finding is rule-scoped. */
   path?: string;
+  /** Set on the SQL findings, so a caller can show them where they apply. */
+  code?: "sql-parameters" | "sql-path" | "sql-no-server";
 }
 
 const TTL_RE = /^\d+(\.\d+)?\s*(ns|us|µs|ms|s|m|h|d)?$/;
@@ -631,7 +642,107 @@ export function lintPolicyModel(model: PolicyModel, activeNamespace = ""): LintF
       }
     }
   }
+  findings.push(...lintSqlRules(model, ns));
   return findings;
+}
+
+/** Does the rule path `rulePath` cover the concrete request path `target`? */
+function ruleMatchesPath(rulePath: string, target: string): boolean {
+  const p = stripLeadingSlash(rulePath);
+  const t = stripLeadingSlash(target);
+  const { kind, base } = classifyPath(p);
+  if (kind === "exact") return base === t;
+  if (kind === "prefix") return t.startsWith(base);
+  return segmentMatch(p, t);
+}
+
+/**
+ * What a SQL rule can reach (features/sql-browser.md §3.2): whether its path
+ * covers a server-level check (`…/sql/server`), an object check
+ * (`…/sql/objects/<c>/<s>/<o>`), and which resource it names. Matches sample
+ * check paths against the rule with the same precedence-free matcher the
+ * preview uses, so `+` and `*` behave as the server's matcher does.
+ */
+function sqlRuleShape(path: string, nsPrefix: string) {
+  const segs = stripLeadingSlash(path).split("/");
+  const i = segs.findIndex((s, k) => s === "resources" && segs[k + 1] === "resources");
+  const named = i >= 0 ? segs[i + 2] : undefined;
+  const literal = named && !/[+*]/.test(named) ? named : null;
+  const res = literal ?? "sample-db";
+  const server = `${nsPrefix}resources/resources/${res}/sql/server`;
+  const object = `${nsPrefix}resources/resources/${res}/sql/objects/c/s/o`;
+  // A rule that names `…/sql/objects/…` is object-scoped whatever its tail
+  // (`…/objects/def/netrisk/*` would not match the generic sample object).
+  const namesObjects = i >= 0 && segs[i + 3] === "sql" && segs[i + 4] === "objects";
+  return {
+    literal,
+    server,
+    coversServer: ruleMatchesPath(path, server),
+    coversObjects: namesObjects || ruleMatchesPath(path, object),
+  };
+}
+
+/**
+ * SQL-specific findings (features/sql-browser.md §3.2, §9.1):
+ *
+ *  - **error**: a `sql_*` capability beside `allowed_parameters`,
+ *    `denied_parameters` or `required_parameters`; the server refuses it.
+ *  - **warning**: the rule's path can never carry a SQL check.
+ *  - **warning**: an object-scoped grant with no grant on `…/sql/server` in
+ *    the policy, so the user cannot open a session.
+ *
+ * Non-authoritative, like the rest of this module; the server's answer wins.
+ */
+export function lintSqlRules(model: PolicyModel, activeNamespace = ""): LintFinding[] {
+  const ns = activeNamespace.replace(/^\/+|\/+$/g, "");
+  const nsPrefix = ns ? `${ns}/` : "";
+  const sqlBlocks = model.blocks.filter((b) => namesSql(b.capabilities));
+  const out: LintFinding[] = [];
+  for (const b of sqlBlocks) {
+    const names = (b.capabilities ?? []).filter(isSqlCapability).join(", ");
+    const hasParams =
+      (b.requiredParameters?.length ?? 0) > 0 ||
+      Object.keys(b.allowedParameters ?? {}).length > 0 ||
+      Object.keys(b.deniedParameters ?? {}).length > 0;
+    if (hasParams) {
+      out.push({ severity: "error", message: SQL_PARAMETERS_NOTE, path: b.path, code: "sql-parameters" });
+    }
+    if (b.capabilities.includes("deny")) continue;
+    // Already reported as unreachable; a second finding would only repeat it.
+    if (ns && !stripLeadingSlash(b.path).startsWith(nsPrefix)) continue;
+
+    const shape = sqlRuleShape(b.path, nsPrefix);
+    if (!shape.coversServer && !shape.coversObjects) {
+      out.push({
+        severity: "warning",
+        message:
+          `${names} can never be checked on this path: SQL capabilities are evaluated only on ` +
+          `${nsPrefix}resources/resources/<resource>/sql/server and ` +
+          `${nsPrefix}resources/resources/<resource>/sql/objects/<catalog>/<schema>/<object>. ` +
+          `Write the rule as ${nsPrefix}resources/resources/<resource>/sql/*.`,
+        path: b.path,
+        code: "sql-path",
+      });
+      continue;
+    }
+    if (shape.coversObjects && !shape.coversServer) {
+      const others = sqlBlocks.filter((o) => o !== b && !o.capabilities.includes("deny"));
+      const hasServerGrant = shape.literal
+        ? others.some((o) => ruleMatchesPath(o.path, shape.server))
+        : others.some((o) => sqlRuleShape(o.path, nsPrefix).coversServer);
+      if (!hasServerGrant) {
+        out.push({
+          severity: "warning",
+          message:
+            `object-scoped SQL grant without a grant on ${nsPrefix}resources/resources/${shape.literal ?? "<resource>"}/sql/server: ` +
+            "the user cannot open a session or run SELECT now(). Add sql_select there, or write a resource-wide rule on …/sql/*.",
+          path: b.path,
+          code: "sql-no-server",
+        });
+      }
+    }
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
