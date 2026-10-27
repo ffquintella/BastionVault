@@ -55,6 +55,19 @@ pub const SSH_EXEC_RESULT_CEILING_BYTES: usize = 4 * 262_144 + 65_536;
 /// fixed fields.
 pub const WEB_FETCH_RESULT_CEILING_BYTES: usize = 4 * 262_144 + 65_536;
 
+/// The route `bv_audit_read` reads: the unified audit trail.
+pub const AUDIT_EVENTS_PATH: &str = "sys/audit/events";
+
+/// Most events one `bv_audit_read` returns, and the count it asks for when
+/// `limit` is omitted. The endpoint's own default is 500; an assistant's
+/// context is the tighter bound.
+pub const MAX_AUDIT_EVENTS: u64 = 200;
+pub const DEFAULT_AUDIT_EVENTS: u64 = 100;
+
+/// Longest `from`/`to` accepted; the vault parses it as RFC3339 and refuses
+/// anything else.
+const MAX_AUDIT_BOUND_BYTES: usize = 64;
+
 /// Non-secret facts about the calling principal, needed only to answer
 /// `bv_whoami` without a routed request (spec §7: "answered from the token
 /// entry, not by routing to `auth/token/lookup-self`").
@@ -951,6 +964,40 @@ fn build_tool_request(tool: &str, args: &Map<String, Value>) -> Result<ToolReque
                 operation: Operation::Read,
                 path: format!("sys/policies/acl/{name}"),
                 body: None,
+                scope_subject: None,
+            })
+        }
+        // Reads `sys/audit/events`, another `sys/` path `normalize_component`
+        // would refuse: fixed here, with only a window and a cap taken from
+        // the client. The namespace is the token's own, and the vault's ACL
+        // (the endpoint is sudo-gated) decides on the caller's token, so a
+        // user who may not read the audit trail gets a refusal whatever the
+        // pairing says.
+        "bv_audit_read" => {
+            check_known_args(args, &["from", "to", "limit"])?;
+            let mut body = Map::new();
+            for key in ["from", "to"] {
+                if let Some(v) = args.get(key) {
+                    let raw = v
+                        .as_str()
+                        .filter(|s| !s.is_empty() && s.len() <= MAX_AUDIT_BOUND_BYTES && !s.chars().any(char::is_control))
+                        .ok_or_else(|| {
+                            McpError::InvalidArgument(format!("`{key}` must be an RFC3339 timestamp"))
+                        })?;
+                    body.insert(key.into(), Value::String(raw.to_string()));
+                }
+            }
+            let limit = match args.get("limit") {
+                None => DEFAULT_AUDIT_EVENTS,
+                Some(v) => v.as_u64().filter(|n| (1..=MAX_AUDIT_EVENTS).contains(n)).ok_or_else(|| {
+                    McpError::InvalidArgument(format!("`limit` must be an integer in 1..={MAX_AUDIT_EVENTS}"))
+                })?,
+            };
+            body.insert("limit".into(), json!(limit));
+            Ok(ToolRequest {
+                operation: Operation::Read,
+                path: AUDIT_EVENTS_PATH.to_string(),
+                body: Some(body),
                 scope_subject: None,
             })
         }

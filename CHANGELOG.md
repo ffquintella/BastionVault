@@ -58,6 +58,10 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### MCP audit read
+
+- **Let a paired AI assistant read the audit trail, only when you grant it and only if your own sign-in may read it** (T464, S26, S115) -- The opt-in `bv_audit_read` tool (optional `from`, `to`, `limit`) reads `sys/audit/events` in the token's namespace, newest first, at most 200 events per call (100 by default; 24 hours back when `from` is omitted). It is read-only, is left out of a pairing's default tools, and is refused unless the grant's path scope covers `sys/audit/events`. The vault applies your policies to the call, so an audit trail you cannot read stays unreadable to the assistant. The catalogue hash is now `cd1f12af722e7c191d5033f9087cbbf98ba1daad1aabfae62b605d5dcd8f32f5`; an operator who pinned the previous hash in `sys/mcp/config` must pin this one.
+
 #### MCP policy read
 
 - **Let a paired AI assistant read one ACL policy, only when you grant it and only if your own sign-in may read it** (T463, S26, S115) -- The opt-in `bv_policy_read` tool (`name`) reads `sys/policies/acl/<name>` in the token's namespace. It is read-only, takes one plain name (no `/`, `..`, extra arguments or namespace), is left out of a pairing's default tools, and is refused unless the grant's path scope names `sys/policies/acl/...`. The vault applies your policies to the call, so a policy you cannot read stays unreadable to the assistant. The catalogue hash is now `968c50ae6a800915fcf0b6e5506b54e3b95192ff0d50789a0491bb034f47221a`; an operator who pinned the previous hash in `sys/mcp/config` must pin this one.

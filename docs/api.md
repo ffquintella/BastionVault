@@ -2617,8 +2617,9 @@ from a remote system. A shaped result over 1 MiB + 64 KiB is refused
 (`mcp_result_too_large`).
 
 The catalogue hash is
-`248f5409e32dfaacc148dec68abca7c5a2dd63ebcb796894487bbeab39011ffc`
-(`bv_policy_read` appended to the catalogue whose hash was
+`cd1f12af722e7c191d5033f9087cbbf98ba1daad1aabfae62b605d5dcd8f32f5`
+(`bv_audit_read` appended to the catalogue whose hash was
+`248f5409…011ffc`; `bv_policy_read` appended to the catalogue whose hash was
 `2ef9b814…bf5262`, then reworded twice to search the namespaces the issuer
 could operate in; the earlier forms were `968c50ae…47221a` and
 `449ebd4a…321c79`); a `catalogue_pin` set to an earlier value must be updated.

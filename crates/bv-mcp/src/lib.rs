@@ -676,6 +676,70 @@ mod dispatch_tests {
         assert!(backend.calls.lock().unwrap().is_empty());
     }
 
+    /// `bv_audit_read` reads `sys/audit/events` with the window and cap it was
+    /// given, a default cap when none is, and sanitizes what comes back.
+    #[tokio::test]
+    async fn audit_read_routes_to_the_audit_trail_with_a_bounded_window() {
+        let b = binding(&["bv_audit_read"], &["sys/audit/events"]);
+        let p = principal();
+        let guard = SingleUseGuard::new();
+        let backend = FakeBackend::default().with(
+            "sys/audit/events",
+            json!({ "events": [{ "ts": "2026-10-27T10:00:00+00:00", "user": "a\u{202e}b", "op": "read" }], "failed_sources": [] }),
+        );
+        let args = json!({ "from": "2026-10-27T00:00:00Z", "to": "2026-10-27T12:00:00Z", "limit": 5 });
+        let result = dispatcher::call("bv_audit_read", args.as_object().unwrap().clone(), None, &ctx(&b, &backend, &p, &guard))
+            .await
+            .unwrap();
+        let (op, routed, body) = backend.only_call();
+        assert_eq!((op, routed.as_str()), (Operation::Read, "sys/audit/events"));
+        assert_eq!(
+            Value::Object(body.unwrap()),
+            json!({ "from": "2026-10-27T00:00:00Z", "to": "2026-10-27T12:00:00Z", "limit": 5 })
+        );
+        let user = result.structured_content.unwrap()["events"][0]["user"].as_str().unwrap().to_string();
+        assert!(!user.contains('\u{202e}'), "event text is sanitized for the model");
+
+        let backend = FakeBackend::default().with("sys/audit/events", json!({ "events": [] }));
+        dispatcher::call("bv_audit_read", Map::new(), None, &ctx(&b, &backend, &p, &guard)).await.unwrap();
+        assert_eq!(Value::Object(backend.only_call().2.unwrap()), json!({ "limit": 100 }));
+    }
+
+    /// Only a window and a cap are inputs, and the grant must cover the
+    /// audit endpoint: a scope that does not, or a tool not in the
+    /// allow-list, reaches nothing.
+    #[tokio::test]
+    async fn audit_read_refuses_bad_arguments_and_ungranted_scope() {
+        let p = principal();
+        let guard = SingleUseGuard::new();
+        let backend = FakeBackend::default();
+        let b = binding(&["bv_audit_read"], &["sys/audit/events"]);
+        for args in [
+            json!({ "limit": 0 }),
+            json!({ "limit": 201 }),
+            json!({ "limit": "5" }),
+            json!({ "from": 7 }),
+            json!({ "to": "" }),
+            json!({ "from": "2026\n-01-01" }),
+            json!({ "namespace": "other" }),
+            json!({ "path": "sys/raw" }),
+        ] {
+            let err = dispatcher::call("bv_audit_read", args.as_object().unwrap().clone(), None, &ctx(&b, &backend, &p, &guard))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code(), "mcp_invalid_argument", "{args}");
+        }
+        for scope in [&["secret/*"][..], &["sys/policies/acl/*"][..]] {
+            let b = binding(&["bv_audit_read"], scope);
+            let err = dispatcher::call("bv_audit_read", Map::new(), None, &ctx(&b, &backend, &p, &guard)).await.unwrap_err();
+            assert_eq!(err.code(), "mcp_path_out_of_scope", "scope {scope:?}");
+        }
+        let b = binding(&["bv_whoami"], &["*"]);
+        let err = dispatcher::call("bv_audit_read", Map::new(), None, &ctx(&b, &backend, &p, &guard)).await.unwrap_err();
+        assert_eq!(err.code(), "mcp_tool_not_allowed");
+        assert!(backend.calls.lock().unwrap().is_empty());
+    }
+
     /// Regression: the resource tools routed to `resource/<path>`, a mount
     /// that does not exist, so neither ever answered. The engine is mounted
     /// at `resources/` and keeps its records under `resources/resources/`.

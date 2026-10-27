@@ -1978,6 +1978,48 @@ mod mod_test {
         assert_eq!(revoked["matches"], json!([]), "{revoked}");
     }
 
+    /// `bv_audit_read` through the real endpoint: the vault's own ACL on the
+    /// signed-in user's policies decides, so a user who may not read the
+    /// audit trail is refused whatever the pairing grants.
+    #[tokio::test]
+    async fn test_mcp_audit_read_follows_the_issuers_policies() {
+        let (_bvault, core_arc, root) = new_unseal_test_bastion_vault("test_mcp_audit_read").await;
+        let core: &crate::core::Core = &core_arc;
+        tenants(core, &root).await;
+        let reader = r#"path "sys/audit/events" { capabilities = ["read", "sudo"] }"#;
+        let _ = test_write_api(core, &root, "sys/policy/mcp-audit-reader", true, json!({ "policy": reader }).as_object().cloned()).await;
+        for (user, policies) in [("felipe", "mcp-root,mcp-audit-reader"), ("bob", "mcp-root")] {
+            let body = json!({ "password": "pw", "policies": policies }).as_object().cloned();
+            let _ = test_write_api(core, &root, &format!("auth/userpass/users/{user}"), true, body).await;
+        }
+        let guard = SingleUseGuard::new();
+        let ep = McpEndpoint {
+            core: &core_arc,
+            client_ip: "",
+            tool_timeout: std::time::Duration::from_secs(30),
+            server_version: "9.9",
+            request_state_key: b"audit-read-key",
+            single_use_guard: &guard,
+        };
+        let pair = |user: String, id: &'static str| async move {
+            let mut body = tenant_pairing(id).unwrap();
+            body["pairing"]["tool_allowlist"] = json!(["bv_audit_read"]);
+            body["pairing"]["path_scope"] = json!(["sys/audit/events"]);
+            let data = test_write_api(core, &user, "sys/mcp/token", true, Some(body)).await.unwrap().unwrap().data.unwrap();
+            data["auth"]["client_token"].as_str().unwrap().to_string()
+        };
+
+        let felipe = login_in(core, "felipe", "").await;
+        let bob = login_in(core, "bob", "").await;
+
+        let allowed = ok(tool_call(&ep, &pair(felipe, "pr-audit-felipe").await, "bv_audit_read", json!({ "limit": 5 })).await);
+        assert!(allowed["events"].is_array(), "{allowed}");
+        assert!(allowed["failed_sources"].is_array(), "{allowed}");
+
+        let refused = tool_call(&ep, &pair(bob, "pr-audit-bob").await, "bv_audit_read", json!({})).await;
+        assert!(refused["error"].is_object(), "a user without the audit policy must be refused: {refused}");
+    }
+
     // ── MCP namespace selection: app tokens ───────────────────────────────
 
     /// A login as AppRole `tenant-app-role`, bound to namespace `ns` by the

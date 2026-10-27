@@ -25,7 +25,7 @@ normal vault token presented to `/v2/mcp` is refused too. There is no way to
 `bv_capabilities`, `bv_kv_list`, `bv_kv_read_metadata`, `bv_kv_read`,
 `bv_resource_list`, `bv_resource_describe`, `bv_transit_encrypt|decrypt|sign|verify`,
 `bv_totp_code`, `bv_pki_list_certs`, `bv_pki_read_cert`, and the opt-in `bv_policy_read`
-(see [Reading a policy](#reading-a-policy)). The write tools:
+(see [Reading a policy](#reading-a-policy)) and `bv_audit_read` (see [Reading the audit trail](#reading-the-audit-trail)). The write tools:
 `bv_kv_write`, `bv_kv_delete` (soft-delete only), `bv_pki_issue`, `bv_ssh_sign`.
 The session tools: `bv_resource_ssh_exec`, which runs one command on a server
 over an SSH session the vault opens (see
@@ -45,8 +45,18 @@ prefix ending in `*`:
 | `bv_resource_describe` (`name`) | `resources/resources/<name>` |
 | `bv_capabilities` (`path`) | the `path` asked about, not `sys/capabilities-self` |
 | `bv_policy_read` (`name`) | `sys/policies/acl/<name>` |
+| `bv_audit_read` (optional `from`, `to`, `limit`) | `sys/audit/events` |
 | `bv_resource_ssh_exec` (`resource`, `profile`, `command`) | `resources/secrets/<resource>/`, the path the `connect` capability is checked on |
 | `bv_resource_web_fetch` (`resource`, `profile`, `path`, optional `method`) | `resources/secrets/<resource>/`, likewise |
+
+### Reading the audit trail
+
+`bv_audit_read` returns the vault's audit trail, newest first, so an assistant can answer "who changed this" or "what happened since this morning". It is read-only.
+
+- **Opt-in.** It is not in the default tool list. Tick it when you approve a pairing (or name it in `bvault mcp pair`), and give the pairing a path scope that covers `sys/audit/events`.
+- **Your own permissions apply.** The endpoint is sudo-gated and the call runs on the assistant's token, which carries your policies. If your sign-in may not read the audit trail, the vault refuses and the assistant gets the refusal.
+- **Bounded reads.** Optional `from` and `to` (RFC3339) set the window; without `from` it is the 24 hours before `to` (or now). `limit` is 1-200 and defaults to 100. Nothing else is an argument, and there is no namespace argument: it reads in the token's own namespace.
+- **Untrusted content.** Event fields record other users' activity (targets, summaries). They are sanitized like every tool result and are data, not instructions.
 
 ### Reading a policy
 
