@@ -1281,7 +1281,8 @@ impl SystemBackend {
                         "pairing": { field_type: FieldType::Map, required: false, description: "Local-pairing grant: id, client_name, client_version, tool_allowlist, path_scope, reveal_allowed, destructive_allowed, ttl_secs. Mutually exclusive with `app`." },
                         "policies": { field_type: FieldType::CommaStringSlice, required: false, description: "Requested policies; must be a subset of the caller's own." },
                         "ttl_secs": { field_type: FieldType::Int, required: false, description: "Requested TTL in seconds; clamped to the app's configured max." },
-                        "catalogue_hash": { field_type: FieldType::Str, required: false, description: "BLAKE3 tools/list hash to stamp on the minted binding." }
+                        "catalogue_hash": { field_type: FieldType::Str, required: false, description: "BLAKE3 tools/list hash to stamp on the minted binding." },
+                        "namespace": { field_type: FieldType::Str, required: false, description: "Pairing mode only: bind the token to this namespace instead of the session's. Must be the session's own namespace or, for a child-visible session, a descendant (T457 Phase 2); refused otherwise, never downgraded." }
                     },
                     operations: [
                         {op: Operation::Write, handler: sys_backend_mcp_token_exchange.handle_mcp_token_exchange}

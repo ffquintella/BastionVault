@@ -169,6 +169,13 @@ pub struct TranscriptSummary {
     pub pairing_id: String,
     #[serde(default)]
     pub client_name: String,
+    /// The namespace the session ran in, canonical (`""` = root)
+    /// (`features/mcp-namespace-selection.md`). `#[serde(default)]`: a record
+    /// written before the field existed reads as root, which is where every
+    /// agent session ran then. Additive, so [`TRANSCRIPT_RECORD_VERSION`] is
+    /// unchanged and an older reader still opens a newer record.
+    #[serde(default)]
+    pub namespace: String,
     /// Whether the same binding could also reveal secrets (§1).
     #[serde(default)]
     pub binding_reveal_allowed: bool,
@@ -868,5 +875,23 @@ mod tests {
             w.hops = vec![WebTranscriptHop::default(); MAX_TRANSCRIPT_WEB_HOPS + 1];
         }
         assert!(matches!(encode(many, 1, &NoCredential), Err(TranscriptError::Invalid(_))));
+    }
+
+    /// `features/mcp-namespace-selection.md` "Persisted formats": a summary
+    /// written before `namespace` existed reads as root; a new record keeps
+    /// the namespace through the store's encoding, at the same version.
+    #[test]
+    fn the_namespace_is_additive_and_old_summaries_read_as_root() {
+        let old = r#"{"session_id":"as_1","tool":"bv_resource_ssh_exec","resource":"web-01","profile_id":"p",
+            "operator":{"username":"felipe"},"pairing_id":"pair-1","client_name":"c",
+            "started_at_ms":1,"finished_at_ms":2}"#;
+        let summary: TranscriptSummary = serde_json::from_str(old).unwrap();
+        assert_eq!(summary.namespace, "");
+
+        let mut record = ssh("uptime", "up\n");
+        record.summary.namespace = "dti/esi".into();
+        let (id, entries) = encode(record, 9, &NoCredential).unwrap();
+        assert_eq!(round_trip(&entries, &id).unwrap().summary.namespace, "dti/esi");
+        assert_eq!(TRANSCRIPT_RECORD_VERSION, 1, "an additive field does not move the record version");
     }
 }

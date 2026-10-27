@@ -792,8 +792,13 @@ mod mod_test {
     }
 
     impl VaultLink for InProcessLink {
-        fn exchange_pairing(&self, record: &PairingRecord, ttl_secs: u64) -> Result<MintedToken, String> {
-            let data = self.write("sys/mcp/token", exchange_request_body(record, ttl_secs))?;
+        fn exchange_pairing(
+            &self,
+            record: &PairingRecord,
+            ttl_secs: u64,
+            namespace: Option<&str>,
+        ) -> Result<MintedToken, String> {
+            let data = self.write("sys/mcp/token", exchange_request_body(record, ttl_secs, namespace))?;
             minted_token_from_exchange(&data, ttl_secs, now_secs())
         }
 
@@ -814,13 +819,20 @@ mod mod_test {
             }
         }
 
-        fn connect_mfa_begin(&self, resource: &str, profile_id: &str) -> Result<MfaPreflight, MfaBeginError> {
+        // A root-namespace operator: the token's namespace is root too.
+        fn connect_mfa_begin(
+            &self,
+            _namespace: Option<&str>,
+            resource: &str,
+            profile_id: &str,
+        ) -> Result<MfaPreflight, MfaBeginError> {
             let data = self.write(CONNECT_MFA_BEGIN_PATH, mfa_begin_body(resource, profile_id));
             mfa_preflight_from_begin(&data.map_err(mfa_begin_error)?)
         }
 
         fn connect_mfa_verify(
             &self,
+            _namespace: Option<&str>,
             resource: &str,
             profile_id: &str,
             factor: &MfaFactor,
@@ -855,6 +867,7 @@ mod mod_test {
                 connect_allowed: true,
                 confirm_connect: true,
                 ttl_secs: 600,
+                namespace: None,
             }))
         }
 

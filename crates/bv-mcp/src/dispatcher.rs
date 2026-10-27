@@ -62,6 +62,10 @@ pub struct PrincipalInfo {
     pub accessor: String,
     pub display_name: String,
     pub policies: Vec<String>,
+    /// The namespace the token is bound to and every call is routed in,
+    /// canonical (`""` = root). From the token's stored binding, never from
+    /// the client. Reported by `bv_whoami` and `bv_resource_list`.
+    pub namespace: String,
 }
 
 /// Everything a single `tools/call` dispatch needs that isn't the tool name
@@ -248,7 +252,15 @@ pub(crate) async fn dispatch(
     if meta.open_world {
         return shape_session_result(meta, &args, response);
     }
-    Ok(shape_result(meta, reveal_requested, response))
+    let mut result = shape_result(meta, reveal_requested, response);
+    if tool == "bv_resource_list" {
+        // Which namespace's resources these are: the token's own, never one
+        // the client named.
+        if let Some(Value::Object(data)) = result.structured_content.as_mut() {
+            data.insert("namespace".into(), Value::String(sanitize_for_model(&ctx.principal.namespace)));
+        }
+    }
+    Ok(result)
 }
 
 /// Runs the MRTR confirmation half of a gated call. `Ok(Some(result))`
@@ -437,6 +449,7 @@ fn whoami_result(principal: &PrincipalInfo) -> CallToolResult {
         "accessor": principal.accessor,
         "display_name": sanitize_for_model(&principal.display_name),
         "policies": principal.policies,
+        "namespace": sanitize_for_model(&principal.namespace),
     });
     let mut result = CallToolResult::text(format!("accessor: {}", principal.accessor));
     result.structured_content = Some(data);

@@ -40,6 +40,10 @@ pub const CONNECT_AGENT_REFUSED: &str = "connect.agent.refused";
 pub const CONNECT_AGENT_ABORTED: &str = "connect.agent.aborted";
 /// `mcp.transcript.accessed`: a transcript, or the list of them, was read.
 pub const MCP_TRANSCRIPT_ACCESSED: &str = "mcp.transcript.accessed";
+/// `mcp.pairing.namespace_changed`: an exchange of a pairing bound its token
+/// to another namespace than the pairing's previous exchange
+/// (`features/mcp-namespace-selection.md`, "Follow the operator's session").
+pub const MCP_PAIRING_NAMESPACE_CHANGED: &str = "mcp.pairing.namespace_changed";
 
 /// Longest string an event carries for a value that may have come from a
 /// model (a refused call's resource or profile argument). Longer values are
@@ -65,6 +69,9 @@ pub struct AgentRefused {
     pub operator: Option<McpOperatorRef>,
     pub pairing_id: Option<String>,
     pub client_name: String,
+    /// The namespace the MCP token is bound to (`""` = root): where the call
+    /// would have run. `features/mcp-namespace-selection.md`.
+    pub namespace: String,
 }
 
 impl McpAuditEvent for AgentRefused {
@@ -91,6 +98,8 @@ pub struct AgentAborted {
     pub profile_id: String,
     pub operator: Option<McpOperatorRef>,
     pub pairing_id: Option<String>,
+    /// The namespace the session ran in (`""` = root).
+    pub namespace: String,
 }
 
 impl McpAuditEvent for AgentAborted {
@@ -105,6 +114,8 @@ pub struct SshExecEvent {
     pub operator: Option<McpOperatorRef>,
     pub pairing_id: Option<String>,
     pub client_name: String,
+    /// The namespace the session ran in (`""` = root).
+    pub namespace: String,
     pub binding_reveal_allowed: bool,
     pub resource: String,
     pub profile_id: String,
@@ -144,6 +155,8 @@ pub struct WebFetchEvent {
     pub operator: Option<McpOperatorRef>,
     pub pairing_id: Option<String>,
     pub client_name: String,
+    /// The namespace the session ran in (`""` = root).
+    pub namespace: String,
     pub binding_reveal_allowed: bool,
     pub resource: String,
     pub profile_id: String,
@@ -198,6 +211,27 @@ pub struct TranscriptAccessed {
 
 impl McpAuditEvent for TranscriptAccessed {
     const NAME: &'static str = MCP_TRANSCRIPT_ACCESSED;
+}
+
+/// `mcp.pairing.namespace_changed`: the same pairing, exchanged from an
+/// operator session in another namespace, now acts there. The pairing follows
+/// the operator's session by design; this record is what makes the move
+/// visible. Recorded at the exchange, before the new token is minted.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PairingNamespaceChanged {
+    pub pairing_id: String,
+    pub client_name: String,
+    /// The namespace the pairing's previous exchange was bound to (`""` =
+    /// root, which is where every pairing token minted before namespace
+    /// binding existed was bound).
+    pub previous_namespace: String,
+    /// The namespace this exchange binds the new token to.
+    pub namespace: String,
+    pub operator: Option<McpOperatorRef>,
+}
+
+impl McpAuditEvent for PairingNamespaceChanged {
+    const NAME: &'static str = MCP_PAIRING_NAMESPACE_CHANGED;
 }
 
 /// `"hmac:<hex>"` of `data` under the audit HMAC key, the form every audit
@@ -284,8 +318,22 @@ mod tests {
             profile_id: "p".into(),
             operator: None,
             pairing_id: None,
+            namespace: "dti/esi".into(),
         };
         assert_eq!(event_fields(&aborted)["cause"], "token_revoked");
+        assert_eq!(event_fields(&aborted)["namespace"], "dti/esi");
+        // Root is the empty string, written out rather than omitted.
+        assert_eq!(event_fields(&refused)["namespace"], "");
+
+        let moved = PairingNamespaceChanged {
+            pairing_id: "p-1".into(),
+            previous_namespace: String::new(),
+            namespace: "dti/esi".into(),
+            ..Default::default()
+        };
+        let fields = event_fields(&moved);
+        assert_eq!(PairingNamespaceChanged::NAME, "mcp.pairing.namespace_changed");
+        assert_eq!((fields["previous_namespace"].as_str(), fields["namespace"].as_str()), (Some(""), Some("dti/esi")));
 
         let fetch = WebFetchEvent { path_hmac: Some("hmac:cd".into()), path_bytes: 11, ..Default::default() };
         let fields = event_fields(&fetch);

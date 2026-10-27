@@ -77,6 +77,9 @@ struct Running {
     instance: u64,
     #[cfg(unix)]
     socket: bv_mcp::local::uds::SocketServer,
+    /// The gatekeeper itself, for what Settings shows about its tokens.
+    #[cfg(unix)]
+    server: Arc<bv_mcp::local::LocalServer>,
     socket_path: PathBuf,
     started_at: u64,
 }
@@ -163,6 +166,16 @@ impl McpHost {
         }
     }
 
+    /// Where each live minted token is bound, by pairing id (T457): what
+    /// Settings → AI Assistants shows. Empty while the server is off.
+    pub fn token_namespaces(&self) -> std::collections::HashMap<String, Option<String>> {
+        #[cfg(unix)]
+        if let Some(running) = lock(&self.running).as_ref() {
+            return running.server.token_namespaces();
+        }
+        std::collections::HashMap::new()
+    }
+
     fn set_last_error(&self, message: Option<String>) {
         *lock(&self.last_error) = message;
     }
@@ -224,6 +237,7 @@ impl McpHost {
         let ended_app = app.clone();
         let link = link::GuiVaultLink {
             session: session.clone(),
+            operator_namespace: Mutex::new(None),
             last_error: self.last_error.clone(),
             on_session_ended: Box::new(move || {
                 // Off the calling connection's stack: stopping cuts that very
@@ -249,7 +263,8 @@ impl McpHost {
         // pairing prompt is shown and answerable at once.
         broker.open();
         *lock(&self.prompts) = broker.clone();
-        let socket = match uds::SocketServer::start(Arc::new(server), &socket_path) {
+        let server = Arc::new(server);
+        let socket = match uds::SocketServer::start(server.clone(), &socket_path) {
             Ok(socket) => socket,
             Err(e) => {
                 broker.close();
@@ -257,7 +272,7 @@ impl McpHost {
             }
         };
         log::info!(target: "mcp", "serving AI assistants on {} (owner-only)", socket_path.display());
-        *running = Some(Running { instance, socket, socket_path, started_at: now_secs() });
+        *running = Some(Running { instance, socket, server, socket_path, started_at: now_secs() });
         Ok(())
     }
 

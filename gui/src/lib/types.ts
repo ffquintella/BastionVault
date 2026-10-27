@@ -2453,6 +2453,12 @@ export interface McpPairingPrompt {
   same_user: boolean;
   /** The vault this session is signed in to (remote address, or local). */
   vault: string;
+  /**
+   * The namespace this client's tokens will be bound to unless the operator
+   * narrows them: the session's own (`""` = root). Absent when the host could
+   * not read it (features/mcp-namespace-selection.md).
+   */
+  namespace?: string | null;
   deadline_unix_ms: number;
   default_tools: string[];
   default_ttl_secs: number;
@@ -2498,6 +2504,11 @@ export interface McpConfirmPrompt {
   reveals: boolean;
   destructive: boolean;
   deadline_unix_ms: number;
+  /**
+   * The namespace the call runs in: where the vault bound the pairing's token,
+   * from its exchange answer (`""` = root). Absent when the vault did not say.
+   */
+  namespace?: string | null;
   /** Present for a brokered-session call; its confirmation is mandatory. */
   session?: McpSessionPrompt | null;
   /** Present when the profile requires the operator's MFA. */
@@ -2517,6 +2528,11 @@ export interface McpGrantInput {
   /** May open brokered sessions; every such call is confirmed, always. */
   connect_allowed: boolean;
   ttl_secs: number;
+  /**
+   * Narrow this pairing's tokens to a descendant of the session's namespace.
+   * Sent only when the operator chose one; the vault validates it.
+   */
+  namespace?: string | null;
 }
 
 /** The factor proved in a session confirmation. The host verifies it and
@@ -2545,4 +2561,8 @@ export interface McpPairing {
   expires_at: number | null;
   last_used_at: number;
   expired: boolean;
+  /** The namespace the operator narrowed this pairing to; absent: it follows the sign-in. */
+  namespace?: string | null;
+  /** Where its live token is bound, from the vault's answer (`""` = root); absent: no live token. */
+  token_namespace?: string | null;
 }

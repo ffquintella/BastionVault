@@ -2456,6 +2456,23 @@ impl PolicyStore {
         Ok((acl, unresolved))
     }
 
+    /// The names in `policy_names` that would resolve to nothing for a token
+    /// bound to `ns_path`: the same lookup [`Self::build_acl`] makes. `default`
+    /// is never reported; outside root it is the implicit namespace pair.
+    pub async fn unresolved_in_namespace(
+        &self,
+        policy_names: &[String],
+        ns_path: &str,
+    ) -> Result<Vec<String>, RvError> {
+        let mut missing = Vec::new();
+        for name in policy_names.iter().filter(|n| n.as_str() != DEFAULT_POLICY_NAME) {
+            if self.get_policy_ns(name, PolicyType::Token, ns_path).await?.is_none() {
+                missing.push(name.clone());
+            }
+        }
+        Ok(missing)
+    }
+
     async fn new_acl_inner(
         &self,
         policy_names: &[String],

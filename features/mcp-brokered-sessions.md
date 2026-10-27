@@ -1666,6 +1666,14 @@ remain:
    serve`. FIDO2-only operators must use the desktop app. Adding CTAP2 to
    `bvault-cli` is unscheduled.
 
+Resolved since: **operators in a child namespace** (T457,
+[mcp-namespace-selection.md](mcp-namespace-selection.md)). Agent calls run in
+the namespace the MCP token is bound to — the operator's sign-in, or a
+descendant the pairing was narrowed to — and the operator's step-up runs, and
+its ticket binds, in that same namespace, so MFA-gated profiles work there.
+Still open from that work: a session signed in *to* a tenant namespace cannot
+be granted `sys/mcp/token`; see that spec's open questions.
+
 ## What Is Not Yet Implemented
 
 Phase 1 (SSH, 0.44.37–0.44.40) and Phase 2 (web, 0.44.41) are released.
@@ -1684,9 +1692,9 @@ Still missing:
 - **Builds:** `mcp_sessions_ssh` and `mcp_sessions_web` are off by default in
   every build, the desktop app's included; a deployment must be built with
   them.
-- **Operator MFA:** userpass operators only, in the operator's own namespace;
-  the CLI offers TOTP only, and its confirmation prompt has no timeout on
-  Windows.
+- **Operator MFA:** userpass operators only, in the namespace the agent's
+  token is bound to (T457); the CLI offers TOTP only, and its confirmation
+  prompt has no timeout on Windows.
 - **Tests not yet written:** the OpenSSH-container `sshd` enforcement test and
   the share-to-operator regression test.
 - **Operator views** (Phase 4): recent agent sessions and transcripts in the

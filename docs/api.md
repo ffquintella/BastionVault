@@ -2302,7 +2302,7 @@ loopback-only listener with `allow_plaintext_loopback`).
 | `LIST` | `/v2/sys/mcp/apps` | ACL | List MCP apps |
 | `GET`/`POST`/`DELETE` | `/v2/sys/mcp/apps/{name}` | ACL | App record; `DELETE` revokes its tokens. A brokered-session tool in `tool_allowlist` is refused, permanently |
 | `POST`/`DELETE` | `/v2/sys/mcp/apps/{name}/machine-waiver` | `sudo` | Grant (`reason`, `expires_in_days` 1-90) or revoke a machine-identity waiver; revoking also revokes the tokens minted under it |
-| `LIST` | `/v2/sys/mcp/tokens` | ACL | Active MCP-bound tokens (`kind` is `app` or `pairing`) |
+| `LIST` | `/v2/sys/mcp/tokens` | ACL | Active MCP-bound tokens (`kind` is `app` or `pairing`; `namespace` is where each is bound, `null` for one minted before tokens carried a binding, i.e. root) |
 | `DELETE` | `/v2/sys/mcp/tokens/{accessor}` | ACL | Revoke one token |
 | `DELETE` | `/v2/sys/mcp/pairings/{id}` | ACL | Revoke every token minted for one local pairing |
 | `LIST` (or `GET`) | `/v2/sys/mcp/transcripts` | `list` + `sudo` | Brokered-session transcript ids, newest first |
@@ -2321,7 +2321,8 @@ Send the login token in `X-BastionVault-Token`, `X-Vault-Token` or
 { "pairing": { "id": "<[a-z0-9-]{1,64}>", "client_name": "claude-desktop", "client_version": "1.0",
                "tool_allowlist": ["bv_kv_read_metadata"], "path_scope": ["secret/metadata/ai/*"],
                "reveal_allowed": false, "destructive_allowed": false, "ttl_secs": 28800,
-               "connect_allowed": false, "confirm_connect": true } }
+               "connect_allowed": false, "confirm_connect": true },
+  "namespace": "dti/esi" }
 ```
 
 - **App mode** requires the caller to be the app's AppID login, carrying a
@@ -2350,10 +2351,34 @@ Send the login token in `X-BastionVault-Token`, `X-Vault-Token` or
     namespace) from the caller's own login, for audit and for binding an
     operator's MFA step-up to one call. It is never used for authorization.
 - The token's policies are the caller's, narrowed by `policies`, never wider.
+- **Namespace** ([spec](../features/mcp-namespace-selection.md)). The token is
+  bound to the namespace of the caller's own login (its stored binding, never
+  a header) and is never child-visible; every tool call runs there. An app
+  token is bound to its AppID login's namespace. `X-BastionVault-Namespace`
+  on this request asks for nothing. A namespace that was deleted or cannot be
+  resolved is refused, `403 mcp_namespace_unavailable`, never replaced by root.
+- **`namespace`** (optional string, pairing mode only; T457 Phase 2) asks to
+  bind the token to that namespace instead. It is accepted only when the
+  caller's binding may operate there: the caller's own namespace, or a
+  descendant of it when the caller's login is child-visible. Namespace
+  assignments do not count. Anything else — a parent, a sibling, an unrelated
+  or malformed path — is refused with `403 mcp_namespace_not_permitted`; a
+  permitted descendant that does not exist with `403 mcp_namespace_unavailable`.
+  Nothing is minted in another namespace instead. Every policy the token would
+  carry (`policies`, or the caller's own when absent; `default` excepted) must
+  exist in the target namespace's policy store, else `400
+  mcp_policy_not_in_namespace` naming the missing ones. Sent with `app`, it is
+  refused (`400`). When narrowed, the recorded operator namespace is the
+  target's, so the operator's MFA step-up binds where the calls run.
+- A pairing whose token lands in another namespace than its previous
+  exchange's — a different sign-in, or a narrowing — emits
+  `mcp.pairing.namespace_changed` before the token is minted (fail closed on
+  an audit device error).
 
 Response: `{ "auth": { "client_token", "accessor", "policies", "lease_duration",
-"metadata": { "mcp_kind", "mcp_name" } } }`. The token is refused by every
-endpoint except `POST /v2/mcp`.
+"metadata": { "mcp_kind", "mcp_name", "namespace" } } }`; `namespace` is where
+the token is bound (`""` = root). The token is refused by every endpoint except
+`POST /v2/mcp`.
 
 ### `POST /v2/mcp`
 
@@ -2363,7 +2388,9 @@ expired, or whose waiver ended, `413` over `max_request_bytes`, `503`
 `mcp_requires_tls` or `mcp_hybrid_kex_unverifiable`. Tool errors are JSON-RPC
 errors whose `data.code` is one of `mcp_tool_not_allowed`,
 `mcp_path_out_of_scope`, `mcp_reveal_denied`, `mcp_destructive_denied`,
-`mcp_invalid_argument`, `mcp_tool_timeout`, `mcp_connect_not_allowed` (a
+`mcp_invalid_argument`, `mcp_tool_timeout`, `mcp_namespace_unavailable` (the
+token's namespace was deleted or its binding does not normalize; the call is
+never run at root), `mcp_connect_not_allowed` (a
 session tool on a token without `connect_allowed` and `confirm_connect`) and
 `mcp_connect_requires_local_operator` (a session tool on an app token,
 always), plus the session handlers' codes listed under

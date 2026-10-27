@@ -29,7 +29,10 @@ commands at the same time (§5).
 
 Before implementing, fixing, refactoring, testing, reviewing, investigating or
 planning anything, invoke the `ai-skills:agent-router` skill to decide
-whether to work inline or delegate, and to which tier, model and effort. The
+whether to work inline or delegate, and to which tier, model and effort.
+**Always invoke it before every call to the `Agent` tool** (any sub-agent,
+including `Explore`, `Plan`, `general-purpose` and the project tier agents),
+even when the choice looks obvious; a fork or a resumed agent counts. The
 router is the single source of truth for that matrix — do not duplicate it
 here, and do not pick an agent or model from memory. The project's tier
 agents live in `.claude/agents/` (`scout`, `builder`, `architect`, `reviewer`,

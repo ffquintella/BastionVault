@@ -37,8 +37,8 @@ use crate::{
     agent_access,
     agent_limits::{binding_limit_key, SessionPermit},
     agent_session::{
-        aborted_refusal, cause_str, check_destination, check_transport, destination_policy, now_ms, pairing_id,
-        redeem_agent_ticket, refused, resource_type, str_field, watch_revocation, without_code, CallError,
+        aborted_refusal, agent_namespace, cause_str, check_destination, check_transport, destination_policy, now_ms,
+        pairing_id, redeem_agent_ticket, refused, resource_type, str_field, watch_revocation, without_code, CallError,
         ScrubberAdapter, SessionRefusal,
     },
     connect_mfa::find_profile,
@@ -218,6 +218,7 @@ pub(crate) async fn prepare_and_run(
         scrubber,
         session_id,
         started_at_ms: now_ms(),
+        namespace: agent_namespace(req),
         _permit: permit,
     };
     // The fetch runs in its own task: when the MCP endpoint's timeout drops
@@ -255,6 +256,8 @@ struct WebSessionTask {
     scrubber: CredentialScrubber,
     session_id: String,
     started_at_ms: u64,
+    /// The namespace the fetch ran in (the MCP token's binding).
+    namespace: String,
     /// Held for the life of the session; dropping it frees the slot.
     _permit: SessionPermit,
 }
@@ -360,6 +363,7 @@ impl WebSessionTask {
                 operator: self.binding.operator.clone(),
                 pairing_id: self.pairing_id().unwrap_or_default(),
                 client_name: self.binding.client_name.clone(),
+                namespace: self.namespace.clone(),
                 binding_reveal_allowed: self.binding.reveal_allowed,
                 operator_confirmation: self.operator_confirmation.clone(),
                 mfa_method: self.mfa_method.clone(),
@@ -395,6 +399,7 @@ impl WebSessionTask {
             operator: self.binding.operator.clone(),
             pairing_id: self.pairing_id(),
             client_name: self.binding.client_name.clone(),
+            namespace: self.namespace.clone(),
         };
         if let Err(e) = mcp_events::emit(self.ctx.as_ref(), &event, Some(&self.who)).await {
             log::warn!(target: "security", "connect.agent.refused could not be written to the audit log: {e}");
@@ -410,6 +415,7 @@ impl WebSessionTask {
             profile_id: self.profile_id.clone(),
             operator: self.binding.operator.clone(),
             pairing_id: self.pairing_id(),
+            namespace: self.namespace.clone(),
         };
         if let Err(e) = mcp_events::emit(self.ctx.as_ref(), &event, Some(&self.who)).await {
             log::warn!(target: "security", "connect.agent.aborted could not be written to the audit log: {e}");
@@ -490,6 +496,7 @@ impl WebSessionTask {
             operator: self.binding.operator.clone(),
             pairing_id: self.pairing_id(),
             client_name: self.binding.client_name.clone(),
+            namespace: self.namespace.clone(),
             binding_reveal_allowed: self.binding.reveal_allowed,
             resource: self.resource.clone(),
             profile_id: self.profile_id.clone(),

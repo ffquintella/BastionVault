@@ -19,6 +19,10 @@ pub struct PairingRequest<'a> {
     pub client_version: &'a str,
     pub transport: Transport,
     pub peer_uid: Option<u32>,
+    /// The namespace the client's tokens will be bound to (`""` = root): the
+    /// host's narrowing request (`bvault mcp serve --namespace`), else the
+    /// operator session's own. `None` when the host cannot tell.
+    pub namespace: Option<&'a str>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -37,6 +41,10 @@ pub struct PairingGrant {
     /// turn it off.
     pub confirm_connect: bool,
     pub ttl_secs: u64,
+    /// The operator chose to narrow this pairing's tokens to a namespace
+    /// (T457 Phase 2; the desktop dialog's selector). `None` follows the
+    /// operator's session. The vault decides whether it is permitted.
+    pub namespace: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -112,6 +120,9 @@ pub struct ConfirmRequest<'a> {
     pub open_world: bool,
     /// Present when the profile requires the operator's MFA.
     pub mfa: Option<MfaStep<'a>>,
+    /// The namespace the call runs in: the one the pairing's token is bound
+    /// to (`""` = root). `None` when the host cannot tell.
+    pub namespace: Option<&'a str>,
 }
 
 /// A human. `None` from either method means *no operator is reachable*, which
@@ -237,6 +248,7 @@ pub fn normalize_grant(grant: PairingGrant) -> Result<PairingGrant, String> {
     if grant.ttl_secs == 0 {
         return Err("the token lifetime must be at least one second".to_string());
     }
+    let namespace = grant.namespace.as_deref().map(super::link::normalize_namespace).transpose()?;
 
     Ok(PairingGrant {
         tool_allowlist,
@@ -249,6 +261,7 @@ pub fn normalize_grant(grant: PairingGrant) -> Result<PairingGrant, String> {
         // Never what the channel asked for: on whenever sessions are.
         confirm_connect: grant.connect_allowed,
         ttl_secs: grant.ttl_secs.min(MAX_TOKEN_TTL_SECS),
+        namespace,
     })
 }
 
@@ -276,6 +289,7 @@ pub fn build_record(request: &PairingRequest<'_>, grant: &PairingGrant, now: u64
         approved_at: now,
         expires_at: Some(now + DEFAULT_PAIRING_LIFETIME_SECS),
         last_used_at: now,
+        namespace: grant.namespace.clone(),
     };
     (record, token)
 }
@@ -296,7 +310,32 @@ mod tests {
             connect_allowed: false,
             confirm_connect: false,
             ttl_secs: 8 * 3600,
+            namespace: None,
         }
+    }
+
+    /// T457 Phase 2: a narrowing chosen at approval is canonicalized, refused
+    /// when malformed, and recorded on the pairing.
+    #[test]
+    fn a_narrowing_is_normalized_and_recorded() {
+        let mut g = grant();
+        g.namespace = Some("/dti/esi/".into());
+        let normalized = normalize_grant(g.clone()).unwrap();
+        assert_eq!(normalized.namespace.as_deref(), Some("dti/esi"));
+        let request = PairingRequest {
+            client_name: "c",
+            client_version: "1",
+            transport: Transport::Stdio,
+            peer_uid: None,
+            namespace: Some("dti"),
+        };
+        let (record, _) = build_record(&request, &normalized, 1);
+        assert_eq!(record.namespace.as_deref(), Some("dti/esi"), "the grant's choice, not the dialog's default");
+        let (record, _) = build_record(&request, &normalize_grant(grant()).unwrap(), 1);
+        assert_eq!(record.namespace, None, "no choice: the tokens follow the session");
+
+        g.namespace = Some("dti/../root".into());
+        assert!(normalize_grant(g).unwrap_err().contains("not a well-formed namespace path"));
     }
 
     #[test]
@@ -323,8 +362,13 @@ mod tests {
         // No sessions, nothing to confirm; and the record follows the grant.
         let none = normalize_grant(grant()).unwrap();
         assert!(!none.connect_allowed && !none.confirm_connect);
-        let request =
-            PairingRequest { client_name: "c", client_version: "1", transport: Transport::Stdio, peer_uid: None };
+        let request = PairingRequest {
+            client_name: "c",
+            client_version: "1",
+            transport: Transport::Stdio,
+            peer_uid: None,
+            namespace: None,
+        };
         let (record, _) = build_record(&request, &both, 1);
         assert!(record.connect_allowed && record.confirm_connect);
     }
@@ -433,8 +477,13 @@ mod tests {
 
     #[test]
     fn only_a_loopback_http_pairing_gets_a_bearer_and_only_its_hash_is_recorded() {
-        let request =
-            PairingRequest { client_name: "c", client_version: "1", transport: Transport::Uds, peer_uid: Some(7) };
+        let request = PairingRequest {
+            client_name: "c",
+            client_version: "1",
+            transport: Transport::Uds,
+            peer_uid: Some(7),
+            namespace: None,
+        };
         let (record, bearer) = build_record(&request, &grant(), 100);
         assert!(bearer.is_none() && record.pairing_token_hash.is_none());
         assert_eq!((record.peer_uid, record.transport.as_str()), (Some(7), "uds"));
@@ -445,6 +494,7 @@ mod tests {
             client_version: "1",
             transport: Transport::LoopbackHttp,
             peer_uid: None,
+            namespace: None,
         };
         let (record, bearer) = build_record(&request, &grant(), 100);
         let bearer = bearer.expect("loopback HTTP needs a bearer");

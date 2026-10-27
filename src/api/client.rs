@@ -278,7 +278,15 @@ impl Client {
 
         let method_upper = method.to_uppercase();
         let build_request = |builder: http::request::Builder| -> http::request::Builder {
-            let builder = builder.header("Accept", "application/json");
+            let mut builder = builder.header("Accept", "application/json");
+            // The caller's extra headers (`add_header`), such as the
+            // namespace an operator call targets. Set by code, never from a
+            // response; the token header below is not one a caller can name.
+            for (name, value) in &self.headers {
+                if !name.eq_ignore_ascii_case("X-BastionVault-Token") {
+                    builder = builder.header(name.as_str(), value.as_str());
+                }
+            }
             if !path.ends_with("/login") {
                 builder.header("X-BastionVault-Token", &self.token)
             } else {

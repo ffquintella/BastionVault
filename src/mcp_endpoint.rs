@@ -10,6 +10,7 @@
 //! forward to. Keeping it here means an embedded vault answers an assistant
 //! exactly as a remote one does, gate for gate.
 
+use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -25,7 +26,11 @@ use serde_json::{json, Map, Value};
 use crate::{
     core::Core,
     errors::RvError,
-    kernel_api::mcp_events::{self, AgentRefused},
+    kernel_api::{
+        mcp_events::{self, AgentRefused},
+        namespace::{bound_namespace, NAMESPACE_HEADER},
+        VaultCtx,
+    },
     logical::{is_open_world_mcp_tool, Auth, McpAuditContext, McpBinding, McpBindingKind, Operation, Request},
     modules::auth::AuthModule,
 };
@@ -122,17 +127,36 @@ async fn handle_tools_call(
     let connect_ticket =
         is_open_world_mcp_tool(&tool).then(|| bv_mcp::jsonrpc::connect_ticket(params.get("_meta"))).flatten();
 
-    let mcp_audit = mcp_audit_context(ep, &tool, &args, binding, params.get("_meta"));
     // The dispatcher consumes the arguments; a session tool's refusal event
     // names the resource and profile they gave.
     let session_args = is_open_world_mcp_tool(&tool).then(|| args.clone());
-    let backend = InProcessMcpBackend { core: ep.core.clone(), mcp_audit };
+
+    // The namespace every request of this call runs in: the token's stored
+    // binding, resolved now, or the call is refused. Never a header, a body
+    // field or an argument, and never root in place of an unusable one.
+    let namespace = match call_namespace(ep.core, auth).await {
+        Ok(ns) => ns,
+        Err(message) => {
+            if let Some(args) = &session_args {
+                audit_session_refusal(ep.core, token, auth, binding, &tool, args, MCP_NAMESPACE_UNAVAILABLE).await;
+            }
+            return JsonRpcResponse::failure(
+                id,
+                JsonRpcError::with_data_code(bv_mcp::error::JSONRPC_INVALID_PARAMS, message, MCP_NAMESPACE_UNAVAILABLE),
+            );
+        }
+    };
+
+    let mut mcp_audit = mcp_audit_context(ep, &tool, &args, binding, params.get("_meta"));
+    mcp_audit.namespace = namespace.clone();
+    let backend = InProcessMcpBackend { core: ep.core.clone(), mcp_audit, namespace: namespace.clone() };
     let principal = PrincipalInfo {
         accessor: mcp_accessor(token),
         display_name: meta.client_info.as_ref().map(|c| c.name.clone()).unwrap_or_default(),
         // The token entry's own policies, which are what the ACL evaluates
         // every routed call against.
         policies: auth.policies.clone(),
+        namespace,
     };
     let ctx = DispatchContext {
         binding,
@@ -277,12 +301,47 @@ async fn audit_session_refusal(
             McpBindingKind::App(_) => None,
         },
         client_name: binding.client_name.clone(),
+        // Attribution: the binding as stored, even when it is the reason the
+        // call was refused.
+        namespace: bound_namespace(&auth.metadata)
+            .unwrap_or_else(|_| crate::kernel_api::namespace::binding_from_metadata(&auth.metadata).0),
     };
     let mut who = Request::new("mcp/dispatch");
     who.client_token = token.to_string();
     who.auth = Some(auth.clone());
     if let Err(e) = mcp_events::emit(core.as_ref(), &event, Some(&who)).await {
         log::warn!(target: "security", "connect.agent.refused could not be written to the audit log: {e}");
+    }
+}
+
+/// The stable refusal for a call whose namespace cannot be used: one code,
+/// shared with the exchange that refuses to mint such a token.
+pub use crate::modules::system::mcp::MCP_NAMESPACE_UNAVAILABLE;
+
+/// The namespace an MCP token's calls run in: its stored binding, canonical
+/// and resolvable now. `Err` is the refusal text, led by
+/// [`MCP_NAMESPACE_UNAVAILABLE`].
+async fn call_namespace(core: &Arc<Core>, auth: &Auth) -> Result<String, String> {
+    let ns = bound_namespace(&auth.metadata).map_err(|_| {
+        format!("{MCP_NAMESPACE_UNAVAILABLE}: this token's namespace binding is malformed; the call was not run")
+    })?;
+    resolve_namespace(core, &ns).await
+}
+
+/// `ns` as the namespace registry knows it now; root needs no lookup. A
+/// namespace that was deleted, or that cannot be resolved, is refused.
+async fn resolve_namespace(core: &Arc<Core>, ns: &str) -> Result<String, String> {
+    if ns.is_empty() {
+        return Ok(String::new());
+    }
+    let unavailable = |why: String| {
+        format!("{MCP_NAMESPACE_UNAVAILABLE}: namespace {ns:?} {why}; the call was not run, and is never run at root instead")
+    };
+    let registry = core.namespaces().ok_or_else(|| unavailable("cannot be resolved: no namespace registry".into()))?;
+    match registry.resolve(ns).await {
+        Ok(Some(found)) if !found.is_root() => Ok(found.path),
+        Ok(_) => Err(unavailable("no longer exists".into())),
+        Err(e) => Err(unavailable(format!("could not be resolved ({e})"))),
     }
 }
 
@@ -304,6 +363,9 @@ struct InProcessMcpBackend {
     core: Arc<Core>,
     /// Stamped on every request this call routes (`Request::mcp_audit`).
     mcp_audit: McpAuditContext,
+    /// The namespace every routed request targets (`""` = root): the MCP
+    /// token's own binding, resolved by [`call_namespace`].
+    namespace: String,
 }
 
 #[async_trait::async_trait]
@@ -324,6 +386,15 @@ impl Backend for InProcessMcpBackend {
         };
         req.client_token = token.to_string();
         req.body = body;
+        // The namespace comes from the token's binding alone (T457): the
+        // request is built here, so no client header reaches it. Re-resolved
+        // per request, so a namespace deleted mid-call is refused, not
+        // silently read as root by a header-scoped path.
+        if !self.namespace.is_empty() {
+            let ns = resolve_namespace(&self.core, &self.namespace).await.map_err(ClientError::backend)?;
+            req.headers = Some(HashMap::from([(NAMESPACE_HEADER.to_string(), ns.clone())]));
+            req.namespace_path = Some(ns);
+        }
         // The token this call carries is MCP-bound; `pre_route`'s
         // `check_token` must be told so via `Request::mcp_dispatch`, or its
         // MCP-origin gate refuses the very token this whole path exists to

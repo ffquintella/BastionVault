@@ -130,6 +130,13 @@ pub struct McpAuditContext {
     pub client_version: String,
     pub transport: String,
     pub tool: String,
+    /// The namespace the MCP token is bound to and every request of this
+    /// call was routed in, canonical (`""` = root). Taken from the token's
+    /// stored binding, never from the client (`features/mcp-namespace-selection.md`).
+    /// `#[serde(default)]`: an entry written before the field existed reads
+    /// as root, which is where every MCP call ran then.
+    #[serde(default)]
+    pub namespace: String,
     pub catalogue_hash: String,
     /// `bv_mcp::dispatcher::args_hash` of the call's `arguments`: BLAKE3 hex,
     /// so the arguments correlate across the gatekeeper, the vault and an
@@ -376,5 +383,28 @@ impl Request {
         };
 
         storage.delete(key).await
+    }
+}
+
+#[cfg(test)]
+mod mcp_audit_context_tests {
+    use super::McpAuditContext;
+
+    /// `features/mcp-namespace-selection.md` "Persisted formats": an audit
+    /// block written before `namespace` existed decodes as root, which is
+    /// where every MCP call ran then; a new one carries it.
+    #[test]
+    fn a_block_without_a_namespace_reads_as_root() {
+        let old = r#"{"kind":"pairing","name":"p","client_name":"c","client_version":"1","transport":"http",
+            "tool":"bv_kv_read","catalogue_hash":"h","reveal_requested":false,"reveal_granted":false,
+            "destructive":false,"confirmed_by_operator":false,"decision":"allowed","tls_kx_group":null,
+            "waived":false,"peer_uid":null,"peer_pid":null,"otel_traceparent":null,"otel_tracestate":null}"#;
+        let parsed: McpAuditContext = serde_json::from_str(old).unwrap();
+        assert_eq!(parsed.namespace, "");
+
+        let new = McpAuditContext { namespace: "dti/esi".into(), ..Default::default() };
+        let wire = serde_json::to_value(&new).unwrap();
+        assert_eq!(wire["namespace"], "dti/esi");
+        assert_eq!(serde_json::from_value::<McpAuditContext>(wire).unwrap().namespace, "dti/esi");
     }
 }
