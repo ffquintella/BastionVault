@@ -937,8 +937,13 @@ _bump-write:
 	@# a `version = "0.39.7"` requirement cannot match a 0.40.0 package.
 	@$(SED_INPLACE) 's/^bastion_vault = { path = "\.\.\/\.\.", version = "[^"]*"/bastion_vault = { path = "..\/..", version = "$(NEW)"/' crates/bvault-cli/Cargo.toml
 	@$(SED_INPLACE) 's/^bastion_vault = { path = "\.\.\/\.\.", version = "[^"]*"/bastion_vault = { path = "..\/..", version = "$(NEW)"/' crates/bv-server/Cargo.toml
+	@# Cargo.lock records every workspace member's version. CI builds with
+	@# `--locked`, so a bump committed without the matching lock fails the
+	@# release job ("cannot update the lock file"). `--workspace` re-resolves
+	@# the members only and leaves every third-party pin alone.
+	@cargo update --workspace --offline >/dev/null 2>&1 || { echo "_bump-write: cargo update --workspace --offline failed; run it by hand and commit Cargo.lock" >&2; exit 1; }
 	@echo "Bumped version: $(VERSION) -> $(NEW)"
-	@echo "  Cargo.toml:                    $$(grep '^version' Cargo.toml | head -1)"
+	@echo "  Cargo.toml:                   $$(grep '^version' Cargo.toml | head -1)"
 	@echo "  gui/src-tauri/Cargo.toml:      $$(grep '^version' gui/src-tauri/Cargo.toml | head -1)"
 	@echo "  gui/package.json:              $$(grep '\"version\"' gui/package.json | head -1 | sed 's/^[ \t]*//')"
 	@echo "  gui/src-tauri/tauri.conf.json: $$(grep '\"version\"' gui/src-tauri/tauri.conf.json | head -1 | sed 's/^[ \t]*//')"
