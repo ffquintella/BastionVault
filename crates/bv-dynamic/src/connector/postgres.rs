@@ -182,12 +182,13 @@ impl Connector for PostgresConnector {
 
     fn default_revocation(&self, username: &str) -> Result<Vec<String>, DynamicError> {
         let ident = quote_ident(username)?;
-        Ok(vec![format!("DROP OWNED BY {ident}"), format!("DROP ROLE IF EXISTS {ident}")])
+        // `ident` is `quote_ident` output, the only dynamic part of either statement.
+        Ok(vec![["DROP OWNED BY ", &ident].concat(), ["DROP ROLE IF EXISTS ", &ident].concat()])
     }
 
     fn default_renew(&self, username: &str, expiration: &str) -> Result<Vec<String>, DynamicError> {
         check_expiration(expiration)?;
-        Ok(vec![format!("ALTER ROLE {} VALID UNTIL {}", quote_ident(username)?, quote_literal(expiration)?)])
+        Ok(vec![["ALTER ROLE ", &quote_ident(username)?, " VALID UNTIL ", &quote_literal(expiration)?].concat()])
     }
 
     fn default_root_rotation(&self, username: &str, password: &str) -> Result<Vec<String>, DynamicError> {
