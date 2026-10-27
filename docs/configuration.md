@@ -246,6 +246,7 @@ hsm "yubihsm2" {
 | `pqc_key_cache_ttl` | `60s` | Unwrapped-seed cache TTL; `0` disables caching. |
 | `recovery` | `none` | `none` or `shamir-ceremony` (init-time only). `shamir-ceremony` is refused at `init` in the per-node topology and by `migrate-to-pool`; in a pool, init creates the recovery key and returns its shares (`recovery_shares` / `recovery_threshold`, default 5 / 3); see [docs/hsm.md](hsm.md#recovery-modes). |
 | `topology` | `per-node` | `per-node` (one device per node) or `pool` (two devices shared by the cluster; see below). |
+| `attestation_roots_file` | | (yubihsm2) PEM file holding the Yubico YubiHSM attestation root and intermediate certificates, which every YubiHSM 2 attestation is verified against (pool `bootstrap` and `member add`, per-node enrollment). Unset ⇒ every YubiHSM 2 attestation is refused. BastionVault neither ships nor downloads these certificates: get them from Yubico and check their fingerprints ([docs/hsm.md](hsm.md#yubico-attestation-trust-file)). Refused on the `mock` backend. |
 
 > The mock backend has no hardware protection and refuses to start when
 > `BVAULT_ENV=production`. See the [HSM guide](hsm.md) for the full workflow.
@@ -253,9 +254,11 @@ hsm "yubihsm2" {
 ### HSM pool topology (`topology = "pool"`)
 
 Two devices serve the whole cluster ([HSM pool HA](../features/hsm-pool-ha.md),
-T454). This build runs the pool on the **mock** backend only; a `yubihsm2` pool
-block is validated and then refused at startup, because pool nodes authenticate
-with per-node credentials that node enrollment (T454 phase 4) delivers.
+T454). Pool nodes authenticate with per-node credentials that node enrollment
+delivers. A `yubihsm2` pool reaches its members through the HSM link and
+attests them against `attestation_roots_file`; its device path is validated on
+hardware by T454 phase 7 ([runbook](hsm.md#phase-7-hardware-validation-t454)),
+which has not run yet.
 
 ```hcl
 hsm "mock" {

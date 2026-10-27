@@ -1120,6 +1120,7 @@ mod tests {
             node_id: node_id.into(),
             pool: None,
             recovery_explicit: false,
+            attestation_roots_file: None,
         }
     }
 

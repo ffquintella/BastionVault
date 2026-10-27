@@ -1278,6 +1278,7 @@ mod tests {
             node_id: node.into(),
             pool: None,
             recovery_explicit: false,
+            attestation_roots_file: None,
         }
     }
 
@@ -1615,6 +1616,7 @@ mod tests {
                     device_audit: crate::hsm::device_audit::DeviceAuditMode::Drain,
                 }),
                 recovery_explicit: true,
+                attestation_roots_file: None,
                 ..cfg(node)
             }
         }

@@ -25,6 +25,10 @@ use zeroize::Zeroizing;
 use crate::errors::RvError;
 
 pub mod admin;
+// Yubico chain pinning (T454 phase 7): compiled with the hardware backend,
+// and in unit tests, which check it against generated chains.
+#[cfg(any(feature = "hsm_yubihsm2", test))]
+pub mod attestation;
 pub mod authz;
 pub mod blob;
 pub mod blobset;
@@ -36,6 +40,9 @@ pub mod custody_store;
 pub mod derive;
 pub mod device_audit;
 pub mod enroll;
+// The phase 7 hardware harness: test tooling, never in a product build.
+#[cfg(any(feature = "hsm_hardware_tests", test))]
+pub mod hw_validation;
 pub mod node_creds;
 pub mod pool;
 pub mod recovery;
@@ -256,6 +263,9 @@ pub struct ResolvedHsmConfig {
     /// Whether `recovery` was written in the config. Pool init refuses an
     /// implicit recovery posture (spec § Barrier KEK, bootstrap at init).
     pub recovery_explicit: bool,
+    /// PEM file with the Yubico attestation root and intermediates (yubihsm2
+    /// only, T454 phase 7). `None` refuses every YubiHSM 2 attestation.
+    pub attestation_roots_file: Option<String>,
 }
 
 impl ResolvedHsmConfig {
@@ -431,6 +441,10 @@ pub struct HsmConfigBlock {
     pub authz_key_id: u16,
     #[serde(default)]
     pub seed_ecdh_key_id: u16,
+    /// yubihsm2 only: the operator's PEM file of Yubico attestation roots
+    /// and intermediates, which attestation is pinned to (T454 phase 7).
+    #[serde(default)]
+    pub attestation_roots_file: String,
 }
 
 /// Parse a `"60s"` / `"500ms"` / `"0"` duration string. Empty ⇒ the default.
@@ -518,6 +532,17 @@ pub fn resolve_config(label: &str, raw: &HsmConfigBlock) -> Result<ResolvedHsmCo
     };
     validate_node_id(&node_id)?;
 
+    let attestation_roots_file = match raw.attestation_roots_file.trim() {
+        "" => None,
+        _ if backend_type != "yubihsm2" => {
+            return Err(config_err(
+                "`attestation_roots_file` pins the Yubico attestation chain and is for the yubihsm2 backend only; \
+                 the mock attests with its own test CA",
+            ))
+        }
+        path => Some(path.to_string()),
+    };
+
     Ok(ResolvedHsmConfig {
         backend_type,
         connector: raw.connector.clone(),
@@ -530,6 +555,7 @@ pub fn resolve_config(label: &str, raw: &HsmConfigBlock) -> Result<ResolvedHsmCo
         node_id,
         pool,
         recovery_explicit: !raw.recovery.trim().is_empty(),
+        attestation_roots_file,
     })
 }
 
@@ -926,7 +952,9 @@ impl MemberOpener for ConfigMemberOpener {
             #[cfg(feature = "hsm_yubihsm2")]
             {
                 let (connector, relay) = self.yubihsm2_route(target)?;
-                let session = yubihsm2::YubiHsm2AdminSession::open(connector, relay, password, self.config.objects)?;
+                let roots = self.config.attestation_roots_file.as_deref().map(std::path::PathBuf::from);
+                let session =
+                    yubihsm2::YubiHsm2AdminSession::open(connector, relay, password, self.config.objects, roots)?;
                 return Ok(Box::new(session));
             }
             #[cfg(not(feature = "hsm_yubihsm2"))]
@@ -1100,6 +1128,20 @@ mod tests {
             Err(other) => panic!("unexpected error {other}"),
             Ok(_) => panic!("config must be rejected ({needle})"),
         }
+    }
+
+    /// The Yubico trust file is a yubihsm2 setting; unset is `None`, which
+    /// the attestation verifier refuses, and the mock never takes it.
+    #[test]
+    fn attestation_roots_file_is_yubihsm2_only() {
+        assert_eq!(resolve_config("yubihsm2", &yubi_pool()).unwrap().attestation_roots_file, None);
+        let mut raw = yubi_pool();
+        raw.attestation_roots_file = " /etc/bastionvault/yubico-attestation.pem ".into();
+        let cfg = resolve_config("yubihsm2", &raw).unwrap();
+        assert_eq!(cfg.attestation_roots_file.as_deref(), Some("/etc/bastionvault/yubico-attestation.pem"));
+        let mut mock = mock_pool();
+        mock.attestation_roots_file = "/etc/roots.pem".into();
+        rejects("mock", &mock, "yubihsm2 backend only");
     }
 
     #[test]

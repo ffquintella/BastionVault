@@ -1702,6 +1702,7 @@ mod tests {
                     device_audit: self.device_audit,
                 }),
                 recovery_explicit: true,
+                attestation_roots_file: None,
             }
         }
 

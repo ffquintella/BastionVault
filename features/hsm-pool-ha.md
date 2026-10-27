@@ -4,7 +4,9 @@
 > pool backend) done 2026-10-19, phase 3 (HSM link) done 2026-10-27, phase 4
 > (ceremonies, repair, bootstrap, provisioning, YubiHSM 2 wiring, rotation,
 > migration) done 2026-10-27 on the mock, phase 5 (recovery) done 2026-10-27
-> on the mock; see [Current state](#current-state). Spec
+> on the mock, phase 6 (audit and observability) done 2026-10-27 on the mock,
+> phase 7 (hardware validation) prepared 2026-10-27 and awaiting the hardware
+> run; see [Current state](#current-state). Spec
 > written 2026-10-19. Extends
 > [HSM Support (YubiHSM 2)](hsm-support.md) (S17), whose non-negotiable security
 > rules apply here unchanged unless a section below says otherwise and why.
@@ -551,8 +553,11 @@ provisioned. Init:
 **Attestation verification**, which closes the S17 gap "Yubico root-CA pinning not
 yet enforced":
 
-1. Pin the Yubico attestation root and intermediate certificates. They ship in the
-   binary, with SHA-256 fingerprints in the source.
+1. Pin the Yubico attestation root and intermediate certificates. *(Changed in
+   phase 7: they do not ship in the binary. The operator supplies them in a
+   PEM trust file, `attestation_roots_file`, after checking their fingerprints
+   against Yubico's; without it every YubiHSM 2 attestation is refused. See
+   [Current state](#current-state).)*
 2. Walk the chain: leaf → device attestation certificate → intermediate → root.
 3. Require the serial extension (`41482.4.2`) to equal the device serial reported
    by `device-info`.
@@ -884,7 +889,99 @@ the relay and the device's admin commands in. Phase 5 adds the recovery key,
 recovery copies and the recovery ceremony, also on the mock. Phase 6 adds the
 device-log drain, the remaining metrics, the extended status and the GUI pool
 sections; the drain runs on the mock and is refused on a YubiHSM 2 until
-phase 7.
+phase 7. Phase 7 is **prepared, awaiting the hardware run**: the Yubico
+attestation chain is verified against an operator-supplied trust file, and a
+hardware suite that only an operator runs is in place; nothing has been run
+on a device yet.
+
+Phase 7 (hardware validation, prepared; compiled and tested against the
+mock and generated certificates only):
+
+- **Attestation chain** (`hsm/attestation.rs`, `x509-parser` with its `ring`
+  verifier). A YubiHSM 2 attestation is now `key certificate ‖ device
+  attestation certificate` (opaque object 0), DER. `verify_chain` checks:
+  exactly those two certificates (intermediates come from the trust file);
+  every link's signature, validity now, X.509 v3, an accepted algorithm (SHA-2
+  RSA PKCS#1, ECDSA SHA-256/384, Ed25519) matching the TBS one, and no unknown
+  critical extension; the key certificate is signed by the device certificate
+  and is not a CA; the device certificate is issued by a trust-file
+  certificate, every trust-file certificate on the path is a CA with
+  `keyCertSign`, and the path ends at a self-signed root in the file within
+  four links; the YubiHSM extensions `41482.4.{2,3,4,5,6,9}` are present and
+  well formed; origin is "generated on the device". A BIT STRING field is read
+  in full or DER-minimal (trailing zero bits dropped), the same bits either
+  way; the firmware field is reported, never decided on.
+- **Pinned to the device** (`yubihsm2.rs`). The admin session's
+  `verify_attestation` additionally requires the attested serial to be the
+  `device-info` serial of the device reached, and object id, label, domains,
+  capabilities and algorithm to equal what `provision` creates for that
+  object (`attested_layout`, the table `provision` itself generates from), with
+  no export bit; `verify_member` then compares the key with the device's own
+  public key and runs the `bv-identity` challenge and the layout check, as on
+  the mock. The per-node backend's `verify_attestation` (S17 enrollment) is
+  pinned to the same trust file and requires origin "generated"; it used to
+  accept an unpinned leaf with a warning.
+- **Trust file** (`attestation_roots_file`, yubihsm2 only, refused on the
+  mock). PEM certificates only (a key or other block is refused), at most
+  1 MiB, at least one self-signed root; a missing or unreadable file is an
+  error naming it. Unset: every YubiHSM 2 attestation is refused, with the
+  message naming the setting and where Yubico publishes the certificates.
+- **`provision`** reads the device attestation certificate with the factory
+  key before any write (only the factory key holds `get-opaque` in this
+  layout) and appends it to each attestation in the bundle. `--adopt` on a
+  pool device cannot read it (`bv-admin` lacks `get-opaque`) and is refused,
+  rather than emitting a bundle that could never be attested. A bundle from an
+  earlier build holds only the key certificate and is refused as truncated.
+- **Hardware suite** (feature `hsm_hardware_tests`, which no crate above
+  `bv-core` forwards; `tests/hsm_pool_hardware.rs` with `required-features`;
+  logic in `hsm/hw_validation/mod.rs`, device half in
+  `hsm/hw_validation/device.rs`). Skipped unless `BVAULT_TEST_YUBIHSM_POOL=1`.
+  Three invocations, ordered least to most destructive: `snapshot`
+  (read-only: serial, firmware, algorithms, storage, force-audit and
+  command-audit options, every object's metadata, the device certificate's
+  summary, the device log and whether its digest chain verifies; then the
+  factory-state preflight; saved once as `snapshot-before.json`, never
+  overwritten), `validate` (re-snapshot and match, preflight, trust file, then
+  behind `BVAULT_TEST_YUBIHSM_ALLOW_WRITES=1`: provision, attest, test node
+  key, dual-wrap, relay through a real gateway, latency, revoke, and the
+  reset instructions), and `compare` after the operator's physical reset
+  (read-only: snapshot, save, preflight, diff with "none" expected; log
+  counters, the device log and the connector version are ignored, an
+  unreadable value is reported as unverified, never as equal). Serial
+  allow-list of exactly two (`BVAULT_TEST_YUBIHSM_SERIALS`), checked at the
+  connector status and again at `device-info`; one `yubihsm-connector` per
+  device on its own loopback port with `--serial`, killed on exit; passwords
+  only from the environment, zeroized, never printed. The harness refuses by
+  name, with the reason, any request to reset, update firmware, enable FIPS
+  mode, set command or forced audit, or run the production provision.
+  Runbook: `docs/hsm.md` § Phase 7 hardware validation.
+
+Decisions made in phase 7 where this spec left room:
+
+- The Yubico root and intermediate are operator-supplied, not shipped.
+  Rejected: embedding them (the spec's first plan), because this build has no
+  copy whose provenance can be checked offline, and a wrong embedded root
+  would be trusted silently; a trust file the operator verified against
+  Yubico's published fingerprints keeps that check with the operator, and its
+  absence refuses rather than trusts.
+- The bundle carries the device certificate next to each key certificate
+  instead of `verify_member` reading object 0 through the admin session:
+  `bv-admin`'s capabilities stay as the layout table says (no `get-opaque`).
+- The hardware suite is a feature-gated test binary, not `#[ignore]` tests:
+  `--ignored` would run it from any default build, and a default build should
+  not even compile the device half.
+- The suite stops before the production `provision` and never runs
+  `bootstrap` / `init` against the devices; its write set is the test
+  `provision` and one node key.
+
+Still owed by the hardware run (not done, not claimed): attestation against
+the real Yubico chain (the extension encodings are Yubico's documented ones,
+unconfirmed on a device; any mismatch refuses), `provision` and `--adopt` on
+hardware, the unwrap MAC-failure code, the relay's latencies, the device-log
+layout (captured read-only by the snapshot; the YubiHSM 2 drain, `bv-auditor`
+and forced audit stay refused until it is reviewed), unplugging a device
+mid-run, a three-node `bootstrap` / `init`, the reset-then-`faulted` check,
+and the FIPS Ed25519 question (these devices are not FIPS models).
 
 Phase 6 (audit and observability, mock):
 
@@ -1275,6 +1372,7 @@ Decisions made in phase 4 part 3:
 Phase 7 (needs hardware): pin the Yubico attestation root and intermediate
 and walk the chain (serial, capability and origin extensions); run
 `provision`, bootstrap, enrollment and the relay against two devices.
+Prepared, see the phase 7 entry at the top of this section.
 
 Phase 3:
 
@@ -1491,7 +1589,7 @@ Not done in phase 2, deliberately:
 | 4. Ceremonies and repair | `provision`, attestation chain pinning, node enroll/revoke with credential delivery, member add/retire, repair job, epoch rotation, `migrate-to-pool`, v2 routes, CLI | `crates/bv-core/src/hsm/{admin,ceremony,node_creds,repair}.rs`, `crates/bv-core/src/seal/hsm/pool_admin.rs`, `crates/bv-kernel/src/modules/system/`, `crates/bvault-cli` | Done (mock; Yubico attestation pinning and device validation moved to phase 7) |
 | 5. Recovery | Recovery keypair, Shamir split, recovery copies, `recover` route | `crates/bv-core/src/hsm/recovery.rs`, `crates/bv-core/src/seal/hsm/recovery_ceremony.rs`, `crates/bv-server/src/sys.rs`, `crates/bvault-cli` | Done (mock; the YubiHSM 2 ceremony waits on phase 7 attestation) |
 | 6. Audit and observability | Device-log drain, events, metrics, status, GUI page, `docs/hsm.md`, `docs/api.md` | `crates/bv-core/src/hsm/device_audit.rs`, `crates/bv-core/src/seal/hsm/device_drain.rs`, `gui/src/routes/HsmStatusPage.tsx` | Done (mock; the YubiHSM 2 drain waits on phase 7) |
-| 7. Hardware validation | Two physical devices plus three nodes; pin the Yubico attestation chain and lift the YubiHSM 2 attestation refusal; validate `provision`, bootstrap, enrollment and the relay; confirm the device log layout, digest chain and forced audit, and lift the YubiHSM 2 drain refusal; measure latencies; confirm the FIPS Ed25519 question; **end every run by factory-resetting both devices and checking they provision again** (see [Resetting the test devices](#resetting-the-test-devices)) | `tests/` behind `BVAULT_TEST_YUBIHSM_POOL=1` | Planned |
+| 7. Hardware validation | Two physical devices plus three nodes; pin the Yubico attestation chain and lift the YubiHSM 2 attestation refusal; validate `provision`, bootstrap, enrollment and the relay; confirm the device log layout, digest chain and forced audit, and lift the YubiHSM 2 drain refusal; measure latencies; confirm the FIPS Ed25519 question; **end every run by factory-resetting both devices and checking they provision again** (see [Resetting the test devices](#resetting-the-test-devices)) | `crates/bv-core/src/hsm/{attestation,yubihsm2}.rs`, `crates/bv-core/src/hsm/hw_validation/`, `crates/bv-core/tests/hsm_pool_hardware.rs` (feature `hsm_hardware_tests`, behind `BVAULT_TEST_YUBIHSM_POOL=1`), `docs/hsm.md` | Prepared, awaiting hardware run (attestation pinning and the suite done on the mock; no device run yet) |
 
 **What happens to the existing modules:**
 

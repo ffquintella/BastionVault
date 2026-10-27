@@ -18,7 +18,11 @@
 //! signs `domain_separated(ctx, msg)` with pure Ed25519, and wrap blobs use the
 //! shared [`crate::hsm::blob`] envelope over the device's AES-CCM `wrap-data`.
 
-use std::{path::Path, sync::Mutex};
+use std::{
+    path::{Path, PathBuf},
+    sync::Mutex,
+    time::SystemTime,
+};
 
 use bv_hsm_link::{GatewayUrl, LinkTls, Relay, RelayConfig, RelayLimits};
 use sha2::{Digest, Sha256};
@@ -36,11 +40,84 @@ use crate::{
             node_slot_of, verify_layout, HsmAdminSession, NodeCredential, ObjectInfo, ObjectKind, ADMIN_AUTH_KEY_ID,
             FACTORY_AUTH_KEY_ID,
         },
+        attestation::{self, AttestedKeyAlgorithm, ExpectedKey, YubiHsmAttestation, YubicoTrustAnchors},
         blob::{open_blob, seal_blob, Context, HsmId},
         ceremony::AttestationBundle,
         domain_separated, AttestedKey, HsmBackend, HsmObjectId, HsmObjectIds, ResolvedHsmConfig, ResolvedLink,
     },
 };
+
+/// The device attestation certificate: opaque object 0, signed by Yubico.
+/// Reading it needs `get-opaque`, which only the factory key holds in the
+/// pool layout, so `provision` reads it before deleting that key.
+pub const DEVICE_ATTESTATION_CERT_ID: u16 = 0;
+
+/// Read the device attestation certificate (opaque object 0).
+pub fn device_attestation_certificate(client: &Client) -> Result<Vec<u8>, RvError> {
+    client.get_opaque(DEVICE_ATTESTATION_CERT_ID).map_err(|e| {
+        RvError::ErrHsmAttestationInvalid(format!(
+            "cannot read the device attestation certificate (opaque object 0): {e}"
+        ))
+    })
+}
+
+/// An attestation as bundles carry it: the attested key's certificate
+/// followed by the device certificate, both DER.
+fn attestation_chain(key_certificate: Vec<u8>, device_certificate: &[u8]) -> Vec<u8> {
+    let mut chain = key_certificate;
+    chain.extend_from_slice(device_certificate);
+    chain
+}
+
+/// The trust file, or the refusal that says how to configure one.
+fn load_anchors(path: Option<&Path>) -> Result<YubicoTrustAnchors, RvError> {
+    YubicoTrustAnchors::load(path.ok_or_else(attestation::anchors_not_configured)?)
+}
+
+/// The three attested objects `provision` generates, with the exact domain,
+/// capabilities and algorithm each gets. Provisioning and attestation
+/// verification both read this table, so they cannot drift apart.
+pub fn attested_layout(
+    objects: &HsmObjectIds,
+) -> [(HsmObjectId, &'static str, Domain, Capability, asymmetric::Algorithm); 3] {
+    [
+        (objects.identity, "bv-identity", Domain::DOM2, Capability::SIGN_ECDSA, asymmetric::Algorithm::EcP256),
+        (objects.seed_ecdh, "bv-seed-ecdh", Domain::DOM1, Capability::DERIVE_ECDH, asymmetric::Algorithm::EcP256),
+        (objects.authz, "bv-authz", Domain::DOM1, Capability::SIGN_EDDSA, asymmetric::Algorithm::Ed25519),
+    ]
+}
+
+/// What the attestation of object `object_id` on device `serial` must say.
+pub fn expected_attested_key(
+    objects: &HsmObjectIds,
+    object_id: HsmObjectId,
+    serial: u32,
+) -> Result<ExpectedKey<'static>, RvError> {
+    let (_, label, domains, capabilities, algorithm) =
+        attested_layout(objects).into_iter().find(|entry| entry.0 == object_id).ok_or_else(|| {
+            RvError::ErrHsmAttestationInvalid(format!(
+                "object {object_id:#06x} is not one of the attested pool keys (bv-identity, bv-seed-ecdh, bv-authz)"
+            ))
+        })?;
+    let algorithm = match algorithm {
+        asymmetric::Algorithm::EcP256 => AttestedKeyAlgorithm::EcP256,
+        asymmetric::Algorithm::Ed25519 => AttestedKeyAlgorithm::Ed25519,
+        _ => AttestedKeyAlgorithm::Other,
+    };
+    Ok(ExpectedKey {
+        serial,
+        object_id,
+        label,
+        capabilities: capabilities.bits(),
+        domains: domains.bits(),
+        algorithm,
+    })
+}
+
+fn exportable(attested: &YubiHsmAttestation) -> bool {
+    let caps = Capability::from_bits_retain(attested.capabilities);
+    caps.intersects(Capability::EXPORTABLE_UNDER_WRAP | Capability::EXPORT_WRAPPED)
+}
 
 /// Map a `yubihsm` client error to an opaque HSM error (never leak device
 /// internals or key material through the message). The class matters to the
@@ -81,6 +158,8 @@ pub struct YubiHsm2Backend {
     /// `bv-identity`, cached at open. Empty for a pool member client, whose
     /// domain-1 node key cannot read the domain-2 identity.
     identity_pub: Vec<u8>,
+    /// The Yubico trust file attestations are pinned to (`None` refuses).
+    attestation_roots: Option<PathBuf>,
     /// The loopback relay to the member's gateway; after `client`, so the
     /// client is dropped first.
     _relay: Option<Relay>,
@@ -105,7 +184,15 @@ impl YubiHsm2Backend {
         // binds, so an unreadable serial is an error rather than "".
         let serial = client.device_info().map(|i| i.serial_number.to_string()).map_err(map_yubi)?;
 
-        Ok(Self { client: Mutex::new(client), objects: config.objects, serial, authz_pub, identity_pub, _relay: None })
+        Ok(Self {
+            client: Mutex::new(client),
+            objects: config.objects,
+            serial,
+            authz_pub,
+            identity_pub,
+            attestation_roots: config.attestation_roots_file.as_deref().map(PathBuf::from),
+            _relay: None,
+        })
     }
 
     fn client(&self) -> Result<std::sync::MutexGuard<'_, Client>, RvError> {
@@ -181,43 +268,33 @@ impl HsmBackend for YubiHsm2Backend {
         }
     }
 
+    /// The key's attestation certificate (signed by the device's default
+    /// attestation key) followed by the device certificate (object 0), so the
+    /// verifier can walk to the Yubico root. Fails, rather than emitting a
+    /// leaf alone, when this auth key cannot read object 0.
     async fn attest(&self, key: HsmObjectId) -> Result<Vec<u8>, RvError> {
         let client = self.client()?;
-        // `None` ⇒ device's default attestation key, which chains to the Yubico
-        // attestation root CA.
+        let device = device_attestation_certificate(&client)?;
         let cert = client.sign_attestation_certificate(key, None).map_err(map_yubi)?;
-        Ok(cert.into_vec())
+        Ok(attestation_chain(cert.into_vec(), &device))
     }
 
+    /// Per-node attestation (S17 enrollment): the chain is pinned to the
+    /// Yubico trust file and the key must have been generated on the device.
+    /// The per-node layout has no fixed profile, so capabilities are only
+    /// reported (`non_exportable`); the pool's admin session checks them.
     async fn verify_attestation(&self, cert_chain: &[u8]) -> Result<AttestedKey, RvError> {
-        // Parse the leaf attestation certificate and extract the attested
-        // public key and serial. The presence of a YubiHSM 2 attestation cert
-        // itself certifies in-device generation and non-exportability.
-        //
-        // SECURITY: full pinning of the Yubico attestation root CA is required
-        // before production use of the hardware backend. The enrollment flow
-        // (Phase 3) is where the chain must be walked to the pinned root; this
-        // leaf extraction is the input to that check. Emit a loud warning so
-        // the gap is never silent.
-        use x509_cert::der::Decode;
-        let cert = x509_cert::Certificate::from_der(cert_chain)
-            .map_err(|e| RvError::ErrHsmAttestationInvalid(format!("leaf parse: {e}")))?;
-
-        let spki = &cert.tbs_certificate.subject_public_key_info;
-        let public_key = spki
-            .subject_public_key
-            .as_bytes()
-            .ok_or_else(|| RvError::ErrHsmAttestationInvalid("missing subject public key".into()))?
-            .to_vec();
-        let serial = cert.tbs_certificate.serial_number.to_string();
-
-        log::warn!(
-            target: "security",
-            "yubihsm2 attestation: leaf parsed but Yubico root-CA chain pinning is not yet enforced — \
-             enable pinned-root verification before production enrollment"
-        );
-
-        Ok(AttestedKey { label: String::new(), object_id: 0, public_key, serial, non_exportable: true })
+        let anchors = load_anchors(self.attestation_roots.as_deref())?;
+        let attested = attestation::verify_chain(&anchors, cert_chain, SystemTime::now()).inspect_err(|e| {
+            log::error!(target: "security", "YubiHSM 2 attestation refused: {e}");
+        })?;
+        Ok(AttestedKey {
+            label: attested.label.clone(),
+            object_id: attested.object_id,
+            serial: attestation::format_serial(attested.serial),
+            non_exportable: !exportable(&attested),
+            public_key: attested.public_key,
+        })
     }
 
     async fn derive_ecdh(&self, key: HsmObjectId, peer_pub: &[u8]) -> Result<Zeroizing<Vec<u8>>, RvError> {
@@ -325,7 +402,16 @@ impl YubiHsm2Backend {
             Client::open(connector, Credentials::new(credential.auth_key_id(), key), true).map_err(map_yubi)?;
         let authz_pub = client.get_public_key(objects.authz).map_err(map_yubi)?.as_ref().to_vec();
         let serial = client.device_info().map(|i| i.serial_number.to_string()).map_err(map_yubi)?;
-        Ok(Self { client: Mutex::new(client), objects, serial, authz_pub, identity_pub: Vec::new(), _relay: relay })
+        Ok(Self {
+            client: Mutex::new(client),
+            objects,
+            serial,
+            authz_pub,
+            identity_pub: Vec::new(),
+            // A member client never attests; the admin session does.
+            attestation_roots: None,
+            _relay: relay,
+        })
     }
 }
 
@@ -395,6 +481,8 @@ pub struct YubiHsm2AdminSession {
     client: Mutex<Client>,
     serial: String,
     objects: HsmObjectIds,
+    /// The Yubico trust file attestations are pinned to (`None` refuses).
+    attestation_roots: Option<PathBuf>,
     _relay: Option<Relay>,
 }
 
@@ -404,11 +492,27 @@ impl YubiHsm2AdminSession {
         relay: Option<Relay>,
         password: &str,
         objects: HsmObjectIds,
+        attestation_roots: Option<PathBuf>,
     ) -> Result<Self, RvError> {
         let credentials = Credentials::from_password(ADMIN_AUTH_KEY_ID, password.as_bytes());
         let client = Client::open(connector, credentials, false).map_err(map_yubi)?;
         let serial = client.device_info().map(|i| i.serial_number.to_string()).map_err(map_yubi)?;
-        Ok(Self { client: Mutex::new(client), serial, objects, _relay: relay })
+        Ok(Self { client: Mutex::new(client), serial, objects, attestation_roots, _relay: relay })
+    }
+
+    /// The pinned check behind [`HsmAdminSession::verify_attestation`]: the
+    /// chain reaches a root in the trust file, the key was generated on this
+    /// very device (serial), and its object id, label, domains, capabilities
+    /// and algorithm are exactly what `provision` creates for that object.
+    pub fn verify_pinned(&self, chain: &[u8], now: SystemTime) -> Result<YubiHsmAttestation, RvError> {
+        let anchors = load_anchors(self.attestation_roots.as_deref())?;
+        let attested = attestation::verify_chain(&anchors, chain, now)?;
+        let serial = attestation::parse_serial(&self.serial)?;
+        attested.require(&expected_attested_key(&self.objects, attested.object_id, serial)?)?;
+        if exportable(&attested) {
+            return Err(RvError::ErrHsmAttestationInvalid(format!("{} carries an export capability", attested.label)));
+        }
+        Ok(attested)
     }
 
     fn client(&self) -> Result<std::sync::MutexGuard<'_, Client>, RvError> {
@@ -503,16 +607,25 @@ impl HsmAdminSession for YubiHsm2AdminSession {
         self.client()?.sign_ecdsa_prehash_raw(key, digest).map_err(map_yubi)
     }
 
-    /// Refused: walking the chain to the pinned Yubico attestation root and
-    /// intermediate needs their certificates, which this build does not pin
-    /// yet. Accepting a leaf alone would let any device pose as a member.
-    async fn verify_attestation(&self, _attestation: &[u8]) -> Result<AttestedKey, RvError> {
-        log::error!(target: "security", "YubiHSM 2 attestation refused: the Yubico attestation chain is not pinned");
-        Err(RvError::ErrHsmAttestationInvalid(
-            "the Yubico attestation root and intermediate are not pinned in this build, so a YubiHSM 2 cannot be \
-             attested as a pool member yet (T454 phase 7)"
-                .into(),
-        ))
+    /// Pinned to the operator's Yubico trust file ([`Self::verify_pinned`]);
+    /// refused outright when none is configured. `verify_member` then checks
+    /// the key against the bundle and the device's own public key.
+    async fn verify_attestation(&self, chain: &[u8]) -> Result<AttestedKey, RvError> {
+        let attested = self.verify_pinned(chain, SystemTime::now()).inspect_err(|e| {
+            log::error!(target: "security", "YubiHSM 2 {} attestation refused: {e}", self.serial);
+        })?;
+        log::info!(
+            target: "security",
+            "YubiHSM 2 {} attested {} (object {:#06x}) to Yubico root {}",
+            self.serial, attested.label, attested.object_id, attested.root_sha256
+        );
+        Ok(AttestedKey {
+            label: attested.label,
+            object_id: attested.object_id,
+            public_key: attested.public_key,
+            serial: self.serial.clone(),
+            non_exportable: true,
+        })
     }
 
     async fn close(&self) -> Result<(), RvError> {
@@ -521,9 +634,9 @@ impl HsmAdminSession for YubiHsm2AdminSession {
 }
 
 /// `bvault operator hsm provision` on a YubiHSM 2 (spec § Provision a
-/// device), through its local connector: from factory state, create
-/// `bv-admin` and the layout, delete factory key 1, return the bundle.
-/// Unverified on hardware (T454 phase 7).
+/// device), through its local connector: from factory state, read the
+/// device attestation certificate, create `bv-admin` and the layout, delete
+/// factory key 1, return the bundle. Validated on hardware by T454 phase 7.
 #[maybe_async::maybe_async]
 pub async fn provision(
     connector: &str,
@@ -535,9 +648,13 @@ pub async fn provision(
     if admin_password.is_empty() {
         return Err(RvError::ErrHsm("the bv-admin password must not be empty".into()));
     }
+    let mut device_certificate = None;
     if !adopt {
         let factory = Credentials::from_password(FACTORY_AUTH_KEY_ID, factory_password.as_bytes());
         let client = Client::open(local_connector(connector)?, factory, false).map_err(map_yubi)?;
+        // Read-only, before any write: a device whose certificate cannot be
+        // read could never be attested, so it is left untouched.
+        device_certificate = Some(device_attestation_certificate(&client)?);
         let present = client.list_objects(&[]).map_err(map_yubi)?;
         let factory_state = present.len() == 1
             && present[0].object_id == FACTORY_AUTH_KEY_ID
@@ -573,25 +690,67 @@ pub async fn provision(
                 )
                 .map_err(map_yubi)?;
         }
-        let asymmetric = [
-            (objects.identity, "bv-identity", Domain::DOM2, Capability::SIGN_ECDSA, asymmetric::Algorithm::EcP256),
-            (objects.seed_ecdh, "bv-seed-ecdh", Domain::DOM1, Capability::DERIVE_ECDH, asymmetric::Algorithm::EcP256),
-            (objects.authz, "bv-authz", Domain::DOM1, Capability::SIGN_EDDSA, asymmetric::Algorithm::Ed25519),
-        ];
-        for (id, name, domain, caps, algorithm) in asymmetric {
+        for (id, name, domain, caps, algorithm) in attested_layout(objects) {
             client.generate_asymmetric_key(id, label(name)?, domain, caps, algorithm).map_err(map_yubi)?;
         }
     }
-    let session = YubiHsm2AdminSession::open(local_connector(connector)?, None, admin_password, *objects)?;
+    let session = YubiHsm2AdminSession::open(local_connector(connector)?, None, admin_password, *objects, None)?;
     if !adopt {
         session.client()?.delete_object(FACTORY_AUTH_KEY_ID, object::Type::AuthenticationKey).map_err(map_yubi)?;
     }
     verify_layout(&session, objects).await?;
+    // `--adopt` has no factory key; `bv-admin` lacks `get-opaque` in the pool
+    // layout, so this is refused there, explicitly, rather than emitting a
+    // bundle without the device certificate that could never be attested.
+    let device_certificate = match device_certificate {
+        Some(der) => der,
+        None => device_attestation_certificate(&*session.client()?).map_err(|e| {
+            RvError::ErrHsmAttestationInvalid(format!(
+                "{e}; `--adopt` cannot produce an attestable bundle on this device, reset it and provision it from \
+                 factory state"
+            ))
+        })?,
+    };
     let attest = |id: HsmObjectId| -> Result<Vec<u8>, RvError> {
-        Ok(session.client()?.sign_attestation_certificate(id, None).map_err(map_yubi)?.into_vec())
+        let key_certificate = session.client()?.sign_attestation_certificate(id, None).map_err(map_yubi)?;
+        Ok(attestation_chain(key_certificate.into_vec(), &device_certificate))
     };
     let bundle =
         AttestationBundle::new("yubihsm2", &session.serial, "", &attest(objects.identity)?, &attest(objects.authz)?)
             .with_seed_ecdh(&attest(objects.seed_ecdh)?);
     Ok(bundle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What attestation must say is the provision table, in the bit values
+    /// Yubico's attestation extensions carry (sign-ecdsa 0x80, sign-eddsa
+    /// 0x100, derive-ecdh 0x800; domain n is bit n-1). AES wrap keys have no
+    /// attestation; `verify_member` checks them by `get-object-info`.
+    #[test]
+    fn the_attested_profile_is_the_provision_layout() {
+        let objects = HsmObjectIds::default();
+        let profile = |id: HsmObjectId| {
+            let e = expected_attested_key(&objects, id, 36_470_559).unwrap();
+            assert_eq!((e.serial, e.object_id), (36_470_559, id));
+            (e.label, e.capabilities, e.domains, e.algorithm)
+        };
+        assert_eq!(profile(objects.identity), ("bv-identity", 0x80, 0x0002, AttestedKeyAlgorithm::EcP256));
+        assert_eq!(profile(objects.seed_ecdh), ("bv-seed-ecdh", 0x800, 0x0001, AttestedKeyAlgorithm::EcP256));
+        assert_eq!(profile(objects.authz), ("bv-authz", 0x100, 0x0001, AttestedKeyAlgorithm::Ed25519));
+        for wrap_key in [objects.wrap_barrier, objects.wrap_pqc] {
+            assert!(expected_attested_key(&objects, wrap_key, 1).is_err(), "{wrap_key:#x}");
+        }
+    }
+
+    /// No trust file configured: refused, naming the setting.
+    #[test]
+    fn attestation_is_refused_without_a_trust_file() {
+        let err = load_anchors(None).unwrap_err().to_string();
+        assert!(err.contains("attestation_roots_file"), "{err}");
+        let err = load_anchors(Some(Path::new("/nonexistent/yubico-attestation.pem"))).unwrap_err().to_string();
+        assert!(err.contains("/nonexistent/yubico-attestation.pem"), "{err}");
+    }
 }

@@ -187,6 +187,7 @@ mod tests {
             node_id: node.into(),
             pool: None,
             recovery_explicit: false,
+            attestation_roots_file: None,
         }
     }
 

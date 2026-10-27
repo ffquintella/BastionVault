@@ -76,12 +76,12 @@ yubihsm = { version = "0.42.1", optional = true, default-features = false, featu
 # in the minimal Wolfi runtime.
 rusb = { version = "0.9", optional = true, features = ["vendored"] }
 
-# Leaf-certificate parsing for `hsm::yubihsm2::verify_attestation` (the YubiHSM
-# 2 attestation cert). DER decode only -- no `builder`, no `pem` -- so the
-# hardware backend does not drag the PKI engine's certificate-authoring surface
-# into the seal path. Optional, and reached only through `hsm_yubihsm2`.
-# `make check-hsm` is what compiles this -- no default build does.
-x509-cert = { version = "0.2", default-features = false, features = ["std"], optional = true }
+# Yubico attestation chain verification (`hsm::attestation`, T454 phase 7):
+# PEM/DER, the YubiHSM extensions and each link's signature. `verify` is the
+# `ring` backend, as in the root crate, PKI and SAML: no aws-lc-sys/openssl-sys.
+# Replaces the leaf-only `x509-cert` parse that accepted an unpinned chain.
+# Only through `hsm_yubihsm2` (and the unit tests); `make check-hsm` builds it.
+x509-parser = { version = "0.18", features = ["verify"], optional = true }
 # The HSM pool's node-side loopback relay (T454 phase 4): `yubihsm` 0.42 speaks
 # only plain HTTP, so each pool member client talks to a relay that carries its
 # requests over mTLS to the member's gateway. Tier 0, `bv-errors` only; reached
@@ -104,6 +104,20 @@ bv-storage = { path = "../bv-storage", features = ["test-support"] }
 # compile at all, so nothing ran them. Already in the graph through bv-errors
 # with these features, so it adds no compile cost.
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros"] }
+# The attestation verifier's unit tests (`hsm::attestation`) build fake Yubico
+# chains -- root, intermediate, device certificate, attested key with the
+# YubiHSM extensions -- and parse them with the verifier's own crate. Both are
+# already in the lockfile (root crate, PKI engine, bv-hsm-link). Test-only.
+rcgen = "0.14"
+x509-parser = { version = "0.18", features = ["verify"] }
+
+# T454 phase 7 hardware suite: two real YubiHSM 2 devices, skipped unless
+# BVAULT_TEST_YUBIHSM_POOL=1. `required-features` keeps every default build,
+# `make test-changed` and `make test-integration` from compiling it at all.
+[[test]]
+name = "hsm_pool_hardware"
+path = "tests/hsm_pool_hardware.rs"
+required-features = ["hsm_hardware_tests"]
 
 [features]
 default = []
@@ -123,7 +137,12 @@ storage_hiqlite = ["bv-storage/storage_hiqlite"]
 # provides NO hardware protection and REFUSES TO START in production. See
 # features/hsm-support.md.
 hsm_mock = []
-hsm_yubihsm2 = ["dep:yubihsm", "dep:rusb", "dep:x509-cert", "dep:bv-hsm-link"]
+hsm_yubihsm2 = ["dep:yubihsm", "dep:rusb", "dep:x509-parser", "dep:bv-hsm-link"]
+# T454 phase 7: the hardware validation harness (`hsm::hw_validation::device`
+# and `tests/hsm_pool_hardware.rs`). Test tooling, never part of a product
+# build: no crate above bv-core forwards it and the container image does not
+# name it. The harness's pure logic is unit-tested without it.
+hsm_hardware_tests = ["hsm_yubihsm2"]
 
 # Lints this crate's code trips, all of which the root crate already allows.
 [lints.clippy]

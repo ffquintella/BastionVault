@@ -120,6 +120,7 @@ mod tests {
             node_id: "n1".into(),
             pool: None,
             recovery_explicit: false,
+            attestation_roots_file: None,
         }
     }
 

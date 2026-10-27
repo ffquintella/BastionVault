@@ -127,6 +127,11 @@ EXAMPLE ENTRY:
 - Add the `sql` Connect protocol to `database` resources with strict profile parsing, endpoint-bound credential release from a secret's `sql_endpoint`, MFA for `sql` profiles, and `resources/v2/sql/privileges/<resource>`. (T124, S109)
 - Offer the SQL capabilities in the GUI: chips and validator messages in the policy builder, chips and presets on resource and asset-group shares, a SQL profile editor on database resources, and a consent panel for the two plugin grants. (T124, S109)
 
+#### HSM pool HA (phase 7 of 7, prepared: hardware validation)
+
+- Attest YubiHSM 2 pool members against the Yubico attestation chain: set `attestation_roots_file` in the `hsm "yubihsm2"` block to a PEM file of the Yubico YubiHSM attestation root and intermediates, which you download from Yubico and check against its published fingerprints (BastionVault neither ships nor fetches them); `bootstrap`, `member add` and `recover` then verify each key certificate up to a root in that file, with the device's serial, on-device generation, and the exact domains, capabilities, label and object id `provision` created, and log the root fingerprint reached; without the file every YubiHSM 2 attestation is refused, naming the setting (T454, S114)
+- Validate the pool on two real YubiHSM 2 devices with the phase 7 hardware suite (`cargo test -p bv-core --features hsm_hardware_tests --test hsm_pool_hardware`, skipped unless `BVAULT_TEST_YUBIHSM_POOL=1`; runbook in `docs/hsm.md`): a read-only `snapshot` and factory-state preflight, a `validate` run whose writes need `BVAULT_TEST_YUBIHSM_ALLOW_WRITES=1` (test provision, pinned attestation, a test node key, dual-wrap, the HSM link relay, latency rounds, revocation) and ends with the physical-reset instructions, and a read-only `compare` against the saved snapshot after the reset; it touches only the two serials in `BVAULT_TEST_YUBIHSM_SERIALS`, takes passwords only from the environment, and never resets a device, updates firmware, enables FIPS mode, sets an audit option or runs the production provision. Not yet run on hardware (T454, S114)
+
 #### HSM pool HA (phase 6 of 7: audit and observability)
 
 - Drain every HSM pool member's device audit log every 5 seconds while unsealed: the `bv-auditor` key (auth key 8: read and acknowledge the log, nothing else) reads it, the digest chain is verified from the cursor at `core/hsm/audit-cursor/<hsm_id>`, each command becomes an `hsm.device_log` audit event naming the auth key and the node it belongs to, and the log is acknowledged only after the cursor is stored; an index jump (overflow), a chain break, a reset log or new unlogged events raise `hsm.device_log_gap` and `bv_hsm_device_log_gap_total{member}`, and the entries after a gap are still drained. A member drained by another node less than 5 s ago is skipped. `device_audit` is now accepted in a pool `hsm` block: `drain` (default), `forced`, or `off` (refused in production) (T454, S114)
@@ -164,6 +169,10 @@ EXAMPLE ENTRY:
 - Run `bvault hsm-gateway --config gateway.hcl` on a host with a YubiHSM 2 to expose its localhost `yubihsm-connector` to vault nodes over mutual TLS: only TLS 1.3 clients whose certificate chains to `client_ca_file` and carries a DNS SAN exactly equal to one of `allowed_clients` get through; each client may have one request in flight and `max_rps_per_client` requests per second (default 50); only `POST /connector/api` (3–3139-byte body) and `GET /connector/status` are forwarded, bodies verbatim and client headers dropped, with a 5 s connector timeout; chunked, duplicated-length, pipelined and other malformed requests are refused before reaching the connector; a non-loopback `connector`, an empty or invalid `allowed_clients` or an unknown field stops the command at startup; logs name the peer and client and never contain a request or response body. The node-side loopback relay ships in the new `bv-hsm-link` crate but is not used by the HSM seal yet, so a `yubihsm2` pool is still refused (T454, S114)
 
 ### Changed
+
+#### HSM pool HA (phase 7, prepared)
+
+- Include the device attestation certificate in every YubiHSM 2 attestation `operator hsm provision` writes: it is read with the factory key before the first write, and appended to each key certificate in the bundle. Re-provision a device whose bundle came from an earlier build, which is now refused as truncated; `--adopt` on a provisioned pool device cannot read the certificate and is refused instead of writing a bundle that could never be attested (T454, S114)
 
 #### MCP namespace selection (Phase 3)
 
@@ -214,6 +223,10 @@ EXAMPLE ENTRY:
 - Keep the expiration register-and-restore benchmark's leases alive for the whole test: their 400 s TTL was shorter than the 10 000-lease registration loop on Windows (453 s alone, ~960 s in a full run), so leases expired before the count.
 
 ### Security
+
+#### HSM pool HA: YubiHSM 2 attestation pinned to the Yubico chain (T454 phase 7)
+
+- Stop accepting a YubiHSM 2 attestation that is not chained to a trusted Yubico root: per-node enrollment used to accept the key certificate alone with a warning; every YubiHSM 2 attestation is now refused unless it reaches a self-signed root in `attestation_roots_file` through CA certificates from that file, with valid dates, accepted SHA-2 or Ed25519 signatures, no unknown critical extension, and a key generated on the device; a missing, unreadable or rootless trust file, or one holding anything but certificates, is an error, never an empty trust set (T454, S114)
 
 #### HSM pool HA: device audit log (T454 phase 6)
 

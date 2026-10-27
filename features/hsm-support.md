@@ -45,8 +45,9 @@ Because the YubiHSM 2 has no native ML-KEM / ML-DSA support, post-quantum keys u
 
 All behavior is covered by unit/integration tests using the mock backend (30+ tests across the
 `hsm` and `seal` modules). The `hsm_yubihsm2` backend compiles against the real crate but requires
-a device (`BVAULT_TEST_YUBIHSM=1`) to exercise; its attestation chain still needs Yubico root-CA
-pinning before production use (flagged in `src/hsm/yubihsm2.rs`).
+a device (`BVAULT_TEST_YUBIHSM=1`) to exercise. Its attestation chain is verified against the
+operator's Yubico trust file (`attestation_roots_file`, T454 phase 7,
+`crates/bv-core/src/hsm/attestation.rs`) and refused without one; not yet run against a device.
 
 ## Motivation
 

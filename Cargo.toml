@@ -600,7 +600,7 @@ ssh_pqc = ["bv-engine-ssh/ssh_pqc"]
 hsm_mock = ["bv-core/hsm_mock"]
 # `hsm_yubihsm2` is the production backend for the mandated YubiHSM 2, via
 # the pure-Rust `yubihsm` crate over the HTTP connector or direct USB.
-# The backend itself, its `x509-cert` attestation parsing and its `rusb`
+# The backend itself, its `x509-parser` attestation chain check and its `rusb`
 # vendored-libusb build now live in `bv-core` (Phase 4.5 moved `src/hsm/`
 # there); this feature only forwards the flag down. `make check-hsm` is what
 # compiles the result — nothing else in the workspace does.

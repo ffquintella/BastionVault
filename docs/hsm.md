@@ -140,6 +140,38 @@ operator-unseal.
 | `pqc_key_cache_ttl` | both | No | `60s` | TTL for the unwrapped-seed session cache. `0` disables caching (strict per-operation unwrap). |
 | `recovery` | both | No | `none` | `none` or `shamir-ceremony`. **Honored only at `init`; cannot be enabled later.** `shamir-ceremony` is refused at `init` in the per-node topology and by `migrate-to-pool` (see below). |
 | `topology` | both | No | `per-node` | `per-node` or `pool`. The pool keys (`member`, `min_wrap_copies`, `link`, `credential_dir`) are in [configuration.md](configuration.md#hsm-pool-topology-topology--pool); see [Pool topology](#pool-topology-two-devices-for-the-cluster). |
+| `attestation_roots_file` | yubihsm2 | For attestation | — | PEM file of the Yubico attestation root and intermediates. Unset ⇒ every YubiHSM 2 attestation is refused. See [Yubico attestation trust file](#yubico-attestation-trust-file). |
+
+### Yubico attestation trust file
+
+A YubiHSM 2 attests a key by signing a certificate for it with the device's
+attestation key, whose own certificate (opaque object 0, read by `provision`)
+Yubico signs through an intermediate under its root. BastionVault verifies
+that chain against a trust file **you supply**: it does not ship the Yubico
+certificates and never downloads them.
+
+1. Download the YubiHSM attestation root and intermediate certificates from
+   Yubico (<https://developers.yubico.com/YubiHSM2/Concepts/Attestation.html>)
+   on a trusted machine, and check their SHA-256 fingerprints against the
+   values Yubico publishes.
+2. Concatenate them into one PEM file (certificates only; any other block,
+   such as a key, is refused) and point `attestation_roots_file` at it on
+   every node that runs `bootstrap`, `member add` or `recover`.
+3. The file needs no secrecy, only integrity: make it root-owned and
+   read-only.
+
+What is checked, for each attested key (`bv-identity`, `bv-seed-ecdh`,
+`bv-authz`): the bundle holds exactly the key certificate and the device
+certificate (intermediates come from the trust file, never from the device);
+each link's signature, validity at the current time, X.509 v3 and an accepted
+algorithm (SHA-2 RSA PKCS#1, ECDSA P-256/P-384, Ed25519; SHA-1 and RSA-PSS are
+refused); every trust-file certificate on the path is a CA allowed to sign
+certificates; the path ends at a self-signed root in the file; the key was
+generated on the device (origin); and its serial, object id, label, domains,
+capabilities and algorithm are exactly what `provision` created on the device
+reached. The `security` log names the root fingerprint each attestation
+reached. A missing, unreadable or rootless trust file is an error naming the
+file, never an empty trust set.
 
 ### Recovery modes
 
@@ -320,10 +352,13 @@ bvault operator hsm repair --run                                # drops hsm-b's 
   `bv-seed-ecdh` (object 6 by default, `seed_ecdh_key_id`).
 - **Audit:** pool events reach the audit log at
   `sys/hsm/events/<event>/<member>` once it is up, and the `security` log always.
-- **YubiHSM 2 pools** start and reach members through the link, but attesting a
-  YubiHSM 2 is refused until the Yubico attestation chain is pinned, so
-  bootstrap and `member add` stop there; nothing on the device path is
-  verified on hardware yet (phase 7).
+- **YubiHSM 2 pools** start and reach members through the link. Attestation is
+  verified against the [Yubico trust file](#yubico-attestation-trust-file)
+  (`attestation_roots_file`) and refused without it. Nothing on the device
+  path is verified on hardware until the
+  [phase 7 run](#phase-7-hardware-validation-t454); `provision` now also
+  reads the device attestation certificate, so a bundle made by an earlier
+  build (key certificate only) is refused as truncated: provision again.
 - **Epoch rotation:** `bvault operator hsm rotate-epoch --admin hsm-a --admin hsm-b`
   generates new wrap keys on every active member, re-wraps the KEK and every
   custody set to the next epoch and deletes the old keys; an interrupted run
@@ -437,6 +472,122 @@ cannot be recovered is listed in `custody_unrecovered` and raised as
 `hsm.crypto_failure`. Other enrolled nodes pick up their new credentials on
 their next refresh. Reset or destroy the lost devices if they reappear.
 
+### Phase 7 hardware validation (T454)
+
+The pool's YubiHSM 2 path is validated on two real devices by a test suite
+that only an operator at the machine runs. It is compiled only with the
+`hsm_hardware_tests` feature (no product build, `make test` or
+`make test-changed` compiles it) and does nothing unless
+`BVAULT_TEST_YUBIHSM_POOL=1`. Design and acceptance:
+[HSM pool HA § Phase 7](../features/hsm-pool-ha.md#resetting-the-test-devices).
+
+**What it never does:** reset a device, update firmware, enable FIPS mode, set
+any audit option (forced or command audit), run the production `provision`,
+or touch a device whose serial is not in `BVAULT_TEST_YUBIHSM_SERIALS`. Its
+only writes are the test `provision` (behind `BVAULT_TEST_YUBIHSM_ALLOW_WRITES=1`)
+and one test node key, which it deletes again. Passwords come only from the
+environment and are never printed or written.
+
+Prerequisites: both devices in factory state on this host, which is not
+shared; `yubihsm-connector` 3.0.x (no connector already running on ports
+12345 and 12346); the [Yubico trust file](#yubico-attestation-trust-file); a
+new, empty output directory per campaign.
+
+| Variable | Required | Meaning |
+|---|---|---|
+| `BVAULT_TEST_YUBIHSM_POOL` | yes | `1` runs the suite; anything else skips it |
+| `BVAULT_TEST_YUBIHSM_SERIALS` | yes | The two serials, comma-separated; any other device is refused |
+| `BVAULT_TEST_YUBIHSM_OUT` | yes | Output directory (snapshots, bundles, reports) |
+| `BVAULT_TEST_YUBIHSM_STEP` | no | `snapshot` (default), `validate` or `compare` |
+| `BVAULT_TEST_YUBIHSM_UNTIL` | no | Stop after this step, e.g. `anchors` (before the first write) |
+| `BVAULT_TEST_YUBIHSM_ALLOW_WRITES` | for `provision` | `1` opens the write gate; without it a plan that writes is refused whole |
+| `BVAULT_TEST_YUBIHSM_ADMIN_PASSWORD` | for writes | The **test** `bv-admin` password; must differ from the factory one |
+| `BVAULT_TEST_YUBIHSM_FACTORY_PASSWORD` | no | Factory key password; default the published one |
+| `BVAULT_TEST_YUBICO_ATTESTATION_ROOTS` | for `validate` | The Yubico trust file |
+| `BVAULT_TEST_YUBIHSM_CONNECTOR` | no | Connector binary; default `yubihsm-connector` on `PATH` |
+| `BVAULT_TEST_YUBIHSM_PORT_BASE` | no | First connector port, default `12345` (the second device gets the next) |
+| `BVAULT_TEST_YUBIHSM_LATENCY_ITERATIONS` | no | Rounds per timed operation, 1–1000, default 20 |
+
+Each invocation starts one connector per device on `127.0.0.1` with
+`--serial`, checks the connector's status and then the authenticated
+`device-info` serial against the list, and kills the connectors when it
+exits.
+
+~~~bash
+# 0. Build it (no device is touched).
+cargo test -p bv-core --features hsm_hardware_tests --test hsm_pool_hardware --no-run
+
+export BVAULT_TEST_YUBIHSM_POOL=1
+export BVAULT_TEST_YUBIHSM_SERIALS=36470559,36470560
+export BVAULT_TEST_YUBIHSM_OUT="$HOME/bv-phase7-$(date +%Y%m%d)"
+export BVAULT_TEST_YUBIHSM_CONNECTOR=/usr/local/bin/yubihsm-connector
+export BVAULT_TEST_YUBICO_ATTESTATION_ROOTS=/path/to/yubico-attestation.pem
+mkdir "$BVAULT_TEST_YUBIHSM_OUT"
+
+# 1. Read-only: snapshot both devices with the factory key, preflight them
+#    (factory key 0x0001 and nothing else) and save snapshot-before.json.
+BVAULT_TEST_YUBIHSM_STEP=snapshot \
+  cargo test -p bv-core --features hsm_hardware_tests --test hsm_pool_hardware -- --nocapture
+
+# 2a. Still read-only: re-snapshot, match the saved one, preflight, load the
+#     trust file. Stops before the first write.
+BVAULT_TEST_YUBIHSM_STEP=validate BVAULT_TEST_YUBIHSM_UNTIL=anchors \
+  cargo test -p bv-core --features hsm_hardware_tests --test hsm_pool_hardware -- --nocapture
+
+# 2b. The run. Writes begin here; from now on the devices need a physical reset.
+read -rs BVAULT_TEST_YUBIHSM_ADMIN_PASSWORD && export BVAULT_TEST_YUBIHSM_ADMIN_PASSWORD
+BVAULT_TEST_YUBIHSM_STEP=validate BVAULT_TEST_YUBIHSM_ALLOW_WRITES=1 \
+  cargo test -p bv-core --features hsm_hardware_tests --test hsm_pool_hardware -- --nocapture
+unset BVAULT_TEST_YUBIHSM_ADMIN_PASSWORD
+
+# 3. Physical reset, each device in turn: unplug it, press and hold the metal
+#    rim while inserting it, keep pressing for at least 10 seconds, release.
+
+# 4. Read-only: snapshot again, save snapshot-after-<time>.json, preflight,
+#    and diff against snapshot-before.json. The expected difference is none.
+BVAULT_TEST_YUBIHSM_STEP=compare \
+  cargo test -p bv-core --features hsm_hardware_tests --test hsm_pool_hardware -- --nocapture
+~~~
+
+The `validate` run, in order: connectors, snapshot, match-before, preflight,
+anchors (all read-only); **provision** both devices from factory state with
+the test password (it reads each device's attestation certificate first);
+attest each with `verify_member` (pinned chain, `bv-identity` challenge,
+layout check) and present each device's bundle to the other (must be
+refused); enroll a test node key on both; dual-wrap and unwrap on each, a
+copy for one device refused by the other, a tampered copy reported as a
+crypto failure, `bv-identity` refused to the node key (domain 2); the
+latency rounds (wrap, signed unwrap authorization, unwrap, custody key
+creation) on each device through a real gateway and relay (throwaway mTLS CA,
+nothing written to disk) and directly through its connector; delete
+the test node key and confirm the device refuses it; print the reset
+instructions (also in `RESET-REQUIRED.txt`). A failed check is recorded and
+the run goes on, because each run costs a reset; the test fails at the end
+if any check failed. A step that errors after the first write still prints
+the reset instructions.
+
+Output, in `BVAULT_TEST_YUBIHSM_OUT` (no secrets; bundles and certificates
+are public): `snapshot-before.json` (never overwritten), `snapshot-after-*.json`,
+`comparison-*.json`, `bundle-<serial>.json`, `attestations.json` (each
+attested key's serial, origin, domains, capabilities, firmware, device
+certificate and Yubico root fingerprints), `checks-*.json`, `latency.md` /
+`latency.json`, and `connector-<serial>.log`. Each snapshot also records the
+device log read with the factory key and whether its digest chain verified
+as the drain expects; that is the evidence the YubiHSM 2 drain refusal is
+lifted on.
+
+Read by hand, with the factory key, after the reset (the suite cannot):
+`algorithm-toggle`, with `yubihsm-shell`'s `get-option`, the way the
+"before" table in the spec was read. Then the production `provision`, which
+this suite never runs.
+
+Not covered by the suite (manual or later): unplugging a device mid-run,
+a full three-node `bootstrap` / `init` on the devices, the forced-audit
+option and the YubiHSM 2 drain, and the FIPS Ed25519 question (these two
+devices are not FIPS models).
+
+**Measured latencies:** not measured yet; paste the run's `latency.md` here.
+
 ### Failure behavior (fail-closed)
 
 An unreachable or unenrolled HSM keeps the node **sealed** — it never opens the
@@ -456,8 +607,9 @@ sealed while already-unsealed nodes keep serving barrier data.
   absolute (HSM-gated); the runtime guarantee is best-effort. Set
   `pqc_key_cache_ttl = "0"` for strict per-operation unwrap.
 - **Attestation is the enrollment trust root.** Enrollment verifies the device
-  attestation before any key material moves. On real hardware, pin the Yubico
-  attestation root CA before production enrollment.
+  attestation before any key material moves. On a YubiHSM 2 it is verified
+  against the operator's [Yubico trust file](#yubico-attestation-trust-file);
+  without one it is refused, never accepted unverified.
 - **Credentials.** The auth-key password is read via `env:` (or the OS keychain
   in GUI/embedded mode); plaintext credentials in config are rejected outside
   dev builds.
