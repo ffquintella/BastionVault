@@ -842,6 +842,23 @@ fn build_tool_request(tool: &str, args: &Map<String, Value>) -> Result<ToolReque
                 scope_subject: None,
             })
         }
+        // The one tool that reads under `sys/`, which `normalize_component`
+        // refuses for every client-supplied component: the prefix is fixed
+        // here and only a single-segment name is taken from the client. The
+        // namespace is the token's own (`InProcessMcpBackend`), never an
+        // argument, and the vault's ACL decides on the caller's token, so a
+        // user who may not read the policy gets a refusal whatever the
+        // pairing says.
+        "bv_policy_read" => {
+            check_known_args(args, &["name"])?;
+            let name = session_name(args, "name")?;
+            Ok(ToolRequest {
+                operation: Operation::Read,
+                path: format!("sys/policies/acl/{name}"),
+                body: None,
+                scope_subject: None,
+            })
+        }
         "bv_transit_encrypt" => {
             let key = normalize_component(arg_str(args, "key")?)?;
             let mut body = Map::new();

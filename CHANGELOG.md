@@ -58,6 +58,10 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### MCP policy read
+
+- **Let a paired AI assistant read one ACL policy, only when you grant it and only if your own sign-in may read it** (T463, S26, S115) -- The opt-in `bv_policy_read` tool (`name`) reads `sys/policies/acl/<name>` in the token's namespace. It is read-only, takes one plain name (no `/`, `..`, extra arguments or namespace), is left out of a pairing's default tools, and is refused unless the grant's path scope names `sys/policies/acl/...`. The vault applies your policies to the call, so a policy you cannot read stays unreadable to the assistant. The catalogue hash is now `968c50ae6a800915fcf0b6e5506b54e3b95192ff0d50789a0491bb034f47221a`; an operator who pinned the previous hash in `sys/mcp/config` must pin this one.
+
 #### MCP namespace selection (Phases 2 and 3)
 
 - **Narrow an AI assistant's token to a namespace beneath your sign-in** (T457, S115)

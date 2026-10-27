@@ -24,7 +24,8 @@ normal vault token presented to `/v2/mcp` is refused too. There is no way to
 `bvault mcp catalogue` prints every tool. The read tools: `bv_whoami`,
 `bv_capabilities`, `bv_kv_list`, `bv_kv_read_metadata`, `bv_kv_read`,
 `bv_resource_list`, `bv_resource_describe`, `bv_transit_encrypt|decrypt|sign|verify`,
-`bv_totp_code`, `bv_pki_list_certs`, `bv_pki_read_cert`. The write tools:
+`bv_totp_code`, `bv_pki_list_certs`, `bv_pki_read_cert`, and the opt-in `bv_policy_read`
+(see [Reading a policy](#reading-a-policy)). The write tools:
 `bv_kv_write`, `bv_kv_delete` (soft-delete only), `bv_pki_issue`, `bv_ssh_sign`.
 The session tools: `bv_resource_ssh_exec`, which runs one command on a server
 over an SSH session the vault opens (see
@@ -43,8 +44,18 @@ prefix ending in `*`:
 | `bv_resource_list` (no arguments) | `resources/resources/` |
 | `bv_resource_describe` (`name`) | `resources/resources/<name>` |
 | `bv_capabilities` (`path`) | the `path` asked about, not `sys/capabilities-self` |
+| `bv_policy_read` (`name`) | `sys/policies/acl/<name>` |
 | `bv_resource_ssh_exec` (`resource`, `profile`, `command`) | `resources/secrets/<resource>/`, the path the `connect` capability is checked on |
 | `bv_resource_web_fetch` (`resource`, `profile`, `path`, optional `method`) | `resources/secrets/<resource>/`, likewise |
+
+### Reading a policy
+
+`bv_policy_read` returns the rules of one ACL policy by name, so an assistant can help you debug why a user is allowed or refused. It is read-only: it cannot list, write or delete a policy.
+
+- **Opt-in.** It is not in the default tool list. Tick it when you approve a pairing (or name it in `bvault mcp pair`), and give the pairing a path scope that names `sys/policies/acl/*`. No other scope covers it.
+- **Your own permissions apply.** The call runs on the assistant's token, which carries your policies. If your sign-in may not read the policy, the vault refuses and the assistant gets the refusal.
+- **Your namespace only.** The policy is looked up in the namespace the token is bound to. There is no namespace argument, so to read a child namespace's policy, pair with the narrowing to that namespace.
+- **One plain name.** A name with `/`, `..`, a leading space or an invisible character is refused before the vault is asked.
 
 So `secret/*` covers every KV tool on the `secret` mount, and `resources/*`
 covers both resource tools.

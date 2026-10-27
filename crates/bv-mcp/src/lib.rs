@@ -514,6 +514,78 @@ mod dispatch_tests {
         assert!(backend.calls.lock().unwrap().is_empty());
     }
 
+    /// `bv_policy_read` is the only tool that reads under `sys/`: it routes a
+    /// plain read of `sys/policies/acl/<name>` and nothing else.
+    #[tokio::test]
+    async fn policy_read_routes_a_read_of_the_named_policy() {
+        let b = binding(&["bv_policy_read"], &["sys/policies/acl/*"]);
+        let backend = FakeBackend::default().with(
+            "sys/policies/acl/esi-ssh-connect",
+            json!({ "name": "esi-ssh-connect", "policy": "path \"a/*\" {}" }),
+        );
+        let p = principal();
+        let guard = SingleUseGuard::new();
+        let mut args = Map::new();
+        args.insert("name".into(), json!("esi-ssh-connect"));
+        let result = dispatcher::call("bv_policy_read", args, None, &ctx(&b, &backend, &p, &guard)).await.unwrap();
+        assert_eq!(result.structured_content.unwrap()["name"], json!("esi-ssh-connect"));
+        let (op, routed, body) = backend.only_call();
+        assert_eq!((op, routed.as_str(), body), (Operation::Read, "sys/policies/acl/esi-ssh-connect", None));
+    }
+
+    /// The grant must name `sys/policies/acl/...`: a broad non-`sys` scope, or
+    /// a tool allow-list without the tool, refuses before the vault is asked.
+    #[tokio::test]
+    async fn policy_read_needs_both_the_tool_and_a_sys_policy_scope() {
+        let p = principal();
+        let guard = SingleUseGuard::new();
+        let backend = FakeBackend::default();
+        let mut args = Map::new();
+        args.insert("name".into(), json!("x"));
+        for scope in [&["secret/*"][..], &["resources/*"][..], &["sys/policies/acl/other"][..]] {
+            let b = binding(&["bv_policy_read"], scope);
+            let err = dispatcher::call("bv_policy_read", args.clone(), None, &ctx(&b, &backend, &p, &guard))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code(), "mcp_path_out_of_scope", "scope {scope:?}");
+        }
+        let b = binding(&["bv_whoami"], &["sys/policies/acl/*"]);
+        let err = dispatcher::call("bv_policy_read", args, None, &ctx(&b, &backend, &p, &guard)).await.unwrap_err();
+        assert_eq!(err.code(), "mcp_tool_not_allowed");
+        assert!(backend.calls.lock().unwrap().is_empty());
+    }
+
+    /// The name is one plain segment, and nothing rides along: no other
+    /// `sys/` path, no traversal, no namespace argument.
+    #[tokio::test]
+    async fn policy_read_takes_exactly_one_plain_name() {
+        let b = binding(&["bv_policy_read"], &["sys/*"]);
+        let p = principal();
+        let guard = SingleUseGuard::new();
+        let backend = FakeBackend::default();
+        for args in [
+            json!({ "name": "a/b" }),
+            json!({ "name": "../root" }),
+            json!({ "name": "history/../x" }),
+            json!({ "name": "" }),
+            json!({ "name": " x" }),
+            json!({ "name": "x\u{202e}" }),
+            json!({ "name": "x", "namespace": "other" }),
+            json!({}),
+        ] {
+            let err = dispatcher::call(
+                "bv_policy_read",
+                args.as_object().unwrap().clone(),
+                None,
+                &ctx(&b, &backend, &p, &guard),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.code(), "mcp_invalid_argument", "{args}");
+        }
+        assert!(backend.calls.lock().unwrap().is_empty());
+    }
+
     /// Regression: the resource tools routed to `resource/<path>`, a mount
     /// that does not exist, so neither ever answered. The engine is mounted
     /// at `resources/` and keeps its records under `resources/resources/`.

@@ -2479,9 +2479,9 @@ from a remote system. A shaped result over 1 MiB + 64 KiB is refused
 (`mcp_result_too_large`).
 
 The catalogue hash is
-`2ef9b8149ea89aa2d509d204988414450bd12658223299e7ee77eb8a48bf5262`
-(`bv_resource_web_fetch` appended to the 0.44.40 catalogue,
-`3f24b819…bd173`); a `catalogue_pin` set to an earlier value must be updated.
+`968c50ae6a800915fcf0b6e5506b54e3b95192ff0d50789a0491bb034f47221a`
+(`bv_policy_read` appended to the catalogue whose hash was
+`2ef9b814…bf5262`); a `catalogue_pin` set to an earlier value must be updated.
 
 **Audit.** Every request a `tools/call` routes is recorded with an `mcp`
 block beside `request.data` (`request.mcp`), in the clear:
