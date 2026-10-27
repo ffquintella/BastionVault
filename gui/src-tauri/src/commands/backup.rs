@@ -181,9 +181,9 @@ pub async fn backup_restore(state: State<'_, AppState>, path: String, password: 
     let vault = vault_guard.as_ref().ok_or("Vault not open")?.clone();
     drop(vault_guard);
     let core = vault.core.load();
-    let hmac_key = core.barrier.derive_hmac_key().map_err(|e| CommandError::from(format!("derive hmac key: {e}")))?;
     let mut reader = Cursor::new(inner);
-    let count = bastion_vault::backup::restore::restore_backup(core.physical.as_ref(), &hmac_key, &mut reader)
+    // Honours the `sql_*` write gate, like `sys/restore`.
+    let count = bastion_vault::backup::restore::restore_backup_live(&core, &mut reader)
         .await
         .map_err(|e| CommandError::from(format!("restore backup: {e}")))?;
     Ok(count)

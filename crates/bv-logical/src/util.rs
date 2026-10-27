@@ -24,7 +24,9 @@ use serde_json::{Map, Number, Value};
 /// change epochs for. It belongs here for the same reason the pagination
 /// pair does: that endpoint is a read (a read-only session must be able to
 /// subscribe), so its parameters cannot travel in a body.
-const ALLOWED_QUERY_KEYS: &[&str] = &["env", "version", "after", "limit", "topics"];
+/// `objects` is the `catalog/schema/object` list `resources/v2/sql/privileges`
+/// reports per object, a read for the same reason (features/sql-browser.md).
+const ALLOWED_QUERY_KEYS: &[&str] = &["env", "version", "after", "limit", "topics", "objects"];
 
 /// Allowlisted keys whose value is parsed as an unsigned integer. A
 /// non-numeric value is dropped rather than passed through as a string, so a
@@ -164,6 +166,12 @@ mod tests {
         let data = parse_query_allowlist("after=aa&limit=all").unwrap();
         assert_eq!(data.get("after").unwrap(), "aa");
         assert!(data.get("limit").is_none());
+    }
+
+    #[test]
+    fn the_sql_privileges_object_list_is_lifted_once_decoded() {
+        let data = parse_query_allowlist("objects=netrisk%2Fpublic%2Fusers%2Cdef%2Fx%2Fa%252Fb").unwrap();
+        assert_eq!(data.get("objects").unwrap(), "netrisk/public/users,def/x/a%2Fb");
     }
 
     #[test]

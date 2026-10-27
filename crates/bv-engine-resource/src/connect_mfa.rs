@@ -419,12 +419,13 @@ pub fn find_profile(meta: &Map<String, Value>, profile_id: &str) -> Option<Value
         })
 }
 
-/// Whether a profile value carries the gate. Absent / non-boolean ⇒ false,
-/// so every profile written before this feature keeps its old behaviour.
-///
-/// Re-exported from `kernel_api::engines`, where it has to live so a transport
-/// engine can read the same flag without naming this module.
-pub use crate::kernel_api::engines::profile_gate_flag;
+/// Whether a profile value carries the gate: the profile's `require_mfa`
+/// (`kernel_api::engines::profile_gate_flag`; absent or non-boolean is off,
+/// so older profiles keep their behaviour), or an `sql` profile's
+/// `sql.require_mfa`, read fail closed (`sql_profile::sql_gate_flag`).
+pub fn profile_gate_flag(profile: &Value) -> bool {
+    crate::kernel_api::engines::profile_gate_flag(profile) || crate::sql_profile::sql_gate_flag(profile)
+}
 
 /// Whether *any* connection profile on `resource` carries the gate.
 ///
@@ -572,6 +573,19 @@ fn step_up_path(ns_prefix: &str, mount: &str, leaf: &str) -> String {
     format!("{ns_prefix}auth/{m}/v2/step-up/{leaf}")
 }
 
+/// `resource` and `profile_id` off a connect pre-flight body, trimmed and
+/// required.
+fn target_fields(req: &Request) -> Result<(String, String), RvError> {
+    let field = |key: &str| {
+        req.get_data(key)
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.trim().to_string()))
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| bv_error_response_status!(400, &format!("`{key}` is required")))
+    };
+    Ok((field("resource")?, field("profile_id")?))
+}
+
 impl super::ResourceBackendInner {
     /// Verify the caller may connect to this resource at all before telling
     /// them anything about its profiles.
@@ -611,39 +625,43 @@ impl super::ResourceBackendInner {
         Ok(())
     }
 
-    /// Shared front half of all three handlers: pull `resource` +
-    /// `profile_id` off the body, canonicalize the name, check the connect
-    /// grant, and load the profile.
-    async fn connect_target(
-        &self,
-        req: &mut Request,
-    ) -> Result<(String, String, Option<Value>), RvError> {
-        let (resource, profile_id, meta) = self.connect_target_record(req).await?;
+    /// Front half of `connect/mfa/begin|verify`. As [`Self::connect_target_record`],
+    /// except that an `sql` profile is reachable through either grant: the
+    /// connect grant, or any SQL capability on the resource's `sql/server`
+    /// (the SQL browser needs no `connect`, §3.3). A caller with neither
+    /// gets the connect grant's own refusal. An `sql` profile must parse
+    /// strictly first, so a broken one costs no factor.
+    async fn mfa_target(&self, req: &mut Request) -> Result<(String, String, Option<Value>), RvError> {
+        let (raw, profile_id) = target_fields(req)?;
+        let resource = super::resolve_resource_name(req, &raw).await?;
+        // Read before the grant is checked, so nothing here may answer
+        // differently for a caller without one: a record that does not
+        // parse reads as no profile, and the grant check below decides.
+        let meta = match req.storage_get(&format!("meta/{resource}")).await? {
+            Some(e) => serde_json::from_slice::<Map<String, Value>>(&e.value).ok(),
+            None => None,
+        };
         let profile = meta.as_ref().and_then(|m| find_profile(m, &profile_id));
+        let sql = profile.as_ref().is_some_and(crate::sql_resource::is_sql_profile);
+        let sql_grant = sql && req.auth.is_some() && self.caller_holds_sql_privilege(req, &resource).await?;
+        if !sql_grant {
+            self.require_connect_grant(req, &resource).await?;
+        }
+        if let (true, Some(meta), Some(p)) = (sql, meta.as_ref(), profile.as_ref()) {
+            crate::sql_resource::validate_sql_profile(meta, p).map_err(|r| r.into_rv())?;
+        }
         Ok((resource, profile_id, profile))
     }
 
-    /// [`Self::connect_target`], returning the whole resource record instead
-    /// of just the profile — `v2/connect/web/launch` also reads the record's
-    /// type and exposure policy. The connect grant is checked before the
-    /// record is read, exactly as for the other handlers.
+    /// Shared front half of the connect pre-flights: `resource` and
+    /// `profile_id` off the body, the canonical name, the connect grant, then
+    /// the whole record (`v2/connect/web/launch` also reads its type and
+    /// exposure policy). The grant is checked before the record is read.
     pub(crate) async fn connect_target_record(
         &self,
         req: &mut Request,
     ) -> Result<(String, String, Option<Map<String, Value>>), RvError> {
-        let raw = req
-            .get_data("resource")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.trim().to_string()))
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| bv_error_response_status!(400, "`resource` is required"))?;
-        let profile_id = req
-            .get_data("profile_id")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.trim().to_string()))
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| bv_error_response_status!(400, "`profile_id` is required"))?;
-
+        let (raw, profile_id) = target_fields(req)?;
         let resource = super::resolve_resource_name(req, &raw).await?;
         self.require_connect_grant(req, &resource).await?;
 
@@ -710,7 +728,7 @@ impl super::ResourceBackendInner {
         _backend: &dyn crate::logical::Backend,
         req: &mut Request,
     ) -> Result<Option<crate::logical::Response>, RvError> {
-        let (resource, profile_id, profile) = self.connect_target(req).await?;
+        let (resource, profile_id, profile) = self.mfa_target(req).await?;
         let profile = profile.ok_or_else(|| {
             bv_error_response_status!(
                 404,
@@ -775,7 +793,7 @@ impl super::ResourceBackendInner {
         _backend: &dyn crate::logical::Backend,
         req: &mut Request,
     ) -> Result<Option<crate::logical::Response>, RvError> {
-        let (resource, profile_id, profile) = self.connect_target(req).await?;
+        let (resource, profile_id, profile) = self.mfa_target(req).await?;
         let profile = profile.ok_or_else(|| {
             bv_error_response_status!(
                 404,
@@ -893,6 +911,17 @@ impl super::ResourceBackendInner {
                 &format!("profile `{profile_id}` not found on resource `{resource}`")
             )
         })?;
+
+        // An `sql` session is opened by the SQL browser plugin, which redeems
+        // the connect ticket itself (`connect_ticket_redeem`). Refused here,
+        // before any ticket is touched, so this path cannot burn it.
+        if crate::sql_resource::is_sql_profile(&profile) {
+            return Err(bv_error_response_status!(
+                400,
+                "sql_profile_not_direct: an sql profile's session is opened by the SQL browser, which redeems the \
+                 connect ticket itself; `connect/authorize` does not apply to it"
+            ));
+        }
 
         let account_id = crate::connect_provider::account_id_field(req)?;
         match crate::kernel_api::provider::profile_provider(&profile) {

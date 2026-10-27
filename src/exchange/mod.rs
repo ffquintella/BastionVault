@@ -23,6 +23,7 @@ pub mod namespaces;
 pub mod preview;
 pub mod schema;
 pub mod scope;
+pub mod sql_gate;
 pub mod verify;
 
 pub use envelope::{decrypt_bvx, encrypt_bvx, Envelope, EnvelopeError, MIN_PASSWORD_LEN};

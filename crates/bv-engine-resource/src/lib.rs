@@ -24,6 +24,8 @@ pub mod connect_session;
 pub mod connect_provider;
 pub mod connect_web;
 pub mod kernel_service;
+pub mod sql_profile;
+pub mod sql_resource;
 pub mod type_config;
 
 // The substrate, under the names this engine already spells it by. Private:
@@ -350,6 +352,7 @@ impl ResourceBackend {
         let h_cfg_effective = self.inner.clone();
         let h_agent_ssh_exec = self.inner.clone();
         let h_agent_web_fetch = self.inner.clone();
+        let h_sql_privileges = self.inner.clone();
 
         let backend = new_logical_backend!({
             paths: [
@@ -936,6 +939,30 @@ impl ResourceBackend {
                     help: "Fetch one page of a web resource with GET or HEAD over a vault-brokered HTTPS session \
                            (MCP bv_resource_web_fetch only). Returns status, content type and capped, \
                            credential-scrubbed, sanitized page text; never a cookie, header or session URL."
+                },
+                {
+                    // The SQL browser's privilege chips (features/sql-browser.md
+                    // §3.4, §9.5): the caller's own effective SQL capabilities.
+                    // A display read; see sql_resource.rs.
+                    pattern: r"v2/sql/privileges/(?P<resource>[^/]+)$",
+                    fields: {
+                        "resource": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Database resource name."
+                        },
+                        "objects": {
+                            field_type: FieldType::Str,
+                            required: false,
+                            description: "Comma-separated catalog/schema/object triples (segments may be \
+                                          percent-encoded) to report per object, at most 64."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Read, handler: h_sql_privileges.handle_sql_privileges}
+                    ],
+                    help: "Read the caller's effective SQL capabilities on a database resource: on sql/server, \
+                           resource-wide, and per named object. Display only; nothing is enforced from it."
                 }
             ],
             secrets: [{
@@ -1042,18 +1069,24 @@ pub(crate) async fn resolve_resource_name(
     req: &mut Request,
     raw: &str,
 ) -> Result<String, RvError> {
+    let storage = req.storage.clone().ok_or(RvError::ErrRequestNotReady)?;
+    resolve_resource_name_in(storage.as_ref(), raw).await
+}
+
+/// [`resolve_resource_name`] over the mount's storage view itself, for a
+/// reader that holds the view rather than a request routed to the mount.
+#[maybe_async::maybe_async]
+pub(crate) async fn resolve_resource_name_in(view: &dyn storage::Storage, raw: &str) -> Result<String, RvError> {
     let trimmed = raw.trim();
     let lower = trimmed.to_ascii_lowercase();
 
-    if req.storage_get(&format!("{META_PREFIX}{lower}")).await?.is_some() {
+    if view.get(&format!("{META_PREFIX}{lower}")).await?.is_some() {
         return Ok(lower);
     }
-    if trimmed != lower
-        && req.storage_get(&format!("{META_PREFIX}{trimmed}")).await?.is_some()
-    {
+    if trimmed != lower && view.get(&format!("{META_PREFIX}{trimmed}")).await?.is_some() {
         return Ok(trimmed.to_string());
     }
-    for k in req.storage_list(META_PREFIX).await? {
+    for k in view.list(META_PREFIX).await? {
         if k.eq_ignore_ascii_case(trimmed) {
             return Ok(k);
         }
@@ -1851,6 +1884,10 @@ impl ResourceBackendInner {
         let resource = resolve_resource_name(req, &raw).await?;
         let key_name = req.get_data("key")?.as_str().unwrap().to_string();
         let body = req.body.as_ref().ok_or(RvError::ErrRequestNoDataField)?.clone();
+
+        // `sql_endpoint` is the SQL browser's endpoint binding (§5.4 rule 5):
+        // reserved, so a malformed value is refused here, not stored.
+        sql_profile::validate_sql_endpoint_on_write(&body).map_err(|m| bv_error_response_status!(400, m))?;
 
         // Brokered-resource enforcement: a resource pinned to `brokered`
         // (at any tier) may not carry a *static SSH credential*. Reject at

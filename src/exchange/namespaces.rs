@@ -38,6 +38,7 @@ use crate::{
     exchange::{
         schema::{ExchangeDocument, ExchangeItems, ExporterInfo, NamespaceBundle, ScopeSpec},
         scope::{self, ConflictPolicy, ImportResult, MountIndex},
+        sql_gate::{self, SqlGate},
     },
     modules::namespace::{NamespaceModule, NAMESPACE_MODULE_NAME},
     storage::Storage,
@@ -142,11 +143,35 @@ pub async fn import_document(
     policy: ConflictPolicy,
     dry_run: bool,
 ) -> Result<ImportResult, RvError> {
+    import_document_gated(core, document, policy, dry_run, &SqlGate::of(core)).await
+}
+
+/// [`import_document`] against an explicit `sql_*` write gate. Policies are
+/// written as raw barrier keys, past the policy store's own gate, so one
+/// naming `sql_*` refuses the whole import while `gate` is closed (a dry run
+/// warns instead), before anything is written.
+pub(crate) async fn import_document_gated(
+    core: &Arc<Core>,
+    document: &ExchangeDocument,
+    policy: ConflictPolicy,
+    dry_run: bool,
+    gate: &SqlGate,
+) -> Result<ImportResult, RvError> {
     document.validate_schema_tag().map_err(|_| RvError::ErrRequestInvalid)?;
     let barrier = core.barrier();
     let storage: &dyn Storage = barrier.as_storage();
 
     let mut result = ImportResult::default();
+    let sql_policies = sql_gate::sql_policies_in(document);
+    if !sql_policies.is_empty() {
+        if dry_run {
+            if let Err(reason) = gate.writable_now().await {
+                result.warnings.push(sql_gate::import_warning(&sql_policies, &reason));
+            }
+        } else {
+            gate.open_or_reason().await.map_err(|reason| sql_gate::import_refused(&sql_policies, &reason))?;
+        }
+    }
     let mut warnings: Vec<String> = Vec::new();
     let indexes = all_namespace_indexes(core, &mut warnings).await?;
     result.warnings.append(&mut warnings);
@@ -432,6 +457,57 @@ mod tests {
             let rules = resp.data.unwrap()["rules"].as_str().unwrap().to_string();
             assert_eq!(rules, expected, "policy {name:?} in namespace {ns:?}");
         }
+    }
+
+    /// Regression (sql-browser subsystem 4's open gap): an import wrote
+    /// policy documents as raw barrier keys, past the `sql_*` write gate.
+    /// Closed, a document carrying a `sql_*` policy anywhere refuses the whole
+    /// import before the first write and a dry run warns; open, it imports.
+    #[tokio::test]
+    async fn a_closed_sql_gate_refuses_an_import_that_carries_sql_policies() {
+        let (_bvault, core, root) = new_unseal_test_bastion_vault("test_exchange_sql_gate").await;
+        let store = store_of(&core);
+        store.create("tenant-a", NamespaceQuotas::default(), false).await.unwrap();
+        ns_req(&core, &root, Operation::Write, "sys/mounts/cubby/", "", json!({ "type": "kv" }).as_object().cloned())
+            .await
+            .unwrap();
+        put_secret(&core, &root, "", "cubby/app", "v1").await;
+        let sql_hcl = "path \"tenant-a/resources/resources/db/sql/*\" { capabilities = [\"sql_select\"] }";
+        ns_req(&core, &root, Operation::Write, "sys/policy/analysts", "tenant-a", json!({ "policy": sql_hcl }).as_object().cloned())
+            .await
+            .unwrap();
+        let doc =
+            export_all_namespaces(&core, ExporterInfo::default(), ScopeSpec { kind: ScopeKind::AllNamespaces, include: vec![] })
+                .await
+                .unwrap();
+        // The stored `default` names `sql_*` once the gate is open, so every
+        // export from an upgraded vault carries one.
+        let named = sql_gate::sql_policies_in(&doc);
+        assert!(named.contains(&"tenant-a/analysts".to_string()) && named.contains(&"default".to_string()), "{named:?}");
+
+        // Remove what the import would restore, so a write would show.
+        ns_req(&core, &root, Operation::Delete, "sys/policy/analysts", "tenant-a", None).await.unwrap();
+        ns_req(&core, &root, Operation::Delete, "cubby/app", "", None).await.unwrap();
+        let absent = |ns: &'static str, path: &'static str| {
+            let core = core.clone();
+            let root = root.clone();
+            async move { ns_req(&core, &root, Operation::Read, path, ns, None).await.ok().flatten().and_then(|r| r.data).is_none() }
+        };
+
+        let closed = SqlGate::Fixed(Err("node 2: no version record".into()));
+        let e = import_document_gated(&core, &doc, ConflictPolicy::Overwrite, false, &closed).await.unwrap_err();
+        let RvError::ErrResponseStatus(409, m) = e else { panic!("expected a 409") };
+        assert!(m.contains("tenant-a/analysts") && m.contains("node 2: no version record"), "{m}");
+        assert!(absent("tenant-a", "sys/policy/analysts").await, "the sql_* policy must not be written");
+        assert!(absent("", "cubby/app").await, "nothing else may be written either");
+
+        let preview = import_document_gated(&core, &doc, ConflictPolicy::Overwrite, true, &closed).await.unwrap();
+        assert!(preview.warnings.iter().any(|w| w.contains("tenant-a/analysts")), "{:?}", preview.warnings);
+
+        let open = SqlGate::Fixed(Ok(()));
+        import_document_gated(&core, &doc, ConflictPolicy::Overwrite, false, &open).await.unwrap();
+        assert!(!absent("tenant-a", "sys/policy/analysts").await);
+        assert_eq!(read_secret(&core, &root, "", "cubby/app").await, "v1");
     }
 
     /// A bundle naming a namespace this vault does not have is reported, not

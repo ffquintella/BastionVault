@@ -79,11 +79,23 @@ fn parse(bytes: &[u8], source: TypeConfigSource) -> Result<Map<String, Value>, T
 /// or — for a child-namespace request whose mount has none — the root's.
 #[maybe_async::maybe_async]
 pub async fn effective_type_config(core: &dyn VaultCtx, req: &Request) -> Result<EffectiveTypeConfig, TypeConfigError> {
-    if let Some(entry) = req.storage_get(TYPE_CONFIG_KEY).await.map_err(TypeConfigError::Storage)? {
+    let storage = req.storage.clone().ok_or(TypeConfigError::Storage(RvError::ErrRequestNotReady))?;
+    let in_child_namespace = req.namespace_path.as_deref().is_some_and(|ns| !ns.is_empty());
+    effective_type_config_in(core, storage.as_ref(), in_child_namespace).await
+}
+
+/// [`effective_type_config`] over a resource mount's own storage view, for a
+/// reader that holds the view rather than a request routed to the mount.
+#[maybe_async::maybe_async]
+pub async fn effective_type_config_in(
+    core: &dyn VaultCtx,
+    view: &dyn Storage,
+    in_child_namespace: bool,
+) -> Result<EffectiveTypeConfig, TypeConfigError> {
+    if let Some(entry) = view.get(TYPE_CONFIG_KEY).await.map_err(TypeConfigError::Storage)? {
         let types = parse(&entry.value, TypeConfigSource::Mount)?;
         return Ok(EffectiveTypeConfig { source: TypeConfigSource::Mount, types: Some(types) });
     }
-    let in_child_namespace = req.namespace_path.as_deref().is_some_and(|ns| !ns.is_empty());
     if !in_child_namespace {
         return Ok(EffectiveTypeConfig { source: TypeConfigSource::None, types: None });
     }
