@@ -46,6 +46,9 @@ pub(crate) enum RevokeOrigin {
     Token,
     /// The issuing mount revoked it early (`OwnedLeaseRevoker`).
     Owner,
+    /// Its registration failed, so the kernel took the credential back
+    /// (host-managed secrets only).
+    Registration,
 }
 
 /// A secret lease whose backend revoke failed: still on record, still owed a

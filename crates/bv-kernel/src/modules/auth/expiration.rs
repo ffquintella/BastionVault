@@ -55,6 +55,50 @@ pub const REVOKE_RETRY_SECS: Duration = Duration::from_secs(10);
 pub const MIN_REVOKE_DELAY_SECS: Duration = Duration::from_secs(5);
 pub use crate::kernel_api::auth::{DEFAULT_LEASE_DURATION_SECS, MAX_LEASE_DURATION_SECS};
 
+/// `internal_data["secret_type"]` of a secret issued by the dynamic-secrets
+/// plugin host (T62). Such a secret is always registered as a lease, whatever
+/// the mount's `leased_passthrough` option says: the credential lives in an
+/// external system and only its lease ever revokes it.
+pub const HOST_MANAGED_SECRET_TYPE: &str = "bv_dynamic";
+
+/// Whether `secret` was issued by the dynamic-secrets plugin host.
+pub fn is_host_managed_secret(secret: &SecretData) -> bool {
+    secret.internal_data.get("secret_type").and_then(Value::as_str) == Some(HOST_MANAGED_SECRET_TYPE)
+}
+
+/// `Request::ctx` key of a `RwLock<Option<String>>` slot the dynamic-secrets
+/// host may leave there; the kernel writes the id of the lease it registered
+/// for the host's answer into it.
+pub const HOST_MANAGED_LEASE_SLOT: &str = "bv_dynamic.lease_id";
+
+/// Response data never kept on a host-managed secret's lease row: its renew
+/// and revoke do not read the credential, so the row (and every backup of it)
+/// does not carry it.
+const HOST_MANAGED_UNSTORED_KEYS: [&str; 1] = ["password"];
+
+/// `data` as a lease row of `secret` stores it.
+fn lease_row_data(secret: &SecretData, data: Option<&Map<String, Value>>) -> Map<String, Value> {
+    let mut data = data.cloned().unwrap_or_default();
+    if is_host_managed_secret(secret) {
+        HOST_MANAGED_UNSTORED_KEYS.iter().for_each(|k| {
+            data.remove(*k);
+        });
+    }
+    data
+}
+
+/// Hand `lease_id` to the slot a host-managed backend left in `req.ctx`.
+fn publish_host_managed_lease_id(req: &Request, lease_id: &str) {
+    let Some(slot) = req.ctx.get_mut(HOST_MANAGED_LEASE_SLOT) else {
+        return;
+    };
+    if let Ok(mut guard) = slot.write() {
+        if let Some(value) = guard.downcast_mut::<Option<String>>() {
+            *value = Some(lease_id.to_string());
+        }
+    };
+}
+
 /// Format of a lease row. 0 is every row written before T62 (the field is
 /// absent there); 1 added `max_ttl_secs` and `revoke_failure`, both of which
 /// default to "none" for a version-0 row, so reading one needs no rewrite.
@@ -484,17 +528,102 @@ impl ExpirationManager {
     /// the namespace module is unavailable.
     #[maybe_async::maybe_async]
     async fn enforce_lease_quota(&self, req: &Request) -> Result<(), RvError> {
+        self.enforce_lease_quota_for_path(&req.path).await
+    }
+
+    #[maybe_async::maybe_async]
+    async fn enforce_lease_quota_for_path(&self, path: &str) -> Result<(), RvError> {
         let Some(core) = self.core.upgrade() else {
             return Ok(());
         };
         let Some(namespaces) = core.namespaces() else {
             return Ok(());
         };
-        let Some((ns_path, limit)) = namespaces.lease_quota_for_path(&req.path).await? else {
+        let Some((ns_path, limit)) = namespaces.lease_quota_for_path(path).await? else {
             return Ok(());
         };
         let current = self.count_leases_for_namespace(&ns_path) as u64;
         crate::modules::namespace::quota::check_lease_quota(&ns_path, current, limit)
+    }
+
+    /// [`OwnedLeaseRevoker::check_lease_quota`]: the check registration makes,
+    /// for the namespace `ns_path` (empty: root, never capped).
+    #[maybe_async::maybe_async]
+    pub async fn check_namespace_lease_quota(&self, ns_path: &str) -> Result<(), RvError> {
+        let ns_path = ns_path.trim_matches('/');
+        if ns_path.is_empty() {
+            return Ok(());
+        }
+        // The resolver never reads a path's last segment as a namespace.
+        self.enforce_lease_quota_for_path(&format!("{ns_path}/_")).await
+    }
+
+    /// Register a host-managed secret's lease, on every mount. When that
+    /// fails the credential already exists in its external system and nothing
+    /// else would revoke it, so it is revoked now ([`Self::take_back`]).
+    #[maybe_async::maybe_async]
+    pub async fn register_host_managed_secret(
+        &self,
+        req: &mut Request,
+        resp: &mut Response,
+    ) -> Result<String, RvError> {
+        match self.register_secret(req, resp).await {
+            Ok(lease_id) => {
+                publish_host_managed_lease_id(req, &lease_id);
+                Ok(lease_id)
+            }
+            Err(e) => {
+                self.take_back(req, resp, &e).await;
+                Err(e)
+            }
+        }
+    }
+
+    /// Revoke the credential of an answer whose lease could not be registered,
+    /// through its own backend. A failed revoke is kept as `revoke_failed`
+    /// (origin `registration`) so the reaper retries it and operators see it.
+    #[maybe_async::maybe_async]
+    async fn take_back(&self, req: &Request, resp: &Response, error: &RvError) {
+        let Some(mut secret) = resp.secret.clone() else {
+            return;
+        };
+        // Set when registration failed after the row was written: undo it.
+        let partial = std::mem::take(&mut secret.lease_id);
+        if !partial.is_empty() {
+            let _ = self.delete_lease_entry(&partial).await;
+            let _ = self.remove_index_by_token(&req.client_token, &partial).await;
+        }
+        // The answer's data rides along only so the backend can redact the
+        // credential from its error; it is not stored.
+        let mut revoke = Request::new_revoke_request(&req.path, Some(secret.clone()), resp.data.clone());
+        let Err(revoke_error) = self.router.handle_request(&mut revoke).await else {
+            log::warn!("lease registration under {} failed ({error}); the credential it was for was revoked", req.path);
+            return;
+        };
+        let lease_id = if partial.is_empty() { format!("{}/{}", req.path, generate_uuid()) } else { partial };
+        let now = SystemTime::now();
+        secret.lease_id.clone_from(&lease_id);
+        secret.issue_time = Some(now);
+        let le = LeaseEntry {
+            lease_id: lease_id.clone(),
+            client_token: req.client_token.clone(),
+            path: req.path.clone(),
+            data: lease_row_data(&secret, resp.data.as_ref()),
+            secret: Some(secret),
+            issue_time: now,
+            expire_time: now,
+            ..Default::default()
+        };
+        if let Err(e) = self.create_index_by_token(&le.client_token, &lease_id).await {
+            log::warn!("revoke_failed lease {lease_id} is not indexed under its token: {e}");
+        }
+        if let Err(e) = self.record_revoke_failure(le, RevokeOrigin::Registration, &revoke_error).await {
+            log::error!(
+                "lease registration under {} failed and revoking its credential failed too ({revoke_error}); \
+                 it could not be kept as revoke_failed ({e}): remove the credential by hand",
+                req.path
+            );
+        }
     }
 
     pub async fn register_secret(&self, req: &mut Request, resp: &mut Response) -> Result<String, RvError> {
@@ -530,7 +659,7 @@ impl ExpirationManager {
                 lease_id: lease_id.clone(),
                 client_token: req.client_token.clone(),
                 path: req.path.clone(),
-                data: resp.data.clone().unwrap_or_default(),
+                data: lease_row_data(secret, resp.data.as_ref()),
                 secret: Some(secret.clone()),
                 issue_time: now,
                 expire_time: secret.expiration_time(),
@@ -1083,7 +1212,15 @@ impl ExpirationManager {
     /// Persists a lease entry to storage.
     #[maybe_async::maybe_async]
     async fn persist_lease_entry(&self, le: &LeaseEntry) -> Result<(), RvError> {
-        let value = serde_json::to_string(&le)?;
+        // Read-old, write-new: a host-managed row written before the
+        // credential was left out loses it on its next write.
+        let value = match le.secret.as_ref() {
+            Some(secret) if is_host_managed_secret(secret) => {
+                let row = LeaseEntry { data: lease_row_data(secret, Some(&le.data)), ..le.clone() };
+                serde_json::to_string(&row)?
+            }
+            _ => serde_json::to_string(&le)?,
+        };
 
         let entry = StorageEntry { key: le.lease_id.clone(), value: value.as_bytes().to_vec() };
 
@@ -1266,6 +1403,10 @@ impl OwnedLeaseRevoker for ExpirationManager {
             // lost the row underneath us: say so rather than claim a revoke.
             RevokeOutcome::Missing => Err(RvError::ErrLeaseNotFound),
         }
+    }
+
+    async fn check_lease_quota(&self, namespace_path: &str) -> Result<(), RvError> {
+        self.check_namespace_lease_quota(namespace_path).await
     }
 }
 

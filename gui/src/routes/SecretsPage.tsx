@@ -15,12 +15,14 @@ import {
   Select,
   SecretPairsEditor,
   SecretHistoryPanel,
+  Tabs,
   pairsFromData,
   dataFromPairs,
   type SecretPair,
   type SecretHistoryVersion,
   useToast,
 } from "../components/ui";
+import { DynamicSecretsSection } from "../components/DynamicSecretsSection";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
 import { hasLiteralAdminPolicy } from "../lib/access";
@@ -32,6 +34,8 @@ type KvMount = { path: string; mount_type: string };
 
 export function SecretsPage() {
   const { toast } = useToast();
+  // T62: dynamic-secret mounts get their own tab; nothing loads until opened.
+  const [section, setSection] = useState<"kv" | "dynamic">("kv");
   const [currentPath, setCurrentPath] = useState("");
   const [mountBase, setMountBase] = useState(""); // e.g. "secret/"
   const [mountType, setMountType] = useState(""); // "kv" or "kv-v2"
@@ -534,13 +538,26 @@ export function SecretsPage() {
       <div className="space-y-4">
         <div className="flex items-center justify-between">
           <h1 className="text-2xl font-bold">Secrets</h1>
-          {currentPath && (
+          {section === "kv" && currentPath && (
             <Button size="sm" onClick={() => setShowCreate(true)}>
               New Secret
             </Button>
           )}
         </div>
 
+        <Tabs
+          tabs={[
+            { id: "kv", label: "Key/value" },
+            { id: "dynamic", label: "Dynamic" },
+          ]}
+          active={section}
+          onChange={(id) => setSection(id === "dynamic" ? "dynamic" : "kv")}
+        />
+
+        {section === "dynamic" ? (
+          <DynamicSecretsSection />
+        ) : (
+        <>
         <Breadcrumb segments={breadcrumbs} />
 
         {!currentPath ? (
@@ -834,6 +851,8 @@ export function SecretsPage() {
             </Card>
             </div>
           </div>
+        )}
+        </>
         )}
 
         {/* Create secret modal */}

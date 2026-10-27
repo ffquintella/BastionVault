@@ -138,6 +138,8 @@ const adminNav: NavItem[] = [
   { path: "/policies", label: "Policies" },
   { path: "/namespaces", label: "Namespaces" },
   { path: "/mounts", label: "Mounts" },
+  // T62: lease paths are deployment-wide; the page sends them root-scoped.
+  { path: "/leases", label: "Leases" },
   { path: "/hsm", label: "HSM / Seal", requires: [...SUPER_ADMIN] },
   { path: "/audit", label: "Audit" },
   { path: "/recordings", label: "Recordings" },

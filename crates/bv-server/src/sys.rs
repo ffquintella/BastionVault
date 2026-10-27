@@ -2226,14 +2226,47 @@ async fn sys_plugins_list_handler(
 ) -> Result<HttpResponse, HttpError> {
     let audit = SysAuditCtx::new(&authz, &req, &core);
 
+    // `?kind=<plugin_type>` (e.g. `secret/dynamic`, T62) narrows the list on
+    // `/v2` only: `/v1` is frozen and keeps ignoring query parameters.
+    let kind = plugin_list_kind(req.path(), req.query_string());
     let result: Result<HttpResponse, HttpError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
-        let manifests = catalog.list(core.barrier().as_storage()).await?;
+        let storage = core.barrier();
+        let manifests = match kind {
+            Some(kind) => catalog.list_by_kind(storage.as_storage(), &kind).await?,
+            None => catalog.list(storage.as_storage()).await?,
+        };
         Ok(response_json_ok(None, json!({ "plugins": manifests })))
     })
     .await;
     audit.finish(&result).await;
     result
+}
+
+/// The `kind` filter of `GET /v2/sys/plugins`; `None` on `/v1` or when absent.
+fn plugin_list_kind(path: &str, query: &str) -> Option<String> {
+    #[derive(Deserialize)]
+    struct ListQuery {
+        kind: Option<String>,
+    }
+    if !path.starts_with("/v2/") {
+        return None;
+    }
+    web::Query::<ListQuery>::from_query(query).ok().and_then(|q| q.into_inner().kind).filter(|k| !k.is_empty())
+}
+
+#[cfg(test)]
+mod plugin_list_kind_tests {
+    use super::plugin_list_kind;
+
+    #[test]
+    fn only_v2_filters_by_kind() {
+        assert_eq!(plugin_list_kind("/v2/sys/plugins", "kind=secret%2Fdynamic").as_deref(), Some("secret/dynamic"));
+        assert_eq!(plugin_list_kind("/v2/sys/plugins", "kind=secret/dynamic").as_deref(), Some("secret/dynamic"));
+        assert_eq!(plugin_list_kind("/v1/sys/plugins", "kind=secret/dynamic"), None, "v1 is frozen");
+        assert_eq!(plugin_list_kind("/v2/sys/plugins", ""), None);
+        assert_eq!(plugin_list_kind("/v2/sys/plugins", "kind="), None);
+    }
 }
 
 async fn sys_plugins_register_handler(

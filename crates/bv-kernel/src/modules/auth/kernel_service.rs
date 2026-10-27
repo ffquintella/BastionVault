@@ -97,6 +97,11 @@ impl OwnedLeaseRevoker for AuthModule {
         let expiration = self.expiration.load_full().ok_or(RvError::ErrBarrierSealed)?;
         expiration.revoke_owned_lease(owner_mount, lease_id).await
     }
+
+    async fn check_lease_quota(&self, namespace_path: &str) -> Result<(), RvError> {
+        let expiration = self.expiration.load_full().ok_or(RvError::ErrBarrierSealed)?;
+        expiration.check_namespace_lease_quota(namespace_path).await
+    }
 }
 
 /// Publish the auth module as its three services.

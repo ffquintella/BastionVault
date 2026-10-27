@@ -1,10 +1,10 @@
 //! Secret leases, as an engine sees them (T62, `features/dynamic-secrets.md`).
 //!
-//! One capability, deliberately narrow: a mount ending, before its TTL runs
-//! out, a lease **it issued** — a dynamic-credential engine whose session has
-//! ended, say. Registration, renewal and the operator surface stay in the
-//! kernel: through this trait an engine cannot list, renew or force-clear
-//! leases, nor revoke a token's lease or another mount's.
+//! Deliberately narrow: a mount ending early a lease **it issued**, and a
+//! quota pre-check before it creates a credential. Registration, renewal and
+//! the operator surface stay in the kernel: through this trait an engine
+//! cannot list, renew or force-clear leases, nor revoke a token's lease or
+//! another mount's.
 
 use bv_errors::RvError;
 
@@ -30,4 +30,10 @@ pub trait OwnedLeaseRevoker: Send + Sync {
     /// [`RvError::ErrLeaseNotFound`] for an unknown id; `409` when a revoke or
     /// renew of the same lease is already running.
     async fn revoke_owned_lease(&self, owner_mount: &str, lease_id: &str) -> Result<LeaseRevocation, RvError>;
+
+    /// Refuse, with the quota error registration would give, when the
+    /// namespace `namespace_path` (`Request::namespace_path`; empty for root)
+    /// is already at its `max_leases`. A pre-check for a backend about to
+    /// create a credential in an external system: registration still enforces.
+    async fn check_lease_quota(&self, namespace_path: &str) -> Result<(), RvError>;
 }

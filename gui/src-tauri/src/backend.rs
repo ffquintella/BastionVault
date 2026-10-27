@@ -363,6 +363,7 @@ mod embedded {
                 name: "self-accounts".into(),
                 version: "0.1.1".into(),
                 plugin_type: "secret-engine".into(),
+                engine_type: None,
                 runtime: RuntimeKind::Wasm,
                 abi_version: "1.0".into(),
                 sha256: sha256_hex(&binary),

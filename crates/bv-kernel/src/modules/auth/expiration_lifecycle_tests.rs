@@ -426,3 +426,110 @@ async fn the_sweeper_keeps_an_expired_lease_whose_revoke_fails() {
     assert_eq!((failure.attempts, failure.origin), (1, RevokeOrigin::Expiry));
     assert_eq!(expiration.get_lease_count(), 1, "still tracked");
 }
+
+// ── Host-managed (dynamic-secrets) leases ─────────────────────────────────
+
+fn host_managed_response(lease: Lease) -> Response {
+    let mut internal_data = serde_json::Map::new();
+    internal_data.insert("secret_type".into(), json!(super::HOST_MANAGED_SECRET_TYPE));
+    internal_data.insert("bv_dynamic".into(), json!({ "username": "v-app-1" }));
+    Response {
+        secret: Some(SecretData { lease, internal_data, ..Default::default() }),
+        data: json!({ "username": "v-app-1", "password": PASSWORD, "port": 5432 }).as_object().cloned(),
+        ..Default::default()
+    }
+}
+
+async fn raw_row(expiration: &ExpirationManager, lease_id: &str) -> String {
+    let entry = expiration.id_view.get(lease_id).await.unwrap().expect("a stored row");
+    String::from_utf8(entry.value).unwrap()
+}
+
+#[tokio::test]
+async fn a_host_managed_lease_row_never_stores_the_password() {
+    let (core, expiration, _ts) = manager("t62_host_managed_no_password", RevokeRetryPolicy::default()).await;
+    let _target = mount_target(&core, &expiration, "dyn/", renews_as_issued());
+    let mut req = Request::new("dyn/creds/app");
+    req.client_token = OWNER_TOKEN.into();
+    let mut resp = host_managed_response(lease(3600, 0, true));
+    let id = expiration.register_secret(&mut req, &mut resp).await.unwrap();
+
+    assert!(!raw_row(&expiration, &id).await.contains(PASSWORD), "the stored row carries the credential");
+    let le = row(&expiration, &id).await.unwrap();
+    assert_eq!((le.data["username"].clone(), le.data["port"].clone()), (json!("v-app-1"), json!(5432)));
+    assert_eq!(resp.data.unwrap()["password"], PASSWORD, "the caller still gets it");
+
+    // Any other secret's row is as before.
+    let plain = issue(&expiration, "dyn/creds/plain", lease(3600, 0, true)).await;
+    assert_eq!(row(&expiration, &plain).await.unwrap().data["password"], PASSWORD);
+}
+
+#[tokio::test]
+async fn an_old_host_managed_row_with_a_password_still_loads_and_loses_it_when_rewritten() {
+    let (core, expiration, _ts) = manager("t62_host_managed_old_row", RevokeRetryPolicy::default()).await;
+    let target = mount_target(&core, &expiration, "dyn/", renews_as_issued());
+    let mut resp = host_managed_response(lease(3600, 0, true));
+    let mut secret = resp.secret.take().unwrap();
+    let id = "dyn/creds/app/old-row".to_string();
+    secret.lease_id.clone_from(&id);
+    let now = SystemTime::now();
+    let old = LeaseEntry {
+        lease_id: id.clone(),
+        client_token: OWNER_TOKEN.into(),
+        path: "dyn/creds/app".into(),
+        data: resp.data.clone().unwrap(),
+        secret: Some(secret),
+        issue_time: now,
+        expire_time: now + Duration::from_secs(3600),
+        ..Default::default()
+    };
+    // Written as a slice-2 build did: the password inside the row.
+    let bytes = serde_json::to_vec(&old).unwrap();
+    expiration.id_view.put(&StorageEntry { key: id.clone(), value: bytes }).await.unwrap();
+    assert!(raw_row(&expiration, &id).await.contains(PASSWORD));
+    assert_eq!(row(&expiration, &id).await.expect("an old row still reads").data["password"], PASSWORD);
+
+    expiration.renew(&id, Duration::ZERO).await.expect("renew");
+    assert_eq!(target.renews(), 1);
+    assert!(!raw_row(&expiration, &id).await.contains(PASSWORD), "rewritten without the credential");
+}
+
+#[tokio::test]
+async fn a_host_managed_secret_whose_lease_cannot_be_registered_is_taken_back() {
+    let (core, expiration, ts) = manager("t62_host_managed_take_back", RevokeRetryPolicy::default()).await;
+    let target = mount_target(&core, &expiration, "dyn/", renews_as_issued());
+    // Without its token store, registration fails after the row is written.
+    drop(ts);
+    let mut req = Request::new("dyn/creds/app");
+    req.client_token = OWNER_TOKEN.into();
+    let mut resp = host_managed_response(lease(3600, 0, true));
+    assert!(expiration.register_host_managed_secret(&mut req, &mut resp).await.is_err());
+    assert_eq!(target.revokes(), 1, "the credential was revoked through its backend");
+    assert!(expiration.id_view.list("dyn/creds/app/").await.unwrap().is_empty(), "no half-written row is left");
+    assert!(expiration.list_revoke_failed().await.unwrap().is_empty());
+
+    // The revoke fails too: kept as revoke_failed, listed, retried.
+    target.fail(true);
+    let mut resp = host_managed_response(lease(3600, 0, true));
+    assert!(expiration.register_host_managed_secret(&mut req, &mut resp).await.is_err());
+    assert_eq!(target.revokes(), 2);
+    let listed = expiration.list_revoke_failed().await.unwrap();
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0].failure.origin, RevokeOrigin::Registration);
+    assert!(!raw_row(&expiration, &listed[0].lease_id).await.contains(PASSWORD));
+    assert_eq!(expiration.get_lease_count(), 1, "tracked by the reaper");
+}
+
+#[tokio::test]
+async fn a_registered_host_managed_lease_id_reaches_the_slot_the_backend_left() {
+    let (core, expiration, _ts) = manager("t62_host_managed_slot", RevokeRetryPolicy::default()).await;
+    let _target = mount_target(&core, &expiration, "dyn/", renews_as_issued());
+    let mut req = Request::new("dyn/creds/app");
+    req.client_token = OWNER_TOKEN.into();
+    let slot: Arc<RwLock<dyn std::any::Any + Send + Sync>> = Arc::new(RwLock::new(None::<String>));
+    req.ctx.set_mut(super::HOST_MANAGED_LEASE_SLOT, slot.clone());
+    let mut resp = host_managed_response(lease(3600, 0, true));
+    let id = expiration.register_host_managed_secret(&mut req, &mut resp).await.unwrap();
+    let seen = slot.read().unwrap().downcast_ref::<Option<String>>().cloned().flatten();
+    assert_eq!(seen.as_deref(), Some(id.as_str()));
+}

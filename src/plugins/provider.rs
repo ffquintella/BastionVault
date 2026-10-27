@@ -516,6 +516,7 @@ mod tests {
             name: "self-accounts".into(),
             version: "1.0.0".into(),
             plugin_type: "secret-engine".into(),
+            engine_type: None,
             runtime: RuntimeKind::Wasm,
             abi_version: "1.3".into(),
             sha256: "0".repeat(64),

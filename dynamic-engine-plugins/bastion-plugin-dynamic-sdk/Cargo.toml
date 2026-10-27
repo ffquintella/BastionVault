@@ -1,0 +1,38 @@
+[package]
+name = "bastion-plugin-dynamic-sdk"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "SDK for BastionVault dynamic-secret engine plugins (plugin_type = \"secret/dynamic\", ABI 1.4): the DynamicCredentialBackend trait, the dynamic host calls and the plugin-side dispatch loop."
+# Not published until the plugin ABI 1.4 ships in a stable host release.
+publish = false
+
+[features]
+default = ["process"]
+# The line-delimited JSON-RPC dispatch loop of the process runtime (stdio).
+process = ["dep:tokio"]
+# The `bv.dynamic_*` WASM imports and the `dynamic_module!` macro (wasm32 only).
+wasm = []
+# `testing::MockHost`, an in-memory host for plugin authors' unit tests.
+testing = []
+
+[dependencies]
+# Re-exported: dynamic plugins keep the conventions of the base plugin SDK.
+bastion-plugin-sdk = { path = "../../crates/bastion-plugin-sdk", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Base64 framing of the process runtime's `input` / `data_b64` fields.
+base64 = "0.22"
+# The backend trait is used as `dyn` by the dispatcher; `?Send` futures, so a
+# single-threaded runtime (and wasm32) can drive it.
+async-trait = "0.1"
+# Credentials received from the host and decoded envelopes are wiped on drop.
+zeroize = "1.8"
+# Constant-time comparison of the process runtime's bootstrap token.
+subtle = "2.6"
+tokio = { version = "1", features = ["io-std", "io-util", "rt"], optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["io-util", "rt", "macros"] }

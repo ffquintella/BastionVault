@@ -1,0 +1,31 @@
+[package]
+name = "bastion-plugin-dynamic-fixture"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Test fixture: a fake dynamic engine on bastion-plugin-dynamic-sdk, run through bastion-plugin-testkit as a real process and as WASM. Never shipped."
+publish = false
+
+[lib]
+# `cdylib` is the WASM artefact (`--target wasm32-unknown-unknown --lib`).
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "bastion-plugin-dynamic-fixture"
+path = "src/main.rs"
+
+[dependencies]
+async-trait = "0.1"
+serde_json = "1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+bastion-plugin-dynamic-sdk = { path = "../bastion-plugin-dynamic-sdk" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+bastion-plugin-dynamic-sdk = { path = "../bastion-plugin-dynamic-sdk", default-features = false, features = ["wasm"] }
+
+[dev-dependencies]
+# The host's mock (same capability gate and wire protocol as the server).
+bastion-plugin-testkit = { path = "../../crates/bastion-plugin-testkit" }

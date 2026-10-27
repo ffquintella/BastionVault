@@ -120,7 +120,7 @@ endif
 # affect cargo's own internal parallelism, which is where the cores actually go.
 .NOTPARALLEL:
 
-.PHONY: help build run-dev run-dev-gui run-dev-gui-proxy gui-deps gui-build gui-test gui-check require-nextest test-bin test test-changed test-plan ci-plan check-isolated check-hsm test-pki-composite test-pki-composite-lib test-pki-composite-integration test-integration test-doc test-cucumber test-hiqlite test-all test-release verify-gates verify-routes verify-fast verify-kani verify-differential verify verify-full verification-report docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugins-test plugin-bump container-image container-image-run container-image-test downloads-image downloads-image-run downloads-image-test container-deps-key container-deps-ref container-deps-image container-deps-push container-cache-clean container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages windows-cli-msi windows-cli-nupkg windows-cli-packages macos-cli-pkg cli-packages cli-packages-all install uninstall gui-linux-packages gui-windows-msi gui-windows-nsis windows-gui-nupkg gui-macos-pkg gui-packages macos-client-install sign-packages crates-login crates-publish-dry crates-publish crates-verify crates-plan crates-bump crates-publish-changed crates-publish-changed-dry crates-tag-push bench-build bench-build-quick deps-unused deps-unused-warn build-timings release release-version-check release-dispatch release-linux-appimage release-macos-pkg release-windows-msi release-local release-checksums
+.PHONY: help build run-dev run-dev-gui run-dev-gui-proxy gui-deps gui-build gui-test gui-check require-nextest test-bin test test-changed test-plan ci-plan check-isolated check-hsm test-pki-composite test-pki-composite-lib test-pki-composite-integration test-integration test-doc test-cucumber test-hiqlite test-all test-release verify-gates verify-routes verify-fast verify-kani verify-differential verify verify-full verification-report docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugins-test dynamic-plugins-test plugin-bump container-image container-image-run container-image-test downloads-image downloads-image-run downloads-image-test container-deps-key container-deps-ref container-deps-image container-deps-push container-cache-clean container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages windows-cli-msi windows-cli-nupkg windows-cli-packages macos-cli-pkg cli-packages cli-packages-all install uninstall gui-linux-packages gui-windows-msi gui-windows-nsis windows-gui-nupkg gui-macos-pkg gui-packages macos-client-install sign-packages crates-login crates-publish-dry crates-publish crates-verify crates-plan crates-bump crates-publish-changed crates-publish-changed-dry crates-tag-push bench-build bench-build-quick deps-unused deps-unused-warn build-timings release release-version-check release-dispatch release-linux-appimage release-macos-pkg release-windows-msi release-local release-checksums
 
 # Number of rustc incremental sessions to keep per crate. Anything
 # older than the Nth most recent is reaped by `prune-stale`. Override
@@ -2737,3 +2737,22 @@ plugins-test: require-nextest ## Run plugin unit tests: testkit, host ABI parity
 	cargo nextest run -p bastion_vault --lib --run-ignored only -E 'test(/self_accounts_(host|connect)/)'
 	@echo ""
 	@echo "==> plugins-test complete."
+
+# ── Dynamic-secret engine plugins (dynamic-engine-plugins/, T62) ────────
+# A separate Cargo workspace with its own target/, like plugins-ext. The SDK
+# runs through the testkit as a real process and as WASM; the live-Postgres
+# test stays ignored (see dynamic-engine-plugins/README.md).
+DYNAMIC_PLUGINS_DIR := dynamic-engine-plugins
+
+dynamic-plugins-test: require-nextest ## Dynamic SDK + engine plugins: unit tests, testkit process and WASM runs, dependency ban
+	@echo "==> wasm32 build of the SDK fixture (for the WASM-runtime tests)"
+	cd $(DYNAMIC_PLUGINS_DIR) && cargo build --release --target $(PLUGINS_WASM_TARGET) -p bastion-plugin-dynamic-fixture --lib
+	@echo "==> SDK, fixture and Postgres plugin tests"
+	cd $(DYNAMIC_PLUGINS_DIR) && cargo nextest run -p bastion-plugin-dynamic-sdk -p bastion-plugin-dynamic-fixture -p bastion-plugin-postgres
+	@echo "==> the fixture over the WASM imports (needs the wasm built above)"
+	cd $(DYNAMIC_PLUGINS_DIR) && cargo nextest run -p bastion-plugin-dynamic-fixture --run-ignored only
+	@echo "==> no openssl-sys / aws-lc-sys anywhere in the plugin graph"
+	@cd $(DYNAMIC_PLUGINS_DIR) && for c in openssl-sys aws-lc-sys; do \
+		if cargo tree --workspace --target all -i $$c >/dev/null 2>&1; then echo "$$c is in the dynamic-engine-plugins graph"; exit 1; fi; \
+	done
+	@echo "==> dynamic-plugins-test complete."

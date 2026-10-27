@@ -259,6 +259,37 @@ pub async fn plugins_list(state: State<'_, AppState>) -> CmdResult<PluginListRes
     Ok(PluginListResult { plugins })
 }
 
+/// The catalog narrowed to one `plugin_type`, e.g. `secret/dynamic` (T62).
+/// Remote: `GET /v2/sys/plugins?kind=…`, which exists on the v2 surface only.
+/// Embedded: the same filter, `PluginCatalog::list_by_kind`.
+#[tauri::command]
+pub async fn plugins_list_by_kind(state: State<'_, AppState>, kind: String) -> CmdResult<PluginListResult> {
+    let kind = checked_plugin_kind(&kind)?;
+    if is_remote(&state).await {
+        let path = format!("sys/plugins?kind={}", kind.replace('/', "%2F"));
+        let json = remote_call_v2(&state, "GET", &path, None).await?;
+        let plugins_v = json.get("plugins").cloned().unwrap_or(Value::Array(Vec::new()));
+        let plugins: Vec<PluginManifest> = decode_json(plugins_v, "plugin manifests")?;
+        return Ok(PluginListResult { plugins });
+    }
+    let vault_guard = state.vault.lock().await;
+    let vault = vault_guard.as_ref().ok_or("Vault not open")?;
+    let core = vault.core.load();
+    let plugins =
+        PluginCatalog::new().list_by_kind(core.barrier.as_storage(), kind).await.map_err(CommandError::from)?;
+    Ok(PluginListResult { plugins })
+}
+
+/// A `plugin_type` value safe to put on a query string unescaped (bar `/`).
+fn checked_plugin_kind(kind: &str) -> Result<&str, CommandError> {
+    let kind = kind.trim();
+    let allowed = |c: char| c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_' | '.');
+    if kind.is_empty() || !kind.chars().all(allowed) {
+        return Err("plugin kind must be a plugin_type such as `secret/dynamic`".into());
+    }
+    Ok(kind)
+}
+
 #[tauri::command]
 pub async fn plugins_get(state: State<'_, AppState>, name: String) -> CmdResult<Option<PluginManifest>> {
     if is_remote(&state).await {

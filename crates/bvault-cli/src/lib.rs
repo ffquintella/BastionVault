@@ -63,7 +63,7 @@ mod test_utils {
     pub fn seeded_policy_names<'a>(extra: &[&'a str]) -> Vec<&'a str> {
         let mut names: Vec<&str> = vec![
             "administrator", "default", "ldap-admin", "ldap-user", "pki-admin", "pki-user",
-            "secret-author", "shared-access", "standard-user", "standard-user-readonly",
+            "secret-author", "self-accounts-user", "shared-access", "standard-user", "standard-user-readonly",
             "totp-admin", "totp-user", "transit-admin", "transit-user",
             // Per-module baselines (features/module-policies.md).
             "secrets-full", "secrets-read", "secrets-shared",

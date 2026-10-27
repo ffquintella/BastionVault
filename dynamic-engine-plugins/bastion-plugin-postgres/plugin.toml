@@ -1,0 +1,24 @@
+name        = "bastion-plugin-postgres"
+version     = "0.2.0"
+plugin_type = "secret/dynamic"
+engine_type = "database"
+runtime     = "process"
+abi_version = "1.4"
+
+# Filled in by bv-plugin-pack from the built binary.
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+size   = 0
+
+description = "PostgreSQL dynamic credentials: short-lived roles created from host-generated credentials and rendered statements, dropped when the lease ends."
+
+[capabilities]
+# Diagnostics go to stderr, which the host forwards to its log; the plugin
+# never calls the `log` host import.
+log_emit = false
+# config/<name> (connection + root credential), roles/<name> and state/.
+storage_prefix = ""
+# The three dynamic-secret calls, and nothing else: no allowed_hosts (the
+# host refuses them for secret/dynamic), no app or provider capability.
+dynamic_lease_register = true
+dynamic_audit_emit     = true
+dynamic_pool_checkout  = true

@@ -373,7 +373,9 @@ endpoints above. The listing's `keys` are the lease ids; `key_info` has, per
 lease, `path`, `issue_time`, `expire_time`, `attempts`, `max_attempts`,
 `exhausted`, `first_failed_at`, `last_failed_at`, `next_attempt_at` (absent
 once exhausted), `last_error` (cut to 256 characters) and `origin` (`expiry`,
-`operator`, `prefix`, `token`, `owner`, `retry`) — never the lease's data.
+`operator`, `prefix`, `token`, `owner`, `retry`, `registration`) — never the lease's data.
+`registration` marks a dynamic credential whose lease could not be registered
+and whose immediate revoke failed (see *Dynamic-secret plugin mounts*).
 
 `DELETE` force-clears one: it drops the lease record **without** asking its
 backend, for an operator who has cleaned the target system up by hand. `400`
@@ -2772,6 +2774,86 @@ built-in `administrator` policy reaches it through `path "*"`.
   "pending_purges": 0
 }
 ~~~
+
+### Dynamic-secret plugin mounts (ABI 1.4)
+
+A plugin registered with `plugin_type = "secret/dynamic"` and an `engine_type`
+(`database`, `aws`, `gcp`, `azure` or `ssh`) is mounted like any plugin
+(`type = "plugin:<name>"`), but the host serves the mount itself and calls the
+plugin only for target-side work. See
+[features/dynamic-secrets.md](../features/dynamic-secrets.md).
+
+**List only dynamic plugins** (v2 only; `/v1` ignores the parameter)
+
+~~~
+GET /v2/sys/plugins?kind=secret/dynamic
+~~~
+
+The same catalog listing, narrowed to one `plugin_type`.
+
+**Paths of a dynamic mount** (relative to the mount, e.g. `database/`)
+
+| Path | Operation | What happens |
+|------|-----------|--------------|
+| `creds/{role}` | `read` | Generate a credential, or serve a cached one (below). `507` when the request's namespace is at its `max_leases` quota, checked before the plugin is called; `404` for an unknown role, `400` for a role whose statements use a token outside the allowlist (or `{{password}}` outside its creation statements), `502` when the plugin fails |
+| `config/{connection}` | any | Proxied to the plugin, except `insecure_skip_tls_verify` and `tls_ca_pem`, which the host keeps and strips from what the plugin receives; a `read` adds them and `root_credential_version` |
+| `roles/…` | any | Proxied to the plugin; a write or delete of `roles/{role}` drops that role's cached credentials |
+| `rotate-root/{connection}` | `write` | The host generates a new root credential (same generator as `creds/`) and hands it to the plugin, which sets it on the target and stores it; the host then bumps `root_credential_version` and drains the connection's pool. Answers only `connection` and `root_credential_version`, never the credential |
+
+Any other path is `404`. A proxied answer never creates a lease.
+
+A generated credential answers `data.username` (`v-<display>-<role>-<unix>-<8 hex>`)
+and `data.password` (24 bytes from the OS random source, URL-safe base64, 32
+characters), both made by the host, plus a lease: it is registered on every
+dynamic mount, whatever the mount's `leased_passthrough` option says, and is
+renewed (`sys/renew/{lease_id}`) and revoked (`sys/revoke/{lease_id}`, expiry,
+token revocation) through the plugin. A failed revoke keeps the lease as
+`revoke_failed` (see *Leases whose revoke failed*), including when the plugin
+is quarantined or deleted; once the plugin is registered again a retry reaches
+it. A generate that does not end with a lease (the plugin failed, timed out or
+registered none) is followed at once by a revoke of the generated identity,
+and the request answers `502` or the plugin's error. The same holds when the
+kernel then cannot register the lease (the namespace filled its quota in the
+meantime, a storage write failed): the identity is revoked through the plugin
+and the request fails; if that revoke fails, the lease is kept as
+`revoke_failed` with origin `registration` and retried. When the plugin is
+quarantined during `generate` (an undeclared host call) it is not called again:
+the identity it may have created is logged at ERROR and audited as
+`revoke_failed` (role, connection, target identity) for an operator to remove.
+
+The lease row of a dynamic credential does not store `data.password` (renew and
+revoke never read it); a row written before this change loses it on its next
+write. A plugin's own storage (`storage_*` host calls, i.e. its `config/` and
+`roles/`) is per mount: two mounts of one plugin never see each other's. That
+storage lives under `core/plugins/<name>/data/mounts/<mount id>/`; data a
+dynamic plugin wrote before this layout (unreleased slice 2) is not migrated.
+
+**Credential cache** (opt-in per role): a role whose recipe sets
+`cache_ttl_secs` (`cache_ttl` on the role write, e.g. `30s`; default `0`, off)
+may answer a repeated `creds/{role}` read of the **same identity entity** with
+the credential and lease of its earlier read. The window is clamped to 300 s,
+and an entry is served only while its lease has more than `max(2 x window,
+60 s)` left. A hit calls no plugin, creates nothing on the target and
+registers no lease: it carries no top-level lease, names the shared lease in
+`data.lease_id`, `data.lease_duration` (seconds left as of issue) and
+`data.renewable`, adds a warning, and is audited as a `cache_hit` event (lease
+id, role, connection, target identity, actor; never the credential). Callers
+without an identity entity (the root token, for one) are never served from the
+cache, and two entities never share an entry. Entries are dropped on any revoke
+or renew of their lease, on `rotate-root` of the mount, when the plugin is
+deleted, re-activated or quarantined, and on expiry; at most 4096 live per
+node, oldest dropped first. The cache is per node: a revoke handled by another
+node does not reach this node's entries, which is why they end well before
+their lease does.
+
+Every step is audited as a `dynamic_secret` event (`generate`, `renew`,
+`revoke`, `revoke_failed`, `rotate_root`, and the host-only `cache_hit`, which
+`dynamic_audit_emit` refuses from a plugin) carrying the lease id where known,
+engine, `plugin@version`, role, connection, target identity, expiry and actor —
+never the credential. A plugin that calls a `dynamic_*` host capability its
+manifest does not declare is refused, audited as `plugin.capability_refused`
+and quarantined: the request fails with `502` and the mount refuses every
+request until the plugin is registered again.
 
 ## Error Responses
 
