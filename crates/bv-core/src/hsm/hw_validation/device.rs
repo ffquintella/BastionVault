@@ -28,7 +28,7 @@ use crate::{
         blob::{Context, Purpose},
         context,
         derive::{derive_pqc_key_material, PqcKeyKind},
-        device_audit::{DeviceLog, DeviceLogEntry},
+        device_audit::{log_result_from_yubihsm, DeviceLog, DeviceLogEntry},
         yubihsm2::{device_attestation_certificate, YubiHsm2Backend},
         HsmBackend, HsmObjectIds,
     },
@@ -206,7 +206,8 @@ pub fn read_snapshot(client: &Client, status: &ConnectorStatus) -> Result<Device
                     session_key: e.session_key,
                     target_key: e.target_key,
                     second_key: e.second_key,
-                    result: e.result.to_u8(),
+                    // The digest covers the device's byte, not the crate's re-encoding.
+                    result: log_result_from_yubihsm(e.result.to_u8()),
                     systick: e.tick,
                     digest: e.digest.0,
                 })

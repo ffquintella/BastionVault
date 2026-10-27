@@ -511,8 +511,12 @@ bvault operator hsm status        # device_audit.members[].enrolled = true
   stored behind the barrier at `core/hsm/auditor/<hsm_id>` and never shown. A
   repair replaces it when it no longer authenticates (device reset).
 - **YubiHSM 2:** installing `bv-auditor`, the forced-audit option and the drain
-  are refused, naming phase 7, until the log layout is confirmed on a device.
-  `v2/sys/hsm/status` then shows each member with `enrolled: false`.
+  are refused, naming phase 7, until the log is confirmed on a device.
+  `v2/sys/hsm/status` then shows each member with `enrolled: false`. The first
+  read-only run confirmed the entry byte order and the digest chain on a
+  factory device; a logged command's fields, a failed command's result byte
+  and `LOG_FULL` under forced audit are still to confirm
+  (`features/hsm-pool-ha.md` § Phase 7 findings: device log).
 
 Metrics (`/metrics`):
 
@@ -681,7 +685,13 @@ certificate and Yubico root fingerprints), `checks-*.json`, `latency.md` /
 `latency.json`, `RESET-REQUIRED.txt` and `connector-<serial>.log`. Each
 snapshot also records the device log read with the factory key and whether
 its digest chain verified as the drain expects; that is the evidence the
-YubiHSM 2 drain refusal is lifted on.
+YubiHSM 2 drain refusal is lifted on. A factory device logs only its boot
+entries (command audit is off), and they should read `digest chain verified`.
+The log's `result_encoding` is `device`; a snapshot saved by a build before
+that field existed reads as `yubihsm-code`: its result bytes are the
+`yubihsm` crate's re-encoding (a boot entry's 0x00 reads 117) and its
+`chain_gaps` are an artefact of that, not of the device. Such a "before"
+snapshot stays valid for `compare`, which never compares the device log.
 
 Every output names its run mode. The JSON files carry `"mode"`
 (`"pool-of-one"` or `"two-member"`) and the `serials`; `latency.md`,

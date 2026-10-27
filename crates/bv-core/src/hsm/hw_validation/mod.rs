@@ -24,7 +24,7 @@ use crate::{
     hsm::{
         admin::FACTORY_PASSWORD,
         attestation::{format_serial, parse_serial, CertificateSummary},
-        device_audit::{verify_log, DeviceLog, DeviceLogEntry},
+        device_audit::{log_result_from_yubihsm, verify_log, DeviceLog, DeviceLogEntry},
     },
 };
 
@@ -563,11 +563,27 @@ pub struct DeviceSnapshot {
     pub connector_version: Option<String>,
 }
 
+/// What a capture's `result` bytes are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LogResultEncoding {
+    /// A capture written before the field existed: yubihsm 0.42's re-encoding
+    /// (a boot entry's 0x00 reads 0x75), so its `chain_gaps` are not evidence.
+    YubihsmCode,
+    /// The device's own bytes, the ones its digest chain covers.
+    Device,
+}
+
+impl LogResultEncoding {
+    fn absent() -> Self {
+        Self::YubihsmCode
+    }
+}
+
 /// The device log as a snapshot read it (`get-log-entries` with the factory
 /// key: a read), and what [`verify_log`] makes of it with no cursor. This is
 /// the on-device evidence for the entry layout and digest chain that
-/// `hsm::device_audit` assumes; the YubiHSM 2 drain stays refused until it
-/// is reviewed. Never compared between snapshots.
+/// `hsm::device_audit` relies on. Never compared between snapshots.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceLogCapture {
     pub unlogged_boot: u16,
@@ -576,9 +592,13 @@ pub struct DeviceLogCapture {
     /// Index jumps and digest-chain breaks; empty means every entry chains
     /// from the one before as `DeviceLogEntry::data` lays it out.
     pub chain_gaps: Vec<String>,
+    /// Always written; absent only from a capture saved before it existed.
+    #[serde(default = "LogResultEncoding::absent")]
+    pub result_encoding: LogResultEncoding,
 }
 
 impl DeviceLogCapture {
+    /// `log` holds the device's own result bytes.
     pub fn new(log: DeviceLog) -> Result<Self, RvError> {
         let (verified, _) = verify_log(None, &log)?;
         Ok(Self {
@@ -586,15 +606,35 @@ impl DeviceLogCapture {
             unlogged_auth: log.unlogged_auth,
             entries: log.entries,
             chain_gaps: verified.gaps,
+            result_encoding: LogResultEncoding::Device,
         })
     }
 
-    /// One line for the run's output.
+    /// The log with the device's result bytes, decoding an old capture's.
+    pub fn device_log(&self) -> DeviceLog {
+        let mut entries = self.entries.clone();
+        if self.result_encoding == LogResultEncoding::YubihsmCode {
+            for e in &mut entries {
+                e.result = log_result_from_yubihsm(e.result);
+            }
+        }
+        DeviceLog { unlogged_boot: self.unlogged_boot, unlogged_auth: self.unlogged_auth, entries }
+    }
+
+    /// One line for the run's output. An old capture says so, and is checked
+    /// again from its decoded bytes; its recorded gaps are not repeated.
     pub fn summary(&self) -> String {
-        match (self.entries.len(), self.chain_gaps.as_slice()) {
-            (n, _) if n < 2 => format!("{n} log entries, too few to check the digest chain"),
-            (n, []) => format!("{n} log entries, digest chain verified"),
-            (n, gaps) => format!("{n} log entries, {} chain gap(s): {}", gaps.len(), gaps.join("; ")),
+        let (gaps, note) = match self.result_encoding {
+            LogResultEncoding::Device => (self.chain_gaps.clone(), ""),
+            LogResultEncoding::YubihsmCode => (
+                verify_log(None, &self.device_log()).map(|(v, _)| v.gaps).unwrap_or_else(|e| vec![e.to_string()]),
+                " (an old capture's result bytes, decoded again)",
+            ),
+        };
+        match (self.entries.len(), gaps.as_slice()) {
+            (n, _) if n < 2 => format!("{n} log entries, too few to check the digest chain{note}"),
+            (n, []) => format!("{n} log entries, digest chain verified{note}"),
+            (n, found) => format!("{n} log entries, {} chain gap(s){note}: {}", found.len(), found.join("; ")),
         }
     }
 }
@@ -1482,7 +1522,35 @@ mod tests {
 
         // It survives the snapshot's JSON round trip.
         let json = serde_json::to_string(&good).unwrap();
+        assert!(json.contains(r#""result_encoding":"device""#), "{json}");
         assert_eq!(serde_json::from_str::<DeviceLogCapture>(&json).unwrap(), good);
+    }
+
+    /// Read-old, write-new: the first hardware run's capture, saved before
+    /// `result_encoding` existed, with yubihsm's re-encoded result bytes.
+    #[test]
+    fn an_old_capture_is_named_and_decoded_again_never_taken_as_is() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../testdata/yubihsm2-log-0036470559.json")).unwrap();
+        let old: DeviceLogCapture = serde_json::from_value(fixture["capture"].clone()).unwrap();
+        assert_eq!(old.result_encoding, LogResultEncoding::YubihsmCode);
+        assert_eq!(old.chain_gaps.len(), 7, "the recorded gaps are kept as recorded");
+        assert_eq!(
+            old.summary(),
+            "8 log entries, digest chain verified (an old capture's result bytes, decoded again)"
+        );
+
+        // Rewritten from the decoded bytes, it is a current capture.
+        let new = DeviceLogCapture::new(old.device_log()).unwrap();
+        assert_eq!(new.result_encoding, LogResultEncoding::Device);
+        assert!(new.chain_gaps.is_empty() && new.entries.iter().skip(1).all(|e| e.result == 0), "{new:?}");
+        assert_eq!(new.device_log(), old.device_log());
+        assert_eq!(new.summary(), "8 log entries, digest chain verified");
+
+        // A current capture's bytes are never decoded a second time.
+        let mut tampered = new.clone();
+        tampered.entries[3].result = 0x75;
+        assert_eq!(tampered.device_log().entries[3].result, 0x75);
     }
 
     #[test]

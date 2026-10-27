@@ -131,8 +131,16 @@ pub fn command_name(code: u8) -> String {
     name.to_string()
 }
 
+/// A device status byte of 0x00: success. The YubiHSM 2 writes it as the
+/// result of its boot entries (phase 7 capture).
+pub const DEVICE_RESULT_OK: u8 = 0x00;
+
 /// One device log entry: the 16 data bytes the device chains and the
-/// truncated SHA-256 digest that links it to the entry before.
+/// truncated SHA-256 digest that links it to the entry before. Layout and
+/// chain are confirmed on a YubiHSM 2 by `testdata/yubihsm2-log-0036470559.json`
+/// (spec § Phase 7 findings); a first drain anchors on the oldest entry
+/// unverified, because the first entry after a reset chains from no value
+/// in the log. `result` is the device's byte: see [`log_result_from_yubihsm`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceLogEntry {
     pub index: u16,
@@ -147,8 +155,12 @@ pub struct DeviceLogEntry {
 }
 
 impl DeviceLogEntry {
-    /// The entry's data as the device lays it out (big-endian, 16 bytes).
-    /// The exact on-device layout is confirmed on hardware in phase 7.
+    /// The entry's data as the device lays it out (big-endian, 16 bytes):
+    /// index u16, command u8, length u16, session key u16, target key u16,
+    /// second key u16, result u8, systick u32. The byte order and the chain
+    /// are confirmed on hardware (see the type's documentation); which of the
+    /// three key fields is which is confirmed only once a device logs a
+    /// command, which a factory device with command audit off does not.
     pub fn data(&self) -> [u8; 16] {
         let mut out = [0u8; 16];
         out[0..2].copy_from_slice(&self.index.to_be_bytes());
@@ -171,6 +183,19 @@ impl DeviceLogEntry {
         let mut out = [0u8; 16];
         out.copy_from_slice(&full[..16]);
         out
+    }
+}
+
+/// The device's result byte from yubihsm 0.42's `response::Code::to_u8()`.
+/// That crate decodes device status bytes 0x00..=0x13 through a fallback that
+/// re-encodes them as `0x75 - byte` (a boot entry's 0x00 reads 0x75), and
+/// every other byte it accepts as itself; this undoes it. Its direct reading
+/// of 0x62..=0x75 (host-side codes no device logs) collides: such a byte
+/// would come back changed and break the digest chain, a gap, never a pass.
+pub fn log_result_from_yubihsm(encoded: u8) -> u8 {
+    match encoded {
+        0x62..=0x75 => 0x75 - encoded,
+        other => other,
     }
 }
 
@@ -318,8 +343,8 @@ pub fn actor_of(session_key: u16, hsm_id: &HsmId, enrollments: &[NodeEnrollment]
 
 /// The `hsm.device_log` detail of one entry. Names and numbers only.
 pub fn describe(entry: &DeviceLogEntry, actor: &str) -> String {
-    let result =
-        if entry.result == 0x80 | entry.command { "ok".to_string() } else { format!("error({:#04x})", entry.result) };
+    let ok = entry.result == 0x80 | entry.command || entry.result == DEVICE_RESULT_OK;
+    let result = if ok { "ok".to_string() } else { format!("error({:#04x})", entry.result) };
     format!(
         "index={} command={} auth_key={:#06x} actor={actor} target={:#06x} result={result} systick={}",
         entry.index,
@@ -560,6 +585,143 @@ mod tests {
         let entry = chain(1, 1, [0; 16])[0];
         let text = describe(&entry, "node n1");
         assert!(text.contains("command=wrap-data") && text.contains("result=ok") && text.contains("actor=node n1"));
+    }
+
+    /// The phase 7 capture from a factory-state YubiHSM 2, as the harness
+    /// first recorded it (provenance in the file).
+    const REAL_LOG: &str = include_str!("testdata/yubihsm2-log-0036470559.json");
+
+    #[derive(Deserialize)]
+    struct RealFixture {
+        capture: RealCapture,
+    }
+
+    #[derive(Deserialize)]
+    struct RealCapture {
+        unlogged_boot: u16,
+        unlogged_auth: u16,
+        entries: Vec<DeviceLogEntry>,
+    }
+
+    fn recorded_log() -> DeviceLog {
+        let real: RealFixture = serde_json::from_str(REAL_LOG).unwrap();
+        let c = real.capture;
+        DeviceLog { unlogged_boot: c.unlogged_boot, unlogged_auth: c.unlogged_auth, entries: c.entries }
+    }
+
+    /// The log as the device wrote it: the recorded results decoded back.
+    fn real_log() -> DeviceLog {
+        let mut log = recorded_log();
+        for e in &mut log.entries {
+            e.result = log_result_from_yubihsm(e.result);
+        }
+        log
+    }
+
+    fn indexes(entries: &[DeviceLogEntry]) -> Vec<u16> {
+        entries.iter().map(|e| e.index).collect()
+    }
+
+    fn gaps(log: &DeviceLog) -> Vec<String> {
+        verify_log(None, log).unwrap().0.gaps
+    }
+
+    #[test]
+    fn the_real_yubihsm2_log_verifies_link_by_link() {
+        let log = real_log();
+        assert_eq!(indexes(&log.entries), (1..=8).collect::<Vec<_>>());
+        assert!(log.entries[1..].iter().all(|e| e.command == 0 && e.result == DEVICE_RESULT_OK && e.systick == 0));
+        // Entry 2's data, byte for byte, and every link recomputed.
+        assert_eq!(hex::encode(log.entries[1].data()), "0002000000ffff000000000000000000");
+        for pair in log.entries.windows(2) {
+            assert_eq!(pair[1].chained_digest(&pair[0].digest), pair[1].digest, "entry {}", pair[1].index);
+        }
+        let (v, last) = verify_log(None, &log).unwrap();
+        assert!(v.gaps.is_empty(), "{:?}", v.gaps);
+        assert_eq!(indexes(&v.new_entries), (1..=8).collect::<Vec<_>>());
+        assert_eq!(last, Some((8, log.entries[7].digest)));
+        // The first entry chains from a value the log does not hold.
+        assert_ne!(log.entries[0].chained_digest(&[0; 16]), log.entries[0].digest);
+        assert_ne!(log.entries[0].chained_digest(&[0xff; 16]), log.entries[0].digest);
+        // A boot entry is a success, not an error.
+        assert!(describe(&log.entries[1], "boot").contains("result=ok"));
+    }
+
+    #[test]
+    fn the_capture_as_first_recorded_breaks_every_link() {
+        // Regression: the result bytes as yubihsm's re-encoding left them
+        // (0x75 for the device's 0x00) are what the first run reported.
+        let recorded = recorded_log();
+        assert!(recorded.entries[1..].iter().all(|e| e.result == 0x75));
+        assert_eq!(gaps(&recorded), (2..=8).map(|i| format!("digest chain break at entry {i}")).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn the_real_log_resumes_from_a_cursor_and_reports_tampering() {
+        let log = real_log();
+        let cursor = AuditCursor::new(&id(), (4, log.entries[3].digest), &log, 1, "n1");
+        let (v, last) = verify_log(Some(&cursor), &log).unwrap();
+        assert!(v.gaps.is_empty(), "{:?}", v.gaps);
+        assert_eq!((indexes(&v.new_entries), last.unwrap().0), (vec![5, 6, 7, 8], 8));
+
+        // A changed field breaks the link into that entry only.
+        let mut changed = log.clone();
+        changed.entries[4].systick = 1;
+        assert_eq!(gaps(&changed), vec!["digest chain break at entry 5".to_string()]);
+        // A changed digest breaks the links into and out of it.
+        let mut digest = log.clone();
+        digest.entries[4].digest[0] ^= 1;
+        assert_eq!(gaps(&digest), vec!["digest chain break at entry 5", "digest chain break at entry 6"]);
+        // Reordered.
+        let mut swapped = log.clone();
+        swapped.entries.swap(4, 5);
+        assert_eq!(gaps(&swapped), vec!["index jump 4 -> 6", "index jump 6 -> 5", "index jump 5 -> 7"]);
+        // Dropped.
+        let mut dropped = log.clone();
+        dropped.entries.remove(4);
+        assert_eq!(gaps(&dropped), vec!["index jump 4 -> 6"]);
+        // Dropped and renumbered to hide it: every renumbered link breaks.
+        let mut hidden = dropped.clone();
+        for e in &mut hidden.entries[4..] {
+            e.index -= 1;
+        }
+        assert_eq!(
+            gaps(&hidden),
+            vec!["digest chain break at entry 5", "digest chain break at entry 6", "digest chain break at entry 7"]
+        );
+        // A cursor whose entry the log holds with another digest is a rewrite.
+        let mut stale = cursor.clone();
+        stale.last_digest = hex::encode([0u8; 16]);
+        let (v, _) = verify_log(Some(&stale), &log).unwrap();
+        assert!(v.gaps[0].contains("no longer holds the drained entry 4"), "{:?}", v.gaps);
+        assert_eq!(v.new_entries.len(), 8, "every entry is drained again, none skipped");
+    }
+
+    #[test]
+    fn result_bytes_outside_the_yubihsm_fallback_pass_through() {
+        assert_eq!(log_result_from_yubihsm(0x75), 0x00);
+        assert_eq!(log_result_from_yubihsm(0x62), 0x13);
+        for byte in (0x00..0x62).chain(0x76..=0xff) {
+            assert_eq!(log_result_from_yubihsm(byte), byte);
+        }
+    }
+
+    /// Pins the yubihsm crate's decoding: an upgrade that changes it fails here.
+    #[cfg(feature = "hsm_yubihsm2")]
+    #[test]
+    fn yubihsm_result_codes_decode_back_to_the_device_byte() {
+        use serde::de::value::{Error, U8Deserializer};
+        use yubihsm::{command, response::Code};
+        let crate_reads = |raw: u8| Code::deserialize(U8Deserializer::<Error>::new(raw)).map(Code::to_u8).unwrap();
+        // The phase 7 finding: a boot entry's 0x00 comes back as 0x75.
+        assert_eq!(crate_reads(0x00), 0x75);
+        // Device status bytes, the error command and every success byte.
+        let success = (0u8..=0x7f).filter(|c| command::Code::from_u8(*c).is_ok()).map(|c| 0x80 | c);
+        for raw in (0x00..=0x13).chain([0x7f]).chain(success) {
+            assert_eq!(log_result_from_yubihsm(crate_reads(raw)), raw, "{raw:#04x}");
+        }
+        // The collision the decoding documents.
+        assert_eq!(crate_reads(0x75), crate_reads(0x00));
     }
 
     #[test]

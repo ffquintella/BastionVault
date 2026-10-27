@@ -213,6 +213,10 @@ EXAMPLE ENTRY:
 
 ### Fixed
 
+#### HSM pool HA (phase 7, first read-only hardware run)
+
+- Read a YubiHSM 2's device log with the device's own result bytes in the phase 7 hardware suite: the `yubihsm` crate re-encodes a boot entry's result 0x00 as 0x75, so a factory device's log was reported as `7 chain gap(s)` although its chain is intact; the snapshot now stores the device's byte, a snapshot's device log carries `result_encoding`, and one saved by an earlier build is labelled as such and checked again from its decoded bytes. The entry layout and digest chain the drain uses are unchanged and now confirmed on a device; the YubiHSM 2 drain stays refused until a logged command is confirmed (T454, S114)
+
 #### Connect MFA in a child namespace
 
 - **Let an operator signed in to a child namespace complete an MFA-gated Connect** (T457, S115)

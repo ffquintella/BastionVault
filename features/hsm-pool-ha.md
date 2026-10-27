@@ -5,8 +5,9 @@
 > (ceremonies, repair, bootstrap, provisioning, YubiHSM 2 wiring, rotation,
 > migration) done 2026-10-27 on the mock, phase 5 (recovery) done 2026-10-27
 > on the mock, phase 6 (audit and observability) done 2026-10-27 on the mock,
-> phase 7 (hardware validation) prepared 2026-10-27 and awaiting the hardware
-> run, which can now validate a pool of one on a single device; the [pool of one](#pool-of-one-a-single-member-pool) (operator decision
+> phase 7 (hardware validation) prepared 2026-10-27, its first read-only run
+> done the same day on one device (device log layout and digest chain
+> confirmed), the write steps still awaiting the operator; the run can validate a pool of one on a single device; the [pool of one](#pool-of-one-a-single-member-pool) (operator decision
 > 2026-10-27) done on the mock the same day; see [Current state](#current-state). Spec
 > written 2026-10-19. Extends
 > [HSM Support (YubiHSM 2)](hsm-support.md) (S17), whose non-negotiable security
@@ -964,8 +965,11 @@ device-log drain, the remaining metrics, the extended status and the GUI pool
 sections; the drain runs on the mock and is refused on a YubiHSM 2 until
 phase 7. Phase 7 is **prepared, awaiting the hardware run**: the Yubico
 attestation chain is verified against an operator-supplied trust file, and a
-hardware suite that only an operator runs is in place; nothing has been run
-on a device yet. The **pool of one** (operator decision 2026-10-27) is
+hardware suite that only an operator runs is in place. Its first read-only
+run (`snapshot`, one device, 2026-10-27) confirmed the device log's layout
+and digest chain and found a decoding bug in the harness (see
+[Phase 7 findings: device log](#phase-7-findings-device-log)); no write step
+has run on a device yet. The **pool of one** (operator decision 2026-10-27) is
 implemented on the mock: a cluster starts with one device and adds the second
 later.
 
@@ -1259,7 +1263,9 @@ Not done in phase 6, deliberately (phase 7, hardware):
 - The YubiHSM 2 side: `put_auditor_auth_key`, `set_forced_audit` and
   `open_auditor` refuse on a YubiHSM 2, naming phase 7, until the entry layout,
   the digest chain, whether the device logs `get-log-entries` /
-  `set-log-index`, and `LOG_FULL` behaviour are confirmed on a device.
+  `set-log-index`, and `LOG_FULL` behaviour are confirmed on a device. The
+  byte order and the digest chain are now confirmed; the rest is open (see
+  [Phase 7 findings: device log](#phase-7-findings-device-log)).
 - Gateway-side counters (`GatewayStats`) stay in the gateway's log; the metric
   is the node's relay view.
 - The mock's log is per process: a mock pool whose nodes run in separate
@@ -1780,7 +1786,7 @@ Not done in phase 2, deliberately:
 | 5. Recovery | Recovery keypair, Shamir split, recovery copies, `recover` route | `crates/bv-core/src/hsm/recovery.rs`, `crates/bv-core/src/seal/hsm/recovery_ceremony.rs`, `crates/bv-server/src/sys.rs`, `crates/bvault-cli` | Done (mock; the YubiHSM 2 ceremony waits on phase 7 attestation) |
 | 6. Audit and observability | Device-log drain, events, metrics, status, GUI page, `docs/hsm.md`, `docs/api.md` | `crates/bv-core/src/hsm/device_audit.rs`, `crates/bv-core/src/seal/hsm/device_drain.rs`, `gui/src/routes/HsmStatusPage.tsx` | Done (mock; the YubiHSM 2 drain waits on phase 7) |
 | Amendment: pool of one (2026-10-27) | One or two members; init, bootstrap and unseal with one; `acknowledge_single_member_without_recovery`; at most two members not retired; redundancy status, event and metric | `crates/bv-core/src/hsm/{mod,pool}.rs`, `crates/bv-core/src/seal/hsm.rs`, `crates/bv-core/src/seal/hsm/pool_admin.rs`, `crates/bv-metrics/src/hsm_metrics.rs` | Done (mock; YubiHSM 2 with phase 7) |
-| 7. Hardware validation | Two physical devices plus three nodes; pin the Yubico attestation chain and lift the YubiHSM 2 attestation refusal; validate `provision`, bootstrap, enrollment and the relay; confirm the device log layout, digest chain and forced audit, and lift the YubiHSM 2 drain refusal; measure latencies; confirm the FIPS Ed25519 question; **end every run by factory-resetting both devices and checking they provision again** (see [Resetting the test devices](#resetting-the-test-devices)) | `crates/bv-core/src/hsm/{attestation,yubihsm2}.rs`, `crates/bv-core/src/hsm/hw_validation/`, `crates/bv-core/tests/hsm_pool_hardware.rs` (feature `hsm_hardware_tests`, behind `BVAULT_TEST_YUBIHSM_POOL=1`), `docs/hsm.md` | Prepared, awaiting hardware run (attestation pinning and the suite done on the mock; no device run yet). The suite validates a pool of one on a single device (the planned run, 36470559) or a two-member pool; on a pool of one the cross-device checks are listed as `not exercised (pool of one)` |
+| 7. Hardware validation | Two physical devices plus three nodes; pin the Yubico attestation chain and lift the YubiHSM 2 attestation refusal; validate `provision`, bootstrap, enrollment and the relay; confirm the device log layout, digest chain and forced audit, and lift the YubiHSM 2 drain refusal; measure latencies; confirm the FIPS Ed25519 question; **end every run by factory-resetting both devices and checking they provision again** (see [Resetting the test devices](#resetting-the-test-devices)) | `crates/bv-core/src/hsm/{attestation,yubihsm2}.rs`, `crates/bv-core/src/hsm/hw_validation/`, `crates/bv-core/tests/hsm_pool_hardware.rs` (feature `hsm_hardware_tests`, behind `BVAULT_TEST_YUBIHSM_POOL=1`), `docs/hsm.md` | Prepared, awaiting hardware run (attestation pinning and the suite done on the mock; first read-only run on 36470559 confirmed the device log's byte order and digest chain, see [Phase 7 findings: device log](#phase-7-findings-device-log); no write step run yet). The suite validates a pool of one on a single device (the planned run, 36470559) or a two-member pool; on a pool of one the cross-device checks are listed as `not exercised (pool of one)` |
 
 **What happens to the existing modules:**
 
@@ -1939,17 +1945,73 @@ the factory key only. Part number 78CLUFX5000P, firmware 2.4.1 on both.
 | | 36470559 | 36470560 |
 |---|---|---|
 | Objects | `0x0001` factory key only (read) | `0x0001` factory key only (read) |
-| `force-audit` | `00` (assumed) | `00` (read) |
-| `command-audit` | all 65 commands `00` (assumed) | all 65 commands `00` (read) |
-| `algorithm-toggle` | all 55 algorithms enabled (assumed) | all 55 algorithms enabled (read) |
-| `fips-mode` | assumed absent | rejected as malformed: not a FIPS model |
-| Storage | assumed 255/256 records, 1023/1024 pages | 255/256 records, 1023/1024 pages (read) |
+| `force-audit` | `00` (read) | `00` (read) |
+| `command-audit` | all 65 commands `00` (read) | all 65 commands `00` (read) |
+| `algorithm-toggle` | all 55 algorithms enabled (read) | all 55 algorithms enabled (read) |
+| `fips-mode` | not read by the harness (the option is absent on a non-FIPS model) | rejected as malformed: not a FIPS model |
+| Storage | 255/256 records, 1023/1024 pages (read) | 255/256 records, 1023/1024 pages (read) |
 | Log used | 7/62 | 9/62 |
 
-"Assumed" means the operator declared device 36470559 identical to 36470560
-and its options were not read. The post-reset comparison for that device
-uses the values above as expectations; a mismatch there cannot tell a device
-that was changed by the run from one that was already different, so read its
-options and storage before the first write if that distinction matters.
-After the reset, both devices must read as the table says (log counters
+Both columns were read from the devices on 2026-10-27; every value for
+36470559 was read by hand with `yubihsm-shell` (`force-audit`, `command-audit`,
+`algorithm-toggle`, storage) and by the harness snapshot (objects), so the
+post-reset comparison has a measured baseline for each device. After the reset, both devices must read as the table says (log counters
 aside).
+
+The first harness `snapshot` (2026-10-27, pool of one, 36470559) read that
+device's options instead of assuming them: `force-audit` off, every command's
+audit option off, log used 8/62 (one more boot entry than the manual read).
+
+### Phase 7 findings: device log
+
+From the first read-only run on 36470559 (firmware 2.4.1, factory state),
+whose 8 log entries are committed as
+`crates/bv-core/src/hsm/testdata/yubihsm2-log-0036470559.json`:
+
+- **What the run reported.** `8 log entries, 7 chain gap(s): digest chain
+  break at entry 2; … entry 8`: every link after the first failed.
+- **Cause: the harness, not the device or the rule.** The entries are one
+  initialization entry (index 1, every field 0xff) and seven boot entries
+  (command 0x00, length 0, session key 0xffff, target and second key 0,
+  tick 0, result 0x00). `yubihsm` 0.42 decodes the result byte as a
+  `response::Code`: 0x00 is not a valid code, so its deserializer falls back
+  to `Code::from_u8(0x75 - byte)` (`DeviceOk`), whose `to_u8()` is 0x75. The
+  harness recorded that re-encoding (117) instead of the device's byte, and
+  the digest covers the device's byte. Recomputed offline: with result 0x00
+  all seven links verify; with 0x75 none does; little-endian fields, the
+  previous digest first, or the entry alone verify none.
+- **Rule, confirmed.** An entry's data is its first 16 wire bytes, big-endian:
+  index u16, command u8, length u16, session key u16, target key u16, second
+  key u16, result u8, systick u32. Its digest is `SHA-256(data ‖ previous
+  digest)[..16]` — what `DeviceLogEntry::chained_digest` already computed,
+  and what the mock writes; the mock and the device follow one rule, and the
+  drain's cursor (index, the device's own digest, counters) is unchanged.
+  The first entry after a reset chains from a value not in the log (neither
+  zeros nor 0xff), so a first drain anchors on it unverified, as it did.
+- **Fix.** `device_audit::log_result_from_yubihsm` undoes the crate's
+  re-encoding (0x62..=0x75 → `0x75 - byte`; anything else as is), and the
+  harness stores the device's byte. A unit test pins the crate's decoding
+  for every byte a device logs (status 0x00..=0x13, 0x7f, every 0x80|command),
+  so a `yubihsm` upgrade that changes it fails `bv-core`'s unit tests run
+  with `hsm_yubihsm2` (e.g. `--features hsm_mock,hsm_hardware_tests`; no CI
+  job runs those, CI's HSM job only checks). The crate's
+  own reading of 0x62..=0x75 (host-side codes no device logs) collides with
+  that range; such a byte would come back changed and fail the chain as a
+  gap, never pass it. A boot entry's result 0x00 is reported as `ok`.
+- **Old captures.** A snapshot's device log now carries `result_encoding`
+  (`device`); one saved without it (the first run's `snapshot-before.json`)
+  reads as `yubihsm-code`, keeps its recorded gaps, and its summary says it is
+  an old capture checked again from its decoded bytes. The device log is
+  never compared between snapshots, so `compare` is unaffected.
+
+**The YubiHSM 2 drain stays refused.** A factory device with command audit
+off logs only boot entries, so this run confirmed the byte order and the
+chain, not the meaning of the key fields of a command entry. Still to confirm
+on a device, after `provision` turns command audit on: a logged command's
+session, target and second key fields; a failed command's result byte (the
+mock writes 0x7f, `yubihsm` expects a status 0x01..=0x13); whether
+`get-log-entries` and `set-log-index` are themselves logged; `set-log-index`
+and `LOG_FULL` under forced audit; and `bv-admin`'s delegation of
+`put-authentication-key` and `set-option` for `bv-auditor`. The YubiHSM 2
+`open_auditor`, `put_auditor_auth_key` and `set_forced_audit` are not
+written yet; they use `log_result_from_yubihsm` when they are.
