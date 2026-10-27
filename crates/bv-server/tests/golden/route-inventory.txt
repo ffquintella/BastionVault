@@ -262,6 +262,9 @@ DELETE /v2/sys/mcp/pairings/{id} [routed] -> sys/mcp/pairings/{id}
 LIST   /v2/sys/mcp/transcripts [routed] -> sys/mcp/transcripts
 GET    /v2/sys/mcp/transcripts [routed] -> sys/mcp/transcripts
 GET    /v2/sys/mcp/transcripts/{id} [routed] -> sys/mcp/transcripts/{id}
+LIST   /v2/sys/leases/revoke-failed [routed] -> sys/leases/revoke-failed
+GET    /v2/sys/leases/revoke-failed [routed] -> sys/leases/revoke-failed
+DELETE /v2/sys/leases/revoke-failed/{lease_id:.*} [routed] -> sys/leases/revoke-failed/{lease_id}
 GET    /v2/sys/plugins/{name}/grants/credential-provider [privileged] read sys/plugins/{name}/grants/credential-provider (SysPluginProviderGrantRead)
 PUT    /v2/sys/plugins/{name}/grants/credential-provider [privileged] write sys/plugins/{name}/grants/credential-provider (SysPluginProviderGrantWrite)
 DELETE /v2/sys/plugins/{name}/grants/credential-provider [privileged] delete sys/plugins/{name}/grants/credential-provider (SysPluginProviderGrantDelete)

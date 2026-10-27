@@ -36,6 +36,28 @@ pub struct QuarantineRecord {
     /// same code.
     #[serde(default)]
     pub last_active_version: String,
+    /// Why the plugin was quarantined while still registered (T62: a host
+    /// call outside its manifest). Empty for a delete, and for every record
+    /// written before the field existed.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
+}
+
+impl QuarantineRecord {
+    /// The operator-facing reason the plugin's mounts are refused.
+    pub fn describe(&self, name: &str) -> String {
+        if self.reason.is_empty() {
+            format!(
+                "plugin `{name}` is quarantined (deleted at unix-secs {}; last active version `{}`)",
+                self.quarantined_at_unix_secs, self.last_active_version
+            )
+        } else {
+            format!(
+                "plugin `{name}` is quarantined at unix-secs {} (version `{}`): {}",
+                self.quarantined_at_unix_secs, self.last_active_version, self.reason
+            )
+        }
+    }
 }
 
 fn key(name: &str) -> String {
@@ -48,11 +70,24 @@ pub async fn quarantine(
     actor_entity_id: &str,
     last_active_version: &str,
 ) -> Result<(), RvError> {
+    quarantine_for(storage, name, actor_entity_id, last_active_version, "").await
+}
+
+/// Quarantine a plugin, recording why. The marker refuses every mount and
+/// invocation of the plugin until the operator re-registers it.
+pub async fn quarantine_for(
+    storage: &dyn Storage,
+    name: &str,
+    actor_entity_id: &str,
+    last_active_version: &str,
+    reason: &str,
+) -> Result<(), RvError> {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let rec = QuarantineRecord {
         quarantined_at_unix_secs: now,
         actor_entity_id: actor_entity_id.to_string(),
         last_active_version: last_active_version.to_string(),
+        reason: reason.to_string(),
     };
     storage.put(&StorageEntry { key: key(name), value: serde_json::to_vec(&rec)? }).await
 }
@@ -74,4 +109,26 @@ pub async fn clear(storage: &dyn Storage, name: &str) -> Result<(), RvError> {
 pub async fn list(storage: &dyn Storage) -> Result<Vec<String>, RvError> {
     let entries = storage.list(PREFIX).await.unwrap_or_default();
     Ok(entries.into_iter().map(|e| e.trim_end_matches('/').to_string()).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn records_written_before_the_reason_field_still_read() {
+        let old = br#"{"quarantined_at_unix_secs":7,"actor_entity_id":"","last_active_version":"0.1.0"}"#;
+        let rec: QuarantineRecord = serde_json::from_slice(old).unwrap();
+        assert!(rec.reason.is_empty());
+        assert!(rec.describe("p").contains("deleted at unix-secs 7"));
+        // And a delete still writes the old shape.
+        let v = serde_json::to_value(&rec).unwrap();
+        assert!(v.get("reason").is_none());
+    }
+
+    #[test]
+    fn a_reason_is_reported() {
+        let rec = QuarantineRecord { reason: "called dynamic_pool_checkout".into(), ..Default::default() };
+        assert!(rec.describe("p").ends_with("called dynamic_pool_checkout"));
+    }
 }

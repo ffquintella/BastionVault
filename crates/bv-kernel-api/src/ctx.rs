@@ -96,6 +96,7 @@ use crate::{
     dos::DosGuard,
     engines::{ConnectMfaGate, LoginClassPolicy, NotificationSink, PluginHost, TotpMfa},
     identity::IdentityService,
+    leases::OwnedLeaseRevoker,
     mount::{MountsMonitor, MountsRouter},
     namespace::NamespaceRegistry,
     policy::PolicyGate,
@@ -219,6 +220,11 @@ pub trait VaultCtx: Send + Sync {
     /// Registration and inspection of `auth/` mounts.
     fn auth_mounts(&self) -> Option<Arc<dyn AuthMountRegistry>> {
         self.kernel().auth_mounts()
+    }
+
+    /// Early revocation of a secret lease by the mount that issued it.
+    fn lease_revoker(&self) -> Option<Arc<dyn OwnedLeaseRevoker>> {
+        self.kernel().lease_revoker()
     }
 
     /// The authorization questions an engine may ask.

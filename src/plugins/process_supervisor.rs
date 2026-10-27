@@ -60,6 +60,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
 
+use super::dynamic::DynamicSession;
 use super::invocation::InvocationCaller;
 use super::manifest::PluginManifest;
 use super::process_mux::{DeathCause, LifecycleEvent, MuxError, MuxWorker, LIFECYCLE_DEADLINE};
@@ -271,12 +272,15 @@ pub async fn invoke_with_config(
     core: Option<Arc<dyn VaultCtx>>,
     config: BTreeMap<String, String>,
 ) -> Result<InvokeOutput, ProcessRuntimeError> {
-    invoke_bound(manifest, binary, input, core, config, None, DEFAULT_INVOKE_TIMEOUT).await
+    invoke_bound(manifest, binary, input, core, config, None, None, DEFAULT_INVOKE_TIMEOUT).await
 }
 
-/// [`invoke_with_config`] on behalf of `caller` (ABI 1.4), with an explicit
-/// deadline. A `concurrent` plugin runs on the multiplexed child; every
-/// other long-lived plugin keeps the serialized protocol.
+/// [`invoke_with_config`] on behalf of `caller` (ABI 1.4) and of a
+/// dynamic-secret RPC `session` (ABI 1.5), with an explicit deadline. A
+/// `concurrent` plugin runs on the multiplexed child; every other
+/// long-lived plugin keeps the serialized protocol. A lease whose plugin
+/// child is not running (never spawned on this node, shut down by a reload
+/// or a delete) spawns it here: revocation never needs it resident.
 pub async fn invoke_bound(
     manifest: &PluginManifest,
     binary: &[u8],
@@ -284,10 +288,11 @@ pub async fn invoke_bound(
     core: Option<Arc<dyn VaultCtx>>,
     config: BTreeMap<String, String>,
     caller: Option<InvocationCaller>,
+    session: Option<Arc<DynamicSession>>,
     timeout: Duration,
 ) -> Result<InvokeOutput, ProcessRuntimeError> {
     if manifest.capabilities.concurrent {
-        return invoke_mux(manifest, binary, input, core, config, caller, timeout).await;
+        return invoke_mux(manifest, binary, input, core, config, caller, session, timeout).await;
     }
     let sup_arc = supervised_for(&manifest.name);
     let mut sup = sup_arc.lock().await;
@@ -324,7 +329,8 @@ pub async fn invoke_bound(
     // Drive one invoke. On any I/O / protocol error we tear the child
     // down and surface the error; the next call will respawn under
     // the breaker.
-    let result = drive_invoke(&mut sup, manifest, &core, &config, input, caller.as_ref(), timeout).await;
+    let result =
+        drive_invoke(&mut sup, manifest, &core, &config, input, caller.as_ref(), session.as_ref(), timeout).await;
     match result {
         Ok(out) => Ok(out),
         Err(e) => {
@@ -352,6 +358,7 @@ async fn drive_invoke(
     config: &BTreeMap<String, String>,
     input: &[u8],
     caller: Option<&InvocationCaller>,
+    session: Option<&Arc<DynamicSession>>,
     timeout: Duration,
 ) -> Result<InvokeOutput, SupervisorError> {
     let worker = sup.worker.as_mut().ok_or(SupervisorError::Protocol("worker missing"))?;
@@ -382,7 +389,8 @@ async fn drive_invoke(
                     return Err(SupervisorError::Protocol("unexpected hello mid-invoke"));
                 }
                 PluginMessage::HostCall { id: hid, method, params } => {
-                    let result = handle_host_call(manifest, core.as_ref(), config, &method, &params, caller).await;
+                    let result =
+                        handle_host_call(manifest, core.as_ref(), config, &method, &params, caller, session).await;
                     let mut reply = match result {
                         Ok(v) => HostMessage::HostReply { id: hid, result: v },
                         Err(e) => HostMessage::HostReplyError { id: hid, error: e },
@@ -431,6 +439,7 @@ async fn invoke_mux(
     core: Option<Arc<dyn VaultCtx>>,
     config: BTreeMap<String, String>,
     caller: Option<InvocationCaller>,
+    session: Option<Arc<DynamicSession>>,
     timeout: Duration,
 ) -> Result<InvokeOutput, ProcessRuntimeError> {
     let sup_arc = supervised_for(&manifest.name);
@@ -471,7 +480,7 @@ async fn invoke_mux(
         }
     };
     worker
-        .invoke(manifest, core, &config, caller.as_ref(), input, timeout)
+        .invoke(manifest, core, &config, caller.as_ref(), session.as_ref(), input, timeout)
         .await
         .map_err(|e| SupervisorError::from(e).into())
 }
@@ -740,6 +749,7 @@ mod tests {
             name: name.to_string(),
             version: "0.1.0".to_string(),
             plugin_type: "test".to_string(),
+            engine_type: None,
             runtime: RuntimeKind::Process,
             abi_version: "1.4".to_string(),
             sha256: "0".repeat(64),
@@ -772,7 +782,8 @@ mod tests {
         caller: Option<InvocationCaller>,
         timeout: Duration,
     ) -> Result<serde_json::Value, ProcessRuntimeError> {
-        let out = invoke_bound(m, bin, input.to_string().as_bytes(), None, BTreeMap::new(), caller, timeout).await?;
+        let out =
+            invoke_bound(m, bin, input.to_string().as_bytes(), None, BTreeMap::new(), caller, None, timeout).await?;
         assert!(matches!(out.outcome, InvokeOutcome::Success));
         Ok(serde_json::from_slice(&out.response).unwrap())
     }
@@ -862,6 +873,33 @@ mod tests {
         // the missing core, since this test runs without a vault).
         let bound = call(&m, &bin, json!({"host_call": target}), Some(a_caller()), LONG).await.unwrap();
         assert_eq!(bound["reply"]["error"], "no core");
+        shutdown_for(&m.name).await;
+    }
+
+    /// ABI 1.5 on the multiplexed child: a `dynamic_*` host call acts on the
+    /// session of the invocation it belongs to, and is `no_session` (not a
+    /// violation) in an invocation without one.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn dynamic_host_calls_reach_their_session_on_the_multiplexed_child() {
+        use crate::plugins::dynamic::{DynamicSession, DynamicVerb};
+        let mut m = mux_manifest("test-mux-dynamic", None);
+        m.capabilities.dynamic_lease_register = true;
+        let bin = test_binary();
+        let lease = json!({"method": "dynamic_lease_register", "params": {"internal": {}, "ttl_secs": 60}});
+
+        let without = call(&m, &bin, json!({"host_call": lease}), None, LONG).await.unwrap();
+        assert_eq!(without["reply"]["error"], "no_session");
+
+        let session = Arc::new(DynamicSession::new(DynamicVerb::Generate, "0a1b", None));
+        let input = json!({"host_call": lease}).to_string();
+        let out = invoke_bound(&m, &bin, input.as_bytes(), None, BTreeMap::new(), None, Some(session.clone()), LONG)
+            .await
+            .unwrap();
+        let with: serde_json::Value = serde_json::from_slice(&out.response).unwrap();
+        assert_eq!(with["reply"]["result"]["registered"], true, "{with}");
+        assert!(session.take_lease_request().is_some());
+        assert!(!session.violated());
         shutdown_for(&m.name).await;
     }
 
@@ -995,9 +1033,18 @@ mod tests {
         let run = |input: serde_json::Value| {
             let (m, bin, vault, ana) = (m.clone(), bin.clone(), vault.clone(), ana.clone());
             async move {
-                let out = invoke_bound(&m, &bin, input.to_string().as_bytes(), Some(vault), BTreeMap::new(), Some(ana), LONG)
-                    .await
-                    .unwrap();
+                let out = invoke_bound(
+                    &m,
+                    &bin,
+                    input.to_string().as_bytes(),
+                    Some(vault),
+                    BTreeMap::new(),
+                    Some(ana),
+                    None,
+                    LONG,
+                )
+                .await
+                .unwrap();
                 serde_json::from_slice::<serde_json::Value>(&out.response).unwrap()
             }
         };

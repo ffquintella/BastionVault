@@ -76,6 +76,8 @@ members = [
     "crates/bv-engine-ldap",
     "crates/bv-engine-cert-lifecycle",
     "crates/bv-engine-transit",
+    # Dynamic-secrets building blocks (T62): bv-kernel-api + Tier 0 only.
+    "crates/bv-dynamic",
     # Not part of the Tier 0-4 ladder: a dispatcher, not an engine. See
     # features/mcp-access.md § Phases 1-3 and this crate's own manifest.
     "crates/bv-mcp",
@@ -101,8 +103,9 @@ members = [
 # `crates/bastion-plugin-sdk` via a relative path, but is built
 # separately — its build artefacts shouldn't pollute the host's
 # `target/`, and its release-profile (panic=abort, opt=s) shouldn't
-# leak into our normal builds.
-exclude = ["plugins-ext", "IronRDP", "third_party/hiqlite"]
+# leak into our normal builds. `dynamic-engine-plugins/` (T62's dynamic
+# SDK and engine plugins) is a separate workspace for the same reasons.
+exclude = ["plugins-ext", "dynamic-engine-plugins", "IronRDP", "third_party/hiqlite"]
 resolver = "2"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -170,6 +173,10 @@ bv-engine-ssh-broker = { path = "crates/bv-engine-ssh-broker" }
 bv-engine-ldap = { path = "crates/bv-engine-ldap" }
 bv-engine-cert-lifecycle = { path = "crates/bv-engine-cert-lifecycle" }
 bv-engine-transit = { path = "crates/bv-engine-transit" }
+# Dynamic-secrets building blocks (T62): templating, generated credentials,
+# pool, cache and the `dynamic_secret` event. The plugin host in
+# `src/plugins/dynamic/` wires them to the runtimes and the lease manager.
+bv-dynamic = { path = "crates/bv-dynamic" }
 bv_crypto = { path = "crates/bv_crypto" }
 bv_plugin_surface = { path = "crates/bv_plugin_surface" }
 bv_plugin_manifest = { path = "crates/bv-plugin-manifest" }

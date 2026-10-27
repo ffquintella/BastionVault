@@ -196,6 +196,7 @@ mod tests {
             name: "webhook-notify".into(),
             version: "1.0.0".into(),
             plugin_type: "secret-engine".into(),
+            engine_type: None,
             runtime: Default::default(),
             abi_version: "1.1".into(),
             sha256: "0".repeat(64),

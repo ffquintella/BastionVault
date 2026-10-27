@@ -1996,7 +1996,9 @@ run. Subsystems 3–6 remain; T124 stays `[/]`.
 Plugin ABI 1.4 on the host (§9.2–§9.4), built on subsystem 2's
 `PolicyGate::sql_privileges`:
 
-- **ABI and manifest.** `HOST_ABI_MINOR` is 4. The new keys `concurrent`,
+- **ABI and manifest.** `HOST_ABI_MINOR` was 4 when this shipped (0.45.9);
+  it is 5 since dynamic secrets (T62) took the next minor, and minor 5 still
+  serves every 1.4 key unchanged. The new keys `concurrent`,
   `max_concurrent`, `sql_gate`, `resource_credentials = ["sql"]` and
   `sql_console` each require `abi_version` minor 4, so a 1.3 host refuses a
   plugin that declares them. They parse strictly: a wrong type, or a
@@ -2079,7 +2081,8 @@ stop every older node from unsealing.
   `updated_at`). `<node>` is the Raft node id, or `standalone`. It is written
   at unseal (`PolicyModule::setup_policy`, before the baselines load) and every
   60 s by a heartbeat task (`PolicyModule::start_background`) until the gate
-  opens. Policy schema 2 is the vocabulary with `sql_*`; the ABI minor is 4.
+  opens. Policy schema 2 is the vocabulary with `sql_*`; the gate needs ABI
+  minor 4 or later (a 0.45.9 node reports 4, a later one 5).
   The kernel keeps its own copy of `HOST_ABI_MINOR` (it sits below
   `bv_plugin_manifest`), pinned by a facade test.
 - **Who must report.** Every member of the Raft membership, voters and

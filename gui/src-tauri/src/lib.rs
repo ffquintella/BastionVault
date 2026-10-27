@@ -326,8 +326,16 @@ pub fn run() {
             commands::scheduled_exports::scheduled_exports_run_now,
             commands::scheduled_exports::scheduled_exports_backups_list,
             commands::scheduled_exports::scheduled_exports_restore,
+            // Leases and dynamic secrets (T62)
+            commands::leases::leases_list_revoke_failed,
+            commands::leases::leases_force_clear_revoke_failed,
+            commands::leases::leases_renew,
+            commands::leases::leases_revoke,
+            commands::dynamic_secrets::dynamic_list_roles,
+            commands::dynamic_secrets::dynamic_generate_creds,
             // Plugins
             commands::plugins::plugins_list,
+            commands::plugins::plugins_list_by_kind,
             commands::plugins::plugins_get,
             commands::plugins::plugins_register,
             commands::plugins::plugins_delete,

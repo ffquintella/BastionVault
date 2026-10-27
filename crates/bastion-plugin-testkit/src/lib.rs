@@ -69,9 +69,12 @@ use wasmtime::{
 pub mod app;
 pub mod artifact;
 mod assertions;
+mod dynamic;
 pub mod hooks;
 pub mod process;
 pub mod sql;
+
+pub use dynamic::{DYNAMIC_FORBIDDEN, DYNAMIC_INVALID, DYNAMIC_NO_SESSION, DYNAMIC_UNAVAILABLE};
 
 /// Default per-invocation fuel budget — matches
 /// `bastion_vault::plugins::runtime::DEFAULT_FUEL`.
@@ -140,6 +143,13 @@ pub struct TestInvocation {
     /// the same envelope the server would audit:
     /// `{"path": "sys/plugins/<name>/event", "data": {"plugin_event": ...}}`.
     pub audit_events: Vec<serde_json::Value>,
+    /// `bv.dynamic_lease_register` requests accepted during this invocation.
+    pub dynamic_leases: Vec<serde_json::Value>,
+    /// `bv.dynamic_audit_emit` events accepted during this invocation.
+    pub dynamic_events: Vec<serde_json::Value>,
+    /// Dynamic host calls refused because the capability was not granted:
+    /// the server quarantines a plugin that makes one.
+    pub capability_violations: Vec<String>,
 }
 
 impl TestInvocation {
@@ -213,6 +223,43 @@ struct HostState {
     sql: sql::SqlMock,
     /// The caller of the process invocation in flight, if any.
     invocation_caller: Option<TestCaller>,
+    /// ABI 1.5 dynamic-secret mock state.
+    dynamic: dynamic::DynamicState,
+}
+
+/// Where each capture list stood when an invocation started.
+#[derive(Clone, Copy)]
+struct Marks {
+    logs: usize,
+    audit: usize,
+    leases: usize,
+    events: usize,
+    violations: usize,
+}
+
+impl HostState {
+    fn marks(&self) -> Marks {
+        Marks {
+            logs: self.logs.len(),
+            audit: self.audit.len(),
+            leases: self.dynamic.leases.len(),
+            events: self.dynamic.events.len(),
+            violations: self.dynamic.violations.len(),
+        }
+    }
+
+    fn invocation(&self, m: Marks, outcome: InvokeOutcome, response: Vec<u8>, fuel_consumed: u64) -> TestInvocation {
+        TestInvocation {
+            outcome,
+            response,
+            fuel_consumed,
+            logs: self.logs[m.logs..].to_vec(),
+            audit_events: self.audit[m.audit..].to_vec(),
+            dynamic_leases: self.dynamic.leases[m.leases..].to_vec(),
+            dynamic_events: self.dynamic.events[m.events..].to_vec(),
+            capability_violations: self.dynamic.violations[m.violations..].to_vec(),
+        }
+    }
 }
 
 /// Per-invocation store context — the testkit's `PluginCtx`.
@@ -228,6 +275,7 @@ struct Ctx {
     response_window: Option<(u32, u32)>,
     limits: StoreLimits,
     shared: Arc<Mutex<HostState>>,
+    dynamic_caps: dynamic::DynamicCaps,
 }
 
 impl Ctx {
@@ -311,9 +359,36 @@ pub struct TestHostBuilder {
     sql: sql::SqlMock,
     abi_minor: u32,
     caller_identity: bool,
+    dynamic_caps: dynamic::DynamicCaps,
+    connections: BTreeSet<String>,
 }
 
 impl TestHostBuilder {
+    /// Grant `dynamic_lease_register` (ABI 1.5; default off).
+    pub fn dynamic_lease_register(mut self, on: bool) -> Self {
+        self.dynamic_caps.lease_register = on;
+        self
+    }
+
+    /// Grant `dynamic_audit_emit` (ABI 1.5; default off).
+    pub fn dynamic_audit_emit(mut self, on: bool) -> Self {
+        self.dynamic_caps.audit_emit = on;
+        self
+    }
+
+    /// Grant `dynamic_pool_checkout` (ABI 1.5; default off).
+    pub fn dynamic_pool_checkout(mut self, on: bool) -> Self {
+        self.dynamic_caps.pool_checkout = on;
+        self
+    }
+
+    /// Declare a connection `dynamic_pool_checkout` may hand a slot for (the
+    /// server needs `config/<name>` written through the host first).
+    pub fn dynamic_connection(mut self, name: impl Into<String>) -> Self {
+        self.connections.insert(name.into());
+        self
+    }
+
     /// Grant the storage capability. The prefix has the same meaning
     /// as `manifest.capabilities.storage_prefix` — pass `""` for
     /// unrestricted access to the plugin's own data root.
@@ -407,6 +482,7 @@ impl TestHostBuilder {
             memory_budget: self.memory_budget,
             abi_minor: self.abi_minor,
             caller_identity: self.caller_identity,
+            dynamic_caps: self.dynamic_caps,
             state: Arc::new(Mutex::new(HostState {
                 storage,
                 config: self.config,
@@ -417,6 +493,7 @@ impl TestHostBuilder {
                 stderr: Vec::new(),
                 sql: self.sql,
                 invocation_caller: None,
+                dynamic: dynamic::DynamicState { connections: self.connections, ..Default::default() },
             })),
         }
     }
@@ -437,6 +514,7 @@ pub struct TestHost {
     memory_budget: usize,
     abi_minor: u32,
     caller_identity: bool,
+    dynamic_caps: dynamic::DynamicCaps,
     state: Arc<Mutex<HostState>>,
 }
 
@@ -457,7 +535,29 @@ impl TestHost {
             sql: sql::SqlMock::default(),
             abi_minor: 0,
             caller_identity: false,
+            dynamic_caps: dynamic::DynamicCaps::default(),
+            connections: BTreeSet::new(),
         }
+    }
+
+    /// Invoke on behalf of a dynamic-secret RPC, the way the server's dynamic
+    /// host does: `envelope["op"]` (`dynamic.generate`, `dynamic.revoke`, …)
+    /// names the call the `bv.dynamic_*` imports are served in.
+    pub fn invoke_dynamic(&self, wasm: &[u8], envelope: &serde_json::Value) -> Result<TestInvocation, TestkitError> {
+        let input = serde_json::to_vec(envelope).expect("envelope serialise");
+        self.with_dynamic_session(envelope, || self.invoke_raw(wasm, &input))
+    }
+
+    fn with_dynamic_session<T>(&self, envelope: &serde_json::Value, run: impl FnOnce() -> T) -> T {
+        let op = envelope.get("op").and_then(serde_json::Value::as_str).unwrap_or("").to_string();
+        {
+            let mut st = self.state.lock().unwrap();
+            st.dynamic.session = Some(op);
+            st.dynamic.lease_in_session = false;
+        }
+        let out = run();
+        self.state.lock().unwrap().dynamic.session = None;
+        out
     }
 
     /// Invoke `bv_run` with the standard host→plugin envelope
@@ -524,10 +624,7 @@ impl TestHost {
         let module =
             Module::new(&self.engine, wasm).map_err(|e| TestkitError::Compile(e.to_string()))?;
 
-        let (logs_before, audit_before) = {
-            let st = self.state.lock().unwrap();
-            (st.logs.len(), st.audit.len())
-        };
+        let marks = self.state.lock().unwrap().marks();
 
         let ctx = Ctx {
             plugin_name: self.name.clone(),
@@ -539,6 +636,7 @@ impl TestHost {
             response_window: None,
             limits: StoreLimitsBuilder::new().memory_size(self.memory_budget).build(),
             shared: self.state.clone(),
+            dynamic_caps: self.dynamic_caps,
         };
 
         let mut store: Store<Ctx> = Store::new(&self.engine, ctx);
@@ -595,13 +693,7 @@ impl TestHost {
         };
 
         let st = self.state.lock().unwrap();
-        Ok(TestInvocation {
-            outcome,
-            response,
-            fuel_consumed,
-            logs: st.logs[logs_before..].to_vec(),
-            audit_events: st.audit[audit_before..].to_vec(),
-        })
+        Ok(st.invocation(marks, outcome, response, fuel_consumed))
     }
 
     /// Snapshot of the plugin's storage, keyed by plugin-relative key
@@ -902,7 +994,52 @@ fn register_test_imports(linker: &mut Linker<Ctx>) -> Result<(), TestkitError> {
             .map_err(eng)?;
     }
 
+    // bv.dynamic_* (ABI 1.5) — gate first, like the server, then the mock.
+    for method in ["dynamic_lease_register", "dynamic_audit_emit", "dynamic_pool_checkout"] {
+        linker
+            .func_wrap(
+                "bv",
+                method,
+                move |mut caller: Caller<'_, Ctx>, req_ptr: i32, req_len: i32, out_ptr: i32, out_max: i32| -> i32 {
+                    dynamic_mock(&mut caller, method, req_ptr, req_len, out_ptr, out_max)
+                },
+            )
+            .map_err(eng)?;
+    }
+
     Ok(())
+}
+
+fn dynamic_mock(
+    caller: &mut Caller<'_, Ctx>,
+    method: &str,
+    req_ptr: i32,
+    req_len: i32,
+    out_ptr: i32,
+    out_max: i32,
+) -> i32 {
+    let caps = caller.data().dynamic_caps;
+    let shared = caller.data().shared.clone();
+    // An undeclared call is refused before the request is even read.
+    if let Err((code, _)) = dynamic::gate(caps, &mut shared.lock().unwrap().dynamic, method) {
+        return code;
+    }
+    let params = if req_len == 0 {
+        serde_json::Value::Null
+    } else {
+        let Some(bytes) = read_bytes(caller, req_ptr, req_len) else {
+            return STORAGE_INTERNAL_ERROR;
+        };
+        match serde_json::from_slice(&bytes) {
+            Ok(v) => v,
+            Err(_) => return DYNAMIC_INVALID,
+        }
+    };
+    let reply = dynamic::serve(&mut shared.lock().unwrap().dynamic, method, &params);
+    match reply {
+        Ok(v) => write_to_buffer(caller, &serde_json::to_vec(&v).unwrap_or_default(), out_ptr, out_max),
+        Err((code, _)) => code,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1047,6 +1184,9 @@ pub const HOST_IMPORTS: &[(&str, &str, &str)] = &[
     ("crypto_sign", "(param i32 i32 i32 i32 i32 i32)", "(result i32)"),
     ("crypto_verify", "(param i32 i32 i32 i32 i32 i32)", "(result i32)"),
     ("crypto_hmac", "(param i32 i32 i32 i32 i32 i32)", "(result i32)"),
+    ("dynamic_lease_register", "(param i32 i32 i32 i32)", "(result i32)"),
+    ("dynamic_audit_emit", "(param i32 i32 i32 i32)", "(result i32)"),
+    ("dynamic_pool_checkout", "(param i32 i32 i32 i32)", "(result i32)"),
 ];
 
 /// A WebAssembly-text module that imports **every** entry in

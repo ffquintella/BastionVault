@@ -1112,6 +1112,7 @@ dependencies = [
  "bv-client",
  "bv-context",
  "bv-core",
+ "bv-dynamic",
  "bv-engine-cert-lifecycle",
  "bv-engine-files",
  "bv-engine-kv",
@@ -1823,6 +1824,22 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tower",
+]
+
+[[package]]
+name = "bv-dynamic"
+version = "0.41.0"
+dependencies = [
+ "base64 0.22.1",
+ "bv-errors",
+ "bv-kernel-api",
+ "log",
+ "rand 0.10.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "zeroize",
 ]
 
 [[package]]

@@ -118,14 +118,28 @@ fn several_blockers_are_counted() {
 
 // ---- persisted records -----------------------------------------------------
 
-/// A v1 record, as this build writes it, reads back unchanged.
+/// A v1 record as 0.45.9 wrote it (host ABI 1.4) reads back unchanged, and
+/// this build writes the same shape with its own minor.
 #[test]
 fn a_v1_node_record_reads_back() {
     let stored = br#"{"v":1,"node":"2","policy_schema":2,"host_abi_minor":4,"updated_at":1800000000}"#;
     let record = NodeSchemaRecord::parse(stored).expect("v1 record");
-    assert_eq!(record, NodeSchemaRecord::this_build("2", 1_800_000_000));
+    let mut this_build = NodeSchemaRecord::this_build("2", 1_800_000_000);
+    assert_eq!(this_build.host_abi_minor, NODE_HOST_ABI_MINOR);
+    this_build.host_abi_minor = 4;
+    assert_eq!(record, this_build);
     let written = serde_json::to_vec(&record).unwrap();
     assert_eq!(NodeSchemaRecord::parse(&written).unwrap(), record);
+}
+
+/// A node still on 0.45.9 (host ABI 1.4) serves the SQL host calls: in a
+/// cluster rolling to a minor-5 build it keeps qualifying.
+#[test]
+fn a_host_abi_1_4_node_still_qualifies() {
+    let mut v0459 = NodeSchemaRecord::this_build("2", NOW);
+    v0459.host_abi_minor = 4;
+    let e = evaluate("1", raft(&[1, 2]), records(vec![("2", Ok(v0459))]), NOW);
+    assert!(e.ready(), "{e:?}");
 }
 
 #[test]

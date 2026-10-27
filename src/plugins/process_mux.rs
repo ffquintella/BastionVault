@@ -17,6 +17,7 @@ use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::{mpsc, oneshot, watch, Mutex, Semaphore};
 use zeroize::Zeroizing;
 
+use super::dynamic::DynamicSession;
 use super::invocation::InvocationCaller;
 use super::manifest::PluginManifest;
 use super::process_runtime::{handle_host_call, scrub};
@@ -466,13 +467,15 @@ impl MuxWorker {
     }
 
     /// Run one invocation. Its host calls are answered in this task against
-    /// `caller`, and refused once it has finished.
+    /// `caller` and the dynamic-secret `session`, and refused once it has
+    /// finished.
     pub async fn invoke(
         self: &Arc<Self>,
         manifest: &PluginManifest,
         core: Option<Arc<dyn VaultCtx>>,
         config: &std::collections::BTreeMap<String, String>,
         caller: Option<&InvocationCaller>,
+        session: Option<&Arc<DynamicSession>>,
         input: &[u8],
         timeout: Duration,
     ) -> Result<InvokeOutput, MuxError> {
@@ -511,7 +514,7 @@ impl MuxWorker {
                         };
                     }
                     Some(call) = calls_rx.recv() => {
-                        let result = handle_host_call(manifest, core.as_ref(), config, &call.method, &call.params, caller).await;
+                        let result = handle_host_call(manifest, core.as_ref(), config, &call.method, &call.params, caller, session).await;
                         let (mut ok, error) = match result {
                             Ok(v) => (Some(v), None),
                             Err(e) => (None, Some(e)),

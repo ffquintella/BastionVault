@@ -345,6 +345,16 @@ pub(crate) const V2_ONLY: &[ResourceSpec] = &[
     resource!("/mcp/transcripts/{id}" => [
         route!(routed Get => sys_mcp_transcript_read_request_handler, "sys/mcp/transcripts/{id}"),
     ]),
+    // Leases whose secret backend failed to revoke them, and their
+    // force-clear (features/dynamic-secrets.md, T62). `sudo` via the sys
+    // backend's `root_paths`.
+    resource!("/leases/revoke-failed" => [
+        route!(routed List => sys_leases_revoke_failed_list_handler, "sys/leases/revoke-failed"),
+        route!(routed Get => sys_leases_revoke_failed_list_handler, "sys/leases/revoke-failed"),
+    ]),
+    resource!("/leases/revoke-failed/{lease_id:.*}" => [
+        route!(routed Delete => sys_leases_revoke_failed_clear_handler, "sys/leases/revoke-failed/{lease_id}"),
+    ]),
     // Credential-provider grant and entity-data purge
     // (features/self-accounts.md §4.5, §4.7).
     resource!("/plugins/{name}/grants/credential-provider" => [

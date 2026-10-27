@@ -2244,14 +2244,47 @@ async fn sys_plugins_list_handler(
 ) -> Result<HttpResponse, HttpError> {
     let audit = SysAuditCtx::new(&authz, &req, &core);
 
+    // `?kind=<plugin_type>` (e.g. `secret/dynamic`, T62) narrows the list on
+    // `/v2` only: `/v1` is frozen and keeps ignoring query parameters.
+    let kind = plugin_list_kind(req.path(), req.query_string());
     let result: Result<HttpResponse, HttpError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
-        let manifests = catalog.list(core.barrier().as_storage()).await?;
+        let storage = core.barrier();
+        let manifests = match kind {
+            Some(kind) => catalog.list_by_kind(storage.as_storage(), &kind).await?,
+            None => catalog.list(storage.as_storage()).await?,
+        };
         Ok(response_json_ok(None, json!({ "plugins": manifests })))
     })
     .await;
     audit.finish(&result).await;
     result
+}
+
+/// The `kind` filter of `GET /v2/sys/plugins`; `None` on `/v1` or when absent.
+fn plugin_list_kind(path: &str, query: &str) -> Option<String> {
+    #[derive(Deserialize)]
+    struct ListQuery {
+        kind: Option<String>,
+    }
+    if !path.starts_with("/v2/") {
+        return None;
+    }
+    web::Query::<ListQuery>::from_query(query).ok().and_then(|q| q.into_inner().kind).filter(|k| !k.is_empty())
+}
+
+#[cfg(test)]
+mod plugin_list_kind_tests {
+    use super::plugin_list_kind;
+
+    #[test]
+    fn only_v2_filters_by_kind() {
+        assert_eq!(plugin_list_kind("/v2/sys/plugins", "kind=secret%2Fdynamic").as_deref(), Some("secret/dynamic"));
+        assert_eq!(plugin_list_kind("/v2/sys/plugins", "kind=secret/dynamic").as_deref(), Some("secret/dynamic"));
+        assert_eq!(plugin_list_kind("/v1/sys/plugins", "kind=secret/dynamic"), None, "v1 is frozen");
+        assert_eq!(plugin_list_kind("/v2/sys/plugins", ""), None);
+        assert_eq!(plugin_list_kind("/v2/sys/plugins", "kind="), None);
+    }
 }
 
 async fn sys_plugins_register_handler(
@@ -4466,6 +4499,33 @@ async fn sys_mcp_transcripts_list_request_handler(
     handle_request(core, &mut r).await
 }
 
+/// LIST (or GET) `/v2/sys/leases/revoke-failed` — leases whose secret backend
+/// failed to revoke them (T62). Shim over the sudo-gated logical route;
+/// deployment-wide, so no namespace header is forwarded.
+async fn sys_leases_revoke_failed_list_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, HttpError> {
+    let mut r = request_auth(&req);
+    r.path = "sys/leases/revoke-failed".to_string();
+    r.operation = Operation::List;
+    handle_request(core, &mut r).await
+}
+
+/// DELETE `/v2/sys/leases/revoke-failed/{lease_id}` — force-clear one
+/// `revoke_failed` lease. Shim over the sudo-gated logical route, which
+/// validates the id and refuses a lease that is not `revoke_failed`.
+async fn sys_leases_revoke_failed_clear_handler(
+    req: HttpRequest,
+    path: web::Path<String>,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, HttpError> {
+    let mut r = request_auth(&req);
+    r.path = format!("sys/leases/revoke-failed/{}", path.into_inner());
+    r.operation = Operation::Delete;
+    handle_request(core, &mut r).await
+}
+
 /// GET `/v2/sys/mcp/transcripts/{id}` — one MCP session transcript. Shim over
 /// the sudo-gated logical route, which validates the id.
 async fn sys_mcp_transcript_read_request_handler(
@@ -4814,6 +4874,7 @@ mod sql_grant_route_tests {
             name: "dbms-management".into(),
             version: version.into(),
             plugin_type: "sql-browser".into(),
+            engine_type: None,
             runtime: RuntimeKind::Process,
             abi_version: "1.4".into(),
             sha256: bastion_vault::utils::sha256(&bin),

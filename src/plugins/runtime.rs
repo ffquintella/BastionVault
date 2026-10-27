@@ -71,6 +71,7 @@ use wasmtime::{AsContextMut, Caller, Linker, Memory, Store, StoreLimits, StoreLi
 use crate::kernel_api::VaultCtx;
 use crate::storage::StorageEntry;
 
+use super::dynamic::host_calls::{DynamicMethod, HostCallContext};
 use super::manifest::PluginManifest;
 use super::module_cache::ModuleCache;
 
@@ -176,8 +177,10 @@ struct PluginCtx {
     /// `core/plugins/<name>/data/` for the default scope, or
     /// `core/plugins/<name>/data/entity/<entity_id>/` for
     /// `storage_scope = "entity"` — set by the host from the attested
-    /// caller, never by the plugin.
-    data_root: String,
+    /// caller, never by the plugin. A `secret/dynamic` plugin's is its
+    /// mount's (`dynamic::plugin_data_root`), and `None` (no storage)
+    /// outside a dynamic RPC.
+    data_root: Option<String>,
     response_window: Option<(u32, u32)>,
     limits: StoreLimits,
     core: Option<Arc<dyn VaultCtx>>,
@@ -208,8 +211,11 @@ struct PluginCtx {
     notify_read: bool,
     /// ABI 1.4: the invocation's caller, for actor-stamped `bv.audit_emit`.
     caller: Option<super::invocation::InvocationCaller>,
-    /// The plugin's manifest, for the stamping rule.
-    manifest: PluginManifest,
+    /// The plugin's manifest, for the actor-stamping rule (ABI 1.4) and the
+    /// `bv.dynamic_*` capability gate (ABI 1.5).
+    manifest: Arc<PluginManifest>,
+    /// ABI 1.5: the dynamic-secret RPC this invocation serves, if any.
+    session: Option<Arc<super::dynamic::DynamicSession>>,
 }
 
 impl PluginCtx {
@@ -232,7 +238,7 @@ impl PluginCtx {
         if req_norm.contains("..") {
             return None;
         }
-        Some(format!("{}{}", self.data_root, req_norm))
+        Some(format!("{}{}", self.data_root.as_deref()?, req_norm))
     }
 }
 
@@ -328,11 +334,14 @@ impl WasmRuntime {
         config: std::collections::BTreeMap<String, String>,
         entity_id: Option<&str>,
     ) -> Result<InvokeOutput, RuntimeError> {
-        self.invoke_bound(manifest, wasm_bytes, input, core, config, entity_id, None).await
+        self.invoke_bound(manifest, wasm_bytes, input, core, config, entity_id, None, None).await
     }
 
     /// [`invoke_scoped`](Self::invoke_scoped) on behalf of `caller` (ABI
-    /// 1.4): `bv.audit_emit` is stamped with the caller as its actor.
+    /// 1.4), whose `bv.audit_emit` is stamped with the caller as its actor,
+    /// and of a dynamic-secret RPC `session` (ABI 1.5), which the
+    /// `bv.dynamic_*` imports act on. Without a session they answer
+    /// `DYNAMIC_NO_SESSION` (after the capability gate).
     pub async fn invoke_bound(
         &self,
         manifest: &PluginManifest,
@@ -342,13 +351,16 @@ impl WasmRuntime {
         config: std::collections::BTreeMap<String, String>,
         entity_id: Option<&str>,
         caller: Option<super::invocation::InvocationCaller>,
+        session: Option<Arc<super::dynamic::DynamicSession>>,
     ) -> Result<InvokeOutput, RuntimeError> {
-        let data_root = if manifest.capabilities.storage_scope == super::manifest::StorageScope::Entity {
-            entity_data_root(&manifest.name, entity_id.unwrap_or("")).ok_or_else(|| {
+        let data_root = if manifest.is_dynamic() {
+            super::dynamic::plugin_data_root(&manifest.name, session.as_deref())
+        } else if manifest.capabilities.storage_scope == super::manifest::StorageScope::Entity {
+            Some(entity_data_root(&manifest.name, entity_id.unwrap_or("")).ok_or_else(|| {
                 RuntimeError::Engine("entity-scoped plugin invoked without a valid caller entity".to_string())
-            })?
+            })?)
         } else {
-            format!("core/plugins/{}/data/", manifest.name)
+            Some(format!("core/plugins/{}/data/", manifest.name))
         };
         // Reuse a previously-compiled module when one is cached for
         // this `(name, sha256)` pair; otherwise compile + insert.
@@ -385,7 +397,8 @@ impl WasmRuntime {
             notify_emit: manifest.capabilities.notify_emit,
             notify_read: manifest.capabilities.notify_read,
             caller,
-            manifest: manifest.clone(),
+            manifest: Arc::new(manifest.clone()),
+            session,
         };
 
         let mut store: Store<PluginCtx> = Store::new(self.cache.engine(), ctx);
@@ -681,10 +694,63 @@ fn register_host_imports(linker: &mut Linker<PluginCtx>, manifest: &PluginManife
         })
         .map_err(|e| RuntimeError::Engine(e.to_string()))?;
 
+    // ABI minor 5: dynamic secrets. Same (in_ptr, in_len, out_ptr, out_max)
+    // convention; gated per call by `super::dynamic::host_calls`, which also
+    // audits and quarantines a plugin calling one its manifest lacks.
+    for (name, method) in [
+        ("dynamic_lease_register", DynamicMethod::LeaseRegister),
+        ("dynamic_audit_emit", DynamicMethod::AuditEmit),
+        ("dynamic_pool_checkout", DynamicMethod::PoolCheckout),
+    ] {
+        linker
+            .func_wrap_async("bv", name, move |mut caller: Caller<'_, PluginCtx>, args: (i32, i32, i32, i32)| {
+                Box::new(async move { dynamic_call_impl(&mut caller, method, args).await })
+            })
+            .map_err(|e| RuntimeError::Engine(e.to_string()))?;
+    }
+
     // Suppress unused-variable warning when the manifest is not consulted
     // here yet — kept for future selective-registration logic.
     let _ = manifest;
     Ok(())
+}
+
+/// `bv.dynamic_*`: gate first (so even a malformed call by a plugin without
+/// the capability is refused and recorded), then parse and serve.
+async fn dynamic_call_impl(
+    caller: &mut Caller<'_, PluginCtx>,
+    method: DynamicMethod,
+    (req_ptr, req_len, out_ptr, out_max): (i32, i32, i32, i32),
+) -> i32 {
+    let manifest = caller.data().manifest.clone();
+    let core = caller.data().core.clone();
+    let session = caller.data().session.clone();
+    let ctx = HostCallContext { manifest: &manifest, core: core.as_ref(), session: session.as_ref(), runtime: "wasm" };
+    if let Err(e) = super::dynamic::host_calls::authorize(&ctx, method).await {
+        return e.wasm_code();
+    }
+    let params = if req_len == 0 {
+        serde_json::Value::Null
+    } else {
+        let Some(bytes) = read_bytes(caller, req_ptr, req_len) else {
+            return STORAGE_INTERNAL_ERROR;
+        };
+        match serde_json::from_slice(&bytes) {
+            Ok(v) => v,
+            Err(_) => return super::dynamic::host_calls::DYNAMIC_INVALID,
+        }
+    };
+    match super::dynamic::host_calls::dispatch(&ctx, method, &params).await {
+        Ok(reply) => {
+            let bytes = serde_json::to_vec(&reply).unwrap_or_default();
+            write_to_buffer(caller, &bytes, out_ptr, out_max)
+        }
+        Err(e) => {
+            // The detail can echo plugin-supplied values; only the code is logged.
+            log::debug!(target: "plugin", "[{}] {} refused with {}", manifest.name, method.capability(), e.wasm_code());
+            e.wasm_code()
+        }
+    }
 }
 
 // Return codes for `bv.net_http` (mirror the client `bvx.net_http`).
@@ -1024,7 +1090,9 @@ async fn storage_list_impl(
         Some(c) => c,
         None => return STORAGE_FORBIDDEN,
     };
-    let mut full_prefix = caller.data().data_root.clone();
+    let Some(mut full_prefix) = caller.data().data_root.clone() else {
+        return STORAGE_FORBIDDEN;
+    };
     if !prefix.is_empty() {
         // For the list call we don't need full prefix-membership check
         // (the plugin can only list under its own prefix), but we still
@@ -1276,6 +1344,7 @@ mod tests {
             name: "echo".to_string(),
             version: "0.1.0".to_string(),
             plugin_type: "test".to_string(),
+            engine_type: None,
             runtime: RuntimeKind::Wasm,
             abi_version: "1.0".to_string(),
             sha256: hex,
@@ -1604,6 +1673,58 @@ mod tests {
         let out = runtime.invoke(&manifest, &bytes, b"hello-storage", Some(core)).await.unwrap();
         assert!(matches!(out.outcome, InvokeOutcome::Success));
         assert_eq!(out.response, b"hello-storage");
+    }
+
+    /// Calls `bv.<import>(0, 0, 4096, 1024)` and answers with its i32 result.
+    fn dynamic_call_wat(import: &str) -> String {
+        format!(
+            r#"(module
+              (import "bv" "set_response" (func $set_response (param i32 i32)))
+              (import "bv" "{import}" (func $dyn (param i32 i32 i32 i32) (result i32)))
+              (memory (export "memory") 1)
+              (func (export "bv_alloc") (param i32) (result i32) i32.const 8192)
+              (func (export "bv_run") (param i32 i32) (result i32)
+                (i32.store (i32.const 2048) (call $dyn (i32.const 0) (i32.const 0) (i32.const 4096) (i32.const 1024)))
+                (call $set_response (i32.const 2048) (i32.const 4))
+                (i32.const 0)))"#
+        )
+    }
+
+    fn code_of(out: &InvokeOutput) -> i32 {
+        i32::from_le_bytes(out.response[..4].try_into().unwrap())
+    }
+
+    /// T62: a plugin calling a dynamic host import its manifest does not
+    /// declare is refused, and quarantined so its mounts stop serving.
+    #[tokio::test]
+    async fn out_of_manifest_dynamic_call_is_refused_and_quarantines() {
+        for import in ["dynamic_lease_register", "dynamic_audit_emit", "dynamic_pool_checkout"] {
+            let bytes = wat::parse_str(dynamic_call_wat(import)).unwrap();
+            let mut manifest = manifest_for(&bytes);
+            manifest.name = format!("wasm-undeclared-{import}");
+            let core = test_core(&format!("wasm-dyn-refused-{import}")).await;
+            let out = WasmRuntime::new().unwrap().invoke(&manifest, &bytes, b"", Some(core.clone())).await.unwrap();
+            assert_eq!(code_of(&out), super::super::dynamic::host_calls::DYNAMIC_FORBIDDEN, "{import}");
+            let rec = crate::plugins::quarantine::lookup(core.barrier().as_storage(), &manifest.name)
+                .await
+                .unwrap()
+                .expect("the plugin is quarantined");
+            assert!(rec.reason.contains(import), "{}", rec.reason);
+        }
+    }
+
+    /// A declared dynamic import used outside a dynamic RPC is refused with
+    /// `DYNAMIC_NO_SESSION`, which is not a manifest violation.
+    #[tokio::test]
+    async fn declared_dynamic_call_without_a_session_is_not_a_violation() {
+        let bytes = wat::parse_str(dynamic_call_wat("dynamic_lease_register")).unwrap();
+        let mut manifest = manifest_for(&bytes);
+        manifest.name = "wasm-declared-no-session".into();
+        manifest.capabilities.dynamic_lease_register = true;
+        let core = test_core("wasm-dyn-no-session").await;
+        let out = WasmRuntime::new().unwrap().invoke(&manifest, &bytes, b"", Some(core.clone())).await.unwrap();
+        assert_eq!(code_of(&out), super::super::dynamic::host_calls::DYNAMIC_NO_SESSION);
+        assert!(crate::plugins::quarantine::lookup(core.barrier().as_storage(), &manifest.name).await.unwrap().is_none());
     }
 
     /// Build a real `Core` instance with an unsealed in-memory backend

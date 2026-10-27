@@ -158,6 +158,7 @@ pub(crate) mod tests_support {
             name: "dbms-management".into(),
             version: "0.1.0".into(),
             plugin_type: "sql-browser".into(),
+            engine_type: None,
             runtime: RuntimeKind::Process,
             abi_version: "1.4".into(),
             sha256: "0".repeat(64),

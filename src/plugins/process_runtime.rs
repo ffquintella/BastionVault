@@ -76,6 +76,10 @@ use zeroize::Zeroizing;
 use crate::kernel_api::VaultCtx;
 use crate::storage::StorageEntry;
 
+use super::dynamic::{
+    host_calls::{DynamicMethod, HostCallContext},
+    DynamicSession,
+};
 use super::invocation::InvocationCaller;
 use super::manifest::PluginManifest;
 use super::runtime::{InvokeOutcome, InvokeOutput};
@@ -140,12 +144,13 @@ impl ProcessRuntime {
         core: Option<Arc<dyn VaultCtx>>,
         config: std::collections::BTreeMap<String, String>,
     ) -> Result<InvokeOutput, ProcessRuntimeError> {
-        self.invoke_bound(manifest, binary, input, core, config, None).await
+        self.invoke_bound(manifest, binary, input, core, config, None, None).await
     }
 
-    /// Like `invoke_with_config`, on behalf of `caller` (ABI 1.4): the
-    /// caller-bound host calls are evaluated against it, and refused when it
-    /// is `None`.
+    /// Like `invoke_with_config`, on behalf of `caller` (ABI 1.4) and of a
+    /// dynamic-secret RPC `session` (ABI 1.5). The caller-bound host calls
+    /// are evaluated against `caller` and refused when it is `None`; the
+    /// `dynamic_*` calls act on `session` and are refused without one.
     pub async fn invoke_bound(
         &self,
         manifest: &PluginManifest,
@@ -154,6 +159,7 @@ impl ProcessRuntime {
         core: Option<Arc<dyn VaultCtx>>,
         config: std::collections::BTreeMap<String, String>,
         caller: Option<InvocationCaller>,
+        session: Option<Arc<DynamicSession>>,
     ) -> Result<InvokeOutput, ProcessRuntimeError> {
         // Write the binary to a uniquely-named temp file so concurrent
         // invocations don't clobber each other. Mark executable on Unix.
@@ -218,20 +224,15 @@ impl ProcessRuntime {
 
         let mut child = cmd.spawn().map_err(|e| ProcessRuntimeError::Spawn(format!("{e}")))?;
 
-        let result =
-            match timeout(
-                self.invoke_timeout,
-                drive_invocation(&mut child, manifest, &bootstrap, input, core, config, caller.as_ref()),
-            )
-            .await
-            {
-                Ok(Ok(out)) => Ok(out),
-                Ok(Err(e)) => Err(e),
-                Err(_) => {
-                    let _ = child.start_kill();
-                    Err(ProcessRuntimeError::Timeout(self.invoke_timeout))
-                }
-            };
+        let driven = drive_invocation(&mut child, manifest, &bootstrap, input, core, config, caller.as_ref(), session);
+        let result = match timeout(self.invoke_timeout, driven).await {
+            Ok(Ok(out)) => Ok(out),
+            Ok(Err(e)) => Err(e),
+            Err(_) => {
+                let _ = child.start_kill();
+                Err(ProcessRuntimeError::Timeout(self.invoke_timeout))
+            }
+        };
 
         // Best-effort cleanup of the temp file (the directory is the
         // OS temp dir, which is rotated; this is just being tidy).
@@ -274,6 +275,7 @@ async fn drive_invocation(
     core: Option<Arc<dyn VaultCtx>>,
     config: std::collections::BTreeMap<String, String>,
     caller: Option<&InvocationCaller>,
+    session: Option<Arc<DynamicSession>>,
 ) -> Result<InvokeOutput, ProcessRuntimeError> {
     let mut stdin = child.stdin.take().ok_or(ProcessRuntimeError::Protocol("stdin"))?;
     let stdout = child.stdout.take().ok_or(ProcessRuntimeError::Protocol("stdout"))?;
@@ -330,7 +332,9 @@ async fn drive_invocation(
 
         match msg {
             PluginMessage::HostCall { id, method, params } => {
-                let result = handle_host_call(manifest, core.as_ref(), &config, &method, &params, caller).await;
+                let result =
+                    handle_host_call(manifest, core.as_ref(), &config, &method, &params, caller, session.as_ref())
+                        .await;
                 let mut reply = match result {
                     Ok(v) => HostMessage::HostReply { id, result: v },
                     Err(e) => HostMessage::HostReplyError { id, error: e },
@@ -386,7 +390,13 @@ pub(super) async fn handle_host_call(
     method: &str,
     params: &Value,
     caller: Option<&InvocationCaller>,
+    session: Option<&Arc<DynamicSession>>,
 ) -> Result<Value, String> {
+    // ABI minor 5: the dynamic-secret calls share the WASM imports' gate.
+    if let Some(dynamic) = DynamicMethod::parse(method) {
+        let ctx = HostCallContext { manifest, core, session, runtime: "process" };
+        return super::dynamic::host_calls::handle(&ctx, dynamic, params).await.map_err(|e| e.process_error());
+    }
     match method {
         "config_get" => {
             let key = params.get("key").and_then(|v| v.as_str()).unwrap_or("");
@@ -418,7 +428,7 @@ pub(super) async fn handle_host_call(
         }
         "storage_get" => {
             let key = params.get("key").and_then(|v| v.as_str()).unwrap_or("");
-            let full = match rebase_key(manifest, key) {
+            let full = match rebase_key(manifest, session, key) {
                 Some(v) => v,
                 None => return Err("forbidden".to_string()),
             };
@@ -437,7 +447,7 @@ pub(super) async fn handle_host_call(
         "storage_put" => {
             let key = params.get("key").and_then(|v| v.as_str()).unwrap_or("");
             let value_b64 = params.get("value_b64").and_then(|v| v.as_str()).unwrap_or("");
-            let full = match rebase_key(manifest, key) {
+            let full = match rebase_key(manifest, session, key) {
                 Some(v) => v,
                 None => return Err("forbidden".to_string()),
             };
@@ -457,7 +467,7 @@ pub(super) async fn handle_host_call(
         }
         "storage_delete" => {
             let key = params.get("key").and_then(|v| v.as_str()).unwrap_or("");
-            let full = match rebase_key(manifest, key) {
+            let full = match rebase_key(manifest, session, key) {
                 Some(v) => v,
                 None => return Err("forbidden".to_string()),
             };
@@ -480,7 +490,9 @@ pub(super) async fn handle_host_call(
                 Some(c) => c,
                 None => return Err("no core".to_string()),
             };
-            let mut full_prefix = format!("core/plugins/{}/data/", manifest.name);
+            let Some(mut full_prefix) = data_root(manifest, session) else {
+                return Err("forbidden".to_string());
+            };
             if !prefix.is_empty() {
                 let prefix_norm = manifest.capabilities.storage_prefix.as_deref().unwrap_or("").trim_end_matches('/');
                 let req_norm = prefix.trim_start_matches('/').trim_end_matches('/');
@@ -529,6 +541,9 @@ pub const HOST_CALL_METHODS: &[&str] = &[
     "resource_sql_authorize",
     "resource_sql_credential",
     "connect_ticket_redeem",
+    "dynamic_lease_register",
+    "dynamic_audit_emit",
+    "dynamic_pool_checkout",
 ];
 
 /// Overwrite every string of a sent reply before it is dropped.
@@ -542,10 +557,19 @@ pub(super) fn scrub(v: &mut Value) {
     }
 }
 
+/// Barrier prefix of the plugin's storage: per name, or for a
+/// `secret/dynamic` plugin per mount (`None` outside a dynamic RPC).
+fn data_root(manifest: &PluginManifest, session: Option<&Arc<DynamicSession>>) -> Option<String> {
+    if manifest.is_dynamic() {
+        return super::dynamic::plugin_data_root(&manifest.name, session.map(|s| s.as_ref()));
+    }
+    Some(format!("core/plugins/{}/data/", manifest.name))
+}
+
 /// Rebase a plugin-supplied key into the absolute barrier key while
 /// enforcing the declared `storage_prefix`. Mirrors the WASM runtime's
 /// `PluginCtx::rebase_key`.
-fn rebase_key(manifest: &PluginManifest, requested: &str) -> Option<String> {
+fn rebase_key(manifest: &PluginManifest, session: Option<&Arc<DynamicSession>>, requested: &str) -> Option<String> {
     let prefix = manifest.capabilities.storage_prefix.as_deref()?;
     let prefix_norm = prefix.trim_end_matches('/');
     let req_norm = requested.trim_start_matches('/');
@@ -555,7 +579,7 @@ fn rebase_key(manifest: &PluginManifest, requested: &str) -> Option<String> {
     if req_norm.contains("..") {
         return None;
     }
-    Some(format!("core/plugins/{name}/data/{rel}", name = manifest.name, rel = req_norm,))
+    Some(format!("{}{req_norm}", data_root(manifest, session)?))
 }
 
 /// Operator-configured directory the process runtime stages plugin
@@ -780,6 +804,23 @@ pub fn run_test_subprocess_plugin() -> ! {
             writeln!(stdout, "{}", json!({"type": "set_response", "data_b64": b64})).unwrap();
             writeln!(stdout, "{}", json!({"type": "done", "status": 0})).unwrap();
         }
+        "dynamic_forbidden" => {
+            // host_call dynamic_lease_register; answer with the host's error
+            // (or "accepted"); done(0).
+            let call = json!({
+                "type": "host_call", "id": 1, "method": "dynamic_lease_register",
+                "params": {"internal": {}, "ttl_secs": 60},
+            });
+            writeln!(stdout, "{call}").unwrap();
+            stdout.flush().unwrap();
+            let mut reply = String::new();
+            stdin.lock().read_line(&mut reply).unwrap();
+            let v: Value = serde_json::from_str(reply.trim()).unwrap_or(Value::Null);
+            let answer = v.get("error").and_then(|e| e.as_str()).unwrap_or("accepted").to_string();
+            let b64 = base64::engine::general_purpose::STANDARD.encode(answer.as_bytes());
+            writeln!(stdout, "{}", json!({"type": "set_response", "data_b64": b64})).unwrap();
+            writeln!(stdout, "{}", json!({"type": "done", "status": 0})).unwrap();
+        }
         other => {
             eprintln!("unknown BV_TEST_PLUGIN_BEHAVIOUR={other} for plugin={plugin_name}");
             std::process::exit(1);
@@ -821,6 +862,7 @@ mod tests {
             name: name.to_string(),
             version: "0.1.0".to_string(),
             plugin_type: "test".to_string(),
+            engine_type: None,
             runtime: RuntimeKind::Process,
             abi_version: "1.0".to_string(),
             sha256: "0".repeat(64),
@@ -911,6 +953,35 @@ mod tests {
         let out = invoke_proc(m, b"hello-process-storage", Some(core)).await.unwrap();
         assert!(matches!(out.outcome, InvokeOutcome::Success));
         assert_eq!(out.response, b"hello-process-storage");
+    }
+
+    /// T62: the process runtime refuses an out-of-manifest dynamic host call
+    /// exactly like the WASM one, and quarantines the plugin.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn out_of_manifest_dynamic_call_is_refused_and_quarantines() {
+        let m = manifest_for("dynamic_forbidden", "test-dynamic_forbidden");
+        let core = crate::test_utils::new_unseal_test_bastion_vault("plugin-process-dynamic-forbidden").await.1;
+        let out = invoke_proc(m, b"", Some(core.clone())).await.unwrap();
+        assert_eq!(out.response, b"forbidden");
+        let rec = crate::plugins::quarantine::lookup(core.barrier().as_storage(), "test-dynamic_forbidden")
+            .await
+            .unwrap()
+            .expect("the plugin is quarantined");
+        assert!(rec.reason.contains("dynamic_lease_register"), "{}", rec.reason);
+    }
+
+    /// Declared, but outside a dynamic RPC: refused, not a violation.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn declared_dynamic_call_without_a_session_is_refused_without_quarantine() {
+        let mut m = manifest_for("dynamic_forbidden", "test-dynamic_forbidden");
+        m.capabilities.dynamic_lease_register = true;
+        let core = crate::test_utils::new_unseal_test_bastion_vault("plugin-process-dynamic-no-session").await.1;
+        let out = invoke_proc(m, b"", Some(core.clone())).await.unwrap();
+        assert_eq!(out.response, b"no_session");
+        let storage = core.barrier();
+        assert!(crate::plugins::quarantine::lookup(storage.as_storage(), "test-dynamic_forbidden").await.unwrap().is_none());
     }
 
     #[tokio::test]

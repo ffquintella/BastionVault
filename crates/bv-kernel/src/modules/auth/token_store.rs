@@ -1592,7 +1592,13 @@ impl Handler for TokenStore {
 
         let resp = resp.as_mut().unwrap();
 
-        if !is_unauth_path && resp.secret.is_some() && !req.path.starts_with("/sys/renew") {
+        let host_managed = resp.secret.as_ref().is_some_and(super::expiration::is_host_managed_secret);
+        if host_managed && !is_unauth_path && !req.path.starts_with("/sys/renew") {
+            // A dynamic credential is leased on every mount: no option can
+            // leave a credential in an external system without a lease, and
+            // one whose lease cannot be registered is taken back.
+            self.expiration.register_host_managed_secret(req, resp).await?;
+        } else if !is_unauth_path && resp.secret.is_some() && !req.path.starts_with("/sys/renew") {
             let mut register_lease = true;
             let me = self.router.matching_mount_entry(&req.path)?;
             if me.is_none() {

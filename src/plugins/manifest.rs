@@ -15,5 +15,6 @@ pub use bv_plugin_manifest::{
     check_abi_compatibility, parse_abi, signing_message, AppCapabilities, Capabilities, ClientAssetRef,
     ConfigCondition, ConfigField, ConfigFieldKind, CredentialProviderCap, NetCapabilities, PluginManifest,
     ProviderSelection, ResourceCredentialKind, RuntimeKind, StorageScope, SurfaceRef, WindowsCapabilities,
-    DEFAULT_MAX_CONCURRENT, HOST_ABI_MAJOR, HOST_ABI_MINOR, MAX_CONCURRENT_HARD_CAP, MAX_PLUGIN_WINDOWS,
+    DEFAULT_MAX_CONCURRENT, DYNAMIC_ENGINE_TYPES, HOST_ABI_MAJOR, HOST_ABI_MINOR, MAX_CONCURRENT_HARD_CAP,
+    MAX_PLUGIN_WINDOWS, PLUGIN_TYPE_DYNAMIC,
 };

@@ -51,6 +51,7 @@ pub(crate) mod self_accounts_host_tests {
             name: "self-accounts".into(),
             version: "0.1.0".into(),
             plugin_type: "secret".into(),
+            engine_type: None,
             runtime: RuntimeKind::Wasm,
             abi_version: "1.3".into(),
             sha256: hex::encode(Sha256::digest(bin)),

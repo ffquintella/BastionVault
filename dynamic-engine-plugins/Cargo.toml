@@ -1,0 +1,28 @@
+[workspace]
+resolver = "2"
+members = [
+    "bastion-plugin-dynamic-sdk",
+    "bastion-plugin-dynamic-fixture",
+    "bastion-plugin-postgres",
+]
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/ffquintella/BastionVault"
+authors = ["BastionVault contributors"]
+
+# Dynamic-secret engine plugins for BastionVault (features/dynamic-secrets.md,
+# T62). A separate workspace, like `plugins-ext/`: its own `target/` and
+# release profile, excluded from the host workspace in the root Cargo.toml.
+# The SDK reaches `crates/bastion-plugin-sdk` and the test harness
+# `crates/bastion-plugin-testkit` by relative path. Dependencies are declared
+# per crate on purpose (AGENTS.md §7, per-crate versioning).
+
+# Same shipping profile as plugins-ext: plugins are artefacts operators copy.
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"
+codegen-units = 1
+strip = true

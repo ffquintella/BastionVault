@@ -14,7 +14,10 @@ use std::sync::Arc;
 
 use crate::{
     errors::RvError,
-    kernel_api::auth::{AuthMountRegistry, TokenInfo, TokenService},
+    kernel_api::{
+        auth::{AuthMountRegistry, TokenInfo, TokenService},
+        leases::{LeaseRevocation, OwnedLeaseRevoker},
+    },
     storage::barrier_view::BarrierView,
 };
 
@@ -86,8 +89,24 @@ impl AuthMountRegistry for AuthModule {
     }
 }
 
-/// Publish the auth module as both of its services.
+/// The expiration manager is rebuilt on every unseal, after registration
+/// ran, so the published service is the module and resolves it per call.
+#[maybe_async::maybe_async]
+impl OwnedLeaseRevoker for AuthModule {
+    async fn revoke_owned_lease(&self, owner_mount: &str, lease_id: &str) -> Result<LeaseRevocation, RvError> {
+        let expiration = self.expiration.load_full().ok_or(RvError::ErrBarrierSealed)?;
+        expiration.revoke_owned_lease(owner_mount, lease_id).await
+    }
+
+    async fn check_lease_quota(&self, namespace_path: &str) -> Result<(), RvError> {
+        let expiration = self.expiration.load_full().ok_or(RvError::ErrBarrierSealed)?;
+        expiration.check_namespace_lease_quota(namespace_path).await
+    }
+}
+
+/// Publish the auth module as its three services.
 pub fn register(module: Arc<AuthModule>, services: &crate::kernel_api::KernelServices) {
     services.set_tokens(module.clone());
+    services.set_lease_revoker(module.clone());
     services.set_auth_mounts(module);
 }

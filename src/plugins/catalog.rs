@@ -164,7 +164,11 @@ impl PluginCatalog {
     /// present (legacy layout); otherwise leaves the active version
     /// alone so operators can stage without flipping production.
     pub async fn put(&self, storage: &dyn Storage, manifest: &PluginManifest, binary: &[u8]) -> Result<(), RvError> {
-        manifest.validate().map_err(|_| RvError::ErrRequestInvalid)?;
+        // T62: say *why* a manifest is refused (capability minimisation in
+        // particular must be explained, not just answered with a bare 400).
+        manifest
+            .validate()
+            .map_err(|e| RvError::ErrResponseStatus(400, format!("invalid plugin manifest `{}`: {e}", manifest.name)))?;
         Self::verify_integrity(manifest, binary)?;
         // A WASM module importing anything but the host's `bv` namespace
         // (notably WASI, from a `wasm32-wasip1` build) can never be
@@ -439,7 +443,33 @@ impl PluginCatalog {
                 ));
             }
         }
+        // ABI minor 5 (dynamic secrets): becoming or ceasing to be a dynamic
+        // plugin, or changing engine, is refused (its leases name the plugin),
+        // and no dynamic_* capability can be gained on re-register.
+        if prev.is_dynamic() != new.is_dynamic() || prev.engine_type != new.engine_type {
+            return Err(RvError::ErrString(
+                "capability widening: plugin_type secret/dynamic / engine_type cannot change on re-register; \
+                 DELETE + re-register"
+                    .into(),
+            ));
+        }
+        for (was, now, name) in [
+            (p.dynamic_lease_register, n.dynamic_lease_register, "dynamic_lease_register"),
+            (p.dynamic_audit_emit, n.dynamic_audit_emit, "dynamic_audit_emit"),
+            (p.dynamic_pool_checkout, n.dynamic_pool_checkout, "dynamic_pool_checkout"),
+        ] {
+            if !was && now {
+                return Err(RvError::ErrString(format!(
+                    "capability widening: {name} cannot be enabled on re-register; DELETE + re-register"
+                )));
+            }
+        }
         Ok(())
+    }
+
+    /// [`Self::list`] narrowed to one `plugin_type` (`?kind=secret/dynamic`).
+    pub async fn list_by_kind(&self, storage: &dyn Storage, kind: &str) -> Result<Vec<PluginManifest>, RvError> {
+        Ok(self.list(storage).await?.into_iter().filter(|m| m.plugin_type == kind).collect())
     }
 
     /// Switch the active version. Refuses to point at a version that
@@ -448,7 +478,10 @@ impl PluginCatalog {
         if self.read_versioned_manifest(storage, name, version).await?.is_none() {
             return Err(RvError::ErrRequestInvalid);
         }
-        storage.put(&StorageEntry { key: active_key(name), value: version.as_bytes().to_vec() }).await
+        storage.put(&StorageEntry { key: active_key(name), value: version.as_bytes().to_vec() }).await?;
+        // T62: credentials the previous build issued are not served from cache.
+        super::dynamic::cache::invalidate_plugin(name);
+        Ok(())
     }
 
     /// Drop a single version. Refuses to delete the active version
@@ -519,6 +552,8 @@ impl PluginCatalog {
         // re-register doesn't inherit a wedged process from the
         // previous version.
         super::process_supervisor::shutdown_for(name).await;
+        // T62: an unloaded plugin's cached credentials are dropped with it.
+        super::dynamic::cache::invalidate_plugin(name);
         Ok(())
     }
 
@@ -868,6 +903,7 @@ mod tests {
             name: name.to_string(),
             version: version.to_string(),
             plugin_type: "secret-engine".to_string(),
+            engine_type: None,
             runtime: RuntimeKind::Wasm,
             abi_version: "1.0".to_string(),
             sha256: hex,
@@ -911,6 +947,79 @@ mod tests {
         let bad = wat::parse_str(r#"(module (import "env" "x" (func)))"#).unwrap();
         let e = check_host_imports(&bad).unwrap_err().to_string();
         assert!(e.contains("env::x") && e.contains("`bv` import module"), "{e}");
+    }
+
+    fn dynamic_manifest_with(name: &str, version: &str, binary: &[u8]) -> PluginManifest {
+        let mut m = manifest_with(name, version, binary);
+        m.plugin_type = crate::plugins::manifest::PLUGIN_TYPE_DYNAMIC.into();
+        m.engine_type = Some("database".into());
+        m.abi_version = "1.5".into();
+        m.capabilities.dynamic_lease_register = true;
+        m
+    }
+
+    /// T62: `?kind=` is a filter over the same catalog, nothing more.
+    #[tokio::test]
+    async fn list_by_kind_narrows_to_dynamic_plugins() {
+        let s = MemStorage::default();
+        enable_unsigned(&s).await;
+        let bin = b"bin".to_vec();
+        let catalog = PluginCatalog::new();
+        catalog.put(&s, &manifest_with("static-one", "0.1.0", &bin), &bin).await.unwrap();
+        catalog.put(&s, &dynamic_manifest_with("pg", "0.1.0", &bin), &bin).await.unwrap();
+        let dynamic = catalog.list_by_kind(&s, "secret/dynamic").await.unwrap();
+        assert_eq!(dynamic.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), ["pg"]);
+        assert_eq!(catalog.list(&s).await.unwrap().len(), 2);
+    }
+
+    /// Capability minimisation is enforced at registration, with the reason.
+    #[tokio::test]
+    async fn put_refuses_unneeded_dynamic_capabilities_with_a_reason() {
+        let s = MemStorage::default();
+        enable_unsigned(&s).await;
+        let bin = b"bin".to_vec();
+        let mut m = manifest_with("static", "0.1.0", &bin);
+        m.abi_version = "1.5".into();
+        m.capabilities.dynamic_pool_checkout = true;
+        let err = PluginCatalog::new().put(&s, &m, &bin).await.unwrap_err().to_string();
+        assert!(err.contains("only granted to plugin_type"), "{err}");
+
+        let mut m = dynamic_manifest_with("pg", "0.1.0", &bin);
+        m.engine_type = Some("postgres".into());
+        let err = PluginCatalog::new().put(&s, &m, &bin).await.unwrap_err().to_string();
+        assert!(err.contains("engine_type must be one of"), "{err}");
+        assert!(PluginCatalog::new().get(&s, "pg").await.unwrap().is_none());
+
+        // ABI 1.4 is the SQL substrate a 0.45.9 host implements without this
+        // plugin kind: a dynamic manifest must say 1.5.
+        let mut m = dynamic_manifest_with("pg", "0.1.0", &bin);
+        m.abi_version = "1.4".into();
+        let err = PluginCatalog::new().put(&s, &m, &bin).await.unwrap_err().to_string();
+        assert!(err.contains("minor >= 5"), "{err}");
+        assert!(PluginCatalog::new().get(&s, "pg").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn re_register_cannot_gain_dynamic_capabilities_or_change_kind() {
+        let s = MemStorage::default();
+        enable_unsigned(&s).await;
+        let bin = b"bin".to_vec();
+        let catalog = PluginCatalog::new();
+        catalog.put(&s, &dynamic_manifest_with("pg", "0.1.0", &bin), &bin).await.unwrap();
+
+        let mut wider = dynamic_manifest_with("pg", "0.2.0", &bin);
+        wider.capabilities.dynamic_pool_checkout = true;
+        let err = catalog.put(&s, &wider, &bin).await.unwrap_err().to_string();
+        assert!(err.contains("dynamic_pool_checkout cannot be enabled"), "{err}");
+
+        let mut other_engine = dynamic_manifest_with("pg", "0.2.0", &bin);
+        other_engine.engine_type = Some("aws".into());
+        assert!(catalog.put(&s, &other_engine, &bin).await.unwrap_err().to_string().contains("engine_type"));
+
+        let not_dynamic = manifest_with("pg", "0.2.0", &bin);
+        assert!(catalog.put(&s, &not_dynamic, &bin).await.is_err());
+        // The same capability set is fine.
+        catalog.put(&s, &dynamic_manifest_with("pg", "0.2.0", &bin), &bin).await.unwrap();
     }
 
     #[test]

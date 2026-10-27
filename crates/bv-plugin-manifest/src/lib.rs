@@ -247,6 +247,20 @@ pub struct Capabilities {
     /// mounts. Grants no server authority; requires `sql_gate`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub sql_console: bool,
+
+    /// Dynamic secrets (`plugin_type = "secret/dynamic"` only): may the plugin
+    /// ask the host to lease a credential it created (`dynamic_lease_register`)?
+    /// Requires `abi_version` minor >= 5. Omitted from the canonical signing
+    /// message (and from [`Capabilities::canonical_sha256`]) when false, so
+    /// already-signed plugins keep verifying and ABI 1.4 grant pins hold.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dynamic_lease_register: bool,
+    /// Dynamic secrets: may the plugin emit `dynamic_secret` audit events?
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dynamic_audit_emit: bool,
+    /// Dynamic secrets: may the plugin check out a host-pooled connection?
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dynamic_pool_checkout: bool,
 }
 
 /// A resource credential kind (`[capabilities] resource_credentials`). A
@@ -285,7 +299,19 @@ impl Capabilities {
         let digest = Sha256::digest(canonical.as_bytes());
         digest.iter().map(|b| format!("{b:02x}")).collect()
     }
+
+    /// True when any `dynamic_*` capability is requested.
+    pub fn requests_dynamic(&self) -> bool {
+        self.dynamic_lease_register || self.dynamic_audit_emit || self.dynamic_pool_checkout
+    }
 }
+
+/// `plugin_type` of a dynamic-secret engine plugin (`features/dynamic-secrets.md`).
+pub const PLUGIN_TYPE_DYNAMIC: &str = "secret/dynamic";
+
+/// The `engine_type` values a `secret/dynamic` plugin may claim. Database
+/// engines (Postgres, MySQL, MSSQL, MongoDB, Redis) all claim `database`.
+pub const DYNAMIC_ENGINE_TYPES: [&str; 5] = ["database", "aws", "gcp", "azure", "ssh"];
 
 /// Storage scope a plugin's `bv.storage_*` calls are confined to.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -489,6 +515,11 @@ pub struct PluginManifest {
     /// `database`, etc. Free-form in v1; future versions may gate on it.
     #[serde(default)]
     pub plugin_type: String,
+    /// For `plugin_type = "secret/dynamic"` only: the engine family the plugin
+    /// serves, one of [`DYNAMIC_ENGINE_TYPES`]. Absent for every other kind,
+    /// and then omitted from the canonical signing message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_type: Option<String>,
     #[serde(default)]
     pub runtime: RuntimeKind,
     /// Major.minor `PluginService` ABI version the plugin targets.
@@ -580,19 +611,13 @@ fn default_abi_version() -> String {
 /// `(major, ≤ HOST_ABI_MINOR)` are accepted; cross-major mismatches
 /// are refused with a compatibility-matrix link in the error.
 pub const HOST_ABI_MAJOR: u32 = 1;
-/// Minor `1` added the Extensibility v2 (app extensions) `bvx.*` host
-/// surface; plugins that declare `capabilities.app` target
-/// `abi_version = "1.1"`. Minor `2` adds the notification surface — the
-/// `bv.notify_*` host imports, plugin-provided `notification_channels`,
-/// and the `capabilities.app.notify` app-module access; those plugins
-/// target `abi_version = "1.2"`. Minor `3` adds credential providers:
-/// the `caller` envelope block, `storage_scope = "entity"` and
-/// `[capabilities.credential_provider]`. Older hosts refuse a newer minor
-/// cleanly via [`check_abi_compatibility`] — the intended downgrade
-/// behavior. Minor `4` adds the SQL browser substrate (sql-browser §9.2):
-/// multiplexed process invocations, `sql_gate`, `resource_credentials`,
-/// `sql_console`, lifecycle messages and actor-stamped `audit_emit`.
-pub const HOST_ABI_MINOR: u32 = 4;
+/// Minors: `1` app extensions (`bvx.*`, `capabilities.app`); `2`
+/// notifications (`bv.notify_*`, `notification_channels`); `3` credential
+/// providers (`caller` block, entity storage, `credential_provider`); `4`
+/// (0.45.9) the SQL browser substrate (sql-browser §9.2); `5` dynamic
+/// secrets (`secret/dynamic`, `engine_type`, `dynamic_*`). Older hosts
+/// refuse a newer minor via [`check_abi_compatibility`].
+pub const HOST_ABI_MINOR: u32 = 5;
 
 /// Phase 5.4 — parse `"major.minor"` from a manifest. Returns
 /// `Err(_)` for any non-numeric or missing component so a typo'd
@@ -649,6 +674,11 @@ impl PluginManifest {
     /// instead of silently at first invoke.
     pub fn needs_runtime_dir(&self) -> bool {
         matches!(self.runtime, RuntimeKind::Process)
+    }
+
+    /// Is this a dynamic-secret engine plugin?
+    pub fn is_dynamic(&self) -> bool {
+        self.plugin_type == PLUGIN_TYPE_DYNAMIC
     }
 
     /// Validate static invariants. Does not touch storage.
@@ -726,6 +756,7 @@ impl PluginManifest {
         self.validate_notify_capabilities()?;
         self.validate_provider_capabilities()?;
         self.validate_sql_capabilities()?;
+        self.validate_dynamic_capabilities()?;
         Ok(())
     }
 
@@ -776,6 +807,51 @@ impl PluginManifest {
         }
         if caps.sql_console && !caps.sql_gate {
             return Err("sql_console requires sql_gate = true");
+        }
+        Ok(())
+    }
+
+    /// Static invariants on `plugin_type = "secret/dynamic"`, `engine_type`
+    /// and the `dynamic_*` capabilities (ABI minor 5), including capability
+    /// minimisation: only a dynamic plugin may request `dynamic_*`, and a
+    /// dynamic plugin may not request what its kind does not need (direct
+    /// network, per-user storage, a credential provider, the caller-bound
+    /// SQL host calls).
+    fn validate_dynamic_capabilities(&self) -> Result<(), &'static str> {
+        let caps = &self.capabilities;
+        if !self.is_dynamic() {
+            if caps.requests_dynamic() {
+                return Err("dynamic_* capabilities are only granted to plugin_type = \"secret/dynamic\"");
+            }
+            if self.engine_type.is_some() {
+                return Err("engine_type is only meaningful for plugin_type = \"secret/dynamic\"");
+            }
+            return Ok(());
+        }
+        let (_maj, min) = parse_abi(&self.abi_version).map_err(|_| "abi_version must be MAJOR.MINOR")?;
+        if min < 5 {
+            return Err("plugin_type = \"secret/dynamic\" requires abi_version minor >= 5 (\"1.5\")");
+        }
+        match self.engine_type.as_deref() {
+            None | Some("") => return Err("plugin_type = \"secret/dynamic\" requires engine_type"),
+            Some(t) if !DYNAMIC_ENGINE_TYPES.contains(&t) => {
+                return Err("engine_type must be one of database, aws, gcp, azure, ssh")
+            }
+            Some(_) => {}
+        }
+        if !caps.dynamic_lease_register {
+            return Err("a secret/dynamic plugin must declare dynamic_lease_register: the host owns every lease");
+        }
+        if !caps.allowed_hosts.is_empty() || caps.app.net.is_some() {
+            return Err("a secret/dynamic plugin reaches its target through dynamic_pool_checkout, not allowed_hosts or app.net");
+        }
+        if caps.storage_scope == StorageScope::Entity || caps.credential_provider.is_some() {
+            return Err("a secret/dynamic plugin may not request storage_scope = \"entity\" or credential_provider");
+        }
+        // The dynamic host never runs the plugin on behalf of a caller, so
+        // these could only ever be refused; declaring them is an error.
+        if caps.sql_gate || !caps.resource_credentials.is_empty() || caps.sql_console {
+            return Err("a secret/dynamic plugin may not request sql_gate, resource_credentials or sql_console");
         }
         Ok(())
     }
@@ -986,6 +1062,7 @@ mod tests {
             name: "bv-plugin-totp".to_string(),
             version: "0.1.0".to_string(),
             plugin_type: "secret-engine".to_string(),
+            engine_type: None,
             runtime: RuntimeKind::Wasm,
             abi_version: "1.0".to_string(),
             sha256: "0".repeat(64),
@@ -1116,13 +1193,25 @@ mod tests {
         m
     }
 
+    /// Minor 4 is the SQL substrate shipped in 0.45.9; dynamic secrets are 5.
     #[test]
-    fn host_abi_minor_is_four() {
-        assert_eq!(HOST_ABI_MINOR, 4);
+    fn host_abi_minor_is_five() {
+        assert_eq!(HOST_ABI_MINOR, 5);
+        assert!(check_abi_compatibility("1.5").is_ok());
         assert!(check_abi_compatibility("1.4").is_ok());
         assert!(check_abi_compatibility("1.3").is_ok());
         assert!(check_abi_compatibility("1.0").is_ok());
-        assert!(check_abi_compatibility("1.5").unwrap_err().contains("minor 5"));
+        assert!(check_abi_compatibility("1.6").unwrap_err().contains("minor 6"));
+    }
+
+    /// The SQL substrate keys stay at minor 4 under a minor-5 host: a 1.4
+    /// plugin is not asked to move.
+    #[test]
+    fn sql_substrate_still_validates_at_1_4_and_1_5() {
+        let mut m = sql_manifest();
+        m.validate().unwrap();
+        m.abi_version = "1.5".into();
+        m.validate().unwrap();
     }
 
     #[test]
@@ -1301,6 +1390,174 @@ mod tests {
         for c in changed {
             assert_ne!(c.canonical_sha256(), pin);
         }
+    }
+
+    /// Off, the dynamic keys leave the canonical block alone, so a grant pinned
+    /// under 0.45.9 still matches; on, any of them voids the pin.
+    #[test]
+    fn dynamic_keys_leave_abi_1_4_grant_pins_alone() {
+        let base = sql_manifest().capabilities;
+        let v = serde_json::to_value(&base).unwrap();
+        for k in ["dynamic_lease_register", "dynamic_audit_emit", "dynamic_pool_checkout"] {
+            assert!(v.get(k).is_none(), "{k}");
+        }
+        let mut c = base.clone();
+        c.dynamic_audit_emit = true;
+        assert_ne!(c.canonical_sha256(), base.canonical_sha256());
+    }
+
+    // ── dynamic secrets (ABI minor 5) ──
+
+    fn dynamic_manifest() -> PluginManifest {
+        let mut m = fixture();
+        m.name = "bastion-plugin-postgres".into();
+        m.plugin_type = PLUGIN_TYPE_DYNAMIC.into();
+        m.engine_type = Some("database".into());
+        m.runtime = RuntimeKind::Process;
+        m.abi_version = "1.5".into();
+        m.capabilities.dynamic_lease_register = true;
+        m.capabilities.dynamic_audit_emit = true;
+        m.capabilities.dynamic_pool_checkout = true;
+        m.capabilities.storage_prefix = Some(String::new());
+        m
+    }
+
+    #[test]
+    fn dynamic_manifest_validates() {
+        let m = dynamic_manifest();
+        assert!(m.is_dynamic());
+        m.validate().unwrap();
+        for engine in DYNAMIC_ENGINE_TYPES {
+            let mut m = dynamic_manifest();
+            m.engine_type = Some(engine.into());
+            m.validate().unwrap();
+        }
+    }
+
+    #[test]
+    fn dynamic_manifest_needs_a_known_engine_type() {
+        let mut m = dynamic_manifest();
+        m.engine_type = None;
+        assert!(m.validate().unwrap_err().contains("requires engine_type"));
+        m.engine_type = Some(String::new());
+        assert!(m.validate().is_err());
+        for bad in ["postgres", "Database", "database ", "kubernetes"] {
+            m.engine_type = Some(bad.into());
+            assert!(m.validate().unwrap_err().contains("engine_type must be one of"), "{bad}");
+        }
+    }
+
+    #[test]
+    fn dynamic_manifest_requires_abi_1_5_and_lease_registration() {
+        // 1.4 is the SQL substrate: a 1.4 host ignores the dynamic keys and
+        // would load the plugin as an ordinary one.
+        for old in ["1.3", "1.4"] {
+            let mut m = dynamic_manifest();
+            m.abi_version = old.into();
+            assert!(m.validate().unwrap_err().contains("minor >= 5"), "{old}");
+        }
+        let mut m = dynamic_manifest();
+        m.capabilities.dynamic_lease_register = false;
+        assert!(m.validate().unwrap_err().contains("dynamic_lease_register"));
+    }
+
+    /// Capability minimisation, both directions: a plugin of another kind may
+    /// not ask for a dynamic capability, and a dynamic plugin may not ask for
+    /// what its kind does not need.
+    #[test]
+    fn unneeded_capabilities_are_refused() {
+        for set in [
+            |c: &mut Capabilities| c.dynamic_lease_register = true,
+            |c: &mut Capabilities| c.dynamic_audit_emit = true,
+            |c: &mut Capabilities| c.dynamic_pool_checkout = true,
+        ] {
+            let mut m = fixture();
+            m.abi_version = "1.5".into();
+            set(&mut m.capabilities);
+            assert!(m.validate().unwrap_err().contains("only granted to plugin_type"));
+        }
+        let mut m = fixture();
+        m.engine_type = Some("database".into());
+        assert!(m.validate().unwrap_err().contains("engine_type is only meaningful"));
+
+        let mut m = dynamic_manifest();
+        m.capabilities.allowed_hosts = vec!["db.example.com".into()];
+        assert!(m.validate().unwrap_err().contains("dynamic_pool_checkout"));
+        let mut m = dynamic_manifest();
+        m.capabilities.credential_provider = Some(provider_cap());
+        assert!(m.validate().is_err());
+    }
+
+    /// The dynamic host never runs a plugin on behalf of a caller, so the
+    /// ABI 1.4 caller-bound SQL keys are refused on a dynamic plugin.
+    #[test]
+    fn dynamic_plugin_may_not_request_the_sql_host_calls() {
+        type Set = fn(&mut Capabilities);
+        let setters: [Set; 3] = [
+            |c| c.sql_gate = true,
+            |c| c.resource_credentials = vec![ResourceCredentialKind::Sql],
+            |c| {
+                c.sql_gate = true;
+                c.sql_console = true
+            },
+        ];
+        for set in setters {
+            let mut m = dynamic_manifest();
+            m.capabilities.caller_identity = true;
+            set(&mut m.capabilities);
+            assert!(m.validate().unwrap_err().contains("may not request sql_gate"));
+        }
+        // Concurrency is a runtime choice, not an authority: allowed.
+        let mut m = dynamic_manifest();
+        m.capabilities.long_lived = true;
+        m.capabilities.concurrent = true;
+        m.validate().unwrap();
+    }
+
+    #[test]
+    fn old_manifests_parse_with_dynamic_fields_off() {
+        let json = r#"{
+            "name": "old-plugin",
+            "version": "0.1.0",
+            "plugin_type": "secret-engine",
+            "abi_version": "1.3",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "size": 1024,
+            "capabilities": { "log_emit": true, "audit_emit": true }
+        }"#;
+        let m: PluginManifest = serde_json::from_str(json).unwrap();
+        assert_eq!(m.engine_type, None);
+        assert!(!m.capabilities.requests_dynamic());
+        assert!(!m.is_dynamic());
+        m.validate().unwrap();
+    }
+
+    #[test]
+    fn dynamic_manifest_parses_from_json() {
+        let json = r#"{
+            "name": "bastion-plugin-postgres", "version": "0.1.0",
+            "plugin_type": "secret/dynamic", "engine_type": "database",
+            "runtime": "process", "abi_version": "1.5",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "size": 1,
+            "capabilities": { "dynamic_lease_register": true, "dynamic_audit_emit": true }
+        }"#;
+        let m: PluginManifest = serde_json::from_str(json).unwrap();
+        assert!(m.is_dynamic());
+        assert!(m.capabilities.dynamic_lease_register && m.capabilities.dynamic_audit_emit);
+        assert!(!m.capabilities.dynamic_pool_checkout);
+        m.validate().unwrap();
+    }
+
+    #[test]
+    fn dynamic_fields_omitted_from_signing_message_when_off() {
+        let msg = signing_message(&fixture(), b"x");
+        let json = std::str::from_utf8(&msg[32..]).unwrap();
+        assert!(!json.contains("engine_type"), "{json}");
+        assert!(!json.contains("dynamic_"), "{json}");
+        let msg = signing_message(&dynamic_manifest(), b"x");
+        let json = std::str::from_utf8(&msg[32..]).unwrap();
+        assert!(json.contains("\"engine_type\":\"database\""));
+        assert!(json.contains("\"dynamic_lease_register\":true"));
     }
 
     #[test]

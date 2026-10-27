@@ -23,6 +23,7 @@
 
 pub mod catalog;
 pub mod config;
+pub mod dynamic;
 pub mod entity_data;
 pub mod grants;
 pub mod invocation;

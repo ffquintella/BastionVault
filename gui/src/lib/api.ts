@@ -1899,12 +1899,21 @@ export interface PluginCapabilities {
     api_paths?: string[];
     net?: { hosts: string[]; https_only?: boolean } | null;
   };
+  /** ABI 1.5, `secret/dynamic` only (T62): the host-owned dynamic-secret gates. */
+  dynamic_lease_register?: boolean;
+  dynamic_audit_emit?: boolean;
+  dynamic_pool_checkout?: boolean;
 }
+
+/** `plugin_type` of a dynamic-secret engine plugin (features/dynamic-secrets.md). */
+export const PLUGIN_TYPE_DYNAMIC = "secret/dynamic";
 
 export interface PluginManifest {
   name: string;
   version: string;
   plugin_type: string;
+  /** `secret/dynamic` only: `database`, `aws`, `gcp`, `azure` or `ssh`. */
+  engine_type?: string | null;
   /** "wasm" or "process" — Phase 2 lights up out-of-process plugins. */
   runtime: "wasm" | "process";
   abi_version: string;
@@ -1970,6 +1979,71 @@ export interface PluginInvokeResult {
 
 export const pluginsList = () =>
   invoke<{ plugins: PluginManifest[] }>("plugins_list").then((r) => r.plugins);
+
+/** The catalog narrowed to one `plugin_type` (`GET /v2/sys/plugins?kind=…`). */
+export const pluginsListByKind = (kind: string) =>
+  invoke<{ plugins: PluginManifest[] }>("plugins_list_by_kind", { kind }).then(
+    (r) => r.plugins,
+  );
+
+// ── Leases and dynamic secrets (T62) ─────────────────────────────────────
+//
+// `features/dynamic-secrets.md` Phase 5, `docs/api.md` § Leases. The host has
+// no listing of live leases; only `revoke_failed` ones are listed.
+
+/** One lease the host failed to revoke. State only, never the lease's data. */
+export interface RevokeFailedLease {
+  lease_id: string;
+  path: string;
+  issue_time: string | null;
+  expire_time: string | null;
+  attempts: number;
+  max_attempts: number;
+  exhausted: boolean;
+  first_failed_at: string | null;
+  last_failed_at: string | null;
+  /** Absent once the retries are exhausted. */
+  next_attempt_at: string | null;
+  /** Already cut to 256 characters by the host. */
+  last_error: string;
+  origin: string;
+}
+
+/** `lease_duration` / `renewable` are null when the host did not report them. */
+export interface LeaseRenewResult {
+  lease_id: string;
+  lease_duration: number | null;
+  renewable: boolean | null;
+}
+
+export const leasesListRevokeFailed = () =>
+  invoke<RevokeFailedLease[]>("leases_list_revoke_failed");
+
+export const leasesForceClearRevokeFailed = (leaseId: string) =>
+  invoke<void>("leases_force_clear_revoke_failed", { leaseId });
+
+export const leasesRenew = (leaseId: string, increment?: number) =>
+  invoke<LeaseRenewResult>("leases_renew", { leaseId, increment: increment ?? null });
+
+export const leasesRevoke = (leaseId: string) =>
+  invoke<void>("leases_revoke", { leaseId });
+
+/** A credential from `<mount>/creds/<role>`: shown once, never stored. */
+export interface DynamicCredsResult {
+  data: Record<string, unknown>;
+  lease_id: string | null;
+  lease_duration: number | null;
+  renewable: boolean | null;
+  /** Served from the credential cache: the lease is shared. */
+  cache_hit: boolean;
+  warnings: string[];
+}
+
+export const dynamicListRoles = (mount: string) =>
+  invoke<string[]>("dynamic_list_roles", { mount });
+
+export const dynamicGenerateCreds = (mount: string, role: string) =>
+  invoke<DynamicCredsResult>("dynamic_generate_creds", { mount, role });
 
 export const pluginsGetAcceptUnsigned = () =>
   invoke<boolean>("plugins_get_accept_unsigned");

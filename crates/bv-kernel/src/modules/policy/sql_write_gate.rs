@@ -29,8 +29,9 @@ pub const NODE_POLICY_SCHEMA: u32 = 2;
 pub const SQL_POLICY_SCHEMA: u32 = 2;
 /// The plugin host ABI minor this build serves. The kernel sits below
 /// `bv_plugin_manifest`, so it keeps a copy; the facade test
-/// `node_host_abi_minor_matches_the_manifest_host` pins the two.
-pub const NODE_HOST_ABI_MINOR: u32 = 4;
+/// `node_host_abi_minor_matches_the_manifest_host` pins the two. Minor 5
+/// (dynamic secrets) still serves the minor-4 SQL host calls.
+pub const NODE_HOST_ABI_MINOR: u32 = 5;
 /// The plugin host ABI minor that ships the SQL browser host calls.
 pub const SQL_MIN_HOST_ABI_MINOR: u32 = 4;
 /// How often an unsealed node refreshes its record while the gate is closed.
