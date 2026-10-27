@@ -13,7 +13,7 @@ use crate::{
     connection::Connection,
     host::{DynamicMethod, HostCalls},
     lease::{LeaseSlot, LeaseTerms},
-    pool::PoolGrant,
+    pool::{HostConnector, HostExecution, PoolGrant},
     role::check_name,
     secret::{redact, SecretString},
     DynamicError,
@@ -67,6 +67,26 @@ impl<'h> DynamicCtx<'h> {
             .dynamic_call(DynamicMethod::PoolCheckout, serde_json::json!({ "connection": connection }))
             .await?;
         serde_json::from_value(reply).map_err(|e| DynamicError::Protocol(format!("dynamic_pool_checkout reply: {e}")))
+    }
+
+    /// Have the host run this call's rendered statements on the slot of
+    /// `grant`, dialling `connector` itself under the operator's TLS policy.
+    /// Only when `grant.executes(connector.kind)`. The host runs what it
+    /// rendered for this call, once; there is no way to pass a statement.
+    /// A failure is the operation's failure: never retry by dialling.
+    pub async fn host_execute(
+        &mut self,
+        grant: &PoolGrant,
+        connector: &HostConnector,
+    ) -> Result<HostExecution, DynamicError> {
+        self.remember_secret(&connector.password);
+        let mut params = serde_json::json!({
+            "connection": grant.connection,
+            "execute": { "slot": grant.slot, "connector": connector.to_params() },
+        });
+        let reply = self.host.dynamic_call(DynamicMethod::PoolCheckout, params.clone()).await;
+        crate::secret::wipe_value(&mut params);
+        serde_json::from_value(reply?).map_err(|_| DynamicError::Protocol("host execution reply".into()))
     }
 
     /// Emit a plugin `dynamic_secret` event; the host stamps the rest.

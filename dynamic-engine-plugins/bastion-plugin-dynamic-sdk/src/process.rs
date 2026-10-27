@@ -86,8 +86,11 @@ impl<'a, R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin> StdioHost<'a, R, W> {
     async fn call(&mut self, method: &'static str, params: Value) -> Result<Value, DynamicError> {
         *self.next_id += 1;
         let id = *self.next_id;
-        let msg = json!({ "type": "host_call", "id": id, "method": method, "params": params });
-        write_line(self.writer, &msg).await.map_err(|e| DynamicError::Unavailable(format!("{method}: {e}")))?;
+        let mut msg = json!({ "type": "host_call", "id": id, "method": method, "params": params });
+        let written = write_line(self.writer, &msg).await;
+        // A host execution's params carry the connection's root secret.
+        crate::secret::wipe_value(&mut msg);
+        written.map_err(|e| DynamicError::Unavailable(format!("{method}: {e}")))?;
         loop {
             let reply = match read_message(self.reader).await {
                 Ok(Some(v)) => v,

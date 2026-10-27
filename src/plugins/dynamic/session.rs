@@ -9,7 +9,11 @@ use std::sync::{
     Arc, Mutex,
 };
 
-use bv_dynamic::{audit::Actor, records::LeaseRequest};
+use bv_dynamic::{
+    audit::Actor,
+    connector::{ExecPlan, RootRestore},
+    records::LeaseRequest,
+};
 use zeroize::Zeroizing;
 
 use crate::storage::Storage;
@@ -53,8 +57,15 @@ pub struct DynamicSession {
     pub lease_id: Option<String>,
     pub actor: Option<Actor>,
     pub request_id: Option<String>,
-    /// Credential material of this call, searched for in plugin audit text.
-    secrets: Vec<Zeroizing<String>>,
+    /// Credential material of this call, searched for in plugin audit text
+    /// and redacted from errors. Grows when a plugin presents a connection's
+    /// root secret for a host execution.
+    secrets: Mutex<Vec<Zeroizing<String>>>,
+    /// The statements the host rendered for this call, which a plugin may ask
+    /// the host to run once (`dynamic_pool_checkout` with `execute`).
+    plan: Mutex<Option<ExecPlan>>,
+    /// What a host root rotation of this call left on the target.
+    rotation: Mutex<Option<RotationState>>,
     lease_request: Mutex<Option<LeaseRequest>>,
     grants: Mutex<Vec<super::pool::HeldGrant>>,
     plugin_events: AtomicU32,
@@ -73,7 +84,9 @@ impl DynamicSession {
             lease_id: None,
             actor: None,
             request_id: None,
-            secrets: Vec::new(),
+            secrets: Mutex::new(Vec::new()),
+            plan: Mutex::new(None),
+            rotation: Mutex::new(None),
             lease_request: Mutex::new(None),
             grants: Mutex::new(Vec::new()),
             plugin_events: AtomicU32::new(0),
@@ -82,13 +95,48 @@ impl DynamicSession {
     }
 
     /// Remember a secret so plugin-supplied audit text cannot carry it.
-    pub fn with_secret(mut self, secret: &str) -> Self {
-        self.secrets.push(Zeroizing::new(secret.to_string()));
+    pub fn with_secret(self, secret: &str) -> Self {
+        self.add_secret(secret);
         self
     }
 
-    pub fn secrets(&self) -> Vec<&str> {
-        self.secrets.iter().map(|s| s.as_str()).collect()
+    /// [`Self::with_secret`] on a live session.
+    pub fn add_secret(&self, secret: &str) {
+        if !secret.is_empty() {
+            self.secrets.lock().unwrap_or_else(|p| p.into_inner()).push(Zeroizing::new(secret.to_string()));
+        }
+    }
+
+    /// A copy of this call's secrets (wiped on drop); `.refs()` for redaction.
+    pub fn secrets(&self) -> SecretSet {
+        SecretSet(self.secrets.lock().unwrap_or_else(|p| p.into_inner()).clone())
+    }
+
+    /// Attach the statements the host rendered for this call.
+    pub fn with_plan(self, plan: ExecPlan) -> Self {
+        *self.plan.lock().unwrap_or_else(|p| p.into_inner()) = Some(plan);
+        self
+    }
+
+    /// The rendered statements, once: a second execution request finds none.
+    pub fn take_plan(&self) -> Option<ExecPlan> {
+        self.plan.lock().unwrap_or_else(|p| p.into_inner()).take()
+    }
+
+    pub fn has_plan(&self) -> bool {
+        self.plan.lock().unwrap_or_else(|p| p.into_inner()).is_some()
+    }
+
+    pub fn set_rotation(&self, state: RotationState) {
+        *self.rotation.lock().unwrap_or_else(|p| p.into_inner()) = Some(state);
+    }
+
+    pub fn clear_rotation(&self) {
+        self.rotation.lock().unwrap_or_else(|p| p.into_inner()).take();
+    }
+
+    pub fn take_rotation(&self) -> Option<RotationState> {
+        self.rotation.lock().unwrap_or_else(|p| p.into_inner()).take()
     }
 
     /// Record the plugin's lease request. Only one per session.
@@ -119,6 +167,15 @@ impl DynamicSession {
         self.grants.lock().unwrap_or_else(|p| p.into_inner()).len()
     }
 
+    /// Take the held slot `slot` out for a host execution; [`Self::hold_grant`]
+    /// puts it back. Dropped instead (and so returned to the pool) when the
+    /// execution is cancelled.
+    pub fn take_grant(&self, slot: u64) -> Option<super::pool::HeldGrant> {
+        let mut grants = self.grants.lock().unwrap_or_else(|p| p.into_inner());
+        let at = grants.iter().position(|g| g.id == slot)?;
+        Some(grants.swap_remove(at))
+    }
+
     /// The plugin made a host call its manifest does not declare.
     pub fn mark_violation(&self) {
         self.violated.store(true, Ordering::SeqCst);
@@ -137,7 +194,32 @@ impl std::fmt::Debug for DynamicSession {
             .field("role", &self.role)
             .field("connection", &self.connection)
             .field("target_identity", &self.target_identity)
-            .field("secrets", &self.secrets.len())
+            .field("secrets", &self.secrets.lock().map(|s| s.len()).unwrap_or(0))
+            .field("plan", &self.has_plan())
             .finish_non_exhaustive()
+    }
+}
+
+/// What a host root rotation left on the target, for the backend to settle
+/// once the plugin has (or has not) stored the new secret.
+#[derive(Debug)]
+pub enum RotationState {
+    /// Set before the host touches the target; still there if the call was
+    /// cut short (the runtime dropped it), which the backend treats as stranded.
+    InFlight,
+    /// The new secret is set and verified; undo it if the plugin fails.
+    Applied(RootRestore),
+    /// It did not log in and the old secret was put back: nothing changed.
+    RolledBack,
+    /// The target holds the new secret and putting the old one back failed.
+    Stranded(String),
+}
+
+/// A copy of a session's secrets. Wiped on drop; no `Debug`.
+pub struct SecretSet(Vec<Zeroizing<String>>);
+
+impl SecretSet {
+    pub fn refs(&self) -> Vec<&str> {
+        self.0.iter().map(|s| s.as_str()).collect()
     }
 }

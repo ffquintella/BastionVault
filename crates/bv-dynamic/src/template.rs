@@ -143,6 +143,19 @@ pub fn validate(template: &str, allow_password: bool) -> Result<(), TemplateErro
     Ok(())
 }
 
+/// [`validate`], and every token one of `allowed` (a root-rotation statement
+/// names only `{{name}}` and `{{password}}`).
+pub fn validate_only(template: &str, allowed: &[&'static str]) -> Result<(), TemplateError> {
+    for piece in parse(template)? {
+        if let Piece::Token(token) = piece {
+            if !allowed.contains(&token.label()) {
+                return Err(TemplateError::TokenNotAllowed(token.label()));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The values a template is expanded with. `Debug` never prints the password.
 #[derive(Clone, Copy)]
 pub struct TemplateVars<'a> {

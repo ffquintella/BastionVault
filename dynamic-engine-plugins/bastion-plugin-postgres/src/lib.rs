@@ -1,7 +1,8 @@
 //! PostgreSQL dynamic credentials for BastionVault (`secret/dynamic`,
 //! `engine_type = "database"`), on `bastion-plugin-dynamic-sdk`. The host
-//! makes the username and password and renders the role's statements; this
-//! engine runs them over a TLS-verified connection and drops the role again.
+//! makes the username and password and renders the role's statements. When
+//! the host has a `postgres` connector it also runs them, on its own pooled,
+//! TLS-enforced connection; on an older host this engine dials itself.
 
 pub mod sql;
 pub mod target;
@@ -10,8 +11,8 @@ pub mod tls;
 use async_trait::async_trait;
 use bastion_plugin_dynamic_sdk::{
     AuditEvent, Connection, ConnectionSchema, DynamicCredentialBackend, DynamicCtx, DynamicError, EventKind,
-    GenerateRequest, Generated, LeaseTerms, RenewRequest, Renewed, RevokeRequest, RoleRecipe, RotateRootRequest,
-    SecretString,
+    GenerateRequest, Generated, HostConnector, LeaseTerms, PoolGrant, RenewRequest, Renewed, RevokeRequest, RoleRecipe,
+    RotateRootRequest, SecretString,
 };
 use serde_json::json;
 
@@ -29,6 +30,29 @@ pub const SCHEMA: ConnectionSchema = ConnectionSchema {
 
 /// `target_identity_type` of this engine's audit events.
 pub const IDENTITY_TYPE: &str = "postgres_role";
+/// The host connector kind this engine's connections are dialled with.
+pub const CONNECTOR_KIND: &str = "postgres";
+
+/// How one call reaches the database.
+enum Route {
+    /// The host runs the statements it rendered for this call, on its own
+    /// connection under the operator's TLS policy. Its failure is final.
+    Host(PoolGrant, HostConnector),
+    /// An older host: this engine dials with the grant's TLS policy.
+    Dial(Box<dyn Session>),
+}
+
+/// The stored connection as the host connector receives it (already checked
+/// by [`Target::from_connection`]).
+fn host_connector(conn: &Connection, target: &Target) -> HostConnector {
+    HostConnector {
+        kind: CONNECTOR_KIND,
+        url: conn.setting_str("connection_url").unwrap_or_default().to_string(),
+        username: target.username.clone(),
+        password: target.password.clone(),
+        connect_timeout_secs: conn.setting("connect_timeout_secs").and_then(|v| v.as_u64()),
+    }
+}
 
 pub struct PostgresBackend<C = PgConnector> {
     connector: C,
@@ -39,23 +63,34 @@ impl<C: Connector> PostgresBackend<C> {
         Self { connector }
     }
 
-    /// Check out a pool slot for the connection and dial it with the slot's
-    /// TLS policy.
-    async fn open(
+    /// Dial with the grant's TLS policy (a host without a `postgres`
+    /// connector, or a connection whose endpoint it has not pinned).
+    async fn dial(
         &self,
         ctx: &mut DynamicCtx<'_>,
         conn: &Connection,
-    ) -> Result<(Target, Box<dyn Session>), DynamicError> {
-        let target = Target::from_connection(conn)?;
-        let grant = ctx.pool_checkout(&conn.name).await?;
+        target: &Target,
+        grant: &PoolGrant,
+    ) -> Result<Box<dyn Session>, DynamicError> {
         if !grant.tls.verify {
             ctx.warn(&format!(
                 "connection `{}`: TLS certificate verification disabled by insecure_skip_tls_verify (development only)",
                 conn.name
             ));
         }
-        let session = self.connector.connect(&target, &grant.tls).await?;
-        Ok((target, session))
+        self.connector.connect(target, &grant.tls).await
+    }
+
+    /// The host when its grant lists the `postgres` connector, else a dial.
+    /// A host that executes is always used: dialling instead would bypass
+    /// the TLS enforcement the host does for the operator.
+    async fn route(&self, ctx: &mut DynamicCtx<'_>, conn: &Connection) -> Result<Route, DynamicError> {
+        let target = Target::from_connection(conn)?;
+        let grant = ctx.pool_checkout(&conn.name).await?;
+        if grant.executes(CONNECTOR_KIND) {
+            return Ok(Route::Host(grant, host_connector(conn, &target)));
+        }
+        Ok(Route::Dial(self.dial(ctx, conn, &target, &grant).await?))
     }
 }
 
@@ -104,9 +139,16 @@ impl<C: Connector> DynamicCredentialBackend for PostgresBackend<C> {
             return Err(DynamicError::invalid("the role has no creation_statements"));
         }
         quote_ident(&req.username)?;
-        let (_, mut session) = self.open(ctx, &req.connection).await?;
-        let statements: Vec<&str> = req.statements.iter().map(SecretString::expose).collect();
-        session.execute_in_transaction(&statements).await?;
+        match self.route(ctx, &req.connection).await? {
+            // The host runs the creation statements it rendered: these ones.
+            Route::Host(grant, connector) => {
+                ctx.host_execute(&grant, &connector).await?;
+            }
+            Route::Dial(mut session) => {
+                let statements: Vec<&str> = req.statements.iter().map(SecretString::expose).collect();
+                session.execute_in_transaction(&statements).await?;
+            }
+        }
         let count = req.statements.len().to_string();
         emit(ctx, event(EventKind::Generate).and_then(|e| e.detail("statements", &count))).await;
         Ok(Generated::new(LeaseTerms::new(req.ttl_secs).with_internal(json!({ "v": 1 }))))
@@ -119,16 +161,38 @@ impl<C: Connector> DynamicCredentialBackend for PostgresBackend<C> {
         } else {
             req.statements
         };
-        let (_, mut session) = self.open(ctx, &req.connection).await?;
-        let refs: Vec<&str> = statements.iter().map(String::as_str).collect();
-        session.execute_in_transaction(&refs).await?;
+        match self.route(ctx, &req.connection).await? {
+            // The host renders the same default itself when the role has none.
+            Route::Host(grant, connector) => {
+                ctx.host_execute(&grant, &connector).await?;
+            }
+            Route::Dial(mut session) => {
+                let refs: Vec<&str> = statements.iter().map(String::as_str).collect();
+                session.execute_in_transaction(&refs).await?;
+            }
+        }
         emit(ctx, event(EventKind::Renew)).await;
         Ok(Renewed::default())
     }
 
     async fn revoke(&self, ctx: &mut DynamicCtx<'_>, req: RevokeRequest) -> Result<(), DynamicError> {
         quote_ident(&req.username)?;
-        let (_, mut session) = self.open(ctx, &req.connection).await?;
+        let mut session = match self.route(ctx, &req.connection).await? {
+            // The host checks the role exists (and runs nothing when it is
+            // gone), then the revocation statements or its own default.
+            Route::Host(grant, connector) => {
+                let done = ctx.host_execute(&grant, &connector).await?;
+                let revoked = event(EventKind::Revoke);
+                let revoked = if done.identity_absent {
+                    revoked.and_then(|e| e.detail("already_absent", "true"))
+                } else {
+                    revoked
+                };
+                emit(ctx, revoked).await;
+                return Ok(());
+            }
+            Route::Dial(session) => session,
+        };
         // Revoking an identity that is already gone succeeds: the host retries
         // failed revokes, and the target may have been cleaned by hand.
         if !session.role_exists(&req.username).await? {
@@ -143,7 +207,27 @@ impl<C: Connector> DynamicCredentialBackend for PostgresBackend<C> {
     }
 
     async fn rotate_root(&self, ctx: &mut DynamicCtx<'_>, req: RotateRootRequest) -> Result<(), DynamicError> {
-        let (target, mut session) = self.open(ctx, &req.connection).await?;
+        let mut session = match self.route(ctx, &req.connection).await? {
+            // The host sets the new secret over its old-secret connection and
+            // proves it with a fresh login; this engine only stores it. If
+            // storing fails the call fails, and the host puts the previous
+            // secret back on the target itself.
+            Route::Host(grant, connector) => {
+                ctx.host_execute(&grant, &connector).await?;
+                let mut conn = req.connection;
+                conn.set_secret("password", req.new_secret.clone());
+                // Anything after the store must not fail the call: from here
+                // the host assumes the new secret is stored.
+                ctx.save_connection(&conn).await.map_err(|stored| {
+                    DynamicError::RootNotStored(format!("{stored}; the host restores the previous one"))
+                })?;
+                emit(ctx, event(EventKind::RotateRoot)).await;
+                return Ok(());
+            }
+            Route::Dial(session) => session,
+        };
+        // An older host, or a connection it has not pinned: dial, as before.
+        let target = Target::from_connection(&req.connection)?;
         let alter = SecretString::new(alter_password(&target.username, req.new_secret.expose())?);
         session.execute_in_transaction(&[alter.expose()]).await?;
         let mut conn = req.connection;

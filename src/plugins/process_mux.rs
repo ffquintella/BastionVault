@@ -199,7 +199,8 @@ pub(super) async fn read_bounded_line<R: AsyncBufRead + Unpin>(
     buf: &mut Vec<u8>,
     max: usize,
 ) -> std::io::Result<Line> {
-    buf.clear();
+    // The previous line may have carried a credential (a host call's params).
+    zeroize::Zeroize::zeroize(buf);
     let mut overflow = false;
     let mut tail: Vec<u8> = Vec::new();
     loop {
@@ -513,8 +514,9 @@ impl MuxWorker {
                             Err(_) => Err(MuxError::Died("worker closed".into())),
                         };
                     }
-                    Some(call) = calls_rx.recv() => {
+                    Some(mut call) = calls_rx.recv() => {
                         let result = handle_host_call(manifest, core.as_ref(), config, &call.method, &call.params, caller, session).await;
+                        scrub(&mut call.params);
                         let (mut ok, error) = match result {
                             Ok(v) => (Some(v), None),
                             Err(e) => (None, Some(e)),

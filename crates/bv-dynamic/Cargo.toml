@@ -40,5 +40,33 @@ serde_json = "^1.0"
 thiserror = { version = "^2.0" }
 log = "0.4"
 
+# Host-side connectors (`src/connector/`): the host dials the target itself,
+# so the operator's TLS policy is enforced by the host, not handed to the
+# plugin as an instruction. PostgreSQL is the first connector. No TLS feature
+# of tokio-postgres (it would pull native-tls/openssl-sys): TLS is the rustls
+# glue in `connector/tls.rs`.
+tokio-postgres = { version = "0.7.17", default-features = false, features = ["runtime"], optional = true }
+# The `ring` provider, chosen explicitly per connection, never `aws_lc_rs`:
+# these add no path to openssl-sys or aws-lc-sys (`cargo tree -p bv-dynamic
+# -i aws-lc-sys` shows only the existing one, through bv-errors' rustls).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"], optional = true }
+# The OS trust store, used when the operator gave the connection no CA.
+rustls-native-certs = { version = "0.8", optional = true }
+
+[features]
+default = ["connector-postgres"]
+# The host's PostgreSQL connector (tokio-postgres over rustls/ring).
+connector-postgres = [
+    "dep:tokio-postgres",
+    "dep:rustls",
+    "dep:tokio-rustls",
+    "dep:rustls-native-certs",
+    "tokio/rt",
+    "tokio/net",
+]
+
 [dev-dependencies]
-tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "time", "io-util"] }
+# Self-signed test certificates for the connector's TLS tests (ring, not aws-lc-rs).
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
