@@ -152,6 +152,8 @@ impl SystemBackend {
         let sys_backend_renew = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_revoke = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_revoke_prefix = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_revoke_failed_list = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_revoke_failed_clear = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_auth_table = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_auth_enable = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_auth_disable = self.self_ptr.upgrade().unwrap().clone();
@@ -334,6 +336,29 @@ impl SystemBackend {
                     operations: [
                         {op: Operation::Write, handler: sys_backend_revoke_prefix.handle_revoke_prefix}
                     ]
+                },
+                {
+                    // Leases whose secret backend failed to revoke them (T62,
+                    // features/dynamic-secrets.md). Sudo-gated via
+                    // `root_paths`. HTTP shim under /v2/sys only.
+                    pattern: "leases/revoke-failed/?$",
+                    operations: [
+                        {op: Operation::List, handler: sys_backend_revoke_failed_list.handle_revoke_failed_list}
+                    ],
+                    help: "List leases whose secret backend failed to revoke them."
+                },
+                {
+                    pattern: "leases/revoke-failed/(?P<lease_id>.+)",
+                    fields: {
+                        "lease_id": {
+                            field_type: FieldType::Str,
+                            description: "The revoke_failed lease to drop without revoking it in its backend."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Delete, handler: sys_backend_revoke_failed_clear.handle_revoke_failed_clear}
+                    ],
+                    help: "Force-clear a revoke_failed lease after cleaning its target up by hand."
                 },
                 {
                     pattern: "auth$",
@@ -1529,7 +1554,7 @@ impl SystemBackend {
             // Admin reads/writes are gated by policy on the explicit
             // mount/name paths instead. `identity/profile/*` is caller-scoped
             // for the same reason and is likewise never root-scoped.
-            root_paths: ["mounts/*", "auth/*", "remount", "policy", "policy/*", "audit", "audit/*", "audit-retention", "seal", "raw/*", "revoke-prefix/*", "cache/flush", "owner/backfill", "sso/settings", "namespaces", "namespaces/*", "namespace-links", "namespace-links/*", "identity/ns-assignment", "identity/ns-assignment/*", "dos/config", "dos/stats", "dos/bans/*", "mcp/config", "mcp/transcripts", "mcp/transcripts/*"],
+            root_paths: ["mounts/*", "auth/*", "remount", "policy", "policy/*", "audit", "audit/*", "audit-retention", "seal", "raw/*", "revoke-prefix/*", "leases/revoke-failed", "leases/revoke-failed/*", "cache/flush", "owner/backfill", "sso/settings", "namespaces", "namespaces/*", "namespace-links", "namespace-links/*", "identity/ns-assignment", "identity/ns-assignment/*", "dos/config", "dos/stats", "dos/bans/*", "mcp/config", "mcp/transcripts", "mcp/transcripts/*"],
             // NB: `mcp/apps/<name>/machine-waiver` is NOT listed here even
             // though it is sudo-gated: `root_paths` only supports an exact
             // path or a trailing-`*` prefix (`new_radix_from_paths` in

@@ -1,55 +1,62 @@
-//! The Vault lease endpoints: `sys/renew/<lease_id>`, `sys/revoke/<lease_id>`
-//! and `sys/revoke-prefix/<prefix>` (routes in `mod.rs`).
+//! The Vault lease endpoints `sys/renew/<lease_id>`, `sys/revoke/<lease_id>`
+//! and `sys/revoke-prefix/<prefix>`, and the v2-only `revoke_failed`
+//! surface `sys/leases/revoke-failed[/<lease_id>]` (routes in `mod.rs`).
 //!
-//! These were stubs that answered success without touching a lease. Revocation
-//! now goes to the [`ExpirationManager`]; renewal is refused explicitly (see
-//! [`SystemBackend::handle_renew`]).
-//!
-//! `bv-server`'s `/v1/sys` and `/v2/sys` scopes route none of these paths, so
-//! plain HTTP gets a 404. They are reached through `Core::handle_request`:
-//! embedded vault mode, the in-process API and `POST /v2/sys/batch`.
+//! `bv-server` routes only the `revoke_failed` paths, under `/v2/sys`. The
+//! Vault paths are reached through `Core::handle_request`: embedded vault
+//! mode, the in-process API and `POST /v2/sys/batch`.
 
 use std::sync::Arc;
+
+use serde_json::{json, Map, Value};
 
 use super::SystemBackend;
 use crate::{
     bv_error_response_status,
     errors::RvError,
-    logical::{Backend, Request, Response},
+    logical::{Backend, Lease, Request, Response, SecretData},
     modules::{
-        auth::{AuthModule, ExpirationManager},
+        auth::{expiration::RevokeFailedLease, lease_state::rfc3339, AuthModule, ExpirationManager},
         namespace::token_binding::token_operable_resolved,
     },
 };
 
 #[maybe_async::maybe_async]
 impl SystemBackend {
-    /// `sys/renew/<lease_id>`: refused with 501.
-    ///
-    /// [`ExpirationManager::renew`] has never had a production caller, and
-    /// wired as it stands it would report renewals that did not happen: a
-    /// backend renew that returns nothing comes back as `Ok(None)`, which
-    /// `LogicalBackend::handle_revoke_renew` does for every token lease (no
-    /// secret) and for an unsupported secret type; a renewed secret without a
-    /// TTL is returned as success with the lease's expiry unchanged; and token
-    /// leases are not refused, where Vault sends them to `auth/token/renew`.
-    /// Renewal is deferred to the dynamic-secrets framework (T62).
-    pub async fn handle_renew(&self, _backend: &dyn Backend, _req: &mut Request) -> Result<Option<Response>, RvError> {
-        Err(bv_error_response_status!(
-            501,
-            "sys/renew is not implemented: leases cannot be renewed through this endpoint yet; \
-             renew a token with auth/token/renew-self or auth/token/renew"
-        ))
+    /// `sys/renew/<lease_id>`: renew a secret lease whose backend really
+    /// renews it (T62), clamped to the lease's max_ttl. Answers only for a
+    /// renewal that happened, with the lease id, duration and renewability,
+    /// never the backend's data. `400`: unknown, expired, non-renewable or
+    /// past max_ttl. `409`: another renew/revoke is running, or the lease is
+    /// `revoke_failed`. `501`: a token's lease (use `auth/token/renew`), or a
+    /// backend with no renew hook or that answers without a lease.
+    pub async fn handle_renew(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        self.ensure_deployment_lease_caller(req).await?;
+        let lease_id = lease_key(req, "lease_id")?;
+        let increment = renew_increment(req)?;
+        let renewal = match self.expiration_manager()?.renew(&lease_id, increment).await {
+            Err(RvError::ErrLeaseNotFound) => {
+                return Err(bv_error_response_status!(400, "invalid lease: no lease has this id, nothing was renewed"))
+            }
+            Err(RvError::ErrLeaseNotRenewable) => {
+                return Err(bv_error_response_status!(
+                    400,
+                    "lease not renewed: it has expired or was issued non-renewable"
+                ))
+            }
+            result => result?,
+        };
+        let lease = Lease { ttl: renewal.ttl, renewable: renewal.renewable, ..Default::default() };
+        let secret = SecretData { lease, lease_id: renewal.lease_id, internal_data: Map::new() };
+        Ok(Some(Response { secret: Some(secret), ..Default::default() }))
     }
 
     /// `sys/revoke/<lease_id>`: revoke one lease, or refuse with 400 when no
     /// lease has that id.
     ///
-    /// A secret lease's revoke error is still logged and swallowed by
-    /// `ExpirationManager::revoke_lease_entry`, which deletes the lease row
-    /// anyway. Every secret type in the tree revokes with a no-op today, so
-    /// only routing can fail there (a removed mount, say); surfacing that
-    /// failure is part of T62.
+    /// A secret backend's failed revoke is a `502`, and the lease is kept as
+    /// `revoke_failed` and retried (see `v2/sys/leases/revoke-failed`)
+    /// instead of being deleted with its credential still live.
     pub async fn handle_revoke(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         self.ensure_deployment_lease_caller(req).await?;
         let lease_id = lease_key(req, "lease_id")?;
@@ -74,6 +81,45 @@ impl SystemBackend {
         let prefix = lease_key(req, "prefix")?;
         self.expiration_manager()?.revoke_prefix(&prefix).await?;
         Ok(None)
+    }
+
+    /// `LIST v2/sys/leases/revoke-failed`: every lease whose secret backend
+    /// failed to revoke it, with its attempts, last error (bounded) and next
+    /// retry. Needs `list` and `sudo` (`root_paths`). No secret data is read
+    /// into the answer, only the lease's identity and revoke state.
+    pub async fn handle_revoke_failed_list(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        self.ensure_deployment_lease_caller(req).await?;
+        let leases = self.expiration_manager()?.list_revoke_failed().await?;
+        let keys: Vec<String> = leases.iter().map(|l| l.lease_id.clone()).collect();
+        let key_info: Map<String, Value> = leases.iter().map(|l| (l.lease_id.clone(), revoke_failed_info(l))).collect();
+        let mut data = Map::new();
+        data.insert("keys".into(), json!(keys));
+        data.insert("key_info".into(), Value::Object(key_info));
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    /// `DELETE v2/sys/leases/revoke-failed/<lease_id>`: drop a `revoke_failed`
+    /// lease without its backend revoking it, after the operator has cleaned
+    /// the target up by hand. Needs `delete` and `sudo`. `400` for a lease
+    /// that is not `revoke_failed` (revoke it instead) or an unknown id; the
+    /// `lease.revoke_failed_cleared` audit event must be written first.
+    pub async fn handle_revoke_failed_clear(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        self.ensure_deployment_lease_caller(req).await?;
+        let lease_id = lease_key(req, "lease_id")?;
+        match self.expiration_manager()?.force_clear_revoke_failed(&lease_id, Some(req)).await {
+            Err(RvError::ErrLeaseNotFound) => {
+                Err(bv_error_response_status!(400, "invalid lease: no lease has this id, nothing was cleared"))
+            }
+            result => result.map(|()| None),
+        }
     }
 
     fn expiration_manager(&self) -> Result<Arc<ExpirationManager>, RvError> {
@@ -101,6 +147,34 @@ impl SystemBackend {
             return Err(RvError::ErrPermissionDenied);
         }
         Ok(())
+    }
+}
+
+/// One listing row: the revoke state, never the lease's data.
+fn revoke_failed_info(lease: &RevokeFailedLease) -> Value {
+    let failure = &lease.failure;
+    json!({
+        "path": lease.path,
+        "issue_time": rfc3339(lease.issue_time),
+        "expire_time": rfc3339(lease.expire_time),
+        "attempts": failure.attempts,
+        "max_attempts": lease.max_attempts,
+        "exhausted": lease.exhausted,
+        "first_failed_at": rfc3339(failure.first_failed_at),
+        "last_failed_at": rfc3339(failure.last_failed_at),
+        "next_attempt_at": (!lease.exhausted).then(|| rfc3339(failure.next_attempt_at)),
+        "last_error": failure.last_error,
+        "origin": failure.origin,
+    })
+}
+
+/// `increment`, in seconds; absent or 0 asks for the backend's own TTL.
+fn renew_increment(req: &Request) -> Result<std::time::Duration, RvError> {
+    let value = req.get_data_or_default("increment")?;
+    let secs = value.as_i64().or_else(|| value.as_str().and_then(|s| s.trim().parse::<i64>().ok()));
+    match secs {
+        Some(secs) if secs >= 0 => Ok(std::time::Duration::from_secs(secs as u64)),
+        _ => Err(bv_error_response_status!(400, "invalid increment: must be a non-negative number of seconds")),
     }
 }
 
@@ -302,19 +376,125 @@ mod tests {
         assert!(lease_row_exists(core, &team_ab).await, "{team_ab} is outside leased/team-a/ and must survive");
     }
 
-    /// Renewal is refused outright rather than wired: see `handle_renew`.
+    /// T62: `sys/renew` renews a lease whose backend really renews it (KV v1
+    /// re-reads the value) and still refuses the rest: a token's lease is
+    /// `501`, an unknown id `400`. The answer carries no KV data.
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
-    async fn test_sys_renew_is_refused_explicitly() {
-        let (_bvault, core, root) = new_unseal_test_bastion_vault("test_sys_renew_refused").await;
+    async fn test_sys_renew_renews_only_leases_that_really_renew() {
+        let (_bvault, core, root) = new_unseal_test_bastion_vault("test_sys_renew_real_only").await;
         let core = &*core;
         mount_leased_kv(core, &root).await;
         let lease_id = lease_for(core, &root, "app/db").await;
 
-        for path in [format!("sys/renew/{lease_id}"), "sys/renew/leased/app/db/unknown".to_string()] {
-            let result = call(core, Operation::Write, &path, &root, None, json!({ "increment": 3600 })).await;
-            assert_status(&result, 501);
-        }
+        let path = format!("sys/renew/{lease_id}");
+        let resp = call(core, Operation::Write, &path, &root, None, json!({ "increment": 600 }))
+            .await
+            .expect("a KV v1 lease renews")
+            .expect("the renewal is answered");
+        let secret = resp.secret.expect("the renewed lease");
+        assert_eq!(secret.lease_id, lease_id);
+        assert_eq!(secret.ttl, std::time::Duration::from_secs(600));
+        assert!(resp.data.is_none(), "sys/renew must not hand out the secret's data: {:?}", resp.data);
         assert!(lease_row_exists(core, &lease_id).await);
+
+        let unknown = call(core, Operation::Write, "sys/renew/leased/app/db/unknown", &root, None, Value::Null).await;
+        assert_status(&unknown, 400);
+
+        token_with(core, &root, "default").await;
+        let view = core.system_view().expect("an unsealed vault has a system view").new_sub_view(LEASE_VIEW_PREFIX);
+        let salted = view.list("auth/token/create/").await.expect("list token leases");
+        let token_lease = format!("sys/renew/auth/token/create/{}", salted[0]);
+        assert_status(&call(core, Operation::Write, &token_lease, &root, None, Value::Null).await, 501);
+    }
+
+    /// T62: a lease whose backend cannot revoke it (here: its mount is gone)
+    /// is kept as `revoke_failed`, listed, and force-cleared only on request.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_revoke_failed_leases_are_kept_listed_and_force_cleared() {
+        let (_bvault, core, root) = new_unseal_test_bastion_vault("test_sys_revoke_failed_listing").await;
+        let core = &*core;
+        mount_leased_kv(core, &root).await;
+        let lease_id = lease_for(core, &root, "app/db").await;
+        let clear = format!("sys/leases/revoke-failed/{lease_id}");
+
+        let healthy = call(core, Operation::Delete, &clear, &root, None, Value::Null).await;
+        assert_status(&healthy, 400);
+        assert!(lease_row_exists(core, &lease_id).await, "a healthy lease is revoked, not cleared");
+
+        call(core, Operation::Delete, "sys/mounts/leased", &root, None, Value::Null).await.expect("unmount");
+        let revoke = call(core, Operation::Write, &format!("sys/revoke/{lease_id}"), &root, None, Value::Null).await;
+        assert_status(&revoke, 502);
+        assert!(lease_row_exists(core, &lease_id).await, "a failed revoke must not delete the lease");
+
+        let list = call(core, Operation::List, "sys/leases/revoke-failed", &root, None, Value::Null).await;
+        let data = list.expect("list").expect("listing").data.expect("listing data");
+        assert_eq!(data["keys"], json!([lease_id]));
+        let info = &data["key_info"][&lease_id];
+        assert_eq!((info["attempts"].clone(), info["origin"].clone()), (json!(1), json!("operator")));
+        assert!(info.get("data").is_none() && !info.to_string().contains("\"value\""), "no lease data: {info}");
+
+        let cleared = call(core, Operation::Delete, &clear, &root, None, Value::Null).await;
+        assert!(matches!(cleared, Ok(None)), "force-clear: {cleared:?}");
+        assert!(!lease_row_exists(core, &lease_id).await);
+        let list = call(core, Operation::List, "sys/leases/revoke-failed", &root, None, Value::Null).await;
+        assert_eq!(list.unwrap().unwrap().data.unwrap()["keys"], json!([]));
+    }
+
+    /// The `revoke_failed` surface is in the sys backend's `root_paths`.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_revoke_failed_surface_needs_sudo() {
+        let (_bvault, core, root) = new_unseal_test_bastion_vault("test_sys_revoke_failed_sudo").await;
+        let core = &*core;
+        let policy = r#"path "sys/leases/revoke-failed*" { capabilities = ["list", "delete"] }"#;
+        let write =
+            call(core, Operation::Write, "sys/policies/acl/lease-ops", &root, None, json!({ "policy": policy }));
+        write.await.expect("write policy");
+        let token = token_with(core, &root, "lease-ops").await;
+
+        for (operation, path) in
+            [(Operation::List, "sys/leases/revoke-failed"), (Operation::Delete, "sys/leases/revoke-failed/kv/a/1")]
+        {
+            let result = call(core, operation, path, &token, None, Value::Null).await;
+            let refused = matches!(&result, Err(RvError::ErrPermissionDenied))
+                || matches!(&result, Err(RvError::ErrString(m)) if m.contains("root path"));
+            assert!(refused, "{path} without sudo: {result:?}");
+        }
+    }
+
+    /// The kernel contract an engine uses to end its own lease early.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_a_mount_revokes_its_own_lease_through_the_kernel_contract() {
+        use crate::kernel_api::leases::LeaseRevocation;
+
+        let (_bvault, core, root) = new_unseal_test_bastion_vault("test_owner_lease_revoke").await;
+        let core = &*core;
+        mount_leased_kv(core, &root).await;
+        let lease_id = lease_for(core, &root, "app/db").await;
+        let revoker = core.lease_revoker().expect("the auth module publishes the lease revoker");
+
+        let foreign = revoker.revoke_owned_lease("secret/", &lease_id).await;
+        assert_eq!(foreign.err(), Some(RvError::ErrPermissionDenied));
+        assert!(lease_row_exists(core, &lease_id).await);
+
+        assert_eq!(revoker.revoke_owned_lease("leased/", &lease_id).await, Ok(LeaseRevocation::Revoked));
+        assert!(!lease_row_exists(core, &lease_id).await);
+    }
+
+    /// Served over HTTP under `/v2/sys`. That it is *only* there (`/v1/sys`
+    /// is frozen) is pinned by bv-server's golden route inventory.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_revoke_failed_surface_is_served_under_v2() {
+        let mut server = TestHttpServer::new("test_revoke_failed_http", true).await;
+        server.url_prefix = server.url_prefix.trim_end_matches("/v1").to_string();
+        let root = server.root_token.clone();
+
+        let (status, resp) = server.read("v2/sys/leases/revoke-failed", Some(&root)).unwrap();
+        assert_eq!(status, 200, "{resp:?}");
+        // The harness hands back the response's `data` object.
+        assert_eq!(resp["keys"], json!([]), "{resp:?}");
+        let (status, resp) =
+            server.delete("v2/sys/leases/revoke-failed/leased/app/db/0e7a", None, Some(&root)).unwrap();
+        assert_eq!(status, 400, "an unknown lease is not cleared: {resp:?}");
     }
 
     /// Lease ids are deployment-wide, so a namespace header cannot scope these

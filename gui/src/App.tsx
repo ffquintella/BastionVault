@@ -33,6 +33,7 @@ import { SshPage } from "./routes/SshPage";
 import { TotpPage } from "./routes/TotpPage";
 import { LdapPage } from "./routes/LdapPage";
 import { PluginsPage } from "./routes/PluginsPage";
+import { LeasesPage } from "./routes/LeasesPage";
 import { NotificationsAdminPage } from "./routes/NotificationsAdminPage";
 import { SurfaceRouter } from "./components/surface/SurfaceRouter";
 import { useAuthStore } from "./stores/authStore";
@@ -171,6 +172,10 @@ export default function App() {
             <Route
               path="/mounts"
               element={<ProtectedRoute><MountsPage /></ProtectedRoute>}
+            />
+            <Route
+              path="/leases"
+              element={<ProtectedRoute><LeasesPage /></ProtectedRoute>}
             />
             <Route
               path="/namespaces"

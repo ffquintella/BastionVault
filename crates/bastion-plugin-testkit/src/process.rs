@@ -37,6 +37,7 @@ use serde_json::{json, Value};
 
 use crate::{data_key, envelope, InvokeOutcome, LogLine, TestClock, TestHost, TestInvocation, TestkitError};
 
+
 /// Same default as `process_runtime::DEFAULT_INVOKE_TIMEOUT`.
 pub const DEFAULT_PROCESS_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -61,10 +62,7 @@ impl TestHost {
         input: &[u8],
         timeout: Duration,
     ) -> Result<TestInvocation, TestkitError> {
-        let (logs_before, audit_before) = {
-            let st = self.state.lock().unwrap();
-            (st.logs.len(), st.audit.len())
-        };
+        let marks = self.state.lock().unwrap().marks();
 
         let mut cmd = Command::new(exe);
         cmd.env_clear()
@@ -157,13 +155,16 @@ impl TestHost {
 
         let status = result?;
         let st = self.state.lock().unwrap();
-        Ok(TestInvocation {
-            outcome: if status == 0 { InvokeOutcome::Success } else { InvokeOutcome::PluginError(status) },
-            response,
-            fuel_consumed: 0,
-            logs: st.logs[logs_before..].to_vec(),
-            audit_events: st.audit[audit_before..].to_vec(),
-        })
+        let outcome = if status == 0 { InvokeOutcome::Success } else { InvokeOutcome::PluginError(status) };
+        Ok(st.invocation(marks, outcome, response, 0))
+    }
+
+    /// [`invoke_process_raw`](Self::invoke_process_raw) on behalf of a
+    /// dynamic-secret RPC named by `envelope["op"]`; see
+    /// [`TestHost::invoke_dynamic`].
+    pub fn invoke_process_dynamic(&self, exe: &Path, envelope: &Value) -> Result<TestInvocation, TestkitError> {
+        let input = serde_json::to_vec(envelope).expect("envelope serialise");
+        self.with_dynamic_session(envelope, || self.invoke_process_raw(exe, &input, DEFAULT_PROCESS_TIMEOUT))
     }
 
     /// Lines the process plugin wrote to stderr (the server forwards
@@ -174,6 +175,11 @@ impl TestHost {
 
     /// Mirror of `process_runtime::handle_host_call`.
     fn handle_process_call(&self, method: &str, params: &Value) -> Result<Value, String> {
+        if crate::dynamic::is_dynamic_method(method) {
+            let mut st = self.state.lock().unwrap();
+            return crate::dynamic::call(self.dynamic_caps, &mut st.dynamic, method, params)
+                .map_err(crate::dynamic::process_error);
+        }
         let s = |k: &str| params.get(k).and_then(Value::as_str).unwrap_or("");
         match method {
             "config_get" => match self.state.lock().unwrap().config.get(s("key")) {

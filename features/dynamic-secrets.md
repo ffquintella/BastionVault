@@ -21,12 +21,77 @@ The framework itself is built on the existing pure-Rust stack — no OpenSSL any
 
 ## Current State
 
-- **Lease manager exists** but is exercised only by KV v1 (mostly noop) and the planned PKI/SSH-OTP engines. There is no abstraction for "the secret lives in an external system that we must call out to on revoke."
-- **No connection-pool layer exists.** Today a hypothetical DB plugin would have to open a fresh DB connection on every API call, which is unacceptable for both latency and target-side connection-limit reasons. The framework provides the pool; plugins consume it via a host capability rather than embedding their own.
-- **No credential-cache layer exists.** Roles like "give me read-only access to db X" are called many times a minute; we need a per-role short-lived cache so identical role calls don't multiply credentials.
-- **No central audit pipeline for credential lifecycle.** Audit today logs HTTP requests; dynamic-secret events (`generate`, `extend`, `revoke`, `revoke-failed`) deserve a richer schema (target system, target identity, credential id) so a SOC can answer "what credentials were live in this DB at 14:32 last Tuesday?" in one query.
+**Status: in progress (T62).** Slices 1 to 6 are done, the GUI included.
+
+| Slice | Scope | State |
+|---|---|---|
+| 1 | Host lease substrate: `revoke_failed` lease state with a backoff reaper, `v2/sys/leases/revoke-failed` list + force-clear, `sys/renew` for leases whose backend really renews them (max_ttl clamp, non-renewable refused), per-lease renew/revoke guard, `OwnedLeaseRevoker` early revoke by the issuing mount, `lease.*` audit events | Done |
+| 2 | Plugin kind `secret/dynamic` (+ `engine_type`, ABI 1.4), the `dynamic_lease_register` / `dynamic_audit_emit` / `dynamic_pool_checkout` capabilities in both runtimes, the dynamic plugin host (generate / renew / revoke / rotate-root, host-side credential generation and statement templating) | Done |
+| 3 | Connection pool and credential cache | Done: the bounded pool is wired to `dynamic_pool_checkout` as slot grants; the opt-in credential cache is wired into `creds/` (per node, see below) |
+| 4 | `dynamic_secret` audit schema (engine / plugin / role / target identity) | Done |
+| 5 | Dynamic SDK, Postgres reference plugin migration | Done in `dynamic-engine-plugins/`; removing the old copy from the `plugins-ext` submodule is left to its owner |
+| 6 | GUI (Phase 5 below) | Done: Secrets → Dynamic, the credential dialog, the Leases page and the Plugins filter; the live-lease listing is limited to what the host serves (below) |
+
+What slice 6 (the GUI) delivered, with no new server route:
+
+- **Secrets → Dynamic** (`gui/src/components/DynamicSecretsSection.tsx`): the mounts whose plugin is in `GET /v2/sys/plugins?kind=secret/dynamic` (a plugin mount's type names only the plugin), each with its roles (`LIST <mount>/roles/`). Nothing loads until the tab is opened; a token that cannot read the catalog is told why no mount is shown.
+- **Generate credential** (`gui/src/components/DynamicCredsModal.tsx`): reads `<mount>/creds/<role>` only on an explicit click, shows the credential once (masked, with copy) and a countdown to the lease's end, and drops it on close or expiry. It is never logged, cached or put in Web Storage; only the lease's id, mount, role and TTL go to an in-memory store (`gui/src/stores/leaseStore.ts`, cleared on logout). A cache hit (lease named in `data`) is flagged as a shared lease.
+- **Leases** (`gui/src/routes/LeasesPage.tsx`, Admin → Leases): the `revoke_failed` listing with attempts, last error, next retry and TTL, retry revoke, and force-clear behind a typed confirmation; renew (renewable leases only) and revoke for the leases this window issued or any lease id. The host has **no listing of live leases** (`sys/leases/lookup` is not implemented), so no other live lease is shown.
+- **Plugins → Dynamic engines**: the `?kind=` filter, `engine_type` and the three dynamic capabilities on a plugin's row; registration is unchanged (a bundle's `engine_type` and capabilities already pass through).
+- **Tauri commands** (`gui/src-tauri/src/commands/leases.rs`, `dynamic_secrets.rs`, `plugins_list_by_kind`): lease calls are root-scoped (the lease paths refuse a namespace header). `sys/renew` and `sys/revoke` have no HTTP route, so remote mode sends them as one `POST /v2/sys/batch` operation; a batch drops the lease block, so a remote renew cannot report the new TTL and the page says so.
+
+What slice 2 delivered (with the parts of slices 3 and 4 it needed):
+
+- `crates/bv-dynamic` (new; `bv-kernel-api` + Tier 0 only) — the pure, separately tested pieces: the statement template engine (`template.rs`: exactly the six tokens, anything else refused, values restricted to quote-free character sets instead of dialect-specific escaping, `{{password}}` allowed only in creation statements), generated credentials (`credential.rs`: 24 bytes from the OS RNG as 32 URL-safe base64 characters, `v-<display>-<role>-<unix>-<8 hex>` usernames), the per-(mount, role, entity) credential cache (`cache.rs`), the keyed pool with drain-on-rotate and a TLS policy that verifies by default (`pool.rs`), the `dynamic_secret` event with no credential field (`audit.rs`), and the versioned records (`records.rs`: the lease's `bv_dynamic` blob, the host's connection record, the role recipe, the lease request).
+- `crates/bv-plugin-manifest` — `plugin_type = "secret/dynamic"`, `engine_type` (one of `database`, `aws`, `gcp`, `azure`, `ssh`) and the three capabilities, ABI minor 4, capability minimisation both ways; none of the new fields enter an existing plugin's signing message.
+- `src/plugins/dynamic/` — the host: `backend.rs` serves `creds/`, `config/`, `roles/`, `rotate-root/` and the lease manager's renew/revoke for a dynamic mount, reached from `PluginLogicalBackend` (`logical_backend.rs`), which still owns quarantine, the reload lock and the catalog lookup; `host_calls.rs` is the one capability gate both runtimes call (`runtime.rs` `bv.dynamic_*` imports, `process_runtime.rs` / `process_supervisor.rs` `dynamic_*` methods); `state.rs` keeps the host-owned per-mount records in the mount's own storage; `pool.rs` is the process-wide grant pool.
+- `crates/bv-kernel/src/modules/auth/token_store.rs` — a secret marked `secret_type = "bv_dynamic"` (`expiration::HOST_MANAGED_SECRET_TYPE`) is leased on every mount, not only on `leased_passthrough` ones; the generic plugin bridge strips that marker from plugin answers.
+- `src/plugins/quarantine.rs` — a quarantine record may carry a `reason`; an out-of-manifest dynamic host call writes one.
+- `GET /v2/sys/plugins?kind=…` (`crates/bv-server/src/sys.rs`), additive and v2-only.
+
+How it differs from the design below, and why:
+
+- **The pool holds grants, not sockets.** The host ships no target drivers, so `dynamic_pool_checkout` returns a slot counted against the target's `max_size`, keyed by the root credential version the host owns, and carrying the TLS policy the operator set through `config/<name>`; the plugin still dials. `deadpool` was not added: its managed pool is one manager per key, and this needs a keyed map with drain-on-rotate, so a small bounded pool on `tokio::sync::Semaphore` is used. A process plugin is not network-sandboxed, so the TLS policy is the host's instruction, not an enforcement point, until host-side connectors exist.
+- **Roles are the plugin's, templates are the host's.** The host asks the plugin for a role's recipe (`dynamic.role`), checks and expands its statements, generates the credential, then hands the rendered statements to the plugin (`dynamic.generate`). Revocation statements are expanded at generation and kept on the lease; renew statements are kept as templates.
+- **The generate event has no lease id.** The lease id is assigned when the kernel registers the lease, after the plugin host has answered; the `generate` event carries the request id and the target identity instead, and `renew` / `revoke` / `revoke_failed` events join on the target identity (revoke ones carry the lease id).
+- **A cache hit names its lease in `data`.** A hit answers without a `secret`, so the kernel registers no second lease; the shared lease is in `data.lease_id` / `lease_duration` / `renewable`. The miss learns its lease id from the kernel through a slot it leaves in the request context (`expiration::HOST_MANAGED_LEASE_SLOT`), since the backend answers before the lease exists.
+- **"Unloaded" means not resident.** Every RPC resolves the active plugin from the catalog and the runtimes instantiate (WASM, single-shot process) or respawn (long-lived process) it, so revoking a lease never needs the plugin loaded; a deleted (quarantined) plugin makes the revoke fail and keeps the lease `revoke_failed` until the plugin is registered again.
+
+Plugin protocol (both runtimes, JSON envelopes): `{"op":"dynamic.role","role"}` → `{"data": <recipe>|null}`; `{"op":"dynamic.generate","role","connection","statements","credential":{"username","password","expiration"},"ttl_secs"}` → the plugin creates the identity, calls `dynamic_lease_register` with `{"internal","ttl_secs","max_ttl_secs","renewable"}` exactly once, and answers `{"data":{…extra fields}}`; `{"op":"dynamic.renew"|"dynamic.revoke","role","connection","username","statements","internal",…}`; `{"op":"dynamic.rotate_root","connection","credential":{"password"}}` (the new root secret, generated by the host); and the generic `{op, path, data}` envelope for `config/` and `roles/`. Process host replies are matched by `id` and carry `result` or `error`; the server tags an error reply `host_reply_error` (the testkit `host_reply`), so a plugin reads both.
+
+What the T62 fix pass changed (security review and slice-3 follow-ups):
+
+- **A credential is never left behind by a failed registration.** `creds/` checks the namespace's `max_leases` before the plugin is called (`OwnedLeaseRevoker::check_lease_quota`, reached through `VaultCtx::lease_revoker()`); and when the kernel still cannot register a host-managed lease (quota filled meanwhile, storage error), `ExpirationManager::register_host_managed_secret` revokes the credential through the plugin at once, or keeps it as `revoke_failed` (origin `registration`) when that revoke fails.
+- **A quarantined generate is reported.** A plugin quarantined half-way through `generate` is not called again; the identity it may have created is logged at ERROR and audited as `revoke_failed` with role, connection and target identity.
+- **Compensation errors are redacted.** The take-back revoke's session carries the password as a redaction needle, so a plugin error echoing it reaches neither the ERROR log nor the audit event; the kernel's take-back passes the issued data along for the same reason.
+- **Lease rows no longer store the password.** A host-managed lease row keeps `data` without `password` (read-old/write-new: an older row loses it on its next write).
+- **Plugin storage is per mount.** A dynamic plugin's `storage_*` root is `core/plugins/<name>/data/mounts/<mount id>/` in both runtimes, and it has no storage outside a dynamic RPC. Slice-2 data under the per-name root is not migrated (slice 2 is unreleased).
+- **Host-call order matches the testkit.** The session is checked in `authorize`, before the request is parsed; the testkit exports `DYNAMIC_UNAVAILABLE`.
+- **The credential cache is wired** (see *Credential-Cache Layer*): `cache_ttl_secs` on the role (SDK: `cache_ttl`), clamped to 300 s and to end while the lease has `max(2 x window, 60 s)` left; dropped on any revoke or renew of its lease, rotate-root, role rewrite, plugin delete/activate/quarantine and expiry; bounded to 4096 entries per node, oldest first; a hit is a `cache_hit` event without the credential.
+
+What slice 5 delivered, in the separate Cargo workspace `dynamic-engine-plugins/` (excluded from the host workspace; `make dynamic-plugins-test`):
+
+- `bastion-plugin-dynamic-sdk` — re-exports `bastion-plugin-sdk`; the `DynamicCredentialBackend` trait (`generate` / `renew` / `revoke` / optional `rotate_root`, plus the connection schema and role/connection validation hooks); `DynamicCtx` (pool checkout, plugin audit events, `state/` storage, redaction; no way to register a lease); the dispatcher, which serves `dynamic.role` from `roles/<name>` (refused when the connection's `allowed_roles` does not admit it, before the host generates anything), the CRUD of `config/` (secret fields stored, never read back) and `roles/`, and registers the lease **once, after** a successful `generate`; the process loop (single-shot and long-lived, constant-time bootstrap-token check) and the WASM glue (`bv.dynamic_*` imports, `dynamic_module!`, no retry of a call whose reply did not fit, since the host already acted); `testing::MockHost`. Credentials arrive rendered and are `SecretString`s (no `Display`/`Serialize`, redacted `Debug`, wiped on drop); error text is redacted before it leaves; a reply, lease blob or audit label carrying a known secret is refused; diagnostics name only the op and an error kind.
+- `bastion-plugin-postgres` 0.2.0 — the reference plugin rebased on the SDK, `runtime = "process"`, capabilities exactly the three dynamic ones plus `storage_prefix = ""`. `tokio-postgres` over rustls on the `ring` provider (no `openssl-sys`, no `aws-lc-sys`, checked by the make target): verifies against the connection's CA or the OS trust store and requires TLS (`sslmode=disable` refused) unless the host's grant carries the operator's `insecure_skip_tls_verify`. Creation statements run in one transaction; revoke is `DROP OWNED BY` + `DROP ROLE IF EXISTS` by default and succeeds for a role already gone; renew is `ALTER ROLE … VALID UNTIL` by default; `rotate-root` sets the host's new secret, stores it, and restores the old one if storing fails. `connection_url` may not carry a user or password.
+- `bastion-plugin-dynamic-fixture` — a fake engine that runs the SDK through `bastion-plugin-testkit` as a real process and as WASM, i.e. against the host's wire protocol and capability gate.
+
+Not yet: a host-side end-to-end test with the real Postgres binary (the main workspace does not build plugin binaries; the testkit runs stand in for it); the live-database test is `#[ignore]` and needs a server (`tests/live.rs`); `plugins-ext/bastion-plugin-postgres` is still in that submodule.
+
+What slice 1 delivered, and where it lives (older paths elsewhere in this spec are stale; corrections follow the list):
+
+- `crates/bv-kernel/src/modules/auth/expiration.rs` — the lease manager. A secret lease whose backend revoke fails is **kept** with a `revoke_failure` record (attempts, first/last failure, next attempt, last error cut to 256 characters, origin) instead of being deleted; the sweeper doubles as the reaper (10 s, doubling, `max_revoke_attempts` = 6, then parked and listed). Lease rows carry `version` 1 and `max_ttl_secs`; version-0 rows read unchanged. Not yet operator-configurable: `max_revoke_attempts` is the spec default.
+- `crates/bv-kernel/src/modules/auth/lease_state.rs` — the retry policy, the per-lease guard (a renew and a revoke of one lease never overlap; the loser gets a `409`) and the `lease.revoke_failed` / `lease.revoked` / `lease.revoke_failed_cleared` events, emitted through the kernel's audit-event path (`bv_kernel_api::mcp_events::emit`, broker `event` entries).
+- `crates/bv-kernel/src/modules/system/leases.rs` — `sys/renew` (now renews), `sys/revoke` (`502` + kept on backend failure), `sys/leases/revoke-failed` (`LIST`) and `sys/leases/revoke-failed/<lease_id>` (`DELETE`, force-clear), HTTP-routed under `/v2/sys` only by `crates/bv-server/src/sys/routes.rs`. See `docs/api.md` § Leases.
+- `crates/bv-kernel-api/src/leases.rs` — `OwnedLeaseRevoker`, reached as `VaultCtx::lease_revoker()`: a mount revokes a lease it issued (path must route to exactly that mount; token leases refused). No engine calls it yet.
+
+Corrections to the paths below: there is no `src/modules/dynamic/` or `src/sys/leases.rs`; the lease manager and lease endpoints are the `crates/bv-kernel/…` files above, KV v1's lease is `crates/bv-engine-kv/src/v1.rs`, and the plugin runtime is `src/plugins/…`. A plugin mount's type is `plugin:<name>` (`src/plugins/mod.rs`, `PLUGIN_MOUNT_PREFIX`), and the manifest's kind is the free-form `plugin_type` string (`crates/bv-plugin-manifest`), so "plugin kind `secret/dynamic`" means a new `plugin_type` value, not a parser change.
+
+- **Lease manager**: slice 1 gave it the revoke-failed state, renewal and early revoke; slice 2 added the abstraction for "the secret lives in an external system the host must call out to on revoke" — the dynamic plugin host, whose leases are registered on every mount.
+- **Connection pool**: the host pool exists and admits connections per target (max size, root-credential version, TLS policy) through `dynamic_pool_checkout`; it hands out slot grants, not sockets, until host-side connectors exist (see above).
+- **Credential cache**: `bv-dynamic::cache` behind `creds/` (`src/plugins/dynamic/cache.rs`), opt-in per role, keyed by mount, role and caller entity, never for a caller without one.
+- **Credential-lifecycle audit**: every `generate`, `renew`, `revoke`, `revoke_failed` and `rotate_root` is a `dynamic_secret` event (engine, `plugin@version`, role, connection, target identity, expiry, actor), so a SOC can answer "what credentials were live in this DB at 14:32 last Tuesday?" from the audit log.
 - The repo's existing engines (`kv`, `kv_v2`, `crypto`, `files`, `resource`, `system`) are all **static** — they store data, they don't mint it. Dynamic secrets is the first engine class where the interesting state lives outside BastionVault.
-- **The plugin system is feature-complete** through Phase 5 (publisher signatures, manifest verification, quarantine, hot-reload lock, metrics, process supervisor). What it does *not* yet do is expose dynamic-secret-shaped host capabilities — that's a deliverable of this feature, not a separate plugin-system phase.
+- **The plugin system** (publisher signatures, manifest verification, quarantine, hot-reload lock, metrics, process supervisor) now also exposes the three dynamic-secret host capabilities, at ABI minor 4, through the same gate in both runtimes; the guest-side SDK for them (`bastion-plugin-dynamic-sdk`, slice 5) is in `dynamic-engine-plugins/`.
 
 ## Design
 
@@ -210,6 +275,8 @@ Cache lives in the host so a plugin restart doesn't invalidate cached credential
 
 Cache is opt-in because for many use cases (DB users, IAM keys), every caller getting a unique identity is a feature, not a cost.
 
+**Multi-node limit (as built).** The cache is per node and in memory. A revoke or renew handled by another node does not invalidate this node's entries: a lease revoked early elsewhere can still be handed out here for the rest of the entry's window (at most 300 s). Entries never outlive the lease's own expiry, since an entry ends while its lease still has `max(2 x window, 60 s)` to run. Operators who cannot accept that leave `cache_ttl_secs` at 0 (the default).
+
 ### Audit Schema Extension
 
 A new audit event type `dynamic_secret`:
@@ -323,7 +390,9 @@ Same shape — separate plugins under `dynamic-engine-plugins/`. AWS uses the pu
 
 Hook the `ssh` engine's third historical mode (push key to `authorized_keys` over outbound SSH, return private key, sweep on revoke) into the framework as `bastion-plugin-ssh-dynamic`. The existing in-tree SSH engine ([features/ssh-secret-engine.md](ssh-secret-engine.md)) keeps its CA + OTP + PQC modes; only dynamic-keys is plugin-shaped.
 
-### Phase 5 — GUI Integration
+### Phase 5 — GUI Integration (Complete, T62 slice 6)
+
+The Leases page lists live leases only as far as the host can: see *What slice 6 (the GUI) delivered* above.
 
 | Deliverable | Location |
 |---|---|

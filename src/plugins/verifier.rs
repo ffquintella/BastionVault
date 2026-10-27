@@ -178,6 +178,7 @@ mod tests {
             name: "verifier-test".into(),
             version: "0.1.0".into(),
             plugin_type: "test".into(),
+            engine_type: None,
             runtime: RuntimeKind::Wasm,
             abi_version: "1.0".into(),
             sha256: hex,

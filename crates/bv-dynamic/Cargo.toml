@@ -1,0 +1,44 @@
+[package]
+name = "bv-dynamic"
+version = "0.41.0"
+edition = "2021"
+description = "Host-side building blocks of BastionVault's dynamic-secrets framework: statement templating, credential generation, credential cache, connection pool and the dynamic_secret audit event"
+license = "Apache-2.0"
+repository = "https://github.com/ffquintella/BastionVault"
+
+publish = ["uox-bastionvault"]
+
+# Pure logic for features/dynamic-secrets.md (T62). It owns no runtime, no
+# storage and no plugin ABI: the plugin host in the facade (`src/plugins/`)
+# wires these pieces to the WASM and process runtimes. Kept out of the facade
+# so the security-critical parts (template allowlist, generated-credential
+# entropy, pool TLS chokepoint) can be tested and reviewed without linking the
+# 300 MB root crate.
+
+[dependencies]
+# `RvError` conversion for the facade's error path.
+bv-errors = { path = "../bv-errors", version = "0.41.0", registry = "uox-bastionvault" }
+# `McpAuditEvent`: the `dynamic_secret` event is emitted through the same
+# typed audit-event path as the `lease.*` events (bv_kernel_api::mcp_events).
+bv-kernel-api = { path = "../bv-kernel-api", version = "0.42.0", registry = "uox-bastionvault" }
+
+# Generated passwords and username suffixes come from the OS random source
+# (`rand::rngs::SysRng`, getrandom), never a userspace PRNG. Same major as the
+# rest of the workspace; no new crate enters the graph.
+rand = "^0.10"
+# URL-safe rendering of the 24 password bytes.
+base64 = "0.22"
+# Generated passwords and cached credentials are wiped on drop.
+zeroize = "1.8.2"
+# Pool admission (one semaphore per target) and checkout timeouts. The pool is
+# a small bounded pool written here rather than `deadpool`: deadpool's managed
+# pool is one manager per key, and this pool needs a keyed map with
+# drain-on-rotate and a TLS-policy chokepoint the factory cannot override.
+tokio = { version = "1.52", features = ["sync", "time"] }
+serde = { version = "^1.0", features = ["derive"] }
+serde_json = "^1.0"
+thiserror = { version = "^2.0" }
+log = "0.4"
+
+[dev-dependencies]
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "time"] }

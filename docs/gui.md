@@ -106,6 +106,8 @@ Once secrets exist, the page lets you:
 - Share an individual secret with an entity or identity group (entry surfaces on the recipient's "Shared with me" tab — see below).
 - Edit metadata (max versions, `cas_required`, custom tags).
 
+The **Dynamic** tab lists the mounts of dynamic-secret engine plugins (`plugin_type = "secret/dynamic"`, see [features/dynamic-secrets.md](https://github.com/ffquintella/BastionVault/blob/main/features/dynamic-secrets.md)) and their roles. **Generate credential** creates a credential on the target system and shows it once, masked with copy buttons and a countdown to its lease's end; it is cleared from the window when the dialog closes or the lease ends, and the GUI never logs or stores it. A credential served from the credential cache is flagged as a shared lease. Telling dynamic mounts apart needs read access to the plugin catalog (`sys/plugins`).
+
 ### Sharing
 
 ![Sharing page](img/gui/sharing.png)
@@ -151,8 +153,9 @@ Visible to tokens with `root`, `super-admin`, `administrator`, `admin`, or a del
 | Asset Groups | Named bundles of resources and KV paths that can be shared as a unit |
 | Policies | View, edit, and create HCL policies; surfaces seeded baselines (default, standard-user, secret-author, shared-access, pki-user, …) |
 | Mounts | Browse and unmount secret/auth engines (mount creation lives next to each engine's own page) |
+| Leases | Leases whose revoke failed (attempts, last error, next retry; retry the revoke, or force-clear after cleaning the target up by hand; needs `sudo`), and renew or revoke the leases this window issued or any lease by id. The server has no listing of live leases, so no other live lease is shown |
 | Audit | Live tail of the audit log with category filters (auth, user lifecycle, policy, share, etc.) |
-| Plugins | Plugin Extensibility v1: registry view, activation, surface bundle browser |
+| Plugins | Plugin Extensibility v1: registry view, activation, surface bundle browser; a **Dynamic engines** filter shows only `secret/dynamic` plugins with their `engine_type` and dynamic capabilities |
 | Import / Export | BVBK backup/restore, scheduled exports, KV/cluster migrations |
 | Settings | Server-wide configuration knobs (cache, telemetry, FIDO2 RP, SSO) |
 

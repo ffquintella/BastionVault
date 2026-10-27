@@ -210,6 +210,7 @@ mod tests {
             name: "test-config".to_string(),
             version: "0.1.0".to_string(),
             plugin_type: "test".to_string(),
+            engine_type: None,
             runtime: RuntimeKind::Wasm,
             abi_version: "1.0".to_string(),
             sha256: "0".repeat(64),

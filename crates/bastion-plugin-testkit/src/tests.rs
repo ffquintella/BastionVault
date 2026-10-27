@@ -712,3 +712,119 @@ fn entity_scope_list_stays_inside_the_entity_prefix() {
     assert_eq!(host.entity_storage_dump("e2").len(), 1);
     assert!(host.entity_storage_dump("e3").is_empty());
 }
+
+// ── ABI 1.4: dynamic-secret host calls ──
+
+/// Calls `bv.dynamic_lease_register` then `bv.dynamic_pool_checkout` and
+/// answers with both i32 results (8 bytes, little endian).
+fn dynamic_wat() -> String {
+    let lease = r#"{"internal":{"oid":1},"ttl_secs":60}"#;
+    let pool = r#"{"connection":"prod"}"#;
+    format!(
+        r#"(module
+          (import "bv" "set_response" (func $set_response (param i32 i32)))
+          (import "bv" "dynamic_lease_register" (func $lease (param i32 i32 i32 i32) (result i32)))
+          (import "bv" "dynamic_pool_checkout" (func $pool (param i32 i32 i32 i32) (result i32)))
+          (memory (export "memory") 1)
+          (data (i32.const 0) "{lease_esc}")
+          (data (i32.const 256) "{pool_esc}")
+          (func (export "bv_alloc") (param i32) (result i32) i32.const 8192)
+          (func (export "bv_run") (param i32 i32) (result i32)
+            (i32.store (i32.const 2048) (call $lease (i32.const 0) (i32.const {lease_len}) (i32.const 4096) (i32.const 1024)))
+            (i32.store (i32.const 2052) (call $pool (i32.const 256) (i32.const {pool_len}) (i32.const 4096) (i32.const 1024)))
+            (call $set_response (i32.const 2048) (i32.const 8))
+            (i32.const 0)))"#,
+        lease_esc = lease.replace('"', "\\\""),
+        lease_len = lease.len(),
+        pool_esc = pool.replace('"', "\\\""),
+        pool_len = pool.len(),
+    )
+}
+
+fn codes(out: &TestInvocation) -> (i32, i32) {
+    let r = &out.response;
+    (i32::from_le_bytes(r[0..4].try_into().unwrap()), i32::from_le_bytes(r[4..8].try_into().unwrap()))
+}
+
+fn generate_envelope() -> serde_json::Value {
+    serde_json::json!({ "op": "dynamic.generate", "role": "readonly", "connection": "prod" })
+}
+
+#[test]
+fn dynamic_calls_outside_the_manifest_are_refused_and_recorded() {
+    let wasm = dynamic_wat().into_bytes();
+    let host = TestHost::builder("dyn").dynamic_connection("prod").build();
+    let out = host.invoke_dynamic(&wasm, &generate_envelope()).unwrap();
+    assert_eq!(codes(&out), (DYNAMIC_FORBIDDEN, DYNAMIC_FORBIDDEN));
+    assert_eq!(out.capability_violations, ["dynamic_lease_register", "dynamic_pool_checkout"]);
+    assert!(out.dynamic_leases.is_empty());
+}
+
+#[test]
+fn declared_dynamic_calls_need_a_dynamic_rpc() {
+    let wasm = dynamic_wat().into_bytes();
+    let host = TestHost::builder("dyn").dynamic_lease_register(true).dynamic_pool_checkout(true).build();
+    let out = host.invoke_raw(&wasm, b"{}").unwrap();
+    assert_eq!(codes(&out), (DYNAMIC_NO_SESSION, DYNAMIC_NO_SESSION));
+    assert!(out.capability_violations.is_empty());
+}
+
+#[test]
+fn a_generate_rpc_registers_one_lease_and_checks_out_a_slot() {
+    let wasm = dynamic_wat().into_bytes();
+    let host = TestHost::builder("dyn")
+        .dynamic_lease_register(true)
+        .dynamic_pool_checkout(true)
+        .dynamic_connection("prod")
+        .build();
+    let out = host.invoke_dynamic(&wasm, &generate_envelope()).unwrap();
+    let (lease, pool) = codes(&out);
+    assert!(lease > 0 && pool > 0, "{lease} {pool}");
+    assert_eq!(out.dynamic_leases, [serde_json::json!({"internal": {"oid": 1}, "ttl_secs": 60})]);
+
+    // Outside `dynamic.generate` a lease request is refused on its merits.
+    let revoke = serde_json::json!({ "op": "dynamic.revoke" });
+    let out = host.invoke_dynamic(&wasm, &revoke).unwrap();
+    let (lease, pool) = codes(&out);
+    assert_eq!(lease, DYNAMIC_INVALID);
+    assert!(pool > 0);
+    assert!(out.capability_violations.is_empty());
+}
+
+#[cfg(unix)]
+mod dynamic_process {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn script(tag: &str, body: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("bvtk-dyn-{}-{tag}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("plugin.sh");
+        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    }
+
+    const LEASE: &str = r#"
+read init
+echo '{"type":"host_call","id":1,"method":"dynamic_lease_register","params":{"internal":{},"ttl_secs":60}}'
+read r1
+echo "$r1" >&2
+echo '{"type":"done","status":0}'
+"#;
+
+    #[test]
+    fn process_dynamic_calls_share_the_gate() {
+        let exe = script("gate", LEASE);
+        let host = TestHost::builder("dynproc").build();
+        let out = host.invoke_process_dynamic(&exe, &generate_envelope()).unwrap();
+        assert_eq!(out.capability_violations, ["dynamic_lease_register"]);
+        assert!(host.process_stderr()[0].contains(r#""error":"forbidden""#), "{:?}", host.process_stderr());
+
+        let exe = script("ok", LEASE);
+        let host = TestHost::builder("dynproc").dynamic_lease_register(true).build();
+        let out = host.invoke_process_dynamic(&exe, &generate_envelope()).unwrap();
+        assert_eq!(out.dynamic_leases.len(), 1);
+        assert!(host.process_stderr()[0].contains(r#""registered":true"#), "{:?}", host.process_stderr());
+    }
+}

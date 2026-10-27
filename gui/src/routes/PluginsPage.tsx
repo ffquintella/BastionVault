@@ -45,16 +45,26 @@ export function PluginsPage() {
   );
   const [pubBusy, setPubBusy] = useState(false);
   const [showAddPub, setShowAddPub] = useState(false);
+  // T62: "Dynamic engines" asks the host for `?kind=secret/dynamic` only.
+  const [kindFilter, setKindFilter] = useState<"all" | "dynamic">("all");
 
-  async function refresh() {
+  async function refresh(filter: "all" | "dynamic" = kindFilter) {
     setLoading(true);
     try {
-      setPlugins(await api.pluginsList());
+      setPlugins(
+        filter === "dynamic"
+          ? await api.pluginsListByKind(api.PLUGIN_TYPE_DYNAMIC)
+          : await api.pluginsList(),
+      );
     } catch (e) {
       toast("error", extractError(e));
     } finally {
       setLoading(false);
     }
+  }
+  function changeFilter(filter: "all" | "dynamic") {
+    setKindFilter(filter);
+    void refresh(filter);
   }
   async function refreshAcceptUnsigned() {
     try {
@@ -267,9 +277,37 @@ export function PluginsPage() {
           </div>
         </Card>
 
-        <Card title="Registered plugins">
+        <Card
+          title="Registered plugins"
+          actions={
+            <div className="flex gap-1" role="group" aria-label="Plugin kind filter">
+              <Button
+                size="sm"
+                variant={kindFilter === "all" ? "primary" : "ghost"}
+                aria-pressed={kindFilter === "all"}
+                onClick={() => changeFilter("all")}
+              >
+                All
+              </Button>
+              <Button
+                size="sm"
+                variant={kindFilter === "dynamic" ? "primary" : "ghost"}
+                aria-pressed={kindFilter === "dynamic"}
+                onClick={() => changeFilter("dynamic")}
+              >
+                Dynamic engines
+              </Button>
+            </div>
+          }
+        >
           {loading ? (
             <p className="text-sm text-[var(--color-text-muted)]">Loading…</p>
+          ) : plugins.length === 0 && kindFilter === "dynamic" ? (
+            <p className="text-sm text-[var(--color-text-muted)]">
+              No dynamic-secret engine registered. Register a plugin whose
+              manifest declares <code className="font-mono">plugin_type = "secret/dynamic"</code>{" "}
+              (for example <code className="font-mono">bastion-plugin-postgres</code>).
+            </p>
           ) : plugins.length === 0 ? (
             <p className="text-sm text-[var(--color-text-muted)]">
               No plugins registered. Click <strong>Register plugin</strong> to
@@ -425,6 +463,9 @@ function PluginRow({
           <Badge label={`v${plugin.version}`} variant="info" />
           <Badge label={plugin.runtime} variant="neutral" />
           <Badge label={plugin.plugin_type || "—"} variant="neutral" />
+          {plugin.engine_type && (
+            <Badge label={`engine: ${plugin.engine_type}`} variant="info" />
+          )}
         </div>
         <p className="text-xs text-[var(--color-text-muted)] mt-1 font-mono truncate">
           sha256: {plugin.sha256.slice(0, 16)}… · {plugin.size} bytes · ABI v{plugin.abi_version}
@@ -473,6 +514,13 @@ function CapabilityBadges({ capabilities }: { capabilities: PluginManifest["capa
     },
     { label: "audit", on: capabilities.audit_emit, hint: "bv.audit_emit" },
   ];
+  // T62: only a plugin that declares any dynamic gate shows all three.
+  const dynamic = [
+    { label: "lease_register", on: !!capabilities.dynamic_lease_register, hint: "dynamic_lease_register" },
+    { label: "dynamic_audit", on: !!capabilities.dynamic_audit_emit, hint: "dynamic_audit_emit" },
+    { label: "pool_checkout", on: !!capabilities.dynamic_pool_checkout, hint: "dynamic_pool_checkout" },
+  ];
+  if (dynamic.some((d) => d.on)) items.push(...dynamic);
   return (
     <div className="flex gap-1 mt-1.5 flex-wrap">
       {items.map((it) => (

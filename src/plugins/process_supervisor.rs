@@ -239,6 +239,20 @@ pub async fn invoke_with_config(
     core: Option<Arc<dyn VaultCtx>>,
     config: BTreeMap<String, String>,
 ) -> Result<InvokeOutput, ProcessRuntimeError> {
+    invoke_session(manifest, binary, input, core, config, None).await
+}
+
+/// [`invoke_with_config`] on behalf of a dynamic-secret RPC. A lease whose
+/// plugin child is not running (never spawned on this node, shut down by a
+/// reload or a delete) spawns it here: revocation never needs it resident.
+pub async fn invoke_session(
+    manifest: &PluginManifest,
+    binary: &[u8],
+    input: &[u8],
+    core: Option<Arc<dyn VaultCtx>>,
+    config: BTreeMap<String, String>,
+    session: Option<Arc<super::dynamic::DynamicSession>>,
+) -> Result<InvokeOutput, ProcessRuntimeError> {
     let sup_arc = supervised_for(&manifest.name);
     let mut sup = sup_arc.lock().await;
 
@@ -274,7 +288,7 @@ pub async fn invoke_with_config(
     // Drive one invoke. On any I/O / protocol error we tear the child
     // down and surface the error; the next call will respawn under
     // the breaker.
-    let result = drive_invoke(&mut sup, manifest, &core, &config, input).await;
+    let result = drive_invoke(&mut sup, manifest, &core, &config, input, session.as_ref()).await;
     match result {
         Ok(out) => Ok(out),
         Err(e) => {
@@ -301,6 +315,7 @@ async fn drive_invoke(
     core: &Option<Arc<dyn VaultCtx>>,
     config: &BTreeMap<String, String>,
     input: &[u8],
+    session: Option<&Arc<super::dynamic::DynamicSession>>,
 ) -> Result<InvokeOutput, SupervisorError> {
     let worker = sup.worker.as_mut().ok_or(SupervisorError::Protocol("worker missing"))?;
     let id = worker.next_id;
@@ -331,7 +346,7 @@ async fn drive_invoke(
                     return Err(SupervisorError::Protocol("unexpected hello mid-invoke"));
                 }
                 PluginMessage::HostCall { id: hid, method, params } => {
-                    let result = handle_host_call(manifest, core.as_ref(), config, &method, &params).await;
+                    let result = handle_host_call(manifest, core.as_ref(), config, &method, &params, session).await;
                     let reply = match result {
                         Ok(v) => HostMessage::HostReply { id: hid, result: v },
                         Err(e) => HostMessage::HostReplyError { id: hid, error: e },
