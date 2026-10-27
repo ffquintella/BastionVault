@@ -219,7 +219,10 @@ No proactive cache warming is implemented. Caches are populated lazily on first 
 
 - Write-behind caching (buffering writes before flushing to storage). Too risky for a secrets manager.
 - Distributed cache invalidation across cluster nodes. Hiqlite's Raft handles
-  write consistency; cache staleness is bounded by TTL. **Partly addressed
+  write consistency; cache staleness is bounded by TTL (the policy cache
+  included since T465: `POLICY_CACHE_TTL`, 30 s, in `policy_store.rs`; before
+  it a cached ACL policy never expired and a node that did not take a policy
+  write served the old document until it restarted). **Partly addressed
   since:** `sys/cache/version` ([`client-request-efficiency.md`](client-request-efficiency.md),
   Phase 5) publishes per-mount change epochs, so a client whose session is
   pinned to a node learns about writes committed through *that* node. It is

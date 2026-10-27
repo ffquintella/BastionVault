@@ -20,7 +20,7 @@
 
 use std::{
     str::FromStr,
-    sync::{atomic::AtomicBool, Arc, Weak},
+    sync::{atomic::{AtomicBool, AtomicU64}, Arc, Weak},
 };
 
 use better_default::Default;
@@ -1648,14 +1648,31 @@ pub struct PolicyStore {
     pub(crate) sql_gate_open: AtomicBool,
     /// The gated baselines were loaded with their SQL rule.
     pub(crate) sql_baselines_full: AtomicBool,
+    /// Lifetime of a cached ACL policy in milliseconds; `0` is
+    /// [`POLICY_CACHE_TTL`]. Only tests set it.
+    pub(crate) policy_cache_ttl_ms: AtomicU64,
     /// Test seam for the cluster topology (this node, membership).
     #[cfg(test)]
     pub(crate) sql_gate_test_topology:
         std::sync::Mutex<Option<(String, Result<super::sql_write_gate::Membership, String>)>>,
 }
 
+/// How long a node serves a cached ACL policy before it reads the document
+/// again. A write refreshes the cache of the node that took it only, so on a
+/// cluster this bounds how long any other node can keep enforcing the previous
+/// document (`features/caching.md`: staleness across nodes is bounded by TTL).
+/// Without it an entry lived until the node restarted.
+pub const POLICY_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
 #[maybe_async::maybe_async]
 impl PolicyStore {
+    fn cache_ttl(&self) -> std::time::Duration {
+        match self.policy_cache_ttl_ms.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => POLICY_CACHE_TTL,
+            ms => std::time::Duration::from_millis(ms),
+        }
+    }
+
     /// Creates a new `PolicyStore` with initial setup based on the given `Core`.
     ///
     /// This function initializes views and caches necessary for policy management.
@@ -1882,7 +1899,7 @@ impl PolicyStore {
         let p = Arc::new(policy);
 
         if let Some(lru) = cache {
-            lru.insert(index.clone(), p.clone(), 1);
+            lru.insert_with_ttl(index.clone(), p.clone(), 1, self.cache_ttl());
         }
 
         Ok(Some(p))
@@ -1996,7 +2013,7 @@ impl PolicyStore {
         policy.templated = policy_entry.templated;
         let p = Arc::new(policy);
         if let Some(lru) = &self.token_policies_lru {
-            lru.insert(index, p.clone(), 1);
+            lru.insert_with_ttl(index, p.clone(), 1, self.cache_ttl());
         }
         Ok(Some(p))
     }
@@ -2680,7 +2697,7 @@ impl PolicyStore {
 
     fn save_token_policy_cache(&self, index: String, policy: Arc<Policy>) -> Result<(), RvError> {
         if let Some(lru) = &self.token_policies_lru {
-            if !lru.insert(index, policy, 1) {
+            if !lru.insert_with_ttl(index, policy, 1, self.cache_ttl()) {
                 return Err(bv_error_string!("save token policy cache failed!"));
             }
         }
@@ -5666,5 +5683,62 @@ mod sql_privilege_substrate_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod policy_cache_ttl_tests {
+    use std::{str::FromStr, time::Duration};
+
+    use super::*;
+    use crate::test_utils::new_unseal_test_bastion_vault;
+
+    fn acl(name: &str, marker: &str) -> Policy {
+        let mut p = Policy::from_str(&format!(r#"path "{marker}/data/x" {{ capabilities = ["read"] }}"#)).unwrap();
+        p.name = name.to_string();
+        p
+    }
+
+    /// What a node that did not take the write sees: the document replaced in
+    /// shared storage while this store's cache still holds the old one.
+    async fn written_by_another_node(store: &PolicyStore, ns: &str, name: &str, raw: &str) {
+        let entry = PolicyEntry {
+            version: 2,
+            raw: raw.to_string(),
+            templated: false,
+            policy_type: PolicyType::Acl,
+            sentinal_policy: Default::default(),
+        };
+        store.acl_view_for(ns).unwrap().put(&StorageEntry::new(name, &entry).unwrap()).await.unwrap();
+    }
+
+    /// A node keeps serving a cached policy after another node rewrote it, but
+    /// only for the TTL: before this bound a namespace policy edited on one
+    /// node was enforced on the other with the old text until a restart
+    /// (features/caching.md: staleness across nodes is bounded by TTL).
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn a_cached_namespace_policy_is_stale_for_at_most_the_ttl() {
+        let (_bvault, core, _root) = new_unseal_test_bastion_vault("test_policy_cache_ttl").await;
+        let store = PolicyStore::new(&core).await.unwrap();
+        store.policy_cache_ttl_ms.store(300, std::sync::atomic::Ordering::Relaxed);
+        let cache = store.token_policies_lru.as_ref().unwrap();
+
+        store.set_policy_ns(acl("p", "v1"), "tenant-a").await.unwrap();
+        let read = || async { store.get_policy_ns("p", PolicyType::Acl, "tenant-a").await.unwrap().unwrap().raw.clone() };
+        cache.wait().unwrap();
+        assert!(read().await.contains("v1/"));
+
+        written_by_another_node(&store, "tenant-a", "p", r#"path "v2/data/x" { capabilities = ["read"] }"#).await;
+        assert!(read().await.contains("v1/"), "within the TTL the cached document is served");
+
+        std::thread::sleep(Duration::from_millis(900));
+        assert!(read().await.contains("v2/"), "after the TTL the document is read again");
+    }
+
+    /// The default is a real bound, never zero (which would read as "no cache")
+    /// and never unbounded.
+    #[test]
+    fn the_default_ttl_is_a_short_positive_bound() {
+        assert!(POLICY_CACHE_TTL >= Duration::from_secs(1) && POLICY_CACHE_TTL <= Duration::from_secs(300));
     }
 }

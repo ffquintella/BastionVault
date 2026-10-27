@@ -238,6 +238,10 @@ EXAMPLE ENTRY:
 
 ### Fixed
 
+#### Policy cache
+
+- **Stop a cluster node from enforcing an edited policy's old text indefinitely** (T465, S5) -- On a multi-node cluster a policy written through one node was refreshed in that node's cache only, and cached ACL policies never expired, so the other node kept serving, and enforcing, the previous document until it restarted: an operator who added a rule to a namespace policy saw it in the GUI while the affected user kept being denied. Cached policies now expire after 30 seconds, so every node reads the stored document again within that time. Operators who cannot wait can still call `sys/cache/flush` on the node.
+
 #### HSM pool HA (phase 7, first read-only hardware run)
 
 - Read a YubiHSM 2's device log with the device's own result bytes in the phase 7 hardware suite: the `yubihsm` crate re-encodes a boot entry's result 0x00 as 0x75, so a factory device's log was reported as `7 chain gap(s)` although its chain is intact; the snapshot now stores the device's byte, a snapshot's device log carries `result_encoding`, and one saved by an earlier build is labelled as such and checked again from its decoded bytes. The entry layout and digest chain the drain uses are unchanged and now confirmed on a device; the YubiHSM 2 drain stays refused until a logged command is confirmed (T454, S114)

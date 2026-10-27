@@ -82,6 +82,8 @@ Next-up list recorded before the migration, in its order:
   - source: roadmap.md feature row "Caching", status `[x]` Done
   - initiative: [Caching](features/caching.md) — token cache + ciphertext-only secret cache + Prometheus metrics + `mlockall` / no-core-dump + sealed-flush + admin flush endpoint.
   - old-notes: [spec](features/caching.md) — token cache + ciphertext-only secret cache + memory hardening.
+- [x] T465 Bound how long a cluster node serves a cached ACL policy after another node rewrote it (S5)
+  - note: the policy cache had a size bound but no lifetime, so on a two-node cluster the node that did not take a write kept enforcing the previous document, and answering reads with it, until it restarted. Cached entries now expire after `POLICY_CACHE_TTL` (30 s, in `policy_store.rs`), the same bound `features/caching.md` states for the other caches. Not yet configurable.
 - [x] T13 Batch multiple operations in one request (S4)
   - source: roadmap.md feature row "Batch Operations", status `[x]` Done
   - old-notes: [spec](features/batch-operations.md) — Phase 1 HTTP shipped; CLI + SDK [deferred](#deferred-sub-initiatives).
