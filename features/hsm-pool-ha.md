@@ -1491,7 +1491,7 @@ Not done in phase 2, deliberately:
 | 4. Ceremonies and repair | `provision`, attestation chain pinning, node enroll/revoke with credential delivery, member add/retire, repair job, epoch rotation, `migrate-to-pool`, v2 routes, CLI | `crates/bv-core/src/hsm/{admin,ceremony,node_creds,repair}.rs`, `crates/bv-core/src/seal/hsm/pool_admin.rs`, `crates/bv-kernel/src/modules/system/`, `crates/bvault-cli` | Done (mock; Yubico attestation pinning and device validation moved to phase 7) |
 | 5. Recovery | Recovery keypair, Shamir split, recovery copies, `recover` route | `crates/bv-core/src/hsm/recovery.rs`, `crates/bv-core/src/seal/hsm/recovery_ceremony.rs`, `crates/bv-server/src/sys.rs`, `crates/bvault-cli` | Done (mock; the YubiHSM 2 ceremony waits on phase 7 attestation) |
 | 6. Audit and observability | Device-log drain, events, metrics, status, GUI page, `docs/hsm.md`, `docs/api.md` | `crates/bv-core/src/hsm/device_audit.rs`, `crates/bv-core/src/seal/hsm/device_drain.rs`, `gui/src/routes/HsmStatusPage.tsx` | Done (mock; the YubiHSM 2 drain waits on phase 7) |
-| 7. Hardware validation | Two physical devices plus three nodes; pin the Yubico attestation chain and lift the YubiHSM 2 attestation refusal; validate `provision`, bootstrap, enrollment and the relay; confirm the device log layout, digest chain and forced audit, and lift the YubiHSM 2 drain refusal; measure latencies; confirm the FIPS Ed25519 question | `tests/` behind `BVAULT_TEST_YUBIHSM_POOL=1` | Planned |
+| 7. Hardware validation | Two physical devices plus three nodes; pin the Yubico attestation chain and lift the YubiHSM 2 attestation refusal; validate `provision`, bootstrap, enrollment and the relay; confirm the device log layout, digest chain and forced audit, and lift the YubiHSM 2 drain refusal; measure latencies; confirm the FIPS Ed25519 question; **end every run by factory-resetting both devices and checking they provision again** (see [Resetting the test devices](#resetting-the-test-devices)) | `tests/` behind `BVAULT_TEST_YUBIHSM_POOL=1` | Planned |
 
 **What happens to the existing modules:**
 
@@ -1575,3 +1575,31 @@ and all of them unseal.
 - The upstream `yubihsm.rs` patch (HTTPS / public connector trait, asymmetric
   session auth). Asymmetric auth would let `node add` install only public keys and
   remove credential delivery entirely. Worth a follow-up task once it is upstream.
+
+### Resetting the test devices
+
+Phase 7 runs on two physical devices that must return to a known state
+afterwards. Checked against Yubico's
+[reset guide](https://docs.yubico.com/hardware/yubihsm-2/hsm-2-user-guide/hsm2-reset-to-factory.html)
+(not yet exercised on a device):
+
+- **Physical reset always works.** Press the metal rim while inserting the
+  device and keep pressing for at least 10 seconds. It needs no credential,
+  so it is the recovery path whatever state `provision` left the device in.
+- **Software reset does not work after `provision`.** The `RESET DEVICE`
+  command (`yubihsm-shell` `reset`, or `yubihsm-manager reset`) needs an
+  authentication key with the `reset-device` capability. No key in the layout
+  above carries it (`bv-admin` is limited to the capabilities of the objects
+  it manages) and `provision` deletes the factory key, so the software route
+  is unavailable on a provisioned device. This is deliberate: a leaked
+  `bv-admin` credential must not be able to wipe the pool. Do not add the
+  capability for test convenience.
+- A reset destroys every object that is not factory-installed, restores the
+  default authentication key and options, and so makes the device accepted by
+  `provision` again.
+
+Phase 7 acceptance: after the run, both devices are reset by the physical
+method, `provision` succeeds on each from scratch, and a device that is only
+reset (not re-provisioned) is reported `faulted` by a running node, as the
+failure-mode table requires. The operator must be at the machine for the
+10-second press; the run cannot do it unattended.
