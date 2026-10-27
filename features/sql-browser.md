@@ -1,7 +1,7 @@
 # Feature: SQL Browser — query and change data on database resources (`dbms-management` plugin)
 
-**Status: In progress (2026-10-26). Phase 0 closed; Phase 1 subsystems 1–2
-(the policy substrate) implemented, the rest of Phase 1 not.** Proposed
+**Status: In progress (2026-10-26). Phase 0 and Phase 1 (T124) closed; Phases
+2–9 (T125–T130) not started.** Proposed
 2026-10-13. Tracked as ROADMAP
 T124–T130 under M5 (see *Tracking*). Written against the tree at 0.44.31; every
 "today" statement below was verified by reading the code on that date and
@@ -138,14 +138,21 @@ BastionVault, is out of scope (see *Alternatives considered*).
 subsystem 1 (the eleven `sql_*` capabilities, `ShareCap` at `u16`) and
 subsystem 2 (`PolicyGate::sql_privileges` with denial records, the qualifier
 edge, the share vocabulary and baseline rule, theorem T9) are in the tree; see
-*Phase 1, subsystem 1 validation* and *Phase 1, subsystem 2*. Nothing that a
-plugin, an HTTP route or the GUI can reach is implemented yet. The Phase table
-maps each phase to its ROADMAP task.
+*Phase 1, subsystem 1 validation* and *Phase 1, subsystem 2*. Subsystem 3
+(plugin ABI 1.4: the caller-bound host calls, their grants, actor-stamped
+audit, multiplexed process invocations, lifecycle messages, the SDK process
+runner and testkit parity) is in the tree too; see *Phase 1, subsystem 3*.
+Subsystem 4 (the rolling-upgrade write gate for `sql_*`) and subsystem 5 (the
+resource engine's `sql` protocol: strict profiles, credential resolution with
+endpoint binding, the privileges read, connect MFA for `sql` profiles, and the
+gate on `.bvx` import and BVBK restore) are in the tree; see *Phase 1,
+subsystem 4* and *Phase 1, subsystem 5*. The GUI half (subsystem 6) is not.
+The Phase table maps each phase to its ROADMAP task.
 
 | Phase | Task | Status |
 |---|---|---|
 | Phase 0 — verification spike and decisions | T124 | Done (2026-10-21) |
-| Phase 1 — host substrate: SQL capabilities, plugin ABI 1.4, `sql` protocol | T124 | In progress (subsystems 1–2 of 6) |
+| Phase 1 — host substrate: SQL capabilities, plugin ABI 1.4, `sql` protocol | T124 | In progress (subsystems 1–5 of 6) |
 | Phase 2 — `bv-sql-classify` classifier crate | T125 | Todo |
 | Phase 3 — the `dbms-management` plugin with PostgreSQL | T125 | Todo |
 | Phase 4 — GUI SQL workspace | T125 | Todo |
@@ -1241,6 +1248,7 @@ stated in *Security Considerations*.
   node still runs a version that cannot parse it. Phase 1 gates writing
   `sql_*` capabilities on every node reporting a version that understands them
   (*Open questions* 2). Older nodes would otherwise fail to load the policy.
+  Implemented in *Phase 1, subsystem 4* (`GET v2/sys/policy-schema`).
 - **Shares.** The vocabulary change is additive. Older nodes drop unknown
   entries on write and ignore them on read, which fails closed.
 - **Resource records.** `sql` profiles and `sql.enforcement` are new keys in a
@@ -1783,7 +1791,7 @@ and seal during a run.
 
 | Task | Phases | State |
 |---|---|---|
-| T124 Grant SQL privileges in policies and shares, and let plugins ask the host to authorize statements and release database credentials | 0, 1 | `[/]` |
+| T124 Grant SQL privileges in policies and shares, and let plugins ask the host to authorize statements and release database credentials | 0, 1 | `[x]` |
 | T125 Browse, query and edit PostgreSQL databases in the SQL browser through the `dbms-management` plugin | 2, 3, 4 | `[ ]` |
 | T126 Export query results and run SQL scripts only with their own grants | 5 | `[ ]` |
 | T127 Add MySQL and MariaDB to the SQL browser | 6 | `[ ]` |
@@ -1831,7 +1839,9 @@ All seven tasks are under M5 (Resources) in `ROADMAP.md`; this spec is S109.
    `sql_create` and `sql_drop` into one `sql_ddl` beside `sql_alter`. To be
    decided in Phase 0 by the maintainer.
 2. **The rolling-upgrade gate** for writing `sql_*` capabilities: a version
-   check across nodes, or an operator flag?
+   check across nodes, or an operator flag? *Answered in Phase 1, subsystem
+   4:* a version check across the Raft membership, latched once it holds; no
+   operator flag.
 3. **The Oracle driver path** (Phase 0, item 5).
 4. **Should `sql_admin` exist in v1**, or should administrative statements stay
    refused until approvals exist?
@@ -1980,3 +1990,436 @@ next. That property was removed rather than left flaky. The disagreement is
 open, does not involve SQL, and needs its own investigation: does any caller
 read probe `root_privs` past a deny? `make test-release` (L4) has not been
 run. Subsystems 3–6 remain; T124 stays `[/]`.
+
+## Phase 1, subsystem 3
+
+Plugin ABI 1.4 on the host (§9.2–§9.4), built on subsystem 2's
+`PolicyGate::sql_privileges`:
+
+- **ABI and manifest.** `HOST_ABI_MINOR` is 4. The new keys `concurrent`,
+  `max_concurrent`, `sql_gate`, `resource_credentials = ["sql"]` and
+  `sql_console` each require `abi_version` minor 4, so a 1.3 host refuses a
+  plugin that declares them. They parse strictly: a wrong type, or a
+  credential kind other than `sql`, fails the manifest. They are omitted
+  from the signed bytes when off, so already-signed plugins keep verifying.
+  `sql_gate` and `resource_credentials` require `caller_identity`, the
+  process runtime, and (for credentials on a long-lived child)
+  `concurrent`, because only a multiplexed child receives the seal message.
+  Gaining `sql_gate`, a credential kind or `sql_console` on re-register is
+  refused as capability widening.
+- **Grants.** `v2/sys/plugins/<name>/grants/{sql-gate,resource-credentials}`
+  (GET/PUT/DELETE), records `core/plugins/engine/sql-gate-grants/<name>` and
+  `…/resource-credential-grants/<name>` (`v: 1`; a record that does not parse
+  or has another version reads as absent).
+- **Host calls** (`src/plugins/sql_host.rs`). Every call checks, in order:
+  the manifest capability, an invocation caller, the live grant, strict
+  parameters, then its own rules. `resource_sql_credential` applies §5.4
+  rules 3–5 in the host and audits every attempt as
+  `resource-credential-release` (actor stamped, value never recorded).
+  `connect_ticket_redeem` refuses an `action`, which this host's tickets
+  cannot bind. The resource engine's half is a seam (`SqlResourceSource`)
+  whose default answers `not_available` until subsystem 5.
+- **Actor-stamped `audit_emit`** in both runtimes for ABI 1.4 plugins with
+  `caller_identity`, inside an invocation that has a caller.
+- **Multiplexed invocations** (`src/plugins/process_mux.rs`): one reader
+  task, one writer behind a lock, `max_concurrent` (default 32) slots, a
+  4 MiB bounded line reader, `cancel{id}` on timeout, kill only for a
+  protocol violation or a missed heartbeat (`ping`/`pong`), the unchanged
+  crash breaker, and `lifecycle{seal|reload|shutdown}` with a 10 s
+  acknowledgement deadline. Seal reaches the children through a module
+  registered by the plugin runtime (`PluginLifecycleModule`).
+- **SDK and testkit.** `bastion-plugin-sdk`'s `process` feature has the
+  runner for the single-shot, serialized and multiplexed protocols and typed
+  wrappers for every host call. The testkit mirrors the calls, the release
+  rules and the stamping rule; `tests/test_plugin_testkit_parity.rs` checks
+  both against the host.
+
+Decisions taken where the spec is silent:
+
+- **What the grants pin.** The SHA-256 of the whole canonical
+  `[capabilities]` block. The requesting keys are flat flags, so a pin over
+  them alone could never change. Rejected: pinning only `sql_gate` /
+  `resource_credentials`, which would survive any other capability change.
+- **"Holds any SQL capability".** A `Display` probe of the eleven
+  capabilities on `sql/server` answers the common case without writing
+  anything; when it finds none, the batch is re-run under `Enforce`, which
+  records the refusals and decides. Rejected: always `Enforce`, which writes
+  ten denial records for every successful select-only session.
+- **Oversized lines.** Attributed by the `type` / `id` / `invocation` found at
+  either end of the line; one that cannot be attributed is dropped and logged
+  and its invocation times out and is cancelled. The child is never killed
+  for size.
+- **Old plugins.** 1.0–1.3 plugins keep the serialized protocol, the
+  unbounded line reader and actor-less `audit_emit` unchanged.
+
+Residual: the host cannot tell which thread of a multiplexed child made a
+host call, so a plugin must name the right invocation; the authority it can
+reach is that of callers whose invocations are in flight. Node shutdown
+reaches a child through the closed stdin (the SDK runner calls
+`on_lifecycle(Shutdown)`), not through an explicit `lifecycle{shutdown}`.
+The GUI has no consent panel for the two grants yet.
+
+## Phase 1, subsystem 4
+
+The rolling-upgrade write gate for `sql_*` (§13, decision D4, *Open
+questions* 2), in `crates/bv-kernel/src/modules/policy/sql_write_gate.rs`.
+
+**Why the force-load had to be gated too.** Phase 0 found that an older node
+refuses a whole policy that names `sql_*`. It is worse for `default`:
+`force_load_acl_policy` reads the stored copy before comparing it, and the
+parse error propagates, so an older node whose stored `default` names `sql_*`
+cannot unseal at all. Subsystem 2 put the SQL rule in `default` and
+`shared-access`, so without this gate the first upgraded node to unseal would
+stop every older node from unsealing.
+
+**Mechanism.**
+
+- **Node records.** Each node writes `policy-schema/nodes/<node>` in the
+  system barrier view (`v: 1`: `node`, `policy_schema`, `host_abi_minor`,
+  `updated_at`). `<node>` is the Raft node id, or `standalone`. It is written
+  at unseal (`PolicyModule::setup_policy`, before the baselines load) and every
+  60 s by a heartbeat task (`PolicyModule::start_background`) until the gate
+  opens. Policy schema 2 is the vocabulary with `sql_*`; the ABI minor is 4.
+  The kernel keeps its own copy of `HOST_ABI_MINOR` (it sits below
+  `bv_plugin_manifest`), pinned by a facade test.
+- **Who must report.** Every member of the Raft membership, voters and
+  learners, read from the hiqlite metrics, and not only the nodes that have
+  written a record. A pre-T124 node writes no record, so the shape first
+  sketched ("every live record ≥ 4") would hold with an older node still in
+  the cluster. A deployment that is not a Raft cluster is one node, the process
+  asking.
+- **Decision.** The gate opens when every member has a record with policy
+  schema ≥ 2 and ABI minor ≥ 4 that is at most 180 s old and not dated more
+  than 30 s ahead. The evaluating node counts from its own constants. Anything
+  unknown keeps the gate closed and names the first blocker: no record, a
+  record that does not parse or has another `v`, an old schema or ABI, a stale
+  or future record, unreadable membership or storage.
+- **Latch.** Opening writes `policy-schema/sql-gate` (`v: 1`: `opened_at`,
+  `opened_by`, `members`). The latch is monotonic: the gate never closes by
+  itself, and heartbeats stop mattering. A latch that does not parse is not
+  trusted; the gate is decided from the records again, and a valid latch
+  replaces it when they hold.
+- **Policy writes.** `PolicyStore::set_policy_internal` (root) and
+  `set_policy_ns` (namespaces) are the funnels for every policy document
+  write. Both refuse a policy naming `sql_*` with `409` while the gate is
+  closed. That covers `sys/policy/{name}`, `sys/policies/acl/{name}` and the
+  seeded baselines. The write that finds the evidence complete opens the gate.
+- **Share writes.** `identity/sharing/…` PUT refuses a `capabilities` list
+  naming `sql_*` with `409`, after the share-admin check, so a caller who may
+  not share learns nothing about the gate. When the policy module cannot be
+  reached, the share is refused too.
+- **Baselines.** The SQL rule in `default` and `shared-access` sits between
+  two marker comments. While the gate is closed they are force-loaded without
+  it (the rest is byte for byte the bundled text), which every older node
+  parses. When the gate opens they are force-loaded in full, by the heartbeat
+  or by the write that opened it. A stored copy that already names `sql_*`
+  while the gate is closed is kept, with an error logged: a stored `sql_*`
+  policy is never removed automatically (D4). `namespace-shared` is parsed in
+  process at ACL build and never stored, so it is not gated.
+- **Observability.** `GET v2/sys/policy-schema` (read-only; never opens the
+  gate) reports the state, the reason, each node's record and the state of
+  the two baselines (`with-sql` / `without-sql`). Logs on target `security`:
+  a warning at unseal while closed, with the reason; info when the gate opens
+  and when the baselines are upgraded; an error when a stored baseline naming
+  `sql_*` is kept while closed.
+
+**Decisions taken where the spec was open.**
+
+- **Open question 2: a version check, not an operator flag.** A flag is
+  simpler and explicit. But setting it one node too early makes that older
+  node unable to unseal, and the operator has no way to check the claim. The
+  version check derives the decision from evidence each node writes about
+  itself. Its costs are one small write per node per minute while the gate
+  is closed, and the TTL window below.
+- **The latch never closes.** Rejected: re-closing when a member stops
+  reporting. It would make SQL shares flap with a missed heartbeat, and it
+  protects nothing, because stored `sql_*` policies stay (D4).
+- **Baseline text while closed.** The marked rule is removed and everything
+  else is kept. Rejected: moving the SQL rule into an in-process policy like
+  `namespace-shared`. That avoids storing `sql_*` in a baseline at all, but it
+  hides the grant from operators who read `default`, and it changes subsystem
+  2's design.
+- **Status is read-only.** Rejected: letting `GET v2/sys/policy-schema` open
+  the gate, which would give a read a side effect.
+
+**Residual risks.**
+
+- **TTL window.** A node rolled back to an older build less than 180 s after
+  its last report still counts. If the gate opens in that window, that node
+  cannot unseal. Do not roll back nodes during an upgrade, and read
+  `v2/sys/policy-schema` before writing `sql_*`.
+- **Clock skew.** A clock up to 30 s ahead extends a record's freshness by
+  that much. A record further ahead is refused, which keeps the gate closed.
+- **After the latch,** adding an older node or downgrading one is
+  unsupported. That node cannot unseal, because the stored `default` names
+  `sql_*` (D4).
+- **Shared storage without Raft.** Several processes on one MySQL or cloud
+  backend are not a cluster in this tree; each one sees only itself.
+- **Engine shape.** Membership comes from the shape of hiqlite's metrics
+  JSON (openraft 0.9, `membership_config.membership`). A changed shape reads
+  as "membership unreadable" and keeps the gate closed, so the failure is
+  safe and shows in the status.
+- **Not gated (follow-up, closed in subsystem 5).** `.bvx` exchange import
+  writes policy entries as raw barrier keys, bypassing the store, and a BVBK
+  restore replaces storage wholesale. Neither consulted the gate; subsystem 5
+  makes both refuse while it is closed (see *Phase 1, subsystem 5*).
+
+### Phase 1, subsystem 4 validation
+
+Commands run on branch `feat/t124-sql-policy-substrate`, one at a time, on
+top of subsystem 3's uncommitted tree:
+
+1. `cargo check -p bv-kernel`, `cargo check --lib`,
+   `cargo check -p bv-server -p bvault-cli`: exit 0 each.
+2. `cargo clippy -p bv-kernel --lib` and `cargo clippy -p bv-server --lib`:
+   exit 0, with no warning in a touched file.
+3. `cargo nextest run -p bv-kernel --lib`: exit 0, `330 tests run: 330
+   passed` (20 of them are the gate's: decision, records, membership, marked
+   baselines, and closed/open/fail-closed paths against a test vault).
+4. `cargo nextest run -p bastion_vault --lib kernel_policy_sql`: exit 0,
+   `7 tests run: 7 passed`.
+5. `cargo nextest run -p bv-server --lib`: exit 0, `82 tests run: 82 passed`,
+   including the golden route inventory.
+6. `make test-changed PKG=bv-kernel`: exit 2, `972/984 tests run: 970
+   passed, 2 failed`. Unseeded, `make test-plan` forces a full run because
+   subsystem 3 changed `Cargo.lock`. The failures are `bvault-cli`
+   `test_cli_policy_list` / `test_cli_policy_write`, whose fixture lacks
+   `self-accounts-user` (as in subsystem 2). Fail-fast left 12 unrun, so
+   `cargo nextest run -p bvault-cli --lib --no-fail-fast` was run: `51 tests
+   run: 49 passed, 2 failed`, the same two.
+
+Not run: `make test-release` (L4) and a real multi-node hiqlite cluster. The
+cluster paths are covered through a `cfg(test)` topology seam, not against
+Raft. T124 stays `[/]`.
+
+## Phase 1, subsystem 5
+
+The resource engine's `sql` protocol (§5, §9.5), the production
+`SqlResourceSource` behind the subsystem-3 host calls, and the gate on the two
+raw policy writers subsystem 4 left open.
+
+- **`sql` profiles** (`crates/bv-engine-resource/src/sql_profile.rs`). A
+  `database` resource whose `engine` is `postgresql`, `mysql`, `mariadb`,
+  `mssql` or `oracle` offers `sql`, default ports 5432, 3306, 3306, 1433 and
+  1521. The built-in block applies unless the saved type configuration says
+  otherwise: `connect.enabled = false`, or a `connect.protocols` list without
+  `sql` (any other `protocols` value offers nothing, as the GUI reads it); a
+  `connect` block that does not parse refuses. A profile parses strictly,
+  §5.1's shape: top-level `id`, `name`/`label`, `is_default`, `protocol`,
+  `target {host, port}`, `sql`, `credential_source`; `sql` takes `catalog`,
+  `instance` (SQL Server only), `tls {mode, server_name, ca_pem}` (`mode`
+  defaults to `verify-full`), `ceiling` (required, non-empty, no repeats),
+  `require_mfa`, `step_up`. Anything else, or a wrong type, fails the profile
+  (`invalid_profile`). The record's own `sql` block takes `enforcement`
+  (`database-first`, the default, or `classifier-only`). The endpoint is
+  `target.host`, else `hostname`, else `ip_address`; `target.port`, else the
+  record's `port`, else the engine default. Other protocols are never parsed
+  here, so a record a pre-T102 GUI saved is untouched.
+- **Credential resolution** (`sql_resource.rs`). `secret` reads
+  `secret/<resource>/<secret_id>` from the mount's view; the secret needs a
+  string `username` and `password`. The reserved `sql_endpoint` is passed to
+  the host's rule 5 as stored, and a secret write with a malformed one is
+  refused with `400` (`null` or `[]` unbinds). `dynamic` parses and is refused
+  at release (`dynamic_not_available`). The password is read into a
+  `Zeroizing` buffer and leaves only through the host call's reply.
+- **The seam** (`src/plugins/sql_resource.rs`), installed at assembly
+  (`BastionVault::new`). It reads the caller's namespace's `resources/` mount
+  view, refusing a mount that is not the resource engine or is tainted, under
+  the server's authority after the host has checked rule 2. The transport is
+  Rustion's own resolver (`bv_engine_rustion::policy::resolve`) over its
+  stored tiers; a lock violation or an unreadable tier refuses. The material
+  now carries `require_mfa`.
+- **`sql.require_mfa`.** `connect_ticket_redeem` records a redeemed ticket on
+  the invocation (`InvocationCaller`); `resource_sql_credential` for a gated
+  profile spends exactly one record for the same namespace, resource and
+  profile, after rules 3–5, so a refusal the operator can fix does not spend
+  it. The testkit mirrors this.
+- **Host-call codes.** `404` from the engine is `not_found`, `409`/`422` are
+  `refused`, `503` is `not_available`. The release audit records the stable
+  second code (`refused: dynamic_not_available: …` → `dynamic_not_available`).
+- **`resources/v2/sql/privileges/<resource>`** (read): `server`,
+  `resource_wide` and per-object `objects` capabilities, with
+  `SqlPurpose::Display`. Resource-wide is a check on `…/sql/objects/`, where
+  only a grant covering every object applies. `?objects=` is comma-separated
+  `catalog/schema/object` triples, segments percent-encoded, at most 64, so a
+  batch stays under `SQL_MAX_CHECKS`. `objects` joins the query allowlist in
+  `bv-logical`. The record is not read: no existence oracle.
+- **Baselines.** `read` on `resources/v2/sql/privileges/+` in `default`,
+  `shared-access`, templated `namespace-shared`, and restated in
+  `administrator`. Outside the gated block: it names no `sql_*`, so the
+  closed-gate text (tested) still grants it and still parses on an older
+  node.
+- **Connect MFA.** `connect/mfa/begin|verify` read the gate from
+  `sql.require_mfa` for an `sql` profile (anything but absent or `false`
+  gates it, read without the strict parse so a broken profile cannot skip
+  it). A caller holding any `sql_*` on `sql/server` may call them without
+  `connect`; one holding neither gets the connect grant's refusal. A profile
+  that does not parse is refused with `422` before a factor is asked for.
+  `connect/authorize` refuses an `sql` profile (`400 sql_profile_not_direct`)
+  before touching the ticket. No `action` binding (Phase 5, T126).
+- **The gate on raw writers** (`src/exchange/sql_gate.rs`). An exchange
+  import carrying a policy that names `sql_*` (parsed; an unparseable one is
+  scanned for the eleven names) is refused with `409` before any write while
+  the gate is closed; a dry run warns. A BVBK restore into a running vault
+  (`sys/restore`, the desktop app) that carries any policy document (keys are
+  plaintext: `sys/policy/`, `policy-rgp/`, `policy-egp/`,
+  `policy-ns/<b64>/acl/`, legacy or re-rooted) is refused with `409` before
+  any write while the gate is closed. Opening the gate there upgrades the
+  baselines, as a policy write does (`PolicyStore::sql_gate_open_or_reason`).
+
+Decisions taken where the spec is silent:
+
+- **Endpoint precedence `hostname` before `ip_address`**, unlike the provider
+  target: §5.1 names them in that order, and `verify-full` needs the name.
+- **Top-level `require_mfa` on an `sql` profile is refused**, not honoured:
+  §5.1 places it in `sql`, and two flags for one gate is an ambiguity. The
+  gate flag still reads it (either gates), so it cannot be skipped.
+- **The privileges endpoint is ungated by the write gate.** Rejected: putting
+  it inside the marked block, which would hide a read that names no `sql_*`.
+- **Restore refuses on the presence of policy documents.** It cannot decrypt
+  them without a new barrier API. Rejected: restore-then-verify-then-rollback,
+  which is not atomic, and stripping, which D4 rules out.
+- **MFA at release, not only at redeem.** The host refuses a gated profile's
+  credential without a redemption in the same invocation. Rejected: trusting
+  the plugin to redeem first, which a compromised plugin would skip.
+- **`?objects=` needs `bv-logical`.** A GET's query reaches a handler only
+  through the allowlist; the edit rebuilds most of the workspace.
+
+Residual risks:
+
+- **Rolling upgrades and exports.** Every export from a gate-open vault
+  carries a `default` naming `sql_*`, so importing it into a cluster whose
+  gate is closed is refused until the upgrade completes. A BVBK restore with
+  policies is refused in the same window. `bvault operator restore` writes
+  into a stopped backend and cannot consult the gate.
+- **Legacy mixed-case resource keys.** A ticket binds the record's storage
+  name; the host redeems with the lower-cased name, so a legacy mixed-case
+  record cannot use connect MFA for `sql` until renamed.
+- **The type gate reads `config/types` as saved.** A deployment that saved a
+  `database` type with an explicit `protocols` list (say `["ssh"]`) has `sql`
+  off until it adds it; the GUI (subsystem 6) must offer it.
+- **Weak-authentication refusal without TLS** (§5.4) is plugin-side and lands
+  with Phase 3; the host passes `tls.mode`.
+- **`resource_sql_target` reveals `ca_pem`** to the plugin: public material,
+  but a large bundle travels on every call.
+
+### Phase 1, subsystem 5 validation
+
+Commands run on branch `feat/t124-sql-policy-substrate`, one at a time, on
+top of subsystems 3 and 4's uncommitted tree:
+
+1. `cargo check -p bv-engine-resource`: exit 0. `cargo check --lib`: exit 101
+   once (`Core::barrier` is a field in the facade), then exit 0.
+   `cargo check -p bastion_vault --lib --tests`, `cargo check -p bv-server -p
+   bvault-cli` and `cargo check -p bastion-vault-gui`: exit 0 each.
+2. `cargo clippy --lib` for `bv-engine-resource`, `bv-logical`, `bv-kernel`,
+   `bastion-plugin-testkit`, `bastion_vault` and `bv-server`: exit 0 each,
+   no warning in a touched file.
+3. `cargo nextest run --lib`: `bv-engine-resource` 138 passed (15 new),
+   `bv-logical` (filter `util`) 8 passed, `bv-kernel` 331 passed,
+   `bastion-plugin-testkit` 42 passed, `bastion_vault` (filters
+   `resource_sql`, `sql_host`, `sql_gate`, `backup::restore`,
+   `exchange::namespaces`, `invocation`, `kernel_policy_sql`) 42 passed.
+   `cargo nextest run -p bastion_vault --test test_plugin_testkit_parity`:
+   6 passed.
+4. `scripts/test-changed.sh --pkg bv-logical --pkg bv-engine-resource --pkg
+   bv-kernel --pkg bastion-plugin-testkit --pkg bastion_vault --pkg bv-server
+   -- --no-fail-fast` (seeded: `Cargo.lock` is changed, so the unseeded plan
+   is a full run): exit 100, `2108 tests run: 2106 passed, 2 failed`, the
+   same two `bvault-cli` `test_cli_policy_list` / `test_cli_policy_write`
+   fixture failures as subsystems 2 and 4. The plan's `bv-plugin-pack
+   --bins` step, skipped after that failure, was run alone: 17 passed.
+5. After L3, `mfa_target` stopped failing on a record that does not parse
+   before the grant check, and the new files were run through `rustfmt`; the
+   engine's lib tests (138) and the facade filters above were re-run, green.
+
+Not run: `make test-release` (L4), `make plugins-test` beyond the parity
+binary, and a GUI build (no `gui/src` change). T124 stays `[/]`; subsystem 6
+(the GUI) remains.
+
+## Phase 1, subsystem 6
+
+The GUI parts of Phase 1 (§3.2, §3.3, §5, §9.1, §9.5, §10); the SQL workspace
+itself is T125. Frontend in `gui/src/`, five Tauri commands in
+`gui/src-tauri/`.
+
+- **Policy builder and validator** (`lib/policyHcl.ts`, `lib/sqlPrivileges.ts`,
+  `PolicyBlockEditor`, `PolicyValidatorPanel`).
+  - The eleven `sql_*` chips appear on resource rules only
+    (`resources/resources/…`, `resources/*`, behind any namespace prefix); a
+    rule that already names one keeps them wherever its path points.
+  - `lintPolicyModel` accepts the eleven names, and `lintSqlRules` adds three
+    findings: an **error** for a SQL capability beside `allowed_parameters`,
+    `denied_parameters` or `required_parameters` (the server refuses it, §9.1);
+    a **warning** when the path can never carry a SQL check; a **warning** for
+    an object-scoped grant with no grant on `…/sql/server` in the policy (§3.2).
+    The env restriction is not offered on a SQL rule.
+  - A validator case with a `sql_*` capability is explained against its
+    synthetic path (`…/sql/server`, `…/sql/objects/<catalog>/<schema>/<object>`,
+    or the `…/sql/objects/` bucket for an unaddressable name). The verdict is
+    still the server's dry-run.
+  - While a draft names `sql_*`, `GET v2/sys/policy-schema` is read and, if the
+    gate is closed, a notice names the blocking node. A `409` on save (policy,
+    share) is shown as one sentence with the same reason
+    (`describeSqlWriteError`). The status read never opens the gate.
+- **Sharing** (`ObjectSharingCard`). `sqlPrivileges` adds the eleven chips and
+  the four presets of §3.3 to the grant form, honoured for `resource` and
+  `asset-group` targets only (never `kv-secret` or `file`). Presets are
+  cumulative; `sql_export` and `sql_script` stay separate toggles. A database
+  resource's form starts on *Read only* (`sql_select`, not `read`) and says why
+  `read` is not needed. The generic chips now carry `aria-pressed`.
+- **SQL profile editor** (`SqlProfilesCard`, `lib/sqlProfile.ts`). A database
+  resource gets the Connection tab (also when its type offers no launchable
+  protocol) with a SQL card: profiles, enforcement and the type switch.
+  - Fields and limits mirror `sql_profile.rs` one for one; the editor emits
+    only the keys it accepts, `require_mfa` under `sql`, the port as a number,
+    optional fields omitted. A stored profile the server would refuse is listed
+    as invalid with the reason and can be repaired by saving it.
+  - Credential source is a stored secret; *dynamic* is shown disabled ("later")
+    and a stored one is kept as is. The editor shows the `host:port` the
+    secret's reserved `sql_endpoint` must name, resolved as the server does
+    (profile, then `hostname`, then `ip_address`; the profile's port, the
+    record's, the engine's). It reads no secret.
+  - Enforcement (`database-first` | `classifier-only`) is written to the
+    record's `sql` block; `classifier-only` shows the downgrade banner text.
+    Step-up is stored and labelled not enforced yet (T126).
+  - `sql` profiles stay out of `ConnectionProfile` / `readProfiles`, so the
+    launcher never lists or launches them; they ride the T102 "unknown" path
+    and `profilesForWrite` re-appends them and every other unknown entry
+    untouched.
+  - A saved `database` type with an explicit `connect.protocols` list without
+    `sql` shows an alert with *Add sql to the Database type* (only where that
+    namespace saved the configuration itself; an inherited one points at the
+    root). The type editor also gained an SQL checkbox on `database`, because
+    saving the type with the four launchable protocols would otherwise have
+    written a list without `sql` and turned the browser off.
+  - The caller's own effective SQL privileges
+    (`resources/v2/sql/privileges/<resource>`) are shown as chips.
+- **Plugin admin** (`PluginsPage`). The page's grants surface is extended with
+  a *SQL access* panel for plugins requesting `sql_gate` or
+  `resource_credentials = ["sql"]`: one section per grant, consent checkbox,
+  approve and revoke, the pinned capability-block hash, stale status. Tauri
+  commands `plugins_{get,set,delete}_sql_grant` (embedded: the facade's
+  `plugins::sql_grants`; remote: `v2/sys/plugins/<name>/grants/<kind>`),
+  `policy_schema_status` and `resource_sql_privileges`.
+
+Not done: no browser or visual check; the Tauri commands were compiled, not
+exercised against a running vault or a remote server; the exchange-import and
+restore pages do not yet translate the gate's `409` (the helper is ready);
+there is no *Bind credential to this endpoint* button (the hint states the
+value instead, so no secret is read or written from the card).
+
+### Phase 1, subsystem 6 validation
+
+Run in `gui/` and the repository root, one at a time: `npx tsc --noEmit`
+(exit 0); `npx vitest run` over the whole GUI (102 files, 1276 tests passed,
+of which the new files are `sqlPrivileges`, `sqlProfile`, `policySql`,
+`sqlSharing`, `sqlProfilesCard`, `sqlResourcePage` and `pluginSqlGrants`);
+`cargo check -p bastion-vault-gui` (exit 0).
+
+## Phase 1 exit gate (T124 closed 2026-10-26)
+
+- `make verify-kani KANI_SET=full` — `KANI GATE: PASS`.
+- `make test-release`, in pieces: suites 1–5 (unit 2511/2511, integration 2613/2613, doctests, hiqlite, cucumber) in one run, after the `bvault-cli` fixture gained the `self-accounts-user` baseline; suites 6–9 (`plugins-test`, `gui-check`, `gui-test`, `test-pki-composite`, `check-hsm DEEP=1`) in a second run, once the worktree's `plugins-ext` submodule was initialised. All exited 0.
+- Not run: the 1,000,000-case differential suite; a browser check of the GUI; a multi-node hiqlite run of the closed gate.
+- Open, outside T124's gate: the `root_privs` disagreement between ACLs built from identical text (see subsystem 2), TCPS cancellation (D2), the real-driver 50-session measurement (D5).

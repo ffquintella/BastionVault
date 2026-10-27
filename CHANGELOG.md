@@ -84,6 +84,13 @@ EXAMPLE ENTRY:
 - Share SQL privileges on resources and asset groups: the share vocabulary accepts the eleven `sql_*` names for `resource` and `asset-group` targets, and a share-scoped `resources/resources/+/sql/*` rule in `default`, `namespace-shared` and `shared-access` conveys exactly the entries a share names; owning the resource record grants none. (T124, S109)
 - Prove with theorem T9 (two Kani harnesses, `docs/verification.md`) that `connect` and the SQL capabilities decide nothing but their own bits. (T124, S108)
 
+#### SQL Browser: plugin ABI 1.4, write gate, `sql` protocol and GUI (Phase 1, subsystems 3–6)
+
+- Run plugins at ABI 1.4: caller-bound host calls `resource_sql_target`, `resource_sql_authorize`, `resource_sql_credential` and `connect_ticket_redeem`, admin grants at `v2/sys/plugins/<name>/grants/{sql-gate,resource-credentials}` pinned to the manifest's capability block, host-stamped actors on `audit_emit`, and multiplexed long-lived process invocations that cancel instead of killing the child; plugins at 1.0–1.3 load unchanged. (T124, S109)
+- Gate writes of `sql_*` capabilities on every Raft member reporting ABI 1.4: policy and share writes naming them are refused with a `409` that names the blocking node, the built-in `default` and `shared-access` policies are stored without their SQL rule until the gate opens, and `GET v2/sys/policy-schema` shows the state. `.bvx` import and BVBK restore are refused while it is closed. (T124, S109)
+- Add the `sql` Connect protocol to `database` resources with strict profile parsing, endpoint-bound credential release from a secret's `sql_endpoint`, MFA for `sql` profiles, and `resources/v2/sql/privileges/<resource>`. (T124, S109)
+- Offer the SQL capabilities in the GUI: chips and validator messages in the policy builder, chips and presets on resource and asset-group shares, a SQL profile editor on database resources, and a consent panel for the two plugin grants. (T124, S109)
+
 ### Changed
 
 #### SQL Browser: SQL privilege evaluation (Phase 1, subsystem 2)

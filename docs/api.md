@@ -206,6 +206,46 @@ HSM pool response (`topology = "pool"`; T454 phase 2). There is no single
 
 CLI equivalent: `bvault operator hsm status`.
 
+### Policy Schema (`sql_*` write gate)
+
+Reports the rolling-upgrade gate for the `sql_*` policy capabilities
+(features/sql-browser.md §13; behaviour under *SQL privileges* below).
+Read-only, governed by the ACL on `sys/policy-schema` (not in the `default`
+baseline), never returns secret material, and never opens the gate itself.
+
+~~~
+GET /v2/sys/policy-schema
+~~~
+
+~~~json
+{
+  "sql_capabilities_writable": false,
+  "latched": false,
+  "evidence_ready": false,
+  "reason": "node 3: no version record: it runs a build older than the SQL write gate, or has not unsealed since it was upgraded",
+  "this_node": { "node": "1", "policy_schema": 2, "host_abi_minor": 4 },
+  "required": { "policy_schema": 2, "host_abi_minor": 4, "record_ttl_seconds": 180 },
+  "membership": "raft",
+  "nodes": [
+    { "node": "1", "member": true, "policy_schema": 2, "host_abi_minor": 4,
+      "updated_at": "2026-10-26T12:00:00+00:00", "qualifies": true, "problem": null },
+    { "node": "3", "member": true, "policy_schema": null, "host_abi_minor": null,
+      "updated_at": null, "qualifies": false, "problem": "no version record: …" }
+  ],
+  "baselines": { "default": "without-sql", "shared-access": "without-sql" }
+}
+~~~
+
+- `membership` — `standalone` (not a Raft cluster: this node alone),
+  `raft`, or `unreadable` (with `membership_error`; the gate stays closed).
+- Once open: `latched: true`, `opened_at`, `opened_by`, and no `reason`. A
+  latch record that does not parse is reported as `latch_error` and not
+  trusted.
+- `nodes` also lists records of former members (`member: false`); they are
+  not required.
+- `baselines` — `with-sql`, `without-sql`, `missing` or `unreadable`, per
+  stored baseline that carries a gated SQL rule.
+
 ### Mounts (Secrets Engines)
 
 **List all mounts**
@@ -848,17 +888,143 @@ effect through the share-scoped rule on `resources/resources/+/sql/*` in the
 exactly the `sql_*` entries the share names. Owning the resource record grants
 no SQL privilege.
 
-No HTTP route uses these yet. The SQL browser's host calls and the
-`resources/v2/sql/privileges/<resource>` read land with later Phase 1
-subsystems of T124. A refused check made for a plugin is recorded on the Audit
-page's denied view with `reason=sql-privilege`, the capability, the namespace
-and the plugin name.
+A refused check made for a plugin (the SQL browser's host calls, below) is
+recorded on the Audit page's denied view with `reason=sql-privilege`, the
+capability, the namespace and the plugin name.
+
+#### The caller's SQL privileges (v2)
+
+~~~
+GET /v2/resources/v2/sql/privileges/{resource}[?objects=c/s/o,…]
+~~~
+
+The caller's own effective SQL capabilities on a database resource, for the
+SQL browser's chips (features/sql-browser.md §3.4). A display read: nothing is
+recorded in the denial store and nothing is enforced from the answer. The
+resource record is not read, so a resource that does not exist answers with
+empty lists rather than `404`.
+
+~~~json
+{
+  "resource": "netrisk-db",
+  "server": ["sql_select"],
+  "resource_wide": ["sql_select"],
+  "objects": [
+    { "catalog": "netrisk", "schema": "public", "object": "users",
+      "addressable": true, "capabilities": ["sql_select", "sql_update"] }
+  ]
+}
+~~~
+
+- `server` — capabilities on `…/sql/server` (opening a session needs at
+  least one).
+- `resource_wide` — capabilities on every object: a grant on `…/sql/*` or
+  `…/sql/objects/*`. An object-scoped grant does not appear here.
+- `objects` — one entry per triple in `objects`, at most 64. Triples are
+  comma-separated `catalog/schema/object`; a segment percent-encodes `/`, `,`
+  or `%` (`%2F`, `%2C`, `%25`) on top of the URL's own encoding. An entry with
+  `addressable: false` is evaluated on `…/sql/objects/` (§3.2), so only a
+  resource-wide grant reaches it.
+
+`read` on `resources/v2/sql/privileges/+` is in the `default`,
+`shared-access` and (templated) `namespace-shared` baselines, outside their
+gated SQL block: it names no `sql_*` capability. A malformed `objects` is a
+`400`.
+
+#### SQL connection profiles (`sql` protocol)
+
+A `database` resource whose `engine` is `postgresql`, `mysql`, `mariadb`,
+`mssql` or `oracle` may carry `sql` profiles in `connection_profiles`
+(features/sql-browser.md §5.1). The type's built-in Connect block offers `sql`
+with default ports 5432, 3306, 3306, 1433 and 1521; a saved type configuration
+turns it off with `connect.enabled = false` or a `connect.protocols` list
+without `sql`.
+
+~~~json
+{
+  "id": "netrisk-ro",
+  "name": "Read-only (svc_netrisk_ro)",
+  "protocol": "sql",
+  "target": { "host": "db1.example.net", "port": 3306 },
+  "sql": {
+    "catalog": "netrisk",
+    "instance": null,
+    "tls": { "mode": "verify-full", "server_name": null, "ca_pem": null },
+    "ceiling": ["sql_select"],
+    "require_mfa": false,
+    "step_up": ["sql_drop", "sql_admin", "sql_export", "sql_script"]
+  },
+  "credential_source": { "kind": "secret", "secret_id": "svc_netrisk_ro" }
+}
+~~~
+
+- Parsed strictly: an unknown key (top level, `target`, `sql`, `sql.tls`,
+  `credential_source`) or a wrongly typed value makes the profile unusable
+  (`invalid_profile`); nothing is defaulted from a value that does not parse.
+  Top-level keys are `id`, `name` or `label`, `is_default`, `protocol`,
+  `target`, `sql` and `credential_source`; `require_mfa` lives in `sql`.
+- The endpoint is `target.host`, else the resource's `hostname`, else its
+  `ip_address`; `target.port`, else the resource's `port`, else the engine's
+  default. `tls.mode` defaults to `verify-full`. `ceiling` is required and
+  non-empty. `instance` is SQL Server only.
+- `credential_source.kind` is `secret`, or `dynamic`
+  (`{mount, role}`), which parses but is never released until dynamic
+  database credentials ship (T130).
+- The resource record's own `sql` block takes `enforcement`:
+  `database-first` (default) or `classifier-only`.
+- A resource secret's `sql_endpoint` is reserved: `"host:port"` (`"[v6]:port"`)
+  or a list of them, naming the endpoints its login may be sent to. A
+  malformed value is refused on write with `400`; `null` or `[]` unbinds. A
+  profile's credential is released only to an endpoint its secret names.
+- Profiles of other protocols are not read by the `sql` code, so a record an
+  older GUI saved is unaffected.
+
+`resources/v2/connect/mfa/begin` and `…/verify` accept `sql` profiles: the
+gate is `sql.require_mfa` (anything but absent or `false` gates it), a caller
+holding any `sql_*` capability on `…/sql/server` may call them without
+`connect` on the resource, and a profile that does not parse is refused with
+`422 invalid_profile` before any factor is asked for. The SQL browser redeems
+the ticket itself; `resources/v2/connect/authorize` refuses an `sql` profile
+with `400 sql_profile_not_direct` and does not touch its ticket.
+
+#### Rolling upgrades: the `sql_*` write gate
 
 A node built before T124 cannot parse a policy that names a `sql_*`
-capability and refuses the whole policy, including `default`, which carries
-the baseline rule above. The cluster-wide write gate for `sql_*` (§13,
-decision D4) is not implemented yet, so this vocabulary is not for clusters
-running mixed versions.
+capability. It refuses the whole policy, and it cannot unseal while the stored
+`default` names one. So `sql_*` is written only after every cluster node runs
+a build that parses it (features/sql-browser.md §13, decision D4):
+
+- Each node records its policy schema (`2` parses `sql_*`) and its plugin host
+  ABI minor (`4`) in barrier storage at unseal, and every 60 s until the gate
+  opens. A record older than 180 s, or dated more than 30 s ahead, does not
+  count.
+- The gate opens when every Raft member (voters and learners) has a
+  qualifying record. A deployment that is not a Raft cluster is one node and
+  opens at its first unseal. Once open, the gate is latched: it does not
+  close again by itself, and a stored `sql_*` policy is never removed.
+- While it is closed:
+  - any policy write naming a `sql_*` capability (`sys/policy/{name}`,
+    `sys/policies/acl/{name}`, root or namespace) is refused with **`409`**;
+  - a share whose `capabilities` names one is refused with **`409`**;
+  - `default` and `shared-access` are stored without their SQL rule, and
+    upgraded to the full text when the gate opens;
+  - a `.bvx` / JSON exchange import (`sys/exchange/import`, the desktop app)
+    carrying a policy that names `sql_*`, in the root or any namespace bundle,
+    is refused with **`409`** before anything is written; a dry run (preview)
+    reports it as a warning. An export from an upgraded vault always carries
+    one: its stored `default` names `sql_*`;
+  - a BVBK restore into a running vault (`sys/restore`, the desktop app) that
+    carries any policy document is refused with **`409`** before anything is
+    written: its policies are ciphertext, so whether one names `sql_*` cannot
+    be checked first. `bvault operator restore` writes into a stopped
+    backend and cannot consult the gate.
+
+  The `409` message names the first node that keeps the gate closed and why
+  (no record, old schema or ABI, stale, malformed, membership unreadable).
+  Policies and shares without `sql_*` are not affected. Reading policies that
+  already name `sql_*` keeps working on every node of this build.
+
+`GET /v2/sys/policy-schema` (below) reports the gate.
 
 ### Web Connect (`form` and `http-auth` modes)
 
@@ -2720,6 +2886,8 @@ spelling out:
 | `POST /v1/sys/cluster/failover` | `sys/cluster/failover` | `create`/`update` |
 | `GET`/`POST` `/v1/sys/plugins…` | `sys/plugins…` | per method |
 | `GET`/`PUT`/`DELETE` `/v2/sys/plugins/{name}/grants/credential-provider` | `sys/plugins/{name}/grants/credential-provider` | `read` / `update` / `delete` |
+| `GET`/`PUT`/`DELETE` `/v2/sys/plugins/{name}/grants/sql-gate` | `sys/plugins/{name}/grants/sql-gate` | `read` / `update` / `delete` |
+| `GET`/`PUT`/`DELETE` `/v2/sys/plugins/{name}/grants/resource-credentials` | `sys/plugins/{name}/grants/resource-credentials` | `read` / `update` / `delete` |
 | `GET /v2/sys/plugins/{name}/entity-data` | `sys/plugins/{name}/entity-data` | `read` |
 | `DELETE /v2/sys/plugins/{name}/entity-data/{entity_id}` | `sys/plugins/{name}/entity-data/{entity_id}` | `delete` |
 | `GET`/`POST` `/v1/sys/scheduled-exports…` | `sys/scheduled-exports…` | per method |
@@ -2780,6 +2948,72 @@ built-in `administrator` policy reaches it through `path "*"`.
   "pending_purges": 0
 }
 ~~~
+
+### SQL browser grants (v2, plugin ABI 1.4)
+
+A plugin targeting `abi_version = "1.4"` that declares `sql_gate = true` or
+`resource_credentials = ["sql"]` may call the matching caller-bound host
+calls only after an administrator approves them (features/sql-browser.md
+§9.2). Each approval is pinned to the SHA-256 of the manifest's whole
+`[capabilities]` block, so any change to that block voids it until it is
+approved again.
+
+~~~
+GET    /v2/sys/plugins/{name}/grants/sql-gate
+PUT    /v2/sys/plugins/{name}/grants/sql-gate
+DELETE /v2/sys/plugins/{name}/grants/sql-gate
+GET    /v2/sys/plugins/{name}/grants/resource-credentials
+PUT    /v2/sys/plugins/{name}/grants/resource-credentials
+DELETE /v2/sys/plugins/{name}/grants/resource-credentials
+~~~
+
+`GET` returns whether the active manifest `requested` the capability, its
+current `capability_sha256`, the stored `grant` and whether it is `live`.
+`PUT` takes no body: it approves what the active manifest requests and answers
+`400` for a plugin that requests nothing. `DELETE` is idempotent. Records live
+under `core/plugins/engine/sql-gate-grants/<name>` and
+`core/plugins/engine/resource-credential-grants/<name>` (versioned, `v: 1`; a
+record that does not parse or has another version is read as absent).
+
+The host calls these grants unlock run only inside an invocation that reached
+the plugin's mount, against that caller's token, which the plugin never sees:
+
+| Host call | Needs | Does |
+|---|---|---|
+| `resource_sql_target {resource}` | `sql_gate` + grant `sql-gate` | the resource's SQL view, if the caller holds any `sql_*` capability on it |
+| `resource_sql_authorize {resource, checks[]}` | same | `PolicyGate::sql_privileges` with `SqlPurpose::Enforce`; refusals go to the denial store |
+| `resource_sql_credential {resource, profile, session_ref}` | `resource_credentials = ["sql"]` + grant `resource-credentials` | releases the profile's login under the §5.4 rules (endpoint binding, `sql` profile, not `rustion-required`) and, for a `sql.require_mfa` profile, only after this invocation redeemed a ticket for it (one ticket, one release); audited as `resource-credential-release`, never with the value |
+| `connect_ticket_redeem {resource, profile, ticket}` | `sql_gate` + grant `sql-gate` | burns a connect-MFA ticket; an `action` is refused |
+
+Errors are `code` or `code: detail`, checked in this order: `forbidden` (the
+manifest does not declare the capability), `no_invocation` (no caller-bound
+invocation in flight), `not_granted`, `bad_request`, `no_sql_privilege`, then
+`refused`, `not_found`, `not_available` or `internal`. A `refused` or
+`not_found` detail starts with a stable reason, which the release audit
+records:
+
+| Reason | Meaning |
+|---|---|
+| `resource_not_found`, `profile_not_found` (`not_found`) | no such resource in the caller's namespace, or no such profile on it |
+| `not_a_database`, `engine_unsupported` | not a `database` resource, or not one of the five engines |
+| `sql_disabled_for_type` | the saved type configuration does not offer `sql` |
+| `invalid_profile`, `invalid_resource_settings`, `endpoint_unresolvable` | the profile, the record's `sql` block or the endpoint does not parse |
+| `profile_not_sql` | the named profile is not an `sql` profile |
+| `dynamic_not_available` | a `dynamic` credential source (Phase 9) |
+| `credential_missing`, `credential_invalid` | the secret is absent, or lacks a string `username` / `password` |
+| `endpoint_unbound`, `endpoint_invalid`, `endpoint_mismatch` | the secret's `sql_endpoint` is absent, malformed, or does not name the profile's endpoint |
+| `rustion_required`, `transport_policy` | the effective transport is `rustion-required` (naming the tier), or a Rustion lock violation |
+| `mfa_required` | a `sql.require_mfa` profile without a ticket redeemed in this invocation |
+
+`resource_sql_target` returns the engine, its default port, `hostname`,
+`ip_address`, `database_name`, `enforcement`, the effective `transport` and
+`transport_source`, every `sql` profile strictly parsed (`profiles`, with the
+resolved `endpoint` and the secret's id, never a value) and the ones that do
+not parse (`invalid_profiles`, with `reason` and `error`).
+
+With ABI 1.4 and `caller_identity = true`, `audit_emit` inside a caller-bound
+invocation is stamped by the host with the caller's entity, principal,
+namespace and token HMAC, and written to that namespace's chain.
 
 ## Error Responses
 
