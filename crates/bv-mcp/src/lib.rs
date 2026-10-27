@@ -39,12 +39,21 @@ mod dispatch_tests {
     #[derive(Default)]
     struct FakeBackend {
         responses: HashMap<String, Map<String, Value>>,
+        /// `(namespace, path)` -> the policy read there: data, or the status
+        /// the vault answers with. Absent means 404.
+        in_namespace: HashMap<(String, String), Result<Map<String, Value>, u16>>,
         calls: std::sync::Mutex<Vec<(Operation, String, Option<Map<String, Value>>)>>,
     }
 
     impl FakeBackend {
         fn with(mut self, path: &str, data: Value) -> Self {
             self.responses.insert(path.to_string(), data.as_object().unwrap().clone());
+            self
+        }
+
+        fn with_in(mut self, namespace: &str, path: &str, outcome: Result<Value, u16>) -> Self {
+            let outcome = outcome.map(|d| d.as_object().unwrap().clone());
+            self.in_namespace.insert((namespace.to_string(), path.to_string()), outcome);
             self
         }
 
@@ -68,10 +77,29 @@ mod dispatch_tests {
             self.calls.lock().unwrap().push((operation, path.to_string(), body));
             Ok(self.responses.get(path).map(|d| JsonResponse { data: Some(d.clone()), ..Default::default() }))
         }
+
+        /// Records the call as `[<namespace>]<path>`.
+        async fn handle_with_namespace(
+            &self,
+            operation: Operation,
+            path: &str,
+            body: Option<Map<String, Value>>,
+            _token: &str,
+            namespace: Option<&str>,
+        ) -> Result<Option<JsonResponse>, ClientError> {
+            let ns = namespace.unwrap_or("");
+            self.calls.lock().unwrap().push((operation, format!("[{ns}]{path}"), body));
+            match self.in_namespace.get(&(ns.to_string(), path.to_string())) {
+                Some(Ok(d)) => Ok(Some(JsonResponse { data: Some(d.clone()), ..Default::default() })),
+                Some(Err(status)) => Err(ClientError::Server { status: *status, message: "refused".into() }),
+                None => Err(ClientError::Server { status: 404, message: "no such policy".into() }),
+            }
+        }
     }
 
     fn binding(tool_allowlist: &[&str], path_scope: &[&str]) -> McpBinding {
         McpBinding {
+            policy_namespaces: Vec::new(),
             kind: McpBindingKind::App("test-app".into()),
             catalogue_hash: catalogue::catalogue_hash(),
             tool_allowlist: tool_allowlist.iter().map(|s| s.to_string()).collect(),
@@ -514,45 +542,107 @@ mod dispatch_tests {
         assert!(backend.calls.lock().unwrap().is_empty());
     }
 
-    /// `bv_policy_read` is the only tool that reads under `sys/`: it routes a
-    /// plain read of `sys/policies/acl/<name>` and nothing else.
-    #[tokio::test]
-    async fn policy_read_routes_a_read_of_the_named_policy() {
-        let b = binding(&["bv_policy_read"], &["sys/policies/acl/*"]);
-        let backend = FakeBackend::default().with(
-            "sys/policies/acl/esi-ssh-connect",
-            json!({ "name": "esi-ssh-connect", "policy": "path \"a/*\" {}" }),
-        );
-        let p = principal();
-        let guard = SingleUseGuard::new();
+    fn policy_args(name: &str) -> Map<String, Value> {
         let mut args = Map::new();
-        args.insert("name".into(), json!("esi-ssh-connect"));
-        let result = dispatcher::call("bv_policy_read", args, None, &ctx(&b, &backend, &p, &guard)).await.unwrap();
-        assert_eq!(result.structured_content.unwrap()["name"], json!("esi-ssh-connect"));
-        let (op, routed, body) = backend.only_call();
-        assert_eq!((op, routed.as_str(), body), (Operation::Read, "sys/policies/acl/esi-ssh-connect", None));
+        args.insert("name".into(), json!(name));
+        args
     }
 
-    /// The grant must name `sys/policies/acl/...`: a broad non-`sys` scope, or
-    /// a tool allow-list without the tool, refuses before the vault is asked.
+    /// A binding that records where `bv_policy_read` may read, and a
+    /// principal bound to root (the namespace of a plain read).
+    fn policy_binding(scope: &[&str], namespaces: &[&str]) -> McpBinding {
+        let mut b = binding(&["bv_policy_read"], scope);
+        b.policy_namespaces = namespaces.iter().map(|n| n.to_string()).collect();
+        b
+    }
+
+    fn root_principal() -> PrincipalInfo {
+        let mut p = principal();
+        p.namespace = String::new();
+        p
+    }
+
+    /// `bv_policy_read` reads the named policy in every namespace recorded on
+    /// the binding, and returns only where it exists. It asks the vault
+    /// nothing about the operator: the list is the whole of its reach.
     #[tokio::test]
-    async fn policy_read_needs_both_the_tool_and_a_sys_policy_scope() {
-        let p = principal();
+    async fn policy_read_searches_the_recorded_namespaces() {
+        let b = policy_binding(&["sys/policies/acl/*", "dti/esi/sys/policies/acl/*"], &["", "dti/esi"]);
+        let path = "sys/policies/acl/esi-ssh-connect";
+        let backend = FakeBackend::default()
+            .with_in("dti/esi", path, Ok(json!({ "name": "esi-ssh-connect", "policy": "path \"a/*\" {}" })));
+        let p = root_principal();
         let guard = SingleUseGuard::new();
-        let backend = FakeBackend::default();
-        let mut args = Map::new();
-        args.insert("name".into(), json!("x"));
+        let result = dispatcher::call("bv_policy_read", policy_args("esi-ssh-connect"), None, &ctx(&b, &backend, &p, &guard))
+            .await
+            .unwrap();
+        let data = result.structured_content.unwrap();
+        assert_eq!(data["matches"], json!([{ "namespace": "dti/esi", "policy": "path \"a/*\" {}" }]));
+        assert_eq!((data["searched"].clone(), data["denied"].clone()), (json!(2), json!([])));
+        let calls: Vec<_> = backend.calls.lock().unwrap().iter().map(|(op, p, _)| (*op, p.clone())).collect();
+        assert_eq!(calls, vec![(Operation::Read, path.to_string()), (Operation::Read, format!("[dti/esi]{path}"))]);
+    }
+
+    /// Where the vault's ACL refuses the token, the namespace is reported as
+    /// denied, not as an empty answer and not as a failure of the call.
+    #[tokio::test]
+    async fn policy_read_reports_a_namespace_the_acl_refuses() {
+        let b = policy_binding(&["*"], &["dti", "dti/esi"]);
+        let path = "sys/policies/acl/x";
+        let backend = FakeBackend::default()
+            .with_in("dti", path, Err(403))
+            .with_in("dti/esi", path, Ok(json!({ "name": "x", "policy": "" })));
+        let p = root_principal();
+        let guard = SingleUseGuard::new();
+        let result =
+            dispatcher::call("bv_policy_read", policy_args("x"), None, &ctx(&b, &backend, &p, &guard)).await.unwrap();
+        let data = result.structured_content.unwrap();
+        assert_eq!(data["denied"], json!(["dti"]));
+        assert_eq!(data["matches"][0]["namespace"], json!("dti/esi"));
+    }
+
+    /// The grant names the namespaces: one outside `path_scope` is reported
+    /// and never read, none inside is `mcp_path_out_of_scope`, an empty list
+    /// reads the token's own namespace only, and a binding without the tool
+    /// learns nothing.
+    #[tokio::test]
+    async fn policy_read_is_scoped_per_namespace() {
+        let p = root_principal();
+        let guard = SingleUseGuard::new();
+        let path = "sys/policies/acl/x";
+        let backend = FakeBackend::default()
+            .with(path, json!({ "policy": "root" }))
+            .with_in("dti/esi", path, Ok(json!({ "policy": "tenant" })));
+
+        let b = policy_binding(&["dti/esi/sys/policies/acl/*"], &["", "dti/esi"]);
+        let result =
+            dispatcher::call("bv_policy_read", policy_args("x"), None, &ctx(&b, &backend, &p, &guard)).await.unwrap();
+        let data = result.structured_content.unwrap();
+        assert_eq!((data["out_of_scope"].clone(), data["searched"].clone()), (json!([""]), json!(1)));
+        assert_eq!(data["matches"], json!([{ "namespace": "dti/esi", "policy": "tenant" }]));
+        assert!(!backend.calls.lock().unwrap().iter().any(|(_, p, _)| p == path), "root was not read");
+
         for scope in [&["secret/*"][..], &["resources/*"][..], &["sys/policies/acl/other"][..]] {
-            let b = binding(&["bv_policy_read"], scope);
-            let err = dispatcher::call("bv_policy_read", args.clone(), None, &ctx(&b, &backend, &p, &guard))
+            let b = policy_binding(scope, &["", "dti/esi"]);
+            let err = dispatcher::call("bv_policy_read", policy_args("x"), None, &ctx(&b, &backend, &p, &guard))
                 .await
                 .unwrap_err();
             assert_eq!(err.code(), "mcp_path_out_of_scope", "scope {scope:?}");
         }
-        let b = binding(&["bv_whoami"], &["sys/policies/acl/*"]);
-        let err = dispatcher::call("bv_policy_read", args, None, &ctx(&b, &backend, &p, &guard)).await.unwrap_err();
+
+        let b = policy_binding(&["*"], &[]);
+        let result =
+            dispatcher::call("bv_policy_read", policy_args("x"), None, &ctx(&b, &backend, &p, &guard)).await.unwrap();
+        let data = result.structured_content.unwrap();
+        assert_eq!(data["matches"], json!([{ "namespace": "", "policy": "root" }]), "an empty list is the own namespace");
+        assert_eq!(data["searched"], json!(1));
+
+        let b = binding(&["bv_whoami"], &["*"]);
+        let calls_before = backend.calls.lock().unwrap().len();
+        let err =
+            dispatcher::call("bv_policy_read", policy_args("x"), None, &ctx(&b, &backend, &p, &guard)).await.unwrap_err();
         assert_eq!(err.code(), "mcp_tool_not_allowed");
-        assert!(backend.calls.lock().unwrap().is_empty());
+        assert_eq!(backend.calls.lock().unwrap().len(), calls_before, "a refused tool reaches nothing");
     }
 
     /// The name is one plain segment, and nothing rides along: no other

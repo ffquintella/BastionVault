@@ -54,7 +54,8 @@ prefix ending in `*`:
 
 - **Opt-in.** It is not in the default tool list. Tick it when you approve a pairing (or name it in `bvault mcp pair`), and give the pairing a path scope that names `sys/policies/acl/*`. No other scope covers it.
 - **Your own permissions apply.** The call runs on the assistant's token, which carries your policies. If your sign-in may not read the policy, the vault refuses and the assistant gets the refusal.
-- **Your namespace only.** The policy is looked up in the namespace the token is bound to. There is no namespace argument, so to read a child namespace's policy, pair with the narrowing to that namespace.
+- **Every namespace you could operate in.** When you approve the pairing, the vault records, on the token, the namespaces you can operate in at that moment: your own, a descendant from a child-visible sign-in, and the ones assigned to you. The tool looks the policy up in each of them and answers with the namespaces where it exists. There is no namespace argument. The list is fixed when the token is minted, so a namespace assigned or revoked later applies from the next pairing exchange. The token itself carries no identity: nothing about you is looked up when it reads.
+- **Per namespace consent.** Each namespace must be covered by the path scope as `<namespace>/sys/policies/acl/<name>` (your own namespace and root as `sys/policies/acl/<name>`); `*` covers all. A namespace outside the scope is reported as `out_of_scope` and never read, and one where the vault refuses you is reported as `denied`. A pairing without the tool records no list, and a token without one reads only its own namespace.
 - **One plain name.** A name with `/`, `..`, a leading space or an invisible character is refused before the vault is asked.
 
 So `secret/*` covers every KV tool on the `secret` mount, and `resources/*`

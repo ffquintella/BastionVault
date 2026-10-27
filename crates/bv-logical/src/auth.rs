@@ -333,7 +333,20 @@ pub struct McpBinding {
     /// token minted before the field existed.
     #[serde(default)]
     pub operator: Option<McpOperatorRef>,
+    /// Namespaces (`""` = root) in which `bv_policy_read` may read a policy:
+    /// the ones the issuing session could operate in at the moment the token
+    /// was minted, recorded only for a pairing that lists the tool. A list,
+    /// never an identity: nothing here names the operator, and nothing but
+    /// that tool reads it, so the token stays entity-less. Fixed at mint, so
+    /// a later change to the operator's reach applies from the next pairing
+    /// exchange. At most [`MCP_POLICY_NAMESPACES_MAX`]; empty means the
+    /// token's own namespace only.
+    #[serde(default)]
+    pub policy_namespaces: Vec<String>,
 }
+
+/// Most namespaces a binding's [`McpBinding::policy_namespaces`] records.
+pub const MCP_POLICY_NAMESPACES_MAX: usize = 64;
 
 /// The human behind a pairing binding. See [`McpBinding::operator`] for the
 /// two places allowed to read it.
@@ -440,12 +453,14 @@ mod mcp_binding_tests {
         assert!(!b.connect_allowed);
         assert!(!b.confirm_connect);
         assert_eq!(b.operator, None);
+        assert!(b.policy_namespaces.is_empty(), "an old token reads policies in its own namespace only");
         assert!(b.reveal_allowed, "the existing fields are untouched");
     }
 
     #[test]
     fn a_binding_with_an_operator_round_trips() {
         let b = McpBinding {
+            policy_namespaces: Vec::new(),
             kind: McpBindingKind::Pairing("p-1".into()),
             catalogue_hash: "h".into(),
             tool_allowlist: vec!["bv_resource_ssh_exec".into()],

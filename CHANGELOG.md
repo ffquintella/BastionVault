@@ -62,6 +62,8 @@ EXAMPLE ENTRY:
 
 - **Let a paired AI assistant read one ACL policy, only when you grant it and only if your own sign-in may read it** (T463, S26, S115) -- The opt-in `bv_policy_read` tool (`name`) reads `sys/policies/acl/<name>` in the token's namespace. It is read-only, takes one plain name (no `/`, `..`, extra arguments or namespace), is left out of a pairing's default tools, and is refused unless the grant's path scope names `sys/policies/acl/...`. The vault applies your policies to the call, so a policy you cannot read stays unreadable to the assistant. The catalogue hash is now `968c50ae6a800915fcf0b6e5506b54e3b95192ff0d50789a0491bb034f47221a`; an operator who pinned the previous hash in `sys/mcp/config` must pin this one.
 
+- **Read a policy from every namespace you could operate in, with the same permissions as you** (T463, S26, S115) -- `bv_policy_read` still takes only a policy name. When you approve a pairing that includes it, the vault records on the token the namespaces you can operate in at that moment (your own, descendants from a child-visible sign-in, and assigned ones), and the tool looks the policy up in each and reports where it exists, where the vault refused you (`denied`) and what your path scope left out (`out_of_scope`). The token carries no identity and nothing else reads the list; an assignment granted or revoked later applies from the next pairing. The catalogue hash is now `248f5409e32dfaacc148dec68abca7c5a2dd63ebcb796894487bbeab39011ffc`; an operator who pinned the previous hash in `sys/mcp/config` must pin this one.
+
 #### MCP namespace selection (Phases 2 and 3)
 
 - **Narrow an AI assistant's token to a namespace beneath your sign-in** (T457, S115)

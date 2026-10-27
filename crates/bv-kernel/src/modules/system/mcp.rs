@@ -495,6 +495,30 @@ async fn narrowing_target(
     }
 }
 
+/// The namespaces the exchanging session may operate in right now -- its
+/// binding or an explicit assignment, the answer `sys/namespaces-self` gives
+/// it -- sorted and capped. Recorded on the binding of a pairing that carries
+/// `bv_policy_read` ([`McpBinding::policy_namespaces`]). A store error fails
+/// the exchange: a shorter list would silently narrow what was approved.
+#[maybe_async::maybe_async]
+async fn issuer_operable_namespaces(core: &crate::core::Core, auth: &Auth) -> Result<Vec<String>, RvError> {
+    use crate::modules::namespace::{token_binding, NamespaceModule, NAMESPACE_MODULE_NAME};
+    let store = core
+        .module_manager()
+        .get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
+        .and_then(|m| m.store())
+        .ok_or_else(|| namespace_unavailable("the namespace store is not available to list the issuer's namespaces"))?;
+    let mut operable = Vec::new();
+    for ns in store.list_all().await? {
+        if token_binding::token_operable_checked(core, auth, &ns.path).await? {
+            operable.push(ns.path);
+        }
+    }
+    operable.sort();
+    operable.truncate(crate::logical::MCP_POLICY_NAMESPACES_MAX);
+    Ok(operable)
+}
+
 /// The optional `namespace` of an exchange body: `None` when absent, the raw
 /// string otherwise. Any other shape is refused rather than ignored.
 fn requested_namespace(req: &Request) -> Result<Option<String>, RvError> {
@@ -1100,7 +1124,15 @@ impl SystemBackend {
         let record_namespace = self.note_pairing_namespace(req, &id, &client_name, &namespace, &operator).await?;
 
         let ttl_secs = requested_ttl_secs.or(pairing_ttl).unwrap_or(28_800).clamp(1, 86_400);
+        // Only a pairing that lists `bv_policy_read` records where it may
+        // read; nothing else consults the list.
+        let policy_namespaces = if tool_allowlist.iter().any(|t| t == "bv_policy_read") {
+            issuer_operable_namespaces(self.core.as_ref(), auth).await?
+        } else {
+            Vec::new()
+        };
         let binding = McpBinding {
+            policy_namespaces,
             kind: McpBindingKind::Pairing(id.clone()),
             catalogue_hash,
             tool_allowlist,
@@ -1307,6 +1339,7 @@ impl SystemBackend {
         // superset (mint_mcp_token enforces the subset rule again).
         let ttl_secs = requested_ttl_secs.unwrap_or(app.ttl_secs).min(app.ttl_secs).min(86400);
         let binding = McpBinding {
+            policy_namespaces: Vec::new(),
             kind: McpBindingKind::App(app.name.clone()),
             catalogue_hash,
             tool_allowlist: app.tool_allowlist.clone(),

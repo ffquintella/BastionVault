@@ -152,6 +152,16 @@ The route that works since Phase 2: sign in to a child-visible ancestor (root, o
 - **Tests.** `test_mcp_narrowing_honors_a_namespace_assignment` (engine: no record refused, assigned namespace accepted and bound, parent, sibling and unrelated refused, revoked record refused again) and `mcp_namespace_binding_accepts_an_assignment_verified_target_only` (token store).
 - **Not covered by a test.** The store-error branch of the handler (reporting `mcp_namespace_unavailable`) is simple mapping over `token_operable_checked`, whose error propagation has its own test in `kernel_token_binding.rs`.
 
+## Amendment: policy read across namespaces (2026-10-27)
+
+`bv_policy_read` (`name` only, read-only, opt-in, ROADMAP T463) has to read a tenant's policy for an operator who signed in at root and works there through the namespace picker. A token bound to the tenant cannot (a tenant policy cannot name `sys/`), and the root-bound token deliberately carries no principal, so it cannot show the operator's assignment (`mint_mcp_token` copies only the namespace binding; `McpBinding::operator` is read by audit and MFA only).
+
+- **Decision (owner).** At exchange, a pairing that lists `bv_policy_read` records on the binding the namespaces the exchanging session may operate in then (`McpBinding::policy_namespaces`, the `sys/namespaces-self` answer: binding or explicit assignment, capped at `MCP_POLICY_NAMESPACES_MAX` = 64). It is a list, not an identity: no `username`, `mount_path` or `entity_id` reaches the token, and nothing but this tool reads the list. An unreadable assignment store fails the exchange rather than recording a shorter list.
+- **Tool.** Reads `sys/policies/acl/<name>` in each recorded namespace through the vault's ACL on the token's own policies (the token's own namespace through the normal route, the others through `Backend::handle_with_namespace`). `path_scope` must cover `<namespace>/sys/policies/acl/<name>` per namespace. The answer lists `matches`, `denied` (ACL refused), `out_of_scope`, `searched` and `truncated`. An empty list means the token's own namespace only, which is what every token minted before the field behaves as.
+- **Backend.** `InProcessMcpBackend::handle_with_namespace` serves a namespace other than the token's own only for a `Read` of `sys/policies/acl/…` with no body, and only for a namespace on the binding's list; any other use is refused as permission denied.
+- **Trade-off.** The list is fixed at mint, so revoking an assignment applies from the next pairing exchange (the token's TTL bounds the stale window), where reading the operator's identity at call time would have been immediate. That was rejected because it makes an MCP token entity-aware, against the rule above.
+- **Tests.** Dispatcher tests in `bv-mcp` (per-namespace scope, `denied`, own-namespace fallback), `test_mcp_policy_read_follows_the_issuers_reach` (engine: assignment recorded at pairing, refused by the ACL for an assigned user without permission, fixed at mint, absent after a revoke) and the legacy decode of a binding without the field.
+
 ## Dependencies
 
 [namespaces-multitenancy.md](namespaces-multitenancy.md) (token binding, `token_may_operate`), [mcp-access.md](mcp-access.md), [mcp-brokered-sessions.md](mcp-brokered-sessions.md) (operator reference, MFA ticket binding).

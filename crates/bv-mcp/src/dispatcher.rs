@@ -2,7 +2,7 @@
 
 use bv_client::{Backend, ClientError, Operation};
 use bv_logical::{McpBinding, McpBindingKind};
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 
 use crate::{
     catalogue::{self, ToolMeta},
@@ -206,6 +206,10 @@ pub(crate) async fn dispatch(
     }
 
     let req = build_tool_request(tool, &args)?;
+    if tool == "bv_policy_read" {
+        // Judged once per namespace the tool visits, not once up front.
+        return policy_read_result(meta, &req, ctx).await;
+    }
     check_path_scope(req.scope_subject(), ctx.binding)?;
 
     // Destructiveness is a property of the tool itself (write/delete/issue),
@@ -773,6 +777,97 @@ fn session_timeout(args: &Map<String, Value>) -> Result<Option<u64>, McpError> {
             ))),
         },
     }
+}
+
+/// Most namespaces one `bv_policy_read` visits; the rest are reported as
+/// `truncated`.
+pub const MAX_POLICY_NAMESPACES: usize = bv_logical::MCP_POLICY_NAMESPACES_MAX;
+
+/// The HTTP-style status inside a backend failure, when it carries one: a
+/// server error's own, or the `status: NNN` the in-process adapter writes.
+/// An access refusal that states none is read as 403.
+fn backend_status(err: &ClientError) -> Option<u16> {
+    if let ClientError::Server { status, .. } = err {
+        return Some(*status);
+    }
+    let message = err.to_string();
+    if let Some(at) = message.find("status: ") {
+        let digits: String = message[at + 8..].chars().take_while(char::is_ascii_digit).collect();
+        if let Ok(status) = digits.parse() {
+            return Some(status);
+        }
+    }
+    message.contains("Permission denied").then_some(403)
+}
+
+/// `bv_policy_read`: the policy named `name` in every namespace recorded on
+/// the binding (`policy_namespaces`: where the token's issuer could operate
+/// when it was minted; empty means the token's own namespace only), read
+/// through the vault's ACL on the token's own policies. The model never names
+/// a namespace. Each one must be covered by the grant's `path_scope` as
+/// `<namespace>/sys/policies/acl/<name>` (the token's own namespace and root
+/// as `sys/policies/acl/<name>`); the rest are reported, not read. A namespace
+/// where the policy is absent is skipped, one where the ACL refuses is listed
+/// as `denied`.
+async fn policy_read_result(
+    meta: &ToolMeta,
+    req: &ToolRequest,
+    ctx: &DispatchContext<'_>,
+) -> Result<CallToolResult, McpError> {
+    let own = ctx.principal.namespace.as_str();
+    let recorded = &ctx.binding.policy_namespaces;
+    let truncated = recorded.len() > MAX_POLICY_NAMESPACES;
+    let namespaces: Vec<String> = if recorded.is_empty() {
+        vec![own.to_string()]
+    } else {
+        recorded.iter().take(MAX_POLICY_NAMESPACES).cloned().collect()
+    };
+
+    let (mut matches, mut denied, mut out_of_scope) = (Vec::new(), Vec::new(), Vec::new());
+    let mut searched = 0usize;
+    for ns in &namespaces {
+        let is_own = ns == own;
+        let subject = if is_own || ns.is_empty() { req.path.clone() } else { format!("{ns}/{}", req.path) };
+        if !path_scope_covers(&ctx.binding.path_scope, &subject) {
+            out_of_scope.push(ns.clone());
+            continue;
+        }
+        searched += 1;
+        let read = if is_own {
+            ctx.backend.handle(Operation::Read, &req.path, None, ctx.token).await
+        } else {
+            ctx.backend.handle_with_namespace(Operation::Read, &req.path, None, ctx.token, Some(ns)).await
+        };
+        match read {
+            Ok(Some(resp)) => {
+                if let Some(data) = resp.data {
+                    matches.push(json!({ "namespace": ns, "policy": data.get("policy").cloned().unwrap_or(Value::Null) }));
+                }
+            }
+            Ok(None) => {}
+            Err(e) => match backend_status(&e) {
+                Some(404) => {}
+                Some(403) => denied.push(ns.clone()),
+                _ => return Err(map_backend_error(meta, e)),
+            },
+        }
+    }
+    if searched == 0 {
+        return Err(McpError::PathOutOfScope(req.path.clone()));
+    }
+
+    let name = req.path.strip_prefix("sys/policies/acl/").unwrap_or(&req.path);
+    let mut data = Map::new();
+    data.insert("name".into(), json!(name));
+    data.insert("matches".into(), Value::Array(matches));
+    data.insert("denied".into(), json!(denied));
+    data.insert("out_of_scope".into(), json!(out_of_scope));
+    data.insert("searched".into(), json!(searched));
+    data.insert("truncated".into(), json!(truncated));
+    sanitize_map(&mut data);
+    let mut result = CallToolResult::text(format!("{} ok", meta.name));
+    result.structured_content = Some(Value::Object(data));
+    Ok(result)
 }
 
 fn arg_str<'a>(args: &'a Map<String, Value>, key: &str) -> Result<&'a str, McpError> {

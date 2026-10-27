@@ -552,6 +552,7 @@ mod mod_test {
         // Expiry. Minted directly so the test does not have to wait a day.
         let op = operator_token(core, &root_token, "felipe").await;
         let binding = |waived_until: Option<u64>| crate::logical::McpBinding {
+            policy_namespaces: Vec::new(),
             kind: crate::logical::McpBindingKind::App("x".into()),
             catalogue_hash: String::new(),
             tool_allowlist: vec![],
@@ -1896,6 +1897,85 @@ mod mod_test {
         assignments.delete("userpass/", "felipe").await.unwrap();
         let err = narrow_as(core, &felipe, "assigned-revoked", "dti/esi").await.unwrap_err();
         assert!(err.contains("mcp_namespace_not_permitted"), "a revoked assignment grants nothing: {err}");
+    }
+
+    /// `bv_policy_read` through the real endpoint: a root-signed-in operator
+    /// reads a tenant's policy only after an assignment makes the tenant
+    /// operable for them, and only if their own policies let them read it.
+    #[tokio::test]
+    async fn test_mcp_policy_read_follows_the_issuers_reach() {
+        use crate::modules::namespace::{ns_assignment::NsAssignmentStore, NamespaceModule, NAMESPACE_MODULE_NAME};
+
+        let (_bvault, core_arc, root) = new_unseal_test_bastion_vault("test_mcp_policy_read").await;
+        let core: &crate::core::Core = &core_arc;
+        dti_tree(core, &root).await;
+        tenant_policy(core, "dti/esi", "esi-shared-connect", &tenant_operator_policy("dti/esi")).await;
+        let reader = r#"path "sys/policies/acl/*" { capabilities = ["read"] }"#;
+        let _ = test_write_api(core, &root, "sys/policy/mcp-policy-reader", true, json!({ "policy": reader }).as_object().cloned()).await;
+        let users = [("felipe", "mcp-root,mcp-policy-reader"), ("bob", "mcp-root")];
+        for (user, policies) in users {
+            let body = json!({ "password": "pw", "policies": policies }).as_object().cloned();
+            let _ = test_write_api(core, &root, &format!("auth/userpass/users/{user}"), true, body).await;
+        }
+        let ns_store =
+            core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME).and_then(|m| m.store()).unwrap();
+        let assignments = NsAssignmentStore::new(core).unwrap();
+
+        let guard = SingleUseGuard::new();
+        let ep = McpEndpoint {
+            core: &core_arc,
+            client_ip: "",
+            tool_timeout: std::time::Duration::from_secs(30),
+            server_version: "9.9",
+            request_state_key: b"policy-read-key",
+            single_use_guard: &guard,
+        };
+        let pair = |user: String, id: &'static str| {
+            let ep_core = core;
+            async move {
+                let mut body = tenant_pairing(id).unwrap();
+                body["pairing"]["tool_allowlist"] = json!(["bv_policy_read"]);
+                body["pairing"]["path_scope"] = json!(["*"]);
+                let data = test_write_api(ep_core, &user, "sys/mcp/token", true, Some(body)).await.unwrap().unwrap().data.unwrap();
+                data["auth"]["client_token"].as_str().unwrap().to_string()
+            }
+        };
+        let read = |token: String| {
+            let ep = &ep;
+            async move { ok(tool_call(ep, &token, "bv_policy_read", json!({ "name": "esi-shared-connect" })).await) }
+        };
+
+        // Signed in before any assignment exists: a record also limits login.
+        let felipe = login_in(core, "felipe", "").await;
+        let bob = login_in(core, "bob", "").await;
+
+        // Not assigned: the tenant is not among the issuer's namespaces, so
+        // this token records only root.
+        let early = pair(felipe.clone(), "pr-felipe").await;
+        let before = read(early.clone()).await;
+        assert_eq!(before["matches"], json!([]), "{before}");
+
+        for user in ["felipe", "bob"] {
+            assignments.set(&ns_store, "userpass/", user, vec!["dti/esi".into()]).await.unwrap().unwrap();
+        }
+        let after = read(pair(felipe.clone(), "pr-felipe-2").await).await;
+        let found = after["matches"].as_array().unwrap().clone();
+        assert_eq!(found.len(), 1, "{after}");
+        assert_eq!(found[0]["namespace"], json!("dti/esi"));
+        assert!(found[0]["policy"].as_str().unwrap().contains("dti/esi"), "{found:?}");
+
+        // Assigned but not allowed to read policies: refused by the vault's ACL.
+        let refused = read(pair(bob, "pr-bob").await).await;
+        assert_eq!(refused["matches"], json!([]), "{refused}");
+        assert!(refused["denied"].as_array().unwrap().contains(&json!("dti/esi")), "{refused}");
+
+        // The list is fixed at mint: the early token still reaches root only.
+        assert_eq!(read(early).await["matches"], json!([]));
+
+        // Revoked: the next pairing records root only again.
+        assignments.delete("userpass/", "felipe").await.unwrap();
+        let revoked = read(pair(felipe, "pr-felipe-3").await).await;
+        assert_eq!(revoked["matches"], json!([]), "{revoked}");
     }
 
     // ── MCP namespace selection: app tokens ───────────────────────────────

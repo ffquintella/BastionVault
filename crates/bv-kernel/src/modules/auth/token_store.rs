@@ -2224,6 +2224,7 @@ mod mod_token_store_tests {
 
     fn test_mcp_binding() -> McpBinding {
         McpBinding {
+            policy_namespaces: Vec::new(),
             kind: crate::logical::McpBindingKind::App("ci-secrets-reader".into()),
             catalogue_hash: "test-hash".into(),
             tool_allowlist: vec!["bv_kv_read_metadata".into()],
