@@ -1786,7 +1786,7 @@ Not done in phase 2, deliberately:
 | 5. Recovery | Recovery keypair, Shamir split, recovery copies, `recover` route | `crates/bv-core/src/hsm/recovery.rs`, `crates/bv-core/src/seal/hsm/recovery_ceremony.rs`, `crates/bv-server/src/sys.rs`, `crates/bvault-cli` | Done (mock; the YubiHSM 2 ceremony waits on phase 7 attestation) |
 | 6. Audit and observability | Device-log drain, events, metrics, status, GUI page, `docs/hsm.md`, `docs/api.md` | `crates/bv-core/src/hsm/device_audit.rs`, `crates/bv-core/src/seal/hsm/device_drain.rs`, `gui/src/routes/HsmStatusPage.tsx` | Done (mock; the YubiHSM 2 drain waits on phase 7) |
 | Amendment: pool of one (2026-10-27) | One or two members; init, bootstrap and unseal with one; `acknowledge_single_member_without_recovery`; at most two members not retired; redundancy status, event and metric | `crates/bv-core/src/hsm/{mod,pool}.rs`, `crates/bv-core/src/seal/hsm.rs`, `crates/bv-core/src/seal/hsm/pool_admin.rs`, `crates/bv-metrics/src/hsm_metrics.rs` | Done (mock; YubiHSM 2 with phase 7) |
-| 7. Hardware validation | Two physical devices plus three nodes; pin the Yubico attestation chain and lift the YubiHSM 2 attestation refusal; validate `provision`, bootstrap, enrollment and the relay; confirm the device log layout, digest chain and forced audit, and lift the YubiHSM 2 drain refusal; measure latencies; confirm the FIPS Ed25519 question; **end every run by factory-resetting both devices and checking they provision again** (see [Resetting the test devices](#resetting-the-test-devices)) | `crates/bv-core/src/hsm/{attestation,yubihsm2}.rs`, `crates/bv-core/src/hsm/hw_validation/`, `crates/bv-core/tests/hsm_pool_hardware.rs` (feature `hsm_hardware_tests`, behind `BVAULT_TEST_YUBIHSM_POOL=1`), `docs/hsm.md` | Prepared, awaiting hardware run (attestation pinning and the suite done on the mock; first read-only run on 36470559 confirmed the device log's byte order and digest chain, see [Phase 7 findings: device log](#phase-7-findings-device-log); no write step run yet). The suite validates a pool of one on a single device (the planned run, 36470559) or a two-member pool; on a pool of one the cross-device checks are listed as `not exercised (pool of one)` |
+| 7. Hardware validation | Two physical devices plus three nodes; pin the Yubico attestation chain and lift the YubiHSM 2 attestation refusal; validate `provision`, bootstrap, enrollment and the relay; confirm the device log layout, digest chain and forced audit, and lift the YubiHSM 2 drain refusal; measure latencies; confirm the FIPS Ed25519 question; **end every run by factory-resetting both devices and checking they provision again** (see [Resetting the test devices](#resetting-the-test-devices)) | `crates/bv-core/src/hsm/{attestation,yubihsm2}.rs`, `crates/bv-core/src/hsm/hw_validation/`, `crates/bv-core/tests/hsm_pool_hardware.rs` (feature `hsm_hardware_tests`, behind `BVAULT_TEST_YUBIHSM_POOL=1`), `docs/hsm.md` | Run on one device, 36470559, on 2026-10-27 (see [Phase 7 results](#phase-7-results-pool-of-one-on-36470559)): attestation pinned through the Yubico chain, device-log byte order and digest chain confirmed (see [Phase 7 findings: device log](#phase-7-findings-device-log)), provision, enrollment, wrap/unwrap, tamper detection, the domain-2 refusal, the mTLS relay, latencies and the physical reset passed. Everything that needs a second device, the three-node run, the forced-audit option and the YubiHSM 2 drain are not done. The suite validates a pool of one on a single device (the planned run, 36470559) or a two-member pool; on a pool of one the cross-device checks are listed as `not exercised (pool of one)` |
 
 **What happens to the existing modules:**
 
@@ -2015,3 +2015,31 @@ and `LOG_FULL` under forced audit; and `bv-admin`'s delegation of
 `put-authentication-key` and `set-option` for `bv-auditor`. The YubiHSM 2
 `open_auditor`, `put_auditor_auth_key` and `set_forced_audit` are not
 written yet; they use `log_result_from_yubihsm` when they are.
+
+
+### Phase 7 results: pool of one on 36470559
+
+Run on 2026-10-27 with the suite in pool-of-one mode on one YubiHSM 2
+(serial 36470559, firmware 2.4.1, not a FIPS model). Outputs are in the
+operator's campaign directory; none holds a secret.
+
+- **Read-only steps:** snapshot, preflight and the dry run matched the
+  "before" snapshot; the device log's digest chain verified on the real device
+  once the result byte was decoded as the device wrote it.
+- **Write step:** 8 checks passed, 0 failed, 6 not exercised (pool of one).
+  Passed: attestation through the pinned Yubico chain, wrap/unwrap round trip,
+  tampered copy refused as a crypto failure, a node key refused `bv-identity`
+  (domain 2), 20 rounds through the mTLS gateway and relay (124 requests, none
+  rejected), latencies, test node deleted, revoked credential refused.
+- **Reset:** after the physical reset the harness `compare` found the device
+  in factory state (factory key 0x0001 only), no differences from the "before"
+  snapshot, and a log of 2 entries whose digest chain verifies.
+- **Still read by hand after the reset:** `command-audit`, `algorithm-toggle`
+  and storage (`get-storage-info`); the harness cannot send the first two.
+- **Not exercised, so not validated on hardware:** a second device's bundle
+  refused by the first, `member add` of a second device and repair to two
+  copies, a copy for one device refused by the other, failover, either device
+  alone unsealing after two are enrolled, a three-node `bootstrap` / `init`,
+  the forced-audit option and the YubiHSM 2 device-log drain (still refused).
+- The production `provision` has not been run; the device is back to factory
+  state for it.

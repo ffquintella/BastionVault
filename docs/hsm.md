@@ -715,7 +715,21 @@ a full three-node `bootstrap` / `init` on the devices, the forced-audit
 option and the YubiHSM 2 drain, and the FIPS Ed25519 question (these two
 devices are not FIPS models).
 
-**Measured latencies:** not measured yet; paste the run's `latency.md` here.
+**Measured latencies** (YubiHSM 2, firmware 2.4.1, serial 36470559, pool of one,
+2026-10-27, 20 rounds each; "via relay" goes through a real gateway and relay
+with mTLS on the same host):
+
+| Operation | Direct p50 | Direct p95 | Via relay p50 | Via relay p95 |
+|---|---|---|---|---|
+| signed unwrap authorization (authz-sign) | 120.0 ms | 121.0 ms | 122.3 ms | 123.0 ms |
+| create key | 109.9 ms | 112.8 ms | 115.3 ms | 122.2 ms |
+| wrap | 17.9 ms | 20.0 ms | 19.8 ms | 20.3 ms |
+| unwrap | 13.9 ms | 14.3 ms | 15.7 ms | 16.2 ms |
+
+An authorized unwrap costs about 134 ms (signature plus unwrap), roughly seven
+per second per device. The mTLS relay adds 2 to 5 ms. One create-key round
+through the relay took 186.8 ms. The gateway is on the same host in this run,
+so network latency between hosts is not included.
 
 #### With one device (a pool of one)
 
