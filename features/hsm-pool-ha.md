@@ -2,8 +2,8 @@
 
 > Status: **in progress** (T454) — phases 1–2 of 7 (formats and custody core;
 > pool backend) done 2026-10-19, phase 3 (HSM link) done 2026-10-27, phase 4
-> parts 1–2 (ceremonies, repair, bootstrap, provisioning, YubiHSM 2 wiring)
-> done 2026-10-27 except `rotate-epoch` and `migrate-to-pool`; see
+> (ceremonies, repair, bootstrap, provisioning, YubiHSM 2 wiring, rotation,
+> migration) done 2026-10-27 on the mock; see
 > [Current state](#current-state). Spec
 > written 2026-10-19. Extends
 > [HSM Support (YubiHSM 2)](hsm-support.md) (S17), whose non-negotiable security
@@ -672,6 +672,7 @@ All of these are versioned, read-old/write-new.
 | Authz counter | `core/hsm-authz-counter` | `core/hsm-authz-counter/<node_id>` | A node's first counter is greater than the legacy value. The legacy key is left in place, read-only. |
 | Custody store | — (no engine uses custody) | `core/hsm/custody/<key_id>` (barrier) | None needed. |
 | Pending, credentials, enrollment, audit cursor | — | new keys under `core/hsm/` | None needed. |
+| Wrap keys per epoch (seal record v2) | — (the config's ids) | optional `wrap_keys: epoch → {barrier, pqc}` and `rotating_to` | Absent means the config's ids at every epoch; init, migration and rotation write them. No version bump: an earlier build ignores the fields, which is harmless until the first rotation and fatal for unseal after it (it would use the config's ids), so do not roll back past this build once an epoch has rotated. |
 
 **Per-node → pool** (`bvault operator hsm migrate-to-pool`, sudo, admin credentials
 for both new members):
@@ -1038,13 +1039,48 @@ Decisions made in phase 4 part 2:
   runs on its own thread, so this cannot deadlock. `spawn_blocking` waits for
   phase 7 latency measurements.
 
-Not done in phase 4 (still open):
+Phase 4, part 3:
 
-- Epoch rotation (`rotate-epoch`) and `migrate-to-pool`, with their routes and
-  CLI. Rotation needs the record to carry each member's wrap-key ids per epoch
-  (a format change); migration needs a node that holds both the per-node device
-  and pool clients (a `migrate_from` block in the pool config is the intended
-  shape).
+- **Seal record: wrap keys per epoch** (`record.rs`, read-old/write-new).
+  `wrap_keys: epoch → {barrier, pqc}` and `rotating_to` are new optional
+  fields. A record without them (every record before this part) uses the
+  config's ids at any epoch and still encodes byte for byte without them; a
+  recorded map must hold the current epoch and never answers for an
+  unrecorded one; `rotating_to` must name recorded keys. New pool records
+  (init, migration) always carry the map. Unseal, repair and custody resolve
+  the key for the set's own epoch; `CustodyScope.pqc_wrap_keys` carries the
+  record's map to the custody store.
+- **`rotate-epoch`** (`POST v2/sys/hsm/rotate-epoch`, sudo, admin credentials
+  for every active member; `bvault operator hsm rotate-epoch --admin …`).
+  Under `hsm-repair`, refused with a joining member, a pending revocation, a
+  recovery copy (phase 5) or a member it cannot reach. It allocates two free
+  wrap-key ids (from 0x20, checked on every device), generates them through
+  the admin sessions (`generate_wrap_key`, capabilities verified), records them
+  with `rotating_to` **before** touching any set, re-wraps each custody set
+  and then the KEK to epoch + 1 on every member (a `rewrap` authorization, a
+  full set or nothing), clears `rotating_to`, deletes the old keys and forgets
+  their epoch. An interrupted run resumes with the recorded keys and skips sets
+  already moved; nodes keep unsealing at the old epoch until the KEK moves.
+  `member add` gives a replacement the current (and target) epoch's keys.
+- **`migrate-to-pool`** (`POST v2/sys/hsm/migrate-to-pool`, loopback only,
+  the node being sealed; `bvault operator hsm migrate-to-pool`). The node runs
+  the pool config with a `migrate_from` block (mock: `state_path`; yubihsm2:
+  `connector` and `password = "env:VAR"`, a literal refused) naming its old
+  per-node device. `operator hsm bootstrap` is allowed over a per-node record
+  only then. Migration unwraps the KEK through the per-node device (signed,
+  per-node counter), dual-wraps it on the attested members, and replaces the
+  exact per-node record bytes it read with a pool record that keeps
+  `cluster_uuid` and `epoch` and drops the legacy blobs; the route then tries
+  to auto-unseal. One-way. Tested from the captured v1 fixture.
+- Event `hsm.epoch_rotated`.
+
+Decisions made in phase 4 part 3:
+
+- Wrap-key ids are one pair per epoch for the whole pool, not per member: a
+  ceremony that adds keys makes them the same on every member.
+- Per-node custody sets are not migrated: no engine creates custody keys, and
+  the barrier is sealed while a node migrates.
+- Per-node rotation stays out (T456); `rotate-epoch` is a pool ceremony.
 
 Phase 7 (needs hardware): pin the Yubico attestation root and intermediate
 and walk the chain (serial, capability and origin extensions); run
@@ -1261,7 +1297,7 @@ Not done in phase 2, deliberately:
 | 1. Formats and custody core | `BvHsmBlob` v2, `BvHsmBlobSet`, seal record v2 + v1 reader, per-node authz counters, custody store and handles. Mock only. | `crates/bv-core/src/hsm/{blob,blobset,custody_store}.rs`, `crates/bv-core/src/seal/hsm.rs`, `crates/bv-core/src/seal/hsm/record.rs` | Done |
 | 2. Pool backend | `HsmPool`: members, preference, failover, health probe, circuit breaker, parallel wrap, `min_wrap_copies`. Mock enforces the 16-session limit and `SESSIONS_FULL`. Pool init and unseal, storage gate, status, metrics. | `crates/bv-core/src/hsm/{pool,clock,mock,yubihsm2,mod}.rs`, `crates/bv-core/src/seal/hsm.rs`, `crates/bv-metrics/src/hsm_metrics.rs` | Done |
 | 3. HSM link | `bv-hsm-link` crate (gateway + relay), `bvault hsm-gateway` | `crates/bv-hsm-link/`, `crates/bvault-cli` | Done |
-| 4. Ceremonies and repair | `provision`, attestation chain pinning, node enroll/revoke with credential delivery, member add/retire, repair job, epoch rotation, `migrate-to-pool`, v2 routes, CLI | `crates/bv-core/src/hsm/{admin,ceremony,node_creds,repair}.rs`, `crates/bv-core/src/seal/hsm/pool_admin.rs`, `crates/bv-kernel/src/modules/system/`, `crates/bvault-cli` | In progress (parts 1–2 done; `rotate-epoch` and `migrate-to-pool` open; attestation pinning moved to phase 7) |
+| 4. Ceremonies and repair | `provision`, attestation chain pinning, node enroll/revoke with credential delivery, member add/retire, repair job, epoch rotation, `migrate-to-pool`, v2 routes, CLI | `crates/bv-core/src/hsm/{admin,ceremony,node_creds,repair}.rs`, `crates/bv-core/src/seal/hsm/pool_admin.rs`, `crates/bv-kernel/src/modules/system/`, `crates/bvault-cli` | Done (mock; Yubico attestation pinning and device validation moved to phase 7) |
 | 5. Recovery | Recovery keypair, Shamir split, recovery copies, `recover` route | `crates/bv-core/src/hsm/recovery.rs` | Planned |
 | 6. Audit and observability | Device-log drain, events, metrics, status, GUI page, `docs/hsm.md`, `docs/api.md` | `crates/bv-core/src/hsm/device_audit.rs`, `gui/src/routes/HsmStatusPage.tsx` | Planned |
 | 7. Hardware validation | Two physical devices plus three nodes; pin the Yubico attestation chain and lift the YubiHSM 2 attestation refusal; validate `provision`, bootstrap, enrollment and the relay; measure latencies; confirm the FIPS Ed25519 question | `tests/` behind `BVAULT_TEST_YUBIHSM_POOL=1` | Planned |

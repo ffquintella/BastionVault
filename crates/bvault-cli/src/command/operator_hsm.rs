@@ -33,6 +33,10 @@ pub enum HsmCommands {
     Node(NodeCommands),
     /// Show the last repair run, or run the repair job now with `--run`.
     Repair(HsmRepair),
+    /// New wrap keys on every active member and every set re-wrapped to the next epoch.
+    RotateEpoch(HsmRotateEpoch),
+    /// Move this node's per-node seal record onto the pool (loopback, `migrate_from` configured, after bootstrap).
+    MigrateToPool(HsmMigrateToPool),
     /// Before `operator init` on a pool: attest both members and enroll this node (loopback only).
     Bootstrap(HsmBootstrap),
     /// Provision a factory-state device into the pool layout and write its attestation bundle (local, no server).
@@ -70,6 +74,8 @@ impl Hsm {
             HsmCommands::Node(NodeCommands::List(c)) => c.run("/v2/sys/hsm/nodes"),
             HsmCommands::Repair(c) => c.execute(),
             HsmCommands::Bootstrap(c) => c.execute(),
+            HsmCommands::RotateEpoch(c) => c.execute(),
+            HsmCommands::MigrateToPool(c) => c.execute(),
             HsmCommands::Provision(c) => exit_code(c.run()),
         }
     }
@@ -344,6 +350,46 @@ impl CommandExecutor for HsmRepair {
 }
 
 #[derive(Parser, Deref)]
+pub struct HsmRotateEpoch {
+    #[command(flatten)]
+    admin: AdminArgs,
+    #[deref]
+    #[command(flatten, next_help_heading = "HTTP Options")]
+    http_options: command::HttpOptions,
+}
+
+impl CommandExecutor for HsmRotateEpoch {
+    fn execute(&mut self) -> ExitCode {
+        exit_code(self.main())
+    }
+
+    fn main(&self) -> Result<(), RvError> {
+        let mut data = Map::new();
+        data.insert("admin_credentials".into(), Value::Object(self.admin.credentials()?));
+        print_response(&self.client()?.request_write("/v2/sys/hsm/rotate-epoch".to_string(), Some(data))?);
+        Ok(())
+    }
+}
+
+#[derive(Parser, Deref)]
+pub struct HsmMigrateToPool {
+    #[deref]
+    #[command(flatten, next_help_heading = "HTTP Options")]
+    http_options: command::HttpOptions,
+}
+
+impl CommandExecutor for HsmMigrateToPool {
+    fn execute(&mut self) -> ExitCode {
+        exit_code(self.main())
+    }
+
+    fn main(&self) -> Result<(), RvError> {
+        print_response(&self.client()?.request_write("/v2/sys/hsm/migrate-to-pool".to_string(), None)?);
+        Ok(())
+    }
+}
+
+#[derive(Parser, Deref)]
 pub struct HsmBootstrap {
     /// `MEMBER=FILE`: the attestation bundle `provision` wrote for each member.
     #[arg(long = "bundle", value_name = "MEMBER=FILE")]
@@ -502,6 +548,11 @@ mod test {
             assert!(body.to_string().contains("not an HSM seal"), "{path}: {body:?}");
         }
         // v1 is frozen: no such route (an error, or a 404).
+        let body = serde_json::json!({ "admin_credentials": { "hsm-a": "x" } });
+        let rotate = server.write("v2/sys/hsm/rotate-epoch", body.as_object().cloned(), Some(&server.root_token));
+        assert!(rotate.as_ref().map(|(s, _)| *s == 400).unwrap_or(true), "{rotate:?}");
+        let migrate = server.write("v2/sys/hsm/migrate-to-pool", None, None);
+        assert!(migrate.as_ref().map(|(s, _)| *s == 400 || *s == 403).unwrap_or(true), "{migrate:?}");
         let v1 = server.read("v1/sys/hsm/members", Some(&server.root_token));
         assert!(v1.as_ref().map(|(s, _)| *s == 404).unwrap_or(true), "{v1:?}");
         let anonymous = server.read("v2/sys/hsm/members", None);

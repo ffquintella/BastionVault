@@ -78,6 +78,7 @@ pub enum PoolEventKind {
     MemberAdded,
     MemberRetired,
     MemberPromoted,
+    EpochRotated,
 }
 
 impl PoolEventKind {
@@ -96,6 +97,7 @@ impl PoolEventKind {
             PoolEventKind::MemberAdded => "hsm.member_added",
             PoolEventKind::MemberRetired => "hsm.member_retired",
             PoolEventKind::MemberPromoted => "hsm.member_promoted",
+            PoolEventKind::EpochRotated => "hsm.epoch_rotated",
         }
     }
 }
@@ -128,7 +130,8 @@ impl PoolEventSink for LogEventSink {
             | PoolEventKind::SetRepaired
             | PoolEventKind::NodeEnrolled
             | PoolEventKind::MemberAdded
-            | PoolEventKind::MemberPromoted => {
+            | PoolEventKind::MemberPromoted
+            | PoolEventKind::EpochRotated => {
                 log::info!(target: "security", "{name}: member={member} hsm_id={hsm_id} {detail}")
             }
             PoolEventKind::NodeRevoked | PoolEventKind::MemberRetired | PoolEventKind::RevocationPending => {

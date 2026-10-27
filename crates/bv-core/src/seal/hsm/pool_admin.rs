@@ -16,13 +16,16 @@ use serde_json::{json, Value};
 use zeroize::Zeroizing;
 
 use super::{
-    record::{HsmMember, HsmSealRecord, MemberState, Topology},
+    record::{HsmMember, HsmSealRecord, MemberState, Topology, WrapKeyIds},
     targets_of, Devices, HsmSealProvider, PoolDevices,
 };
 use crate::{
     errors::RvError,
     hsm::{
-        admin::{node_auth_key_id, AdminCredentials, HsmAdminSession, NodeCredential, MAX_POOL_NODES},
+        admin::{
+            node_auth_key_id, AdminCredentials, HsmAdminSession, NodeCredential, ObjectKind, MAX_POOL_NODES,
+            WRAP_KEY_CAPABILITIES,
+        },
         authz::{self, UnwrapRequest},
         authz_fingerprint_of,
         blob::{AuthzAlg, BvHsmBlob, Context, HsmId, Purpose},
@@ -383,10 +386,14 @@ impl HsmSealProvider {
         let node_id = self.config.node_id.as_str();
         let physical = self.physical.as_ref();
         let _custody_lock = physical.lock(HSM_CUSTODY_LOCK).await?;
-        if self.load_record().await?.is_some() {
-            return Err(RvError::ErrHsm(
-                "the HSM pool is already initialized; enroll further nodes with `node add`".into(),
-            ));
+        // Allowed over a per-node record only when this node is set up to
+        // migrate it (`migrate_from`); otherwise the pool is initialized.
+        if let Some(stored) = self.load_record().await? {
+            if stored.record.topology != Topology::PerNode || self.migration_source.is_none() {
+                return Err(RvError::ErrHsm(
+                    "the HSM pool is already initialized; enroll further nodes with `node add`".into(),
+                ));
+            }
         }
         if read_enrollment(physical, node_id).await?.is_some_and(|e| !e.is_revoked()) {
             return Err(RvError::ErrHsm(format!("node {node_id} is already enrolled for bootstrap")));
@@ -451,6 +458,274 @@ impl HsmSealProvider {
         .await;
         close_all(sessions).await;
         result
+    }
+
+    /// Make sure every id in `ids` is a wrap key on the session's device with
+    /// exactly `wrap-data` / `unwrap-data`: generate the missing ones, refuse
+    /// one that exists with any other capability.
+    #[maybe_async::maybe_async]
+    async fn ensure_wrap_keys(session: &dyn HsmAdminSession, ids: &[WrapKeyIds]) -> Result<(), RvError> {
+        for set in ids {
+            for (id, name) in [(set.barrier, "bv-wrap-barrier"), (set.pqc, "bv-wrap-pqc")] {
+                match session.object_info(ObjectKind::WrapKey, id).await? {
+                    None => session.generate_wrap_key(id, name).await?,
+                    Some(info) => {
+                        let mut caps = info.capabilities.clone();
+                        caps.sort();
+                        if caps != WRAP_KEY_CAPABILITIES || !info.delegated.is_empty() {
+                            return Err(RvError::ErrHsmAttestationInvalid(format!(
+                                "wrap key {id} on {} has capabilities {caps:?}",
+                                session.hsm_id()?
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The lowest pair of wrap-key ids from 0x20 that no epoch, no configured
+    /// object and no device among `sessions` uses.
+    #[maybe_async::maybe_async]
+    async fn allocate_wrap_ids(&self, sessions: &Sessions, record: &HsmSealRecord) -> Result<WrapKeyIds, RvError> {
+        let o = &self.config.objects;
+        let mut taken: BTreeSet<HsmObjectId> = [o.wrap_barrier, o.wrap_pqc, o.identity, o.authz, o.seed_ecdh].into();
+        taken.extend(record.wrap_keys.values().flat_map(|k| [k.barrier, k.pqc]));
+        let mut free = Vec::new();
+        for id in 0x20u16..0x400 {
+            if taken.contains(&id) {
+                continue;
+            }
+            let mut used = false;
+            for (_, session) in sessions {
+                used |= session.object_info(ObjectKind::WrapKey, id).await?.is_some();
+            }
+            if !used {
+                free.push(id);
+                if free.len() == 2 {
+                    return Ok(WrapKeyIds { barrier: free[0], pqc: free[1] });
+                }
+            }
+        }
+        Err(RvError::ErrHsm("no free wrap-key ids below 0x400".into()))
+    }
+
+    /// `rotate-epoch` (spec § HSM key epoch rotation): new wrap keys on every
+    /// active member, every set re-wrapped to epoch + 1, then the old keys
+    /// deleted. Crash-safe: the target epoch and its keys are recorded first
+    /// (`rotating_to`), so a rerun resumes with them and skips moved sets.
+    #[maybe_async::maybe_async]
+    pub async fn rotate_epoch(
+        &self,
+        admin: &AdminCredentials,
+        barrier: Option<Arc<dyn Storage>>,
+        actor: &str,
+    ) -> Result<Value, RvError> {
+        let devices = self.pool_devices()?;
+        let barrier = barrier
+            .ok_or_else(|| RvError::ErrHsm("rotate-epoch needs the unsealed barrier to re-wrap custody sets".into()))?;
+        let physical = self.physical.as_ref();
+        let _repair_lock = physical.lock(HSM_REPAIR_LOCK).await?;
+        if let Some(store) = &devices.cache.credentials {
+            let installed = node_creds::pick_up(physical, store).await?;
+            devices.cache.forget_clients(&installed);
+        }
+        let record = self.pool_record().await?;
+        if record.members.values().any(|m| m.state == MemberState::Joining) {
+            return Err(RvError::ErrHsm("a member is joining; promote or retire it before rotating the epoch".into()));
+        }
+        if record.members.values().any(|m| !m.pending_revocations.is_empty()) {
+            return Err(RvError::ErrHsm("apply the pending revocations before rotating the epoch".into()));
+        }
+        if record.kek.as_ref().is_none_or(|k| k.recovery.is_some()) {
+            return Err(RvError::ErrHsm("recovery copies are re-sealed by phase 5; rotation refuses them".into()));
+        }
+        let old_epoch = record.epoch;
+        let target = record.rotating_to.unwrap_or(old_epoch + 1);
+        let targets: Vec<MemberTarget> = targets_of(record.active_members()).into_iter().map(|(t, _)| t).collect();
+        let sessions = self.open_admin_sessions(targets, admin).await?;
+        let result = self.rotate_on(&sessions, devices, &barrier, record, old_epoch, target, actor).await;
+        close_all(sessions).await;
+        result
+    }
+
+    #[maybe_async::maybe_async]
+    async fn rotate_on(
+        &self,
+        sessions: &Sessions,
+        devices: &PoolDevices,
+        barrier: &Arc<dyn Storage>,
+        mut record: HsmSealRecord,
+        old_epoch: u64,
+        target: u64,
+        actor: &str,
+    ) -> Result<Value, RvError> {
+        let physical = self.physical.as_ref();
+        let defaults = self.config.objects;
+        let old_ids = record.wrap_key_ids(old_epoch, &defaults)?;
+        let new_ids = match record.wrap_keys.get(&target) {
+            Some(ids) if record.rotating_to == Some(target) => *ids,
+            _ => self.allocate_wrap_ids(sessions, &record).await?,
+        };
+        for (_, session) in sessions {
+            Self::ensure_wrap_keys(session.as_ref(), &[new_ids]).await?;
+        }
+        if record.rotating_to != Some(target) {
+            let _custody_lock = physical.lock(HSM_CUSTODY_LOCK).await?;
+            record = self.pool_record().await?;
+            record.wrap_keys.entry(old_epoch).or_insert(old_ids);
+            record.wrap_keys.insert(target, new_ids);
+            record.rotating_to = Some(target);
+            self.store_record(&record).await?;
+        }
+
+        let pool_cfg = self.config.pool.as_ref().ok_or_else(|| RvError::ErrHsm("not a pool provider".into()))?;
+        let specs = devices.cache.specs_for(pool_cfg, targets_of(record.active_members()));
+        let pool = HsmPool::new(&self.config.node_id, specs, 1, devices.clock.clone(), devices.events.clone())?;
+        let pacer = Pacer::new(pool_cfg.repair_rate);
+        let mut moved = 0usize;
+        for key_id in barrier.list(CUSTODY_STORE_PREFIX).await? {
+            let key = format!("{CUSTODY_STORE_PREFIX}{key_id}");
+            let Some(entry) = barrier.get(&key).await? else { continue };
+            let custody = CustodyRecord::decode(&key_id, &entry.value)?;
+            if custody.set.epoch == target {
+                continue;
+            }
+            if custody.set.epoch != old_epoch {
+                return Err(RvError::ErrHsm(format!(
+                    "custody key {key_id} is at epoch {}, neither {old_epoch} nor {target}; rotation stopped",
+                    custody.set.epoch
+                )));
+            }
+            if custody.set.recovery.is_some() {
+                return Err(RvError::ErrHsm(format!("custody key {key_id} has a recovery copy (phase 5)")));
+            }
+            let kind = custody.kind()?;
+            let ctx_at = |e: u64| {
+                Context::new(kind.seed_context(&record.cluster_uuid, e), kind.purpose(), e, &self.config.node_id)
+            };
+            let set = self
+                .rewrapped(&pool, &record, &custody.set, &ctx_at(old_epoch), old_ids.pqc, &ctx_at(target), new_ids.pqc)
+                .await?;
+            let _custody_lock = barrier.lock(HSM_CUSTODY_LOCK).await?;
+            if barrier.get(&key).await?.is_none_or(|c| c.value != entry.value) {
+                return Err(RvError::ErrHsm(format!("custody key {key_id} changed during rotation; run it again")));
+            }
+            let updated = CustodyRecord { set, ..custody };
+            barrier.put(&StorageEntry { key, value: updated.encode()? }).await?;
+            moved += 1;
+            pacer.pause().await;
+        }
+
+        let kek = record.kek.clone().ok_or_else(|| RvError::ErrHsm("pool seal record has no KEK set".into()))?;
+        let ctx_old = self.barrier_context(&record.cluster_uuid, old_epoch);
+        let ctx_new = self.barrier_context(&record.cluster_uuid, target);
+        let new_kek =
+            self.rewrapped(&pool, &record, &kek, &ctx_old, old_ids.barrier, &ctx_new, new_ids.barrier).await?;
+        {
+            let _custody_lock = physical.lock(HSM_CUSTODY_LOCK).await?;
+            let mut current = self.pool_record().await?;
+            if current.kek.as_ref() != Some(&kek) || current.rotating_to != Some(target) {
+                return Err(RvError::ErrHsm("the seal record changed during rotation; run it again".into()));
+            }
+            current.kek = Some(new_kek);
+            current.epoch = target;
+            current.rotating_to = None;
+            self.store_record(&current).await?;
+            record = current;
+        }
+
+        // No set references the old epoch any more: delete its keys.
+        let mut not_deleted = Vec::new();
+        for (target_member, session) in sessions {
+            for id in [old_ids.barrier, old_ids.pqc] {
+                if let Err(e) = session.delete_wrap_key(id).await {
+                    not_deleted.push(format!("{} on {}: {e}", id, target_member.name));
+                }
+            }
+        }
+        if not_deleted.is_empty() {
+            let _custody_lock = physical.lock(HSM_CUSTODY_LOCK).await?;
+            let mut current = self.pool_record().await?;
+            current.wrap_keys.remove(&old_epoch);
+            self.store_record(&current).await?;
+        }
+        for (t, _) in sessions {
+            let detail = format!("epoch {old_epoch} -> {target}; custody sets moved={moved} by={actor}");
+            self.event(PoolEventKind::EpochRotated, &t.name, t.hsm_id.as_str(), &detail);
+        }
+        Ok(json!({
+            "epoch": record.epoch,
+            "previous_epoch": old_epoch,
+            "wrap_keys": { "barrier": new_ids.barrier, "pqc": new_ids.pqc },
+            "custody_sets_moved": moved,
+            "old_keys_not_deleted": not_deleted,
+        }))
+    }
+
+    /// `set` unwrapped once (a `rewrap` authorization) and wrapped on every
+    /// member of `pool` under `new_key` at `new_ctx`: a full set or an error.
+    #[maybe_async::maybe_async]
+    async fn rewrapped(
+        &self,
+        pool: &HsmPool,
+        record: &HsmSealRecord,
+        set: &BvHsmBlobSet,
+        old_ctx: &Context,
+        old_key: HsmObjectId,
+        new_ctx: &Context,
+        new_key: HsmObjectId,
+    ) -> Result<BvHsmBlobSet, RvError> {
+        let plaintext = self.rewrap_source(pool, record, set, old_ctx, old_key).await?;
+        let outcome = pool.wrap_on_every_member(new_key, new_ctx, &plaintext).await?;
+        drop(plaintext);
+        let mut copies = outcome.copies.into_values();
+        let first = copies.next().ok_or_else(|| RvError::ErrHsm("re-wrap produced no copy".into()))?;
+        let mut new_set = BvHsmBlobSet::new(set.purpose, new_ctx.epoch, first, &self.config.node_id, unix_now_secs()?)?;
+        for copy in copies {
+            new_set.insert_copy(copy)?;
+        }
+        Ok(new_set)
+    }
+
+    /// `migrate-to-pool` (spec § Per-node → pool): the KEK through this
+    /// node's per-node device (`migrate_from`, a signed unwrap), dual-wrapped
+    /// on the attested pool members, written as a pool record that keeps the
+    /// cluster id and epoch and drops the legacy blobs. One-way.
+    #[maybe_async::maybe_async]
+    pub async fn migrate_to_pool(&self, actor: &str) -> Result<Value, RvError> {
+        let devices = self.pool_devices()?;
+        let source = self.migration_source.as_ref().ok_or_else(|| {
+            RvError::ErrHsmConfigInvalid("migrate-to-pool needs a `migrate_from` block in the pool `hsm` block".into())
+        })?;
+        let physical = self.physical.as_ref();
+        let raw = physical
+            .get(super::HSM_SEAL_RECORD_PATH)
+            .await?
+            .ok_or_else(|| RvError::ErrHsm("there is no seal record to migrate".into()))?
+            .value;
+        let stored = HsmSealRecord::decode(&raw)?;
+        if stored.record.topology != Topology::PerNode {
+            return Err(RvError::ErrHsm("the seal record is already a pool record".into()));
+        }
+        let kek = self.recover_per_node(source, &stored.record).await?;
+        let (cluster_uuid, epoch) = (stored.record.cluster_uuid.clone(), stored.record.epoch);
+        self.write_pool_record(devices, &kek, &cluster_uuid, epoch, Some(&raw)).await?;
+        drop(kek);
+        let legacy = stored.record.legacy_node_blobs.len() + usize::from(stored.record.kek.is_some());
+        log::warn!(
+            target: "security",
+            "hsm.migrated_to_pool: cluster={cluster_uuid} epoch={epoch} per-node copies dropped={legacy} by={actor}; \
+             this vault can no longer be unsealed per node"
+        );
+        Ok(json!({
+            "cluster_uuid": cluster_uuid,
+            "epoch": epoch,
+            "topology": "pool",
+            "per_node_copies_dropped": legacy,
+            "note": "one-way: a pool record cannot be unsealed by a per-node configuration or an older build",
+        }))
     }
 
     /// The lowest node slot no record holds and no live device uses.
@@ -623,6 +898,12 @@ impl HsmSealProvider {
         let physical = self.physical.as_ref();
         let (target, session) = &sessions[0];
         let verified = verify_member(session.as_ref(), bundle, &self.config.objects).await?;
+        // A device provisioned after a rotation holds only the default ids.
+        let mut epoch_keys = vec![record.wrap_key_ids(record.epoch, &self.config.objects)?];
+        if let Some(target_epoch) = record.rotating_to {
+            epoch_keys.push(record.wrap_key_ids(target_epoch, &self.config.objects)?);
+        }
+        Self::ensure_wrap_keys(session.as_ref(), &epoch_keys).await?;
         let mut enrollments = list_enrollments(physical).await?;
         let mut created: Vec<u16> = Vec::new();
         let mut deliveries: Vec<CredentialDelivery> = Vec::new();
@@ -835,7 +1116,8 @@ impl HsmSealProvider {
             let set_plan = plan(&kek, &targets, &retired);
             let mut final_set = kek.clone();
             if !set_plan.is_empty() {
-                match self.rewrap_set(&pool, &record, &kek, &set_plan, &ctx, self.config.objects.wrap_barrier).await {
+                let key = record.wrap_key_ids(kek.epoch, &self.config.objects)?.barrier;
+                match self.rewrap_set(&pool, &record, &kek, &set_plan, &ctx, key).await {
                     Ok((new_set, added, removed, failures)) => {
                         report.failures.extend(failures.into_iter().map(|f| format!("barrier KEK: {f}")));
                         if added + removed > 0 {
@@ -894,7 +1176,8 @@ impl HsmSealProvider {
                         set.epoch,
                         &self.config.node_id,
                     );
-                    match self.rewrap_set(&pool, &record, &set, &set_plan, &ctx, self.config.objects.wrap_pqc).await {
+                    let wrap_key = record.wrap_key_ids(set.epoch, &self.config.objects)?.pqc;
+                    match self.rewrap_set(&pool, &record, &set, &set_plan, &ctx, wrap_key).await {
                         Ok((new_set, added, removed, failures)) => {
                             report.failures.extend(failures.into_iter().map(|f| format!("custody key {key_id}: {f}")));
                             if added + removed > 0 {
@@ -1319,6 +1602,7 @@ mod tests {
                     repair_rate: 100,
                     credential_dir: self.dir(node),
                     link: None,
+                    migrate_from: None,
                     members: vec![member("a", &self.a), member("b", &self.b)],
                 }),
                 recovery_explicit: true,
@@ -1376,6 +1660,7 @@ mod tests {
                 epoch: record.epoch,
                 ecdh_key: HsmObjectIds::default().seed_ecdh,
                 binding_pub,
+                pqc_wrap_keys: record.wrap_keys.iter().map(|(e, k)| (*e, k.pqc)).collect(),
             };
             CustodyStore::with_pool(barrier, pool, provider.config.clone(), scope)
         }
@@ -1655,5 +1940,120 @@ mod tests {
         let err = n1.init_kek(&KEK, &seal_config()).await.unwrap_err();
         assert!(matches!(err, RvError::ErrHsmAttestationInvalid(_)), "{err}");
         assert!(n1.load_record().await.unwrap().is_none(), "nothing initialized");
+    }
+
+    fn admin_session(device: &Arc<MockHsmDevice>, password: &str) -> crate::hsm::mock::MockAdminSession {
+        device.admin_session(password, HsmObjectIds::default()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn rotate_epoch_rewraps_every_set_and_deletes_the_old_keys() {
+        let p = Pool::new(1).await;
+        let n1 = p.init().await;
+        let n2 = p.join("n2", &n1).await;
+        n2.recover_kek().await.unwrap();
+        let barrier = p.barrier().await;
+        let (handle, public) = p.custody(&n1, barrier.clone()).await.create(PqcKeyKind::MlKem768).await.unwrap();
+        let defaults = HsmObjectIds::default();
+        let before = n1.pool_record().await.unwrap();
+        assert_eq!(before.wrap_keys.get(&0), Some(&WrapKeyIds::of(&defaults)), "a new pool record names its keys");
+
+        let out = n1.rotate_epoch(&p.both(), Some(barrier.clone()), "root").await.unwrap();
+        assert_eq!((out["epoch"].as_u64(), out["custody_sets_moved"].as_u64()), (Some(1), Some(1)), "{out}");
+        assert!(out["old_keys_not_deleted"].as_array().unwrap().is_empty(), "{out}");
+        let after = n1.pool_record().await.unwrap();
+        assert_eq!((after.epoch, after.rotating_to, after.kek.as_ref().unwrap().epoch), (1, None, 1));
+        assert_eq!(after.wrap_keys.keys().copied().collect::<Vec<_>>(), vec![1], "epoch 0 forgotten");
+        assert_eq!(after.kek.as_ref().unwrap().copies.len(), 2, "fully replicated");
+
+        assert_eq!(n2.recover_kek().await.unwrap().as_slice(), &KEK, "nodes unseal at the new epoch");
+        let store = p.custody(&n1, barrier.clone()).await;
+        assert_eq!(store.with_private(&handle, |k| k.public_key().to_vec()).await.unwrap(), public);
+        for (device, password) in [(&p.a, "admin-a"), (&p.b, "admin-b")] {
+            let session = admin_session(device, password);
+            for id in [defaults.wrap_barrier, defaults.wrap_pqc] {
+                assert!(session.object_info(ObjectKind::WrapKey, id).await.unwrap().is_none(), "old key {id} deleted");
+            }
+        }
+        assert_eq!(p.seen.count(PoolEventKind::EpochRotated), 2);
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_rotation_resumes_with_the_keys_it_recorded() {
+        let p = Pool::new(1).await;
+        let n1 = p.init().await;
+        let barrier = p.barrier().await;
+        let next = WrapKeyIds { barrier: 0x40, pqc: 0x41 };
+        for (device, password) in [(&p.a, "admin-a"), (&p.b, "admin-b")] {
+            let session = admin_session(device, password);
+            session.generate_wrap_key(next.barrier, "bv-wrap-barrier").await.unwrap();
+            session.generate_wrap_key(next.pqc, "bv-wrap-pqc").await.unwrap();
+        }
+        let mut record = n1.pool_record().await.unwrap();
+        record.wrap_keys.insert(1, next);
+        record.rotating_to = Some(1);
+        n1.store_record(&record).await.unwrap();
+        assert_eq!(n1.recover_kek().await.unwrap().as_slice(), &KEK, "still epoch 0 until the KEK moves");
+
+        let out = n1.rotate_epoch(&p.both(), Some(barrier), "root").await.unwrap();
+        assert_eq!(out["wrap_keys"]["barrier"].as_u64(), Some(0x40), "{out}");
+        let after = n1.pool_record().await.unwrap();
+        assert_eq!((after.epoch, after.rotating_to), (1, None));
+        assert_eq!(n1.recover_kek().await.unwrap().as_slice(), &KEK);
+    }
+
+    #[tokio::test]
+    async fn rotation_refuses_what_it_cannot_finish() {
+        let p = Pool::new(1).await;
+        let n1 = p.init().await;
+        let barrier = p.barrier().await;
+        assert!(n1.rotate_epoch(&p.both(), None, "root").await.unwrap_err().to_string().contains("barrier"));
+        let err = n1.rotate_epoch(&p.admin(&[("a", "admin-a")]), Some(barrier.clone()), "root").await.unwrap_err();
+        assert!(err.to_string().contains(&p.name("b")), "{err}");
+        p.b.set_offline(true);
+        assert!(n1.rotate_epoch(&p.both(), Some(barrier), "root").await.is_err(), "every member must take part");
+        let record = n1.pool_record().await.unwrap();
+        assert_eq!((record.epoch, record.rotating_to), (0, None), "nothing changed");
+    }
+
+    const FIXTURE_STATE: &[u8] = include_bytes!("../testdata/hsm-seal-v1/mock-hsm-state.json");
+    const FIXTURE_RECORD: &[u8] = include_bytes!("../testdata/hsm-seal-v1/core-hsm-seal.json");
+    const FIXTURE_COUNTER: &[u8] = include_bytes!("../testdata/hsm-seal-v1/core-hsm-authz-counter");
+
+    #[tokio::test]
+    async fn migrate_to_pool_moves_a_v1_per_node_record_onto_the_pool() {
+        use crate::storage::BackendEntry;
+        let p = Pool::new(1).await;
+        let node = "fixture-node";
+        let state = std::env::temp_dir().join(format!("bv-migrate-{}.json", rand_tag()));
+        std::fs::write(&state, FIXTURE_STATE).unwrap();
+        let mut per_node = p.config(node);
+        per_node.pool = None;
+        per_node.state_path = state.to_string_lossy().to_string();
+        let source: Arc<dyn HsmBackend> = Arc::new(MockHsmBackend::open(&per_node).await.unwrap());
+        let put = |key: &str, value: &[u8]| BackendEntry { key: key.into(), value: value.to_vec() };
+        p.physical.put(&put("core/hsm-seal", FIXTURE_RECORD)).await.unwrap();
+        p.physical.put(&put("core/hsm-authz-counter", FIXTURE_COUNTER)).await.unwrap();
+
+        let without_source = p.provider(node);
+        assert!(without_source.migrate_to_pool("root").await.unwrap_err().to_string().contains("migrate_from"));
+        assert!(without_source.bootstrap_enroll(&p.both(), &p.bundles, "root").await.is_err(), "not over a record");
+        let n = p.provider(node).with_migration_source(source);
+        assert!(n.recover_kek().await.is_err(), "a pool node never unseals a per-node record");
+        n.bootstrap_enroll(&p.both(), &p.bundles, "root").await.unwrap();
+        let out = n.migrate_to_pool("root").await.unwrap();
+        assert_eq!(out["per_node_copies_dropped"], 1, "{out}");
+
+        let v1: serde_json::Value = serde_json::from_slice(FIXTURE_RECORD).unwrap();
+        let record = n.pool_record().await.unwrap();
+        assert_eq!(record.topology, Topology::Pool);
+        assert_eq!(record.cluster_uuid, v1["cluster_uuid"].as_str().unwrap(), "the cluster keeps its identity");
+        assert_eq!(record.epoch, v1["epoch"].as_u64().unwrap());
+        assert!(record.legacy_node_blobs.is_empty() && record.wrap_keys.contains_key(&record.epoch));
+        assert!(record.members.values().all(|m| m.attestation_fps.len() == 3), "attested at bootstrap");
+        let kek: Vec<u8> = (0u8..32).collect();
+        assert_eq!(n.recover_kek().await.unwrap().as_slice(), kek.as_slice(), "the fixture's KEK, through the pool");
+        assert!(n.migrate_to_pool("root").await.is_err(), "one-way, once");
+        let _ = std::fs::remove_file(&state);
     }
 }

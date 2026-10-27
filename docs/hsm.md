@@ -319,7 +319,15 @@ bvault operator hsm repair --run                                # drops hsm-b's 
   YubiHSM 2 is refused until the Yubico attestation chain is pinned, so
   bootstrap and `member add` stop there; nothing on the device path is
   verified on hardware yet (phase 7).
-- **Not yet:** epoch rotation and `migrate-to-pool`.
+- **Epoch rotation:** `bvault operator hsm rotate-epoch --admin hsm-a --admin hsm-b`
+  generates new wrap keys on every active member, re-wraps the KEK and every
+  custody set to the next epoch and deletes the old keys; an interrupted run
+  resumes. Do not roll back past this build after a rotation.
+- **Per-node to pool:** run the node with the pool config plus
+  `migrate_from { state_path = "…" }` (mock) or
+  `migrate_from { connector = "…", password = "env:VAR" }`, then
+  `operator hsm bootstrap …` and `bvault operator hsm migrate-to-pool` on that
+  node (loopback). The cluster keeps its id and epoch; the change is one-way.
 
 ### Failure behavior (fail-closed)
 

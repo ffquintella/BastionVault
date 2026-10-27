@@ -388,6 +388,13 @@ pub(crate) const V2_ONLY: &[ResourceSpec] = &[
         route!(cluster_local Post => sys_hsm_bootstrap_request_handler,
             "HSM pool init bootstrap before any token can exist: loopback peer only, refused once initialized, needs every member's bv-admin credential"),
     ]),
+    resource!("/hsm/migrate-to-pool" => [
+        route!(cluster_local Post => sys_hsm_migrate_request_handler,
+            "per-node to pool HSM migration while the node is sealed (no token can be checked): loopback peer only, needs a `migrate_from` block, a per-node seal record and a completed bootstrap"),
+    ]),
+    resource!("/hsm/rotate-epoch" => [
+        route!(routed Post => sys_hsm_pool_request_handler, "sys/hsm/rotate-epoch"),
+    ]),
     resource!("/hsm/members" => [route!(routed Get => sys_hsm_pool_request_handler, "sys/hsm/members")]),
     resource!("/hsm/members/{name}/retire" => [
         route!(routed Post => sys_hsm_pool_request_handler, "sys/hsm/members/{name}/retire"),

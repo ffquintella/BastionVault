@@ -199,6 +199,7 @@ impl SystemBackend {
         let sys_backend_hsm_node_revoke = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_hsm_repair_read = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_hsm_repair_run = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_hsm_rotate_epoch = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_policy_schema = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_owner_backfill = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_sso_settings_read = self.self_ptr.upgrade().unwrap().clone();
@@ -850,6 +851,19 @@ impl SystemBackend {
                     operations: [
                         {op: Operation::Write, handler: sys_backend_hsm_node_enroll.handle_hsm_node_enroll},
                         {op: Operation::Delete, handler: sys_backend_hsm_node_revoke.handle_hsm_node_revoke}
+                    ]
+                },
+                {
+                    pattern: "hsm/rotate-epoch$",
+                    fields: {
+                        "admin_credentials": {
+                            field_type: FieldType::Map,
+                            required: true,
+                            description: "Member name to bv-admin credential (every active member), for this request only."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: sys_backend_hsm_rotate_epoch.handle_hsm_rotate_epoch}
                     ]
                 },
                 {
@@ -1669,7 +1683,7 @@ impl SystemBackend {
             // Admin reads/writes are gated by policy on the explicit
             // mount/name paths instead. `identity/profile/*` is caller-scoped
             // for the same reason and is likewise never root-scoped.
-            root_paths: ["mounts/*", "auth/*", "remount", "policy", "policy/*", "audit", "audit/*", "audit-retention", "seal", "raw/*", "revoke-prefix/*", "leases/revoke-failed", "leases/revoke-failed/*", "cache/flush", "owner/backfill", "sso/settings", "namespaces", "namespaces/*", "namespace-links", "namespace-links/*", "identity/ns-assignment", "identity/ns-assignment/*", "dos/config", "dos/stats", "dos/bans/*", "mcp/config", "mcp/transcripts", "mcp/transcripts/*", "hsm/members", "hsm/members/*", "hsm/nodes", "hsm/nodes/*", "hsm/repair"],
+            root_paths: ["mounts/*", "auth/*", "remount", "policy", "policy/*", "audit", "audit/*", "audit-retention", "seal", "raw/*", "revoke-prefix/*", "leases/revoke-failed", "leases/revoke-failed/*", "cache/flush", "owner/backfill", "sso/settings", "namespaces", "namespaces/*", "namespace-links", "namespace-links/*", "identity/ns-assignment", "identity/ns-assignment/*", "dos/config", "dos/stats", "dos/bans/*", "mcp/config", "mcp/transcripts", "mcp/transcripts/*", "hsm/members", "hsm/members/*", "hsm/nodes", "hsm/nodes/*", "hsm/repair", "hsm/rotate-epoch"],
             // NB: `mcp/apps/<name>/machine-waiver` is NOT listed here even
             // though it is sudo-gated: `root_paths` only supports an exact
             // path or a trailing-`*` prefix (`new_radix_from_paths` in
@@ -4223,6 +4237,20 @@ impl SystemBackend {
         let admin = if admin.is_empty() { None } else { Some(&admin) };
         let report = hsm.repair(Some(barrier), admin).await.map_err(Self::hsm_refusal)?;
         Self::hsm_json(serde_json::to_value(report)?)
+    }
+
+    /// `POST v2/sys/hsm/rotate-epoch` — new wrap keys, every set re-wrapped (sudo, admin credentials).
+    pub async fn handle_hsm_rotate_epoch(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let admin = Self::hsm_admin_credentials(req)?;
+        let actor = crate::modules::identity::caller_audit_actor(req);
+        let provider = self.hsm_pool_provider()?;
+        let hsm = provider.as_hsm().ok_or(RvError::ErrHsmUnavailable)?;
+        let barrier: Arc<dyn crate::storage::Storage> = self.core.barrier.clone();
+        Self::hsm_json(hsm.rotate_epoch(&admin, Some(barrier), &actor).await.map_err(Self::hsm_refusal)?)
     }
 
     pub async fn handle_internal_ui_mounts_read(

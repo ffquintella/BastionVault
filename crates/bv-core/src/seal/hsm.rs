@@ -303,12 +303,14 @@ pub struct HsmSealProvider {
     repair_state: Mutex<Option<RepairReport>>,
     /// Audit delivery and the repair tick (pool, from `open`).
     hooks: Option<Arc<hooks::ProviderHooks>>,
+    /// The per-node device `migrate_from` names (pool, `migrate-to-pool`).
+    migration_source: Option<Arc<dyn HsmBackend>>,
 }
 
 impl HsmSealProvider {
     /// The per-node topology over this node's own device.
     pub fn new(backend: Arc<dyn HsmBackend>, physical: Arc<dyn PhysicalBackend>, config: ResolvedHsmConfig) -> Self {
-        Self { devices: Devices::PerNode(backend), physical, config, repair_state: Mutex::new(None), hooks: None }
+        Self { devices: Devices::PerNode(backend), physical, config, repair_state: Mutex::new(None), hooks: None, migration_source: None }
     }
 
     /// The pool topology over pre-opened member clients (`opened`, by member
@@ -364,7 +366,7 @@ impl HsmSealProvider {
         let specs = cache.specs_for(pool_cfg, bootstrap);
         let current = build_pool(&config.node_id, pool_cfg, specs, 0, &clock, &events)?;
         let devices = PoolDevices { cache, clock, events, current: Mutex::new(current), probing: AtomicBool::new(false) };
-        Ok(Self { devices: Devices::Pool(devices), physical, config, repair_state: Mutex::new(None), hooks: None })
+        Ok(Self { devices: Devices::Pool(devices), physical, config, repair_state: Mutex::new(None), hooks: None, migration_source: None })
     }
 
     /// Open the configured topology: per node, the device; for a pool, the
@@ -390,6 +392,19 @@ impl HsmSealProvider {
         let mut provider =
             Self::new_pool_with(opener, credentials, physical, config.clone(), clock, hooks.clone())?;
         provider.hooks = Some(hooks);
+        if let Some(from) = &pool_cfg.migrate_from {
+            // Explicit: a configured migration source that cannot open stops
+            // the node rather than leaving `migrate-to-pool` silently absent.
+            let per_node = ResolvedHsmConfig {
+                connector: from.connector.clone(),
+                state_path: from.state_path.clone(),
+                password: from.password.clone(),
+                objects: crate::hsm::HsmObjectIds { auth_key: from.auth_key_id, ..config.objects },
+                pool: None,
+                ..config.clone()
+            };
+            provider.migration_source = Some(crate::hsm::new_backend(&per_node).await?);
+        }
         let provider = Arc::new(provider);
         if let Err(e) = provider.refresh_membership().await {
             log::error!(target: "security", "HSM pool membership refresh failed at startup: {e}");
@@ -443,6 +458,12 @@ impl HsmSealProvider {
             }
         }
         Ok(())
+    }
+
+    /// The per-node device `migrate-to-pool` reads the KEK from.
+    pub fn with_migration_source(mut self, device: Arc<dyn HsmBackend>) -> Self {
+        self.migration_source = Some(device);
+        self
     }
 
     /// Probe the pool members every 10 s in the background (pool only).
@@ -593,14 +614,27 @@ impl HsmSealProvider {
 
     #[maybe_async::maybe_async]
     async fn init_pool(&self, devices: &PoolDevices, kek: &[u8]) -> Result<(), RvError> {
+        let mut uuid_bytes = [0u8; 16];
+        rand::rng().fill_bytes(&mut uuid_bytes);
+        self.write_pool_record(devices, kek, &hex::encode(uuid_bytes), 0, None).await
+    }
+
+    /// Dual-wrap `kek` for the configured members and write the pool record.
+    /// `replacing`: the exact per-node record bytes a migration replaces;
+    /// `None` (init) refuses any existing record.
+    #[maybe_async::maybe_async]
+    async fn write_pool_record(
+        &self,
+        devices: &PoolDevices,
+        kek: &[u8],
+        cluster_uuid: &str,
+        epoch: u64,
+        replacing: Option<&[u8]>,
+    ) -> Result<(), RvError> {
         self.check_pool_init(devices).await?;
         let pool_cfg = self.config.pool.as_ref().ok_or_else(|| RvError::ErrHsm("not a pool provider".into()))?;
         let pool = devices.pool();
-
-        let mut uuid_bytes = [0u8; 16];
-        rand::rng().fill_bytes(&mut uuid_bytes);
-        let cluster_uuid = hex::encode(uuid_bytes);
-        let epoch = 0u64;
+        let cluster_uuid = cluster_uuid.to_string();
         let ctx = self.barrier_context(&cluster_uuid, epoch);
 
         // Spec § Bootstrap, step 1: a node that authenticates with node
@@ -671,12 +705,22 @@ impl HsmSealProvider {
         for copy in copies {
             kek_set.insert_copy(copy)?;
         }
-        let record = HsmSealRecord::new_pool(cluster_uuid, epoch, members, kek_set);
+        let mut record = HsmSealRecord::new_pool(cluster_uuid, epoch, members, kek_set);
+        // Write-new: a pool record names its wrap keys from the start.
+        record.wrap_keys.insert(epoch, record::WrapKeyIds::of(&self.config.objects));
         {
             // Membership writer: under `hsm-custody`, and never over a record.
             let _custody_lock = self.physical.lock(crate::hsm::custody_store::HSM_CUSTODY_LOCK).await?;
-            if self.physical.get(HSM_SEAL_RECORD_PATH).await?.is_some() {
-                return Err(RvError::ErrHsm("an HSM seal record already exists; refusing to overwrite it".into()));
+            let current = self.physical.get(HSM_SEAL_RECORD_PATH).await?.map(|e| e.value);
+            match (replacing, current) {
+                (None, None) => {}
+                (None, Some(_)) => {
+                    return Err(RvError::ErrHsm("an HSM seal record already exists; refusing to overwrite it".into()))
+                }
+                (Some(old), Some(cur)) if cur == old => {}
+                (Some(_), _) => {
+                    return Err(RvError::ErrHsm("the HSM seal record changed during migration; nothing was written".into()))
+                }
             }
             self.store_record(&record).await?;
             // The attestation now lives in the record's member entries.
@@ -768,8 +812,8 @@ impl HsmSealProvider {
                  vault stays sealed"
             );
             return Err(RvError::ErrHsm(
-                "the HSM seal record has topology `per-node`, but this node is configured for a pool; moving a \
-                 per-node cluster to a pool is `migrate-to-pool` (T454 phase 4)"
+                "the HSM seal record has topology `per-node`, but this node is configured for a pool; to move it, \
+                 add a `migrate_from` block, run `operator hsm bootstrap`, then `operator hsm migrate-to-pool`"
                     .into(),
             ));
         }
@@ -838,7 +882,8 @@ impl HsmSealProvider {
             member.hsm_id(),
             authz::audit_record(&authorization)
         );
-        backend.unwrap_data(self.config.objects.wrap_barrier, ctx, &blob_bytes).await
+        let keys = record.wrap_key_ids(record.epoch, &self.config.objects)?;
+        backend.unwrap_data(keys.barrier, ctx, &blob_bytes).await
     }
 
     #[maybe_async::maybe_async]
@@ -1425,6 +1470,7 @@ mod tests {
                     repair_rate: crate::hsm::repair::DEFAULT_REPAIR_RATE,
                     credential_dir: String::new(),
                     link: None,
+                    migrate_from: None,
                     members: vec![member(&self.name_a, &self.a, true), member(&self.name_b, &self.b, false)],
                 }),
                 recovery_explicit: true,
@@ -1471,6 +1517,7 @@ mod tests {
             epoch: 0,
             ecdh_key: HsmObjectIds::default().identity,
             binding_pub,
+            pqc_wrap_keys: Default::default(),
         };
         CustodyStore::with_pool(storage, pool, provider.config.clone(), scope)
     }

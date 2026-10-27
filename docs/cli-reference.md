@@ -154,6 +154,8 @@ bvault operator hsm repair [--run [--admin <member>…]]
 # on the init node (loopback) before `operator init`.
 bvault operator hsm provision (--mock-state-path <file> --serial <s> | --connector <url>) --out <bundle.json> [--adopt] [--admin-password env:VAR] [--factory-password env:VAR]
 bvault operator hsm bootstrap --bundle <member>=<file> [--bundle …] --admin <member> [--admin <member>…]
+bvault operator hsm rotate-epoch --admin <member> [--admin <member>…]
+bvault operator hsm migrate-to-pool   # loopback, with `migrate_from` configured, after bootstrap
 ~~~
 
 | Option | Description |

@@ -190,6 +190,21 @@ pub struct CustodyScope {
     pub ecdh_key: HsmObjectId,
     /// Cluster ECDH binding point (SEC1-uncompressed P-256).
     pub binding_pub: Vec<u8>,
+    /// `bv-wrap-pqc` id by epoch, from the seal record's `wrap_keys`; empty
+    /// is a pool that never rotated (the config's id at every epoch).
+    pub pqc_wrap_keys: std::collections::BTreeMap<u64, HsmObjectId>,
+}
+
+impl CustodyScope {
+    fn pqc_key(&self, epoch: u64, default: HsmObjectId) -> Result<HsmObjectId, RvError> {
+        if self.pqc_wrap_keys.is_empty() {
+            return Ok(default);
+        }
+        self.pqc_wrap_keys
+            .get(&epoch)
+            .copied()
+            .ok_or_else(|| RvError::ErrHsm(format!("no bv-wrap-pqc key recorded for epoch {epoch}")))
+    }
 }
 
 /// A cached unwrapped seed with an expiry. The seed is `Zeroizing`.
@@ -276,7 +291,8 @@ impl CustodyStore {
         let epoch = self.scope.epoch;
         let seed_context = kind.seed_context(&self.scope.cluster_uuid, epoch);
         let wrap_ctx = Context::new(seed_context, kind.purpose(), epoch, &self.config.node_id);
-        let outcome = self.pool.wrap_all(self.config.objects.wrap_pqc, &wrap_ctx, &material.seed).await?;
+        let key = self.scope.pqc_key(epoch, self.config.objects.wrap_pqc)?;
+        let outcome = self.pool.wrap_all(key, &wrap_ctx, &material.seed).await?;
         let public_key = material.public_key.clone();
         drop(material); // zeroizes the seed
 
@@ -424,7 +440,7 @@ impl CustodyStore {
             member.hsm_id(),
             authz::audit_record(&authorization)
         );
-        backend.unwrap_data(self.config.objects.wrap_pqc, &ctx, copy_bytes).await
+        backend.unwrap_data(self.scope.pqc_key(epoch, self.config.objects.wrap_pqc)?, &ctx, copy_bytes).await
     }
 
     /// Delete the key behind `handle`. Unknown handles are an error.
@@ -584,6 +600,7 @@ mod tests {
             epoch: 0,
             ecdh_key: HsmObjectIds::default().identity,
             binding_pub: backend.identity_public_key().unwrap(),
+            pqc_wrap_keys: Default::default(),
         };
         Arc::new(CustodyStore::new(storage, backend, cfg(ttl), scope).unwrap())
     }

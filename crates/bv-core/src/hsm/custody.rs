@@ -135,6 +135,7 @@ mod tests {
             epoch: 0,
             ecdh_key: HsmObjectIds::default().identity,
             binding_pub: backend.identity_public_key().unwrap(),
+            pqc_wrap_keys: Default::default(),
         };
         Arc::new(CustodyStore::new(storage, backend, cfg(ttl), scope).unwrap())
     }

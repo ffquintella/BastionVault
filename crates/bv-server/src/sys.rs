@@ -365,6 +365,42 @@ async fn sys_hsm_bootstrap_request_handler(
     }
 }
 
+/// POST `/v2/sys/hsm/migrate-to-pool` — move a per-node HSM seal record onto
+/// the pool (T454 phase 4), then try to unseal. The node is sealed, so no
+/// token can be checked: accepted only from a loopback peer.
+async fn sys_hsm_migrate_request_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, HttpError> {
+    let peer = req.conn_data::<crate::Connection>().map(|c| c.peer).or_else(|| req.peer_addr());
+    if !peer.is_some_and(|p| p.ip().is_loopback()) {
+        return Ok(response_error(StatusCode::FORBIDDEN, "HSM migrate-to-pool is accepted only from loopback on the node"));
+    }
+    let provider = core.seal_provider();
+    let Some(hsm) = provider.as_hsm() else {
+        return Ok(response_error(StatusCode::BAD_REQUEST, "this vault's seal is not an HSM seal"));
+    };
+    #[cfg(not(feature = "sync_handler"))]
+    let outcome = hsm.migrate_to_pool("migrate-to-pool").await;
+    #[cfg(feature = "sync_handler")]
+    let outcome = hsm.migrate_to_pool("migrate-to-pool");
+    let mut data = match outcome {
+        Ok(data) => data,
+        Err(e) => return Ok(response_error(StatusCode::BAD_REQUEST, &e.to_string())),
+    };
+    #[cfg(not(feature = "sync_handler"))]
+    let unsealed = core.auto_unseal().await;
+    #[cfg(feature = "sync_handler")]
+    let unsealed = core.auto_unseal();
+    if let Some(obj) = data.as_object_mut() {
+        obj.insert("unsealed".into(), json!(unsealed.as_ref().is_ok_and(|u| *u)));
+        if let Err(e) = unsealed {
+            obj.insert("unseal_error".into(), json!(e.to_string()));
+        }
+    }
+    Ok(response_json_ok(None, json!({ "data": data })))
+}
+
 /// GET `/v2/sys/policy-schema` — the `sql_*` write gate (read-only).
 async fn sys_policy_schema_request_handler(
     req: HttpRequest,

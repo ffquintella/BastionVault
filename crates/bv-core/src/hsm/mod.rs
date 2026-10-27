@@ -291,6 +291,29 @@ pub struct ResolvedLink {
     pub key_file: String,
 }
 
+/// The per-node device a pool node migrates its KEK from (`migrate_from`).
+#[derive(Clone, PartialEq, Eq)]
+pub struct ResolvedMigrateFrom {
+    /// `yubihsm-connector` URL or `usb` (yubihsm2).
+    pub connector: String,
+    /// The mock device's state file (mock).
+    pub state_path: String,
+    pub auth_key_id: u16,
+    /// The per-node auth-key password, from `env:` (yubihsm2 only).
+    pub password: Zeroizing<String>,
+}
+
+impl std::fmt::Debug for ResolvedMigrateFrom {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedMigrateFrom")
+            .field("connector", &self.connector)
+            .field("state_path", &self.state_path)
+            .field("auth_key_id", &self.auth_key_id)
+            .field("password", &"<redacted>")
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedPoolConfig {
     /// 1 (default) or 2: copies a new blob set needs before it is stored.
@@ -301,6 +324,21 @@ pub struct ResolvedPoolConfig {
     pub link: Option<ResolvedLink>,
     /// Exactly [`POOL_MEMBER_COUNT`], sorted by name.
     pub members: Vec<ResolvedPoolMember>,
+    /// The per-node device to migrate the KEK from (`migrate-to-pool`).
+    pub migrate_from: Option<ResolvedMigrateFrom>,
+}
+
+/// Raw `migrate_from { ... }` block inside a pool `hsm` block.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct HsmMigrateFromBlock {
+    #[serde(default)]
+    pub connector: String,
+    #[serde(default)]
+    pub state_path: String,
+    #[serde(default)]
+    pub auth_key_id: u16,
+    #[serde(default)]
+    pub password: String,
 }
 
 /// Raw `member "<name>" { ... }` block inside a pool `hsm` block.
@@ -346,6 +384,9 @@ pub struct HsmConfigBlock {
     pub link: Option<HsmLinkBlock>,
     #[serde(default)]
     pub member: BTreeMap<String, HsmMemberBlock>,
+    /// Pool only: the per-node device `migrate-to-pool` reads the KEK from.
+    #[serde(default)]
+    pub migrate_from: Option<HsmMigrateFromBlock>,
     /// Device-log drain mode (T454 phase 6). Refused until it is implemented.
     #[serde(default)]
     pub device_audit: String,
@@ -510,6 +551,9 @@ fn refuse_pool_only_settings(raw: &HsmConfigBlock) -> Result<(), RvError> {
     if raw.repair_rate.is_some() {
         stray.push("repair_rate");
     }
+    if raw.migrate_from.is_some() {
+        stray.push("migrate_from");
+    }
     if !raw.credential_dir.is_empty() {
         stray.push("credential_dir");
     }
@@ -652,7 +696,32 @@ fn resolve_pool(backend_type: &str, raw: &HsmConfigBlock) -> Result<ResolvedPool
         }
     };
 
-    Ok(ResolvedPoolConfig { min_wrap_copies, repair_rate, credential_dir, link, members })
+    let migrate_from = match &raw.migrate_from {
+        None => None,
+        Some(m) => {
+            let from = ResolvedMigrateFrom {
+                connector: m.connector.trim().to_string(),
+                state_path: m.state_path.trim().to_string(),
+                auth_key_id: if m.auth_key_id == 0 { HsmObjectIds::default().auth_key } else { m.auth_key_id },
+                password: Zeroizing::new(String::new()),
+            };
+            let from = match backend_type {
+                "mock" if !from.state_path.is_empty() && from.connector.is_empty() && m.password.is_empty() => from,
+                "mock" => return Err(config_err("a mock `migrate_from` takes only `state_path`")),
+                _ if !from.connector.is_empty() && from.state_path.is_empty() && m.password.starts_with("env:") => {
+                    ResolvedMigrateFrom { password: resolve_secret(&m.password)?, ..from }
+                }
+                _ => {
+                    return Err(config_err(
+                        "a yubihsm2 `migrate_from` needs `connector` and `password = \"env:VAR\"` (never a literal)",
+                    ))
+                }
+            };
+            Some(from)
+        }
+    };
+
+    Ok(ResolvedPoolConfig { min_wrap_copies, repair_rate, credential_dir, link, members, migrate_from })
 }
 
 /// Longest node id accepted; generous for FQDN-style ids.
@@ -1101,6 +1170,33 @@ mod tests {
         rate.member.clear();
         rate.repair_rate = Some(2);
         rejects("mock", &rate, "repair_rate");
+    }
+
+    #[test]
+    fn migrate_from_is_pool_only_and_never_a_literal_password() {
+        let mut pool = mock_pool();
+        pool.migrate_from = Some(HsmMigrateFromBlock { state_path: "/tmp/old.json".into(), ..Default::default() });
+        let cfg = resolve_config("mock", &pool).unwrap();
+        assert_eq!(cfg.pool.unwrap().migrate_from.unwrap().state_path, "/tmp/old.json");
+        pool.migrate_from = Some(HsmMigrateFromBlock { connector: "usb".into(), ..Default::default() });
+        rejects("mock", &pool, "only `state_path`");
+
+        let mut yubi = yubi_pool();
+        yubi.migrate_from =
+            Some(HsmMigrateFromBlock { connector: "usb".into(), password: "hunter2".into(), ..Default::default() });
+        rejects("yubihsm2", &yubi, "never a literal");
+        std::env::set_var("BV_TEST_MIGRATE_PW", "s3cret");
+        yubi.migrate_from = Some(HsmMigrateFromBlock {
+            connector: "usb".into(),
+            password: "env:BV_TEST_MIGRATE_PW".into(),
+            ..Default::default()
+        });
+        let from = resolve_config("yubihsm2", &yubi).unwrap().pool.unwrap().migrate_from.unwrap();
+        assert!(!format!("{from:?}").contains("s3cret"), "never printed");
+
+        let mut per_node = HsmConfigBlock { node_id: "n".into(), ..Default::default() };
+        per_node.migrate_from = Some(HsmMigrateFromBlock::default());
+        rejects("mock", &per_node, "migrate_from");
     }
 
     #[test]

@@ -227,6 +227,13 @@ pub trait HsmAdminSession: Send + Sync {
     /// delegated capabilities. Refuses an id outside the node range or in use.
     async fn put_node_auth_key(&self, label: &str, credential: &NodeCredential) -> Result<(), RvError>;
 
+    /// `generate-wrap-key` (AES-256-CCM, `wrap-data` / `unwrap-data`, domain 1,
+    /// nothing delegated): an epoch's new key. Refuses an id in use.
+    async fn generate_wrap_key(&self, id: HsmObjectId, label: &str) -> Result<(), RvError>;
+
+    /// Delete a wrap key (an epoch no set references). `Ok(false)` if absent.
+    async fn delete_wrap_key(&self, id: HsmObjectId) -> Result<bool, RvError>;
+
     /// Delete a node authentication key. `Ok(false)` when it was not there.
     async fn delete_node_auth_key(&self, auth_key_id: u16) -> Result<bool, RvError>;
 

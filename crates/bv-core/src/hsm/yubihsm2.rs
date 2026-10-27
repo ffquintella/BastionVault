@@ -456,6 +456,22 @@ impl HsmAdminSession for YubiHsm2AdminSession {
         Ok(())
     }
 
+    async fn generate_wrap_key(&self, id: HsmObjectId, label_text: &str) -> Result<(), RvError> {
+        let wrap = Capability::WRAP_DATA | Capability::UNWRAP_DATA;
+        self.client()?
+            .generate_wrap_key(id, label(label_text)?, Domain::DOM1, wrap, Capability::empty(), wrap::Algorithm::Aes256Ccm)
+            .map_err(map_yubi)?;
+        Ok(())
+    }
+
+    async fn delete_wrap_key(&self, id: HsmObjectId) -> Result<bool, RvError> {
+        match self.client()?.delete_object(id, object::Type::WrapKey) {
+            Ok(()) => Ok(true),
+            Err(e) if is_not_found(&e) => Ok(false),
+            Err(e) => Err(map_yubi(e)),
+        }
+    }
+
     async fn delete_node_auth_key(&self, auth_key_id: u16) -> Result<bool, RvError> {
         node_slot_of(auth_key_id)?;
         match self.client()?.delete_object(auth_key_id, object::Type::AuthenticationKey) {

@@ -225,6 +225,8 @@ request; they are never stored, logged by the server or returned.
 | DELETE | `/v2/sys/hsm/nodes/{node_id}` | `admin_credentials` | Revoke a node; unreachable members get a pending revocation |
 | GET | `/v2/sys/hsm/repair` | — | `repair_rate`, `interval_secs`, `last_run` (the report below) |
 | POST | `/v2/sys/hsm/repair` | `admin_credentials` (optional) | Run repair now; with credentials it also applies pending revocations and promotes joining members |
+| POST | `/v2/sys/hsm/rotate-epoch` | `admin_credentials` (every active member) | New wrap keys and every set re-wrapped to the next epoch; resumes an interrupted rotation |
+| POST | `/v2/sys/hsm/migrate-to-pool` | — | **Loopback peer only, node sealed, no token**: move the per-node seal record onto the pool (needs `migrate_from` and a bootstrap), then auto-unseal |
 
 ~~~json
 POST /v2/sys/hsm/nodes/vault-2

@@ -16,8 +16,22 @@ use crate::{
     hsm::{
         blob::{AuthzAlg, HsmId, Purpose},
         blobset::{deserialize_unique_map, BvHsmBlobSet},
+        HsmObjectId, HsmObjectIds,
     },
 };
+
+/// The wrap keys of one epoch, the same ids on every live member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WrapKeyIds {
+    pub barrier: HsmObjectId,
+    pub pqc: HsmObjectId,
+}
+
+impl WrapKeyIds {
+    pub fn of(objects: &HsmObjectIds) -> Self {
+        Self { barrier: objects.wrap_barrier, pqc: objects.wrap_pqc }
+    }
+}
 
 /// Pre-T454 record: `kek_blobs: node_id → v1 blob`.
 pub const HSM_SEAL_RECORD_VERSION_V1: u8 = 1;
@@ -104,6 +118,14 @@ pub struct HsmSealRecord {
     /// node_id → serialized v1 `BvHsmBlob` of the KEK, kept byte for byte.
     #[serde(default, deserialize_with = "deserialize_unique_map")]
     pub legacy_node_blobs: BTreeMap<String, Vec<u8>>,
+    /// Wrap-key ids by epoch (T454 phase 4, `rotate-epoch`). Absent on every
+    /// record written before it: those use the config's ids at any epoch.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty", deserialize_with = "deserialize_unique_map")]
+    pub wrap_keys: BTreeMap<u64, WrapKeyIds>,
+    /// The epoch a rotation is moving to; `Some` until it completes, so an
+    /// interrupted rotation resumes with the keys it already created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotating_to: Option<u64>,
 }
 
 /// A decoded record plus the version it was stored at, so a caller can tell
@@ -143,7 +165,19 @@ impl HsmSealRecord {
             kek: Some(kek),
             recovery_pub: None,
             legacy_node_blobs: BTreeMap::new(),
+            wrap_keys: BTreeMap::new(),
+            rotating_to: None,
         }
+    }
+
+    /// The wrap keys of `epoch`: the recorded ones, or the config's on a
+    /// record that predates rotation. A recorded map without `epoch` is an
+    /// error, never a guess.
+    pub fn wrap_key_ids(&self, epoch: u64, defaults: &HsmObjectIds) -> Result<WrapKeyIds, RvError> {
+        if self.wrap_keys.is_empty() {
+            return Ok(WrapKeyIds::of(defaults));
+        }
+        self.wrap_keys.get(&epoch).copied().ok_or_else(|| invalid(format!("no wrap keys recorded for epoch {epoch}")))
     }
 
     /// A fresh pool record: `members` are authoritative from here on.
@@ -157,6 +191,8 @@ impl HsmSealRecord {
             kek: Some(kek),
             recovery_pub: None,
             legacy_node_blobs: BTreeMap::new(),
+            wrap_keys: BTreeMap::new(),
+            rotating_to: None,
         }
     }
 
@@ -182,6 +218,8 @@ impl HsmSealRecord {
                     kek: None,
                     recovery_pub: None,
                     legacy_node_blobs: v1.kek_blobs,
+                    wrap_keys: BTreeMap::new(),
+                    rotating_to: None,
                 }
             }
             HSM_SEAL_RECORD_VERSION => serde_json::from_slice(bytes).map_err(|e| invalid(format!("v2: {e}")))?,
@@ -217,6 +255,14 @@ impl HsmSealRecord {
             }
             if kek.epoch != self.epoch {
                 return Err(invalid(format!("kek set epoch {} differs from record epoch {}", kek.epoch, self.epoch)));
+            }
+        }
+        if !self.wrap_keys.is_empty() && !self.wrap_keys.contains_key(&self.epoch) {
+            return Err(invalid(format!("wrap keys recorded, but none for the current epoch {}", self.epoch)));
+        }
+        if let Some(target) = self.rotating_to {
+            if target <= self.epoch || !self.wrap_keys.contains_key(&target) {
+                return Err(invalid(format!("rotation to epoch {target} from {} has no recorded keys", self.epoch)));
             }
         }
         for (node_id, blob) in &self.legacy_node_blobs {
@@ -292,6 +338,37 @@ mod tests {
             state,
             pending_revocations: vec![],
         }
+    }
+
+    #[test]
+    fn wrap_keys_read_old_and_write_new() {
+        let defaults = HsmObjectIds::default();
+        let mut rec = HsmSealRecord::new_pool(
+            "clu".into(),
+            0,
+            BTreeMap::from([(HsmId::from_parts("mock", "A").unwrap(), member(MemberState::Active))]),
+            v2_kek_set("A", 0),
+        );
+        // A record from before rotation: no map, the config's ids, and it
+        // still encodes without the field (byte-compatible with part 2).
+        assert_eq!(rec.wrap_key_ids(7, &defaults).unwrap(), WrapKeyIds::of(&defaults));
+        let old = rec.encode().unwrap();
+        assert!(!String::from_utf8(old.clone()).unwrap().contains("wrap_keys"));
+        assert_eq!(HsmSealRecord::decode(&old).unwrap().record.wrap_keys, BTreeMap::new());
+
+        rec.wrap_keys.insert(0, WrapKeyIds { barrier: 0x20, pqc: 0x21 });
+        let new = HsmSealRecord::decode(&rec.encode().unwrap()).unwrap().record;
+        assert_eq!(new.wrap_key_ids(0, &defaults).unwrap(), WrapKeyIds { barrier: 0x20, pqc: 0x21 });
+        assert!(new.wrap_key_ids(1, &defaults).is_err(), "never a guess for an unrecorded epoch");
+
+        let mut no_current = rec.clone();
+        no_current.wrap_keys = BTreeMap::from([(3, WrapKeyIds { barrier: 1, pqc: 2 })]);
+        assert!(no_current.encode().is_err());
+        let mut rotating = rec.clone();
+        rotating.rotating_to = Some(1);
+        assert!(rotating.encode().is_err(), "the target epoch's keys must be recorded first");
+        rotating.wrap_keys.insert(1, WrapKeyIds { barrier: 0x22, pqc: 0x23 });
+        HsmSealRecord::decode(&rotating.encode().unwrap()).unwrap();
     }
 
     #[test]

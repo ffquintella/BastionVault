@@ -393,6 +393,30 @@ impl HsmAdminSession for MockAdminSession {
         persist_state(&self.device.state_path, &state)
     }
 
+    async fn generate_wrap_key(&self, id: HsmObjectId, _label: &str) -> Result<(), RvError> {
+        self.device.session(ADMIN_SESSION_OWNER)?;
+        let mut state = self.device.state.write().map_err(|_| RvError::ErrRwLockWritePoison)?;
+        if state.objects.contains_key(&id) {
+            return Err(RvError::ErrHsm(format!("object {id} already exists on mock HSM {}", state.serial)));
+        }
+        ensure_object(&mut state, id, MockKind::Wrap);
+        persist_state(&self.device.state_path, &state)
+    }
+
+    async fn delete_wrap_key(&self, id: HsmObjectId) -> Result<bool, RvError> {
+        self.device.session(ADMIN_SESSION_OWNER)?;
+        let mut state = self.device.state.write().map_err(|_| RvError::ErrRwLockWritePoison)?;
+        match state.objects.get(&id).map(|o| o.kind) {
+            None => Ok(false),
+            Some(MockKind::Wrap) => {
+                state.objects.remove(&id);
+                persist_state(&self.device.state_path, &state)?;
+                Ok(true)
+            }
+            Some(_) => Err(RvError::ErrHsm(format!("object {id} is not a wrap key"))),
+        }
+    }
+
     async fn delete_node_auth_key(&self, auth_key_id: u16) -> Result<bool, RvError> {
         self.device.session(ADMIN_SESSION_OWNER)?;
         node_slot_of(auth_key_id)?;
