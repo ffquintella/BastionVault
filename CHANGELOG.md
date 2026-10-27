@@ -140,6 +140,10 @@ EXAMPLE ENTRY:
 
 ### Changed
 
+#### AI assistants page
+
+- **Pair AI assistants from their own menu entry, available to any signed-in non-root user, instead of Settings → AI Assistants** (S115) -- The pairing, serve-toggle and connect-snippet panel moved to a new *AI Assistants* page (`/ai-assistants`) in the workspace menu. It is hidden for root sessions, which the vault refuses to exchange for an assistant token; the vault still authorizes every call with the user's own policies. The Settings tab is gone.
+
 #### MCP namespace selection (Phase 3)
 
 - **Show where an assistant's calls run, as the vault bound its token** (T457, S115)

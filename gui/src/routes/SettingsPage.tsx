@@ -23,7 +23,6 @@ import { UnsealModal } from "../components/UnsealModal";
 import { RustionBastionsTab } from "../components/RustionBastionsTab";
 import { RustionPolicyPanel } from "../components/RustionPolicyPanel";
 import { DosProtectionPanel } from "../components/DosProtectionPanel";
-import { McpAssistantsPanel } from "../components/McpAssistantsPanel";
 import { SessionLayoutCard } from "../components/SessionLayoutCard";
 import { SessionKeyboardCard } from "../components/SessionKeyboardCard";
 import * as api from "../lib/api";
@@ -57,7 +56,11 @@ export function SettingsPage() {
   const [sealConfirm, setSealConfirm] = useState(false);
   const [unsealOpen, setUnsealOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<string>(() => {
-    try { return localStorage.getItem("settings.activeTab") || "general"; } catch { return "general"; }
+    try {
+      const stored = localStorage.getItem("settings.activeTab");
+      // "assistants" moved to its own page; a stale stored tab would render blank.
+      return stored && stored !== "assistants" ? stored : "general";
+    } catch { return "general"; }
   });
   useEffect(() => {
     try { localStorage.setItem("settings.activeTab", activeTab); } catch { /* ignore */ }
@@ -70,7 +73,6 @@ export function SettingsPage() {
     { id: "resources", label: "Resources" },
     { id: "rustion", label: "Rustion" },
     { id: "storage", label: "Storage" },
-    { id: "assistants", label: "AI Assistants" },
   ];
   // Effective data location for the currently-default Local profile.
   // Resolved at mount time so the Connection card reflects what
@@ -966,8 +968,6 @@ export function SettingsPage() {
             }
           }}
         />
-
-        {activeTab === "assistants" && <McpAssistantsPanel />}
 
         {activeTab === "storage" && (<>
         {/* Cloud Storage Targets — OAuth connect flow. Phase 7 of

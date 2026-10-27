@@ -58,6 +58,12 @@ type NavItem = {
    */
   rootOnly?: boolean;
   /**
+   * Hide this item from sessions holding the `root` policy. For features
+   * that act *as* the signed-in user and which the vault refuses to run
+   * from a root token (AI-assistant pairing).
+   */
+  hideForRoot?: boolean;
+  /**
    * The inverse: show this item only inside a child namespace. For
    * per-namespace config whose root-namespace editor lives in Settings
    * (root-only), so each namespace still has a way to reach its own.
@@ -123,6 +129,10 @@ const userNav: NavItem[] = [
     requires: [...SUPER_ADMIN, "pki-admin", "pki-user", ...modulePolicies("pki")],
     requiresMountType: "cert-lifecycle",
   },
+  // AI assistants (MCP) act with the user's own permissions, so any
+  // non-root user may pair one. Desktop-hosted: the page itself explains
+  // when the in-app server is unavailable.
+  { path: "/ai-assistants", label: "AI Assistants", hideForRoot: true },
 ];
 
 // Admin features. The whole section collapses when none of the items
@@ -367,6 +377,7 @@ export function Layout({ children }: LayoutProps) {
     // child-namespace header attached.
     if (item.rootOnly && activeNamespace !== "") return false;
     if (item.nsOnly && activeNamespace === "") return false;
+    if (item.hideForRoot && policySet.has("root")) return false;
     return true;
   }
 
