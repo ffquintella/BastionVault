@@ -437,7 +437,12 @@ fn the_host_pool_drains_a_rotated_target() {
     rt.block_on(async {
         let pool = super::pool::host_pool();
         let key = super::pool::target_key("mount-test", "prod");
-        pool.configure(&key, 1, bv_dynamic::pool::TlsPolicy::default());
+        let settings = bv_dynamic::pool::TargetSettings {
+            root_credential_version: 1,
+            config_generation: 0,
+            tls: bv_dynamic::pool::TlsPolicy::default(),
+        };
+        pool.configure(&key, settings);
         drop(pool.checkout(&key).await.unwrap());
         assert_eq!(pool.idle_count(&key), 1);
         pool.rotate(&key, 2).unwrap();
@@ -820,4 +825,400 @@ async fn a_cached_credential_expires_with_its_window() {
     let later = fx.creds_as(&alice, "cached").await;
     assert_ne!(data_str(&later, "username"), data_str(&first, "username"));
     assert_eq!(fx.generates(), 2);
+}
+
+// ── Host-side connectors ─────────────────────────────────────────────────
+
+use super::test_support::{fake_target, MemStorage};
+
+const ROOT_SECRET: &str = "root-secret-of-the-fake-target";
+
+/// A plugin that has the host execute: it checks out a slot, then asks for
+/// `execute` on it, presenting its stored connection. `mode` makes it
+/// misbehave in one named way.
+struct HostExecDb {
+    url: String,
+    mode: Mutex<&'static str>,
+    /// The host's answer to each `execute`, or its error.
+    answers: Mutex<Vec<Result<Value, String>>>,
+}
+
+impl HostExecDb {
+    fn new(url: &str) -> Arc<Self> {
+        Arc::new(Self { url: url.to_string(), mode: Mutex::new("normal"), answers: Mutex::default() })
+    }
+
+    async fn execute(&self, host: &MockHost<'_>, connection: &Value) -> Result<Value, (i32, String)> {
+        let mode = *self.mode.lock().unwrap();
+        let grant = host.call("dynamic_pool_checkout", json!({ "connection": connection })).await.map_err(host_err)?;
+        let kinds = grant["host_execute"].as_array().cloned().unwrap_or_default();
+        if !kinds.contains(&json!("fake")) {
+            return Err((6, "the host does not grant host execution".into()));
+        }
+        let slot = if mode == "unheld_slot" { json!(999_999) } else { grant["slot"].clone() };
+        let mut execute = json!({
+            "slot": slot,
+            "connector": { "kind": "fake", "url": self.url, "username": "vault-root", "password": ROOT_SECRET },
+        });
+        if mode == "smuggle_statements" {
+            execute["statements"] = json!(["DROP DATABASE app"]);
+        }
+        if mode == "smuggle_tls" {
+            execute["connector"]["insecure_skip_tls_verify"] = json!(true);
+        }
+        if mode == "other_url" {
+            // An endpoint the operator never configured (a port-scan probe).
+            execute["connector"]["url"] = json!("host=127.0.0.1 port=22");
+        }
+        let target = if mode == "other_connection" { json!("other") } else { connection.clone() };
+        let request = json!({ "connection": target, "execute": execute });
+        let mut answer = host.call("dynamic_pool_checkout", request.clone()).await;
+        if mode == "execute_twice" && answer.is_ok() {
+            answer = host.call("dynamic_pool_checkout", request).await;
+        }
+        self.answers.lock().unwrap().push(answer.clone());
+        answer.map_err(host_err)
+    }
+}
+
+#[async_trait::async_trait]
+impl MockPlugin for HostExecDb {
+    async fn handle(&self, env: Value, host: &MockHost<'_>) -> Result<Value, (i32, String)> {
+        match env["op"].as_str().unwrap_or("") {
+            "dynamic.role" => Ok(json!({ "data": serde_json::from_str::<Value>(RECIPE).unwrap() })),
+            "dynamic.generate" => {
+                self.execute(host, &env["connection"]).await?;
+                let lease = json!({ "internal": {}, "ttl_secs": 600 });
+                host.call("dynamic_lease_register", lease).await.map_err(host_err)?;
+                Ok(json!({ "data": {} }))
+            }
+            "dynamic.renew" | "dynamic.revoke" | "dynamic.rotate_root" => {
+                self.execute(host, &env["connection"]).await?;
+                Ok(json!({}))
+            }
+            _ => Ok(json!({ "data": null })),
+        }
+    }
+}
+
+/// A vault with `plugin` mounted at `database/` and `config/prod` written.
+async fn host_exec_vault(name: &str, plugin: Arc<HostExecDb>) -> (crate::BastionVault, Arc<dyn VaultCtx>, String) {
+    let url = plugin.url.clone();
+    let (bv, core, root) = new_unseal_test_bastion_vault(name).await;
+    let core: Arc<dyn VaultCtx> = core;
+    let plugin_name = format!("dyn-{name}");
+    mock::register(&plugin_name, plugin);
+    let storage = core.barrier();
+    crate::plugins::verifier::write_accept_unsigned(storage.as_storage(), true).await.unwrap();
+    PluginCatalog::new().put(storage.as_storage(), &manifest(&plugin_name, all_caps()), BINARY).await.unwrap();
+    crate::test_utils::test_mount_api(core.as_ref(), &root, &format!("plugin:{plugin_name}"), "database").await;
+    for conn in ["prod", "other"] {
+        let mut req = Request::new(&format!("database/config/{conn}"));
+        req.operation = Operation::Write;
+        req.client_token = root.clone();
+        // The host pins this endpoint; the plugin must present exactly it.
+        req.body = json!({ "connection_url": url, "username": "vault-root" }).as_object().cloned();
+        core.handle_request(&mut req).await.unwrap();
+    }
+    (bv, core, root)
+}
+
+async fn root_call(
+    core: &Arc<dyn VaultCtx>,
+    root: &str,
+    op: Operation,
+    path: &str,
+) -> Result<Option<Response>, RvError> {
+    let mut req = Request::new(path);
+    req.operation = op;
+    req.client_token = root.to_string();
+    if op == Operation::Write {
+        req.body = Some(serde_json::Map::new());
+    }
+    core.handle_request(&mut req).await
+}
+
+/// The host dials (once, with the operator's verifying TLS policy and the
+/// plugin's stored root secret) and runs exactly the statements it rendered:
+/// the role's creation, renew and revocation statements, on one pooled socket.
+#[tokio::test]
+async fn the_host_executes_its_rendered_statements_on_a_pooled_connection() {
+    assert!(capture::install(), "this test needs the process logger");
+    let url = "fake://host-exec-lifecycle";
+    let target = fake_target(url);
+    let (_bv, core, root) = host_exec_vault("dyn_host_exec", HostExecDb::new(url)).await;
+
+    let resp = root_call(&core, &root, Operation::Read, "database/creds/readonly").await.unwrap().unwrap();
+    let username = data_str(&resp, "username");
+    let password = data_str(&resp, "password");
+    let lease_id = resp.secret.unwrap().lease_id;
+    {
+        let committed = target.committed.lock().unwrap();
+        assert_eq!(committed.len(), 1);
+        let create = &committed[0][0];
+        assert!(
+            create.starts_with(&format!("CREATE ROLE \"{username}\" WITH LOGIN PASSWORD '{password}'")),
+            "{create}"
+        );
+        assert!(target.identities.lock().unwrap().contains(&username));
+    }
+
+    root_call(&core, &root, Operation::Write, &format!("sys/renew/{lease_id}")).await.unwrap();
+    root_call(&core, &root, Operation::Write, &format!("sys/revoke/{lease_id}")).await.unwrap();
+    let committed = target.committed.lock().unwrap().clone();
+    assert_eq!(committed.len(), 3, "{committed:?}");
+    assert!(committed[1][0].starts_with(&format!("ALTER ROLE \"{username}\" VALID UNTIL '")), "{committed:?}");
+    assert_eq!(committed[2], [format!("DROP ROLE \"{username}\"")]);
+    assert!(target.identities.lock().unwrap().is_empty());
+
+    let dials = target.dials.lock().unwrap().clone();
+    assert_eq!(dials.len(), 1, "one host socket for generate, renew and revoke");
+    assert_eq!((dials[0].0.as_str(), dials[0].1.as_str()), ("vault-root", ROOT_SECRET));
+    assert!(dials[0].2.verifies(), "the operator's default policy verifies TLS");
+    let lines = capture::lines();
+    assert!(!lines.iter().any(|l| l.contains(ROOT_SECRET) || l.contains(&password)), "a secret reached a log line");
+}
+
+/// A plugin cannot widen what the host runs: no statements of its own, no TLS
+/// override, no second run, no other connection, no slot it does not hold,
+/// nothing for rotate-root. And a revoke of an identity already gone runs
+/// nothing. Every refusal is redacted of the root secret.
+#[tokio::test]
+async fn a_plugin_cannot_widen_what_the_host_executes() {
+    let url = "fake://host-exec-refusals";
+    let target = fake_target(url);
+    let plugin = HostExecDb::new(url);
+    let (_bv, core, root) = host_exec_vault("dyn_host_exec_refusals", plugin.clone()).await;
+
+    for mode in ["smuggle_statements", "smuggle_tls", "other_connection", "unheld_slot", "other_url"] {
+        *plugin.mode.lock().unwrap() = mode;
+        let refused = root_call(&core, &root, Operation::Read, "database/creds/readonly").await;
+        assert_eq!(status_of(&refused), Some(502), "{mode}: {refused:?}");
+        assert!(!format!("{refused:?}").contains(ROOT_SECRET), "{mode}: {refused:?}");
+        let answer = plugin.answers.lock().unwrap().last().cloned().unwrap();
+        assert!(matches!(&answer, Err(e) if e.starts_with("invalid:")), "{mode}: {answer:?}");
+    }
+    assert!(target.committed.lock().unwrap().iter().all(|t| !t[0].starts_with("CREATE")), "nothing was created");
+
+    *plugin.mode.lock().unwrap() = "execute_twice";
+    let refused = root_call(&core, &root, Operation::Read, "database/creds/readonly").await;
+    assert_eq!(status_of(&refused), Some(502), "{refused:?}");
+    let answer = plugin.answers.lock().unwrap().last().cloned().unwrap();
+    assert!(matches!(&answer, Err(e) if e.contains("already ran")), "{answer:?}");
+    // The first run created the identity; the failed generate took it back
+    // through the host too (the compensation revoke has its own plan).
+    assert!(target.identities.lock().unwrap().is_empty(), "no orphaned identity");
+
+    *plugin.mode.lock().unwrap() = "normal";
+    let rotate = root_call(&core, &root, Operation::Write, "database/rotate-root/prod").await;
+    assert_eq!(status_of(&rotate), Some(502), "{rotate:?}");
+    let answer = plugin.answers.lock().unwrap().last().cloned().unwrap();
+    assert!(
+        matches!(&answer, Err(e) if e.contains("dynamic.rotate_root has no host-rendered statements")),
+        "{answer:?}"
+    );
+
+    // Revoking an identity the target no longer has runs nothing and succeeds.
+    let resp = root_call(&core, &root, Operation::Read, "database/creds/readonly").await.unwrap().unwrap();
+    target.identities.lock().unwrap().clear();
+    let before = target.committed.lock().unwrap().len();
+    let lease_id = resp.secret.unwrap().lease_id;
+    root_call(&core, &root, Operation::Write, &format!("sys/revoke/{lease_id}")).await.unwrap();
+    assert_eq!(target.committed.lock().unwrap().len(), before);
+    let answer = plugin.answers.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(answer.unwrap()["identity_absent"], true);
+}
+
+/// A failing statement's error, which quotes the statement and so the
+/// generated password, reaches neither the caller nor the log unredacted.
+#[tokio::test]
+async fn a_host_execution_error_is_redacted() {
+    assert!(capture::install(), "this test needs the process logger");
+    let url = "fake://host-exec-redaction";
+    let target = fake_target(url);
+    *target.fail_on.lock().unwrap() = Some("PASSWORD".into());
+    let plugin = HostExecDb::new(url);
+    let (_bv, core, root) = host_exec_vault("dyn_host_exec_redaction", plugin.clone()).await;
+    let refused = root_call(&core, &root, Operation::Read, "database/creds/readonly").await;
+    assert_eq!(status_of(&refused), Some(502), "{refused:?}");
+    let answer = plugin.answers.lock().unwrap().first().cloned().unwrap().unwrap_err();
+    assert!(answer.contains("syntax error"), "{answer}");
+    assert!(answer.contains("PASSWORD '<redacted>'"), "the generated password is redacted: {answer}");
+    let text = format!("{refused:?}");
+    assert!(!text.contains(ROOT_SECRET), "{text}");
+    let lines = capture::lines();
+    assert!(!lines.iter().any(|l| l.contains(ROOT_SECRET)), "the root secret reached a log line");
+}
+
+// ── Cluster-wide cache invalidation ─────────────────────────────────────
+
+fn issued<'a>(data: &'a serde_json::Map<String, Value>, username: &'a str) -> super::cache::Issued<'a> {
+    super::cache::Issued {
+        data,
+        lease_ttl: std::time::Duration::from_secs(3600),
+        renewable: true,
+        plugin: "pg",
+        plugin_build: "pg@1#aa",
+        role: "ro",
+        connection: "prod",
+        username,
+    }
+}
+
+fn fill(slot: &super::cache::LeaseSlot, lease_id: &str) {
+    let mut guard = slot.write().unwrap();
+    *guard.downcast_mut::<Option<String>>().unwrap() = Some(lease_id.to_string());
+}
+
+/// Two nodes, one replicated mount storage: node B cached a credential; node
+/// A revokes its lease, rewrites a role or rotates the root; B never serves
+/// it again. Unreadable storage on B is a miss, never a stale hit.
+#[tokio::test]
+async fn two_nodes_a_revoke_or_epoch_on_one_refuses_the_others_cached_hit() {
+    use super::cache::{bump_epoch, forget_credential, read_epoch, NodeCache};
+    use bv_dynamic::cache::CacheKey;
+    let storage = MemStorage::default();
+    let node_b = NodeCache::new(16);
+    let key = CacheKey::new("m1", "ro", "entity-alice").unwrap();
+    let window = std::time::Duration::from_secs(60);
+    let mut data = serde_json::Map::new();
+    data.insert("password".into(), json!("cached-password-1234"));
+
+    let cache_on_b = |username: &'static str| {
+        let (storage, node_b, key, data) = (&storage, &node_b, key.clone(), data.clone());
+        async move {
+            let epoch = read_epoch(storage).await;
+            let slot = node_b.remember(storage, key, issued(&data, username), window, &epoch).await.expect("cached");
+            fill(&slot, &format!("lease-of-{username}"));
+        }
+    };
+
+    cache_on_b("v-alice-1").await;
+    let (hit, lease) = node_b.lookup(&storage, &key, "pg@1#aa").await.expect("a hit on B");
+    assert_eq!((hit.username.as_str(), lease.as_str()), ("v-alice-1", "lease-of-v-alice-1"));
+    assert!(!storage.keys().iter().any(|k| k.contains("cached-password")), "no credential in the records");
+
+    // Node A revokes (or renews) the lease: its marker goes.
+    forget_credential(&storage, "v-alice-1").await.unwrap();
+    assert!(node_b.lookup(&storage, &key, "pg@1#aa").await.is_none(), "revoked on A: refused on B");
+    assert_eq!(node_b.len(), 0, "and dropped there");
+
+    // Node A rewrites a role or rotates the root: a new epoch.
+    cache_on_b("v-alice-2").await;
+    assert!(node_b.lookup(&storage, &key, "pg@1#aa").await.is_some());
+    bump_epoch(&storage, "m1").await.unwrap();
+    assert!(node_b.lookup(&storage, &key, "pg@1#aa").await.is_none(), "new epoch on A: refused on B");
+
+    // A new build of the plugin activated on A.
+    cache_on_b("v-alice-3").await;
+    assert!(node_b.lookup(&storage, &key, "pg@2#bb").await.is_none(), "another build: refused");
+
+    // Storage down on B: a miss (fail closed), and nothing new is cached.
+    cache_on_b("v-alice-4").await;
+    storage.down.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(node_b.lookup(&storage, &key, "pg@1#aa").await.is_none(), "unreadable records: a miss");
+    let epoch = read_epoch(&storage).await;
+    assert!(node_b.remember(&storage, key.clone(), issued(&data, "v-alice-5"), window, &epoch).await.is_none());
+    assert!(forget_credential(&storage, "v-alice-5").await.is_err(), "a marker that cannot go is an error");
+    assert!(bump_epoch(&storage, "m1").await.is_err());
+}
+
+/// The mount storage prefix (`logical/<uuid>/`) of the dynamic mount, found
+/// by its `bv-dynamic/mount-id` record, so a test can act as another node.
+async fn dynamic_mount_prefix(core: &Arc<dyn VaultCtx>) -> String {
+    // `logical/<uuid>/`, or under `namespaces/<root>/` once re-rooted.
+    let barrier = core.barrier();
+    let mut stack = vec![String::new()];
+    while let Some(dir) = stack.pop() {
+        for child in barrier.as_storage().list(&dir).await.unwrap() {
+            let path = format!("{dir}{child}");
+            if path.ends_with("bv-dynamic/mount-id") {
+                return path.trim_end_matches("bv-dynamic/mount-id").to_string();
+            }
+            if child.ends_with('/') {
+                stack.push(path);
+            }
+        }
+    }
+    panic!("no dynamic mount in the barrier")
+}
+
+/// Through the real backend: another node's revoke (its marker removed) and
+/// another node's role write (a new epoch) both refuse this node's hit.
+#[tokio::test]
+async fn another_nodes_revoke_or_role_write_refuses_a_cached_hit_here() {
+    let fx = Fixture::new("dyn_cache_cluster", all_caps()).await;
+    fx.cached_role("cached", 60);
+    let alice = fx.logins(&["alice"]).await.remove(0).0;
+    let first = fx.creds_as(&alice, "cached").await;
+    let username = data_str(&first, "username");
+    assert_eq!(data_str(&fx.creds_as(&alice, "cached").await, "username"), username, "a hit");
+
+    let prefix = dynamic_mount_prefix(&fx.core).await;
+    let barrier = fx.core.barrier();
+    let storage = barrier.as_storage();
+    let marker = format!("{prefix}{}", bv_dynamic::cache::marker_key(&username).unwrap());
+    assert!(storage.get(&marker).await.unwrap().is_some(), "the miss wrote a marker");
+    storage.delete(&marker).await.unwrap();
+    let second = fx.creds_as(&alice, "cached").await;
+    assert_ne!(data_str(&second, "username"), username, "revoked elsewhere: not served here");
+
+    let username = data_str(&second, "username");
+    assert_eq!(data_str(&fx.creds_as(&alice, "cached").await, "username"), username);
+    let epoch = bv_dynamic::cache::EpochRecord::fresh().unwrap();
+    let entry = crate::storage::StorageEntry {
+        key: format!("{prefix}{}", bv_dynamic::cache::EPOCH_KEY),
+        value: serde_json::to_vec(&epoch).unwrap(),
+    };
+    storage.put(&entry).await.unwrap();
+    let third = fx.creds_as(&alice, "cached").await;
+    assert_ne!(data_str(&third, "username"), username, "role rewritten elsewhere: not served here");
+
+    // A revoke here removes the marker for every node, and the row says so.
+    let marker = format!("{prefix}{}", bv_dynamic::cache::marker_key(&data_str(&third, "username")).unwrap());
+    let lease = third.secret.unwrap().lease_id;
+    assert!(storage.get(&marker).await.unwrap().is_some());
+    fx.write(&format!("sys/revoke/{lease}"), Value::Null).await.unwrap();
+    assert!(storage.get(&marker).await.unwrap().is_none(), "the revoke removed the marker");
+}
+
+/// Egress: host execution is offered only for a connection whose endpoint
+/// the host pinned from the operator's write; an unpinned one (a record from
+/// before pinning, or a write that cleared a half) gets no `host_execute`, so
+/// the plugin dials as before and the host dials nothing for it.
+#[tokio::test]
+async fn host_execution_is_offered_only_for_a_pinned_endpoint() {
+    let url = "fake://host-exec-pinning";
+    let target = fake_target(url);
+    let plugin = HostExecDb::new(url);
+    let (_bv, core, root) = host_exec_vault("dyn_host_exec_pinning", plugin.clone()).await;
+    let mut req = Request::new("database/config/prod");
+    req.operation = Operation::Write;
+    req.client_token = root.clone();
+    req.body = json!({ "username": null }).as_object().cloned();
+    core.handle_request(&mut req).await.unwrap();
+    let refused = root_call(&core, &root, Operation::Read, "database/creds/readonly").await;
+    assert!(format!("{refused:?}").contains("does not grant host execution"), "{refused:?}");
+    assert!(plugin.answers.lock().unwrap().is_empty(), "no execute was even attempted");
+    assert!(target.dials.lock().unwrap().is_empty());
+}
+
+/// A config write or delete (any node) drops cached credentials: a new
+/// mount epoch, and this node's entries go at once.
+#[tokio::test]
+async fn a_config_write_drops_cached_credentials_everywhere() {
+    let fx = Fixture::new("dyn_cache_config", all_caps()).await;
+    fx.cached_role("cached", 60);
+    let alice = fx.logins(&["alice"]).await.remove(0).0;
+    let first = data_str(&fx.creds_as(&alice, "cached").await, "username");
+    assert_eq!(data_str(&fx.creds_as(&alice, "cached").await, "username"), first, "a hit");
+    let prefix = dynamic_mount_prefix(&fx.core).await;
+    let barrier = fx.core.barrier();
+    let epoch_key = format!("{prefix}{}", bv_dynamic::cache::EPOCH_KEY);
+    let before = barrier.as_storage().get(&epoch_key).await.unwrap().map(|e| e.value);
+
+    fx.write("database/config/prod", json!({ "connection_url": "postgres://db.example/other" })).await.unwrap();
+    let after = barrier.as_storage().get(&epoch_key).await.unwrap().map(|e| e.value);
+    assert!(after.is_some() && after != before, "a new epoch for every node");
+    assert_ne!(data_str(&fx.creds_as(&alice, "cached").await, "username"), first, "not served after the write");
 }

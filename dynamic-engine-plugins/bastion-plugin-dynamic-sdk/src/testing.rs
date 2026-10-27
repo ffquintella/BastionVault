@@ -35,7 +35,21 @@ pub struct MockHost {
     pub fail_next: Option<(DynamicMethod, String)>,
     /// Make every `storage_put` fail (`internal`), as a broken barrier would.
     pub fail_storage_put: bool,
+    /// Connector kinds the host executes for (`host_execute` in each grant).
+    /// Empty by default: a host that does not, so the plugin dials itself.
+    pub host_execute: BTreeSet<String>,
+    /// Accepted host executions: op, connection, slot, kind, url, username
+    /// (never the root secret).
+    pub executions: Vec<Value>,
+    /// The answer to the next host execution (default: the statement count).
+    pub execution_reply: Option<Value>,
+    /// Refuse the next host execution with this host error string.
+    pub fail_execution: Option<String>,
     session: Option<String>,
+    session_connection: Option<String>,
+    session_statements: usize,
+    session_slots: BTreeSet<u64>,
+    executed_in_session: bool,
     lease_in_session: bool,
     next_slot: u64,
 }
@@ -49,6 +63,53 @@ impl MockHost {
     pub fn with_connection(mut self, name: &str) -> Self {
         self.connections.insert(name.to_string());
         self
+    }
+
+    /// A host with a connector of `kind`: it runs the call's statements.
+    pub fn executing(mut self, kind: &str) -> Self {
+        self.host_execute.insert(kind.to_string());
+        self
+    }
+
+    /// `execute` on a held slot, refused as the server refuses it.
+    fn execute(&mut self, method: DynamicMethod, connection: &str, exec: &Value) -> Result<Value, DynamicError> {
+        let shape = || refused(method, "invalid: execute must be {slot, connector}");
+        let obj = exec.as_object().ok_or_else(shape)?;
+        if obj.keys().any(|k| k != "slot" && k != "connector") {
+            return Err(shape());
+        }
+        let slot = obj.get("slot").and_then(Value::as_u64).ok_or_else(shape)?;
+        let connector = obj.get("connector").and_then(Value::as_object).ok_or_else(shape)?;
+        let text = |k: &str| connector.get(k).and_then(Value::as_str).filter(|v| !v.is_empty()).map(str::to_string);
+        let allowed = ["kind", "url", "username", "password", "connect_timeout_secs"];
+        if connector.keys().any(|k| !allowed.contains(&k.as_str()))
+            || ["kind", "url", "username", "password"].iter().any(|k| text(k).is_none())
+        {
+            return Err(refused(method, "invalid: invalid connector"));
+        }
+        let kind = text("kind").unwrap_or_default();
+        if self.session_connection.as_deref() != Some(connection) {
+            return Err(refused(method, "invalid: not the connection this call's statements were rendered for"));
+        }
+        if !self.host_execute.contains(&kind) {
+            return Err(refused(method, &format!("invalid: this host has no `{kind}` connector")));
+        }
+        if !self.session_slots.contains(&slot) {
+            return Err(refused(method, &format!("invalid: slot {slot} is not held by this call")));
+        }
+        let op = self.session.clone().unwrap_or_default();
+        let planned = ["dynamic.generate", "dynamic.renew", "dynamic.revoke"].contains(&op.as_str());
+        if !planned || self.executed_in_session {
+            return Err(refused(method, &format!("invalid: {op} has no host-rendered statements to execute")));
+        }
+        self.executed_in_session = true;
+        if let Some(err) = self.fail_execution.take() {
+            return Err(refused(method, &err));
+        }
+        self.executions.push(json!({ "op": op, "connection": connection, "slot": slot, "kind": kind,
+            "url": text("url"), "username": text("username") }));
+        let default = json!({ "executed": self.session_statements, "identity_absent": false });
+        Ok(self.execution_reply.take().unwrap_or(default))
     }
 
     fn declared(&self, method: DynamicMethod) -> bool {
@@ -108,17 +169,22 @@ impl HostCalls for MockHost {
                 Ok(json!({ "emitted": true }))
             }
             DynamicMethod::PoolCheckout => {
-                let conn = obj.get("connection").and_then(Value::as_str).unwrap_or("");
-                if !self.connections.contains(conn) {
+                let conn = obj.get("connection").and_then(Value::as_str).unwrap_or("").to_string();
+                if let Some(exec) = obj.get("execute") {
+                    return self.execute(method, &conn, exec);
+                }
+                if !self.connections.contains(&conn) {
                     return Err(refused(method, &format!("invalid: connection `{conn}` is not configured")));
                 }
                 self.next_slot += 1;
+                self.session_slots.insert(self.next_slot);
                 Ok(json!({
                     "connection": conn,
                     "root_credential_version": 1,
                     "tls": self.tls.clone().unwrap_or_else(|| json!({ "verify": true })),
                     "slot": self.next_slot,
                     "max_connections": 8,
+                    "host_execute": self.host_execute.iter().collect::<Vec<_>>(),
                 }))
             }
         }
@@ -171,6 +237,10 @@ pub async fn invoke<B: DynamicCredentialBackend + ?Sized>(
     let op = envelope.get("op").and_then(Value::as_str).unwrap_or("");
     host.session = op.starts_with("dynamic.").then(|| op.to_string());
     host.lease_in_session = false;
+    host.session_connection = envelope.get("connection").and_then(Value::as_str).map(str::to_string);
+    host.session_statements = envelope.get("statements").and_then(Value::as_array).map_or(0, Vec::len);
+    host.session_slots.clear();
+    host.executed_in_session = false;
     let input = Zeroizing::new(serde_json::to_vec(envelope).unwrap_or_default());
     let mut lines = Vec::new();
     let mut diag = |l: &str| lines.push(l.to_string());

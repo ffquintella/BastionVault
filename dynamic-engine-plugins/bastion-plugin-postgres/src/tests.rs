@@ -328,3 +328,73 @@ fn insecure_tls_comes_only_from_the_host_and_is_warned_about() {
         assert!(diag.iter().any(|l| l.contains("insecure_skip_tls_verify")), "{diag:?}");
     });
 }
+
+// ── A host with a `postgres` connector runs the statements itself ──────
+
+async fn configured_on_executing_host(engine: &PostgresBackend<FakeConnector>) -> MockHost {
+    let mut host = configured(engine).await;
+    host.host_execute.insert("postgres".into());
+    host
+}
+
+#[test]
+fn an_executing_host_runs_generate_renew_and_revoke_and_the_plugin_never_dials() {
+    rt().block_on(async {
+        let (engine, db) = engine();
+        let mut host = configured_on_executing_host(&engine).await;
+        for env in [generate(), lease_op("dynamic.renew", json!([])), lease_op("dynamic.revoke", json!([]))] {
+            let (r, diag) = invoke(&engine, &mut host, &env).await;
+            assert_eq!(r.status, 0, "{}: {}", env["op"], body(&r));
+            assert!(!body(&r).contains(ROOT) && diag.iter().all(|l| !l.contains(ROOT)), "{diag:?}");
+        }
+        assert!(db.dials.borrow().is_empty(), "the host dialled, not the plugin");
+        assert!(db.committed.borrow().is_empty());
+        let ops: Vec<&str> = host.executions.iter().map(|e| e["op"].as_str().unwrap()).collect();
+        assert_eq!(ops, ["dynamic.generate", "dynamic.renew", "dynamic.revoke"]);
+        for e in &host.executions {
+            assert_eq!((e["kind"].as_str(), e["username"].as_str()), (Some("postgres"), Some("vault")));
+            assert_eq!(e["url"], "postgres://db.internal:5432/app");
+            assert!(!e.to_string().contains(ROOT), "the mock records no root secret");
+        }
+        assert_eq!(host.leases.len(), 1, "the lease is still registered once, after the host ran the statements");
+    });
+}
+
+#[test]
+fn an_executing_host_reports_an_absent_role_and_its_refusal_is_final() {
+    rt().block_on(async {
+        let (engine, db) = engine();
+        let mut host = configured_on_executing_host(&engine).await;
+        host.execution_reply = Some(json!({ "executed": 0, "identity_absent": true }));
+        let (r, _) = invoke(&engine, &mut host, &lease_op("dynamic.revoke", json!([]))).await;
+        assert_eq!(r.status, 0, "{}", body(&r));
+        assert_eq!(host.events.last().unwrap()["detail"], json!({ "already_absent": "true" }));
+
+        // A refused host execution (here: a TLS failure the host reports) is
+        // the operation's failure; the plugin does not dial around it.
+        host.fail_execution = Some(format!("unavailable: certificate verify failed for root {ROOT}"));
+        let (r, _) = invoke(&engine, &mut host, &generate()).await;
+        assert_eq!(r.status, status::UNAVAILABLE, "{}", body(&r));
+        assert!(!body(&r).contains(ROOT), "the root secret is redacted: {}", body(&r));
+        assert!(db.dials.borrow().is_empty(), "no fallback dial");
+        assert!(host.leases.is_empty());
+    });
+}
+
+#[test]
+fn rotate_root_dials_even_on_an_executing_host() {
+    rt().block_on(async {
+        let (engine, db) = engine();
+        let mut host = configured_on_executing_host(&engine).await;
+        let new_root = "Zq9-host-generated-root-secret";
+        let rotate =
+            json!({ "op": "dynamic.rotate_root", "connection": "prod", "credential": { "password": new_root } });
+        let (r, _) = invoke(&engine, &mut host, &rotate).await;
+        assert_eq!(r.status, 0, "{}", body(&r));
+        assert_eq!(db.dials.borrow().len(), 1);
+        assert!(host.executions.is_empty(), "the host renders no rotate-root statement to execute");
+        // The next generate goes through the host with the new root secret.
+        invoke(&engine, &mut host, &generate()).await;
+        assert_eq!(host.executions.len(), 1);
+    });
+}

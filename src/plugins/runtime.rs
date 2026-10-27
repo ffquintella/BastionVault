@@ -729,10 +729,12 @@ async fn dynamic_call_impl(
     if let Err(e) = super::dynamic::host_calls::authorize(&ctx, method).await {
         return e.wasm_code();
     }
-    let params = if req_len == 0 {
+    // The request can carry a credential (a connection's root secret): the
+    // copy read out of guest memory and the parsed value are both wiped.
+    let mut params = if req_len == 0 {
         serde_json::Value::Null
     } else {
-        let Some(bytes) = read_bytes(caller, req_ptr, req_len) else {
+        let Some(bytes) = read_bytes(caller, req_ptr, req_len).map(zeroize::Zeroizing::new) else {
             return STORAGE_INTERNAL_ERROR;
         };
         match serde_json::from_slice(&bytes) {
@@ -740,7 +742,9 @@ async fn dynamic_call_impl(
             Err(_) => return super::dynamic::host_calls::DYNAMIC_INVALID,
         }
     };
-    match super::dynamic::host_calls::dispatch(&ctx, method, &params).await {
+    let dispatched = super::dynamic::host_calls::dispatch(&ctx, method, &params).await;
+    super::process_runtime::scrub(&mut params);
+    match dispatched {
         Ok(reply) => {
             let bytes = serde_json::to_vec(&reply).unwrap_or_default();
             write_to_buffer(caller, &bytes, out_ptr, out_max)
@@ -1725,6 +1729,68 @@ mod tests {
         let out = WasmRuntime::new().unwrap().invoke(&manifest, &bytes, b"", Some(core.clone())).await.unwrap();
         assert_eq!(code_of(&out), super::super::dynamic::host_calls::DYNAMIC_NO_SESSION);
         assert!(crate::plugins::quarantine::lookup(core.barrier().as_storage(), &manifest.name).await.unwrap().is_none());
+    }
+
+    /// T62 host connectors through `bv.dynamic_pool_checkout`: a WASM plugin
+    /// has the host run its session's rendered statements on a held slot.
+    #[tokio::test]
+    async fn host_execution_through_the_wasm_import() {
+        use bv_dynamic::{connector::ExecPlan, records::ConnectionRecord};
+
+        use super::super::dynamic::{pool, test_support, DynamicSession, DynamicVerb};
+        let target = test_support::fake_target("fake://wasm-host-exec");
+        let storage = Arc::new(test_support::MemStorage::default());
+        let record = ConnectionRecord {
+            connection_url: Some("fake://wasm-host-exec".into()),
+            username: Some("root".into()),
+            ..Default::default()
+        };
+        let entry = crate::storage::StorageEntry {
+            key: "bv-dynamic/connections/prod".into(),
+            value: serde_json::to_vec(&record).unwrap(),
+        };
+        crate::storage::Storage::put(storage.as_ref(), &entry).await.unwrap();
+        let plan = ExecPlan::Create { statements: vec![zeroize::Zeroizing::new("CREATE \"v-wasm\"".to_string())] };
+        let mut session = DynamicSession::new(DynamicVerb::Generate, "0a1d", Some(storage)).with_plan(plan);
+        session.connection = Some("prod".into());
+        // The slot the module's own checkout would have taken; its id goes
+        // into the request the module sends.
+        let key = pool::target_key("0a1d", "prod");
+        pool::host_pool().configure(&key, record.target_settings());
+        let grant = pool::host_pool().checkout(&key).await.unwrap();
+        let slot = grant.id;
+        session.hold_grant(grant);
+        let request = serde_json::json!({ "connection": "prod", "execute": { "slot": slot, "connector": {
+            "kind": "fake", "url": "fake://wasm-host-exec", "username": "root", "password": "wasm-root-secret" } } })
+        .to_string();
+        let escaped: String = request.bytes().map(|b| format!("\\{b:02x}")).collect();
+        let wat = format!(
+            r#"(module
+              (import "bv" "set_response" (func $set_response (param i32 i32)))
+              (import "bv" "dynamic_pool_checkout" (func $dyn (param i32 i32 i32 i32) (result i32)))
+              (memory (export "memory") 1)
+              (data (i32.const 0) "{escaped}")
+              (func (export "bv_alloc") (param i32) (result i32) i32.const 8192)
+              (func (export "bv_run") (param i32 i32) (result i32)
+                (i32.store (i32.const 2048) (call $dyn (i32.const 0) (i32.const {len}) (i32.const 4096) (i32.const 1024)))
+                (call $set_response (i32.const 2048) (i32.const 4))
+                (i32.const 0)))"#,
+            len = request.len()
+        );
+        let bytes = wat::parse_str(wat).unwrap();
+        let mut manifest = manifest_for(&bytes);
+        manifest.name = "wasm-host-exec".into();
+        manifest.capabilities.dynamic_pool_checkout = true;
+        let session = Arc::new(session);
+        let out = WasmRuntime::new()
+            .unwrap()
+            .invoke_bound(&manifest, &bytes, b"", None, Default::default(), None, None, Some(session.clone()))
+            .await
+            .unwrap();
+        assert!(code_of(&out) > 0, "the host's reply was written: {}", code_of(&out));
+        assert_eq!(*target.committed.lock().unwrap(), vec![vec!["CREATE \"v-wasm\"".to_string()]]);
+        assert!(!session.has_plan(), "the plan ran once");
+        assert_eq!(session.held_grants(), 1, "the slot went back to the session, its connection with it");
     }
 
     /// Build a real `Core` instance with an unsealed in-memory backend

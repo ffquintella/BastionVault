@@ -71,7 +71,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::time::timeout;
 
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::kernel_api::VaultCtx;
 use crate::storage::StorageEntry;
@@ -313,10 +313,11 @@ async fn drive_invocation(
     // `done` or stdout EOF.
     let mut response: Vec<u8> = Vec::new();
     let status: i32;
-    let mut buf = String::new();
+    // A host call's line can carry a credential (a connection's root secret).
+    let mut buf = Zeroizing::new(String::new());
 
     loop {
-        buf.clear();
+        buf.zeroize();
         let read = stdout.read_line(&mut buf).await.map_err(|e| ProcessRuntimeError::Io(format!("{e}")))?;
         if read == 0 {
             // EOF before `done` — treat as crash.
@@ -331,10 +332,11 @@ async fn drive_invocation(
             .map_err(|_| ProcessRuntimeError::Protocol("plugin message not valid JSON"))?;
 
         match msg {
-            PluginMessage::HostCall { id, method, params } => {
+            PluginMessage::HostCall { id, method, mut params } => {
                 let result =
                     handle_host_call(manifest, core.as_ref(), &config, &method, &params, caller, session.as_ref())
                         .await;
+                scrub(&mut params);
                 let mut reply = match result {
                     Ok(v) => HostMessage::HostReply { id, result: v },
                     Err(e) => HostMessage::HostReplyError { id, error: e },

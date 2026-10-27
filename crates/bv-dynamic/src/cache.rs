@@ -11,6 +11,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+use serde::{Deserialize, Serialize};
+
+use crate::DynamicError;
+
 /// Hard ceiling on a cache entry's life, whatever the role asks for.
 pub const MAX_CACHE_TTL: Duration = Duration::from_secs(300);
 /// Least lease time a credential must have left to be served from the cache.
@@ -146,9 +150,138 @@ impl<V: Clone> CredentialCache<V> {
     }
 }
 
+// ── Cluster-wide validity ────────────────────────────────────────────────
+//
+// Every node keeps its own entries, but whether one may still be served is
+// decided by two records in the mount's replicated storage, read on every
+// hit: the mount's *epoch* (a fresh nonce on every role write, rotate-root
+// and config write) and the credential's *marker* (written when it is
+// cached, deleted on any renew or revoke of its lease, by whichever node).
+
+/// Mount storage key of the mount's cache epoch.
+pub const EPOCH_KEY: &str = "bv-dynamic/cache/epoch";
+/// Mount storage prefix of the per-credential markers.
+pub const MARKER_PREFIX: &str = "bv-dynamic/cache/credentials/";
+/// Current format of both records.
+pub const VALIDITY_RECORD_VERSION: u32 = 1;
+
+fn version_one() -> u32 {
+    1
+}
+
+/// The mount's cache epoch. Rewritten (never incremented) with a fresh
+/// random nonce, so concurrent writers on two nodes cannot lose an update.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EpochRecord {
+    #[serde(default = "version_one")]
+    pub v: u32,
+    pub nonce: String,
+}
+
+/// One cached credential's marker. Holds no credential.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MarkerRecord {
+    #[serde(default = "version_one")]
+    pub v: u32,
+    pub nonce: String,
+    /// Unix seconds after which no entry may be served on it, whatever else.
+    pub expires_at: u64,
+}
+
+impl EpochRecord {
+    pub fn fresh() -> Result<Self, DynamicError> {
+        Ok(Self { v: VALIDITY_RECORD_VERSION, nonce: crate::credential::random_hex(16)? })
+    }
+
+    /// `None` for a record this node cannot read (a newer format): the
+    /// caller treats that as "no entry is valid", never as "no epoch".
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        serde_json::from_slice::<Self>(bytes).ok().filter(|r| r.v <= VALIDITY_RECORD_VERSION)
+    }
+}
+
+impl MarkerRecord {
+    pub fn fresh(expires_at: u64) -> Result<Self, DynamicError> {
+        Ok(Self { v: VALIDITY_RECORD_VERSION, nonce: crate::credential::random_hex(16)?, expires_at })
+    }
+
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        serde_json::from_slice::<Self>(bytes).ok().filter(|r| r.v <= VALIDITY_RECORD_VERSION)
+    }
+}
+
+/// The marker key of the credential `username`. Generated usernames are
+/// `[a-z0-9_-]`; anything else is refused rather than escaped.
+pub fn marker_key(username: &str) -> Result<String, DynamicError> {
+    crate::records::check_name("cached username", username)?;
+    Ok(format!("{MARKER_PREFIX}{username}"))
+}
+
+/// What a storage read of one validity record found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Read<T> {
+    Absent,
+    Found(T),
+    /// Unreadable (storage error, or a format this node does not know).
+    Failed,
+}
+
+/// What an entry was cached under; checked against the records on each hit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Validity {
+    /// The mount epoch read *before* the role was read for the miss.
+    pub epoch: Option<String>,
+    pub marker: String,
+}
+
+impl Validity {
+    /// Whether the records read now still vouch for the entry. Fails closed:
+    /// anything unreadable, missing or different is "no".
+    pub fn holds(&self, epoch: &Read<EpochRecord>, marker: &Read<MarkerRecord>, now_unix: u64) -> bool {
+        let epoch_ok = match (epoch, &self.epoch) {
+            (Read::Absent, None) => true,
+            (Read::Found(rec), Some(nonce)) => &rec.nonce == nonce,
+            _ => false,
+        };
+        let marker_ok = matches!(marker, Read::Found(m) if m.nonce == self.marker && m.expires_at > now_unix);
+        epoch_ok && marker_ok
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validity_fails_closed() {
+        let epoch = EpochRecord::fresh().unwrap();
+        let marker = MarkerRecord::fresh(1_000).unwrap();
+        let v = Validity { epoch: Some(epoch.nonce.clone()), marker: marker.nonce.clone() };
+        assert!(v.holds(&Read::Found(epoch.clone()), &Read::Found(marker.clone()), 999));
+        assert!(!v.holds(&Read::Found(epoch.clone()), &Read::Found(marker.clone()), 1_000), "marker expired");
+        assert!(!v.holds(&Read::Found(epoch.clone()), &Read::Absent, 0), "renewed or revoked elsewhere");
+        assert!(!v.holds(&Read::Found(EpochRecord::fresh().unwrap()), &Read::Found(marker.clone()), 0), "new epoch");
+        assert!(!v.holds(&Read::Absent, &Read::Found(marker.clone()), 0), "an epoch never goes back to absent");
+        assert!(!v.holds(&Read::Failed, &Read::Found(marker.clone()), 0), "unreadable storage is a miss");
+        assert!(!v.holds(&Read::Found(epoch.clone()), &Read::Failed, 0));
+        let other = MarkerRecord { nonce: "other".into(), ..marker.clone() };
+        assert!(!v.holds(&Read::Found(epoch), &Read::Found(other), 0), "a re-cached credential's marker");
+        let no_epoch = Validity { epoch: None, marker: marker.nonce.clone() };
+        assert!(no_epoch.holds(&Read::Absent, &Read::Found(marker), 0), "a mount that never bumped its epoch");
+    }
+
+    #[test]
+    fn validity_records_are_versioned() {
+        let rec = MarkerRecord::fresh(5).unwrap();
+        let bytes = serde_json::to_vec(&rec).unwrap();
+        assert_eq!(MarkerRecord::decode(&bytes), Some(rec));
+        assert!(MarkerRecord::decode(br#"{"v":2,"nonce":"n","expires_at":5}"#).is_none(), "newer: unreadable");
+        assert!(EpochRecord::decode(br#"{"nonce":"n"}"#).is_some(), "no v reads as 1");
+        assert!(EpochRecord::decode(b"garbage").is_none());
+        assert_eq!(marker_key("v-root-ro-1-0a1b2c3d").unwrap(), "bv-dynamic/cache/credentials/v-root-ro-1-0a1b2c3d");
+        assert!(marker_key("../x").is_err());
+        assert_ne!(EpochRecord::fresh().unwrap(), EpochRecord::fresh().unwrap(), "fresh nonces differ");
+    }
 
     fn key(entity: &str) -> CacheKey {
         CacheKey::new("database/", "readonly", entity).unwrap()

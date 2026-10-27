@@ -14,8 +14,9 @@ use std::{
 
 use bv_dynamic::{
     audit::{redact, Actor, DynamicEventKind, DynamicSecretEvent, EventOrigin},
-    cache::CacheKey,
-    credential::{generate_password, generate_username, rfc3339_utc},
+    cache::{CacheKey, Read, MAX_CACHE_TTL},
+    connector::ExecPlan,
+    credential::{generate_password, generate_username, random_u64, rfc3339_utc},
     records::{
         check_name, DynamicLeaseInternal, RoleRecipe, LEASE_INTERNAL_KEY, LEASE_INTERNAL_VERSION,
         MAX_PLUGIN_INTERNAL_BYTES,
@@ -114,7 +115,8 @@ impl DynamicCall<'_> {
     /// or a `502` naming its failure with this call's secrets redacted.
     async fn invoke(&self, envelope: &Value, session: &Arc<DynamicSession>) -> Result<Value, RvError> {
         let output = self.invoke_output(envelope, session).await?;
-        let secrets = session.secrets();
+        let owned = session.secrets();
+        let secrets = owned.refs();
         if let InvokeOutcome::PluginError(code) = output.outcome {
             let raw = serde_json::from_slice::<Value>(&output.response)
                 .ok()
@@ -165,6 +167,77 @@ fn bad_request(msg: impl Into<String>) -> RvError {
     RvError::ErrResponseStatus(400, msg.into())
 }
 
+/// The build a cached credential is tied to: a different active version or
+/// binary (on any node) makes its entries misses.
+fn plugin_build(m: &crate::plugins::manifest::PluginManifest) -> String {
+    format!("{}@{}#{}", m.name, m.version, m.sha256)
+}
+
+/// Remove the cluster-wide cache marker of a lease being renewed or revoked.
+/// Failing it fails the operation (a revoke is then kept `revoke_failed` and
+/// retried): other nodes would otherwise keep serving the credential.
+async fn forget_cached(storage: &dyn Storage, internal: &DynamicLeaseInternal) -> Result<(), RvError> {
+    cache::invalidate_credential(&internal.username);
+    if !internal.cached {
+        return Ok(());
+    }
+    cache::forget_credential(storage, &internal.username).await.map_err(|e| {
+        RvError::ErrResponseStatus(
+            503,
+            format!(
+                "the credential cache marker of `{}` could not be removed ({e}); nothing was changed on the target",
+                internal.username
+            ),
+        )
+    })
+}
+
+/// After an attempted change that may have altered what cached credentials
+/// were made under: a new epoch, then the change's own result. When both
+/// failed, the change's error wins and the epoch's is logged.
+async fn settle_cache_epoch<T>(
+    storage: &dyn Storage,
+    mount_id: &str,
+    what: &str,
+    result: Result<T, RvError>,
+) -> Result<T, RvError> {
+    let bumped = bump_cache_epoch(storage, mount_id, what).await;
+    match (result, bumped) {
+        (Ok(v), Ok(())) => Ok(v),
+        (Ok(_), Err(e)) => Err(e),
+        (Err(e), Ok(())) => Err(e),
+        (Err(e), Err(epoch)) => {
+            log::warn!("{epoch}");
+            Err(e)
+        }
+    }
+}
+
+/// `Some(None)` when `body` clears `key` (`null`), `Some(Some(v))` when it
+/// sets a string, `None` when it leaves `key` as stored (absent, or a type
+/// the plugin will refuse anyway).
+fn written_string(body: &Map<String, Value>, key: &str) -> Option<Option<String>> {
+    match body.get(key) {
+        Some(Value::Null) => Some(None),
+        Some(Value::String(s)) => Some(Some(s.clone())),
+        _ => None,
+    }
+}
+
+/// After a role write, config write or rotate-root: a new cache epoch.
+async fn bump_cache_epoch(storage: &dyn Storage, mount_id: &str, what: &str) -> Result<(), RvError> {
+    cache::bump_epoch(storage, mount_id).await.map_err(|e| {
+        RvError::ErrResponseStatus(
+            503,
+            format!(
+                "{what} succeeded, but the credential cache epoch could not be advanced ({e}); other nodes may \
+                 serve credentials cached before it for up to {} s",
+                MAX_CACHE_TTL.as_secs()
+            ),
+        )
+    })
+}
+
 /// A fresh session for one call, stamped with what the host knows.
 fn session(verb: DynamicVerb, mount_id: &str, storage: &Arc<dyn Storage>, req: &Request) -> DynamicSession {
     let caller = CallerIdentity::from_request(req);
@@ -189,12 +262,19 @@ pub async fn handle(call: DynamicCall<'_>, req: &mut Request) -> Result<Option<R
         ("config", _) => config(&call, req, rest).await,
         ("roles", op) => {
             // Cache entries are looked up before the role is read: a changed
-            // role must not keep serving credentials made under the old one.
-            if matches!(op, Operation::Write | Operation::Delete) && !rest.is_empty() {
-                let storage = mount_storage(req)?;
-                cache::invalidate_role(&state::mount_id(storage.as_ref()).await?, rest);
+            // role must not keep serving credentials made under the old one,
+            // here (dropped now) or on another node (new epoch after the write).
+            let rewrites = matches!(op, Operation::Write | Operation::Delete) && !rest.is_empty();
+            let storage = mount_storage(req)?;
+            let mount_id = state::mount_id(storage.as_ref()).await?;
+            if !rewrites {
+                return proxy(&call, req, None).await;
             }
-            proxy(&call, req, None).await
+            cache::invalidate_role(&mount_id, rest);
+            // Bumped whether or not the plugin reports success: a failed
+            // write may still have changed the stored role.
+            let resp = proxy(&call, req, None).await;
+            settle_cache_epoch(storage.as_ref(), &mount_id, &format!("writing role `{rest}`"), resp).await
         }
         _ => Err(RvError::ErrResponseStatus(
             404,
@@ -213,12 +293,19 @@ async fn generate(call: &DynamicCall<'_>, req: &Request, role: &str) -> Result<O
     // 0. A cached credential of this identity, if its role opted in; then
     // the namespace's lease quota, before anything exists on the target.
     let cache_key = CacheKey::new(&mount_id, role, &caller.entity_id);
+    let build = plugin_build(manifest);
     if let Some(hit) = match &cache_key {
-        Some(key) => serve_cached(call, req, key).await,
+        Some(key) => serve_cached(call, req, storage.as_ref(), key, &build).await,
         None => None,
     } {
         return Ok(Some(hit));
     }
+    // The epoch a new entry is checked against, read *before* the role: a
+    // role write that lands after this read bumps it and refuses the entry.
+    let epoch = match &cache_key {
+        Some(_) => cache::read_epoch(storage.as_ref()).await,
+        None => Read::Absent,
+    };
     let leases = call.core.lease_revoker().ok_or_else(|| {
         RvError::ErrResponseStatus(503, "the lease manager is unavailable; no credential was created".into())
     })?;
@@ -264,7 +351,9 @@ async fn generate(call: &DynamicCall<'_>, req: &Request, role: &str) -> Result<O
     let revocation = render_all(&recipe.revocation_statements)?;
 
     // 3. The plugin creates the identity and asks for its lease.
-    let mut s = session(DynamicVerb::Generate, &mount_id, &storage, req).with_secret(password.expose());
+    // The plan is the only thing a plugin can have the host execute.
+    let plan = ExecPlan::Create { statements: creation.iter().map(|c| Zeroizing::new(c.clone())).collect() };
+    let mut s = session(DynamicVerb::Generate, &mount_id, &storage, req).with_secret(password.expose()).with_plan(plan);
     s.role = Some(role.to_string());
     s.connection = Some(recipe.connection.clone());
     s.target_identity = Some(username.clone());
@@ -320,19 +409,6 @@ async fn generate(call: &DynamicCall<'_>, req: &Request, role: &str) -> Result<O
         (p, r) => p.min(r),
     };
     let renewable = lease_request.renewable && recipe.renewable;
-    let internal = DynamicLeaseInternal {
-        v: LEASE_INTERNAL_VERSION,
-        plugin: manifest.name.clone(),
-        plugin_version: manifest.version.clone(),
-        engine_type: manifest.engine_type.clone().unwrap_or_default(),
-        role: role.to_string(),
-        connection: recipe.connection.clone(),
-        username: username.clone(),
-        revocation_statements: revocation,
-        renew_statements: recipe.renew_statements.clone(),
-        max_ttl_secs,
-        plugin_internal: lease_request.internal,
-    };
 
     let mut data = Map::new();
     if let Some(Value::Object(extra)) = reply.get("data") {
@@ -345,16 +421,10 @@ async fn generate(call: &DynamicCall<'_>, req: &Request, role: &str) -> Result<O
     data.insert("username".into(), Value::String(username.clone()));
     data.insert("password".into(), Value::String(password.expose().to_string()));
 
-    let mut lease = Lease::default();
-    lease.ttl = lease_ttl;
-    lease.max_ttl = Duration::from_secs(max_ttl_secs);
-    lease.renewable = renewable;
-    let mut internal_data = Map::new();
-    internal_data.insert("secret_type".into(), Value::String(HOST_MANAGED_SECRET_TYPE.into()));
-    internal_data.insert(LEASE_INTERNAL_KEY.into(), internal.to_value());
-
-    // 5. The cache, if the role opted in. The kernel writes the lease id into
-    // the slot once it registered the lease; until then nothing is served.
+    // 5. The cache, if the role opted in: its marker is written first, so
+    // every node can refuse the entry later. The kernel writes the lease id
+    // into the slot once it registered the lease; until then nothing is served.
+    let mut cached = false;
     if let (Some(key), true) = (cache_key, recipe.cache_ttl_secs > 0) {
         let connection = &recipe.connection;
         // As the kernel will clamp it: never past the lease's max_ttl.
@@ -362,12 +432,44 @@ async fn generate(call: &DynamicCall<'_>, req: &Request, role: &str) -> Result<O
             0 => lease_ttl,
             m => lease_ttl.min(Duration::from_secs(m)),
         };
-        let issued =
-            Issued { data: &data, lease_ttl, renewable, plugin: &manifest.name, role, connection, username: &username };
-        if let Some(slot) = cache::remember(key, issued, Duration::from_secs(recipe.cache_ttl_secs)) {
+        let issued = Issued {
+            data: &data,
+            lease_ttl,
+            renewable,
+            plugin: &manifest.name,
+            plugin_build: &build,
+            role,
+            connection,
+            username: &username,
+        };
+        let window = Duration::from_secs(recipe.cache_ttl_secs);
+        if let Some(slot) = cache::node().remember(storage.as_ref(), key, issued, window, &epoch).await {
             req.ctx.set_mut(HOST_MANAGED_LEASE_SLOT, slot);
+            cached = true;
         }
     }
+
+    let internal = DynamicLeaseInternal {
+        v: LEASE_INTERNAL_VERSION,
+        plugin: manifest.name.clone(),
+        plugin_version: manifest.version.clone(),
+        engine_type: manifest.engine_type.clone().unwrap_or_default(),
+        role: role.to_string(),
+        connection: recipe.connection.clone(),
+        username: username.clone(),
+        revocation_statements: revocation,
+        renew_statements: recipe.renew_statements.clone(),
+        max_ttl_secs,
+        plugin_internal: lease_request.internal,
+        cached,
+    };
+    let mut lease = Lease::default();
+    lease.ttl = lease_ttl;
+    lease.max_ttl = Duration::from_secs(max_ttl_secs);
+    lease.renewable = renewable;
+    let mut internal_data = Map::new();
+    internal_data.insert("secret_type".into(), Value::String(HOST_MANAGED_SECRET_TYPE.into()));
+    internal_data.insert(LEASE_INTERNAL_KEY.into(), internal.to_value());
 
     let mut event = call.event(DynamicEventKind::Generate);
     event.role = Some(role.to_string());
@@ -389,8 +491,14 @@ async fn generate(call: &DynamicCall<'_>, req: &Request, role: &str) -> Result<O
 /// A cache hit: the credential of an earlier request of this identity and
 /// the lease it already has. No `secret` (so the kernel registers no second
 /// lease), no plugin call, nothing minted; the lease is named in `data`.
-async fn serve_cached(call: &DynamicCall<'_>, req: &Request, key: &CacheKey) -> Option<Response> {
-    let (entry, lease_id) = cache::lookup(key)?;
+async fn serve_cached(
+    call: &DynamicCall<'_>,
+    req: &Request,
+    storage: &dyn Storage,
+    key: &CacheKey,
+    build: &str,
+) -> Option<Response> {
+    let (entry, lease_id) = cache::node().lookup(storage, key, build).await?;
     let mut data = entry.data()?;
     let remaining = entry.lease_remaining(std::time::Instant::now()).as_secs();
     data.insert("lease_id".into(), Value::String(lease_id.clone()));
@@ -456,7 +564,8 @@ async fn compensate(
     internal: Value,
     password: &str,
 ) {
-    let mut s = session(DynamicVerb::Revoke, mount_id, storage, req).with_secret(password);
+    let plan = ExecPlan::Revoke { statements: orphan.revocation.to_vec(), username: orphan.username.to_string() };
+    let mut s = session(DynamicVerb::Revoke, mount_id, storage, req).with_secret(password).with_plan(plan);
     s.role = Some(orphan.role.to_string());
     s.connection = Some(orphan.connection.to_string());
     s.target_identity = Some(orphan.username.to_string());
@@ -496,9 +605,11 @@ fn lease_of(req: &Request) -> Result<(SecretData, DynamicLeaseInternal), RvError
 
 async fn renew(call: &DynamicCall<'_>, req: &Request) -> Result<Option<Response>, RvError> {
     let (secret, mut internal) = lease_of(req)?;
-    // A renewal moves (or fails to move) the expiry a cached copy was sized to.
-    cache::invalidate_credential(&internal.username);
     let storage = mount_storage(req)?;
+    // A renewal moves (or fails to move) the expiry a cached copy was sized
+    // to: no node serves it again. The marker is gone, so the row says so.
+    forget_cached(storage.as_ref(), &internal).await?;
+    internal.cached = false;
     let mount_id = state::mount_id(storage.as_ref()).await?;
     let now = SystemTime::now();
 
@@ -532,7 +643,12 @@ async fn renew(call: &DynamicCall<'_>, req: &Request) -> Result<Option<Response>
         .map(|t| render(t, &vars).map_err(DynamicError::from))
         .collect::<Result<_, _>>()?;
 
-    let mut s = session(DynamicVerb::Renew, &mount_id, &storage, req);
+    let plan = ExecPlan::Renew {
+        statements: statements.clone(),
+        username: internal.username.clone(),
+        expiration: expiration.clone(),
+    };
+    let mut s = session(DynamicVerb::Renew, &mount_id, &storage, req).with_plan(plan);
     s.role = Some(internal.role.clone());
     s.connection = Some(internal.connection.clone());
     s.target_identity = Some(internal.username.clone());
@@ -582,10 +698,11 @@ async fn renew(call: &DynamicCall<'_>, req: &Request) -> Result<Option<Response>
 
 async fn revoke(call: &DynamicCall<'_>, req: &Request) -> Result<Option<Response>, RvError> {
     let (secret, internal) = lease_of(req)?;
-    cache::invalidate_credential(&internal.username);
     let storage = mount_storage(req)?;
     let mount_id = state::mount_id(storage.as_ref()).await?;
-    let mut s = session(DynamicVerb::Revoke, &mount_id, &storage, req);
+    let plan =
+        ExecPlan::Revoke { statements: internal.revocation_statements.clone(), username: internal.username.clone() };
+    let mut s = session(DynamicVerb::Revoke, &mount_id, &storage, req).with_plan(plan);
     // The kernel's take-back of an unregistered lease still has the issued
     // data: the password then only serves to redact the plugin's error.
     if let Some(password) = req.data.as_ref().and_then(|d| d.get("password")).and_then(Value::as_str) {
@@ -604,7 +721,12 @@ async fn revoke(call: &DynamicCall<'_>, req: &Request) -> Result<Option<Response
         "statements": internal.revocation_statements,
         "internal": internal.plugin_internal,
     });
-    let outcome = call.invoke(&envelope, &s).await;
+    // No node may serve the credential once its revoke has begun; if that
+    // cannot be ensured the revoke fails here and the lease manager retries.
+    let outcome = match forget_cached(storage.as_ref(), &internal).await {
+        Ok(()) => call.invoke(&envelope, &s).await,
+        Err(e) => Err(e),
+    };
     let kind = if outcome.is_ok() { DynamicEventKind::Revoke } else { DynamicEventKind::RevokeFailed };
     let mut event = call.event(kind);
     event.lease_id.clone_from(&s.lease_id);
@@ -612,7 +734,7 @@ async fn revoke(call: &DynamicCall<'_>, req: &Request) -> Result<Option<Response
     event.connection = Some(internal.connection.clone());
     event.target_identity = Some(internal.username.clone());
     if let Err(e) = &outcome {
-        event = event.with_error(&e.to_string(), &s.secrets());
+        event = event.with_error(&e.to_string(), &s.secrets().refs());
     }
     super::emit_event(Some(call.core.as_ref()), &event).await;
     outcome.map(|_| None)
@@ -628,7 +750,18 @@ pub async fn audit_unreachable_revoke(core: &dyn VaultCtx, plugin: &str, req: &R
     let Ok(internal) = DynamicLeaseInternal::from_internal_data(&secret.internal_data) else {
         return;
     };
-    cache::invalidate_credential(&internal.username);
+    // Best effort: this lease's mount is refused before the cache anyway
+    // while its plugin is unreachable, and the retry removes the marker.
+    match req.storage.as_ref() {
+        Some(storage) => {
+            if let Err(e) = forget_cached(storage.as_ref(), &internal).await {
+                log::warn!("{e}");
+            }
+        }
+        None => {
+            cache::invalidate_credential(&internal.username);
+        }
+    }
     let mut event = DynamicSecretEvent::new(
         DynamicEventKind::RevokeFailed,
         EventOrigin::Host,
@@ -665,8 +798,9 @@ async fn rotate_root(call: &DynamicCall<'_>, req: &Request, connection: &str) ->
     });
     let result = call.invoke(&envelope, &s).await;
     wipe_strings(&mut envelope);
-    // Attempted or done, the root changed hands: drop what was cached under it.
-    cache::invalidate_mount(&mount_id);
+    // Attempted or done, the root changed hands: drop what was cached under
+    // it, on every node. Reported after the rotation is recorded.
+    let epoch = bump_cache_epoch(storage.as_ref(), &mount_id, &format!("rotating the root of `{connection}`")).await;
     result?;
 
     record.root_credential_version += 1;
@@ -682,6 +816,7 @@ async fn rotate_root(call: &DynamicCall<'_>, req: &Request, connection: &str) ->
     event.actor = s.actor.clone();
     event.request_id.clone_from(&s.request_id);
     super::emit_event(Some(call.core.as_ref()), &event).await;
+    epoch?;
 
     // Only host fields: whatever the plugin answered may name the new root.
     let mut data = Map::new();
@@ -718,7 +853,16 @@ async fn config(call: &DynamicCall<'_>, req: &Request, name: &str) -> Result<Opt
                 Some(Value::String(pem)) if pem.is_empty() || pem.contains("-----BEGIN CERTIFICATE-----") => Some(pem),
                 Some(_) => return Err(bad_request("`tls_ca_pem` must be a PEM certificate bundle")),
             };
-            let resp = proxy(call, req, Some(body)).await?;
+            // The endpoint the host pins (non-secret): a host execution dials
+            // only what the operator wrote here and the plugin accepted.
+            let pin_url = written_string(&body, "connection_url");
+            let pin_user = written_string(&body, "username");
+            let mount_id = state::mount_id(storage.as_ref()).await?;
+            let what = format!("writing config/{name}");
+            let resp = match proxy(call, req, Some(body)).await {
+                Ok(resp) => resp,
+                Err(e) => return settle_cache_epoch(storage.as_ref(), &mount_id, &what, Err(e)).await,
+            };
             let mut record = state::load_connection(storage.as_ref(), name).await?.unwrap_or_default();
             if let Some(v) = insecure {
                 record.insecure_skip_tls_verify = v;
@@ -726,6 +870,16 @@ async fn config(call: &DynamicCall<'_>, req: &Request, name: &str) -> Result<Opt
             if let Some(pem) = ca {
                 record.tls_ca_pem = (!pem.is_empty()).then_some(pem);
             }
+            if let Some(url) = pin_url {
+                record.connection_url = url;
+            }
+            if let Some(user) = pin_user {
+                record.username = user;
+            }
+            // The plugin may hold a new target or root secret now: every
+            // node's pool drains connections opened under the previous write.
+            // A fresh random value, not an increment, so it never repeats.
+            record.config_generation = random_u64()?;
             if record.insecure_skip_tls_verify {
                 log::warn!(
                     "dynamic mount connection `{name}` has insecure_skip_tls_verify set: TLS certificates of the \
@@ -733,16 +887,19 @@ async fn config(call: &DynamicCall<'_>, req: &Request, name: &str) -> Result<Opt
                 );
             }
             state::save_connection(storage.as_ref(), name, &record).await?;
-            let mount_id = state::mount_id(storage.as_ref()).await?;
-            host_pool().configure(&target_key(&mount_id, name), record.root_credential_version, record.tls_policy());
-            Ok(resp)
+            host_pool().configure(&target_key(&mount_id, name), record.target_settings());
+            settle_cache_epoch(storage.as_ref(), &mount_id, &what, Ok(resp)).await
         }
         Operation::Delete => {
-            let resp = proxy(call, req, None).await?;
-            state::delete_connection(storage.as_ref(), name).await?;
             let mount_id = state::mount_id(storage.as_ref()).await?;
+            let what = format!("deleting config/{name}");
+            let resp = match proxy(call, req, None).await {
+                Ok(resp) => resp,
+                Err(e) => return settle_cache_epoch(storage.as_ref(), &mount_id, &what, Err(e)).await,
+            };
+            state::delete_connection(storage.as_ref(), name).await?;
             host_pool().remove(&target_key(&mount_id, name));
-            Ok(resp)
+            settle_cache_epoch(storage.as_ref(), &mount_id, &what, Ok(resp)).await
         }
         Operation::Read => {
             let mut resp = proxy(call, req, None).await?;

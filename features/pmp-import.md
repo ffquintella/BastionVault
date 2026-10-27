@@ -88,7 +88,7 @@ The operator drives the import from a new GUI page (`Settings → Resources → 
 
 ## Plugin runtime choice — Process, not WASM
 
-The plugin lives in [`plugins-ext/bastion-plugin-pmp`](../plugins-ext) and uses the **out-of-process runtime** (the same one `bastion-plugin-xca` and `bastion-plugin-postgres` use), not WASM:
+The plugin lives in [`plugins-ext/bastion-plugin-pmp`](../plugins-ext) and uses the **out-of-process runtime** (the same one `bastion-plugin-xca` and the dynamic-engine plugins use), not WASM:
 
 - **`calamine` is happy in WASM**, but encoding decoders (`encoding_rs`, needed for the legacy `.xls` BIFF code-page handling — the sample file is `Code page: 10000` Mac Roman) push the artefact past 2 MiB and the WASI text-codec story is still patchy.
 - **Symmetry with `bastion-plugin-xca`.** Both are file-driven importers; sharing the runtime means operators uninstall/reinstall the same way they already do for XCA.

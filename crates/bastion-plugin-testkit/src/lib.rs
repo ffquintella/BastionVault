@@ -147,6 +147,9 @@ pub struct TestInvocation {
     pub dynamic_leases: Vec<serde_json::Value>,
     /// `bv.dynamic_audit_emit` events accepted during this invocation.
     pub dynamic_events: Vec<serde_json::Value>,
+    /// Host executions (`dynamic_pool_checkout` with `execute`) accepted
+    /// during this invocation: op, connection, slot, kind, url, username.
+    pub dynamic_executions: Vec<serde_json::Value>,
     /// Dynamic host calls refused because the capability was not granted:
     /// the server quarantines a plugin that makes one.
     pub capability_violations: Vec<String>,
@@ -234,6 +237,7 @@ struct Marks {
     audit: usize,
     leases: usize,
     events: usize,
+    executions: usize,
     violations: usize,
 }
 
@@ -244,6 +248,7 @@ impl HostState {
             audit: self.audit.len(),
             leases: self.dynamic.leases.len(),
             events: self.dynamic.events.len(),
+            executions: self.dynamic.executions.len(),
             violations: self.dynamic.violations.len(),
         }
     }
@@ -257,6 +262,7 @@ impl HostState {
             audit_events: self.audit[m.audit..].to_vec(),
             dynamic_leases: self.dynamic.leases[m.leases..].to_vec(),
             dynamic_events: self.dynamic.events[m.events..].to_vec(),
+            dynamic_executions: self.dynamic.executions[m.executions..].to_vec(),
             capability_violations: self.dynamic.violations[m.violations..].to_vec(),
         }
     }
@@ -361,6 +367,7 @@ pub struct TestHostBuilder {
     caller_identity: bool,
     dynamic_caps: dynamic::DynamicCaps,
     connections: BTreeSet<String>,
+    host_execute: BTreeSet<String>,
 }
 
 impl TestHostBuilder {
@@ -386,6 +393,14 @@ impl TestHostBuilder {
     /// server needs `config/<name>` written through the host first).
     pub fn dynamic_connection(mut self, name: impl Into<String>) -> Self {
         self.connections.insert(name.into());
+        self
+    }
+
+    /// Advertise a host connector of `kind` in every pool grant
+    /// (`host_execute`) and accept `execute` requests for it, like a host
+    /// built with that connector. Default: none, as on a host without them.
+    pub fn dynamic_host_execute(mut self, kind: impl Into<String>) -> Self {
+        self.host_execute.insert(kind.into());
         self
     }
 
@@ -493,7 +508,11 @@ impl TestHostBuilder {
                 stderr: Vec::new(),
                 sql: self.sql,
                 invocation_caller: None,
-                dynamic: dynamic::DynamicState { connections: self.connections, ..Default::default() },
+                dynamic: dynamic::DynamicState {
+                    connections: self.connections,
+                    host_execute: self.host_execute,
+                    ..Default::default()
+                },
             })),
         }
     }
@@ -537,6 +556,7 @@ impl TestHost {
             caller_identity: false,
             dynamic_caps: dynamic::DynamicCaps::default(),
             connections: BTreeSet::new(),
+            host_execute: BTreeSet::new(),
         }
     }
 
@@ -549,12 +569,7 @@ impl TestHost {
     }
 
     fn with_dynamic_session<T>(&self, envelope: &serde_json::Value, run: impl FnOnce() -> T) -> T {
-        let op = envelope.get("op").and_then(serde_json::Value::as_str).unwrap_or("").to_string();
-        {
-            let mut st = self.state.lock().unwrap();
-            st.dynamic.session = Some(op);
-            st.dynamic.lease_in_session = false;
-        }
+        self.state.lock().unwrap().dynamic.open_session(envelope);
         let out = run();
         self.state.lock().unwrap().dynamic.session = None;
         out

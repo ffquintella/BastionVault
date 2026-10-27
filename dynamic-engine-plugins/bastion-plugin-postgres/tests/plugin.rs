@@ -122,3 +122,38 @@ fn a_revoke_that_cannot_reach_the_target_fails_so_the_host_keeps_the_lease() {
     assert_eq!(out.status(), 1);
     assert_clean(&h, &out.response);
 }
+
+/// Against a host with a `postgres` connector (`host_execute`), the binary
+/// has the host run the statements over the wire protocol: the unreachable
+/// `port=1` target is never dialled by the plugin, the lease is registered,
+/// and neither the root secret nor the password leaves in clear.
+#[test]
+fn on_an_executing_host_the_binary_never_dials_and_the_host_runs_the_statements() {
+    let h = TestHost::builder("postgres")
+        .storage_prefix("")
+        .dynamic_lease_register(true)
+        .dynamic_audit_emit(true)
+        .dynamic_pool_checkout(true)
+        .dynamic_connection("prod")
+        .dynamic_host_execute("postgres")
+        .build();
+    let conn = json!({ "connection_url": "host=127.0.0.1 port=1 dbname=app", "username": "vault",
+                       "password": ROOT, "allowed_roles": "*" });
+    assert!(h.invoke_process(exe(), "write", "config/prod", conn).unwrap().is_success());
+
+    let out = h.invoke_process_dynamic(exe(), &generate("prod")).unwrap();
+    assert!(out.is_success(), "{:?}", out.response_json());
+    assert_eq!(out.dynamic_leases.len(), 1);
+    assert_eq!(out.dynamic_executions.len(), 1, "{:?}", out.dynamic_executions);
+    let e = &out.dynamic_executions[0];
+    assert_eq!((e["op"].as_str(), e["kind"].as_str()), (Some("dynamic.generate"), Some("postgres")));
+    assert_eq!((e["url"].as_str(), e["username"].as_str()), (Some("host=127.0.0.1 port=1 dbname=app"), Some("vault")));
+    assert_clean(&h, &out.response);
+
+    let revoke = json!({ "op": "dynamic.revoke", "role": "readonly", "connection": "prod", "username": USER,
+                         "statements": [], "internal": { "v": 1 } });
+    let out = h.invoke_process_dynamic(exe(), &revoke).unwrap();
+    assert!(out.is_success(), "{:?}", out.response_json());
+    assert_eq!(out.dynamic_executions.len(), 1);
+    assert_clean(&h, &out.response);
+}

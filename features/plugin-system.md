@@ -33,7 +33,7 @@ The plugin system is a substrate, not an engine. Concrete out-of-tree plugins (e
 - **LogicalBackend mount wiring** ([src/plugins/logical_backend.rs](../src/plugins/logical_backend.rs)) — `mount type=plugin:<name>` dispatches to the runtime; the same `Request`/`Response` shape the built-in engines use flows through.
 - **`bastion-plugin-sdk` crate** ([crates/bastion-plugin-sdk](../crates/bastion-plugin-sdk)) — `Plugin` trait, `Host` capability handle, `register!` macro emits the WASM ABI exports (`bv_run` + `bv_alloc` + linear `memory`).
 - **`bv-plugin-pack` packer CLI** ([crates/bv-plugin-pack](../crates/bv-plugin-pack)) — bundles `plugin.toml` + `.wasm` into a `.bvplugin` artefact the GUI can self-configure on upload.
-- **Reference plugins out-of-tree** ([plugins-ext/](../plugins-ext/) git submodule) — `bastion-plugin-totp` (full WASM port of the TOTP engine) and `bastion-plugin-postgres` (process-runtime dynamic-secrets PoC).
+- **Reference plugins out-of-tree** ([plugins-ext/](../plugins-ext/) git submodule) — `bastion-plugin-totp` (full WASM port of the TOTP engine) and, until it moved to [`dynamic-engine-plugins/`](../dynamic-engine-plugins/) (T62), `bastion-plugin-postgres`.
 - **GUI** ([gui/src/routes/PluginsPage.tsx](../gui/src/routes/PluginsPage.tsx)) — register modal with manifest preview, list/delete/invoke, version activation, error surfacing.
 - **Process runtime as single-shot spawn-per-invoke** ([src/plugins/process_runtime.rs](../src/plugins/process_runtime.rs)) — host writes the binary to a temp file, spawns it, exchanges request/response over stdin/stdout, kills on timeout. Useful for "I need real network access *for one call*" cases; **not** the long-lived supervised gRPC subprocess the spec calls for.
 
