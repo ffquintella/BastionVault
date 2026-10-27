@@ -1,8 +1,8 @@
-//! T454 phase 7: validation on two real YubiHSM 2 devices. Compiled only with
-//! `--features hsm_hardware_tests`, skipped unless BVAULT_TEST_YUBIHSM_POOL=1,
-//! and refuses any device not in BVAULT_TEST_YUBIHSM_SERIALS. The operator
-//! runbook (environment, the three invocations, the physical reset) is
-//! `docs/hsm.md` § Phase 7 hardware validation; the logic is unit-tested in
+//! T454 phase 7: validation on one (a pool of one) or two real YubiHSM 2
+//! devices. Compiled only with `--features hsm_hardware_tests`, skipped unless
+//! BVAULT_TEST_YUBIHSM_POOL=1, and refuses any device not in
+//! BVAULT_TEST_YUBIHSM_SERIALS. The operator runbook is `docs/hsm.md`
+//! § Phase 7 hardware validation; the logic is unit-tested in
 //! `bv_core::hsm::hw_validation`.
 #![cfg(not(feature = "sync_handler"))]
 
@@ -19,9 +19,9 @@ use bv_core::hsm::{
     blob::BvHsmBlob,
     ceremony::{verify_member, AttestationBundle},
     hw_validation::{
-        after_snapshot_file, compare_pools, device, factory_password, harness_error, plan, preflight,
-        reset_instructions, HarnessEnv, LatencySamples, Mode, PoolSnapshot, Reading, Step, BEFORE_SNAPSHOT_FILE,
-        ENV_ENABLE,
+        after_snapshot_file, compare_pools, device, factory_password, harness_error, not_exercised, plan, preflight,
+        reset_instructions, CheckReport, HarnessEnv, LatencySamples, Mode, PoolMode, PoolSnapshot, Reading, Step,
+        BEFORE_SNAPSHOT_FILE, ENV_ENABLE,
     },
     yubihsm2::{self, YubiHsm2AdminSession, YubiHsm2Backend},
     HsmBackend, HsmObjectIds,
@@ -46,15 +46,6 @@ fn write_json(path: &Path, value: &impl serde::Serialize) -> Result<(), RvError>
     std::fs::write(path, json).map_err(|e| harness_error(format!("{}: {e}", path.display())))
 }
 
-/// One verified property of the hardware. A failed check does not stop the
-/// run (each run costs a physical reset), but fails the test at the end.
-#[derive(serde::Serialize)]
-struct Check {
-    name: String,
-    passed: bool,
-    detail: String,
-}
-
 struct Run {
     env: HarnessEnv,
     objects: HsmObjectIds,
@@ -63,7 +54,7 @@ struct Run {
     anchors: Option<PathBuf>,
     bundles: BTreeMap<u32, AttestationBundle>,
     credential: Option<NodeCredential>,
-    checks: Vec<Check>,
+    checks: CheckReport,
     samples: LatencySamples,
     /// Set before the first write: from then on, every exit prints the reset.
     wrote: bool,
@@ -71,13 +62,38 @@ struct Run {
 
 impl Run {
     fn check(&mut self, name: impl Into<String>, result: Result<String, String>) {
-        let (passed, detail) = match result {
-            Ok(detail) => (true, detail),
-            Err(detail) => (false, detail),
-        };
-        let name = name.into();
-        println!("    [{}] {name}: {detail}", if passed { "pass" } else { "FAIL" });
-        self.checks.push(Check { name, passed, detail });
+        println!("{}", self.checks.record(name, result).line());
+    }
+
+    /// The checks `step` reaches that need a second device (pool of one).
+    fn not_exercised(&mut self, step: Step) {
+        for c in self.checks.record_not_exercised(step) {
+            println!("{}", c.line());
+        }
+    }
+
+    fn pool_mode(&self) -> PoolMode {
+        self.env.serials.pool_mode()
+    }
+
+    fn heading(&self) -> String {
+        self.pool_mode().heading(&self.env.serials.serials())
+    }
+
+    /// A JSON output labelled with the run's mode and devices.
+    fn write_labelled(&self, file: &str, fields: Vec<(&str, serde_json::Value)>) -> Result<(), RvError> {
+        let mut out = self.env.serials.label();
+        for (key, value) in fields {
+            out.insert(key.into(), value);
+        }
+        write_json(&self.env.out_dir.join(file), &out)
+    }
+
+    fn save_checks(&self) {
+        let path = self.env.out_dir.join(format!("checks-{}.json", now_unix()));
+        if let Err(e) = write_json(&path, &self.checks.file()) {
+            eprintln!("    could not save {}: {e}", path.display());
+        }
     }
 
     fn admin_session(&self, index: usize) -> Result<YubiHsm2AdminSession, RvError> {
@@ -97,9 +113,16 @@ impl Run {
     async fn step(&mut self, step: Step) -> Result<(), RvError> {
         match step {
             Step::StartConnectors => {
+                let heading = self.heading();
                 for (i, serial) in self.env.serials.serials().into_iter().enumerate() {
                     let port = self.env.port(i)?;
-                    let c = device::ConnectorProcess::spawn(&self.env.connector_bin, serial, port, &self.env.out_dir)?;
+                    let c = device::ConnectorProcess::spawn(
+                        &self.env.connector_bin,
+                        serial,
+                        port,
+                        &self.env.out_dir,
+                        &heading,
+                    )?;
                     println!("    connector for {} on {} ({:?})", format_serial(serial), c.url(), c.status);
                     self.connectors.push(c);
                 }
@@ -126,7 +149,7 @@ impl Run {
                     devices.push(snapshot);
                 }
                 let label = if self.env.mode == Mode::Compare { "after" } else { "now" };
-                self.snapshot = Some(PoolSnapshot::new(label, now_unix(), devices));
+                self.snapshot = Some(PoolSnapshot::new(label, now_unix(), self.pool_mode(), devices));
             }
             Step::Preflight => {
                 for d in self.snapshot()?.devices.values() {
@@ -149,7 +172,8 @@ impl Run {
                 let before = PoolSnapshot::load(&self.env.out_dir.join(BEFORE_SNAPSHOT_FILE))?;
                 let comparison = compare_pools(&before, self.snapshot()?);
                 println!("{}", comparison.render());
-                write_json(&self.env.out_dir.join(format!("comparison-{}.json", now_unix())), &comparison)?;
+                let value = serde_json::to_value(&comparison).map_err(|e| harness_error(e.to_string()))?;
+                self.write_labelled(&format!("comparison-{}.json", now_unix()), vec![("comparison", value)])?;
                 if !comparison.is_identical() {
                     return Err(harness_error("the devices do not read as the before snapshot"));
                 }
@@ -189,7 +213,8 @@ impl Run {
                     let session = self.admin_session(i)?;
                     session.put_node_auth_key(&format!("bv-node-{}", device::TEST_NODE), &credential).await?;
                 }
-                println!("    test node key {:#06x} on both devices", credential.auth_key_id());
+                let devices: Vec<String> = self.connectors.iter().map(|c| format_serial(c.serial)).collect();
+                println!("    test node key {:#06x} on {}", credential.auth_key_id(), devices.join(", "));
                 self.credential = Some(credential);
             }
             Step::DualWrap => self.dual_wrap().await?,
@@ -203,11 +228,12 @@ impl Run {
                         device::measure(&backend, &label, &self.objects, iterations, &mut self.samples).await;
                     self.check(format!("latency {label}"), result.map(|_| format!("{iterations} rounds")).map_err(|e| e.to_string()));
                 }
-                let table = self.samples.to_markdown();
+                let table = format!("{}\n\n{}", self.heading(), self.samples.to_markdown());
                 println!("{table}");
                 std::fs::write(self.env.out_dir.join("latency.md"), &table)
                     .map_err(|e| harness_error(e.to_string()))?;
-                write_json(&self.env.out_dir.join("latency.json"), &self.samples.rows())?;
+                let rows = serde_json::to_value(self.samples.rows()).map_err(|e| harness_error(e.to_string()))?;
+                self.write_labelled("latency.json", vec![("rows", rows)])?;
             }
             Step::RevokeTestNode => {
                 let id = self.credential()?.auth_key_id();
@@ -230,7 +256,7 @@ impl Run {
                 }
             }
             Step::ResetInstructions => {
-                let text = reset_instructions(&self.env.serials.serials(), &self.env.out_dir);
+                let text = reset_instructions(&self.env.serials, &self.env.out_dir);
                 println!("\n{text}\n");
                 std::fs::write(self.env.out_dir.join("RESET-REQUIRED.txt"), text)
                     .map_err(|e| harness_error(e.to_string()))?;
@@ -244,7 +270,10 @@ impl Run {
     }
 
     /// `verify_member` (pinned chain, challenge, layout) on each device, the
-    /// details of each attested key, and a bundle presented to the wrong device.
+    /// details of each attested key, and (two members) a bundle presented to
+    /// the wrong device. `bundle-<serial>.json` stays a bare
+    /// `AttestationBundle` (it denies unknown fields), so the labelled
+    /// `attestations.json` names the bundle files.
     async fn attest(&mut self) -> Result<(), RvError> {
         let mut report = BTreeMap::new();
         for i in 0..self.connectors.len() {
@@ -273,7 +302,8 @@ impl Run {
                 };
                 report.insert(format!("{}/{what}", bundle.serial), detail);
             }
-            // The other device's bundle must not verify on this device.
+            // The other device's bundle must not verify on this device. A
+            // pool of one has none: `not_exercised` records it after the step.
             if let Some(other) = self.bundles.iter().find(|(s, _)| **s != serial).map(|(_, b)| b.clone()) {
                 let crossed = verify_member(&session, &other, &self.objects).await;
                 self.check(
@@ -285,22 +315,41 @@ impl Run {
                 );
             }
         }
-        write_json(&self.env.out_dir.join("attestations.json"), &report)
+        let bundle_files: BTreeMap<String, String> =
+            self.bundles.values().map(|b| (b.serial.clone(), format!("bundle-{}.json", b.serial))).collect();
+        let bundle_files = serde_json::to_value(bundle_files).map_err(|e| harness_error(e.to_string()))?;
+        let report = serde_json::to_value(report).map_err(|e| harness_error(e.to_string()))?;
+        self.write_labelled("attestations.json", vec![("bundle_files", bundle_files), ("attestations", report)])
     }
 
-    /// Dual-wrap on both devices with the test node key, and the device
-    /// facts phase 2 left open (the unwrap MAC failure code, domain 2).
+    /// Dual-wrap on both devices with the test node key (a single-member
+    /// wrap in a pool of one), and the device facts phase 2 left open (the
+    /// unwrap MAC failure code, domain 2), which need one device only.
     async fn dual_wrap(&mut self) -> Result<(), RvError> {
         let ctx = device::test_context();
         let secret = [0x5au8; 32];
         let a = self.member(0)?;
-        let b = self.member(1)?;
+        let b = match self.pool_mode() {
+            PoolMode::TwoMember => Some(self.member(1)?),
+            PoolMode::PoolOfOne => None,
+        };
         let blob_a = a.wrap_data(self.objects.wrap_barrier, &ctx, &secret).await?;
-        let blob_b = b.wrap_data(self.objects.wrap_barrier, &ctx, &secret).await?;
-        for (name, backend, blob) in [("a", &a, &blob_a), ("b", &b, &blob_b)] {
+        let blob_b = match &b {
+            Some(b) => Some(b.wrap_data(self.objects.wrap_barrier, &ctx, &secret).await?),
+            None => None,
+        };
+        let mut wrapped = vec![("a", &a, &blob_a)];
+        if let (Some(b), Some(blob_b)) = (&b, &blob_b) {
+            wrapped.push(("b", b, blob_b));
+        }
+        for (name, backend, blob) in wrapped {
             let opened = backend.unwrap_data(self.objects.wrap_barrier, &ctx, blob).await;
+            let check = match self.pool_mode() {
+                PoolMode::TwoMember => format!("dual-wrap round trip on {name} ({})", backend.device_serial()),
+                PoolMode::PoolOfOne => format!("wrap round trip on {}", backend.device_serial()),
+            };
             self.check(
-                format!("dual-wrap round trip on {name} ({})", backend.device_serial()),
+                check,
                 match opened {
                     Ok(p) if p.as_slice() == secret => Ok("unwrapped what was wrapped".into()),
                     Ok(_) => Err("unwrapped other bytes".into()),
@@ -308,14 +357,16 @@ impl Run {
                 },
             );
         }
-        let crossed = a.unwrap_data(self.objects.wrap_barrier, &ctx, &blob_b).await;
-        self.check(
-            "a copy for one device is refused by the other",
-            match crossed {
-                Err(e) => Ok(e.to_string()),
-                Ok(_) => Err("opened".into()),
-            },
-        );
+        if let Some(blob_b) = &blob_b {
+            let crossed = a.unwrap_data(self.objects.wrap_barrier, &ctx, blob_b).await;
+            self.check(
+                "a copy for one device is refused by the other",
+                match crossed {
+                    Err(e) => Ok(e.to_string()),
+                    Ok(_) => Err("opened".into()),
+                },
+            );
+        }
         let mut tampered = BvHsmBlob::from_bytes(&blob_a)?;
         if let Some(last) = tampered.wrapped.last_mut() {
             *last ^= 0x01;
@@ -475,8 +526,15 @@ async fn hsm_pool_hardware() {
     };
     let steps = plan(env.mode, env.until, env.allow_writes).unwrap_or_else(|e| panic!("{e}"));
     std::fs::create_dir_all(&env.out_dir).unwrap_or_else(|e| panic!("{}: {e}", env.out_dir.display()));
+    let pool = env.serials.pool_mode();
+    println!("{}", pool.heading(&env.serials.serials()));
     println!("phase 7 {:?}: {:?}", env.mode, steps.iter().map(Step::name).collect::<Vec<_>>());
+    let skipped: Vec<&str> = not_exercised(pool, &steps).iter().map(|c| c.name).collect();
+    if !skipped.is_empty() {
+        println!("not exercised (pool of one), each recorded at its step: {skipped:?}");
+    }
     let mut run = Run {
+        checks: CheckReport::new(&env.serials),
         env,
         objects: HsmObjectIds::default(),
         connectors: Vec::new(),
@@ -484,7 +542,6 @@ async fn hsm_pool_hardware() {
         anchors: None,
         bundles: BTreeMap::new(),
         credential: None,
-        checks: Vec::new(),
         samples: LatencySamples::default(),
         wrote: false,
     };
@@ -492,12 +549,19 @@ async fn hsm_pool_hardware() {
         println!("==> {}", step.name());
         if let Err(e) = run.step(step).await {
             if run.wrote {
-                println!("\n{}\n", reset_instructions(&run.env.serials.serials(), &run.env.out_dir));
+                println!("\n{}\n", reset_instructions(&run.env.serials, &run.env.out_dir));
             }
-            panic!("phase 7 step {:?} failed: {e}", step.name());
+            run.save_checks();
+            panic!("phase 7 step {:?} failed: {e} ({})", step.name(), run.checks.verdict());
         }
+        run.not_exercised(step);
     }
-    let _ = write_json(&run.env.out_dir.join(format!("checks-{}.json", now_unix())), &run.checks);
-    let failed: Vec<&str> = run.checks.iter().filter(|c| !c.passed).map(|c| c.name.as_str()).collect();
-    assert!(failed.is_empty(), "phase 7 checks failed: {failed:?} (details above and in checks-*.json)");
+    run.save_checks();
+    println!("\n{}", run.checks.summary());
+    let failed = run.checks.failed();
+    assert!(
+        failed.is_empty(),
+        "phase 7 checks failed: {failed:?} (details above and in checks-*.json); {}",
+        run.checks.verdict()
+    );
 }

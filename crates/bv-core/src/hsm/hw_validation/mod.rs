@@ -4,6 +4,7 @@
 //! and the operator runbook is `docs/hsm.md` § Phase 7 hardware validation.
 //! It never resets a device, updates firmware, enables FIPS mode or sets an
 //! audit option: the only writes are `provision` and one test node key.
+//! One serial validates a pool of one ([`PoolMode`], [`TWO_DEVICE_CHECKS`]).
 
 #[cfg(feature = "hsm_hardware_tests")]
 pub mod device;
@@ -29,7 +30,8 @@ use crate::{
 
 /// `1` runs the suite; anything else (or unset) skips it.
 pub const ENV_ENABLE: &str = "BVAULT_TEST_YUBIHSM_POOL";
-/// Comma-separated serials of the two devices the run may touch, nothing else.
+/// Comma-separated serials of the one or two devices the run may touch,
+/// nothing else. One serial is a pool-of-one run, two a two-member run.
 pub const ENV_SERIALS: &str = "BVAULT_TEST_YUBIHSM_SERIALS";
 /// `snapshot` (default), `validate` or `compare`.
 pub const ENV_STEP: &str = "BVAULT_TEST_YUBIHSM_STEP";
@@ -48,8 +50,10 @@ pub const ENV_LATENCY_ITERATIONS: &str = "BVAULT_TEST_YUBIHSM_LATENCY_ITERATIONS
 const DEFAULT_PORT_BASE: u16 = 12345;
 const DEFAULT_LATENCY_ITERATIONS: usize = 20;
 const MAX_LATENCY_ITERATIONS: usize = 1000;
-/// The two devices of a pool, exactly.
-pub const DEVICES: usize = 2;
+/// A pool has one or two devices (`features/hsm-pool-ha.md` § Pool of one).
+pub const MAX_DEVICES: usize = 2;
+/// Format 1 throughout: the `mode` label is an optional field, absent from
+/// snapshots written before the pool-of-one harness, which still load.
 pub const SNAPSHOT_FORMAT: u32 = 1;
 /// Written once by the `snapshot` step and never replaced.
 pub const BEFORE_SNAPSHOT_FILE: &str = "snapshot-before.json";
@@ -280,8 +284,48 @@ pub fn plan(mode: Mode, until: Option<Step>, allow_writes: bool) -> Result<Vec<S
     Ok(steps)
 }
 
-/// The two serials the run may touch. Any other device is refused before a
-/// single authenticated command reaches it.
+/// What a run validates, decided only by how many serials [`ENV_SERIALS`]
+/// names. Written as `"mode"` in every JSON output and on the first line of
+/// every text one, so no file of a one-device run reads as two-device evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PoolMode {
+    /// One serial: a pool of one on that device. Every check that needs a
+    /// second device is recorded as [`CheckOutcome::NotExercised`].
+    PoolOfOne,
+    /// Two serials: the two-member pool.
+    TwoMember,
+}
+
+impl PoolMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PoolMode::PoolOfOne => "pool-of-one",
+            PoolMode::TwoMember => "two-member",
+        }
+    }
+
+    /// One line naming the mode and the devices, heading every text output.
+    pub fn heading(&self, serials: &[u32]) -> String {
+        let list: Vec<String> = serials.iter().map(|s| format_serial(*s)).collect();
+        match self {
+            PoolMode::PoolOfOne => format!(
+                "phase 7 mode pool-of-one ({}): checks that need a second device are not exercised",
+                list.join(", ")
+            ),
+            PoolMode::TwoMember => format!("phase 7 mode two-member ({})", list.join(", ")),
+        }
+    }
+}
+
+impl fmt::Display for PoolMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// The one or two serials the run may touch. Any other device is refused
+/// before a single authenticated command reaches it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SerialAllowlist(BTreeSet<u32>);
 
@@ -294,17 +338,36 @@ impl SerialAllowlist {
                 return Err(harness_error(format!("{ENV_SERIALS}: {part:?} is zero or listed twice")));
             }
         }
-        if set.len() != DEVICES {
+        if set.is_empty() || set.len() > MAX_DEVICES {
             return Err(harness_error(format!(
-                "{ENV_SERIALS} must name exactly {DEVICES} devices (the pool), got {}",
+                "{ENV_SERIALS} must name one device (a pool of one) or two (the two-member pool), got {}",
                 set.len()
             )));
         }
         Ok(Self(set))
     }
 
+    /// Total: [`Self::parse`] admits only one or two serials.
+    pub fn pool_mode(&self) -> PoolMode {
+        if self.0.len() == 1 {
+            PoolMode::PoolOfOne
+        } else {
+            PoolMode::TwoMember
+        }
+    }
+
     pub fn serials(&self) -> Vec<u32> {
         self.0.iter().copied().collect()
+    }
+
+    /// The JSON label every output file of the run starts from: `mode` and
+    /// the ten-digit `serials`. The caller adds its own fields.
+    pub fn label(&self) -> serde_json::Map<String, serde_json::Value> {
+        let mut map = serde_json::Map::new();
+        map.insert("mode".into(), serde_json::Value::String(self.pool_mode().as_str().into()));
+        let serials = self.0.iter().map(|s| serde_json::Value::String(format_serial(*s))).collect();
+        map.insert("serials".into(), serde_json::Value::Array(serials));
+        map
     }
 
     pub fn check(&self, serial: u32, seen_by: &str) -> Result<(), RvError> {
@@ -348,7 +411,8 @@ impl HarnessEnv {
             Some(other) => return Err(harness_error(format!("{ENV_ALLOW_WRITES}={other:?}: expected 1 or unset"))),
         };
         let serials = SerialAllowlist::parse(
-            &get(ENV_SERIALS).ok_or_else(|| harness_error(format!("{ENV_SERIALS} is required (two serials)")))?,
+            &get(ENV_SERIALS)
+                .ok_or_else(|| harness_error(format!("{ENV_SERIALS} is required (one or two serials)")))?,
         )?;
         let out_dir = PathBuf::from(
             get(ENV_OUT_DIR).ok_or_else(|| harness_error(format!("{ENV_OUT_DIR} is required (a directory)")))?,
@@ -535,20 +599,24 @@ impl DeviceLogCapture {
     }
 }
 
-/// Both devices at one point in time, as saved to the output directory.
+/// The run's devices at one point in time, as saved to the output directory.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PoolSnapshot {
     pub format: u32,
     pub label: String,
+    /// Always written; `None` only for a snapshot saved before this field
+    /// existed, which still loads and is compared device by device.
+    #[serde(default)]
+    pub mode: Option<PoolMode>,
     pub taken_at_unix: u64,
     /// Keyed by the ten-digit serial.
     pub devices: BTreeMap<String, DeviceSnapshot>,
 }
 
 impl PoolSnapshot {
-    pub fn new(label: &str, taken_at_unix: u64, devices: Vec<DeviceSnapshot>) -> Self {
+    pub fn new(label: &str, taken_at_unix: u64, mode: PoolMode, devices: Vec<DeviceSnapshot>) -> Self {
         let devices = devices.into_iter().map(|d| (format_serial(d.serial), d)).collect();
-        Self { format: SNAPSHOT_FORMAT, label: label.into(), taken_at_unix, devices }
+        Self { format: SNAPSHOT_FORMAT, label: label.into(), mode: Some(mode), taken_at_unix, devices }
     }
 
     pub fn load(path: &Path) -> Result<Self, RvError> {
@@ -701,6 +769,13 @@ fn compare_devices(out: &mut SnapshotComparison, serial: &str, before: &DeviceSn
 /// version are ignored.
 pub fn compare_pools(before: &PoolSnapshot, after: &PoolSnapshot) -> SnapshotComparison {
     let mut out = SnapshotComparison::default();
+    match (before.mode, after.mode) {
+        (Some(b), Some(a)) if b != a => out
+            .differences
+            .push(format!("mode: the {} snapshot is {b}, the {} snapshot is {a}", before.label, after.label)),
+        (Some(_), Some(_)) => {}
+        _ => out.notes.push("a snapshot has no mode label (written before it existed); compared by device".into()),
+    }
     for (serial, b) in &before.devices {
         match after.devices.get(serial) {
             None => out.differences.push(format!("{serial} is missing from the {} snapshot", after.label)),
@@ -782,12 +857,208 @@ impl LatencySamples {
     }
 }
 
+/// A property that needs a second device, and the step that reaches it.
+/// `two_member_suite`: whether a two-member run checks it on hardware.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TwoDeviceCheck {
+    pub step: Step,
+    pub name: &'static str,
+    pub two_member_suite: bool,
+}
+
+impl TwoDeviceCheck {
+    pub fn detail(&self) -> &'static str {
+        if self.two_member_suite {
+            "needs a second device; the two-member run checks it"
+        } else {
+            "needs a second device; covered by the mock tests only, not by this suite in either mode"
+        }
+    }
+}
+
+/// Every check a pool-of-one run cannot make. Each is recorded as
+/// [`CheckOutcome::NotExercised`] when its step runs: never passed, never left out.
+pub const TWO_DEVICE_CHECKS: &[TwoDeviceCheck] = &[
+    TwoDeviceCheck {
+        step: Step::Attest,
+        name: "one device's attestation bundle is refused by the other device",
+        two_member_suite: true,
+    },
+    TwoDeviceCheck {
+        step: Step::EnrollTestNode,
+        name: "member add of the second device, then repair to two copies",
+        two_member_suite: false,
+    },
+    TwoDeviceCheck { step: Step::DualWrap, name: "dual-wrap: one copy on each of two members", two_member_suite: true },
+    TwoDeviceCheck {
+        step: Step::DualWrap,
+        name: "a copy wrapped for one device is refused by the other",
+        two_member_suite: true,
+    },
+    TwoDeviceCheck { step: Step::DualWrap, name: "failover between the two members", two_member_suite: false },
+    TwoDeviceCheck {
+        step: Step::DualWrap,
+        name: "either device alone unseals once both are enrolled",
+        two_member_suite: false,
+    },
+];
+
+/// The two-device checks the `steps` of a run reach and cannot make: all
+/// of them in a pool of one, none with two members.
+pub fn not_exercised(mode: PoolMode, steps: &[Step]) -> Vec<&'static TwoDeviceCheck> {
+    match mode {
+        PoolMode::TwoMember => Vec::new(),
+        PoolMode::PoolOfOne => TWO_DEVICE_CHECKS.iter().filter(|c| steps.contains(&c.step)).collect(),
+    }
+}
+
+/// How a check ended. `NotExercised` is never counted as passed or failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum CheckOutcome {
+    #[serde(rename = "passed")]
+    Passed,
+    #[serde(rename = "failed")]
+    Failed,
+    #[serde(rename = "not exercised (pool of one)")]
+    NotExercised,
+}
+
+impl CheckOutcome {
+    pub fn label(&self) -> &'static str {
+        match self {
+            CheckOutcome::Passed => "pass",
+            CheckOutcome::Failed => "FAIL",
+            CheckOutcome::NotExercised => "not exercised (pool of one)",
+        }
+    }
+}
+
+/// One property of the hardware. A failed check does not stop the run
+/// (each run costs a physical reset), but fails the test at the end.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Check {
+    pub name: String,
+    pub outcome: CheckOutcome,
+    pub detail: String,
+}
+
+impl Check {
+    pub fn line(&self) -> String {
+        format!("    [{}] {}: {}", self.outcome.label(), self.name, self.detail)
+    }
+}
+
+/// Every check of a run with its mode and devices: `checks-<time>.json`
+/// and the console summary.
+#[derive(Debug, Clone)]
+pub struct CheckReport {
+    mode: PoolMode,
+    serials: Vec<u32>,
+    checks: Vec<Check>,
+}
+
+#[derive(Serialize)]
+struct CheckFile<'a> {
+    mode: PoolMode,
+    serials: Vec<String>,
+    verdict: String,
+    passed: usize,
+    failed: usize,
+    not_exercised: usize,
+    checks: &'a [Check],
+}
+
+impl CheckReport {
+    pub fn new(allowlist: &SerialAllowlist) -> Self {
+        Self { mode: allowlist.pool_mode(), serials: allowlist.serials(), checks: Vec::new() }
+    }
+
+    /// A check the run made on a device: passed or failed, nothing else.
+    pub fn record(&mut self, name: impl Into<String>, result: Result<String, String>) -> &Check {
+        let (outcome, detail) = match result {
+            Ok(detail) => (CheckOutcome::Passed, detail),
+            Err(detail) => (CheckOutcome::Failed, detail),
+        };
+        self.checks.push(Check { name: name.into(), outcome, detail });
+        &self.checks[self.checks.len() - 1]
+    }
+
+    /// Record the two-device checks `step` reaches as not exercised (a pool
+    /// of one only) and return them.
+    pub fn record_not_exercised(&mut self, step: Step) -> &[Check] {
+        let start = self.checks.len();
+        for c in not_exercised(self.mode, &[step]) {
+            let check = Check { name: c.name.into(), outcome: CheckOutcome::NotExercised, detail: c.detail().into() };
+            self.checks.push(check);
+        }
+        &self.checks[start..]
+    }
+
+    pub fn checks(&self) -> &[Check] {
+        &self.checks
+    }
+
+    pub fn failed(&self) -> Vec<&str> {
+        self.checks.iter().filter(|c| c.outcome == CheckOutcome::Failed).map(|c| c.name.as_str()).collect()
+    }
+
+    fn count(&self, outcome: CheckOutcome) -> usize {
+        self.checks.iter().filter(|c| c.outcome == outcome).count()
+    }
+
+    /// The run's one-line result. A pool-of-one verdict always says that
+    /// two-device behaviour is not validated, whatever passed.
+    pub fn verdict(&self) -> String {
+        let devices: Vec<String> = self.serials.iter().map(|s| format_serial(*s)).collect();
+        let (passed, failed) = (self.count(CheckOutcome::Passed), self.count(CheckOutcome::Failed));
+        let head = if failed > 0 { "FAILED" } else { "no check failed" };
+        match self.mode {
+            PoolMode::PoolOfOne => format!(
+                "{head}: pool-of-one run on {}: {passed} passed, {failed} failed, {} not exercised (pool of one); \
+                 this run does not validate two-device behaviour",
+                devices.join(", "),
+                self.count(CheckOutcome::NotExercised)
+            ),
+            PoolMode::TwoMember => {
+                format!("{head}: two-member run on {}: {passed} passed, {failed} failed", devices.join(", "))
+            }
+        }
+    }
+
+    /// The console summary: the mode, every check, then the verdict.
+    pub fn summary(&self) -> String {
+        let mut out = format!("{}\n", self.mode.heading(&self.serials));
+        for c in &self.checks {
+            out.push_str(&c.line());
+            out.push('\n');
+        }
+        out.push_str(&self.verdict());
+        out
+    }
+
+    /// What `checks-<time>.json` holds.
+    pub fn file(&self) -> impl Serialize + '_ {
+        CheckFile {
+            mode: self.mode,
+            serials: self.serials.iter().map(|s| format_serial(*s)).collect(),
+            verdict: self.verdict(),
+            passed: self.count(CheckOutcome::Passed),
+            failed: self.count(CheckOutcome::Failed),
+            not_exercised: self.count(CheckOutcome::NotExercised),
+            checks: &self.checks,
+        }
+    }
+}
+
 /// What the operator does after a validate run, printed by the driver: the
 /// harness never resets a device and stops before the production provision.
-pub fn reset_instructions(serials: &[u32], out_dir: &Path) -> String {
+pub fn reset_instructions(allowlist: &SerialAllowlist, out_dir: &Path) -> String {
+    let serials = allowlist.serials();
     let list: Vec<String> = serials.iter().map(|s| format_serial(*s)).collect();
+    let devices_are = if serials.len() == 1 { "device is" } else { "devices are" };
     format!(
-        "PHASE 7 STOPS HERE. The devices are provisioned with TEST credentials and must be reset by hand.\n\
+        "{heading}\n\
+         PHASE 7 STOPS HERE. The {devices_are} provisioned with TEST credentials and must be reset by hand.\n\
          For each device ({list}), one at a time:\n  \
            1. unplug it;\n  \
            2. press and hold the metal rim while inserting it, and keep pressing for at least 10 seconds;\n  \
@@ -798,6 +1069,7 @@ pub fn reset_instructions(serials: &[u32], out_dir: &Path) -> String {
              cargo test -p bv-core --features hsm_hardware_tests --test hsm_pool_hardware -- --nocapture\n\
          The production `provision` is the next step after a clean comparison; this harness never runs it.\n\
          Until then a reset device answers the public factory password: keep it off shared hosts.",
+        heading = allowlist.pool_mode().heading(&serials),
         list = list.join(", "),
         before = out_dir.join(BEFORE_SNAPSHOT_FILE).display(),
         csv = list.join(","),
@@ -857,7 +1129,12 @@ mod tests {
     }
 
     fn pool(label: &str, devices: Vec<DeviceSnapshot>) -> PoolSnapshot {
-        PoolSnapshot::new(label, 0, devices)
+        let mode = if devices.len() == 1 { PoolMode::PoolOfOne } else { PoolMode::TwoMember };
+        PoolSnapshot::new(label, 0, mode, devices)
+    }
+
+    fn allowlist(text: &str) -> SerialAllowlist {
+        SerialAllowlist::parse(text).unwrap()
     }
 
     #[test]
@@ -872,7 +1149,14 @@ mod tests {
         assert_eq!((cfg.mode, cfg.allow_writes, cfg.port_base), (Mode::Snapshot, false, 12345));
         assert_eq!((cfg.port(0).unwrap(), cfg.port(1).unwrap()), (12345, 12346), "one port per device");
         assert_eq!(cfg.serials.serials(), vec![A, B]);
+        assert_eq!(cfg.serials.pool_mode(), PoolMode::TwoMember);
         assert_eq!(cfg.latency_iterations, 20);
+
+        // One serial: a pool-of-one run, with the same gate and defaults.
+        let lookup = [(ENV_ENABLE, "1"), (ENV_SERIALS, "36470559"), (ENV_OUT_DIR, "/tmp/p7")];
+        let one = HarnessEnv::from_lookup(env(&lookup)).unwrap().unwrap();
+        assert_eq!((one.serials.serials(), one.serials.pool_mode()), (vec![A], PoolMode::PoolOfOne));
+        assert_eq!((one.mode, one.allow_writes, one.port(0).unwrap()), (Mode::Snapshot, false, 12345));
 
         // Enabled but incomplete or ambiguous: refused, never defaulted.
         assert!(HarnessEnv::from_lookup(env(&[(ENV_ENABLE, "1"), (ENV_OUT_DIR, "/tmp")])).is_err(), "no serials");
@@ -882,15 +1166,177 @@ mod tests {
     }
 
     #[test]
-    fn the_allowlist_takes_exactly_the_two_devices() {
+    fn the_allowlist_takes_one_or_two_devices() {
         let list = SerialAllowlist::parse(" 0036470559, 36470560 ").unwrap();
-        assert_eq!(list.serials(), vec![A, B]);
+        assert_eq!((list.serials(), list.pool_mode()), (vec![A, B], PoolMode::TwoMember));
         list.check(A, "device-info").unwrap();
         let err = list.check(12_345_678, "device-info").unwrap_err().to_string();
         assert!(err.contains("0012345678") && err.contains("refusing"), "{err}");
-        for bad in ["36470559", "36470559,36470559", "36470559,36470560,1", "36470559,x", "0,36470559", ""] {
+
+        // One serial is a pool of one; the other device is refused like any stranger.
+        let one = SerialAllowlist::parse("36470559").unwrap();
+        assert_eq!((one.serials(), one.pool_mode()), (vec![A], PoolMode::PoolOfOne));
+        one.check(A, "device-info").unwrap();
+        assert!(one.check(B, "device-info").unwrap_err().to_string().contains("refusing"));
+
+        // Zero or three and more are still refused, as are duplicates and junk.
+        for none in ["", " , ", ","] {
+            let err = SerialAllowlist::parse(none).unwrap_err().to_string();
+            assert!(err.contains("one device (a pool of one) or two") && err.contains("got 0"), "{none:?}: {err}");
+        }
+        let err = SerialAllowlist::parse("36470559,36470560,1").unwrap_err().to_string();
+        assert!(err.contains("got 3"), "{err}");
+        for bad in ["36470559,36470559", "36470559,x", "0,36470559", "0", "36470559,36470560,12,13"] {
             assert!(SerialAllowlist::parse(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn a_pool_of_one_keeps_the_gate_and_the_preflight() {
+        // The plan does not depend on the device count: writes stay gated.
+        let lookup = [(ENV_ENABLE, "1"), (ENV_SERIALS, "36470559"), (ENV_OUT_DIR, "/t"), (ENV_STEP, "validate")];
+        let one = HarnessEnv::from_lookup(env(&lookup)).unwrap().unwrap();
+        let err = plan(one.mode, one.until, one.allow_writes).unwrap_err().to_string();
+        assert!(err.contains(ENV_ALLOW_WRITES) && err.contains("provision"), "{err}");
+        assert_eq!(plan(one.mode, None, true).unwrap(), VALIDATE_STEPS.to_vec(), "same steps as two members");
+        // Factory key 0x0001 and nothing else, as with two devices.
+        let mut provisioned = factory_device(A);
+        provisioned.objects.push(SnapshotObject { id: 2, ..provisioned.objects[0].clone() });
+        assert!(preflight(&provisioned).is_err());
+        preflight(&factory_device(A)).unwrap();
+    }
+
+    #[test]
+    fn a_pool_of_one_reports_every_two_device_check_as_not_exercised() {
+        let validate = plan(Mode::Validate, None, true).unwrap();
+        let skipped = not_exercised(PoolMode::PoolOfOne, &validate);
+        assert_eq!(skipped.len(), TWO_DEVICE_CHECKS.len(), "a full run reaches every two-device check");
+        let names: Vec<&str> = skipped.iter().map(|c| c.name).collect();
+        for needle in [
+            "attestation bundle is refused by the other",
+            "member add",
+            "dual-wrap",
+            "refused by the other",
+            "failover",
+            "either device alone",
+        ] {
+            assert!(names.iter().any(|n| n.contains(needle)), "{needle:?} missing from {names:?}");
+        }
+        assert!(not_exercised(PoolMode::TwoMember, &validate).is_empty(), "two members run them or never claimed them");
+        let until_anchors = plan(Mode::Validate, Some(Step::LoadAnchors), false).unwrap();
+        assert!(not_exercised(PoolMode::PoolOfOne, &until_anchors).is_empty(), "stopped before attest: none");
+        assert!(not_exercised(PoolMode::PoolOfOne, SNAPSHOT_STEPS).is_empty());
+        assert!(not_exercised(PoolMode::PoolOfOne, COMPARE_STEPS).is_empty());
+        // Every two-device check belongs to a step the validate run has.
+        assert!(TWO_DEVICE_CHECKS.iter().all(|c| VALIDATE_STEPS.contains(&c.step)));
+
+        let mut report = CheckReport::new(&allowlist("36470559"));
+        report.record("attest 0036470559", Ok("ok".into()));
+        let attest = report.record_not_exercised(Step::Attest).to_vec();
+        assert_eq!(attest.len(), 1);
+        assert_eq!(attest[0].outcome, CheckOutcome::NotExercised);
+        assert!(attest[0].line().contains("[not exercised (pool of one)]"), "{}", attest[0].line());
+        assert!(report.record_not_exercised(Step::Latency).is_empty(), "latency needs no second device");
+        for step in [Step::EnrollTestNode, Step::DualWrap] {
+            report.record_not_exercised(step);
+        }
+        assert_eq!(report.checks().len(), 1 + TWO_DEVICE_CHECKS.len());
+        assert!(report.failed().is_empty(), "not exercised is never a failure");
+
+        // In the JSON: the literal outcome, the mode, and counts that never add it to passed.
+        let json = serde_json::to_value(report.file()).unwrap();
+        assert_eq!(json["mode"], "pool-of-one");
+        assert_eq!(json["serials"], serde_json::json!(["0036470559"]));
+        assert_eq!((json["passed"].as_u64(), json["not_exercised"].as_u64()), (Some(1), Some(6)));
+        let outcomes: Vec<&str> =
+            json["checks"].as_array().unwrap().iter().filter_map(|c| c["outcome"].as_str()).collect();
+        assert_eq!(outcomes.iter().filter(|o| **o == "not exercised (pool of one)").count(), 6, "{outcomes:?}");
+        assert_eq!(outcomes.iter().filter(|o| **o == "passed").count(), 1);
+
+        // The result never claims two devices, even when nothing failed.
+        let verdict = report.verdict();
+        assert!(verdict.contains("pool-of-one run on 0036470559") && verdict.contains("6 not exercised"), "{verdict}");
+        assert!(verdict.contains("does not validate two-device behaviour"), "{verdict}");
+        assert!(!verdict.contains("two-member") && !verdict.contains("FAILED"), "{verdict}");
+        let summary = report.summary();
+        assert!(
+            summary.starts_with("phase 7 mode pool-of-one (0036470559)") && summary.ends_with(&verdict),
+            "{summary}"
+        );
+        assert_eq!(summary.matches("[not exercised (pool of one)]").count(), 6, "{summary}");
+    }
+
+    #[test]
+    fn a_two_member_report_is_unchanged_but_labelled() {
+        let mut report = CheckReport::new(&allowlist("36470559,36470560"));
+        for step in ALL_STEPS {
+            assert!(report.record_not_exercised(*step).is_empty(), "{step:?}");
+        }
+        report.record("bundle 0036470560 refused by 0036470559", Ok("refused".into()));
+        report.record("a copy for one device is refused by the other", Err("opened".into()));
+        assert_eq!(report.failed(), vec!["a copy for one device is refused by the other"]);
+        let verdict = report.verdict();
+        assert!(
+            verdict.starts_with("FAILED: two-member run on 0036470559, 0036470560: 1 passed, 1 failed"),
+            "{verdict}"
+        );
+        assert!(!verdict.contains("not exercised"), "{verdict}");
+        let json = serde_json::to_value(report.file()).unwrap();
+        assert_eq!((json["mode"].as_str(), json["not_exercised"].as_u64()), (Some("two-member"), Some(0)));
+        assert_eq!(json["checks"][1]["outcome"], "failed");
+    }
+
+    #[test]
+    fn every_output_names_its_mode() {
+        let one = allowlist("36470559");
+        let two = allowlist("36470559,36470560");
+        assert_eq!(one.label()["mode"], "pool-of-one");
+        assert_eq!(two.label()["mode"], "two-member");
+        assert_eq!(two.label()["serials"], serde_json::json!(["0036470559", "0036470560"]));
+
+        let snap = serde_json::to_value(pool("before", vec![factory_device(A)])).unwrap();
+        assert_eq!(snap["mode"], "pool-of-one");
+        let snap = serde_json::to_value(pool("before", vec![factory_device(A), factory_device(B)])).unwrap();
+        assert_eq!(snap["mode"], "two-member");
+
+        let text = reset_instructions(&one, Path::new("/tmp/p7"));
+        assert!(text.starts_with("phase 7 mode pool-of-one (0036470559)"), "{text}");
+        assert!(text.contains("The device is provisioned") && text.contains("SERIALS=0036470559 "), "{text}");
+        let text = reset_instructions(&two, Path::new("/tmp/p7"));
+        assert!(text.starts_with("phase 7 mode two-member (0036470559, 0036470560)"), "{text}");
+        assert!(text.contains("The devices are provisioned"), "{text}");
+    }
+
+    #[test]
+    fn a_snapshot_written_before_the_mode_label_still_loads() {
+        let dir = std::env::temp_dir().join(format!("bv-phase7-old-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(BEFORE_SNAPSHOT_FILE);
+        let _ = std::fs::remove_file(&path);
+        // Format 1 as the harness wrote it before the label: no `mode` key.
+        let mut old = serde_json::to_value(pool("before", vec![factory_device(A), factory_device(B)])).unwrap();
+        old.as_object_mut().unwrap().remove("mode");
+        std::fs::write(&path, serde_json::to_vec_pretty(&old).unwrap()).unwrap();
+        let loaded = PoolSnapshot::load(&path).unwrap();
+        assert_eq!(loaded.mode, None);
+        assert_eq!(loaded.devices.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Compared by device, with a note; a new snapshot always carries the label.
+        let mut now = pool("now", vec![factory_device(A), factory_device(B)]);
+        let cmp = compare_pools(&loaded, &now);
+        assert!(cmp.is_identical() && cmp.notes.iter().any(|n| n.contains("no mode label")), "{}", cmp.render());
+
+        // A label that disagrees is a difference, on top of the device-set one.
+        now.mode = Some(PoolMode::PoolOfOne);
+        now.devices.remove("0036470560");
+        let mut before = pool("before", vec![factory_device(A), factory_device(B)]);
+        let cmp = compare_pools(&before, &now);
+        let mismatch = "the before snapshot is two-member, the now snapshot is pool-of-one";
+        assert!(cmp.differences.iter().any(|d| d.contains(mismatch)), "{:?}", cmp.differences);
+        before.devices.remove("0036470560");
+        before.mode = Some(PoolMode::PoolOfOne);
+        assert!(compare_pools(&before, &now).is_identical(), "a pool of one compares against its own before");
     }
 
     #[test]
@@ -1085,7 +1531,7 @@ mod tests {
         assert!(!format!("{admin:?}").contains("t3st"), "redacted");
         assert!(admin_password(env(&[])).is_err());
         assert!(admin_password(env(&[(ENV_ADMIN_PASSWORD, FACTORY_PASSWORD)])).is_err());
-        let text = reset_instructions(&[A, B], Path::new("/tmp/p7"));
+        let text = reset_instructions(&allowlist("36470559,36470560"), Path::new("/tmp/p7"));
         assert!(text.contains("10 seconds") && text.contains("STEP=compare") && text.contains("0036470559,0036470560"));
         assert!(!text.contains("t3st-admin-pw"));
     }

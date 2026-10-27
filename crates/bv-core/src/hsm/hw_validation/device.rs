@@ -58,16 +58,19 @@ pub struct ConnectorProcess {
 impl ConnectorProcess {
     /// Start the connector with `--serial`, wait for its status page, and
     /// refuse it if the page names another device. Its output goes to
-    /// `connector-<serial>.log` in `log_dir` (the connector never sees a
-    /// password: sessions are end-to-end encrypted).
-    pub fn spawn(bin: &Path, serial: u32, port: u16, log_dir: &Path) -> Result<Self, RvError> {
+    /// `connector-<serial>.log` in `log_dir`, after a first line `heading`
+    /// naming the run's mode (the connector never sees a password: sessions
+    /// are end-to-end encrypted).
+    pub fn spawn(bin: &Path, serial: u32, port: u16, log_dir: &Path, heading: &str) -> Result<Self, RvError> {
         let probe = TcpListener::bind(("127.0.0.1", port)).map_err(|e| {
             harness_error(format!("port {port} is not free ({e}); stop any running yubihsm-connector first"))
         })?;
         drop(probe);
         let log_path = log_dir.join(format!("connector-{}.log", format_serial(serial)));
-        let log = File::create(&log_path).map_err(|e| harness_error(format!("{}: {e}", log_path.display())))?;
-        let log_err = log.try_clone().map_err(|e| harness_error(format!("{}: {e}", log_path.display())))?;
+        let log_error = |e: std::io::Error| harness_error(format!("{}: {e}", log_path.display()));
+        let mut log = File::create(&log_path).map_err(log_error)?;
+        writeln!(log, "# {heading}").map_err(log_error)?;
+        let log_err = log.try_clone().map_err(log_error)?;
         let child = Command::new(bin)
             .args(connector_args(serial, port))
             .stdin(Stdio::null())

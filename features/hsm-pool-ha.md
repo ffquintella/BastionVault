@@ -6,7 +6,7 @@
 > migration) done 2026-10-27 on the mock, phase 5 (recovery) done 2026-10-27
 > on the mock, phase 6 (audit and observability) done 2026-10-27 on the mock,
 > phase 7 (hardware validation) prepared 2026-10-27 and awaiting the hardware
-> run; the [pool of one](#pool-of-one-a-single-member-pool) (operator decision
+> run, which can now validate a pool of one on a single device; the [pool of one](#pool-of-one-a-single-member-pool) (operator decision
 > 2026-10-27) done on the mock the same day; see [Current state](#current-state). Spec
 > written 2026-10-19. Extends
 > [HSM Support (YubiHSM 2)](hsm-support.md) (S17), whose non-negotiable security
@@ -1086,13 +1086,36 @@ mock and generated certificates only):
   (read-only: snapshot, save, preflight, diff with "none" expected; log
   counters, the device log and the connector version are ignored, an
   unreadable value is reported as unverified, never as equal). Serial
-  allow-list of exactly two (`BVAULT_TEST_YUBIHSM_SERIALS`), checked at the
+  allow-list of one or two (`BVAULT_TEST_YUBIHSM_SERIALS`; zero, three or
+  more refused), checked at the
   connector status and again at `device-info`; one `yubihsm-connector` per
   device on its own loopback port with `--serial`, killed on exit; passwords
   only from the environment, zeroized, never printed. The harness refuses by
   name, with the reason, any request to reset, update firmware, enable FIPS
   mode, set command or forced audit, or run the production provision.
   Runbook: `docs/hsm.md` § Phase 7 hardware validation.
+- **Pool of one on one device** (operator approval 2026-10-27: one device,
+  36470559, is available; 36470560 is identical hardware, firmware 2.4.1, in
+  factory state, not plugged in). One serial makes the run a pool-of-one
+  run (`PoolMode` in `hw_validation/mod.rs`); the steps, preflight, allow-list
+  and write gate are unchanged, and two serials run exactly as before. On the
+  one device it covers the connector, snapshot, preflight, trust file,
+  `provision`, pinned attestation (`bv-identity` challenge, layout check),
+  node-key enrollment, wrap / unwrap, tamper detection, the domain-2 refusal,
+  latency directly and through a real gateway and relay, the test key's
+  deletion, the reset instructions and the comparison. Every check that needs
+  a second device (`TWO_DEVICE_CHECKS`) is recorded as `not exercised (pool of
+  one)` in `checks-*.json` and the console summary, never as passed and never
+  left out: the crossed attestation bundle, dual-wrap on two members, a copy
+  for one device refused by the other, failover, `member add` of the second
+  device and repair, and either device alone unsealing once both are
+  enrolled. Every output file names its mode (`"mode": "pool-of-one"` or
+  `"two-member"`; a first line in the text files; `bundle-<serial>.json`
+  stays a bare bundle and is named by the labelled `attestations.json`), and
+  the run's verdict says that a pool-of-one run does not validate two-device
+  behaviour. The snapshot's `mode` is an optional field of format 1: a
+  snapshot without it still loads and is compared by device; a mode mismatch
+  between "before" and "after" is a difference.
 
 Decisions made in phase 7 where this spec left room:
 
@@ -1111,6 +1134,18 @@ Decisions made in phase 7 where this spec left room:
 - The suite stops before the production `provision` and never runs
   `bootstrap` / `init` against the devices; its write set is the test
   `provision` and one node key.
+- The pool-of-one run does not set `acknowledge_single_member_without_recovery`
+  or apply the pool-of-one init rules: they gate `bootstrap`, `init`,
+  `migrate-to-pool` and retire, none of which the suite runs, and `provision`
+  is the same device ceremony for one member as for two. Rejected: a
+  pool-of-one `bootstrap` / `init` inside the suite, which would leave a seal
+  record and node credentials the run must not leave behind.
+- Cross-device checks a pool of one cannot make are recorded as their own
+  outcome, not as passed and not dropped. Rejected: skipping them silently
+  (the original harness's crossed-bundle check did so when only one bundle
+  existed), which would let a one-device run read as complete.
+- `bundle-<serial>.json` is not labelled in its content: `AttestationBundle`
+  refuses unknown fields, and the file must stay usable as the bundle it is.
 
 Still owed by the hardware run (not done, not claimed): attestation against
 the real Yubico chain (the extension encodings are Yubico's documented ones,
@@ -1119,7 +1154,11 @@ hardware, the unwrap MAC-failure code, the relay's latencies, the device-log
 layout (captured read-only by the snapshot; the YubiHSM 2 drain, `bv-auditor`
 and forced audit stay refused until it is reviewed), unplugging a device
 mid-run, a three-node `bootstrap` / `init`, the reset-then-`faulted` check,
-and the FIPS Ed25519 question (these devices are not FIPS models).
+and the FIPS Ed25519 question (these devices are not FIPS models). A
+pool-of-one run leaves the two-device checks owed as well, until a
+two-member run covers the three the suite makes (the crossed bundle,
+dual-wrap, the crossed copy); failover, `member add` with repair and
+either-device unseal stay mock-only.
 
 Phase 6 (audit and observability, mock):
 
@@ -1730,7 +1769,7 @@ Not done in phase 2, deliberately:
 | 5. Recovery | Recovery keypair, Shamir split, recovery copies, `recover` route | `crates/bv-core/src/hsm/recovery.rs`, `crates/bv-core/src/seal/hsm/recovery_ceremony.rs`, `crates/bv-server/src/sys.rs`, `crates/bvault-cli` | Done (mock; the YubiHSM 2 ceremony waits on phase 7 attestation) |
 | 6. Audit and observability | Device-log drain, events, metrics, status, GUI page, `docs/hsm.md`, `docs/api.md` | `crates/bv-core/src/hsm/device_audit.rs`, `crates/bv-core/src/seal/hsm/device_drain.rs`, `gui/src/routes/HsmStatusPage.tsx` | Done (mock; the YubiHSM 2 drain waits on phase 7) |
 | Amendment: pool of one (2026-10-27) | One or two members; init, bootstrap and unseal with one; `acknowledge_single_member_without_recovery`; at most two members not retired; redundancy status, event and metric | `crates/bv-core/src/hsm/{mod,pool}.rs`, `crates/bv-core/src/seal/hsm.rs`, `crates/bv-core/src/seal/hsm/pool_admin.rs`, `crates/bv-metrics/src/hsm_metrics.rs` | Done (mock; YubiHSM 2 with phase 7) |
-| 7. Hardware validation | Two physical devices plus three nodes; pin the Yubico attestation chain and lift the YubiHSM 2 attestation refusal; validate `provision`, bootstrap, enrollment and the relay; confirm the device log layout, digest chain and forced audit, and lift the YubiHSM 2 drain refusal; measure latencies; confirm the FIPS Ed25519 question; **end every run by factory-resetting both devices and checking they provision again** (see [Resetting the test devices](#resetting-the-test-devices)) | `crates/bv-core/src/hsm/{attestation,yubihsm2}.rs`, `crates/bv-core/src/hsm/hw_validation/`, `crates/bv-core/tests/hsm_pool_hardware.rs` (feature `hsm_hardware_tests`, behind `BVAULT_TEST_YUBIHSM_POOL=1`), `docs/hsm.md` | Prepared, awaiting hardware run (attestation pinning and the suite done on the mock; no device run yet) |
+| 7. Hardware validation | Two physical devices plus three nodes; pin the Yubico attestation chain and lift the YubiHSM 2 attestation refusal; validate `provision`, bootstrap, enrollment and the relay; confirm the device log layout, digest chain and forced audit, and lift the YubiHSM 2 drain refusal; measure latencies; confirm the FIPS Ed25519 question; **end every run by factory-resetting both devices and checking they provision again** (see [Resetting the test devices](#resetting-the-test-devices)) | `crates/bv-core/src/hsm/{attestation,yubihsm2}.rs`, `crates/bv-core/src/hsm/hw_validation/`, `crates/bv-core/tests/hsm_pool_hardware.rs` (feature `hsm_hardware_tests`, behind `BVAULT_TEST_YUBIHSM_POOL=1`), `docs/hsm.md` | Prepared, awaiting hardware run (attestation pinning and the suite done on the mock; no device run yet). The suite validates a pool of one on a single device (the planned run, 36470559) or a two-member pool; on a pool of one the cross-device checks are listed as `not exercised (pool of one)` |
 
 **What happens to the existing modules:**
 
@@ -1800,11 +1839,13 @@ Phases 1–2 change persisted formats and the seal path. Per AGENTS.md they need
 **Audit:** the drain verifies the chain, and a simulated gap emits
 `hsm.device_log_gap`.
 
-**Hardware suite** (`BVAULT_TEST_YUBIHSM_POOL=1`, two devices):
+**Hardware suite** (`BVAULT_TEST_YUBIHSM_POOL=1`, two devices, or one as a pool
+of one with every two-device check reported as not exercised):
 
 - `provision`; attestation against the pinned Yubico root; capability verification
   of the wrap keys.
-- Dual-wrap round-trip; unplug one device mid-run.
+- Dual-wrap round-trip (a single-member wrap on a pool of one); unplug one
+  device mid-run.
 - Latency measurements recorded in `docs/hsm.md`.
 
 **Cucumber:** initialize a 3-node pool, stop one HSM gateway, restart every node,

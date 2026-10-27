@@ -570,8 +570,10 @@ their next refresh. Reset or destroy the lost devices if they reappear.
 
 ### Phase 7 hardware validation (T454)
 
-The pool's YubiHSM 2 path is validated on two real devices by a test suite
-that only an operator at the machine runs. It is compiled only with the
+The pool's YubiHSM 2 path is validated on two real devices, or on one as a
+[pool of one](#starting-with-one-hsm-a-pool-of-one) (see
+[With one device](#with-one-device-a-pool-of-one)), by a test suite that only
+an operator at the machine runs. It is compiled only with the
 `hsm_hardware_tests` feature (no product build, `make test` or
 `make test-changed` compiles it) and does nothing unless
 `BVAULT_TEST_YUBIHSM_POOL=1`. Design and acceptance:
@@ -584,15 +586,16 @@ only writes are the test `provision` (behind `BVAULT_TEST_YUBIHSM_ALLOW_WRITES=1
 and one test node key, which it deletes again. Passwords come only from the
 environment and are never printed or written.
 
-Prerequisites: both devices in factory state on this host, which is not
-shared; `yubihsm-connector` 3.0.x (no connector already running on ports
-12345 and 12346); the [Yubico trust file](#yubico-attestation-trust-file); a
-new, empty output directory per campaign.
+Prerequisites: the devices named in `BVAULT_TEST_YUBIHSM_SERIALS` in factory
+state on this host, which is not shared; `yubihsm-connector` 3.0.x (no
+connector already running on port 12345, nor on 12346 with two devices); the
+[Yubico trust file](#yubico-attestation-trust-file); a new, empty output
+directory per campaign.
 
 | Variable | Required | Meaning |
 |---|---|---|
 | `BVAULT_TEST_YUBIHSM_POOL` | yes | `1` runs the suite; anything else skips it |
-| `BVAULT_TEST_YUBIHSM_SERIALS` | yes | The two serials, comma-separated; any other device is refused |
+| `BVAULT_TEST_YUBIHSM_SERIALS` | yes | One serial (a pool-of-one run) or two (a two-member run), comma-separated. Zero, three or more, a duplicate or a zero serial are refused; any device not listed is refused |
 | `BVAULT_TEST_YUBIHSM_OUT` | yes | Output directory (snapshots, bundles, reports) |
 | `BVAULT_TEST_YUBIHSM_STEP` | no | `snapshot` (default), `validate` or `compare` |
 | `BVAULT_TEST_YUBIHSM_UNTIL` | no | Stop after this step, e.g. `anchors` (before the first write) |
@@ -601,7 +604,7 @@ new, empty output directory per campaign.
 | `BVAULT_TEST_YUBIHSM_FACTORY_PASSWORD` | no | Factory key password; default the published one |
 | `BVAULT_TEST_YUBICO_ATTESTATION_ROOTS` | for `validate` | The Yubico trust file |
 | `BVAULT_TEST_YUBIHSM_CONNECTOR` | no | Connector binary; default `yubihsm-connector` on `PATH` |
-| `BVAULT_TEST_YUBIHSM_PORT_BASE` | no | First connector port, default `12345` (the second device gets the next) |
+| `BVAULT_TEST_YUBIHSM_PORT_BASE` | no | First connector port, default `12345` (a second device gets the next) |
 | `BVAULT_TEST_YUBIHSM_LATENCY_ITERATIONS` | no | Rounds per timed operation, 1–1000, default 20 |
 
 Each invocation starts one connector per device on `127.0.0.1` with
@@ -645,7 +648,8 @@ BVAULT_TEST_YUBIHSM_STEP=compare \
   cargo test -p bv-core --features hsm_hardware_tests --test hsm_pool_hardware -- --nocapture
 ~~~
 
-The `validate` run, in order: connectors, snapshot, match-before, preflight,
+The two-member `validate` run (one device: see
+[below](#with-one-device-a-pool-of-one)), in order: connectors, snapshot, match-before, preflight,
 anchors (all read-only); **provision** both devices from factory state with
 the test password (it reads each device's attestation certificate first);
 attest each with `verify_member` (pinned chain, `bv-identity` challenge,
@@ -667,10 +671,22 @@ are public): `snapshot-before.json` (never overwritten), `snapshot-after-*.json`
 `comparison-*.json`, `bundle-<serial>.json`, `attestations.json` (each
 attested key's serial, origin, domains, capabilities, firmware, device
 certificate and Yubico root fingerprints), `checks-*.json`, `latency.md` /
-`latency.json`, and `connector-<serial>.log`. Each snapshot also records the
-device log read with the factory key and whether its digest chain verified
-as the drain expects; that is the evidence the YubiHSM 2 drain refusal is
-lifted on.
+`latency.json`, `RESET-REQUIRED.txt` and `connector-<serial>.log`. Each
+snapshot also records the device log read with the factory key and whether
+its digest chain verified as the drain expects; that is the evidence the
+YubiHSM 2 drain refusal is lifted on.
+
+Every output names its run mode. The JSON files carry `"mode"`
+(`"pool-of-one"` or `"two-member"`) and the `serials`; `latency.md`,
+`RESET-REQUIRED.txt` and each `connector-<serial>.log` start with a
+`phase 7 mode …` line. `bundle-<serial>.json` stays a bare attestation bundle,
+because that format refuses unknown fields; `attestations.json` names it under
+`bundle_files`. `checks-*.json` holds `mode`, `serials`, `verdict`, the
+`passed` / `failed` / `not_exercised` counts and each check's `outcome`:
+`passed`, `failed` or `not exercised (pool of one)`. A snapshot saved before
+the label existed still loads, and is compared device by device. A run in one
+mode does not match a "before" snapshot taken in the other: the comparison
+reports the mode as a difference.
 
 Read by hand, with the factory key, after the reset (the suite cannot):
 `algorithm-toggle`, with `yubihsm-shell`'s `get-option`, the way the
@@ -683,6 +699,81 @@ option and the YubiHSM 2 drain, and the FIPS Ed25519 question (these two
 devices are not FIPS models).
 
 **Measured latencies:** not measured yet; paste the run's `latency.md` here.
+
+#### With one device (a pool of one)
+
+With one serial in `BVAULT_TEST_YUBIHSM_SERIALS` the suite validates a
+[pool of one](#starting-with-one-hsm-a-pool-of-one) on that device. The steps,
+the factory-state preflight (factory key `0x0001` and nothing else), the
+allow-list and the write gate are the same as with two. Only that device's
+connector is started, and a second device that is plugged in is never
+touched. Use a new output directory: a "before" snapshot of one mode does not
+match a run in the other.
+
+On the one device it checks: connector and `device-info` serial, snapshot,
+preflight, trust file, the test `provision`, attestation through the pinned
+Yubico chain (`verify_member`: `bv-identity` challenge, layout check), the
+test node key, a wrap and unwrap round trip, a tampered copy reported as a
+crypto failure, `bv-identity` refused to the node key (domain 2), the latency
+rounds directly and through a real gateway and relay (mTLS), the deletion of
+the test node key, the reset instructions and, after the reset, the
+comparison.
+
+These need a second device and are recorded as `not exercised (pool of one)`
+in `checks-*.json` and the console summary, never as passed and never left
+out:
+
+| Check | Recorded at step | Two-member run |
+|---|---|---|
+| One device's attestation bundle is refused by the other device | `attest` | checked |
+| `member add` of the second device, then repair to two copies | `enroll-test-node` | not in this suite (mock tests only) |
+| Dual-wrap: one copy on each of two members | `dual-wrap` | checked |
+| A copy wrapped for one device is refused by the other | `dual-wrap` | checked |
+| Failover between the two members | `dual-wrap` | not in this suite (mock tests only) |
+| Either device alone unseals once both are enrolled | `dual-wrap` | not in this suite (mock tests only) |
+
+The run passes when no check failed. Its last line, also `verdict` in
+`checks-*.json`, names the pool-of-one run and its device and says that it
+does not validate two-device behaviour, whatever passed. The suite never runs
+`bootstrap` or `init`, so `acknowledge_single_member_without_recovery` (which
+gates those) plays no part: the one-device `provision` is the same device
+ceremony as with two.
+
+~~~bash
+# 0. Build it (no device is touched).
+cargo test -p bv-core --features hsm_hardware_tests --test hsm_pool_hardware --no-run
+
+export BVAULT_TEST_YUBIHSM_POOL=1
+export BVAULT_TEST_YUBIHSM_SERIALS=36470559          # one serial: a pool-of-one run
+export BVAULT_TEST_YUBIHSM_OUT="$HOME/bv-phase7-pool-of-one-$(date +%Y%m%d)"
+export BVAULT_TEST_YUBIHSM_CONNECTOR=/usr/local/bin/yubihsm-connector
+export BVAULT_TEST_YUBICO_ATTESTATION_ROOTS=/path/to/yubico-attestation.pem
+mkdir "$BVAULT_TEST_YUBIHSM_OUT"
+
+# 1. Read-only: snapshot and preflight 36470559, save snapshot-before.json.
+BVAULT_TEST_YUBIHSM_STEP=snapshot \
+  cargo test -p bv-core --features hsm_hardware_tests --test hsm_pool_hardware -- --nocapture
+
+# 2a. Still read-only: re-snapshot, match, preflight, load the trust file.
+BVAULT_TEST_YUBIHSM_STEP=validate BVAULT_TEST_YUBIHSM_UNTIL=anchors \
+  cargo test -p bv-core --features hsm_hardware_tests --test hsm_pool_hardware -- --nocapture
+
+# 2b. The run. Writes begin here; from now on 36470559 needs a physical reset.
+read -rs BVAULT_TEST_YUBIHSM_ADMIN_PASSWORD && export BVAULT_TEST_YUBIHSM_ADMIN_PASSWORD
+BVAULT_TEST_YUBIHSM_STEP=validate BVAULT_TEST_YUBIHSM_ALLOW_WRITES=1 \
+  cargo test -p bv-core --features hsm_hardware_tests --test hsm_pool_hardware -- --nocapture
+unset BVAULT_TEST_YUBIHSM_ADMIN_PASSWORD
+
+# 3. Physical reset of 36470559: unplug it, press and hold the metal rim while
+#    inserting it, keep pressing for at least 10 seconds, release.
+
+# 4. Read-only: snapshot again and diff against snapshot-before.json (expected: none).
+BVAULT_TEST_YUBIHSM_STEP=compare \
+  cargo test -p bv-core --features hsm_hardware_tests --test hsm_pool_hardware -- --nocapture
+~~~
+
+A later two-member run (both serials, its own output directory) covers the
+rows marked "checked" above; the others stay with the mock tests.
 
 ### Failure behavior (fail-closed)
 
