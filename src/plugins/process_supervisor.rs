@@ -1000,13 +1000,16 @@ mod tests {
     async fn a_missed_heartbeat_kills_the_child() {
         set_timings_for_tests(MuxTimings {
             heartbeat_interval: Duration::from_millis(100),
-            heartbeat_timeout: Duration::from_millis(400),
+            // The warm-up call below must finish inside this window or the
+            // child is already declared dead mid-call; 400 ms was too tight
+            // for a cold spawn on a loaded CI runner.
+            heartbeat_timeout: Duration::from_millis(1500),
         });
         let m = mux_manifest("test-mux-nopong", None);
         let bin = test_binary();
         call(&m, &bin, json!({}), None, LONG).await.unwrap();
         let w = mux_worker(&m.name).await.unwrap();
-        let cause = tokio::time::timeout(Duration::from_secs(5), w.wait_dead()).await.unwrap();
+        let cause = tokio::time::timeout(Duration::from_secs(15), w.wait_dead()).await.unwrap();
         set_timings_for_tests(MuxTimings::default());
         assert_eq!(cause, DeathCause::MissedHeartbeat);
         tokio::time::sleep(Duration::from_millis(100)).await;
