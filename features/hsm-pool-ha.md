@@ -1633,3 +1633,26 @@ device that fails it is a failed phase.
 - A reset device is open to the public factory password until `provision`
   runs. Keep the devices off any shared host between the reset and the
   production `provision`.
+
+### Phase 7 test devices: "before" snapshot
+
+Read on 2026-10-27 through a local `yubihsm-connector`, authenticating with
+the factory key only. Part number 78CLUFX5000P, firmware 2.4.1 on both.
+
+| | 36470559 | 36470560 |
+|---|---|---|
+| Objects | `0x0001` factory key only (read) | `0x0001` factory key only (read) |
+| `force-audit` | `00` (assumed) | `00` (read) |
+| `command-audit` | all 65 commands `00` (assumed) | all 65 commands `00` (read) |
+| `algorithm-toggle` | all 55 algorithms enabled (assumed) | all 55 algorithms enabled (read) |
+| `fips-mode` | assumed absent | rejected as malformed: not a FIPS model |
+| Storage | assumed 255/256 records, 1023/1024 pages | 255/256 records, 1023/1024 pages (read) |
+| Log used | 7/62 | 9/62 |
+
+"Assumed" means the operator declared device 36470559 identical to 36470560
+and its options were not read. The post-reset comparison for that device
+uses the values above as expectations; a mismatch there cannot tell a device
+that was changed by the run from one that was already different, so read its
+options and storage before the first write if that distinction matters.
+After the reset, both devices must read as the table says (log counters
+aside).
