@@ -358,6 +358,13 @@ export interface HsmStatus {
   min_wrap_copies?: number;
   under_replicated_sets?: number;
   kek_under_replicated?: boolean;
+  // Pool of one (features/hsm-pool-ha.md): "none" while the pool has a
+  // single active member, "full" at two. `redundancy_warning` is null
+  // unless redundancy is "none".
+  redundancy?: "none" | "full" | string;
+  members_active?: number;
+  members_expected?: number;
+  redundancy_warning?: string | null;
   members?: HsmPoolMember[];
   pending_revocations?: HsmPendingRevocation[];
   repair?: HsmRepairStatus;

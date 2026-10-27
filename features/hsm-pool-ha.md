@@ -1028,9 +1028,20 @@ Decisions made where the operator's brief left room:
 - The redundancy metric is a labelled gauge, so a vault without a pool never
   exports a `none` that would page someone.
 
-Still open: the GUI's HSM / Seal page does not show `redundancy` yet (the
-fields are in the status it reads); the YubiHSM 2 pool of one is verified on
-hardware only with the rest of phase 7.
+The GUI's HSM / Seal page (`gui/src/routes/HsmStatusPage.tsx`) shows
+`redundancy` (Full / None), `members_active` of `members_expected`, and a
+warning banner with `redundancy_warning` when the pool has no redundancy.
+
+The `link` rules are validated at startup (`hsm::resolve_link`): a `gateway`
+member without a `link` block is refused naming the member, an incomplete
+block naming the missing key and the member that needs it, and a `link` file
+that is not a readable regular file naming the key and path (a block present
+with no gateway member is checked too). A member only the seal record names
+is outside config validation; the YubiHSM 2 route refuses it by name when the
+node has no `link`.
+
+Still open: the YubiHSM 2 pool of one is verified on hardware only with the
+rest of phase 7.
 
 Phase 7 (hardware validation, prepared; compiled and tested against the
 mock and generated certificates only):

@@ -292,7 +292,7 @@ hsm "mock" {
 | `member.prefer` | `false` | At most one member. Otherwise each node orders members by `SHA-256(node_id ‖ hsm_id)`. |
 | `min_wrap_copies` | `1` | Copies a new key needs before it is stored, each on a distinct active member. `2` refuses key creation while a member is down, and is refused with one `member` block (a pool of one holds one copy). |
 | `acknowledge_single_member_without_recovery` | `false` | Required, with `recovery = "none"`, to initialize a pool of one (or migrate onto one member, or retire down to one): it accepts that losing that one device makes the vault **unrecoverable**. Without it those operations are refused. Refused with `recovery = "shamir-ceremony"` and in a per-node block. Read when the operation runs; not stored. |
-| `link { ca_file, cert_file, key_file }` | | (yubihsm2) This node's mTLS identity for the gateways; required when any member uses `gateway`. |
+| `link { ca_file, cert_file, key_file }` | | (yubihsm2) This node's mTLS identity for the gateways; required when any member uses `gateway`. All three keys are required and each file must be readable at startup (validated, see below). |
 | `credential_dir` | | (yubihsm2, required) Where this node's per-member credentials live. |
 | `repair_rate` | `2` | Blob sets the repair job re-wraps per second, 1–100. |
 | `device_audit` | `"drain"` | Device audit log drain (T454 phase 6): `"drain"` reads every member's log every 5 s and raises each command as `hsm.device_log`; `"forced"` also turns on the device's forced-audit option, so a member refuses commands (`LOG_FULL`) while its log is full until the drain catches up; `"off"` drains nothing and is refused when `BVAULT_ENV=production`. The drain needs the `bv-auditor` key, installed by `bvault operator hsm repair --run --admin …`. Mock only until T454 phase 7. |
@@ -314,10 +314,19 @@ Validation, all at startup:
   refused rather than ignored.
 - Zero or three `member` blocks are refused. With two, init needs both
   devices reachable; it never falls back to a pool of one.
-- `link` is needed only when a member is reached through `gateway`. A node on
-  the HSM host that uses `connector = "http://127.0.0.1:<port>"` for every
-  member it lists needs none; once a member on another host is added, that
-  node needs a `link` block to reach it.
+- `link` is needed only when a member is reached through `gateway`, and that
+  is validated at startup: a `member` with `gateway` and no `link` block is
+  refused with an error naming the member; a `link` block missing `ca_file`,
+  `cert_file` or `key_file` is refused naming the missing key (and the member
+  that needs it); and each `link` file must be a regular file the process can
+  open, or startup is refused naming the key and the path. A `link` block that
+  is present is checked even when no member uses `gateway` yet. A node on the
+  HSM host that uses `connector = "http://127.0.0.1:<port>"` for every member
+  it lists needs none; once a member on another host is added, that node needs
+  a `link` block to reach it. If that member is named only in the seal record
+  (added with `member add --gateway` and no `member` block on this node),
+  startup validation cannot see it: reaching it fails instead, with the same
+  error naming the member.
 
 ## Metrics Access (optional)
 

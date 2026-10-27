@@ -385,7 +385,13 @@ redundancy. The cluster never holds more than two.
    reports `redundancy: "full"` and either device alone unseals every node.
    The recovery copy, if any, is unchanged. Every node that reaches the new
    device through its gateway needs a `link` block, including the first HSM
-   host if it had none.
+   host if it had none; its `ca_file` must be the CA that issued the new
+   gateway's certificate. This is validated at startup: a `member` block with
+   `gateway` and no complete `link` block is refused with an error naming the
+   member and the missing key, and a `link` file the process cannot open is
+   refused naming the key and the path. A member only the seal record names
+   (no `member` block on that node) is not visible to startup validation;
+   reaching it without a `link` fails with the same error naming the member.
 5. **A third device is refused.** To replace a failed one, retire it first
    (`operator hsm member retire hsm-b`; the survivor must hold every set), run
    as a pool of one, then add the replacement as in step 4. With
@@ -396,7 +402,8 @@ redundancy. The cluster never holds more than two.
 **mTLS, in short.** A node that reaches a device on its own host uses
 `connector = "http://127.0.0.1:<port>"` and needs no `link` and no gateway.
 A node without a device of its own never needs one: it uses the member's
-`gateway` (`bvault hsm-gateway` on the HSM host) with its `link` certificate.
+`gateway` (`bvault hsm-gateway` on the HSM host) with its `link` certificate;
+startup refuses a `gateway` member without a complete, readable `link` block.
 The connector itself is never exposed beyond loopback.
 
 #### Ceremonies (phase 4 part 1, mock)

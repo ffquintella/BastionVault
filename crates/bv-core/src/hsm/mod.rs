@@ -705,23 +705,7 @@ fn resolve_pool(backend_type: &str, raw: &HsmConfigBlock) -> Result<ResolvedPool
         return Err(config_err("at most one HSM pool member may set `prefer = true`"));
     }
 
-    let link = match &raw.link {
-        Some(l) => {
-            let link = ResolvedLink {
-                ca_file: l.ca_file.trim().to_string(),
-                cert_file: l.cert_file.trim().to_string(),
-                key_file: l.key_file.trim().to_string(),
-            };
-            if link.ca_file.is_empty() || link.cert_file.is_empty() || link.key_file.is_empty() {
-                return Err(config_err("the HSM `link` block needs `ca_file`, `cert_file` and `key_file`"));
-            }
-            Some(link)
-        }
-        None => None,
-    };
-    if link.is_none() && members.iter().any(|m| !m.gateway.is_empty()) {
-        return Err(config_err("a `link` block is required when any HSM pool member uses `gateway`"));
-    }
+    let link = resolve_link(raw.link.as_ref(), &members)?;
 
     let credential_dir = raw.credential_dir.trim().to_string();
     if backend_type == "yubihsm2" && credential_dir.is_empty() {
@@ -800,6 +784,85 @@ fn resolve_pool(backend_type: &str, raw: &HsmConfigBlock) -> Result<ResolvedPool
         device_audit,
         acknowledge_single_member_without_recovery,
     })
+}
+
+impl ResolvedLink {
+    /// The three files by config key, in the order errors name them.
+    fn files(&self) -> [(&'static str, &str); 3] {
+        [("ca_file", &self.ca_file), ("cert_file", &self.cert_file), ("key_file", &self.key_file)]
+    }
+}
+
+/// The `link` this node needs to reach `member` through its `gateway`;
+/// refused, naming the member, when the node's `hsm` block has none. Config
+/// validation calls it for the first `gateway` member block, and the
+/// YubiHSM 2 route for any member it reaches through a gateway, which covers
+/// one only the seal record names (added later with `member add --gateway`)
+/// that config cannot see.
+pub(crate) fn link_for_gateway_member<'a>(
+    member: &str,
+    link: Option<&'a ResolvedLink>,
+) -> Result<&'a ResolvedLink, RvError> {
+    link.ok_or_else(|| {
+        config_err(format!(
+            "HSM pool member {member:?} is reached through its `gateway`, so a `link` block is required in this \
+             node's `hsm` block: `link {{ ca_file = ..., cert_file = ..., key_file = ... }}` (the CA that issued \
+             the gateway's certificate, and this node's client certificate and key)"
+        ))
+    })
+}
+
+/// Validate the pool's `link` block against the members that use it. A
+/// `gateway` member needs a complete block; a block that is present is
+/// complete and its files readable whether or not a member uses it yet, so a
+/// node is never started with a link it could not open.
+fn resolve_link(raw: Option<&HsmLinkBlock>, members: &[ResolvedPoolMember]) -> Result<Option<ResolvedLink>, RvError> {
+    let gateway_members: Vec<&str> =
+        members.iter().filter(|m| !m.gateway.is_empty()).map(|m| m.name.as_str()).collect();
+    let Some(raw) = raw else {
+        if let Some(first) = gateway_members.first() {
+            link_for_gateway_member(first, None)?;
+        }
+        return Ok(None);
+    };
+    let link = ResolvedLink {
+        ca_file: raw.ca_file.trim().to_string(),
+        cert_file: raw.cert_file.trim().to_string(),
+        key_file: raw.key_file.trim().to_string(),
+    };
+    let missing: Vec<&str> = link.files().iter().filter(|(_, path)| path.is_empty()).map(|(key, _)| *key).collect();
+    if !missing.is_empty() {
+        let missing = missing.iter().map(|k| format!("`{k}`")).collect::<Vec<_>>().join(", ");
+        let used_by = match gateway_members.as_slice() {
+            [] => String::new(),
+            [one] => format!(", which HSM pool member {one:?} needs to reach its `gateway`"),
+            many => format!(
+                ", which HSM pool members {} need to reach their `gateway`",
+                many.iter().map(|m| format!("{m:?}")).collect::<Vec<_>>().join(" and ")
+            ),
+        };
+        return Err(config_err(format!(
+            "the HSM `link` block is missing {missing}{used_by}; it needs `ca_file`, `cert_file` and `key_file`"
+        )));
+    }
+    for (key, path) in link.files() {
+        check_link_file_readable(key, path)?;
+    }
+    Ok(Some(link))
+}
+
+/// A `link` file must be a regular file this process can open, checked at
+/// startup so a wrong path or permission is a config error naming the key,
+/// not a relay failure the first time a member is reached. The file is
+/// opened, never read: the key file is not copied into memory here.
+fn check_link_file_readable(key: &str, path: &str) -> Result<(), RvError> {
+    let unreadable = |why: String| config_err(format!("the HSM `link` {key} {path:?} is not readable: {why}"));
+    let meta = std::fs::metadata(path).map_err(|e| unreadable(e.to_string()))?;
+    if !meta.is_file() {
+        return Err(unreadable("not a regular file".into()));
+    }
+    std::fs::File::open(path).map_err(|e| unreadable(e.to_string()))?;
+    Ok(())
 }
 
 /// Longest node id accepted; generous for FQDN-style ids.
@@ -944,6 +1007,11 @@ impl ConfigMemberOpener {
         let gateway = if target.gateway.is_empty() { block.map(|b| b.gateway.as_str()).unwrap_or_default() } else { &target.gateway };
         if local.is_empty() && gateway.is_empty() {
             return Err(RvError::ErrHsmTransport(format!("no connector or gateway for HSM pool member {}", target.name)));
+        }
+        // Config validation sees only `member` blocks; a member the record
+        // alone names is refused here, by name, when this node has no link.
+        if local.is_empty() {
+            link_for_gateway_member(&target.name, pool.link.as_ref())?;
         }
         yubihsm2::member_connector(local, gateway, pool.link.as_ref())
     }
@@ -1147,12 +1215,34 @@ mod tests {
         raw
     }
 
+    /// A directory holding three readable placeholder `link` files (startup
+    /// only opens them; nothing parses the contents), made once per process.
+    fn link_fixture_dir() -> &'static std::path::Path {
+        static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+        DIR.get_or_init(|| {
+            let dir = std::env::temp_dir().join(format!("bv-hsm-link-fixture-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            for name in ["ca.pem", "n.pem", "n.key"] {
+                std::fs::write(dir.join(name), b"placeholder, not key material\n").unwrap();
+            }
+            dir
+        })
+    }
+
+    fn link_file(name: &str) -> String {
+        link_fixture_dir().join(name).to_string_lossy().into_owned()
+    }
+
+    fn readable_link() -> HsmLinkBlock {
+        HsmLinkBlock { ca_file: link_file("ca.pem"), cert_file: link_file("n.pem"), key_file: link_file("n.key") }
+    }
+
     fn yubi_pool() -> HsmConfigBlock {
         let mut raw = HsmConfigBlock {
             topology: "pool".into(),
             node_id: "vault-3".into(),
             credential_dir: "/var/lib/bastionvault/hsm".into(),
-            link: Some(HsmLinkBlock { ca_file: "ca.pem".into(), cert_file: "n.pem".into(), key_file: "n.key".into() }),
+            link: Some(readable_link()),
             ..Default::default()
         };
         let gw = |url: &str, serial: &str| HsmMemberBlock {
@@ -1346,6 +1436,90 @@ mod tests {
         let mut topology = mock_pool();
         topology.topology = "mesh".into();
         rejects("mock", &topology, "unknown HSM topology");
+    }
+
+    /// A `gateway` member needs a complete `link` block whose files open at
+    /// startup; every refusal names the member or key, and nothing degrades
+    /// to starting without the link.
+    #[test]
+    fn gateway_members_need_a_complete_readable_link() {
+        // Valid: two gateway members, link files readable; paths kept, trimmed.
+        let mut valid = yubi_pool();
+        valid.link.as_mut().unwrap().ca_file = format!("  {}  ", link_file("ca.pem"));
+        let link = resolve_config("yubihsm2", &valid).unwrap().pool.unwrap().link.unwrap();
+        assert_eq!(link.ca_file, link_file("ca.pem"));
+        assert_eq!(link.cert_file, link_file("n.pem"));
+        assert_eq!(link.key_file, link_file("n.key"));
+
+        // The second device reached through its gateway, the first through
+        // the local connector (the first HSM host after `member add`): the
+        // refusal names the gateway member.
+        let mut second_by_gateway = yubi_pool();
+        let a = second_by_gateway.member.get_mut("hsm-a").unwrap();
+        a.gateway.clear();
+        a.connector = "http://127.0.0.1:12345".into();
+        second_by_gateway.link = None;
+        rejects("yubihsm2", &second_by_gateway, "HSM pool member \"hsm-b\" is reached through its `gateway`");
+        rejects("yubihsm2", &second_by_gateway, "`link` block is required");
+
+        // Incomplete: each missing key is named, with the member that needs it.
+        for (key, clear) in [
+            ("ca_file", (|l: &mut HsmLinkBlock| l.ca_file.clear()) as fn(&mut HsmLinkBlock)),
+            ("cert_file", |l| l.cert_file = "   ".into()),
+            ("key_file", |l| l.key_file.clear()),
+        ] {
+            let mut incomplete = second_by_gateway.clone();
+            let mut link = readable_link();
+            clear(&mut link);
+            incomplete.link = Some(link);
+            rejects("yubihsm2", &incomplete, &format!("the HSM `link` block is missing `{key}`"));
+            rejects("yubihsm2", &incomplete, "which HSM pool member \"hsm-b\" needs to reach its `gateway`");
+        }
+        let mut two_missing = yubi_pool();
+        two_missing.link = Some(HsmLinkBlock { ca_file: link_file("ca.pem"), ..Default::default() });
+        rejects(
+            "yubihsm2",
+            &two_missing,
+            "missing `cert_file`, `key_file`, which HSM pool members \"hsm-a\" and \"hsm-b\"",
+        );
+
+        // Unreadable: a missing file and a directory are refused by key and path.
+        let absent = link_file("absent.key");
+        let mut missing_file = second_by_gateway.clone();
+        missing_file.link = Some(HsmLinkBlock { key_file: absent.clone(), ..readable_link() });
+        rejects("yubihsm2", &missing_file, &format!("the HSM `link` key_file {absent:?} is not readable"));
+        let dir = link_fixture_dir().to_string_lossy().into_owned();
+        let mut directory = second_by_gateway.clone();
+        directory.link = Some(HsmLinkBlock { ca_file: dir.clone(), ..readable_link() });
+        rejects("yubihsm2", &directory, &format!("the HSM `link` ca_file {dir:?} is not readable: not a regular file"));
+
+        // Connector-only with no link is fine; a link that is present is
+        // still checked although no member uses it yet.
+        let mut connector_only = second_by_gateway.clone();
+        let b = connector_only.member.get_mut("hsm-b").unwrap();
+        b.gateway.clear();
+        b.connector = "usb".into();
+        assert!(resolve_config("yubihsm2", &connector_only).unwrap().pool.unwrap().link.is_none());
+        let mut unused_incomplete = connector_only.clone();
+        unused_incomplete.link = Some(HsmLinkBlock { cert_file: String::new(), ..readable_link() });
+        rejects("yubihsm2", &unused_incomplete, "the HSM `link` block is missing `cert_file`; it needs");
+        let mut unused_unreadable = connector_only;
+        unused_unreadable.link = Some(HsmLinkBlock { cert_file: link_file("absent.pem"), ..readable_link() });
+        rejects("yubihsm2", &unused_unreadable, "is not readable");
+    }
+
+    /// The runtime route to a member only the seal record names uses the
+    /// same refusal, by member name, when this node has no `link` block.
+    #[test]
+    fn a_record_only_gateway_member_is_refused_by_name_without_a_link() {
+        match link_for_gateway_member("hsm-b", None) {
+            Err(RvError::ErrHsmConfigInvalid(msg)) => {
+                assert!(msg.contains("HSM pool member \"hsm-b\"") && msg.contains("`link` block is required"), "{msg}")
+            }
+            other => panic!("expected a config refusal, got {:?}", other.map(|_| ())),
+        }
+        let link = ResolvedLink { ca_file: "c".into(), cert_file: "n".into(), key_file: "k".into() };
+        assert_eq!(link_for_gateway_member("hsm-b", Some(&link)).unwrap(), &link);
     }
 
     #[test]

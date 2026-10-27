@@ -331,8 +331,22 @@ function PoolSections({ status }: { status: HsmStatus }) {
     status.recovery_fingerprint != null ||
     status.recovery_threshold != null;
 
+  const noRedundancy = status.redundancy === "none";
+
   return (
     <>
+      {noRedundancy && (
+        <div className={WARN_BOX} role="alert">
+          <div className="min-w-0 break-words font-medium">No redundancy: pool of one device</div>
+          {status.redundancy_warning && (
+            <div className="min-w-0 break-words">{status.redundancy_warning}</div>
+          )}
+          <div>
+            Active members: {num(status.members_active)} of {num(status.members_expected)}
+          </div>
+        </div>
+      )}
+
       {(under > 0 || status.kek_under_replicated) && (
         <div className={WARN_BOX} role="alert">
           {under > 0 && (
@@ -349,6 +363,23 @@ function PoolSections({ status }: { status: HsmStatus }) {
 
       <Card title="Pool Replication">
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          {status.redundancy != null && (
+            <Field
+              label="Redundancy"
+              value={
+                <Badge
+                  variant={noRedundancy ? "warning" : "success"}
+                  label={noRedundancy ? "None" : "Full"}
+                />
+              }
+            />
+          )}
+          {status.members_active != null && (
+            <Field
+              label="Active Members"
+              value={`${status.members_active} of ${num(status.members_expected)}`}
+            />
+          )}
           <Field label="Min Wrap Copies" value={num(status.min_wrap_copies)} />
           <Field label="Seal Record Version" value={num(status.seal_record_version)} />
           <Field

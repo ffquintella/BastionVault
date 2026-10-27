@@ -132,6 +132,7 @@ EXAMPLE ENTRY:
 - Start an HSM pool with one device and add the second later: `topology = "pool"` takes one or two `member` blocks; bootstrap and init with one write a one-member seal record and one copy of each secret, every node (a node on the HSM host through `connector = "http://127.0.0.1:<port>"` with no mTLS, the others through the member's gateway) unseals through it, and `bvault operator hsm member add` followed by `repair --run` and an admin-credentialed repair gives every set its second copy and promotes the device, after which either device alone unseals the cluster (T454, S114)
 - Require `acknowledge_single_member_without_recovery = true` in the pool `hsm` block to bootstrap, initialize or migrate onto a pool of one with `recovery = "none"`, or to retire down to one member without a recovery key: losing that one device would make the vault unrecoverable, so without the setting these are refused before any device or record changes; the setting is refused with `recovery = "shamir-ceremony"` and in a per-node block (T454, S114)
 - Report a pool of one as having no redundancy: `v2/sys/hsm/status` adds `redundancy` (`full` or `none`), `members_active`, `members_expected` and `redundancy_warning` (also before init), `v2/sys/hsm/members` adds the first three, every start and unseal raises `hsm.pool_not_redundant` (a `warn` on the `security` log and an audit entry), the startup line says `redundancy none`, and `bv_hsm_pool_redundancy{level="none"}` is 1. Its single-copy sets are not reported as under-replicated (T454, S114)
+- Show the pool's redundancy on the GUI's HSM / Seal page: a `Redundancy` badge (Full or None), the active members out of those expected, and a warning banner with the server's `redundancy_warning` when the pool runs on one device (T454, S114)
 
 #### HSM pool HA (phase 7 of 7, prepared: hardware validation)
 
@@ -180,6 +181,7 @@ EXAMPLE ENTRY:
 #### HSM pool HA (pool of one)
 
 - Hold at most two HSMs per cluster: `bvault operator hsm member add` refuses a device while two members are not retired, so a failed device is now replaced by retiring it first (the pool runs as a pool of one meanwhile; set `min_wrap_copies = 1` first if it is 2) and then adding the replacement; a seal record that already holds a joining third member still repairs and promotes. `member retire` refuses the pool's last active member with its own error, `min_wrap_copies = 2` with one `member` block is a startup error, and pool init with two members configured and one unreachable now says to list only the present device to start a pool of one (T454, S114)
+- Refuse at startup an HSM pool `member` with `gateway` when the node's `link` block is missing (the error names the member) or lacks `ca_file`, `cert_file` or `key_file` (it names the missing key and the member), and any `link` file that is not a regular file the process can open (it names the key and path), whether or not a member uses the link yet; a member only the seal record names is refused by name when reached without a `link`. A node that started with a `link` path it could not read now fails to start instead (T454, S114)
 
 #### HSM pool HA (phase 7, prepared)
 

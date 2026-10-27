@@ -218,6 +218,41 @@ describe("HsmStatusPage pool topology", () => {
   });
 });
 
+describe("HsmStatusPage pool redundancy", () => {
+  const CLEAN = { ...BASE, topology: "pool", under_replicated_sets: 0, members: [] };
+  const WARNING =
+    "pool of one device: losing that device loses the vault until the second device is added";
+
+  it("shows no banner when redundancy is full", async () => {
+    serve({ ...CLEAN, redundancy: "full", members_active: 2, members_expected: 2, redundancy_warning: null });
+    renderPage();
+    await screen.findByText("Pool Replication");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByText("Full")).toBeInTheDocument();
+    expect(screen.getByText("2 of 2")).toBeInTheDocument();
+  });
+
+  it("shows a warning banner with the text and counts when redundancy is none", async () => {
+    serve({ ...CLEAN, redundancy: "none", members_active: 1, members_expected: 2, redundancy_warning: WARNING });
+    renderPage();
+    const banner = await screen.findByRole("alert");
+    expect(banner).toHaveTextContent(WARNING);
+    expect(banner).toHaveTextContent("Active members: 1 of 2");
+    expect(banner.className).toContain("yellow");
+    expect(screen.getByText("1 of 2")).toBeInTheDocument();
+    expect(screen.getByText("None")).toBeInTheDocument();
+  });
+
+  it("renders without a banner or a crash when the fields are absent (older server)", async () => {
+    serve({ ...CLEAN });
+    renderPage();
+    await screen.findByText("Pool Replication");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByText("Redundancy")).not.toBeInTheDocument();
+    expect(screen.queryByText("Active Members")).not.toBeInTheDocument();
+  });
+});
+
 describe("HsmStatusPage per-node topology", () => {
   it("keeps the existing cards and renders no pool sections", async () => {
     serve(PER_NODE);
