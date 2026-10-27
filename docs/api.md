@@ -206,6 +206,44 @@ HSM pool response (`topology = "pool"`; T454 phase 2). There is no single
 
 CLI equivalent: `bvault operator hsm status`.
 
+### HSM pool ceremonies (`v2` only, sudo)
+
+Node enrollment, member replacement and repair for a `topology = "pool"` HSM
+seal ([HSM pool HA](../features/hsm-pool-ha.md), T454 phase 4). Every route
+needs `sudo` on its path; a vault whose seal is not an HSM seal answers `400`.
+`admin_credentials` maps member names to `bv-admin` credentials for that one
+request; they are never stored, logged by the server or returned.
+
+| Method | Path | Body | Purpose |
+|---|---|---|---|
+| GET | `/v2/sys/hsm/members` | — | Members from the seal record: `state` (`joining`/`active`/`retired`/`faulted`), `pending_revocations`, `attestation_fps`, `holds_kek_copy`, this node's `up` / `last_error` |
+| POST | `/v2/sys/hsm/members/{name}` | `bundle` (the JSON `provision` wrote), `gateway`, `admin_credentials` (for `{name}`) | Attest the device and add it as `joining`; every enrolled node gets a key on it |
+| POST | `/v2/sys/hsm/members/{name}/retire` | — | Retire a member; refused below `min_wrap_copies` active members or when a set has no copy elsewhere |
+| GET | `/v2/sys/hsm/nodes` | — | `enrolled` (auth key per member, `signatures_valid`, `revoked`, `credentials_waiting`), `pending` (transport fingerprints), `enrolled_count`, `max_nodes` (12) |
+| POST | `/v2/sys/hsm/nodes/{node_id}` | `transport_fp`, `admin_credentials` (every live member) | Enroll a node |
+| DELETE | `/v2/sys/hsm/nodes/{node_id}` | `admin_credentials` | Revoke a node; unreachable members get a pending revocation |
+| GET | `/v2/sys/hsm/repair` | — | `repair_rate`, `interval_secs`, `last_run` (the report below) |
+| POST | `/v2/sys/hsm/repair` | `admin_credentials` (optional) | Run repair now; with credentials it also applies pending revocations and promotes joining members |
+
+~~~json
+POST /v2/sys/hsm/nodes/vault-2
+{ "transport_fp": "9f2c…", "admin_credentials": { "hsm-a": "…", "hsm-b": "…" } }
+
+{ "data": { "node_id": "vault-2", "auth_key_id": "0x0101", "members": ["hsm-a", "hsm-b"],
+            "transport_fp": "9f2c…", "revocations_applied": [],
+            "next": "the node installs its credentials on its next unseal or membership refresh (30 s)" } }
+~~~
+
+A repair report: `sets_scanned`, `copies_added`, `copies_removed`,
+`under_replicated` (still missing a copy), `failures`, `invalid_custody_entries`,
+`ready_to_promote`, `promoted`, `revocations_applied`, `revocations_pending`,
+`custody_scanned`, `started_at`, `finished_at`. A revoke response adds
+`revoked_on`, `revocation_pending` (`member`, `reason`), `operator_steps` and,
+when a revocation is pending, `residual_risk`.
+
+CLI equivalents: `bvault operator hsm members | member add|retire | node
+add|revoke|list | repair [--run]`.
+
 ### Policy Schema (`sql_*` write gate)
 
 Reports the rolling-upgrade gate for the `sql_*` policy capabilities

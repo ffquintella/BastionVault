@@ -135,6 +135,31 @@ Seal the vault. All secrets become inaccessible until it is unsealed again.
 bvault operator seal
 ~~~
 
+## operator hsm
+
+Inspect the HSM seal and run the HSM pool ceremonies (see
+[docs/hsm.md](hsm.md) and [features/hsm-pool-ha.md](../features/hsm-pool-ha.md)).
+Every verb but `status` needs a `sudo` token; they call the `v2/sys/hsm/*` routes.
+
+~~~bash
+bvault operator hsm status
+bvault operator hsm members
+bvault operator hsm member add <name> --bundle <file> [--gateway https://…] --admin <name>
+bvault operator hsm member retire <name>
+bvault operator hsm node add <node_id> --fingerprint <fp> --admin <member> [--admin <member>…]
+bvault operator hsm node revoke <node_id> --admin <member> [--admin <member>…]
+bvault operator hsm node list
+bvault operator hsm repair [--run [--admin <member>…]]
+~~~
+
+| Option | Description |
+|--------|-------------|
+| `--admin <member>` | Prompt on the TTY (no echo) for that member's `bv-admin` credential; repeat per member |
+| `--admin <member>=env:VAR` | Read it from the environment variable `VAR` instead. Any other `=value` is refused: an argument would sit in the process list and the shell history |
+| `--fingerprint` | The node's transport key fingerprint, as its log shows it; confirm it out of band |
+| `--bundle` | The attestation bundle (JSON) that provisioning the device produced |
+| `--run` | Run the repair job now instead of showing the last run |
+
 ## read
 
 Read data from a path.

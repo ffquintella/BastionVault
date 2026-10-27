@@ -33,7 +33,12 @@ use zeroize::Zeroizing;
 use crate::{
     errors::RvError,
     hsm::{
-        blob::{open_blob, seal_blob, Context},
+        admin::{
+            node_slot_of, verify_layout, AuthKeyRole, HsmAdminSession, NodeCredential, ObjectInfo, ObjectKind,
+            ADMIN_AUTH_KEY_ID, FACTORY_AUTH_KEY_ID, WRAP_KEY_CAPABILITIES,
+        },
+        blob::{open_blob, seal_blob, Context, HsmId},
+        ceremony::AttestationBundle,
         clock::{self, Clock},
         domain_separated, AttestedKey, HsmBackend, HsmObjectId, HsmObjectIds, ResolvedHsmConfig,
     },
@@ -65,12 +70,59 @@ struct StoredObject {
     /// Ed25519 seed. Never leaves the process except re-wrapped (enrollment).
     #[serde(with = "serde_bytes")]
     material: Vec<u8>,
+    /// Capabilities beyond the kind's own set. Only a test that simulates a
+    /// mis-provisioned device writes this; layout verification must catch it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    extra_capabilities: Vec<String>,
+}
+
+/// An authentication key (T454 phase 4). The id namespace is separate from
+/// data objects, as on the device. `key` is the derived session key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MockAuthKey {
+    label: String,
+    role: AuthKeyRole,
+    #[serde(with = "serde_bytes")]
+    key: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct MockState {
     serial: String,
     objects: BTreeMap<u16, StoredObject>,
+    /// Empty on every pre-phase-4 device: those accept unauthenticated
+    /// sessions, as before. A device with `bv-admin` is provisioned.
+    #[serde(default)]
+    auth_keys: BTreeMap<u16, MockAuthKey>,
+}
+
+impl MockState {
+    fn provisioned(&self) -> bool {
+        self.auth_keys.contains_key(&ADMIN_AUTH_KEY_ID)
+    }
+
+    fn factory(&self) -> bool {
+        self.objects.is_empty()
+            && self.auth_keys.len() == 1
+            && self.auth_keys.get(&FACTORY_AUTH_KEY_ID).is_some_and(|k| k.role == AuthKeyRole::Factory)
+    }
+}
+
+/// The mock's password-to-session-key derivation, standing in for the
+/// device's PBKDF2. The mock protects nothing; this only keeps passwords out
+/// of its state file.
+fn mock_password_key(password: &str) -> Vec<u8> {
+    let hk = hkdf::Hkdf::<sha2::Sha256>::new(Some(b"bastionvault/mock-hsm/password/v1"), password.as_bytes());
+    let mut out = vec![0u8; 32];
+    hk.expand(b"auth-key", &mut out).expect("32 bytes is a valid HKDF-SHA256 output length");
+    out
+}
+
+fn auth_failed(id: u16, serial: &str) -> RvError {
+    RvError::ErrHsm(format!(
+        "authentication with auth key {id:#06x} failed on mock HSM {serial}: the key does not exist or the credential \
+         is wrong"
+    ))
 }
 
 /// One simulated device: its object store, session table and link state.
@@ -158,15 +210,239 @@ impl MockHsmDevice {
     /// split) and are persisted so restarts reuse them.
     fn ensure_objects(&self, objects: &HsmObjectIds) -> Result<(), RvError> {
         let mut state = self.state.write().map_err(|_| RvError::ErrRwLockWritePoison)?;
-        let mut changed = ensure_object(&mut state, objects.wrap_barrier, MockKind::Wrap);
-        changed |= ensure_object(&mut state, objects.wrap_pqc, MockKind::Wrap);
-        changed |= ensure_object(&mut state, objects.identity, MockKind::Identity);
-        changed |= ensure_object(&mut state, objects.authz, MockKind::Authz);
-        if changed {
+        if ensure_all(&mut state, objects) {
             persist_state(&self.state_path, &state)?;
         }
         Ok(())
     }
+
+    /// A device in factory state: the factory auth key 1 and nothing else,
+    /// which is what `provision` expects. An existing state file is kept.
+    pub fn open_factory(state_path: &str, serial: &str, clock: Arc<dyn Clock>) -> Result<Arc<Self>, RvError> {
+        let mut state = load_state(state_path)?;
+        if state.serial.is_empty() && state.objects.is_empty() && state.auth_keys.is_empty() {
+            state.serial = serial.to_string();
+            let key = mock_password_key(crate::hsm::admin::FACTORY_PASSWORD);
+            state.auth_keys.insert(FACTORY_AUTH_KEY_ID, MockAuthKey { label: "factory".into(), role: AuthKeyRole::Factory, key });
+            persist_state(state_path, &state)?;
+        }
+        Ok(Arc::new(Self {
+            state_path: state_path.to_string(),
+            state: RwLock::new(state),
+            sessions: Mutex::new(BTreeMap::new()),
+            offline: AtomicBool::new(false),
+            clock,
+        }))
+    }
+
+    /// Whether `bv-admin` exists: such a device only takes authenticated sessions.
+    pub fn is_provisioned(&self) -> bool {
+        self.state.read().map(|s| s.provisioned()).unwrap_or(true)
+    }
+
+    /// Whether the device has authentication keys at all (factory state or
+    /// provisioned). Only a pre-phase-4 device has none.
+    fn takes_credentials(&self) -> bool {
+        self.state.read().map(|s| !s.auth_keys.is_empty()).unwrap_or(true)
+    }
+
+    /// `bvault operator hsm provision` on this device (spec § Pool membership):
+    /// from factory state, create `bv-admin`, generate the objects, delete the
+    /// factory key. Any other state is refused unless `adopt` and the layout
+    /// verifies. Returns the attestation bundle a `member add` takes.
+    #[maybe_async::maybe_async]
+    pub async fn provision(
+        self: &Arc<Self>,
+        factory_password: &str,
+        admin_password: &str,
+        objects: &HsmObjectIds,
+        adopt: bool,
+    ) -> Result<AttestationBundle, RvError> {
+        self.reachable()?;
+        if admin_password.is_empty() {
+            return Err(RvError::ErrHsm("the bv-admin password must not be empty".into()));
+        }
+        {
+            let mut state = self.state.write().map_err(|_| RvError::ErrRwLockWritePoison)?;
+            if state.factory() {
+                if state.auth_keys[&FACTORY_AUTH_KEY_ID].key != mock_password_key(factory_password) {
+                    return Err(auth_failed(FACTORY_AUTH_KEY_ID, &state.serial));
+                }
+                let key = mock_password_key(admin_password);
+                state.auth_keys.insert(ADMIN_AUTH_KEY_ID, MockAuthKey { label: "bv-admin".into(), role: AuthKeyRole::Admin, key });
+                ensure_all(&mut state, objects);
+                state.auth_keys.remove(&FACTORY_AUTH_KEY_ID);
+                persist_state(&self.state_path, &state)?;
+                log::info!(target: "security", "mock HSM {} provisioned; factory key 1 deleted", state.serial);
+            } else if !adopt {
+                return Err(RvError::ErrHsm(format!(
+                    "mock HSM {} is not in factory state; refusing to provision it (adopt accepts a device whose \
+                     layout verifies)",
+                    state.serial
+                )));
+            }
+        }
+        let session = self.admin_session(admin_password, *objects)?;
+        let checked = verify_layout(&session, objects).await;
+        let bundle = checked.and_then(|_| {
+            let state = self.state.read().map_err(|_| RvError::ErrRwLockReadPoison)?;
+            let identity = mock_attestation(&state, objects.identity, objects.identity)?;
+            let authz = mock_attestation(&state, objects.authz, objects.identity)?;
+            Ok(AttestationBundle::new("mock", &state.serial, "mock", &identity, &authz))
+        });
+        session.close().await?;
+        bundle
+    }
+
+    /// A session authenticated with `bv-admin` (spec § ceremonies).
+    pub fn admin_session(self: &Arc<Self>, password: &str, objects: HsmObjectIds) -> Result<MockAdminSession, RvError> {
+        self.reachable()?;
+        let accepted = {
+            let state = self.state.read().map_err(|_| RvError::ErrRwLockReadPoison)?;
+            let key = state.auth_keys.get(&ADMIN_AUTH_KEY_ID);
+            key.is_some_and(|k| k.role == AuthKeyRole::Admin && k.key == mock_password_key(password))
+        };
+        if !accepted {
+            log::warn!(target: "security", "mock HSM {}: bv-admin authentication failed", self.serial());
+            return Err(auth_failed(ADMIN_AUTH_KEY_ID, &self.serial()));
+        }
+        self.session(ADMIN_SESSION_OWNER)?;
+        Ok(MockAdminSession { device: self.clone(), objects })
+    }
+
+    /// Authenticate a node session, as the device does at session open.
+    fn authenticate(&self, credential: &NodeCredential) -> Result<(), RvError> {
+        self.reachable()?;
+        let state = self.state.read().map_err(|_| RvError::ErrRwLockReadPoison)?;
+        match state.auth_keys.get(&credential.auth_key_id()) {
+            Some(k) if k.role == AuthKeyRole::Node && k.key.as_slice() == credential.key() => Ok(()),
+            _ => Err(auth_failed(credential.auth_key_id(), &state.serial)),
+        }
+    }
+
+    /// Simulate a mis-provisioned object (tests of layout verification).
+    #[cfg(test)]
+    pub(crate) fn add_capability(&self, id: u16, capability: &str) {
+        let mut state = self.state.write().unwrap();
+        state.objects.get_mut(&id).unwrap().extra_capabilities.push(capability.to_string());
+    }
+}
+
+const ADMIN_SESSION_OWNER: &str = "bv-admin";
+
+/// A `bv-admin` session on a mock device.
+pub struct MockAdminSession {
+    device: Arc<MockHsmDevice>,
+    objects: HsmObjectIds,
+}
+
+#[maybe_async::maybe_async]
+impl HsmAdminSession for MockAdminSession {
+    fn hsm_id(&self) -> Result<HsmId, RvError> {
+        HsmId::from_parts("mock", &self.device.serial())
+    }
+
+    async fn object_info(&self, kind: ObjectKind, id: u16) -> Result<Option<ObjectInfo>, RvError> {
+        self.device.session(ADMIN_SESSION_OWNER)?;
+        let state = self.device.state.read().map_err(|_| RvError::ErrRwLockReadPoison)?;
+        let info = |label: &str, base: &[&str], extra: &[String]| ObjectInfo {
+            id,
+            kind,
+            label: label.to_string(),
+            capabilities: base.iter().map(|c| c.to_string()).chain(extra.iter().cloned()).collect(),
+            delegated: Vec::new(),
+        };
+        Ok(match kind {
+            ObjectKind::AuthenticationKey => {
+                state.auth_keys.get(&id).map(|k| info(&k.label, k.role.capabilities(), &[]))
+            }
+            ObjectKind::WrapKey => state
+                .objects
+                .get(&id)
+                .filter(|o| o.kind == MockKind::Wrap)
+                .map(|o| info("bv-wrap", WRAP_KEY_CAPABILITIES, &o.extra_capabilities)),
+            ObjectKind::AsymmetricKey => state.objects.get(&id).and_then(|o| match o.kind {
+                MockKind::Identity => Some(info("bv-identity", &["derive-ecdh", "sign-ecdsa"], &o.extra_capabilities)),
+                MockKind::Authz => Some(info("bv-authz", &["sign-eddsa"], &o.extra_capabilities)),
+                MockKind::Wrap => None,
+            }),
+        })
+    }
+
+    async fn auth_key_ids(&self) -> Result<Vec<u16>, RvError> {
+        self.device.session(ADMIN_SESSION_OWNER)?;
+        let state = self.device.state.read().map_err(|_| RvError::ErrRwLockReadPoison)?;
+        Ok(state.auth_keys.keys().copied().collect())
+    }
+
+    async fn put_node_auth_key(&self, label: &str, credential: &NodeCredential) -> Result<(), RvError> {
+        self.device.session(ADMIN_SESSION_OWNER)?;
+        let id = credential.auth_key_id();
+        node_slot_of(id)?;
+        let mut state = self.device.state.write().map_err(|_| RvError::ErrRwLockWritePoison)?;
+        if state.auth_keys.contains_key(&id) {
+            return Err(RvError::ErrHsm(format!("auth key {id:#06x} already exists on mock HSM {}", state.serial)));
+        }
+        let key = MockAuthKey { label: label.to_string(), role: AuthKeyRole::Node, key: credential.key().to_vec() };
+        state.auth_keys.insert(id, key);
+        persist_state(&self.device.state_path, &state)
+    }
+
+    async fn delete_node_auth_key(&self, auth_key_id: u16) -> Result<bool, RvError> {
+        self.device.session(ADMIN_SESSION_OWNER)?;
+        node_slot_of(auth_key_id)?;
+        let mut state = self.device.state.write().map_err(|_| RvError::ErrRwLockWritePoison)?;
+        let existed = state.auth_keys.remove(&auth_key_id).is_some();
+        if existed {
+            persist_state(&self.device.state_path, &state)?;
+        }
+        Ok(existed)
+    }
+
+    async fn public_key(&self, key: HsmObjectId) -> Result<Vec<u8>, RvError> {
+        self.device.session(ADMIN_SESSION_OWNER)?;
+        let state = self.device.state.read().map_err(|_| RvError::ErrRwLockReadPoison)?;
+        match state.objects.get(&key).map(|o| o.kind) {
+            Some(MockKind::Identity) => identity_public(&state, key),
+            Some(MockKind::Authz) => authz_public(&state, key),
+            _ => Err(RvError::ErrHsm(format!("object {key} is not an asymmetric key"))),
+        }
+    }
+
+    async fn identity_sign(&self, key: HsmObjectId, ctx: &str, msg: &[u8]) -> Result<Vec<u8>, RvError> {
+        if key != self.objects.identity {
+            return Err(RvError::ErrHsm(format!("an admin session signs only with bv-identity, not object {key}")));
+        }
+        self.device.session(ADMIN_SESSION_OWNER)?;
+        let state = self.device.state.read().map_err(|_| RvError::ErrRwLockReadPoison)?;
+        let obj = state.objects.get(&key).filter(|o| o.kind == MockKind::Identity).ok_or(RvError::ErrHsmUnavailable)?;
+        ecdsa_sign(&obj.material, &domain_separated(ctx, msg))
+    }
+
+    async fn verify_attestation(&self, attestation: &[u8]) -> Result<AttestedKey, RvError> {
+        verify_mock_attestation(attestation)
+    }
+
+    async fn close(&self) -> Result<(), RvError> {
+        self.device.close_session(ADMIN_SESSION_OWNER);
+        Ok(())
+    }
+}
+
+/// Create every object `objects` names that is missing; true if any was.
+fn ensure_all(state: &mut MockState, objects: &HsmObjectIds) -> bool {
+    let mut changed = ensure_object(state, objects.wrap_barrier, MockKind::Wrap);
+    changed |= ensure_object(state, objects.wrap_pqc, MockKind::Wrap);
+    changed |= ensure_object(state, objects.identity, MockKind::Identity);
+    changed |= ensure_object(state, objects.authz, MockKind::Authz);
+    changed
+}
+
+fn ecdsa_sign(scalar: &[u8], msg: &[u8]) -> Result<Vec<u8>, RvError> {
+    use p256::ecdsa::{signature::Signer, Signature, SigningKey as EcSigningKey};
+    let sk = EcSigningKey::from_slice(scalar).map_err(|_| RvError::ErrHsm("bad identity key".into()))?;
+    let sig: Signature = sk.sign(msg);
+    Ok(sig.to_bytes().to_vec())
 }
 
 /// One client of a [`MockHsmDevice`]: what a node's session to it looks like.
@@ -178,6 +454,9 @@ pub struct MockHsmBackend {
     /// Cached public keys (derived at open; keys are immutable in steady state).
     authz_pub: Vec<u8>,
     identity_pub: Vec<u8>,
+    /// This node's `bv-node` credential on a provisioned device; `None` on a
+    /// pre-phase-4 device, which takes unauthenticated sessions.
+    credential: Option<NodeCredential>,
 }
 
 impl MockHsmBackend {
@@ -189,18 +468,61 @@ impl MockHsmBackend {
         Self::connect(device, &config.node_id, config.objects)
     }
 
-    /// A further client of an already-open device.
+    /// An unauthenticated client of a pre-phase-4 device, creating any missing
+    /// object. A provisioned device refuses it: revocation must hold.
     pub fn connect(device: Arc<MockHsmDevice>, owner: &str, objects: HsmObjectIds) -> Result<Self, RvError> {
+        if device.takes_credentials() {
+            return Err(RvError::ErrHsm(format!(
+                "mock HSM {} has authentication keys (factory state or provisioned): a node session needs this \
+                 node's credential for it",
+                device.serial()
+            )));
+        }
         device.ensure_objects(&objects)?;
+        Self::build(device, owner, objects, None)
+    }
+
+    /// A client of a provisioned device, authenticated with `credential` on
+    /// every command, so deleting the node's auth key cuts it off at once.
+    pub fn connect_with_credential(
+        device: Arc<MockHsmDevice>,
+        owner: &str,
+        objects: HsmObjectIds,
+        credential: NodeCredential,
+    ) -> Result<Self, RvError> {
+        if !device.is_provisioned() {
+            return Err(RvError::ErrHsm(format!(
+                "mock HSM {} is not provisioned; node credentials exist only on provisioned devices",
+                device.serial()
+            )));
+        }
+        Self::build(device, owner, objects, Some(credential))
+    }
+
+    fn build(
+        device: Arc<MockHsmDevice>,
+        owner: &str,
+        objects: HsmObjectIds,
+        credential: Option<NodeCredential>,
+    ) -> Result<Self, RvError> {
         let (authz_pub, identity_pub) = {
             let state = device.state.read().map_err(|_| RvError::ErrRwLockReadPoison)?;
             (authz_public(&state, objects.authz)?, identity_public(&state, objects.identity)?)
         };
-        Ok(Self { device, owner: owner.to_string(), objects, authz_pub, identity_pub })
+        Ok(Self { device, owner: owner.to_string(), objects, authz_pub, identity_pub, credential })
     }
 
     pub fn device(&self) -> Arc<MockHsmDevice> {
         self.device.clone()
+    }
+
+    /// What every authenticated command does first: authenticate (when the
+    /// device takes credentials), then use or open this owner's session.
+    fn open_session(&self) -> Result<(), RvError> {
+        if let Some(credential) = &self.credential {
+            self.device.authenticate(credential)?;
+        }
+        self.device.session(&self.owner)
     }
 
     fn wrap_material(&self, key: HsmObjectId) -> Result<Zeroizing<Vec<u8>>, RvError> {
@@ -233,21 +555,21 @@ impl HsmBackend for MockHsmBackend {
     }
 
     async fn wrap_data(&self, key: HsmObjectId, ctx: &Context, plaintext: &[u8]) -> Result<Vec<u8>, RvError> {
-        self.device.session(&self.owner)?;
+        self.open_session()?;
         let material = self.wrap_material(key)?;
         let device = self.device_binding()?;
         seal_blob("mock", key, ctx, &device, plaintext, |inner| aes256_gcm_seal(&material, inner))
     }
 
     async fn unwrap_data(&self, key: HsmObjectId, ctx: &Context, wrapped: &[u8]) -> Result<Zeroizing<Vec<u8>>, RvError> {
-        self.device.session(&self.owner)?;
+        self.open_session()?;
         let material = self.wrap_material(key)?;
         let device = self.device_binding()?;
         open_blob(wrapped, ctx, &device, |w| aes256_gcm_open(&material, w))
     }
 
     async fn sign(&self, key: HsmObjectId, ctx: &str, msg: &[u8]) -> Result<Vec<u8>, RvError> {
-        self.device.session(&self.owner)?;
+        self.open_session()?;
         let state = self.device.state.read().map_err(|_| RvError::ErrRwLockReadPoison)?;
         let obj = state.objects.get(&key).ok_or(RvError::ErrHsmUnavailable)?;
         let signed = domain_separated(ctx, msg);
@@ -268,77 +590,17 @@ impl HsmBackend for MockHsmBackend {
     }
 
     async fn attest(&self, key: HsmObjectId) -> Result<Vec<u8>, RvError> {
-        self.device.session(&self.owner)?;
+        self.open_session()?;
         let state = self.device.state.read().map_err(|_| RvError::ErrRwLockReadPoison)?;
-        let obj = state.objects.get(&key).ok_or(RvError::ErrHsmUnavailable)?;
-        let public_key = match obj.kind {
-            MockKind::Identity => identity_public(&state, key)?,
-            MockKind::Authz => authz_public(&state, key)?,
-            MockKind::Wrap => return Err(RvError::ErrHsm("wrap key is not attestable".into())),
-        };
-        let label = match obj.kind {
-            MockKind::Identity => "bv-identity",
-            MockKind::Authz => "bv-authz",
-            MockKind::Wrap => unreachable!(),
-        };
-        // The mock's "attestation" is a signed self-description over a test CA:
-        // the device signs the attested-key JSON with its identity key.
-        let attested = AttestedKey {
-            label: label.to_string(),
-            object_id: key,
-            public_key,
-            serial: state.serial.clone(),
-            non_exportable: true,
-        };
-        let body = serde_json::to_vec(&MockAttestation {
-            label: attested.label,
-            object_id: attested.object_id,
-            public_key: attested.public_key,
-            serial: attested.serial,
-            non_exportable: attested.non_exportable,
-        })
-        .map_err(|e| RvError::ErrHsm(format!("attestation encode: {e}")))?;
-        // Sign the body with the identity key so verify_attestation can bind the
-        // bundle to this device's identity (test-CA analogue of the Yubico root).
-        let id_seed = state.objects.get(&self.objects.identity).ok_or(RvError::ErrHsmUnavailable)?.material.clone();
-        drop(state);
-        let sig = {
-            use p256::ecdsa::{signature::Signer, Signature, SigningKey as EcSigningKey};
-            let sk = EcSigningKey::from_slice(&id_seed).map_err(|_| RvError::ErrHsm("bad identity key".into()))?;
-            let sig: Signature = sk.sign(&body);
-            sig.to_bytes().to_vec()
-        };
-        let bundle = MockAttestationBundle { body, signature: sig, signer_pub: self.identity_pub.clone() };
-        serde_json::to_vec(&bundle).map_err(|e| RvError::ErrHsm(format!("bundle encode: {e}")))
+        mock_attestation(&state, key, self.objects.identity)
     }
 
     async fn verify_attestation(&self, cert_chain: &[u8]) -> Result<AttestedKey, RvError> {
-        let bundle: MockAttestationBundle = serde_json::from_slice(cert_chain)
-            .map_err(|_| RvError::ErrHsmAttestationInvalid("malformed mock attestation bundle".into()))?;
-        // Verify the identity signature over the body (test-CA analogue).
-        use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
-        let vk = VerifyingKey::from_sec1_bytes(&bundle.signer_pub)
-            .map_err(|_| RvError::ErrHsmAttestationInvalid("bad attestation signer key".into()))?;
-        let sig = Signature::from_slice(&bundle.signature)
-            .map_err(|_| RvError::ErrHsmAttestationInvalid("bad attestation signature".into()))?;
-        vk.verify(&bundle.body, &sig)
-            .map_err(|_| RvError::ErrHsmAttestationInvalid("attestation signature does not verify".into()))?;
-        let att: MockAttestation = serde_json::from_slice(&bundle.body)
-            .map_err(|_| RvError::ErrHsmAttestationInvalid("malformed attested-key body".into()))?;
-        if !att.non_exportable {
-            return Err(RvError::ErrHsmAttestationInvalid("attested key is exportable".into()));
-        }
-        Ok(AttestedKey {
-            label: att.label,
-            object_id: att.object_id,
-            public_key: att.public_key,
-            serial: att.serial,
-            non_exportable: att.non_exportable,
-        })
+        verify_mock_attestation(cert_chain)
     }
 
     async fn derive_ecdh(&self, key: HsmObjectId, peer_pub: &[u8]) -> Result<Zeroizing<Vec<u8>>, RvError> {
-        self.device.session(&self.owner)?;
+        self.open_session()?;
         let state = self.device.state.read().map_err(|_| RvError::ErrRwLockReadPoison)?;
         let obj = state.objects.get(&key).ok_or(RvError::ErrHsmUnavailable)?;
         if obj.kind != MockKind::Identity {
@@ -351,7 +613,7 @@ impl HsmBackend for MockHsmBackend {
     }
 
     async fn get_random(&self, len: usize) -> Result<Zeroizing<Vec<u8>>, RvError> {
-        self.device.session(&self.owner)?;
+        self.open_session()?;
         Ok(Zeroizing::new(random_bytes(len)))
     }
 
@@ -365,6 +627,55 @@ impl HsmBackend for MockHsmBackend {
         self.device.close_session(&self.owner);
         Ok(())
     }
+}
+
+/// The mock's attestation of `key`: a self-description signed by the device's
+/// identity key (`signer`), the test-CA analogue of the Yubico chain.
+fn mock_attestation(state: &MockState, key: HsmObjectId, signer: HsmObjectId) -> Result<Vec<u8>, RvError> {
+    let obj = state.objects.get(&key).ok_or(RvError::ErrHsmUnavailable)?;
+    let (label, public_key) = match obj.kind {
+        MockKind::Identity => ("bv-identity", identity_public(state, key)?),
+        MockKind::Authz => ("bv-authz", authz_public(state, key)?),
+        MockKind::Wrap => return Err(RvError::ErrHsm("wrap key is not attestable".into())),
+    };
+    let body = serde_json::to_vec(&MockAttestation {
+        label: label.to_string(),
+        object_id: key,
+        public_key,
+        serial: state.serial.clone(),
+        non_exportable: true,
+    })
+    .map_err(|e| RvError::ErrHsm(format!("attestation encode: {e}")))?;
+    let signer_obj = state.objects.get(&signer).ok_or(RvError::ErrHsmUnavailable)?;
+    let signature = ecdsa_sign(&signer_obj.material, &body)?;
+    let bundle = MockAttestationBundle { body, signature, signer_pub: identity_public(state, signer)? };
+    serde_json::to_vec(&bundle).map_err(|e| RvError::ErrHsm(format!("bundle encode: {e}")))
+}
+
+/// Verify a [`mock_attestation`]. It proves only self-consistency: the mock
+/// has no root of trust, which is why it refuses to run in production.
+fn verify_mock_attestation(cert_chain: &[u8]) -> Result<AttestedKey, RvError> {
+    use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
+    let bundle: MockAttestationBundle = serde_json::from_slice(cert_chain)
+        .map_err(|_| RvError::ErrHsmAttestationInvalid("malformed mock attestation bundle".into()))?;
+    let vk = VerifyingKey::from_sec1_bytes(&bundle.signer_pub)
+        .map_err(|_| RvError::ErrHsmAttestationInvalid("bad attestation signer key".into()))?;
+    let sig = Signature::from_slice(&bundle.signature)
+        .map_err(|_| RvError::ErrHsmAttestationInvalid("bad attestation signature".into()))?;
+    vk.verify(&bundle.body, &sig)
+        .map_err(|_| RvError::ErrHsmAttestationInvalid("attestation signature does not verify".into()))?;
+    let att: MockAttestation = serde_json::from_slice(&bundle.body)
+        .map_err(|_| RvError::ErrHsmAttestationInvalid("malformed attested-key body".into()))?;
+    if !att.non_exportable {
+        return Err(RvError::ErrHsmAttestationInvalid("attested key is exportable".into()));
+    }
+    Ok(AttestedKey {
+        label: att.label,
+        object_id: att.object_id,
+        public_key: att.public_key,
+        serial: att.serial,
+        non_exportable: att.non_exportable,
+    })
 }
 
 /// Serializable copy of [`AttestedKey`] for the mock bundle body.
@@ -414,7 +725,7 @@ fn ensure_object(state: &mut MockState, id: u16, kind: MockKind) -> bool {
         MockKind::Identity => random_p256_scalar(),
         MockKind::Authz => random_bytes(32),
     };
-    state.objects.insert(id, StoredObject { kind, material });
+    state.objects.insert(id, StoredObject { kind, material, extra_capabilities: Vec::new() });
     true
 }
 
@@ -681,6 +992,53 @@ mod tests {
             authz::verify_authorization(&auth, &vk, &expected_next).unwrap_err(),
             RvError::ErrHsmAuthzInvalid
         );
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn a_rewrap_authorization_never_stands_in_for_a_use_and_old_requests_still_read() {
+        let hsm = MockHsmBackend::open(&test_config("n1")).await.unwrap();
+        let vk = hsm.authz_public_key().unwrap();
+        let use_req = UnwrapRequest::new(context::barrier_kek("clu"), b"blob", "n1", 0, 7, Purpose::BarrierKek);
+        let rewrap_req = use_req.clone().rewrap();
+        let rewrap = authz::sign_authorization(&hsm, hsm.objects.authz, rewrap_req.clone()).await.unwrap();
+        authz::verify_authorization(&rewrap, &vk, &rewrap_req).unwrap();
+        assert_eq!(authz::verify_authorization(&rewrap, &vk, &use_req).unwrap_err(), RvError::ErrHsmAuthzInvalid);
+        let mut relabelled = rewrap.clone();
+        relabelled.request.operation = authz::UnwrapOperation::Use;
+        assert_eq!(authz::verify_authorization(&relabelled, &vk, &use_req).unwrap_err(), RvError::ErrHsmAuthzInvalid);
+
+        // A request serialized before phase 4 has no `operation` and is a use;
+        // a use still serializes without it, byte for byte as before.
+        let old = r#"{"context":"c","blob_digest":"d","node_id":"n","epoch":0,"counter":1,"purpose":"barrier-kek"}"#;
+        let parsed: UnwrapRequest = serde_json::from_str(old).unwrap();
+        assert_eq!(parsed.operation, authz::UnwrapOperation::Use);
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), old);
+        assert!(authz::audit_record(&rewrap)["operation"] == "rewrap");
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn a_node_credential_opens_sessions_until_its_key_is_deleted() {
+        let clock = crate::hsm::clock::ManualClock::new();
+        let device = MockHsmDevice::open_factory("", "CRED", clock).unwrap();
+        let objects = HsmObjectIds::default();
+        device.provision(crate::hsm::admin::FACTORY_PASSWORD, "admin", &objects, false).await.unwrap();
+        let admin = device.admin_session("admin", objects).unwrap();
+        let cred = NodeCredential::generate(0x100).unwrap();
+        admin.put_node_auth_key("bv-node-n1", &cred).await.unwrap();
+        assert!(admin.put_node_auth_key("bv-node-n1", &cred).await.is_err(), "an id is used once");
+        let bad_id = NodeCredential::from_parts(0x101, Zeroizing::new(cred.key().to_vec())).unwrap();
+
+        let good = MockHsmBackend::connect_with_credential(device.clone(), "n1", objects, cred).unwrap();
+        good.get_random(8).await.unwrap();
+        let wrong = MockHsmBackend::connect_with_credential(device.clone(), "n2", objects, bad_id).unwrap();
+        assert!(wrong.get_random(8).await.unwrap_err().to_string().contains("authentication"));
+        assert_eq!(device.open_sessions(), 2, "the admin and n1; a failed authentication takes no slot");
+
+        assert!(admin.delete_node_auth_key(0x100).await.unwrap());
+        assert!(!admin.delete_node_auth_key(0x100).await.unwrap(), "already gone");
+        assert!(admin.delete_node_auth_key(crate::hsm::admin::ADMIN_AUTH_KEY_ID).await.is_err(), "never bv-admin");
+        assert!(good.get_random(8).await.unwrap_err().to_string().contains("authentication"), "revoked at once");
+        assert!(admin.identity_sign(objects.authz, "c", b"m").await.is_err(), "admin signs only with bv-identity");
     }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]

@@ -5,14 +5,16 @@
 //! Either way release is a signed, audited, replay-resistant unwrap, and a node
 //! that cannot reach a device stays sealed (spec rule 6; never a fallback).
 
+mod pool_admin;
 pub mod record;
 
 use std::{
     collections::BTreeMap,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
+    time::Duration,
 };
 
 use bv_metrics::hsm_metrics::{hsm_metrics, UnderReplicatedScope};
@@ -29,8 +31,11 @@ use crate::{
         blobset::{unix_now_secs, BvHsmBlobSet},
         clock::{self, Clock},
         context,
+        node_creds::{self, NodeCredentialStore},
         pool::{check_pool_storage_backend, HsmPool, LogEventSink, PoolEventSink, PoolMember, PoolMemberSpec},
-        validate_node_id, HsmBackend, RecoveryMode, ResolvedHsmConfig, ResolvedPoolConfig,
+        repair::RepairReport,
+        validate_node_id, ConfigMemberOpener, HsmBackend, MemberOpener, MemberTarget, RecoveryMode, ResolvedHsmConfig,
+        ResolvedPoolConfig,
     },
     seal::SealProvider,
     storage::{Backend as PhysicalBackend, BackendEntry},
@@ -55,23 +60,154 @@ enum Devices {
     Pool(PoolDevices),
 }
 
-/// Who a pool was built for: (name, device, prefer) per member, by name.
-type Membership = Vec<(String, HsmId, bool)>;
+/// How often a running node re-reads the seal record's membership and picks
+/// up delivered credentials (spec § Configuration: at least every 30 s).
+pub const MEMBERSHIP_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Who a pool was built for: (name, device, prefer, why unusable) per member,
+/// and the client generation, so a new credential rebuilds the pool.
+type Membership = (Vec<(String, HsmId, bool, Option<String>)>, u64);
+
+/// How this node reaches each member, and the clients it has opened.
+struct ClientCache {
+    opener: Arc<dyn MemberOpener>,
+    /// `credential_dir`, when the node authenticates with node credentials.
+    credentials: Option<NodeCredentialStore>,
+    /// Opened clients by device; dropped when a new credential arrives.
+    clients: Mutex<BTreeMap<HsmId, Result<Arc<dyn HsmBackend>, String>>>,
+    generation: AtomicU64,
+}
 
 /// This node's clients for the pool members, and the pool built over them.
 struct PoolDevices {
-    /// Opened from the config's `member` blocks, keyed by member name.
-    opened: BTreeMap<String, Result<Arc<dyn HsmBackend>, String>>,
+    cache: ClientCache,
     clock: Arc<dyn Clock>,
     events: Arc<dyn PoolEventSink>,
     current: Mutex<(Membership, Arc<HsmPool>)>,
     probing: AtomicBool,
 }
 
-fn membership_of(specs: &[PoolMemberSpec]) -> Membership {
-    let mut membership: Membership = specs.iter().map(|s| (s.name.clone(), s.hsm_id.clone(), s.prefer)).collect();
-    membership.sort();
-    membership
+fn membership_of(specs: &[PoolMemberSpec], generation: u64) -> Membership {
+    let mut members: Vec<_> = specs
+        .iter()
+        .map(|s| (s.name.clone(), s.hsm_id.clone(), s.prefer, s.device.as_ref().err().cloned()))
+        .collect();
+    members.sort();
+    (members, generation)
+}
+
+/// A fixed set of pre-opened clients, by member name (tests, embedders).
+struct FixedClients(BTreeMap<String, Result<Arc<dyn HsmBackend>, String>>);
+
+impl MemberOpener for FixedClients {
+    fn open_client(
+        &self,
+        target: &MemberTarget,
+        _credential: Option<crate::hsm::admin::NodeCredential>,
+    ) -> Result<Arc<dyn HsmBackend>, RvError> {
+        match self.0.get(&target.name) {
+            Some(Ok(client)) => Ok(client.clone()),
+            Some(Err(e)) => Err(RvError::ErrHsmTransport(e.clone())),
+            None => Err(RvError::ErrHsmTransport(format!(
+                "this node's config has no `member \"{}\"` block; reaching a member through its recorded gateway \
+                 needs the HSM link",
+                target.name
+            ))),
+        }
+    }
+
+    fn open_admin(
+        &self,
+        target: &MemberTarget,
+        _password: &str,
+    ) -> Result<Box<dyn crate::hsm::admin::HsmAdminSession>, RvError> {
+        Err(RvError::ErrHsm(format!("no admin access to HSM pool member {} from this node", target.name)))
+    }
+}
+
+impl ClientCache {
+    /// This node's client for `target`, opened once with the credential this
+    /// node holds for the device, if any.
+    fn client_for(&self, target: &MemberTarget) -> Result<Arc<dyn HsmBackend>, String> {
+        let mut clients = self.clients.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(client) = clients.get(&target.hsm_id) {
+            return client.clone();
+        }
+        let credential = match &self.credentials {
+            Some(store) => store.credential_for(&target.hsm_id),
+            None => Ok(None),
+        };
+        let opened = credential.and_then(|c| self.opener.open_client(target, c)).map_err(|e| e.to_string());
+        if let Err(e) = &opened {
+            log::error!(target: "security", "HSM pool member {} ({}) cannot be opened: {e}", target.name, target.hsm_id);
+        }
+        clients.insert(target.hsm_id.clone(), opened.clone());
+        opened
+    }
+
+    /// Reopen the clients for `ids` (a credential for them arrived).
+    fn forget_clients(&self, ids: &[HsmId]) {
+        if ids.is_empty() {
+            return;
+        }
+        let mut clients = self.clients.lock().unwrap_or_else(|p| p.into_inner());
+        for id in ids {
+            clients.remove(id);
+        }
+        self.generation.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+
+    /// Specs for `members` (where to reach each, and the nodes whose
+    /// revocation is pending on it), with this node's clients.
+    fn specs_for(&self, pool_cfg: &ResolvedPoolConfig, members: Vec<(MemberTarget, Vec<String>)>) -> Vec<PoolMemberSpec> {
+        let by_name = |name: &str| pool_cfg.members.iter().find(|m| m.name == name);
+        members
+            .into_iter()
+            .map(|(target, pending)| {
+                let device = if pending.is_empty() {
+                    self.client_for(&target)
+                } else {
+                    Err(format!(
+                        "node revocation pending on this member for {pending:?}; every node treats it as down until \
+                         an operator applies the revocation with admin credentials"
+                    ))
+                };
+                PoolMemberSpec {
+                    prefer: by_name(&target.name).is_some_and(|m| m.prefer),
+                    name: target.name,
+                    hsm_id: target.hsm_id,
+                    device,
+                }
+            })
+            .collect()
+    }
+}
+
+/// Where each of `members` is reached, and its pending revocations.
+fn targets_of<'a>(members: impl Iterator<Item = (&'a HsmId, &'a HsmMember)>) -> Vec<(MemberTarget, Vec<String>)> {
+    members
+        .map(|(id, m)| {
+            let target = MemberTarget { name: m.name.clone(), hsm_id: id.clone(), gateway: m.gateway.clone() };
+            (target, m.pending_revocations.clone())
+        })
+        .collect()
+}
+
+fn build_pool(
+    node_id: &str,
+    pool_cfg: &ResolvedPoolConfig,
+    specs: Vec<PoolMemberSpec>,
+    generation: u64,
+    clock: &Arc<dyn Clock>,
+    events: &Arc<dyn PoolEventSink>,
+) -> Result<(Membership, Arc<HsmPool>), RvError> {
+    let membership = membership_of(&specs, generation);
+    let pool = HsmPool::new(node_id, specs, pool_cfg.min_wrap_copies, clock.clone(), events.clone())?;
+    Ok((membership, Arc::new(pool)))
 }
 
 impl PoolDevices {
@@ -79,20 +215,21 @@ impl PoolDevices {
         self.current.lock().unwrap_or_else(|p| p.into_inner()).1.clone()
     }
 
-    fn build(
-        &self,
-        node_id: &str,
-        pool_cfg: &ResolvedPoolConfig,
-        specs: Vec<PoolMemberSpec>,
-    ) -> Result<(Membership, Arc<HsmPool>), RvError> {
-        let membership = membership_of(&specs);
-        let pool =
-            Arc::new(HsmPool::new(node_id, specs, pool_cfg.min_wrap_copies, self.clock.clone(), self.events.clone())?);
-        #[cfg(not(feature = "sync_handler"))]
-        if self.probing.load(Ordering::SeqCst) {
-            pool.spawn_health_probe();
-        }
-        Ok((membership, pool))
+    /// Rebuild the pre-init pool from the config's members (new credentials).
+    fn rebuild_bootstrap(&self, config: &ResolvedHsmConfig) -> Result<(), RvError> {
+        let pool_cfg = config.pool.as_ref().ok_or_else(|| RvError::ErrHsm("not a pool provider".into()))?;
+        let targets = pool_cfg
+            .members
+            .iter()
+            .map(|m| {
+                let hsm_id = m.hsm_id(&config.backend_type)?;
+                Ok((MemberTarget { name: m.name.clone(), hsm_id, gateway: m.gateway.clone() }, Vec::new()))
+            })
+            .collect::<Result<Vec<_>, RvError>>()?;
+        let specs = self.cache.specs_for(pool_cfg, targets);
+        let built = build_pool(&config.node_id, pool_cfg, specs, self.cache.generation(), &self.clock, &self.events)?;
+        *self.current.lock().unwrap_or_else(|p| p.into_inner()) = built;
+        Ok(())
     }
 
     /// The pool the seal record describes. The record is authoritative: a
@@ -100,29 +237,19 @@ impl PoolDevices {
     /// only where this node reaches a device (`connector`, `state_path`) is local.
     fn pool_for_record(&self, config: &ResolvedHsmConfig, record: &HsmSealRecord) -> Result<Arc<HsmPool>, RvError> {
         let pool_cfg = config.pool.as_ref().ok_or_else(|| RvError::ErrHsm("not a pool provider".into()))?;
-        let by_name = |name: &str| pool_cfg.members.iter().find(|m| m.name == name);
-        let specs: Vec<PoolMemberSpec> = record
-            .active_members()
-            .map(|(hsm_id, member)| PoolMemberSpec {
-                name: member.name.clone(),
-                hsm_id: hsm_id.clone(),
-                prefer: by_name(&member.name).is_some_and(|m| m.prefer),
-                device: self.opened.get(&member.name).cloned().unwrap_or_else(|| {
-                    Err(format!(
-                        "this node's config has no `member \"{}\"` block; reaching a member through its recorded \
-                         gateway needs the HSM link (T454 phase 3)",
-                        member.name
-                    ))
-                }),
-            })
-            .collect();
-        let wanted = membership_of(&specs);
+        let specs = self.cache.specs_for(pool_cfg, targets_of(record.active_members()));
+        let wanted = membership_of(&specs, self.cache.generation());
         let mut current = self.current.lock().unwrap_or_else(|p| p.into_inner());
         if current.0 == wanted {
             return Ok(current.1.clone());
         }
         warn_config_disagreements(pool_cfg, record);
-        *current = self.build(&config.node_id, pool_cfg, specs)?;
+        let built = build_pool(&config.node_id, pool_cfg, specs, wanted.1, &self.clock, &self.events)?;
+        #[cfg(not(feature = "sync_handler"))]
+        if self.probing.load(Ordering::SeqCst) {
+            built.1.spawn_health_probe();
+        }
+        *current = built;
         Ok(current.1.clone())
     }
 }
@@ -171,15 +298,17 @@ pub struct HsmSealProvider {
     devices: Devices,
     physical: Arc<dyn PhysicalBackend>,
     config: ResolvedHsmConfig,
+    /// The last repair run on this node (pool only), for `v2/sys/hsm/repair`.
+    repair_state: Mutex<Option<RepairReport>>,
 }
 
 impl HsmSealProvider {
     /// The per-node topology over this node's own device.
     pub fn new(backend: Arc<dyn HsmBackend>, physical: Arc<dyn PhysicalBackend>, config: ResolvedHsmConfig) -> Self {
-        Self { devices: Devices::PerNode(backend), physical, config }
+        Self { devices: Devices::PerNode(backend), physical, config, repair_state: Mutex::new(None) }
     }
 
-    /// The pool topology over this node's member clients (`opened`, by member
+    /// The pool topology over pre-opened member clients (`opened`, by member
     /// name; an `Err` is a member this node could not open). Refuses storage
     /// without a cluster lock for `hsm-custody`.
     pub fn new_pool(
@@ -193,7 +322,6 @@ impl HsmSealProvider {
             .pool
             .as_ref()
             .ok_or_else(|| RvError::ErrHsmConfigInvalid("new_pool needs topology = \"pool\"".into()))?;
-        check_pool_storage_backend(physical.backend_kind())?;
         let names: Vec<&str> = pool_cfg.members.iter().map(|m| m.name.as_str()).collect();
         if opened.keys().map(String::as_str).ne(names.iter().copied()) {
             return Err(RvError::ErrHsmConfigInvalid(format!(
@@ -201,34 +329,44 @@ impl HsmSealProvider {
                 opened.keys().collect::<Vec<_>>()
             )));
         }
+        Self::new_pool_with(Arc::new(FixedClients(opened)), None, physical, config, clock, events)
+    }
+
+    /// The pool topology reaching members through `opener`, authenticating
+    /// with the node credentials in `credentials` when it has them.
+    pub fn new_pool_with(
+        opener: Arc<dyn MemberOpener>,
+        credentials: Option<NodeCredentialStore>,
+        physical: Arc<dyn PhysicalBackend>,
+        config: ResolvedHsmConfig,
+        clock: Arc<dyn Clock>,
+        events: Arc<dyn PoolEventSink>,
+    ) -> Result<Self, RvError> {
+        let pool_cfg = config
+            .pool
+            .as_ref()
+            .ok_or_else(|| RvError::ErrHsmConfigInvalid("new_pool needs topology = \"pool\"".into()))?;
+        check_pool_storage_backend(physical.backend_kind())?;
+        let cache =
+            ClientCache { opener, credentials, clients: Mutex::new(BTreeMap::new()), generation: AtomicU64::new(0) };
         // Bootstrap membership: the config, until a seal record exists.
-        let specs = pool_cfg
+        let bootstrap = pool_cfg
             .members
             .iter()
             .map(|m| {
-                Ok(PoolMemberSpec {
-                    name: m.name.clone(),
-                    hsm_id: m.hsm_id(&config.backend_type)?,
-                    prefer: m.prefer,
-                    device: opened[&m.name].clone(),
-                })
+                let hsm_id = m.hsm_id(&config.backend_type)?;
+                Ok((MemberTarget { name: m.name.clone(), hsm_id, gateway: m.gateway.clone() }, Vec::new()))
             })
             .collect::<Result<Vec<_>, RvError>>()?;
-        let membership = membership_of(&specs);
-        let pool = HsmPool::new(&config.node_id, specs, pool_cfg.min_wrap_copies, clock.clone(), events.clone())?;
-        let devices = PoolDevices {
-            opened,
-            clock,
-            events,
-            current: Mutex::new((membership, Arc::new(pool))),
-            probing: AtomicBool::new(false),
-        };
-        Ok(Self { devices: Devices::Pool(devices), physical, config })
+        let specs = cache.specs_for(pool_cfg, bootstrap);
+        let current = build_pool(&config.node_id, pool_cfg, specs, 0, &clock, &events)?;
+        let devices = PoolDevices { cache, clock, events, current: Mutex::new(current), probing: AtomicBool::new(false) };
+        Ok(Self { devices: Devices::Pool(devices), physical, config, repair_state: Mutex::new(None) })
     }
 
-    /// Open the configured topology: per node, the device; for a pool, this
-    /// node's client for each member. A member that fails to open is down,
-    /// not fatal; a configuration or build that cannot run a pool is.
+    /// Open the configured topology: per node, the device; for a pool, the
+    /// member opener and this node's credential store. A member that fails
+    /// to open is down, not fatal; a build that cannot run a pool is.
     #[maybe_async::maybe_async]
     pub async fn open(config: &ResolvedHsmConfig, physical: Arc<dyn PhysicalBackend>) -> Result<Arc<Self>, RvError> {
         let Some(pool_cfg) = &config.pool else {
@@ -237,22 +375,74 @@ impl HsmSealProvider {
         };
         check_pool_storage_backend(physical.backend_kind())?;
         let clock = clock::monotonic();
-        let mut opened = BTreeMap::new();
-        for member in &pool_cfg.members {
-            let device = match crate::hsm::open_pool_member(config, member, clock.clone()).await {
-                Ok(device) => Ok(device),
-                Err(e @ (RvError::ErrHsmConfigInvalid(_) | RvError::ErrHsmMockRefusedInProduction)) => return Err(e),
-                Err(e) => {
-                    log::error!(target: "security", "HSM pool member {} could not be opened: {e}", member.name);
-                    Err(e.to_string())
-                }
-            };
-            opened.insert(member.name.clone(), device);
+        let opener = Arc::new(ConfigMemberOpener::new(config, clock.clone())?);
+        let credentials = if pool_cfg.credential_dir.is_empty() {
+            None
+        } else {
+            let store = NodeCredentialStore::new(&pool_cfg.credential_dir, &config.node_id)?;
+            store.ensure_transport_key()?;
+            Some(store)
+        };
+        let provider = Arc::new(Self::new_pool_with(
+            opener,
+            credentials,
+            physical,
+            config.clone(),
+            clock,
+            Arc::new(LogEventSink),
+        )?);
+        if let Err(e) = provider.refresh_membership().await {
+            log::error!(target: "security", "HSM pool membership refresh failed at startup: {e}");
         }
-        let provider = Arc::new(Self::new_pool(opened, physical, config.clone(), clock, Arc::new(LogEventSink))?);
         #[cfg(not(feature = "sync_handler"))]
-        provider.start_health_probe();
+        {
+            provider.start_health_probe();
+            provider.start_membership_refresh();
+        }
         Ok(provider)
+    }
+
+    /// Re-read the record's membership every [`MEMBERSHIP_REFRESH_INTERVAL`]
+    /// and pick up delivered credentials, until the provider is dropped.
+    #[cfg(not(feature = "sync_handler"))]
+    pub fn start_membership_refresh(self: &Arc<Self>) {
+        if !matches!(self.devices, Devices::Pool(_)) {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            log::error!(target: "security", "no async runtime: HSM pool membership is not re-read every 30 s");
+            return;
+        };
+        let provider = Arc::downgrade(self);
+        runtime.spawn(async move {
+            loop {
+                tokio::time::sleep(MEMBERSHIP_REFRESH_INTERVAL).await;
+                let Some(provider) = provider.upgrade() else { break };
+                if let Err(e) = provider.refresh_membership().await {
+                    log::error!(target: "security", "HSM pool membership refresh failed: {e}");
+                }
+            }
+        });
+    }
+
+    /// Install delivered credentials (or advertise this node for enrollment
+    /// while it has none), then rebuild the pool from the seal record.
+    #[maybe_async::maybe_async]
+    pub async fn refresh_membership(&self) -> Result<(), RvError> {
+        let Devices::Pool(devices) = &self.devices else { return Ok(()) };
+        if let Some(store) = &devices.cache.credentials {
+            let installed = node_creds::pick_up(self.physical.as_ref(), store).await?;
+            devices.cache.forget_clients(&installed);
+            if store.members()?.is_empty() {
+                node_creds::publish_pending(self.physical.as_ref(), &store.ensure_transport_key()?).await?;
+            }
+        }
+        if let Some(stored) = self.load_record().await? {
+            if stored.record.topology == Topology::Pool {
+                devices.pool_for_record(&self.config, &stored.record)?;
+            }
+        }
+        Ok(())
     }
 
     /// Probe the pool members every 10 s in the background (pool only).
@@ -690,6 +880,10 @@ impl SealProvider for HsmSealProvider {
         false
     }
 
+    fn as_hsm(&self) -> Option<&HsmSealProvider> {
+        Some(self)
+    }
+
     async fn check_init(&self, _seal_config: &SealConfig) -> Result<(), RvError> {
         match &self.devices {
             Devices::PerNode(_) => self.refuse_unavailable_recovery(),
@@ -731,6 +925,17 @@ impl SealProvider for HsmSealProvider {
     }
 
     async fn recover_kek(&self) -> Result<Zeroizing<Vec<u8>>, RvError> {
+        if let Devices::Pool(devices) = &self.devices {
+            // Credentials delivered since the last refresh. A delivery that
+            // does not install is logged and left in place; the node keeps
+            // its current credentials and tries every member as usual.
+            if let Some(store) = &devices.cache.credentials {
+                match node_creds::pick_up(self.physical.as_ref(), store).await {
+                    Ok(installed) => devices.cache.forget_clients(&installed),
+                    Err(e) => log::error!(target: "security", "HSM pool credentials could not be installed: {e}"),
+                }
+            }
+        }
         let stored = self.load_record().await?.ok_or(RvError::ErrCoreSealConfigNotFound)?;
         match &self.devices {
             Devices::PerNode(backend) => self.recover_per_node(backend, &stored.record).await,
@@ -1177,6 +1382,7 @@ mod tests {
             ResolvedHsmConfig {
                 pool: Some(ResolvedPoolConfig {
                     min_wrap_copies,
+                    repair_rate: crate::hsm::repair::DEFAULT_REPAIR_RATE,
                     credential_dir: String::new(),
                     link: None,
                     members: vec![member(&self.name_a, &self.a, true), member(&self.name_b, &self.b, false)],

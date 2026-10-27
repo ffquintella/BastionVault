@@ -22,12 +22,15 @@ use crate::{
     hsm::{
         blob::{BvHsmBlob, Context, HsmId},
         clock::Clock,
-        HsmBackend, HsmObjectId, POOL_MEMBER_COUNT,
+        HsmBackend, HsmObjectId,
     },
 };
 
 /// How often each member is probed with `device-info`.
 pub const PROBE_INTERVAL: Duration = Duration::from_secs(10);
+/// Members one pool can hold: the two devices, plus a replacement while it
+/// is joining and until the failed device is retired (spec § Replace).
+pub const MAX_LIVE_MEMBERS: usize = 3;
 /// Consecutive transport or session failures that open a member's breaker.
 pub const BREAKER_THRESHOLD: u32 = 3;
 pub const BREAKER_BACKOFF_MIN: Duration = Duration::from_secs(1);
@@ -263,8 +266,8 @@ impl HsmPool {
         events: Arc<dyn PoolEventSink>,
     ) -> Result<Self, RvError> {
         let invalid = |why: String| RvError::ErrHsmConfigInvalid(format!("HSM pool: {why}"));
-        if specs.is_empty() || specs.len() > POOL_MEMBER_COUNT {
-            return Err(invalid(format!("{} members; a pool has 1 to {POOL_MEMBER_COUNT}", specs.len())));
+        if specs.is_empty() || specs.len() > MAX_LIVE_MEMBERS {
+            return Err(invalid(format!("{} members; a pool has 1 to {MAX_LIVE_MEMBERS}", specs.len())));
         }
         let names: BTreeSet<&str> = specs.iter().map(|s| s.name.as_str()).collect();
         let ids: BTreeSet<&HsmId> = specs.iter().map(|s| &s.hsm_id).collect();
@@ -528,6 +531,30 @@ impl HsmPool {
         Ok(WrapOutcome { copies, missing })
     }
 
+    /// Wrap on one member (repair). A member that is unusable right now, or
+    /// that answers with a copy bound to another device, is an error.
+    #[maybe_async::maybe_async]
+    pub async fn wrap_on(
+        &self,
+        hsm_id: &HsmId,
+        key: HsmObjectId,
+        ctx: &Context,
+        plaintext: &[u8],
+    ) -> Result<BvHsmBlob, RvError> {
+        let m = self.member(hsm_id).ok_or_else(|| RvError::ErrHsm(format!("{hsm_id} is not in this pool")))?;
+        m.usable(self.clock.now()).map_err(|why| RvError::ErrHsmTransport(format!("{}: {why}", m.label())))?;
+        match wrap_one(m, key, ctx, plaintext).await {
+            Ok(blob) => {
+                self.record_success(m, true);
+                Ok(blob)
+            }
+            Err(e) => {
+                self.record_failure(m, "wrap", &e);
+                Err(e)
+            }
+        }
+    }
+
     /// Probe every member with `device-info` (unauthenticated, no session).
     /// A down member is probed only once its backoff has elapsed.
     #[maybe_async::maybe_async]
@@ -755,7 +782,14 @@ mod tests {
         assert!(new(vec![spec("a", "A", true, None), spec("b", "B", true, None)], 1).is_err(), "prefer");
         assert!(new(vec![spec("a", "A", false, None)], 2).is_err(), "min_wrap_copies above members");
         let three = vec![spec("a", "A", false, None), spec("b", "B", false, None), spec("c", "C", false, None)];
-        assert!(new(three, 1).is_err(), "at most two members");
+        assert!(new(three, 1).is_ok(), "two members plus a replacement");
+        let four = vec![
+            spec("a", "A", false, None),
+            spec("b", "B", false, None),
+            spec("c", "C", false, None),
+            spec("d", "D", false, None),
+        ];
+        assert!(new(four, 1).is_err(), "at most three live members");
     }
 
     #[tokio::test]

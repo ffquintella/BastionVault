@@ -191,6 +191,14 @@ impl SystemBackend {
         let sys_backend_policy_tests_write = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_dashboard_summary = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_hsm_status = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_hsm_members = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_hsm_member_add = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_hsm_member_retire = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_hsm_nodes = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_hsm_node_enroll = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_hsm_node_revoke = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_hsm_repair_read = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_hsm_repair_run = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_policy_schema = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_owner_backfill = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_sso_settings_read = self.self_ptr.upgrade().unwrap().clone();
@@ -760,6 +768,102 @@ impl SystemBackend {
                     pattern: "hsm/status$",
                     operations: [
                         {op: Operation::Read, handler: sys_backend_hsm_status.handle_hsm_status}
+                    ]
+                },
+                {
+                    // HSM pool ceremonies (features/hsm-pool-ha.md, T454
+                    // phase 4). Sudo-gated via `root_paths` ("hsm/members",
+                    // "hsm/nodes", "hsm/repair" and their children). Admin
+                    // credentials ride in the body for one request and are
+                    // never stored or returned. HTTP shims under /v2/sys.
+                    pattern: "hsm/members$",
+                    operations: [
+                        {op: Operation::Read, handler: sys_backend_hsm_members.handle_hsm_members}
+                    ]
+                },
+                {
+                    pattern: r"hsm/members/(?P<name>[A-Za-z0-9._-]{1,64})/retire$",
+                    fields: {
+                        "name": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Pool member to retire."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: sys_backend_hsm_member_retire.handle_hsm_member_retire}
+                    ]
+                },
+                {
+                    pattern: r"hsm/members/(?P<name>[A-Za-z0-9._-]{1,64})$",
+                    fields: {
+                        "name": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Name of the new pool member."
+                        },
+                        "bundle": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Attestation bundle (JSON) that `provision` produced."
+                        },
+                        "gateway": {
+                            field_type: FieldType::Str,
+                            required: false,
+                            description: "https:// mTLS gateway URL of the new member (yubihsm2)."
+                        },
+                        "admin_credentials": {
+                            field_type: FieldType::Map,
+                            required: true,
+                            description: "Member name to bv-admin credential, for this request only."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: sys_backend_hsm_member_add.handle_hsm_member_add}
+                    ]
+                },
+                {
+                    pattern: "hsm/nodes$",
+                    operations: [
+                        {op: Operation::Read, handler: sys_backend_hsm_nodes.handle_hsm_nodes}
+                    ]
+                },
+                {
+                    pattern: r"hsm/nodes/(?P<node_id>[A-Za-z0-9._-]{1,128})$",
+                    fields: {
+                        "node_id": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Node to enroll or revoke."
+                        },
+                        "transport_fp": {
+                            field_type: FieldType::Str,
+                            required: false,
+                            description: "The node's transport key fingerprint, confirmed out of band (enroll)."
+                        },
+                        "admin_credentials": {
+                            field_type: FieldType::Map,
+                            required: false,
+                            description: "Member name to bv-admin credential, for this request only."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: sys_backend_hsm_node_enroll.handle_hsm_node_enroll},
+                        {op: Operation::Delete, handler: sys_backend_hsm_node_revoke.handle_hsm_node_revoke}
+                    ]
+                },
+                {
+                    pattern: "hsm/repair$",
+                    fields: {
+                        "admin_credentials": {
+                            field_type: FieldType::Map,
+                            required: false,
+                            description: "Optional: applies pending revocations and promotes joining members."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Read, handler: sys_backend_hsm_repair_read.handle_hsm_repair_status},
+                        {op: Operation::Write, handler: sys_backend_hsm_repair_run.handle_hsm_repair}
                     ]
                 },
                 {
@@ -1565,7 +1669,7 @@ impl SystemBackend {
             // Admin reads/writes are gated by policy on the explicit
             // mount/name paths instead. `identity/profile/*` is caller-scoped
             // for the same reason and is likewise never root-scoped.
-            root_paths: ["mounts/*", "auth/*", "remount", "policy", "policy/*", "audit", "audit/*", "audit-retention", "seal", "raw/*", "revoke-prefix/*", "leases/revoke-failed", "leases/revoke-failed/*", "cache/flush", "owner/backfill", "sso/settings", "namespaces", "namespaces/*", "namespace-links", "namespace-links/*", "identity/ns-assignment", "identity/ns-assignment/*", "dos/config", "dos/stats", "dos/bans/*", "mcp/config", "mcp/transcripts", "mcp/transcripts/*"],
+            root_paths: ["mounts/*", "auth/*", "remount", "policy", "policy/*", "audit", "audit/*", "audit-retention", "seal", "raw/*", "revoke-prefix/*", "leases/revoke-failed", "leases/revoke-failed/*", "cache/flush", "owner/backfill", "sso/settings", "namespaces", "namespaces/*", "namespace-links", "namespace-links/*", "identity/ns-assignment", "identity/ns-assignment/*", "dos/config", "dos/stats", "dos/bans/*", "mcp/config", "mcp/transcripts", "mcp/transcripts/*", "hsm/members", "hsm/members/*", "hsm/nodes", "hsm/nodes/*", "hsm/repair"],
             // NB: `mcp/apps/<name>/machine-waiver` is NOT listed here even
             // though it is sudo-gated: `root_paths` only supports an exact
             // path or a trailing-`*` prefix (`new_radix_from_paths` in
@@ -3996,6 +4100,129 @@ impl SystemBackend {
             obj.insert("initialized".into(), json!(self.core.inited().await.unwrap_or(false)));
         }
         Ok(Some(Response::data_response(status.as_object().cloned())))
+    }
+
+    /// The HSM pool seal provider, or a 400 naming why there is none.
+    fn hsm_pool_provider(&self) -> Result<Arc<dyn bv_core::seal::SealProvider>, RvError> {
+        let provider = self.core.seal_provider();
+        if provider.as_hsm().is_none() {
+            return Err(bv_error_response_status!(400, "this vault's seal is not an HSM seal"));
+        }
+        Ok(provider)
+    }
+
+    /// Operator refusals from a ceremony are a 400 with the reason; storage
+    /// and other failures keep their own mapping.
+    fn hsm_refusal(err: RvError) -> RvError {
+        match err {
+            RvError::ErrHsm(_) | RvError::ErrHsmAttestationInvalid(_) | RvError::ErrHsmConfigInvalid(_) => {
+                bv_error_response_status!(400, &err.to_string())
+            }
+            other => other,
+        }
+    }
+
+    fn hsm_admin_credentials(req: &Request) -> Result<bv_core::hsm::admin::AdminCredentials, RvError> {
+        let raw = req.get_data("admin_credentials").ok();
+        bv_core::hsm::admin::AdminCredentials::from_json(raw.as_ref()).map_err(Self::hsm_refusal)
+    }
+
+    fn hsm_json(value: Value) -> Result<Option<Response>, RvError> {
+        Ok(Some(Response::data_response(value.as_object().cloned())))
+    }
+
+    /// `GET v2/sys/hsm/members` — the seal record's pool members (sudo).
+    pub async fn handle_hsm_members(&self, _backend: &dyn Backend, _req: &mut Request) -> Result<Option<Response>, RvError> {
+        let provider = self.hsm_pool_provider()?;
+        let hsm = provider.as_hsm().ok_or(RvError::ErrHsmUnavailable)?;
+        Self::hsm_json(hsm.hsm_members().await.map_err(Self::hsm_refusal)?)
+    }
+
+    /// `POST v2/sys/hsm/members/:name` — attest and add a member (sudo).
+    pub async fn handle_hsm_member_add(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let name = req.get_data_as_str("name")?;
+        let raw_bundle = req.get_data_as_str("bundle")?;
+        let gateway = req.get_data("gateway").ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+        let admin = Self::hsm_admin_credentials(req)?;
+        let bundle =
+            bv_core::hsm::ceremony::AttestationBundle::decode(raw_bundle.as_bytes()).map_err(Self::hsm_refusal)?;
+        let actor = crate::modules::identity::caller_audit_actor(req);
+        let provider = self.hsm_pool_provider()?;
+        let hsm = provider.as_hsm().ok_or(RvError::ErrHsmUnavailable)?;
+        Self::hsm_json(hsm.add_member(&name, &bundle, &gateway, &admin, &actor).await.map_err(Self::hsm_refusal)?)
+    }
+
+    /// `POST v2/sys/hsm/members/:name/retire` (sudo).
+    pub async fn handle_hsm_member_retire(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let name = req.get_data_as_str("name")?;
+        let actor = crate::modules::identity::caller_audit_actor(req);
+        let provider = self.hsm_pool_provider()?;
+        let hsm = provider.as_hsm().ok_or(RvError::ErrHsmUnavailable)?;
+        let barrier: &dyn crate::storage::Storage = self.core.barrier.as_ref();
+        Self::hsm_json(hsm.retire_member(&name, Some(barrier), &actor).await.map_err(Self::hsm_refusal)?)
+    }
+
+    /// `GET v2/sys/hsm/nodes` — enrolled and pending nodes (sudo).
+    pub async fn handle_hsm_nodes(&self, _backend: &dyn Backend, _req: &mut Request) -> Result<Option<Response>, RvError> {
+        let provider = self.hsm_pool_provider()?;
+        let hsm = provider.as_hsm().ok_or(RvError::ErrHsmUnavailable)?;
+        Self::hsm_json(hsm.hsm_nodes().await.map_err(Self::hsm_refusal)?)
+    }
+
+    /// `POST v2/sys/hsm/nodes/:node_id` — enroll a node (sudo, admin credentials).
+    pub async fn handle_hsm_node_enroll(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let node_id = req.get_data_as_str("node_id")?;
+        let fp = req.get_data("transport_fp").ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+        let admin = Self::hsm_admin_credentials(req)?;
+        let actor = crate::modules::identity::caller_audit_actor(req);
+        let provider = self.hsm_pool_provider()?;
+        let hsm = provider.as_hsm().ok_or(RvError::ErrHsmUnavailable)?;
+        Self::hsm_json(hsm.enroll_node(&node_id, &fp, &admin, &actor).await.map_err(Self::hsm_refusal)?)
+    }
+
+    /// `DELETE v2/sys/hsm/nodes/:node_id` — revoke a node (sudo, admin credentials).
+    pub async fn handle_hsm_node_revoke(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let node_id = req.get_data_as_str("node_id")?;
+        let admin = Self::hsm_admin_credentials(req)?;
+        let actor = crate::modules::identity::caller_audit_actor(req);
+        let provider = self.hsm_pool_provider()?;
+        let hsm = provider.as_hsm().ok_or(RvError::ErrHsmUnavailable)?;
+        Self::hsm_json(hsm.revoke_node(&node_id, &admin, &actor).await.map_err(Self::hsm_refusal)?)
+    }
+
+    /// `GET v2/sys/hsm/repair` — the last repair run on this node (sudo).
+    pub async fn handle_hsm_repair_status(
+        &self,
+        _backend: &dyn Backend,
+        _req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let provider = self.hsm_pool_provider()?;
+        let hsm = provider.as_hsm().ok_or(RvError::ErrHsmUnavailable)?;
+        Self::hsm_json(hsm.repair_status())
+    }
+
+    /// `POST v2/sys/hsm/repair` — run the repair job now (sudo). With admin
+    /// credentials it also applies pending revocations and promotes members.
+    pub async fn handle_hsm_repair(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let admin = Self::hsm_admin_credentials(req)?;
+        let provider = self.hsm_pool_provider()?;
+        let hsm = provider.as_hsm().ok_or(RvError::ErrHsmUnavailable)?;
+        let barrier: Arc<dyn crate::storage::Storage> = self.core.barrier.clone();
+        let admin = if admin.is_empty() { None } else { Some(&admin) };
+        let report = hsm.repair(Some(barrier), admin).await.map_err(Self::hsm_refusal)?;
+        Self::hsm_json(serde_json::to_value(report)?)
     }
 
     pub async fn handle_internal_ui_mounts_read(

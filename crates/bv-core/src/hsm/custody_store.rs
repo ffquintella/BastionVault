@@ -78,7 +78,7 @@ impl BvHsmHandle {
     }
 }
 
-fn is_key_id(s: &str) -> bool {
+pub(crate) fn is_key_id(s: &str) -> bool {
     s.len() == KEY_ID_BYTES * 2 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
@@ -122,16 +122,16 @@ impl PqcKeypair {
 /// inside so a record copied to another key is refused, and the public key
 /// lets every use check that the unwrapped seed is the expected one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct CustodyRecord {
-    version: u8,
-    key_id: String,
+pub(crate) struct CustodyRecord {
+    pub(crate) version: u8,
+    pub(crate) key_id: String,
     #[serde(with = "serde_bytes")]
-    public_key: Vec<u8>,
-    set: BvHsmBlobSet,
+    pub(crate) public_key: Vec<u8>,
+    pub(crate) set: BvHsmBlobSet,
 }
 
 impl CustodyRecord {
-    fn decode(key_id: &str, bytes: &[u8]) -> Result<Self, RvError> {
+    pub(crate) fn decode(key_id: &str, bytes: &[u8]) -> Result<Self, RvError> {
         let invalid = |why: String| RvError::ErrHsm(format!("invalid HSM custody record {key_id}: {why}"));
         let record: Self = serde_json::from_slice(bytes).map_err(|e| invalid(e.to_string()))?;
         if record.version != CUSTODY_RECORD_VERSION {
@@ -148,12 +148,12 @@ impl CustodyRecord {
         Ok(record)
     }
 
-    fn encode(&self) -> Result<Vec<u8>, RvError> {
+    pub(crate) fn encode(&self) -> Result<Vec<u8>, RvError> {
         self.set.validate()?;
         serde_json::to_vec(self).map_err(|e| RvError::ErrHsm(format!("custody record encode: {e}")))
     }
 
-    fn kind(&self) -> Result<PqcKeyKind, RvError> {
+    pub(crate) fn kind(&self) -> Result<PqcKeyKind, RvError> {
         PqcKeyKind::from_purpose(self.set.purpose).ok_or_else(|| {
             RvError::ErrHsm(format!(
                 "custody record {} holds a non-seed purpose {}",

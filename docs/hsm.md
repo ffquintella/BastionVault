@@ -260,13 +260,52 @@ devices, node enrollment, repair and recovery come in later phases.
 - **Key creation with one member down** stores one copy and reports the set
   as under-replicated (`hsm.set_under_replicated`,
   `bv_hsm_under_replicated_sets`), unless `min_wrap_copies = 2`, which refuses
-  it. Repairing those sets is phase 4.
+  it. `repair` fills those sets (below).
 - **Storage.** Every blob-set and membership write takes the `hsm-custody`
   lock, so the pool is accepted only on hiqlite or a single-node local `file`
   backend.
 
 The mock pool is for dev and homolog. Its session limit is per process: two
 processes that open the same `state_path` are two devices as far as sessions go.
+
+#### Ceremonies (phase 4 part 1, mock)
+
+A provisioned device (factory key deleted, `bv-admin` created) takes only
+authenticated sessions: each node has its own random credential per device,
+and revoking a node deletes it on the device. Ceremonies need a sudo token and
+the `bv-admin` credential of each member they touch, given per request with
+`--admin <member>` (prompted on the TTY) or `--admin <member>=env:VAR`; a
+literal value is refused, and nothing stores, logs or returns it.
+
+~~~bash
+# A node with `credential_dir` logs its transport key fingerprint at startup.
+# Confirm it out of band, then enroll it on every member:
+bvault operator hsm node add vault-2 --fingerprint <fp> --admin hsm-a --admin hsm-b
+bvault operator hsm node list
+bvault operator hsm node revoke vault-2 --admin hsm-a --admin hsm-b
+
+# Replace a failed device: attest and add it, repair, promote, retire the old one.
+bvault operator hsm member add hsm-b2 --bundle b2.json --admin hsm-b2
+bvault operator hsm repair --run
+bvault operator hsm repair --run --admin hsm-a --admin hsm-b2   # promotes hsm-b2
+bvault operator hsm member retire hsm-b
+bvault operator hsm repair --run                                # drops hsm-b's copies
+~~~
+
+- **At most 12 nodes** are enrolled at once (the device session budget); the
+  13th is refused until one is revoked.
+- **Revoking with a member down** records a *pending revocation* on it. Every
+  node then treats that member as down, even after it returns, until a
+  ceremony with its admin credential (`node revoke` again or `repair --run
+  --admin`) deletes the key. Update the down host's gateway `allowed_clients`
+  before it comes back: a revoked node that reaches it first through a gateway
+  that still allows it can use it until the key is deleted.
+- **Repair** re-wraps at most `repair_rate` sets per second (default 2) and
+  never drops the last copy of a set. It runs on demand in this build; the
+  5-minute background tick arrives with phase 4 part 2.
+- **Not yet:** the `yubihsm2` pool (relay wiring, on-device admin and
+  `provision`, Yubico chain pinning), initializing a provisioned pool over the
+  API, epoch rotation and `migrate-to-pool` (phase 4 part 2).
 
 ### Failure behavior (fail-closed)
 

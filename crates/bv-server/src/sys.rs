@@ -290,6 +290,29 @@ async fn sys_hsm_status_request_handler(
     handle_request(core, &mut r).await
 }
 
+/// `/v2/sys/hsm/{members,nodes,repair}…` — HSM pool ceremonies. The logical
+/// path is the request path under `sys/`; the body (admin credentials) goes
+/// to the sys backend unchanged and is never logged here.
+async fn sys_hsm_pool_request_handler(
+    req: HttpRequest,
+    mut body: web::Bytes,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, HttpError> {
+    let mut r = request_auth(&req);
+    let tail = req.path().strip_prefix("/v2/sys/").unwrap_or_default();
+    r.path = format!("sys/{tail}");
+    r.operation = match *req.method() {
+        actix_web::http::Method::POST | actix_web::http::Method::PUT => Operation::Write,
+        actix_web::http::Method::DELETE => Operation::Delete,
+        _ => Operation::Read,
+    };
+    if !body.is_empty() && r.operation != Operation::Read {
+        r.body = Some(serde_json::from_slice(&body)?);
+    }
+    body.clear();
+    handle_request(core, &mut r).await
+}
+
 /// GET `/v2/sys/policy-schema` — the `sql_*` write gate (read-only).
 async fn sys_policy_schema_request_handler(
     req: HttpRequest,

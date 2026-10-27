@@ -381,6 +381,25 @@ pub(crate) const V2_ONLY: &[ResourceSpec] = &[
     ]),
     // HSM seal status (features/hsm-support.md). Read-only.
     resource!("/hsm/status" => [route!(routed Get => sys_hsm_status_request_handler, "sys/hsm/status")]),
+    // HSM pool ceremonies (features/hsm-pool-ha.md, T454 phase 4). Sudo via
+    // the sys backend's `root_paths`; admin credentials ride in the body for
+    // one request. `retire` precedes `{name}` so the literal wins.
+    resource!("/hsm/members" => [route!(routed Get => sys_hsm_pool_request_handler, "sys/hsm/members")]),
+    resource!("/hsm/members/{name}/retire" => [
+        route!(routed Post => sys_hsm_pool_request_handler, "sys/hsm/members/{name}/retire"),
+    ]),
+    resource!("/hsm/members/{name}" => [
+        route!(routed Post => sys_hsm_pool_request_handler, "sys/hsm/members/{name}"),
+    ]),
+    resource!("/hsm/nodes" => [route!(routed Get => sys_hsm_pool_request_handler, "sys/hsm/nodes")]),
+    resource!("/hsm/nodes/{node_id}" => [
+        route!(routed Post => sys_hsm_pool_request_handler, "sys/hsm/nodes/{node_id}"),
+        route!(routed Delete => sys_hsm_pool_request_handler, "sys/hsm/nodes/{node_id}"),
+    ]),
+    resource!("/hsm/repair" => [
+        route!(routed Get => sys_hsm_pool_request_handler, "sys/hsm/repair"),
+        route!(routed Post => sys_hsm_pool_request_handler, "sys/hsm/repair"),
+    ]),
     // The `sql_*` rolling-upgrade write gate and each node's policy schema
     // (features/sql-browser.md §13). Read-only.
     resource!("/policy-schema" => [route!(routed Get => sys_policy_schema_request_handler, "sys/policy-schema")]),

@@ -49,6 +49,11 @@ pub trait SealProvider: Send + Sync {
     async fn status(&self) -> Result<serde_json::Value, RvError> {
         Ok(serde_json::json!({ "type": self.seal_type(), "auto_unseal": !self.requires_shares() }))
     }
+
+    /// The HSM provider behind this seal, for the `v2/sys/hsm/*` ceremonies.
+    fn as_hsm(&self) -> Option<&hsm::HsmSealProvider> {
+        None
+    }
 }
 
 /// Classic Shamir seal: split the KEK for the operator, no auto-unseal.

@@ -63,7 +63,7 @@ pub enum Commands {
     /// reject / revoke). Operates against the running server with a root
     /// token and does NOT require an approved machine.
     Ferrogate(operator_ferrogate::Ferrogate),
-    /// Inspect the HSM seal (status). See `features/hsm-support.md`.
+    /// Inspect the HSM seal and run HSM pool ceremonies. See `docs/hsm.md`.
     Hsm(operator_hsm::Hsm),
 }
 

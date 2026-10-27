@@ -277,6 +277,14 @@ DELETE /v2/sys/plugins/{name}/grants/resource-credentials [privileged] delete sy
 GET    /v2/sys/plugins/{name}/entity-data [privileged] read sys/plugins/{name}/entity-data (SysPluginEntityDataUsage)
 DELETE /v2/sys/plugins/{name}/entity-data/{entity_id} [privileged] delete sys/plugins/{name}/entity-data/{entity_id} (SysPluginEntityDataPurge)
 GET    /v2/sys/hsm/status [routed] -> sys/hsm/status
+GET    /v2/sys/hsm/members [routed] -> sys/hsm/members
+POST   /v2/sys/hsm/members/{name}/retire [routed] -> sys/hsm/members/{name}/retire
+POST   /v2/sys/hsm/members/{name} [routed] -> sys/hsm/members/{name}
+GET    /v2/sys/hsm/nodes [routed] -> sys/hsm/nodes
+POST   /v2/sys/hsm/nodes/{node_id} [routed] -> sys/hsm/nodes/{node_id}
+DELETE /v2/sys/hsm/nodes/{node_id} [routed] -> sys/hsm/nodes/{node_id}
+GET    /v2/sys/hsm/repair [routed] -> sys/hsm/repair
+POST   /v2/sys/hsm/repair [routed] -> sys/hsm/repair
 GET    /v2/sys/policy-schema [routed] -> sys/policy-schema
 LIST   /v2/sys/identity/default-account [routed] -> sys/identity/default-account
 GET    /v2/sys/identity/default-account [routed] -> sys/identity/default-account

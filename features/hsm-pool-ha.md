@@ -1,7 +1,8 @@
 # Feature: HSM Pool HA — an N-node cluster served by two YubiHSM 2 devices
 
 > Status: **in progress** (T454) — phases 1–2 of 7 (formats and custody core;
-> pool backend) done 2026-10-19, phase 3 (HSM link) done 2026-10-27; see
+> pool backend) done 2026-10-19, phase 3 (HSM link) done 2026-10-27, phase 4
+> part 1 (ceremonies and repair, mock) done 2026-10-27; see
 > [Current state](#current-state). Spec
 > written 2026-10-19. Extends
 > [HSM Support (YubiHSM 2)](hsm-support.md) (S17), whose non-negotiable security
@@ -871,9 +872,130 @@ Phases 1 (formats and custody core) and 2 (pool backend) are implemented in
 on two **mock** devices: init dual-wraps the KEK, every node unseals through the
 preferred reachable member, and custody keys are created and used through the
 pool. Phase 3 adds the network link as a standalone crate, `bv-hsm-link`, and the
-`bvault hsm-gateway` command; `bv-core` does not use the relay yet. There is no
-enrollment, repair or recovery yet (phases 4–5), and a `yubihsm2` pool is
-validated but refused at startup until phase 4 wires the relay in.
+`bvault hsm-gateway` command; `bv-core` does not use the relay yet. Phase 4
+part 1 adds the ceremonies (node enroll and revoke, member add, retire and
+promotion), credential delivery and the repair job, all on the **mock**; a
+`yubihsm2` pool is still validated but refused at startup until part 2 wires
+the relay and the device's admin commands in. There is no recovery yet (phase 5).
+
+Phase 4, part 1:
+
+- **Device administration** (`hsm/admin.rs`). `HsmAdminSession` is a `bv-admin`
+  session: object info, auth-key list, `put` / `delete` of **node** keys only
+  (`0x100 + slot`, slots 0–11; the factory key and `bv-admin` are out of reach),
+  `bv-identity` signing and attestation verification. `verify_layout` refuses a
+  device with the factory key, without `bv-admin`, with a wrap key whose
+  capabilities are not exactly `wrap-data` / `unwrap-data` or that delegates
+  anything, or with an export bit on an attested key. `AdminCredentials` hold
+  per-member passwords in `Zeroizing` buffers and never print them.
+- **Mock auth model** (`hsm/mock.rs`). Auth keys are their own id namespace, as
+  on the device. `open_factory` gives a device holding only factory key 1;
+  `provision` (factory password, admin password) creates `bv-admin` and the
+  objects, deletes key 1 and returns the attestation bundle, and refuses any
+  other state unless `adopt` and the layout verifies. A device with auth keys
+  refuses an unauthenticated session; `connect_with_credential` authenticates
+  **on every command**, so deleting a node's key cuts it off at once, and a
+  failed authentication takes no session slot. Pre-phase-4 state files (no auth
+  keys) keep working unchanged.
+- **Credential delivery** (`hsm/node_creds.rs`). A pool node with
+  `credential_dir` creates a 64-byte ML-KEM-768 seed (`transport.seed`, 0600, in
+  a 0700 directory), logs the fingerprint and publishes
+  `core/hsm/node-pending/<node>` while it holds no credential. Enrollment seals
+  each credential with `KemDemEnvelopeV1`, AAD = context ‖ node ‖ hsm_id ‖
+  transport fingerprint ‖ auth key id, at `core/hsm/node-credentials/<node>`.
+  The node installs them (`credentials.json`, written 0600 through a rename)
+  under `hsm-custody` and deletes the entry; nothing is written unless every
+  envelope opens. Files group- or world-readable are refused.
+- **Ceremonies** (`seal/hsm/pool_admin.rs`, records in `hsm/ceremony.rs`).
+  Every ceremony holds `hsm-custody` for its whole read-modify-write, opens all
+  its admin sessions before changing anything, closes them on every path, and
+  rolls back keys it created if a later step fails.
+  - `bootstrap_enroll` (init, step 2): before any seal record, the init node's
+    key on every configured member, credentials stored locally only, the
+    enrollment record written; init then wraps through those sessions.
+  - `enroll_node`: the confirmed fingerprint must match the pending record; at
+    most 12 non-revoked nodes; every live (active or joining) member needs its
+    admin credential; lowest free slot not held by a record or present on a
+    device. Writes the delivery, the enrollment record
+    (`core/hsm/nodes/<node>`, one `bv-identity` signature per member over that
+    member's entry) and removes the pending record.
+  - `revoke_node`: discards undelivered credentials first, deletes the key on
+    every member it can reach with an admin credential, records a pending
+    revocation on the others, marks the record revoked, and returns the gateway
+    allow-list step and the residual risk.
+  - `add_member`: name and device unique, at most three members not retired;
+    `verify_member` (bundle names this device, both attested keys are the
+    device's own, a fresh challenge signed by `bv-identity` in this session,
+    `verify_layout`); every enrolled node gets a key and a delivery on the new
+    member; the member is written `joining`.
+  - `retire_member`: refused below `min_wrap_copies` (at least one) active
+    members, or when the KEK or any custody set has no copy on another active
+    member (needs the unsealed barrier).
+  - Promotion: a repair run with admin credentials for the joining member and an
+    active one moves a joining member that holds every set to `active`, with a
+    transcript both identities sign at `core/hsm/promotions/`.
+- **Repair** (`hsm/repair.rs`, `HsmSealProvider::repair`). Under `hsm-repair`:
+  picks up the leader's own new credentials, applies pending revocations when
+  admin credentials are given, then plans each set (the KEK, every custody set)
+  against active ∪ joining, unwraps once through a member holding a copy with a
+  `rewrap` authorization checked against the pinned key, wraps on each missing
+  member, drops retired copies only when another copy exists, and writes back
+  under `hsm-custody` only if the set did not change meanwhile. Writes are
+  spaced `1 / repair_rate` s apart. The report (scanned, added, removed,
+  failures, still under-replicated, ready to promote, promoted, revocations)
+  is kept for `GET v2/sys/hsm/repair` and feeds `bv_hsm_under_replicated_sets`.
+- **Authorization `rewrap`** (`hsm/authz.rs`). `UnwrapRequest.operation`
+  (`use` | `rewrap`, absent = `use`, so old requests read and serialize byte for
+  byte) selects both the signed tag and the `bv-authz` context.
+- **Membership.** Clients are opened through a `MemberOpener` with this node's
+  credential for the device, cached, and reopened when a credential arrives. A
+  member with a pending revocation is unusable for every node. Membership is
+  re-read from the record on unseal, on status and every 30 s
+  (`MEMBERSHIP_REFRESH_INTERVAL`), which also picks up deliveries.
+- **Routes and CLI.** `GET v2/sys/hsm/members`, `POST v2/sys/hsm/members/:name`,
+  `POST …/:name/retire`, `GET v2/sys/hsm/nodes`, `POST` / `DELETE
+  v2/sys/hsm/nodes/:node_id`, `GET` / `POST v2/sys/hsm/repair`, all sudo
+  (`root_paths`), v2 only; `bvault operator hsm members | member add|retire |
+  node add|revoke|list | repair [--run]`, with `--admin <member>` (TTY prompt)
+  or `--admin <member>=env:VAR` and a literal value refused.
+- **Config.** `repair_rate` (1–100, default 2) is accepted in pool mode.
+
+Decisions made in phase 4 part 1 where this spec left room:
+
+- Pending revocations are applied by the next ceremony that carries that
+  member's admin credential (`node revoke` again, or `repair --run --admin`),
+  not automatically on the member's return: deleting a key needs `bv-admin`,
+  whose credential the leader never stores. Until then the member is down for
+  every node, which is stricter than the spec's automatic step 2.
+- Promotion needs an admin-credentialed repair run for the same reason (the
+  transcript is signed by `bv-identity`, an admin-domain key); an automatic run
+  reports `ready_to_promote` instead.
+- Enrollment needs every live member reachable with its admin credential, so a
+  node is never enrolled on one device only. Rejected: a pending enrollment.
+- A pool holds at most three members that are not retired (two plus a
+  replacement while it joins); the config still takes exactly two.
+- Device object ids stay the configured `HsmObjectIds` (the released defaults),
+  because auth keys are a separate id namespace: `bv-admin` is auth key 2 and
+  node keys are `0x100 + slot` without colliding with wrap key 2.
+- Enrollment and promotion records, deliveries and pending records live in
+  physical storage (a sealed node reads them); they hold no secret in clear.
+- Custody sets are repaired in the seal record's cluster scope
+  (`record.cluster_uuid`).
+
+Not done in phase 4 part 1 (part 2, unless marked):
+
+- The `yubihsm2` side: one `bv-hsm-link` relay per `yubihsm::Client`, admin
+  sessions and `provision` on the device, `spawn_blocking`, lifting the
+  refusal; Yubico attestation-chain pinning (step 1 of attestation; the mock's
+  attestation proves only self-consistency).
+- An HTTP / CLI surface for the init bootstrap (`bootstrap_enroll` is a provider
+  method; a provisioned pool cannot yet be initialized over the API), and
+  attestation of the two initial members at init.
+- Epoch rotation (`rotate-epoch`) and `migrate-to-pool`.
+- The 5-minute background repair tick and the member-up trigger (repair runs
+  on demand and after `member add` / `retire` only when asked).
+- `bv-seed-ecdh`, `bv-identity` in domain 2, and `bv-auditor` in the layout.
+- Audit-broker events (phase 6): ceremony events go to the `security` log.
 
 Phase 3:
 
@@ -1086,7 +1208,7 @@ Not done in phase 2, deliberately:
 | 1. Formats and custody core | `BvHsmBlob` v2, `BvHsmBlobSet`, seal record v2 + v1 reader, per-node authz counters, custody store and handles. Mock only. | `crates/bv-core/src/hsm/{blob,blobset,custody_store}.rs`, `crates/bv-core/src/seal/hsm.rs`, `crates/bv-core/src/seal/hsm/record.rs` | Done |
 | 2. Pool backend | `HsmPool`: members, preference, failover, health probe, circuit breaker, parallel wrap, `min_wrap_copies`. Mock enforces the 16-session limit and `SESSIONS_FULL`. Pool init and unseal, storage gate, status, metrics. | `crates/bv-core/src/hsm/{pool,clock,mock,yubihsm2,mod}.rs`, `crates/bv-core/src/seal/hsm.rs`, `crates/bv-metrics/src/hsm_metrics.rs` | Done |
 | 3. HSM link | `bv-hsm-link` crate (gateway + relay), `bvault hsm-gateway` | `crates/bv-hsm-link/`, `crates/bvault-cli` | Done |
-| 4. Ceremonies and repair | `provision`, attestation chain pinning, node enroll/revoke with credential delivery, member add/retire, repair job, epoch rotation, `migrate-to-pool`, v2 routes, CLI | `crates/bv-core/src/hsm/{enroll,ceremony,repair,attest}.rs`, `crates/bv-kernel/src/modules/system/`, `crates/bvault-cli` | Planned |
+| 4. Ceremonies and repair | `provision`, attestation chain pinning, node enroll/revoke with credential delivery, member add/retire, repair job, epoch rotation, `migrate-to-pool`, v2 routes, CLI | `crates/bv-core/src/hsm/{admin,ceremony,node_creds,repair}.rs`, `crates/bv-core/src/seal/hsm/pool_admin.rs`, `crates/bv-kernel/src/modules/system/`, `crates/bvault-cli` | In progress (part 1 done: mock ceremonies, delivery, repair, routes, CLI) |
 | 5. Recovery | Recovery keypair, Shamir split, recovery copies, `recover` route | `crates/bv-core/src/hsm/recovery.rs` | Planned |
 | 6. Audit and observability | Device-log drain, events, metrics, status, GUI page, `docs/hsm.md`, `docs/api.md` | `crates/bv-core/src/hsm/device_audit.rs`, `gui/src/routes/HsmStatusPage.tsx` | Planned |
 | 7. Hardware validation | Two physical devices plus three nodes; measure latencies; confirm the FIPS Ed25519 question | `tests/` behind `BVAULT_TEST_YUBIHSM_POOL=1` | Planned |

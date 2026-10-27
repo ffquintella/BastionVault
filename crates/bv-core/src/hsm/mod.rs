@@ -24,16 +24,20 @@ use zeroize::Zeroizing;
 
 use crate::errors::RvError;
 
+pub mod admin;
 pub mod authz;
 pub mod blob;
 pub mod blobset;
+pub mod ceremony;
 pub mod clock;
 pub mod context;
 pub mod custody;
 pub mod custody_store;
 pub mod derive;
 pub mod enroll;
+pub mod node_creds;
 pub mod pool;
+pub mod repair;
 pub mod replicate;
 
 #[cfg(feature = "hsm_mock")]
@@ -288,6 +292,8 @@ pub struct ResolvedLink {
 pub struct ResolvedPoolConfig {
     /// 1 (default) or 2: copies a new blob set needs before it is stored.
     pub min_wrap_copies: usize,
+    /// Blob sets the repair job re-wraps per second at most.
+    pub repair_rate: u32,
     pub credential_dir: String,
     pub link: Option<ResolvedLink>,
     /// Exactly [`POOL_MEMBER_COUNT`], sorted by name.
@@ -340,7 +346,7 @@ pub struct HsmConfigBlock {
     /// Device-log drain mode (T454 phase 6). Refused until it is implemented.
     #[serde(default)]
     pub device_audit: String,
-    /// Repair job rate (T454 phase 4). Refused until it is implemented.
+    /// Pool only: repair job rate, sets per second (default 2).
     #[serde(default)]
     pub repair_rate: Option<u64>,
     #[serde(default)]
@@ -473,14 +479,11 @@ fn config_err(msg: impl Into<String>) -> RvError {
     RvError::ErrHsmConfigInvalid(msg.into())
 }
 
-/// `device_audit` and `repair_rate` configure jobs that do not exist yet. An
-/// accepted-but-ignored audit setting would be a silent gap, so they fail.
+/// `device_audit` configures a job that does not exist yet. An accepted but
+/// ignored audit setting would be a silent gap, so it fails.
 fn refuse_unimplemented_settings(raw: &HsmConfigBlock) -> Result<(), RvError> {
     if !raw.device_audit.trim().is_empty() {
         return Err(config_err("`device_audit` is not implemented yet (device-log drain, T454 phase 6); remove it"));
-    }
-    if raw.repair_rate.is_some() {
-        return Err(config_err("`repair_rate` is not implemented yet (repair job, T454 phase 4); remove it"));
     }
     Ok(())
 }
@@ -498,6 +501,9 @@ fn refuse_pool_only_settings(raw: &HsmConfigBlock) -> Result<(), RvError> {
     if raw.min_wrap_copies != 0 {
         stray.push("min_wrap_copies");
     }
+    if raw.repair_rate.is_some() {
+        stray.push("repair_rate");
+    }
     if !raw.credential_dir.is_empty() {
         stray.push("credential_dir");
     }
@@ -508,7 +514,7 @@ fn refuse_pool_only_settings(raw: &HsmConfigBlock) -> Result<(), RvError> {
     }
 }
 
-fn validate_member_name(name: &str) -> Result<(), RvError> {
+pub(crate) fn validate_member_name(name: &str) -> Result<(), RvError> {
     let ok_chars = name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'));
     if name.is_empty() || name.len() > MAX_MEMBER_NAME_LEN || !ok_chars {
         return Err(config_err(format!(
@@ -629,7 +635,18 @@ fn resolve_pool(backend_type: &str, raw: &HsmConfigBlock) -> Result<ResolvedPool
         other => return Err(config_err(format!("`min_wrap_copies` must be 1 or 2, got {other}"))),
     };
 
-    Ok(ResolvedPoolConfig { min_wrap_copies, credential_dir, link, members })
+    let repair_rate = match raw.repair_rate {
+        None => repair::DEFAULT_REPAIR_RATE,
+        Some(n @ 1..=repair::MAX_REPAIR_RATE_U64) => n as u32,
+        Some(other) => {
+            return Err(config_err(format!(
+                "`repair_rate` must be 1 to {} sets per second, got {other}",
+                repair::MAX_REPAIR_RATE_U64
+            )))
+        }
+    };
+
+    Ok(ResolvedPoolConfig { min_wrap_copies, repair_rate, credential_dir, link, members })
 }
 
 /// Longest node id accepted; generous for FQDN-style ids.
@@ -666,41 +683,126 @@ pub fn refuse_mock_in_production() -> Result<(), RvError> {
     Ok(())
 }
 
-/// Open this node's client for one pool member, through the path the config
-/// gives this node (mock: `state_path`). Pool mode with yubihsm2 needs the
-/// per-node credentials node enrollment delivers (T454 phase 4), so it fails.
-#[maybe_async::maybe_async]
-pub async fn open_pool_member(
-    config: &ResolvedHsmConfig,
-    member: &ResolvedPoolMember,
+/// One pool member as this node must reach it: the record's name, device and
+/// gateway (or, before init, the config's).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberTarget {
+    pub name: String,
+    pub hsm_id: HsmId,
+    pub gateway: String,
+}
+
+/// How this node reaches pool members: a node client (with this node's
+/// credential for the device, when it holds one) or a `bv-admin` session.
+pub trait MemberOpener: Send + Sync {
+    fn open_client(
+        &self,
+        target: &MemberTarget,
+        credential: Option<admin::NodeCredential>,
+    ) -> Result<Arc<dyn HsmBackend>, RvError>;
+
+    fn open_admin(&self, target: &MemberTarget, password: &str) -> Result<Box<dyn admin::HsmAdminSession>, RvError>;
+}
+
+/// The production opener: a member is reached through this node's `member`
+/// block (mock: its `state_path`). A `yubihsm2` pool needs the HSM link wired
+/// into the client, which this build does not have, so it is refused.
+pub struct ConfigMemberOpener {
+    #[cfg_attr(not(feature = "hsm_mock"), allow(dead_code))]
+    config: ResolvedHsmConfig,
+    #[cfg_attr(not(feature = "hsm_mock"), allow(dead_code))]
     clock: Arc<dyn clock::Clock>,
-) -> Result<Arc<dyn HsmBackend>, RvError> {
-    match config.backend_type.as_str() {
-        "mock" => {
-            refuse_mock_in_production()?;
-            #[cfg(feature = "hsm_mock")]
-            {
-                let device = mock::MockHsmDevice::open(&member.state_path, Some(&member.serial), clock)?;
-                let client = mock::MockHsmBackend::connect(device, &config.node_id, config.objects)?;
-                Ok(Arc::new(client))
+    /// One in-process device per `state_path`, so every client and admin
+    /// session of this node shares its session table.
+    #[cfg(feature = "hsm_mock")]
+    devices: std::sync::Mutex<BTreeMap<String, Arc<mock::MockHsmDevice>>>,
+}
+
+impl ConfigMemberOpener {
+    /// Refuses, up front, a pool this build or environment cannot run.
+    pub fn new(config: &ResolvedHsmConfig, clock: Arc<dyn clock::Clock>) -> Result<Self, RvError> {
+        match config.backend_type.as_str() {
+            "mock" => {
+                refuse_mock_in_production()?;
+                if cfg!(not(feature = "hsm_mock")) {
+                    return Err(RvError::ErrHsmConfigInvalid(
+                        "mock HSM backend requested but this build lacks the `hsm_mock` feature".into(),
+                    ));
+                }
             }
-            #[cfg(not(feature = "hsm_mock"))]
-            {
-                let _ = (member, clock);
-                Err(RvError::ErrHsmConfigInvalid(
-                    "mock HSM backend requested but this build lacks the `hsm_mock` feature".into(),
+            "yubihsm2" => {
+                return Err(RvError::ErrHsmConfigInvalid(
+                    "topology = \"pool\" with the yubihsm2 backend needs the HSM link wired into the YubiHSM 2 \
+                     client, which this build does not have yet (T454 phase 4, part 2); this build only validates \
+                     the configuration"
+                        .into(),
                 ))
             }
+            other => return Err(RvError::ErrHsmConfigInvalid(format!("unknown HSM backend {other:?}"))),
         }
-        "yubihsm2" => {
-            let _ = (member, clock);
-            Err(RvError::ErrHsmConfigInvalid(
-                "topology = \"pool\" with the yubihsm2 backend needs per-node credentials in `credential_dir`, \
-                 which node enrollment delivers (T454 phase 4); this build only validates the configuration"
-                    .into(),
+        Ok(Self {
+            config: config.clone(),
+            clock,
+            #[cfg(feature = "hsm_mock")]
+            devices: std::sync::Mutex::new(BTreeMap::new()),
+        })
+    }
+
+    #[cfg(feature = "hsm_mock")]
+    fn mock_device(&self, target: &MemberTarget) -> Result<Arc<mock::MockHsmDevice>, RvError> {
+        let pool = self.config.pool.as_ref().ok_or_else(|| config_err("not a pool configuration"))?;
+        let block = pool.members.iter().find(|m| m.name == target.name).ok_or_else(|| {
+            RvError::ErrHsmTransport(format!(
+                "this node's config has no `member \"{}\"` block, and a mock member is reached only through its \
+                 `state_path`",
+                target.name
             ))
+        })?;
+        let mut devices = self.devices.lock().map_err(|_| RvError::ErrRwLockWritePoison)?;
+        if let Some(device) = devices.get(&block.state_path) {
+            return Ok(device.clone());
         }
-        other => Err(RvError::ErrHsmConfigInvalid(format!("unknown HSM backend {other:?}"))),
+        let serial = target.hsm_id.as_str().split_once(':').map(|(_, s)| s).unwrap_or_default();
+        let device = mock::MockHsmDevice::open(&block.state_path, Some(serial), self.clock.clone())?;
+        devices.insert(block.state_path.clone(), device.clone());
+        Ok(device)
+    }
+}
+
+impl MemberOpener for ConfigMemberOpener {
+    fn open_client(
+        &self,
+        target: &MemberTarget,
+        credential: Option<admin::NodeCredential>,
+    ) -> Result<Arc<dyn HsmBackend>, RvError> {
+        #[cfg(feature = "hsm_mock")]
+        {
+            let device = self.mock_device(target)?;
+            let (node, objects) = (&self.config.node_id, self.config.objects);
+            let client = match credential {
+                Some(credential) => mock::MockHsmBackend::connect_with_credential(device, node, objects, credential)?,
+                None => mock::MockHsmBackend::connect(device, node, objects)?,
+            };
+            Ok(Arc::new(client))
+        }
+        #[cfg(not(feature = "hsm_mock"))]
+        {
+            let _ = (target, credential);
+            Err(RvError::ErrHsmConfigInvalid("this build has no HSM pool backend".into()))
+        }
+    }
+
+    fn open_admin(&self, target: &MemberTarget, password: &str) -> Result<Box<dyn admin::HsmAdminSession>, RvError> {
+        #[cfg(feature = "hsm_mock")]
+        {
+            let device = self.mock_device(target)?;
+            Ok(Box::new(device.admin_session(password, self.config.objects)?))
+        }
+        #[cfg(not(feature = "hsm_mock"))]
+        {
+            let _ = (target, password);
+            Err(RvError::ErrHsmConfigInvalid("this build has no HSM pool backend".into()))
+        }
     }
 }
 
@@ -943,7 +1045,21 @@ mod tests {
         let audit = HsmConfigBlock { device_audit: "forced".into(), ..Default::default() };
         rejects("mock", &audit, "device_audit");
         let mut rate = mock_pool();
+        rate.topology.clear();
+        rate.member.clear();
         rate.repair_rate = Some(2);
         rejects("mock", &rate, "repair_rate");
+    }
+
+    #[test]
+    fn repair_rate_is_bounded() {
+        let mut pool = mock_pool();
+        assert_eq!(resolve_config("mock", &pool).unwrap().pool.unwrap().repair_rate, repair::DEFAULT_REPAIR_RATE);
+        pool.repair_rate = Some(10);
+        assert_eq!(resolve_config("mock", &pool).unwrap().pool.unwrap().repair_rate, 10);
+        for bad in [0, repair::MAX_REPAIR_RATE_U64 + 1] {
+            pool.repair_rate = Some(bad);
+            rejects("mock", &pool, "repair_rate");
+        }
     }
 }

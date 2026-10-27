@@ -22,6 +22,23 @@ use crate::{
     hsm::{authz_fingerprint_of, blob::Purpose, context, domain_separated, HsmBackend, HsmObjectId},
 };
 
+/// Why a blob is unwrapped. `Use` is every release since S17; `Rewrap` is the
+/// repair job copying a set to another member (T454 phase 4). The two sign
+/// under different tags, so neither authorization can stand in for the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum UnwrapOperation {
+    #[default]
+    Use,
+    Rewrap,
+}
+
+impl UnwrapOperation {
+    fn is_use(&self) -> bool {
+        *self == UnwrapOperation::Use
+    }
+}
+
 /// The canonical, replay-resistant description of a single unwrap.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnwrapRequest {
@@ -34,6 +51,9 @@ pub struct UnwrapRequest {
     /// Strictly-increasing per node; the verifier rejects stale counters.
     pub counter: u64,
     pub purpose: Purpose,
+    /// Absent (and `Use`) in every authorization made before T454 phase 4.
+    #[serde(default, skip_serializing_if = "UnwrapOperation::is_use")]
+    pub operation: UnwrapOperation,
 }
 
 impl UnwrapRequest {
@@ -47,6 +67,23 @@ impl UnwrapRequest {
             epoch,
             counter,
             purpose,
+            operation: UnwrapOperation::Use,
+        }
+    }
+
+    /// The same request, as a repair re-wrap rather than a use.
+    pub fn rewrap(mut self) -> Self {
+        self.operation = UnwrapOperation::Rewrap;
+        self
+    }
+
+    /// The `bv-authz` context the device signs under.
+    fn authz_context(&self) -> String {
+        match self.operation {
+            UnwrapOperation::Use => context::unwrap_authz(&self.node_id, self.purpose.as_token()),
+            UnwrapOperation::Rewrap => {
+                context::unwrap_authz(&self.node_id, &format!("rewrap-{}", self.purpose.as_token()))
+            }
         }
     }
 
@@ -58,7 +95,11 @@ impl UnwrapRequest {
             out.extend_from_slice(b);
         }
         let mut out = Vec::new();
-        push(&mut out, b"bastionvault/hsm/unwrap-request/v1");
+        let tag: &[u8] = match self.operation {
+            UnwrapOperation::Use => b"bastionvault/hsm/unwrap-request/v1",
+            UnwrapOperation::Rewrap => b"bastionvault/hsm/rewrap-request/v1",
+        };
+        push(&mut out, tag);
         push(&mut out, self.context.as_bytes());
         push(&mut out, self.blob_digest.as_bytes());
         push(&mut out, self.node_id.as_bytes());
@@ -89,7 +130,7 @@ pub async fn sign_authorization(
     authz_key_id: HsmObjectId,
     request: UnwrapRequest,
 ) -> Result<UnwrapAuthorization, RvError> {
-    let authz_ctx = context::unwrap_authz(&request.node_id, request.purpose.as_token());
+    let authz_ctx = request.authz_context();
     let signature = backend.sign(authz_key_id, &authz_ctx, &request.tbs()).await?;
 
     let authz_pub = backend.authz_public_key()?;
@@ -126,8 +167,7 @@ pub fn verify_authorization(
 
     // The HSM signs `domain_separated(authz_ctx, tbs)`; reconstruct the same
     // bytes here from the request's own node id and purpose.
-    let authz_ctx = context::unwrap_authz(&auth.request.node_id, auth.request.purpose.as_token());
-    let signed = domain_separated(&authz_ctx, &auth.request.tbs());
+    let signed = domain_separated(&auth.request.authz_context(), &auth.request.tbs());
     vk.verify(&signed, &signature).map_err(|_| RvError::ErrHsmAuthzInvalid)
 }
 
@@ -138,6 +178,7 @@ pub fn audit_record(auth: &UnwrapAuthorization) -> serde_json::Value {
         "event": "hsm_unwrap_authorized",
         "context": auth.request.context,
         "purpose": auth.request.purpose.as_token(),
+        "operation": auth.request.operation,
         "node_id": auth.request.node_id,
         "epoch": auth.request.epoch,
         "counter": auth.request.counter,
