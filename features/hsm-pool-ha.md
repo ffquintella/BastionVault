@@ -1603,3 +1603,33 @@ method, `provision` succeeds on each from scratch, and a device that is only
 reset (not re-provisioned) is reported `faulted` by a running node, as the
 failure-mode table requires. The operator must be at the machine for the
 10-second press; the run cannot do it unattended.
+
+### Phase 7 must leave the devices in factory state
+
+The two devices are reused for the production cluster, whose `provision`
+ceremony refuses any device that is not in factory state. Phase 7 therefore
+passes only when the final check below succeeds; a green functional run on a
+device that fails it is a failed phase.
+
+- **Reversible operations only.** The run must not update firmware, must not
+  turn on FIPS mode (Yubico documents it as available right after a reset and
+  leavable by a reset, but the model and its behaviour are confirmed first),
+  and must not set command audit to an enforced value (a
+  [third-party note](https://gist.github.com/karalabe/fb7ac43f3899f511b5547279c036bf4e)
+  says only a reset clears it; confirm against Yubico's own page before any
+  forced-audit test). Each of these is a separate, explicitly approved step.
+- **Before/after snapshot.** Record serial, firmware version, options and the
+  object list on each device before the first write, and diff against the
+  same read after the reset. The expected difference is none.
+- **Final check, read-only.** After the physical reset, authenticate with the
+  factory key and confirm: only the factory-installed objects exist, options
+  are the defaults, and the BastionVault `provision` preflight accepts the
+  device (the factory key 1 present, no other objects). The check never
+  writes, so it cannot spoil the state it verifies.
+- **Same ceremony as production.** The production cluster starts with
+  `provision`, `bootstrap` and `init`; the run ends exactly one step before
+  that, so no test identity, member entry or node credential survives on a
+  device or in a seal record.
+- A reset device is open to the public factory password until `provision`
+  runs. Keep the devices off any shared host between the reset and the
+  production `provision`.
