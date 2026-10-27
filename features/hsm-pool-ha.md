@@ -3,8 +3,8 @@
 > Status: **in progress** (T454) — phases 1–2 of 7 (formats and custody core;
 > pool backend) done 2026-10-19, phase 3 (HSM link) done 2026-10-27, phase 4
 > (ceremonies, repair, bootstrap, provisioning, YubiHSM 2 wiring, rotation,
-> migration) done 2026-10-27 on the mock; see
-> [Current state](#current-state). Spec
+> migration) done 2026-10-27 on the mock, phase 5 (recovery) done 2026-10-27
+> on the mock; see [Current state](#current-state). Spec
 > written 2026-10-19. Extends
 > [HSM Support (YubiHSM 2)](hsm-support.md) (S17), whose non-negotiable security
 > rules apply here unchanged unless a section below says otherwise and why.
@@ -673,6 +673,8 @@ All of these are versioned, read-old/write-new.
 | Custody store | — (no engine uses custody) | `core/hsm/custody/<key_id>` (barrier) | None needed. |
 | Pending, credentials, enrollment, audit cursor | — | new keys under `core/hsm/` | None needed. |
 | Wrap keys per epoch (seal record v2) | — (the config's ids) | optional `wrap_keys: epoch → {barrier, pqc}` and `rotating_to` | Absent means the config's ids at every epoch; init, migration and rotation write them. No version bump: an earlier build ignores the fields, which is harmless until the first rotation and fatal for unseal after it (it would use the config's ids), so do not roll back past this build once an epoch has rotated. |
+| Recovery key (seal record v2, phase 5) | `recovery_pub: {public_key, fingerprint}` defined, never written | adds required `threshold`, `shares`; pool records only | None needed: no record ever held one. A record without `recovery_pub` encodes byte for byte as before. An earlier build reads a record with one (it ignores the split), but cannot run the ceremony. |
+| Recovery copy (`BvHsmBlobSet.recovery`) | defined, never written | `KemDemEnvelopeV1` (ML-KEM-768 + ChaCha20-Poly1305) under AAD `"bastionvault/hsm/recovery-copy/v1" ‖ context ‖ purpose ‖ epoch ‖ subject ‖ "recovery"`, each field length-prefixed; subject = `barrier-kek` or the custody key id | None needed. A KEK recovery copy without a record recovery key is refused. |
 
 **Per-node → pool** (`bvault operator hsm migrate-to-pool`, sudo, admin credentials
 for both new members):
@@ -878,7 +880,93 @@ pool. Phase 3 adds the network link as a standalone crate, `bv-hsm-link`, and th
 part 1 adds the ceremonies (node enroll and revoke, member add, retire and
 promotion), credential delivery and the repair job, all on the **mock**; a
 `yubihsm2` pool is still validated but refused at startup until part 2 wires
-the relay and the device's admin commands in. There is no recovery yet (phase 5).
+the relay and the device's admin commands in. Phase 5 adds the recovery key,
+recovery copies and the recovery ceremony, also on the mock.
+
+Phase 5 (recovery, mock):
+
+- **Recovery key** (`hsm/recovery.rs`). Pool init with `recovery =
+  "shamir-ceremony"` generates a 64-byte seed from the host CSPRNG, derives the
+  ML-KEM-768 keypair, Shamir-splits the seed with `bv-shamir` (`RecoverySplit`,
+  default 5 / 3, `2 <= threshold <= shares <= 254`) and returns the shares
+  once; the seal record keeps the public key, its fingerprint and the split.
+  `sys/init` takes Vault's `recovery_shares` / `recovery_threshold` (both or
+  neither) and returns `recovery_keys` apart from `keys`; `bvault operator
+  init --recovery-shares --recovery-threshold`. Per-node, a pool with
+  `recovery = "none"` and every non-HSM seal refuse the fields
+  (`SealProvider::check_init_recovery`, before anything is written).
+- **Recovery copies.** The KEK and every custody set carry a
+  `KemDemEnvelopeV1` sealed to the recovery public key, AAD-bound to the set's
+  context, purpose, epoch and subject (custody key id). Written by init,
+  custody `create`, `repair` (adds a missing one, `recovery_copies_added`) and
+  `rotate-epoch` (re-sealed at the new epoch; the phase 4 refusal is gone).
+  Unseal never reads one.
+- **Ceremony** (`seal/hsm/recovery_ceremony.rs`, `POST v2/sys/hsm/recover`,
+  `bvault operator hsm recover`). Route class `public-probe` (the shares are
+  the credential, as for `sys/unseal`); the handler and the provider both
+  require a sealed node, and the provider requires a pool record with a
+  recovery key and every non-retired member unreachable from this node (only
+  `ErrHsmTransport` counts; any other answer refuses). Shares accumulate in
+  memory (zeroized; malformed, duplicate or surplus ones refused, never
+  echoed); the final request names 1–2 new members (at least
+  `min_wrap_copies`) with bundles and admin credentials. Under `hsm-repair`:
+  recombine (accepted only on the recorded fingerprint; every attempt consumes
+  the shares), open the KEK's recovery copy, attest the new devices and give
+  them the epoch's wrap keys, enroll every enrolled node (this node's
+  credentials installed directly, the others sealed for delivery), wrap the
+  KEK on each and prove each copy with an authorized `rewrap` unwrap, unseal
+  the node's own barrier object with the recovered KEK to add each custody
+  set's copies (seed checked against its public key), commit the record (old
+  members `retired`, pending revocations on them dropped with a warning)
+  against the exact bytes read at the start, bump the epoch with the rotation
+  ceremony, reseal the barrier; the route then auto-unseals through the new
+  members. Before the commit a failure deletes every node key it created.
+  Event `hsm.recovery_ceremony` (share indexes, members, custody counts).
+- **Status:** `recovery_fingerprint`, `recovery_threshold`, `recovery_shares`,
+  `kek_recovery_copy`, `recovery_progress` (a count, never a share).
+- **Migration** refuses `recovery = "shamir-ceremony"`: the key is made at init
+  only, so a migrated pool has none.
+
+Decisions made in phase 5 where this spec left room:
+
+- The shares come back as `recovery_keys` (Vault's name) on the shared
+  `sys/init` handler, which therefore accepts the two fields under `v1` too:
+  they are Vault's own `v1` fields, and refusing them on `v1` would turn the
+  default 5 / 3 into a silent loss for a `v1` client. Rejected: a `v2`-only
+  init and HSM-config split parameters.
+- The ceremony adds copies at each set's own epoch, commits, and then bumps
+  the epoch through `rotate-epoch` (which drops the retired copies and
+  re-seals the recovery copies). A failed bump leaves a complete recovery at
+  the old epoch, finished by a later `rotate-epoch`; rejected: re-wrapping
+  straight to epoch + 1 before the commit, which leaves custody sets unusable
+  if the ceremony is abandoned and the old devices come back.
+- Custody sets live behind the barrier, so the ceremony unseals the node's own
+  barrier object with the recovered KEK for the custody step only (the node's
+  state stays sealed, no request is served) and seals it again on every path.
+  Rejected: unsealing the node first through the new members and recovering
+  custody afterwards, which strands every custody set if that step fails,
+  because the gate is closed once the new members answer.
+- The recovery copy's AAD also binds a subject (the custody key id), stricter
+  than the spec's `context ‖ purpose ‖ epoch ‖ "recovery"`: custody contexts
+  do not name the key, so two keys of one kind and epoch would otherwise share
+  an AAD.
+- A custody set that cannot be recovered (no copy, a copy that does not open,
+  a seed that does not derive its public key) is reported and raised, not
+  fatal: failing the ceremony for one tampered copy would turn tampering into
+  a denial of recovery for everything else.
+- Recovery onto one new device is allowed when `min_wrap_copies = 1`; `member
+  add` brings the second.
+
+Not done in phase 5, deliberately:
+
+- `bv-shamir` does not zeroize its internal copies of the shares and
+  coefficients (pre-existing, shared with the unseal path); fixing it touches
+  a Tier 0 crate and every dependent, so it is a follow-up.
+- Rotating the recovery shares (re-split without a ceremony) stays out of
+  scope, as the spec says.
+- The ceremony on a YubiHSM 2 pool stops at member attestation like `member
+  add` (phase 7: Yubico chain pinning); nothing in it needs hardware beyond
+  that.
 
 Phase 4, part 1:
 
@@ -1052,8 +1140,9 @@ Phase 4, part 3:
   record's map to the custody store.
 - **`rotate-epoch`** (`POST v2/sys/hsm/rotate-epoch`, sudo, admin credentials
   for every active member; `bvault operator hsm rotate-epoch --admin …`).
-  Under `hsm-repair`, refused with a joining member, a pending revocation, a
-  recovery copy (phase 5) or a member it cannot reach. It allocates two free
+  Under `hsm-repair`, refused with a joining member, a pending revocation or a
+  member it cannot reach (phase 5 lifted the refusal of recovery copies: they
+  are re-sealed at the new epoch). It allocates two free
   wrap-key ids (from 0x20, checked on every device), generates them through
   the admin sessions (`generate_wrap_key`, capabilities verified), records them
   with `rotating_to` **before** touching any set, re-wraps each custody set
@@ -1298,7 +1387,7 @@ Not done in phase 2, deliberately:
 | 2. Pool backend | `HsmPool`: members, preference, failover, health probe, circuit breaker, parallel wrap, `min_wrap_copies`. Mock enforces the 16-session limit and `SESSIONS_FULL`. Pool init and unseal, storage gate, status, metrics. | `crates/bv-core/src/hsm/{pool,clock,mock,yubihsm2,mod}.rs`, `crates/bv-core/src/seal/hsm.rs`, `crates/bv-metrics/src/hsm_metrics.rs` | Done |
 | 3. HSM link | `bv-hsm-link` crate (gateway + relay), `bvault hsm-gateway` | `crates/bv-hsm-link/`, `crates/bvault-cli` | Done |
 | 4. Ceremonies and repair | `provision`, attestation chain pinning, node enroll/revoke with credential delivery, member add/retire, repair job, epoch rotation, `migrate-to-pool`, v2 routes, CLI | `crates/bv-core/src/hsm/{admin,ceremony,node_creds,repair}.rs`, `crates/bv-core/src/seal/hsm/pool_admin.rs`, `crates/bv-kernel/src/modules/system/`, `crates/bvault-cli` | Done (mock; Yubico attestation pinning and device validation moved to phase 7) |
-| 5. Recovery | Recovery keypair, Shamir split, recovery copies, `recover` route | `crates/bv-core/src/hsm/recovery.rs` | Planned |
+| 5. Recovery | Recovery keypair, Shamir split, recovery copies, `recover` route | `crates/bv-core/src/hsm/recovery.rs`, `crates/bv-core/src/seal/hsm/recovery_ceremony.rs`, `crates/bv-server/src/sys.rs`, `crates/bvault-cli` | Done (mock; the YubiHSM 2 ceremony waits on phase 7 attestation) |
 | 6. Audit and observability | Device-log drain, events, metrics, status, GUI page, `docs/hsm.md`, `docs/api.md` | `crates/bv-core/src/hsm/device_audit.rs`, `gui/src/routes/HsmStatusPage.tsx` | Planned |
 | 7. Hardware validation | Two physical devices plus three nodes; pin the Yubico attestation chain and lift the YubiHSM 2 attestation refusal; validate `provision`, bootstrap, enrollment and the relay; measure latencies; confirm the FIPS Ed25519 question | `tests/` behind `BVAULT_TEST_YUBIHSM_POOL=1` | Planned |
 

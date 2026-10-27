@@ -8,6 +8,9 @@
 pub mod hooks;
 mod pool_admin;
 pub mod record;
+mod recovery_ceremony;
+
+pub use recovery_ceremony::{RecoveryMember, RecoverySubmission};
 
 use std::{
     collections::BTreeMap,
@@ -34,6 +37,7 @@ use crate::{
         context,
         node_creds::{self, NodeCredentialStore},
         pool::{check_pool_storage_backend, HsmPool, PoolEventSink, PoolMember, PoolMemberSpec},
+        recovery::{self, RecoverySplit, ShareSet},
         repair::RepairReport,
         validate_node_id, ConfigMemberOpener, HsmBackend, MemberOpener, MemberTarget, RecoveryMode, ResolvedHsmConfig,
         ResolvedPoolConfig,
@@ -42,7 +46,7 @@ use crate::{
     storage::{Backend as PhysicalBackend, BackendEntry},
 };
 
-use self::record::{HsmMember, HsmSealRecord, MemberState, StoredSealRecord, Topology};
+use self::record::{HsmMember, HsmSealRecord, MemberState, RecoveryPublicKey, StoredSealRecord, Topology};
 
 /// Physical-storage key for the HSM seal record. Non-secret (holds only
 /// opaque wrapped blobs), so it lives in the pre-unseal physical layer.
@@ -305,12 +309,24 @@ pub struct HsmSealProvider {
     hooks: Option<Arc<hooks::ProviderHooks>>,
     /// The per-node device `migrate_from` names (pool, `migrate-to-pool`).
     migration_source: Option<Arc<dyn HsmBackend>>,
+    /// Recovery shares submitted to `v2/sys/hsm/recover` so far (pool,
+    /// phase 5). Memory only; zeroized on reset, on every ceremony attempt
+    /// and on drop.
+    recovery_shares: Mutex<ShareSet>,
 }
 
 impl HsmSealProvider {
     /// The per-node topology over this node's own device.
     pub fn new(backend: Arc<dyn HsmBackend>, physical: Arc<dyn PhysicalBackend>, config: ResolvedHsmConfig) -> Self {
-        Self { devices: Devices::PerNode(backend), physical, config, repair_state: Mutex::new(None), hooks: None, migration_source: None }
+        Self {
+            devices: Devices::PerNode(backend),
+            physical,
+            config,
+            repair_state: Mutex::new(None),
+            hooks: None,
+            migration_source: None,
+            recovery_shares: Mutex::new(ShareSet::default()),
+        }
     }
 
     /// The pool topology over pre-opened member clients (`opened`, by member
@@ -366,7 +382,15 @@ impl HsmSealProvider {
         let specs = cache.specs_for(pool_cfg, bootstrap);
         let current = build_pool(&config.node_id, pool_cfg, specs, 0, &clock, &events)?;
         let devices = PoolDevices { cache, clock, events, current: Mutex::new(current), probing: AtomicBool::new(false) };
-        Ok(Self { devices: Devices::Pool(devices), physical, config, repair_state: Mutex::new(None), hooks: None, migration_source: None })
+        Ok(Self {
+            devices: Devices::Pool(devices),
+            physical,
+            config,
+            repair_state: Mutex::new(None),
+            hooks: None,
+            migration_source: None,
+            recovery_shares: Mutex::new(ShareSet::default()),
+        })
     }
 
     /// Open the configured topology: per node, the device; for a pool, the
@@ -560,8 +584,8 @@ impl HsmSealProvider {
         }
     }
 
-    /// Pool init needs an explicit recovery posture, and the recovery copy
-    /// (`shamir-ceremony`) is T454 phase 5: refused, never faked.
+    /// Pool init needs an explicit recovery posture (spec § Bootstrap at
+    /// init): `none`, or `shamir-ceremony` with its recovery key (phase 5).
     fn refuse_pool_recovery(&self) -> Result<(), RvError> {
         if !self.config.recovery_explicit {
             return Err(RvError::ErrHsmConfigInvalid(
@@ -570,14 +594,25 @@ impl HsmSealProvider {
                     .into(),
             ));
         }
-        match self.config.recovery {
-            RecoveryMode::None => Ok(()),
-            RecoveryMode::ShamirCeremony => Err(RvError::ErrHsmConfigInvalid(
-                "recovery = \"shamir-ceremony\" needs the pool recovery copy, which is T454 phase 5 and not in this \
-                 build; init is refused rather than initializing without the recovery key the config asks for. Set \
-                 recovery = \"none\" to initialize without one"
+        Ok(())
+    }
+
+    /// The recovery split pool init uses: the request's, the default 5 / 3
+    /// with `shamir-ceremony`, and none at all with `recovery = "none"`
+    /// (where explicit parameters are refused, never ignored).
+    fn pool_recovery_split(&self, requested: Option<RecoverySplit>) -> Result<Option<RecoverySplit>, RvError> {
+        match (self.config.recovery, requested) {
+            (RecoveryMode::None, None) => Ok(None),
+            (RecoveryMode::None, Some(_)) => Err(RvError::ErrHsmConfigInvalid(
+                "recovery_shares and recovery_threshold need recovery = \"shamir-ceremony\" in the pool `hsm` block; \
+                 this node's config says recovery = \"none\""
                     .into(),
             )),
+            (RecoveryMode::ShamirCeremony, requested) => {
+                let split = requested.unwrap_or_default();
+                split.validate()?;
+                Ok(Some(split))
+            }
         }
     }
 
@@ -612,16 +647,33 @@ impl HsmSealProvider {
         Ok(())
     }
 
+    /// Pool init. With `shamir-ceremony` the recovery key is generated here
+    /// and its shares returned, once; the seed is gone before this returns.
     #[maybe_async::maybe_async]
-    async fn init_pool(&self, devices: &PoolDevices, kek: &[u8]) -> Result<(), RvError> {
+    async fn init_pool(
+        &self,
+        devices: &PoolDevices,
+        kek: &[u8],
+        requested: Option<RecoverySplit>,
+    ) -> Result<Zeroizing<Vec<Vec<u8>>>, RvError> {
+        let split = self.pool_recovery_split(requested)?;
         let mut uuid_bytes = [0u8; 16];
         rand::rng().fill_bytes(&mut uuid_bytes);
-        self.write_pool_record(devices, kek, &hex::encode(uuid_bytes), 0, None).await
+        let (recovery_pub, shares) = match split {
+            None => (None, Zeroizing::new(Vec::new())),
+            Some(split) => {
+                let generated = recovery::generate(split)?;
+                (Some(RecoveryPublicKey::new(generated.public_key, split)), generated.shares)
+            }
+        };
+        self.write_pool_record(devices, kek, &hex::encode(uuid_bytes), 0, None, recovery_pub.as_ref()).await?;
+        Ok(shares)
     }
 
     /// Dual-wrap `kek` for the configured members and write the pool record.
     /// `replacing`: the exact per-node record bytes a migration replaces;
-    /// `None` (init) refuses any existing record.
+    /// `None` (init) refuses any existing record. `recovery`: the recovery
+    /// key the KEK's recovery copy is sealed to, recorded with it.
     #[maybe_async::maybe_async]
     async fn write_pool_record(
         &self,
@@ -630,6 +682,7 @@ impl HsmSealProvider {
         cluster_uuid: &str,
         epoch: u64,
         replacing: Option<&[u8]>,
+        recovery: Option<&RecoveryPublicKey>,
     ) -> Result<(), RvError> {
         self.check_pool_init(devices).await?;
         let pool_cfg = self.config.pool.as_ref().ok_or_else(|| RvError::ErrHsm("not a pool provider".into()))?;
@@ -705,7 +758,12 @@ impl HsmSealProvider {
         for copy in copies {
             kek_set.insert_copy(copy)?;
         }
+        if let Some(recovery) = recovery {
+            let aad = recovery::kek_recovery_aad(&cluster_uuid, epoch);
+            kek_set.recovery = Some(recovery::seal_copy(&recovery.public_key, &aad, kek)?);
+        }
         let mut record = HsmSealRecord::new_pool(cluster_uuid, epoch, members, kek_set);
+        record.recovery_pub = recovery.cloned();
         // Write-new: a pool record names its wrap keys from the start.
         record.wrap_keys.insert(epoch, record::WrapKeyIds::of(&self.config.objects));
         {
@@ -729,12 +787,24 @@ impl HsmSealProvider {
             }
         }
         hsm_metrics().set_under_replicated(UnderReplicatedScope::SealRecord, 0);
-        log::warn!(
-            target: "security",
-            "HSM pool seal initialized with recovery=none: losing both pool devices makes this vault UNRECOVERABLE \
-             (intended posture); KEK copies on {}",
-            record.members.values().map(|m| m.name.as_str()).collect::<Vec<_>>().join(", ")
-        );
+        let copies_on = record.members.values().map(|m| m.name.as_str()).collect::<Vec<_>>().join(", ");
+        match &record.recovery_pub {
+            None => log::warn!(
+                target: "security",
+                "HSM pool seal initialized with recovery=none: losing both pool devices makes this vault \
+                 UNRECOVERABLE (intended posture); KEK copies on {copies_on}"
+            ),
+            Some(r) => log::warn!(
+                target: "security",
+                "HSM pool seal initialized with recovery=shamir-ceremony (recovery key {}, {} of {} shares): any {} \
+                 share holders together with a copy of storage can decrypt everything (the explicit break-glass \
+                 path); KEK copies on {copies_on}",
+                r.fingerprint,
+                r.threshold,
+                r.shares,
+                r.threshold
+            ),
+        }
         Ok(())
     }
 
@@ -937,6 +1007,15 @@ impl HsmSealProvider {
             obj.insert("seal_record_version".into(), json!(stored.stored_version));
             obj.insert("seal_record_topology".into(), json!(stored.record.topology.as_str()));
             obj.insert("recovery_configured".into(), json!(stored.record.recovery_pub.is_some()));
+            if let Some(r) = &stored.record.recovery_pub {
+                // Public values only: the fingerprint, the split, and how many
+                // shares a running ceremony holds (never the shares).
+                obj.insert("recovery_fingerprint".into(), json!(r.fingerprint));
+                obj.insert("recovery_threshold".into(), json!(r.threshold));
+                obj.insert("recovery_shares".into(), json!(r.shares));
+                obj.insert("kek_recovery_copy".into(), json!(kek.is_some_and(|k| k.recovery.is_some())));
+                obj.insert("recovery_progress".into(), json!(self.recovery_progress()));
+            }
         } else if let Some(obj) = out.as_object_mut() {
             for key in ["cluster_uuid", "epoch", "seal_record_version", "seal_record_topology"] {
                 obj.insert(key.into(), Value::Null);
@@ -976,13 +1055,41 @@ impl SealProvider for HsmSealProvider {
         }
     }
 
+    async fn check_init_recovery(&self, split: Option<RecoverySplit>) -> Result<(), RvError> {
+        match &self.devices {
+            Devices::PerNode(_) => match split {
+                None => Ok(()),
+                Some(_) => Err(RvError::ErrHsmConfigInvalid(
+                    "recovery_shares and recovery_threshold are not available for the per-node HSM topology (no \
+                     recovery key exists there; see features/hsm-pool-ha.md § Recovery)"
+                        .into(),
+                )),
+            },
+            Devices::Pool(_) => self.pool_recovery_split(split).map(|_| ()),
+        }
+    }
+
+    async fn init_kek_with_recovery(
+        &self,
+        kek: &[u8],
+        seal_config: &SealConfig,
+        split: Option<RecoverySplit>,
+    ) -> Result<Zeroizing<Vec<Vec<u8>>>, RvError> {
+        match &self.devices {
+            Devices::Pool(devices) => self.init_pool(devices, kek, split).await,
+            Devices::PerNode(_) => {
+                self.check_init_recovery(split).await?;
+                self.init_kek(kek, seal_config).await
+            }
+        }
+    }
+
+    /// Returns the recovery shares, once, for a pool with `shamir-ceremony`
+    /// (default 5 / 3); nothing otherwise.
     async fn init_kek(&self, kek: &[u8], _seal_config: &SealConfig) -> Result<Zeroizing<Vec<Vec<u8>>>, RvError> {
         let backend = match &self.devices {
             Devices::PerNode(backend) => backend,
-            Devices::Pool(devices) => {
-                self.init_pool(devices, kek).await?;
-                return Ok(Zeroizing::new(Vec::new()));
-            }
+            Devices::Pool(devices) => return self.init_pool(devices, kek, None).await,
         };
         // `Core::init` already ran `check_init`; repeat it for direct callers.
         self.refuse_unavailable_recovery()?;
@@ -1518,6 +1625,7 @@ mod tests {
             ecdh_key: HsmObjectIds::default().identity,
             binding_pub,
             pqc_wrap_keys: Default::default(),
+            recovery_pub: None,
         };
         CustodyStore::with_pool(storage, pool, provider.config.clone(), scope)
     }
@@ -1545,19 +1653,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pool_init_needs_explicit_recovery_and_both_members_and_refuses_shamir() {
+    async fn pool_init_needs_explicit_recovery_and_both_members() {
         let c = Cluster::new("initgate");
         let mut implicit = c.config("n1", 1);
         implicit.recovery_explicit = false;
         let err = c.provider_with(implicit).check_init(&seal_config()).await.unwrap_err();
         assert!(err.to_string().contains("explicit `recovery`"), "{err}");
 
+        // Explicit recovery parameters are refused, never ignored, without a
+        // recovery key to split; and a bad split is refused before any write.
+        let none = c.provider("n1");
+        let split = Some(RecoverySplit { shares: 5, threshold: 3 });
+        assert!(none.check_init_recovery(split).await.unwrap_err().to_string().contains("shamir-ceremony"));
         let mut shamir = c.config("n1", 1);
         shamir.recovery = RecoveryMode::ShamirCeremony;
         let provider = c.provider_with(shamir);
-        let err = provider.check_init(&seal_config()).await.unwrap_err();
-        assert!(err.to_string().contains("T454 phase 5"), "{err}");
-        assert!(provider.init_kek(&[1u8; 32], &seal_config()).await.is_err());
+        provider.check_init(&seal_config()).await.unwrap();
+        provider.check_init_recovery(split).await.unwrap();
+        assert!(provider.check_init_recovery(Some(RecoverySplit { shares: 5, threshold: 1 })).await.is_err());
+        assert_eq!(raw(&c.physical, HSM_SEAL_RECORD_PATH).await, None, "nothing is written by the checks");
 
         c.b.set_offline(true);
         let provider = c.provider("n1");

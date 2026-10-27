@@ -42,6 +42,15 @@ Response:
 }
 ~~~
 
+With an HSM pool seal configured `recovery = "shamir-ceremony"`
+([HSM pool HA](../features/hsm-pool-ha.md#recovery-shamir-ceremony), T454),
+the request may also carry Vault's `recovery_shares` / `recovery_threshold`
+(both or neither; default 5 / 3, `2 <= threshold <= shares <= 254`). The
+response then has `keys: []` and `recovery_keys` (hex): the recovery shares,
+shown once and stored nowhere, never usable as unseal keys. Any other seal, or
+a pool with `recovery = "none"`, refuses the two fields rather than ignoring
+them; `recovery_keys` is absent from every other response.
+
 ### Seal Status
 
 ~~~
@@ -203,6 +212,10 @@ HSM pool response (`topology = "pool"`; T454 phase 2). There is no single
   the custody store and exported as `bv_hsm_under_replicated_sets`.
 - `last_error` is the member's last failure (operation and error class); it
   never carries key material.
+- With a recovery key (T454 phase 5) the status adds `recovery_fingerprint`,
+  `recovery_threshold`, `recovery_shares` (the split), `kek_recovery_copy` and
+  `recovery_progress` (shares a running recovery ceremony holds on this node;
+  never the shares themselves).
 
 CLI equivalent: `bvault operator hsm status`.
 
@@ -238,6 +251,7 @@ POST /v2/sys/hsm/nodes/vault-2
 ~~~
 
 A repair report: `sets_scanned`, `copies_added`, `copies_removed`,
+`recovery_copies_added` (sets that lacked a recovery copy under a recovery key),
 `under_replicated` (still missing a copy), `failures`, `invalid_custody_entries`,
 `ready_to_promote`, `promoted`, `revocations_applied`, `revocations_pending`,
 `custody_scanned`, `started_at`, `finished_at`. A revoke response adds
@@ -246,6 +260,42 @@ when a revocation is pending, `residual_risk`.
 
 CLI equivalents: `bvault operator hsm members | member add|retire | node
 add|revoke|list | repair [--run]`.
+
+### HSM pool recovery (`v2` only, no token)
+
+`POST /v2/sys/hsm/recover` runs the recovery ceremony after **both** pool
+devices are lost (T454 phase 5). Like `sys/unseal`, the recovery shares are
+the credential: no token is checked. It is accepted only on an initialized,
+**sealed** node whose seal record holds a recovery key, and only while every
+member that is not retired is unreachable from this node (a transport
+failure; any other answer refuses). Each request carries one of:
+
+| Body | Effect |
+|---|---|
+| `share` (hex, as `init` printed it) | Add one share to this node's in-memory ceremony. Malformed, duplicated or surplus shares are refused and never echoed |
+| `members` (`{name: {bundle, gateway}}`), `admin_credentials` (each new member) | Once `threshold` shares are in: recombine them (accepted only if they yield the recorded recovery key's fingerprint; every attempt consumes the shares), open the KEK and every custody set from their recovery copies, attest the new devices, enroll every enrolled node on them, wrap and verify the KEK on each, commit the record (old members `retired`, new ones `active`), bump the epoch (`rotate-epoch` on the new members), then auto-unseal through them |
+| `reset: true` | Discard the shares submitted so far |
+
+~~~json
+POST /v2/sys/hsm/recover
+{ "share": "5f1c…01" }
+{ "data": { "progress": 1, "threshold": 3, "ready": false, "complete": false, "recovery_fingerprint": "8b0e…" } }
+
+POST /v2/sys/hsm/recover
+{ "members": { "hsm-a2": { "bundle": "{…}", "gateway": "" }, "hsm-b2": { "bundle": "{…}", "gateway": "" } },
+  "admin_credentials": { "hsm-a2": "…", "hsm-b2": "…" } }
+{ "data": { "complete": true, "share_indexes": [1, 4, 5], "new_members": ["hsm-a2", "hsm-b2"],
+            "retired_members": ["hsm-a", "hsm-b"], "epoch": 1, "epoch_rotated": true, "rotation_error": null,
+            "custody_recovered": 2, "custody_unrecovered": [], "invalid_custody_entries": [],
+            "nodes_enrolled": ["vault-1", "vault-2"], "operator_steps": ["…"], "unsealed": true } }
+~~~
+
+A custody set whose recovery copy is missing, does not open or does not derive
+its recorded public key is listed in `custody_unrecovered` and raised as
+`hsm.crypto_failure`; it does not stop the others. A failure before the
+record is committed deletes every node key the ceremony created. The event
+`hsm.recovery_ceremony` records the share indexes used. CLI equivalent:
+`bvault operator hsm recover`.
 
 ### Policy Schema (`sql_*` write gate)
 
@@ -2982,6 +3032,10 @@ caller needs them before a token can exist: `/v1/sys/init`,
 `/v1/sys/seal-status`, `/v1/sys/unseal`, `/v1/sys/health`, and the anonymous
 tier of `/v1/sys/info`. `/v1/sys/cluster-status` additionally accepts a request
 originating from a cluster machine — see [Cluster Status](#cluster-status).
+Under `v2` only, `/v2/sys/hsm/recover` (the shares are the credential, sealed
+node, every pool member unreachable) and the loopback-only
+`/v2/sys/hsm/bootstrap` and `/v2/sys/hsm/migrate-to-pool` join them — see
+[HSM pool recovery](#hsm-pool-recovery-v2-only-no-token).
 
 **Everything else under `/v1/sys` requires a token and is ACL-checked**, at the
 mount-relative path a policy author writes. The routes below do their work

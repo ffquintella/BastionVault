@@ -30,6 +30,7 @@ use crate::{
         clock,
         derive::{self, PqcKeyKind, PqcKeyMaterial},
         pool::{HsmPool, LogEventSink, PoolMember, PoolMemberSpec},
+        recovery::{self, custody_recovery_aad},
         HsmBackend, HsmObjectId, ResolvedHsmConfig,
     },
     storage::{Storage, StorageEntry},
@@ -104,7 +105,7 @@ impl PqcKeypair {
         }
     }
 
-    fn from_seed(kind: PqcKeyKind, seed: &[u8]) -> Result<Self, RvError> {
+    pub(crate) fn from_seed(kind: PqcKeyKind, seed: &[u8]) -> Result<Self, RvError> {
         match kind {
             PqcKeyKind::MlKem768 => MlKem768Provider
                 .keypair_from_seed(seed)
@@ -193,6 +194,9 @@ pub struct CustodyScope {
     /// `bv-wrap-pqc` id by epoch, from the seal record's `wrap_keys`; empty
     /// is a pool that never rotated (the config's id at every epoch).
     pub pqc_wrap_keys: std::collections::BTreeMap<u64, HsmObjectId>,
+    /// The seal record's recovery public key (T454 phase 5): every new set
+    /// gets a recovery copy sealed to it. `None` without recovery.
+    pub recovery_pub: Option<Vec<u8>>,
 }
 
 impl CustodyScope {
@@ -293,6 +297,14 @@ impl CustodyStore {
         let wrap_ctx = Context::new(seed_context, kind.purpose(), epoch, &self.config.node_id);
         let key = self.scope.pqc_key(epoch, self.config.objects.wrap_pqc)?;
         let outcome = self.pool.wrap_all(key, &wrap_ctx, &material.seed).await?;
+        let handle = BvHsmHandle::generate();
+        let recovery = match &self.scope.recovery_pub {
+            Some(public) => {
+                let aad = custody_recovery_aad(&self.scope.cluster_uuid, kind, epoch, &handle.key_id);
+                Some(recovery::seal_copy(public, &aad, &material.seed)?)
+            }
+            None => None,
+        };
         let public_key = material.public_key.clone();
         drop(material); // zeroizes the seed
 
@@ -306,7 +318,7 @@ impl CustodyStore {
         for copy in copies {
             set.insert_copy(copy)?;
         }
-        let handle = BvHsmHandle::generate();
+        set.recovery = recovery;
         let record = CustodyRecord { version: CUSTODY_RECORD_VERSION, key_id: handle.key_id.clone(), public_key, set };
         let key = handle.storage_key()?;
         let value = record.encode()?;
@@ -601,6 +613,7 @@ mod tests {
             ecdh_key: HsmObjectIds::default().identity,
             binding_pub: backend.identity_public_key().unwrap(),
             pqc_wrap_keys: Default::default(),
+            recovery_pub: None,
         };
         Arc::new(CustodyStore::new(storage, backend, cfg(ttl), scope).unwrap())
     }

@@ -280,6 +280,7 @@ GET    /v2/sys/hsm/status [routed] -> sys/hsm/status
 POST   /v2/sys/hsm/bootstrap [cluster-local] -- HSM pool init bootstrap before any token can exist: loopback peer only, refused once initialized, needs every member's bv-admin credential
 POST   /v2/sys/hsm/migrate-to-pool [cluster-local] -- per-node to pool HSM migration while the node is sealed (no token can be checked): loopback peer only, needs a `migrate_from` block, a per-node seal record and a completed bootstrap
 POST   /v2/sys/hsm/rotate-epoch [routed] -> sys/hsm/rotate-epoch
+POST   /v2/sys/hsm/recover [public-probe] -- HSM pool recovery ceremony: the recovery shares are the credential, as for sys/unseal (no token can be validated while sealed); accepted only on a sealed node while every pool member is unreachable or retired, and a recombination is accepted only if it yields the recorded recovery key
 GET    /v2/sys/hsm/members [routed] -> sys/hsm/members
 POST   /v2/sys/hsm/members/{name}/retire [routed] -> sys/hsm/members/{name}/retire
 POST   /v2/sys/hsm/members/{name} [routed] -> sys/hsm/members/{name}

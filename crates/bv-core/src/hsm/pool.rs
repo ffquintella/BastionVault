@@ -79,6 +79,7 @@ pub enum PoolEventKind {
     MemberRetired,
     MemberPromoted,
     EpochRotated,
+    RecoveryCeremony,
 }
 
 impl PoolEventKind {
@@ -98,6 +99,7 @@ impl PoolEventKind {
             PoolEventKind::MemberRetired => "hsm.member_retired",
             PoolEventKind::MemberPromoted => "hsm.member_promoted",
             PoolEventKind::EpochRotated => "hsm.epoch_rotated",
+            PoolEventKind::RecoveryCeremony => "hsm.recovery_ceremony",
         }
     }
 }
@@ -134,7 +136,10 @@ impl PoolEventSink for LogEventSink {
             | PoolEventKind::EpochRotated => {
                 log::info!(target: "security", "{name}: member={member} hsm_id={hsm_id} {detail}")
             }
-            PoolEventKind::NodeRevoked | PoolEventKind::MemberRetired | PoolEventKind::RevocationPending => {
+            PoolEventKind::NodeRevoked
+            | PoolEventKind::MemberRetired
+            | PoolEventKind::RevocationPending
+            | PoolEventKind::RecoveryCeremony => {
                 log::warn!(target: "security", "{name}: member={member} hsm_id={hsm_id} {detail}")
             }
             PoolEventKind::SetUnderReplicated => {

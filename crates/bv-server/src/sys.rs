@@ -65,6 +65,10 @@ pub use bastion_vault::api::sys::InitRequest;
 #[zeroize(drop)]
 pub struct InitResponse {
     pub keys: Vec<String>,
+    /// Recovery shares (hex) of an HSM pool with a recovery key: shown once,
+    /// stored nowhere, never usable as unseal keys. Absent otherwise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recovery_keys: Vec<String>,
     pub root_token: String,
 }
 
@@ -160,13 +164,28 @@ async fn sys_init_put_request_handler(
         }
     };
 
+    // Recovery shares (HSM pool with `recovery = "shamir-ceremony"`): both or
+    // neither; the provider applies the default split and refuses them on
+    // any seal without a recovery key.
+    let recovery = match (payload.recovery_shares, payload.recovery_threshold) {
+        (Some(shares), Some(threshold)) => Some(bastion_vault::seal::RecoverySplit { shares, threshold }),
+        (None, None) => None,
+        _ => {
+            return Ok(response_error(
+                StatusCode::BAD_REQUEST,
+                "recovery_shares and recovery_threshold must be provided together",
+            ))
+        }
+    };
+
     #[cfg(not(feature = "sync_handler"))]
-    let result = core.init(&seal_config).await?;
+    let result = core.init_with_recovery(&seal_config, recovery).await?;
     #[cfg(feature = "sync_handler")]
-    let result = core.init(&seal_config)?;
+    let result = core.init_with_recovery(&seal_config, recovery)?;
 
     let resp = InitResponse {
         keys: result.secret_shares.iter().map(hex::encode).collect(),
+        recovery_keys: result.recovery_shares.iter().map(hex::encode).collect(),
         root_token: result.root_token.clone(),
     };
 
@@ -399,6 +418,90 @@ async fn sys_hsm_migrate_request_handler(
         }
     }
     Ok(response_json_ok(None, json!({ "data": data })))
+}
+
+/// POST `/v2/sys/hsm/recover` — the HSM pool recovery ceremony (T454 phase
+/// 5). As for `sys/unseal`, the shares are the credential and no token is
+/// checked; only a sealed node with every member unreachable or retired
+/// accepts it (the provider re-checks). The body (a `share`, the new
+/// `members` with `admin_credentials`, or `reset`) is never logged or echoed.
+async fn sys_hsm_recover_request_handler(
+    _req: HttpRequest,
+    mut body: web::Bytes,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, HttpError> {
+    #[cfg(not(feature = "sync_handler"))]
+    let initialized = core.inited().await?;
+    #[cfg(feature = "sync_handler")]
+    let initialized = core.inited()?;
+    if !initialized {
+        return Ok(response_error(StatusCode::BAD_REQUEST, "the vault is not initialized"));
+    }
+    if !core.sealed() {
+        return Ok(response_error(StatusCode::BAD_REQUEST, "this node is unsealed; HSM recovery runs only on a sealed node"));
+    }
+    let provider = core.seal_provider();
+    let Some(hsm) = provider.as_hsm() else {
+        return Ok(response_error(StatusCode::BAD_REQUEST, "this vault's seal is not an HSM seal"));
+    };
+    let parsed = serde_json::from_slice::<serde_json::Value>(&body)
+        .map_err(|_| RvError::ErrHsm("the recovery request body is not JSON".into()))
+        .and_then(|payload| parse_recovery_submission(&payload));
+    body.clear();
+    let submission = match parsed {
+        Ok(s) => s,
+        Err(e) => return Ok(response_error(StatusCode::BAD_REQUEST, &e.to_string())),
+    };
+    #[cfg(not(feature = "sync_handler"))]
+    let outcome = hsm.recover_submit(submission, core.barrier.clone(), "recovery-ceremony").await;
+    #[cfg(feature = "sync_handler")]
+    let outcome = hsm.recover_submit(submission, core.barrier.clone(), "recovery-ceremony");
+    let mut data = match outcome {
+        Ok(data) => data,
+        Err(e) => return Ok(response_error(StatusCode::BAD_REQUEST, &e.to_string())),
+    };
+    // A completed ceremony: unseal through the new members, never the copy.
+    if data["complete"] == json!(true) {
+        #[cfg(not(feature = "sync_handler"))]
+        let unsealed = core.auto_unseal().await;
+        #[cfg(feature = "sync_handler")]
+        let unsealed = core.auto_unseal();
+        if let Some(obj) = data.as_object_mut() {
+            obj.insert("unsealed".into(), json!(unsealed.as_ref().is_ok_and(|u| *u)));
+            if let Err(e) = unsealed {
+                obj.insert("unseal_error".into(), json!(e.to_string()));
+            }
+        }
+    }
+    Ok(response_json_ok(None, json!({ "data": data })))
+}
+
+/// The `v2/sys/hsm/recover` body. The share is decoded into a zeroizing
+/// buffer; a malformed one is refused without being echoed.
+fn parse_recovery_submission(payload: &serde_json::Value) -> Result<bastion_vault::seal::hsm::RecoverySubmission, RvError> {
+    use bastion_vault::seal::hsm::{RecoveryMember, RecoverySubmission};
+    let mut submission = RecoverySubmission {
+        reset: payload.get("reset").and_then(|v| v.as_bool()).unwrap_or(false),
+        ..Default::default()
+    };
+    if let Some(share) = payload.get("share") {
+        let share = share.as_str().ok_or_else(|| RvError::ErrHsm("`share` must be a hex string".into()))?;
+        submission.share = Some(bastion_vault::hsm::recovery::decode_share(share)?);
+    }
+    if let Some(members) = payload.get("members") {
+        let members = members.as_object().ok_or_else(|| RvError::ErrHsm("`members` must be an object".into()))?;
+        for (name, member) in members {
+            let bundle = member
+                .get("bundle")
+                .and_then(|b| b.as_str())
+                .ok_or_else(|| RvError::ErrHsm(format!("member {name:?} needs a `bundle` string")))?;
+            let gateway = member.get("gateway").and_then(|g| g.as_str()).unwrap_or_default().to_string();
+            let bundle = bastion_vault::hsm::ceremony::AttestationBundle::decode(bundle.as_bytes())?;
+            submission.members.insert(name.clone(), RecoveryMember { bundle, gateway });
+        }
+        submission.admin = bastion_vault::hsm::admin::AdminCredentials::from_json(payload.get("admin_credentials"))?;
+    }
+    Ok(submission)
 }
 
 /// GET `/v2/sys/policy-schema` — the `sql_*` write gate (read-only).

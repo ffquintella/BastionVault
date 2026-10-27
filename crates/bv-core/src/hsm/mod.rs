@@ -37,6 +37,7 @@ pub mod derive;
 pub mod enroll;
 pub mod node_creds;
 pub mod pool;
+pub mod recovery;
 pub mod repair;
 pub mod replicate;
 

@@ -31,7 +31,7 @@ use crate::{
         MountTable, MountsMonitor, MountsRouter, CORE_MOUNT_CONFIG_PATH, LOGICAL_BARRIER_PREFIX, SYSTEM_BARRIER_PREFIX,
     },
     router::Router,
-    seal::{SealProvider, ShamirSealProvider},
+    seal::{RecoverySplit, SealProvider, ShamirSealProvider},
     shamir::{ShamirSecret, SHAMIR_OVERHEAD},
     storage::{
         barrier::SecurityBarrier, barrier_view::BarrierView, new_barrier, physical, Backend as PhysicalBackend,
@@ -81,6 +81,10 @@ impl SealConfig {
 #[zeroize(drop)]
 pub struct InitResult {
     pub secret_shares: Zeroizing<Vec<Vec<u8>>>,
+    /// Recovery shares of an auto-unseal seal that has a recovery key (HSM
+    /// pool, `recovery = "shamir-ceremony"`). Never unseal shares; returned
+    /// once and stored nowhere.
+    pub recovery_shares: Zeroizing<Vec<Vec<u8>>>,
     pub root_token: String,
 }
 
@@ -380,6 +384,17 @@ impl Core {
     }
 
     pub async fn init(&self, seal_config: &SealConfig) -> Result<InitResult, RvError> {
+        self.init_with_recovery(seal_config, None).await
+    }
+
+    /// [`Self::init`] with recovery-share parameters (`recovery_shares` /
+    /// `recovery_threshold`), which only an HSM pool seal with a recovery
+    /// key accepts; any other seal refuses them before anything is written.
+    pub async fn init_with_recovery(
+        &self,
+        seal_config: &SealConfig,
+        recovery: Option<RecoverySplit>,
+    ) -> Result<InitResult, RvError> {
         let inited = self.inited().await?;
         if inited {
             return Err(RvError::ErrBarrierAlreadyInit);
@@ -389,6 +404,7 @@ impl Core {
         // Before the first write: a provider refusal after `barrier.init`
         // would leave an initialized barrier whose KEK nobody holds.
         self.seal_provider().check_init(seal_config).await?;
+        self.seal_provider().check_init_recovery(recovery).await?;
 
         // Encode the seal configuration
         let serialized_seal_config = serde_json::to_string(seal_config)?;
@@ -414,7 +430,11 @@ impl Core {
         // Initialize the barrier
         barrier.init(kek.deref().as_slice()).await?;
 
-        let mut init_result = InitResult { secret_shares: Zeroizing::new(Vec::new()), root_token: String::new() };
+        let mut init_result = InitResult {
+            secret_shares: Zeroizing::new(Vec::new()),
+            recovery_shares: Zeroizing::new(Vec::new()),
+            root_token: String::new(),
+        };
 
         // Unseal the barrier
         barrier.unseal(kek.deref().as_slice()).await?;
@@ -431,8 +451,16 @@ impl Core {
         // KEK custody is delegated to the active seal provider. The default
         // Shamir provider reproduces the original behaviour (split into
         // operator shares, or the raw KEK for a 1-of-1 config); an HSM provider
-        // wraps the KEK under the device and returns no shares (auto-unseal).
-        init_result.secret_shares = self.seal_provider().init_kek(kek.deref().as_slice(), seal_config).await?;
+        // wraps the KEK under the device and returns no unseal shares
+        // (auto-unseal); what an auto-unseal provider returns are recovery
+        // shares, reported apart so no client mistakes them for unseal keys.
+        let provider = self.seal_provider();
+        let shares = provider.init_kek_with_recovery(kek.deref().as_slice(), seal_config, recovery).await?;
+        if provider.requires_shares() {
+            init_result.secret_shares = shares;
+        } else {
+            init_result.recovery_shares = shares;
+        }
 
         defer! (
             // Ensure the barrier is re-sealed

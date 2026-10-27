@@ -41,6 +41,8 @@ pub enum HsmCommands {
     Bootstrap(HsmBootstrap),
     /// Provision a factory-state device into the pool layout and write its attestation bundle (local, no server).
     Provision(HsmProvision),
+    /// After losing both pool devices: submit the recovery shares and move the pool onto two new devices.
+    Recover(HsmRecover),
 }
 
 #[derive(Subcommand)]
@@ -77,6 +79,7 @@ impl Hsm {
             HsmCommands::RotateEpoch(c) => c.execute(),
             HsmCommands::MigrateToPool(c) => c.execute(),
             HsmCommands::Provision(c) => exit_code(c.run()),
+            HsmCommands::Recover(c) => c.execute(),
         }
     }
 }
@@ -416,6 +419,110 @@ impl CommandExecutor for HsmBootstrap {
     }
 }
 
+/// `operator hsm recover` (T454 phase 5). Shares come from `--share env:VAR`
+/// or hidden TTY prompts, never from an argument; each one is submitted on
+/// its own, then the new members and their admin credentials.
+#[derive(Parser, Deref)]
+pub struct HsmRecover {
+    /// `NAME=FILE`: a new member and the attestation bundle `provision` wrote for it. Repeat per member.
+    #[arg(long = "member", value_name = "NAME=FILE")]
+    members: Vec<String>,
+    /// `NAME=URL`: the https:// mTLS gateway of a new yubihsm2 member.
+    #[arg(long = "gateway", value_name = "NAME=URL")]
+    gateways: Vec<String>,
+    /// `env:VAR` holding one recovery share (hex). Repeat per share; without it the shares are prompted on the TTY.
+    #[arg(long = "share", value_name = "env:VAR")]
+    shares: Vec<String>,
+    /// Discard the shares submitted so far, and nothing else.
+    #[arg(long)]
+    reset: bool,
+    #[command(flatten)]
+    admin: AdminArgs,
+    #[deref]
+    #[command(flatten, next_help_heading = "HTTP Options")]
+    http_options: command::HttpOptions,
+}
+
+const RECOVER_PATH: &str = "/v2/sys/hsm/recover";
+
+/// The `data` of a successful `recover` response, or the server's refusal.
+fn recover_step(client: &crate::api::Client, body: Map<String, Value>) -> Result<Value, RvError> {
+    let resp = client.request_write(RECOVER_PATH.to_string(), Some(body))?;
+    let data = resp.response_data.clone().unwrap_or(Value::Null);
+    if resp.response_status != 200 {
+        let why = data.get("error").and_then(|e| e.as_str()).unwrap_or("refused").to_string();
+        return Err(RvError::ErrString(format!("{RECOVER_PATH}: {why}")));
+    }
+    Ok(data.get("data").cloned().unwrap_or(data))
+}
+
+/// `NAME=VALUE` arguments into a map; a missing `=` is refused.
+fn name_values(flag: &str, specs: &[String]) -> Result<Map<String, Value>, RvError> {
+    let mut out = Map::new();
+    for spec in specs {
+        let (name, value) =
+            spec.split_once('=').ok_or_else(|| RvError::ErrString(format!("--{flag} {spec:?}: expected NAME=VALUE")))?;
+        out.insert(name.to_string(), Value::String(value.to_string()));
+    }
+    Ok(out)
+}
+
+impl CommandExecutor for HsmRecover {
+    fn execute(&mut self) -> ExitCode {
+        exit_code(self.main())
+    }
+
+    fn main(&self) -> Result<(), RvError> {
+        let client = self.client()?;
+        if self.reset {
+            let mut body = Map::new();
+            body.insert("reset".into(), Value::Bool(true));
+            println!("{}", serde_json::to_string_pretty(&recover_step(&client, body)?).unwrap_or_default());
+            return Ok(());
+        }
+        // Everything that can fail locally fails before a share is sent.
+        let bundles = read_bundles(&self.members)?;
+        if bundles.is_empty() {
+            return Err(RvError::ErrString("give each new member as --member NAME=FILE".into()));
+        }
+        let gateways = name_values("gateway", &self.gateways)?;
+        let admin = self.admin.credentials()?;
+        let mut members = Map::new();
+        for (name, bundle) in bundles {
+            let mut member = Map::new();
+            member.insert("bundle".into(), bundle);
+            member.insert("gateway".into(), gateways.get(&name).cloned().unwrap_or(Value::String(String::new())));
+            members.insert(name, Value::Object(member));
+        }
+
+        let mut submitted = 0usize;
+        loop {
+            let source = match self.shares.get(submitted) {
+                Some(spec) => spec.as_str(),
+                None if !self.shares.is_empty() => {
+                    return Err(RvError::ErrString(format!("{submitted} share(s) given; the ceremony needs more")))
+                }
+                None => "",
+            };
+            let share = zeroize::Zeroizing::new(read_secret(&format!("recovery share {}", submitted + 1), source)?);
+            let mut body = Map::new();
+            body.insert("share".into(), Value::String(share.trim().to_string()));
+            let progress = recover_step(&client, body)?;
+            submitted += 1;
+            eprintln!("share accepted: {} of {}", progress["progress"], progress["threshold"]);
+            if progress["ready"] == Value::Bool(true) {
+                break;
+            }
+        }
+
+        let mut body = Map::new();
+        body.insert("members".into(), Value::Object(members));
+        body.insert("admin_credentials".into(), Value::Object(admin));
+        println!("{}", serde_json::to_string_pretty(&recover_step(&client, body)?).unwrap_or_default());
+        Ok(())
+    }
+}
+
 /// Runs on the HSM host, against the device directly; the vault is not involved.
 #[derive(Parser)]
 pub struct HsmProvision {
@@ -520,8 +627,34 @@ fn provision_yubihsm2(
 
 #[cfg(test)]
 mod test {
-    use super::{read_admin_credentials, read_bundles, read_secret};
+    use super::{name_values, read_admin_credentials, read_bundles, read_secret};
     use crate::{errors::RvError, test_utils::TestHttpServer};
+
+    /// The recovery route exists under v2 only, takes no token, and refuses
+    /// an unsealed node (and a non-HSM seal) without echoing the body.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_hsm_recover_is_refused_on_an_unsealed_or_non_hsm_vault() {
+        let server = TestHttpServer::new_with_prometheus("test_hsm_recover_refused", true).await;
+        let secret = "ab".repeat(65);
+        let body = serde_json::json!({ "share": secret });
+        let out = server.write("v2/sys/hsm/recover", body.as_object().cloned(), None);
+        let status = out.as_ref().map(|(s, _)| *s).unwrap_or(0);
+        assert!(status == 400 || out.is_err(), "{out:?}");
+        if let Ok((_, body)) = &out {
+            assert!(body.to_string().contains("unsealed"), "{body}");
+            assert!(!body.to_string().contains(&secret), "the share is never echoed");
+        }
+        let v1 = server.write("v1/sys/hsm/recover", body.as_object().cloned(), None);
+        assert!(v1.as_ref().map(|(s, _)| *s == 404 || *s == 405).unwrap_or(true), "v1 is frozen: {v1:?}");
+    }
+
+    #[test]
+    fn recovery_shares_never_come_from_an_argument() {
+        let err = read_secret("recovery share 1", "abcdef").unwrap_err();
+        assert!(err.to_string().contains("never from an argument") && !err.to_string().contains("abcdef"));
+        assert!(name_values("gateway", &["hsm-c".into()]).is_err());
+        assert_eq!(name_values("gateway", &["hsm-c=https://c:8250".into()]).unwrap()["hsm-c"], "https://c:8250");
+    }
 
     /// With no `hsm` seal configured, the status endpoint reports the classic
     /// Shamir provider (auto_unseal = false) and the current seal state.

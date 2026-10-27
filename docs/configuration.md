@@ -244,7 +244,7 @@ hsm "yubihsm2" {
 | `state_path` | *(ephemeral)* | (mock) File backing the mock object store. |
 | `node_id` | `$HOSTNAME` | Node identity for context strings / per-node keys. 1–128 characters of `[A-Za-z0-9._-]`. |
 | `pqc_key_cache_ttl` | `60s` | Unwrapped-seed cache TTL; `0` disables caching. |
-| `recovery` | `none` | `none` or `shamir-ceremony` (init-time only). `shamir-ceremony` is refused at `init` in the per-node topology; see [docs/hsm.md](hsm.md#recovery-modes). |
+| `recovery` | `none` | `none` or `shamir-ceremony` (init-time only). `shamir-ceremony` is refused at `init` in the per-node topology and by `migrate-to-pool`; in a pool, init creates the recovery key and returns its shares (`recovery_shares` / `recovery_threshold`, default 5 / 3); see [docs/hsm.md](hsm.md#recovery-modes). |
 | `topology` | `per-node` | `per-node` (one device per node) or `pool` (two devices shared by the cluster; see below). |
 
 > The mock backend has no hardware protection and refuses to start when

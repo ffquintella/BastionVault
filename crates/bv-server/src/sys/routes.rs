@@ -395,6 +395,10 @@ pub(crate) const V2_ONLY: &[ResourceSpec] = &[
     resource!("/hsm/rotate-epoch" => [
         route!(routed Post => sys_hsm_pool_request_handler, "sys/hsm/rotate-epoch"),
     ]),
+    resource!("/hsm/recover" => [
+        route!(public_probe Post => sys_hsm_recover_request_handler,
+            "HSM pool recovery ceremony: the recovery shares are the credential, as for sys/unseal (no token can be validated while sealed); accepted only on a sealed node while every pool member is unreachable or retired, and a recombination is accepted only if it yields the recorded recovery key"),
+    ]),
     resource!("/hsm/members" => [route!(routed Get => sys_hsm_pool_request_handler, "sys/hsm/members")]),
     resource!("/hsm/members/{name}/retire" => [
         route!(routed Post => sys_hsm_pool_request_handler, "sys/hsm/members/{name}/retire"),

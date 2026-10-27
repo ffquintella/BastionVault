@@ -113,8 +113,13 @@ bvault operator init --key-shares=5 --key-threshold=3 # Shamir-sealed vault
 |--------|-------------|
 | `--key-shares` | Number of key shares to generate (required for Shamir; omit for HSM) |
 | `--key-threshold` | Number of shares required to unseal (required for Shamir; omit for HSM) |
+| `--recovery-shares` | HSM pool with `recovery = "shamir-ceremony"` only: recovery shares to generate (default 5). Any other seal refuses it |
+| `--recovery-threshold` | Recovery shares the recovery ceremony needs (default 3); give it with `--recovery-shares` |
 
 Returns a list of unseal keys (empty for an HSM seal) and a root token. Store these securely.
+An HSM pool with `recovery = "shamir-ceremony"` also returns `recovery_keys`: the recovery
+shares, printed once and stored nowhere. They are not unseal keys; hand one to each holder
+(see `operator hsm recover`).
 
 ## operator unseal
 
@@ -156,7 +161,16 @@ bvault operator hsm provision (--mock-state-path <file> --serial <s> | --connect
 bvault operator hsm bootstrap --bundle <member>=<file> [--bundle …] --admin <member> [--admin <member>…]
 bvault operator hsm rotate-epoch --admin <member> [--admin <member>…]
 bvault operator hsm migrate-to-pool   # loopback, with `migrate_from` configured, after bootstrap
+# Both devices lost (sealed node, no token): shares, then the two new devices.
+bvault operator hsm recover --member <name>=<bundle.json> [--member …] [--gateway <name>=https://…] --admin <name> [--admin …] [--share env:VAR …]
+bvault operator hsm recover --reset   # discard the shares submitted so far
 ~~~
+
+`recover` submits each share on its own (`--share env:VAR`, repeatable, or a
+hidden TTY prompt per share until the threshold is reached; a literal share is
+refused), then the new members and their admin credentials. It needs no token:
+the server accepts it only on a sealed node while every pool member is
+unreachable.
 
 | Option | Description |
 |--------|-------------|
@@ -165,6 +179,9 @@ bvault operator hsm migrate-to-pool   # loopback, with `migrate_from` configured
 | `--fingerprint` | The node's transport key fingerprint, as its log shows it; confirm it out of band |
 | `--bundle` | The attestation bundle (JSON) that provisioning the device produced |
 | `--run` | Run the repair job now instead of showing the last run |
+| `--member <name>=<file>` | `recover`: a new device and its attestation bundle |
+| `--share env:VAR` | `recover`: read one recovery share (hex) from `VAR`; repeat per share |
+| `--reset` | `recover`: discard the shares this node holds for a running ceremony |
 
 ## read
 

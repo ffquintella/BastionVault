@@ -138,7 +138,7 @@ operator-unseal.
 | `state_path` | mock | No | *(ephemeral)* | File backing the mock object store. Empty ⇒ in-memory only. |
 | `node_id` | both | No | `$HOSTNAME` | Stable node identity used in context strings and per-node key routing. Set explicitly in clusters. 1–128 characters of `[A-Za-z0-9._-]` (it names the node's unwrap-counter key). |
 | `pqc_key_cache_ttl` | both | No | `60s` | TTL for the unwrapped-seed session cache. `0` disables caching (strict per-operation unwrap). |
-| `recovery` | both | No | `none` | `none` or `shamir-ceremony`. **Honored only at `init`; cannot be enabled later.** `shamir-ceremony` is refused at `init` in the per-node topology (see below). |
+| `recovery` | both | No | `none` | `none` or `shamir-ceremony`. **Honored only at `init`; cannot be enabled later.** `shamir-ceremony` is refused at `init` in the per-node topology and by `migrate-to-pool` (see below). |
 | `topology` | both | No | `per-node` | `per-node` or `pool`. The pool keys (`member`, `min_wrap_copies`, `link`, `credential_dir`) are in [configuration.md](configuration.md#hsm-pool-topology-topology--pool); see [Pool topology](#pool-topology-two-devices-for-the-cluster). |
 
 ### Recovery modes
@@ -153,6 +153,10 @@ operator-unseal.
   with it keeps starting, logs an `error` on every start, and reports
   `recovery_requested: "shamir-ceremony"`, `recovery_configured: false` in
   `v2/sys/hsm/status`. No recovery exists for it; treat it as `none`.
+- `recovery = "shamir-ceremony"` in the **pool** topology (T454 phase 5) — see
+  [Recovery](#recovery-pool-topology-shamir-ceremony) below. This is the one
+  explicit software break-glass path: a quorum of share holders together
+  with a copy of storage can decrypt everything.
 
 ### Per-node HSM objects
 
@@ -235,8 +239,9 @@ devices, node enrollment, repair and recovery come in later phases.
 
 - **Init** needs both members reachable and an explicit `recovery`. The KEK is
   wrapped on each member at once and stored as a two-copy set in a v2 seal
-  record with `topology = pool` and both members `active`. `recovery =
-  "shamir-ceremony"` is refused until the recovery copy exists (phase 5).
+  record with `topology = pool` and both members `active`. With `recovery =
+  "shamir-ceremony"` it also creates the recovery key and returns its shares
+  (see [Recovery](#recovery-pool-topology-shamir-ceremony)).
 - **Unseal** tries the members in this node's preference order
   (`SHA-256(node_id ‖ hsm_id)`, or `prefer = true`). On a member it takes a
   fresh per-node counter, gets a signed unwrap authorization, checks it was
@@ -328,6 +333,52 @@ bvault operator hsm repair --run                                # drops hsm-b's 
   `migrate_from { connector = "…", password = "env:VAR" }`, then
   `operator hsm bootstrap …` and `bvault operator hsm migrate-to-pool` on that
   node (loopback). The cluster keeps its id and epoch; the change is one-way.
+  A migrated pool has no recovery key (it is made at init only), so the node
+  must run `recovery = "none"` for the migration.
+
+#### Recovery (pool topology, `shamir-ceremony`)
+
+Init with `recovery = "shamir-ceremony"` generates an ML-KEM-768 recovery
+keypair from a fresh 64-byte seed, splits the seed M-of-N with Shamir
+(`bvault operator init --recovery-shares 5 --recovery-threshold 3`, the
+default), prints the shares **once** as `recovery_keys` and keeps only the
+public key, its fingerprint and the split in the seal record. The seed is
+zeroized before init returns. Every blob set (the KEK and each custody key)
+then carries a recovery copy sealed to the public key, so adding one needs no
+secret: custody `create`, `repair` (which also adds a missing one, counted as
+`recovery_copies_added`) and `rotate-epoch` (which re-seals it at the new
+epoch) all do. The copy's AAD binds the set's context, purpose, epoch and key
+id, so a copy moved to another set does not open.
+
+Unseal **never** uses a recovery copy. When both devices are lost:
+
+~~~bash
+# 1. Provision two new devices (bundles c.json, d.json), point this node's
+#    `member` blocks at them, restart it: it stays sealed.
+# 2. Holders submit shares (one hidden prompt each, or --share env:VAR),
+#    then the new devices go in with their admin credentials:
+bvault operator hsm recover --member hsm-a2=c.json --member hsm-b2=d.json --admin hsm-a2 --admin hsm-b2
+~~~
+
+`POST /v2/sys/hsm/recover` takes no token (the shares are the credential, as
+for `sys/unseal`) and is accepted only on a **sealed** node while every member
+that is not retired is unreachable (a transport failure; any device that
+answers refuses the ceremony: repair or `member add` instead). Shares stay in
+that node's memory until the ceremony runs or `--reset`. The ceremony accepts
+the recombined key only if it has the recorded fingerprint (wrong, tampered or
+too few shares are refused, and every attempt consumes the shares); opens the
+KEK's recovery copy; attests the new devices and gives them the epoch's wrap
+keys; enrolls every enrolled node on them; wraps the KEK on each and proves
+each copy by an authorized unwrap; opens the barrier with the recovered KEK
+only to wrap each custody set's seed (checked against its public key) on the
+new devices; commits the record (old members `retired`, their pending
+revocations dropped) against the exact bytes it started from; bumps the epoch
+with `rotate-epoch`; seals the barrier again; and then auto-unseals through the
+new devices. A failure before the commit deletes the node keys it created. It
+raises `hsm.recovery_ceremony` with the share indexes used; a custody set that
+cannot be recovered is listed in `custody_unrecovered` and raised as
+`hsm.crypto_failure`. Other enrolled nodes pick up their new credentials on
+their next refresh. Reset or destroy the lost devices if they reappear.
 
 ### Failure behavior (fail-closed)
 

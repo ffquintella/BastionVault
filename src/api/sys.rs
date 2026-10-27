@@ -26,6 +26,12 @@ pub struct InitRequest {
     pub secret_shares: Option<u8>,
     #[serde(default)]
     pub secret_threshold: Option<u8>,
+    /// Recovery shares of an HSM pool with `recovery = "shamir-ceremony"`
+    /// (Vault's field names; default 5 / 3). Any other seal refuses them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_shares: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_threshold: Option<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,6 +112,12 @@ impl Sys<'_> {
         }
         if let Some(threshold) = init_req.secret_threshold {
             data.insert("secret_threshold".to_string(), threshold.into());
+        }
+        if let Some(shares) = init_req.recovery_shares {
+            data.insert("recovery_shares".to_string(), shares.into());
+        }
+        if let Some(threshold) = init_req.recovery_threshold {
+            data.insert("recovery_threshold".to_string(), threshold.into());
         }
 
         self.request_put(format!("{}/sys/init", self.api_prefix()), Some(data))

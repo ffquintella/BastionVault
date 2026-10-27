@@ -16,6 +16,7 @@ use crate::{
     hsm::{
         blob::{AuthzAlg, HsmId, Purpose},
         blobset::{deserialize_unique_map, BvHsmBlobSet},
+        recovery::{recovery_fingerprint, RecoverySplit},
         HsmObjectId, HsmObjectIds,
     },
 };
@@ -91,13 +92,30 @@ pub struct HsmMember {
     pub pending_revocations: Vec<String>,
 }
 
-/// The recovery key's public half and its fingerprint (T454 phase 5).
+/// The recovery key's public half, its fingerprint and the Shamir split of
+/// its seed (T454 phase 5). No record written before phase 5 holds one, so
+/// `threshold` and `shares` are required rather than defaulted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecoveryPublicKey {
     #[serde(with = "serde_bytes")]
     pub public_key: Vec<u8>,
     /// Hex SHA-256 of `public_key`.
     pub fingerprint: String,
+    /// Shares a recovery ceremony needs.
+    pub threshold: u8,
+    /// Shares init handed out.
+    pub shares: u8,
+}
+
+impl RecoveryPublicKey {
+    pub fn new(public_key: Vec<u8>, split: RecoverySplit) -> Self {
+        let fingerprint = recovery_fingerprint(&public_key);
+        Self { public_key, fingerprint, threshold: split.threshold, shares: split.shares }
+    }
+
+    pub fn split(&self) -> RecoverySplit {
+        RecoverySplit { shares: self.shares, threshold: self.threshold }
+    }
 }
 
 /// Seal record, version 2 (in memory and on disk).
@@ -256,6 +274,9 @@ impl HsmSealRecord {
             if kek.epoch != self.epoch {
                 return Err(invalid(format!("kek set epoch {} differs from record epoch {}", kek.epoch, self.epoch)));
             }
+            if kek.recovery.is_some() && self.recovery_pub.is_none() {
+                return Err(invalid("the KEK has a recovery copy, but the record has no recovery key"));
+            }
         }
         if !self.wrap_keys.is_empty() && !self.wrap_keys.contains_key(&self.epoch) {
             return Err(invalid(format!("wrap keys recorded, but none for the current epoch {}", self.epoch)));
@@ -276,6 +297,12 @@ impl HsmSealRecord {
             }
             if recovery.fingerprint != hex::encode(Sha256::digest(&recovery.public_key)) {
                 return Err(invalid("recovery public key fingerprint does not match the key"));
+            }
+            recovery.split().validate().map_err(|_| {
+                invalid(format!("recovery split {} of {} is not valid", recovery.threshold, recovery.shares))
+            })?;
+            if self.topology != Topology::Pool {
+                return Err(invalid("a recovery key exists only for the pool topology"));
             }
         }
         match self.topology {
@@ -500,14 +527,62 @@ mod tests {
         assert!(pool_with_legacy.encode().is_err(), "pool records drop legacy per-node blobs");
     }
 
+    fn pool_record() -> HsmSealRecord {
+        HsmSealRecord::new_pool(
+            "clu".into(),
+            0,
+            BTreeMap::from([(HsmId::from_parts("mock", "A").unwrap(), member(MemberState::Active))]),
+            v2_kek_set("A", 0),
+        )
+    }
+
     #[test]
-    fn recovery_public_key_must_match_its_fingerprint() {
-        let mut r = HsmSealRecord::new_per_node("clu".into(), 0, v2_kek_set("A", 0));
+    fn recovery_public_key_must_match_its_fingerprint_and_carry_a_valid_split() {
+        let mut r = pool_record();
         let public_key = vec![7u8; ML_KEM_768_PUBLIC_KEY_LEN];
-        let fingerprint = hex::encode(Sha256::digest(&public_key));
-        r.recovery_pub = Some(RecoveryPublicKey { public_key: public_key.clone(), fingerprint });
+        let split = RecoverySplit { shares: 5, threshold: 3 };
+        r.recovery_pub = Some(RecoveryPublicKey::new(public_key.clone(), split));
         assert_eq!(HsmSealRecord::decode(&r.encode().unwrap()).unwrap().record, r);
-        r.recovery_pub = Some(RecoveryPublicKey { public_key, fingerprint: "00".into() });
+
+        let good = r.clone();
+        r.recovery_pub = Some(RecoveryPublicKey { fingerprint: "00".into(), ..RecoveryPublicKey::new(public_key.clone(), split) });
         assert!(r.encode().is_err());
+        for (shares, threshold) in [(5, 1), (2, 3), (255, 3)] {
+            let mut bad = good.clone();
+            bad.recovery_pub.as_mut().unwrap().shares = shares;
+            bad.recovery_pub.as_mut().unwrap().threshold = threshold;
+            assert!(bad.encode().is_err(), "{threshold} of {shares}");
+        }
+        // Required fields: a recovery key without its split does not decode.
+        let mut json: serde_json::Value = serde_json::from_slice(&good.encode().unwrap()).unwrap();
+        json["recovery_pub"].as_object_mut().unwrap().remove("threshold");
+        assert!(HsmSealRecord::decode(&serde_json::to_vec(&json).unwrap()).is_err());
+
+        let mut per_node = HsmSealRecord::new_per_node("clu".into(), 0, v2_kek_set("A", 0));
+        per_node.recovery_pub = good.recovery_pub.clone();
+        assert!(per_node.encode().is_err(), "per-node has no recovery key (spec § Recovery)");
+    }
+
+    #[test]
+    fn a_kek_recovery_copy_needs_the_recovery_key() {
+        use bv_crypto::{KemProvider, MlKem768Provider};
+        let keypair = MlKem768Provider.generate_keypair().unwrap();
+        let mut r = pool_record();
+        let mut kek = r.kek.clone().unwrap();
+        kek.recovery = Some(bv_crypto::KemDemEnvelopeV1::seal(&MlKem768Provider, keypair.public_key(), b"a", b"k").unwrap());
+        r.kek = Some(kek);
+        assert!(r.encode().is_err(), "a stray recovery copy is refused");
+        r.recovery_pub = Some(RecoveryPublicKey::new(keypair.public_key().to_vec(), RecoverySplit::default()));
+        HsmSealRecord::decode(&r.encode().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn records_without_a_recovery_key_still_encode_byte_for_byte() {
+        // Every record written before phase 5 has no `recovery_pub`; writing
+        // it back adds nothing.
+        let r = pool_record();
+        let bytes = r.encode().unwrap();
+        assert!(!String::from_utf8(bytes.clone()).unwrap().contains("recovery"));
+        assert_eq!(HsmSealRecord::decode(&bytes).unwrap().record.encode().unwrap(), bytes);
     }
 }

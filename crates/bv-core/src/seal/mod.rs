@@ -14,6 +14,7 @@
 
 use zeroize::Zeroizing;
 
+pub use crate::hsm::recovery::RecoverySplit;
 use crate::{core::SealConfig, errors::RvError, shamir::ShamirSecret};
 
 pub mod hsm;
@@ -35,9 +36,38 @@ pub trait SealProvider: Send + Sync {
     }
 
     /// Persist whatever recovery material this provider needs for the freshly
-    /// generated `kek`, and return the shares to hand back to the operator
-    /// (empty for auto-unseal providers).
+    /// generated `kek`, and return the shares to hand back to the operator.
+    /// For a share-based provider these are unseal shares; an auto-unseal
+    /// provider returns none, or recovery shares (an HSM pool with
+    /// `recovery = "shamir-ceremony"`), which `Core::init` reports apart.
     async fn init_kek(&self, kek: &[u8], seal_config: &SealConfig) -> Result<Zeroizing<Vec<Vec<u8>>>, RvError>;
+
+    /// Refuse recovery-share parameters (`recovery_shares` /
+    /// `recovery_threshold` at init) this provider cannot honour. Called by
+    /// `Core::init_with_recovery` before anything is written. Only an HSM
+    /// pool with a recovery key takes them; everyone else refuses rather
+    /// than ignoring them.
+    async fn check_init_recovery(&self, split: Option<RecoverySplit>) -> Result<(), RvError> {
+        match split {
+            None => Ok(()),
+            Some(_) => Err(RvError::ErrHsmConfigInvalid(format!(
+                "recovery_shares and recovery_threshold apply only to an HSM pool seal with recovery = \
+                 \"shamir-ceremony\"; this vault's seal is `{}`",
+                self.seal_type()
+            ))),
+        }
+    }
+
+    /// [`Self::init_kek`] with explicit recovery-share parameters.
+    async fn init_kek_with_recovery(
+        &self,
+        kek: &[u8],
+        seal_config: &SealConfig,
+        split: Option<RecoverySplit>,
+    ) -> Result<Zeroizing<Vec<Vec<u8>>>, RvError> {
+        self.check_init_recovery(split).await?;
+        self.init_kek(kek, seal_config).await
+    }
 
     /// Recover the KEK with no operator input. Only meaningful when
     /// [`Self::requires_shares`] is `false`; share-based providers return

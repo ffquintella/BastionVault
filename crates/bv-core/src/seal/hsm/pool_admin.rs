@@ -41,16 +41,17 @@ use crate::{
             CredentialDelivery,
         },
         pool::{HsmPool, PoolEvent, PoolEventKind, PoolMember, MAX_LIVE_MEMBERS},
+        recovery::{custody_recovery_aad, kek_recovery_aad, seal_copy as seal_recovery_copy},
         repair::{drop_retired, plan, Pacer, RepairReport, SetPlan, HSM_REPAIR_LOCK, REPAIR_INTERVAL},
         validate_member_name, validate_node_id, verify_identity_signature, HsmObjectId, MemberTarget,
     },
     storage::{Storage, StorageEntry},
 };
 
-type Sessions = Vec<(MemberTarget, Box<dyn HsmAdminSession>)>;
+pub(super) type Sessions = Vec<(MemberTarget, Box<dyn HsmAdminSession>)>;
 
 #[maybe_async::maybe_async]
-async fn close_all(sessions: Sessions) {
+pub(super) async fn close_all(sessions: Sessions) {
     for (target, session) in sessions {
         if let Err(e) = session.close().await {
             log::warn!(target: "security", "closing the admin session on {} failed: {e}", target.name);
@@ -72,7 +73,7 @@ fn member_named<'r>(record: &'r HsmSealRecord, name: &str) -> Result<(&'r HsmId,
 
 impl HsmSealProvider {
     /// Raise a pool event: the security log, and the audit log once attached.
-    fn event(&self, kind: PoolEventKind, member: &str, hsm_id: &str, detail: &str) {
+    pub(super) fn event(&self, kind: PoolEventKind, member: &str, hsm_id: &str, detail: &str) {
         if let Devices::Pool(devices) = &self.devices {
             let event =
                 PoolEvent { kind, member: member.to_string(), hsm_id: hsm_id.to_string(), detail: detail.to_string() };
@@ -80,7 +81,7 @@ impl HsmSealProvider {
         }
     }
 
-    fn pool_devices(&self) -> Result<&PoolDevices, RvError> {
+    pub(super) fn pool_devices(&self) -> Result<&PoolDevices, RvError> {
         match &self.devices {
             Devices::Pool(devices) => Ok(devices),
             Devices::PerNode(_) => Err(RvError::ErrHsm(
@@ -104,7 +105,7 @@ impl HsmSealProvider {
     /// Open a `bv-admin` session on each target, or none: every credential is
     /// checked first, and a session to the wrong device is refused.
     #[maybe_async::maybe_async]
-    async fn open_admin_sessions(
+    pub(super) async fn open_admin_sessions(
         &self,
         targets: Vec<MemberTarget>,
         admin: &AdminCredentials,
@@ -464,7 +465,7 @@ impl HsmSealProvider {
     /// exactly `wrap-data` / `unwrap-data`: generate the missing ones, refuse
     /// one that exists with any other capability.
     #[maybe_async::maybe_async]
-    async fn ensure_wrap_keys(session: &dyn HsmAdminSession, ids: &[WrapKeyIds]) -> Result<(), RvError> {
+    pub(super) async fn ensure_wrap_keys(session: &dyn HsmAdminSession, ids: &[WrapKeyIds]) -> Result<(), RvError> {
         for set in ids {
             for (id, name) in [(set.barrier, "bv-wrap-barrier"), (set.pqc, "bv-wrap-pqc")] {
                 match session.object_info(ObjectKind::WrapKey, id).await? {
@@ -538,8 +539,8 @@ impl HsmSealProvider {
         if record.members.values().any(|m| !m.pending_revocations.is_empty()) {
             return Err(RvError::ErrHsm("apply the pending revocations before rotating the epoch".into()));
         }
-        if record.kek.as_ref().is_none_or(|k| k.recovery.is_some()) {
-            return Err(RvError::ErrHsm("recovery copies are re-sealed by phase 5; rotation refuses them".into()));
+        if record.kek.is_none() {
+            return Err(RvError::ErrHsm("pool seal record has no KEK set".into()));
         }
         let old_epoch = record.epoch;
         let target = record.rotating_to.unwrap_or(old_epoch + 1);
@@ -551,7 +552,7 @@ impl HsmSealProvider {
     }
 
     #[maybe_async::maybe_async]
-    async fn rotate_on(
+    pub(super) async fn rotate_on(
         &self,
         sessions: &Sessions,
         devices: &PoolDevices,
@@ -584,6 +585,7 @@ impl HsmSealProvider {
         let specs = devices.cache.specs_for(pool_cfg, targets_of(record.active_members()));
         let pool = HsmPool::new(&self.config.node_id, specs, 1, devices.clock.clone(), devices.events.clone())?;
         let pacer = Pacer::new(pool_cfg.repair_rate);
+        let recovery_pub = record.recovery_pub.as_ref().map(|r| r.public_key.clone());
         let mut moved = 0usize;
         for key_id in barrier.list(CUSTODY_STORE_PREFIX).await? {
             let key = format!("{CUSTODY_STORE_PREFIX}{key_id}");
@@ -598,15 +600,23 @@ impl HsmSealProvider {
                     custody.set.epoch
                 )));
             }
-            if custody.set.recovery.is_some() {
-                return Err(RvError::ErrHsm(format!("custody key {key_id} has a recovery copy (phase 5)")));
-            }
             let kind = custody.kind()?;
             let ctx_at = |e: u64| {
                 Context::new(kind.seed_context(&record.cluster_uuid, e), kind.purpose(), e, &self.config.node_id)
             };
+            // The recovery copy follows the set to the new epoch (phase 5).
+            let recovery = recovery_pub
+                .as_deref()
+                .map(|public| (public, custody_recovery_aad(&record.cluster_uuid, kind, target, &key_id)));
             let set = self
-                .rewrapped(&pool, &record, &custody.set, &ctx_at(old_epoch), old_ids.pqc, &ctx_at(target), new_ids.pqc)
+                .rewrapped(
+                    &pool,
+                    &record,
+                    &custody.set,
+                    (&ctx_at(old_epoch), old_ids.pqc),
+                    (&ctx_at(target), new_ids.pqc),
+                    recovery,
+                )
                 .await?;
             let _custody_lock = barrier.lock(HSM_CUSTODY_LOCK).await?;
             if barrier.get(&key).await?.is_none_or(|c| c.value != entry.value) {
@@ -621,8 +631,10 @@ impl HsmSealProvider {
         let kek = record.kek.clone().ok_or_else(|| RvError::ErrHsm("pool seal record has no KEK set".into()))?;
         let ctx_old = self.barrier_context(&record.cluster_uuid, old_epoch);
         let ctx_new = self.barrier_context(&record.cluster_uuid, target);
-        let new_kek =
-            self.rewrapped(&pool, &record, &kek, &ctx_old, old_ids.barrier, &ctx_new, new_ids.barrier).await?;
+        let recovery = recovery_pub.as_deref().map(|public| (public, kek_recovery_aad(&record.cluster_uuid, target)));
+        let new_kek = self
+            .rewrapped(&pool, &record, &kek, (&ctx_old, old_ids.barrier), (&ctx_new, new_ids.barrier), recovery)
+            .await?;
         {
             let _custody_lock = physical.lock(HSM_CUSTODY_LOCK).await?;
             let mut current = self.pool_record().await?;
@@ -665,20 +677,25 @@ impl HsmSealProvider {
     }
 
     /// `set` unwrapped once (a `rewrap` authorization) and wrapped on every
-    /// member of `pool` under `new_key` at `new_ctx`: a full set or an error.
+    /// member of `pool` under the new key at the new context: a full set or
+    /// an error. With `recovery` (public key, AAD at the new epoch) the new
+    /// set gets its recovery copy re-sealed from the same plaintext.
     #[maybe_async::maybe_async]
     async fn rewrapped(
         &self,
         pool: &HsmPool,
         record: &HsmSealRecord,
         set: &BvHsmBlobSet,
-        old_ctx: &Context,
-        old_key: HsmObjectId,
-        new_ctx: &Context,
-        new_key: HsmObjectId,
+        (old_ctx, old_key): (&Context, HsmObjectId),
+        (new_ctx, new_key): (&Context, HsmObjectId),
+        recovery: Option<(&[u8], Vec<u8>)>,
     ) -> Result<BvHsmBlobSet, RvError> {
         let plaintext = self.rewrap_source(pool, record, set, old_ctx, old_key).await?;
         let outcome = pool.wrap_on_every_member(new_key, new_ctx, &plaintext).await?;
+        let recovery_copy = match recovery {
+            Some((public, aad)) => Some(seal_recovery_copy(public, &aad, &plaintext)?),
+            None => None,
+        };
         drop(plaintext);
         let mut copies = outcome.copies.into_values();
         let first = copies.next().ok_or_else(|| RvError::ErrHsm("re-wrap produced no copy".into()))?;
@@ -686,6 +703,7 @@ impl HsmSealProvider {
         for copy in copies {
             new_set.insert_copy(copy)?;
         }
+        new_set.recovery = recovery_copy;
         Ok(new_set)
     }
 
@@ -699,6 +717,15 @@ impl HsmSealProvider {
         let source = self.migration_source.as_ref().ok_or_else(|| {
             RvError::ErrHsmConfigInvalid("migrate-to-pool needs a `migrate_from` block in the pool `hsm` block".into())
         })?;
+        // The recovery key is made at init only (spec § Recovery); a migrated
+        // pool has none, so a config that asks for one is refused, not ignored.
+        if self.config.recovery == crate::hsm::RecoveryMode::ShamirCeremony {
+            return Err(RvError::ErrHsmConfigInvalid(
+                "recovery = \"shamir-ceremony\" is honoured at init only: migrate-to-pool creates no recovery key and \
+                 returns no shares. Set recovery = \"none\" for the migration"
+                    .into(),
+            ));
+        }
         let physical = self.physical.as_ref();
         let raw = physical
             .get(super::HSM_SEAL_RECORD_PATH)
@@ -711,7 +738,7 @@ impl HsmSealProvider {
         }
         let kek = self.recover_per_node(source, &stored.record).await?;
         let (cluster_uuid, epoch) = (stored.record.cluster_uuid.clone(), stored.record.epoch);
-        self.write_pool_record(devices, &kek, &cluster_uuid, epoch, Some(&raw)).await?;
+        self.write_pool_record(devices, &kek, &cluster_uuid, epoch, Some(&raw), None).await?;
         drop(kek);
         let legacy = stored.record.legacy_node_blobs.len() + usize::from(stored.record.kek.is_some());
         log::warn!(
@@ -1106,6 +1133,8 @@ impl HsmSealProvider {
             .values()
             .flat_map(|m| m.pending_revocations.iter().map(move |n| format!("{n} on {}", m.name)))
             .collect();
+        // Spec § Recovery, step 5: repair also adds missing recovery copies.
+        let recovery_pub = record.recovery_pub.as_ref().map(|r| r.public_key.clone());
 
         let mut holds: BTreeMap<HsmId, usize> = BTreeMap::new();
         let mut sets_total = 0usize;
@@ -1115,12 +1144,17 @@ impl HsmSealProvider {
             let ctx = self.barrier_context(&record.cluster_uuid, record.epoch);
             let set_plan = plan(&kek, &targets, &retired);
             let mut final_set = kek.clone();
-            if !set_plan.is_empty() {
+            let recovery = recovery_pub
+                .as_deref()
+                .filter(|_| kek.recovery.is_none())
+                .map(|public| (public, kek_recovery_aad(&record.cluster_uuid, kek.epoch)));
+            if !set_plan.is_empty() || recovery.is_some() {
                 let key = record.wrap_key_ids(kek.epoch, &self.config.objects)?.barrier;
-                match self.rewrap_set(&pool, &record, &kek, &set_plan, &ctx, key).await {
+                match self.rewrap_set(&pool, &record, &kek, &set_plan, &ctx, key, recovery).await {
                     Ok((new_set, added, removed, failures)) => {
                         report.failures.extend(failures.into_iter().map(|f| format!("barrier KEK: {f}")));
-                        if added + removed > 0 {
+                        let recovery_added = new_set.recovery.is_some() && kek.recovery.is_none();
+                        if added + removed > 0 || recovery_added {
                             let _custody_lock = physical.lock(HSM_CUSTODY_LOCK).await?;
                             let mut current = self.pool_record().await?;
                             if current.kek.as_ref() == Some(&kek) {
@@ -1128,6 +1162,7 @@ impl HsmSealProvider {
                                 self.store_record(&current).await?;
                                 report.copies_added += added;
                                 report.copies_removed += removed;
+                                report.recovery_copies_added += usize::from(recovery_added);
                                 final_set = new_set;
                             } else {
                                 report.failures.push("barrier KEK: changed during repair; retried next run".into());
@@ -1168,8 +1203,12 @@ impl HsmSealProvider {
                 let set = custody.set.clone();
                 let set_plan = plan(&set, &targets, &retired);
                 let mut final_set = set.clone();
-                if !set_plan.is_empty() {
-                    let kind = custody.kind()?;
+                let kind = custody.kind()?;
+                let recovery = recovery_pub
+                    .as_deref()
+                    .filter(|_| set.recovery.is_none())
+                    .map(|public| (public, custody_recovery_aad(&record.cluster_uuid, kind, set.epoch, &key_id)));
+                if !set_plan.is_empty() || recovery.is_some() {
                     let ctx = Context::new(
                         kind.seed_context(&record.cluster_uuid, set.epoch),
                         kind.purpose(),
@@ -1177,10 +1216,11 @@ impl HsmSealProvider {
                         &self.config.node_id,
                     );
                     let wrap_key = record.wrap_key_ids(set.epoch, &self.config.objects)?.pqc;
-                    match self.rewrap_set(&pool, &record, &set, &set_plan, &ctx, wrap_key).await {
+                    match self.rewrap_set(&pool, &record, &set, &set_plan, &ctx, wrap_key, recovery).await {
                         Ok((new_set, added, removed, failures)) => {
                             report.failures.extend(failures.into_iter().map(|f| format!("custody key {key_id}: {f}")));
-                            if added + removed > 0 {
+                            let recovery_added = new_set.recovery.is_some() && set.recovery.is_none();
+                            if added + removed > 0 || recovery_added {
                                 let _custody_lock = barrier.lock(HSM_CUSTODY_LOCK).await?;
                                 let current = barrier.get(&key).await?;
                                 if current.is_some_and(|c| c.value == entry.value) {
@@ -1188,6 +1228,7 @@ impl HsmSealProvider {
                                     barrier.put(&StorageEntry { key: key.clone(), value: updated.encode()? }).await?;
                                     report.copies_added += added;
                                     report.copies_removed += removed;
+                                    report.recovery_copies_added += usize::from(recovery_added);
                                     final_set = new_set;
                                 } else {
                                     report.failures.push(format!("custody key {key_id}: changed during repair"));
@@ -1244,7 +1285,9 @@ impl HsmSealProvider {
 
     /// Unwrap `set` once through a member that holds it (a `Rewrap`
     /// authorization checked against the pinned key), wrap it on each member
-    /// `plan.add` names, and drop retired copies. The plaintext is zeroized.
+    /// `plan.add` names, seal the missing recovery copy when `recovery`
+    /// (public key, AAD) is given, and drop retired copies. The plaintext is
+    /// zeroized.
     #[maybe_async::maybe_async]
     async fn rewrap_set(
         &self,
@@ -1254,13 +1297,17 @@ impl HsmSealProvider {
         set_plan: &SetPlan,
         ctx: &Context,
         wrap_key: HsmObjectId,
+        recovery: Option<(&[u8], Vec<u8>)>,
     ) -> Result<(BvHsmBlobSet, usize, usize, Vec<String>), RvError> {
         let mut new_set = set.clone();
         let mut failures = Vec::new();
         let mut added = 0;
         let reachable: Vec<&HsmId> = set_plan.add.iter().filter(|id| pool.member(id).is_some()).collect();
-        if !reachable.is_empty() {
+        if !reachable.is_empty() || recovery.is_some() {
             let plaintext = self.rewrap_source(pool, record, set, ctx, wrap_key).await?;
+            if let Some((public, aad)) = &recovery {
+                new_set.recovery = Some(seal_recovery_copy(public, aad, &plaintext)?);
+            }
             for target in reachable {
                 match pool.wrap_on(target, wrap_key, ctx, &plaintext).await {
                     Ok(blob) => {
@@ -1305,7 +1352,7 @@ impl HsmSealProvider {
     }
 
     #[maybe_async::maybe_async]
-    async fn rewrap_unwrap(
+    pub(super) async fn rewrap_unwrap(
         &self,
         member: &PoolMember,
         pinned: &HsmMember,
@@ -1520,9 +1567,15 @@ mod tests {
         hooks: Arc<crate::seal::hsm::hooks::ProviderHooks>,
         seen: Arc<Recorder>,
         min_wrap_copies: usize,
+        recovery: RecoveryMode,
     }
 
     impl Pool {
+        /// A pool whose nodes run `recovery = "shamir-ceremony"`.
+        async fn with_recovery(min_wrap_copies: usize) -> Self {
+            Self { recovery: RecoveryMode::ShamirCeremony, ..Self::new(min_wrap_copies).await }
+        }
+
         async fn new(min_wrap_copies: usize) -> Self {
             let tag = rand_tag();
             let clock = ManualClock::new();
@@ -1547,6 +1600,7 @@ mod tests {
                 },
                 seen,
                 min_wrap_copies,
+                recovery: RecoveryMode::None,
             }
         }
 
@@ -1594,7 +1648,7 @@ mod tests {
                 password: Zeroizing::new(String::new()),
                 domains: vec![1],
                 pqc_key_cache_ttl: Duration::from_secs(60),
-                recovery: RecoveryMode::None,
+                recovery: self.recovery,
                 state_path: String::new(),
                 node_id: node.into(),
                 pool: Some(ResolvedPoolConfig {
@@ -1661,6 +1715,7 @@ mod tests {
                 ecdh_key: HsmObjectIds::default().seed_ecdh,
                 binding_pub,
                 pqc_wrap_keys: record.wrap_keys.iter().map(|(e, k)| (*e, k.pqc)).collect(),
+                recovery_pub: record.recovery_pub.as_ref().map(|r| r.public_key.clone()),
             };
             CustodyStore::with_pool(barrier, pool, provider.config.clone(), scope)
         }
@@ -2055,5 +2110,365 @@ mod tests {
         assert_eq!(n.recover_kek().await.unwrap().as_slice(), kek.as_slice(), "the fixture's KEK, through the pool");
         assert!(n.migrate_to_pool("root").await.is_err(), "one-way, once");
         let _ = std::fs::remove_file(&state);
+    }
+
+    // ---- T454 phase 5: recovery ----------------------------------------
+
+    use crate::{
+        hsm::{
+            custody_store::PqcKeypair,
+            recovery::{recovery_fingerprint, RecoverySplit, ShareSet},
+        },
+        seal::hsm::{RecoveryMember, RecoverySubmission},
+    };
+
+    /// A barrier keyed by the test KEK, so the ceremony's recovered KEK opens
+    /// it; returned sealed, as on a node that cannot unseal.
+    async fn kek_barrier(tag: &str) -> Arc<AESGCMBarrier> {
+        let barrier = Arc::new(AESGCMBarrier::new(new_test_backend(&format!("recovery_{tag}_{}", rand_tag()))));
+        barrier.init(&KEK).await.unwrap();
+        barrier
+    }
+
+    fn storage_of(barrier: &Arc<AESGCMBarrier>) -> Arc<dyn Storage> {
+        barrier.clone()
+    }
+
+    fn sealed(barrier: &Arc<AESGCMBarrier>) -> Arc<dyn SecurityBarrier> {
+        barrier.seal().unwrap();
+        barrier.clone()
+    }
+
+    fn share(shares: &[Vec<u8>], i: usize) -> RecoverySubmission {
+        RecoverySubmission { share: Some(Zeroizing::new(shares[i].clone())), ..Default::default() }
+    }
+
+    impl Pool {
+        /// Init n1 with a recovery key; returns the shares init handed out.
+        async fn init_recovering(&self, split: RecoverySplit) -> (HsmSealProvider, Vec<Vec<u8>>) {
+            let p = self.provider("n1");
+            p.bootstrap_enroll(&self.both(), &self.bundles, "root").await.unwrap();
+            p.check_init(&seal_config()).await.unwrap();
+            p.check_init_recovery(Some(split)).await.unwrap();
+            let shares = p.init_kek_with_recovery(&KEK, &seal_config(), Some(split)).await.unwrap();
+            (p, shares.to_vec())
+        }
+
+        /// Two freshly provisioned devices, reachable, with their bundles.
+        async fn replacements(&self) -> (Arc<MockHsmDevice>, Arc<MockHsmDevice>, [AttestationBundle; 2]) {
+            let (c, bundle_c) = provisioned(&format!("C{}", self.tag), "admin-c", &self.clock).await;
+            let (d, bundle_d) = provisioned(&format!("D{}", self.tag), "admin-d", &self.clock).await;
+            let mut registry = self.registry.lock().unwrap();
+            registry.insert(id_of(&c), c.clone());
+            registry.insert(id_of(&d), d.clone());
+            drop(registry);
+            (c, d, [bundle_c, bundle_d])
+        }
+
+        /// The ceremony's final request: the two new members and their
+        /// admin credentials.
+        fn onto(&self, bundles: &[AttestationBundle; 2]) -> RecoverySubmission {
+            RecoverySubmission {
+                members: BTreeMap::from([
+                    (self.name("c"), RecoveryMember { bundle: bundles[0].clone(), gateway: String::new() }),
+                    (self.name("d"), RecoveryMember { bundle: bundles[1].clone(), gateway: String::new() }),
+                ]),
+                admin: self.admin(&[("c", "admin-c"), ("d", "admin-d")]),
+                ..Default::default()
+            }
+        }
+
+        fn lose_both(&self) {
+            self.a.set_offline(true);
+            self.b.set_offline(true);
+        }
+    }
+
+    /// Every value under every key of `physical`.
+    async fn all_values(physical: &Arc<dyn PhysicalBackend>) -> Vec<(String, Vec<u8>)> {
+        let mut out = Vec::new();
+        let mut pending = vec![String::new()];
+        while let Some(prefix) = pending.pop() {
+            for k in physical.list(&prefix).await.unwrap() {
+                let full = format!("{prefix}{k}");
+                if k.ends_with('/') {
+                    pending.push(full);
+                } else if let Some(e) = physical.get(&full).await.unwrap() {
+                    out.push((full, e.value));
+                }
+            }
+        }
+        out
+    }
+
+    fn recombined(shares: &[Vec<u8>], take: &[usize], record: &HsmSealRecord) -> crate::hsm::recovery::RecoveryKey {
+        let mut set = ShareSet::default();
+        for i in take {
+            set.add(Zeroizing::new(shares[*i].clone())).unwrap();
+        }
+        let r = record.recovery_pub.as_ref().unwrap();
+        set.combine(r.threshold, &r.fingerprint).unwrap()
+    }
+
+    #[tokio::test]
+    async fn shamir_init_hands_out_shares_once_and_stores_only_the_public_key() {
+        let p = Pool::with_recovery(1).await;
+        let (n1, shares) = p.init_recovering(RecoverySplit { shares: 5, threshold: 3 }).await;
+        assert_eq!(shares.len(), 5);
+        let record = n1.pool_record().await.unwrap();
+        let r = record.recovery_pub.as_ref().unwrap();
+        assert_eq!((r.threshold, r.shares), (3, 5));
+        assert_eq!(r.fingerprint, recovery_fingerprint(&r.public_key));
+        let kek = record.kek.as_ref().unwrap();
+        let key = recombined(&shares, &[4, 0, 2], &record);
+        let opened = key.open(kek.recovery.as_ref().unwrap(), &kek_recovery_aad(&record.cluster_uuid, 0)).unwrap();
+        assert_eq!(opened.as_slice(), &KEK, "the KEK's recovery copy opens with any 3 shares");
+
+        // Regression: no share is ever stored, raw or hex, anywhere.
+        let values = all_values(&p.physical).await;
+        for s in &shares {
+            let hex_share = hex::encode(s);
+            for (key, value) in &values {
+                assert!(!value.windows(s.len()).any(|w| w == s.as_slice()), "share bytes in {key}");
+                assert!(!String::from_utf8_lossy(value).contains(&hex_share), "share hex in {key}");
+            }
+        }
+        let status = serde_json::to_string(&n1.status().await.unwrap()).unwrap();
+        assert!(status.contains("\"recovery_configured\":true") && status.contains(&r.fingerprint), "{status}");
+        assert!(shares.iter().all(|s| !status.contains(&hex::encode(s))), "status never carries a share");
+
+        // Custody keys created under a recovery key get their own copy.
+        let barrier = p.barrier().await;
+        let (handle, public) = p.custody(&n1, barrier.clone()).await.create(PqcKeyKind::MlKem768).await.unwrap();
+        let entry = barrier.get(&format!("{CUSTODY_STORE_PREFIX}{}", handle.key_id)).await.unwrap().unwrap();
+        let custody = CustodyRecord::decode(&handle.key_id, &entry.value).unwrap();
+        let aad = custody_recovery_aad(&record.cluster_uuid, PqcKeyKind::MlKem768, 0, &handle.key_id);
+        let seed = key.open(custody.set.recovery.as_ref().unwrap(), &aad).unwrap();
+        assert_eq!(PqcKeypair::from_seed(PqcKeyKind::MlKem768, &seed).unwrap().public_key(), public.as_slice());
+    }
+
+    #[tokio::test]
+    async fn recovery_is_refused_while_a_member_answers_or_the_node_is_unsealed() {
+        let p = Pool::with_recovery(1).await;
+        let (n1, shares) = p.init_recovering(RecoverySplit::default()).await;
+        let barrier = kek_barrier("gate").await;
+        let err = n1.recover_submit(share(&shares, 0), sealed(&barrier), "test").await.unwrap_err();
+        assert!(err.to_string().contains("unreachable or retired"), "{err}");
+        p.a.set_offline(true);
+        let err = n1.recover_submit(share(&shares, 0), sealed(&barrier), "test").await.unwrap_err();
+        assert!(err.to_string().contains(&p.name("b")), "the answering member is named: {err}");
+        assert!(!err.to_string().contains(&hex::encode(&shares[0])), "never echoed");
+        p.b.set_offline(true);
+        barrier.unseal(&KEK).await.unwrap();
+        let unsealed: Arc<dyn SecurityBarrier> = barrier.clone();
+        let err = n1.recover_submit(share(&shares, 0), unsealed, "test").await.unwrap_err();
+        assert!(err.to_string().contains("unsealed"), "{err}");
+        assert_eq!(n1.recovery_progress(), 0, "nothing was taken in");
+
+        // No recovery key, no ceremony.
+        let none = Pool::new(1).await;
+        let n = none.init().await;
+        none.lose_both();
+        let err = n.recover_submit(share(&shares, 0), sealed(&kek_barrier("none").await), "t").await.unwrap_err();
+        assert!(err.to_string().contains("recovery = \"none\""), "{err}");
+    }
+
+    #[tokio::test]
+    async fn the_ceremony_moves_the_pool_onto_two_new_devices() {
+        let p = Pool::with_recovery(1).await;
+        let (n1, shares) = p.init_recovering(RecoverySplit { shares: 5, threshold: 3 }).await;
+        let n2 = p.join("n2", &n1).await;
+        n2.recover_kek().await.unwrap();
+        let barrier = kek_barrier("move").await;
+        barrier.unseal(&KEK).await.unwrap();
+        let store = p.custody(&n1, storage_of(&barrier)).await;
+        let (kem, kem_pub) = store.create(PqcKeyKind::MlKem768).await.unwrap();
+        let (dsa, dsa_pub) = store.create(PqcKeyKind::MlDsa65).await.unwrap();
+        drop(store);
+        let before = n1.pool_record().await.unwrap();
+
+        p.lose_both();
+        assert!(n1.recover_kek().await.is_err(), "both devices lost: sealed, no fallback to the recovery copy");
+        let (c, d, bundles) = p.replacements().await;
+        let members = p.onto(&bundles);
+        let first = n1.recover_submit(share(&shares, 3), sealed(&barrier), "t").await.unwrap();
+        assert_eq!((first["progress"].as_u64(), first["ready"].as_bool()), (Some(1), Some(false)), "{first}");
+        n1.recover_submit(share(&shares, 1), sealed(&barrier), "t").await.unwrap();
+        let early = RecoverySubmission { members: BTreeMap::new(), ..Default::default() };
+        assert_eq!(n1.recover_submit(early, sealed(&barrier), "t").await.unwrap()["progress"], 2);
+        let dup = n1.recover_submit(share(&shares, 1), sealed(&barrier), "t").await.unwrap_err();
+        assert!(dup.to_string().contains("already submitted"), "{dup}");
+        let ready = n1.recover_submit(share(&shares, 4), sealed(&barrier), "t").await.unwrap();
+        assert_eq!(ready["ready"], true, "{ready}");
+        assert_eq!(n1.status().await.unwrap()["recovery_progress"], 3);
+        let mut clash = p.onto(&bundles);
+        let moved = clash.members.remove(&p.name("d")).unwrap();
+        clash.members.insert(p.name("a"), moved);
+        let err = n1.recover_submit(clash, sealed(&barrier), "t").await.unwrap_err();
+        assert!(err.to_string().contains("already in the seal record"), "{err}");
+        assert_eq!(n1.recovery_progress(), 3, "a mistyped member list does not cost the shares");
+
+        let out = n1.recover_submit(members, sealed(&barrier), "t").await.unwrap();
+        assert_eq!(out["complete"], true, "{out}");
+        assert_eq!(out["share_indexes"], serde_json::json!([4, 2, 5]), "{out}");
+        assert_eq!(out["custody_recovered"], 2, "{out}");
+        assert_eq!((out["epoch"].as_u64(), out["epoch_rotated"].as_bool()), (Some(before.epoch + 1), Some(true)), "{out}");
+        assert!(barrier.sealed().unwrap(), "the ceremony leaves the barrier sealed");
+        assert_eq!(n1.recovery_progress(), 0, "the shares are gone");
+
+        let after = n1.pool_record().await.unwrap();
+        let active: Vec<&String> = after.active_members().map(|(_, m)| &m.name).collect();
+        assert_eq!(active, vec![&p.name("c"), &p.name("d")]);
+        assert!(after.members[&id_of(&p.a)].state == MemberState::Retired);
+        assert!(after.members[&id_of(&p.b)].state == MemberState::Retired);
+        let kek_set = after.kek.as_ref().unwrap();
+        assert_eq!(kek_set.copies.keys().cloned().collect::<Vec<_>>(), vec![id_of(&c), id_of(&d)], "old copies dropped");
+        assert_eq!(after.recovery_pub, before.recovery_pub, "the recovery key carries over");
+        let key = recombined(&shares, &[0, 1, 2], &after);
+        let aad = kek_recovery_aad(&after.cluster_uuid, after.epoch);
+        assert_eq!(key.open(kek_set.recovery.as_ref().unwrap(), &aad).unwrap().as_slice(), &KEK, "re-sealed at the new epoch");
+
+        assert_eq!(n1.recover_kek().await.unwrap().as_slice(), &KEK, "n1 unseals through the new devices");
+        n2.refresh_membership().await.unwrap();
+        assert_eq!(n2.recover_kek().await.unwrap().as_slice(), &KEK, "n2 picked up its new credentials");
+        barrier.unseal(&KEK).await.unwrap();
+        let store = p.custody(&n1, storage_of(&barrier)).await;
+        assert_eq!(store.with_private(&kem, |k| k.public_key().to_vec()).await.unwrap(), kem_pub);
+        assert_eq!(store.with_private(&dsa, |k| k.public_key().to_vec()).await.unwrap(), dsa_pub);
+        assert_eq!(p.seen.count(PoolEventKind::RecoveryCeremony), 1);
+        assert!(
+            n1.recover_submit(share(&shares, 0), sealed(&barrier), "t").await.is_err(),
+            "the new members answer: the gate is closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn wrong_tampered_or_malformed_inputs_change_nothing() {
+        let p = Pool::with_recovery(1).await;
+        let (n1, shares) = p.init_recovering(RecoverySplit { shares: 5, threshold: 3 }).await;
+        let barrier = kek_barrier("wrong").await;
+        p.lose_both();
+        let (c, d, bundles) = p.replacements().await;
+        let physical = p.physical.clone();
+        let raw = || {
+            let physical = physical.clone();
+            async move { physical.get(super::super::HSM_SEAL_RECORD_PATH).await.unwrap().unwrap().value }
+        };
+        let untouched = raw().await;
+
+        // Malformed: refused at submission, nothing taken in.
+        let short = RecoverySubmission { share: Some(Zeroizing::new(vec![1; 20])), ..Default::default() };
+        assert!(n1.recover_submit(short, sealed(&barrier), "t").await.is_err());
+        assert_eq!(n1.recovery_progress(), 0);
+
+        // Wrong shares (another split): the fingerprint check refuses them,
+        // and every submitted share is discarded.
+        let other = crate::hsm::recovery::generate(RecoverySplit { shares: 5, threshold: 3 }).unwrap();
+        let mut forged = vec![shares[0].clone(), shares[1].clone(), other.shares[2].clone()];
+        for i in 0..3 {
+            n1.recover_submit(share(&forged, i), sealed(&barrier), "t").await.unwrap();
+        }
+        let err = n1.recover_submit(p.onto(&bundles), sealed(&barrier), "t").await.unwrap_err();
+        assert!(err.to_string().contains("do not reconstruct"), "{err}");
+        assert_eq!(n1.recovery_progress(), 0, "a failed attempt consumes the shares");
+        assert_eq!(raw().await, untouched);
+
+        // A lowered threshold in storage: two shares still do not make the key.
+        let mut record = HsmSealRecord::decode(&untouched).unwrap().record;
+        record.recovery_pub.as_mut().unwrap().threshold = 2;
+        n1.store_record(&record).await.unwrap();
+        forged.truncate(2);
+        for i in 0..2 {
+            n1.recover_submit(share(&forged, i), sealed(&barrier), "t").await.unwrap();
+        }
+        let err = n1.recover_submit(p.onto(&bundles), sealed(&barrier), "t").await.unwrap_err();
+        assert!(err.to_string().contains("do not reconstruct"), "{err}");
+
+        // A barrier the recovered KEK does not open fails after the node keys
+        // were made: every one of them is rolled back, nothing is committed.
+        n1.store_record(&HsmSealRecord::decode(&untouched).unwrap().record).await.unwrap();
+        let untouched = raw().await;
+        let foreign = Arc::new(AESGCMBarrier::new(new_test_backend(&format!("recovery_foreign_{}", rand_tag()))));
+        foreign.init(&[9u8; 32]).await.unwrap();
+        for i in [0, 2, 4] {
+            n1.recover_submit(share(&shares, i), sealed(&barrier), "t").await.unwrap();
+        }
+        assert!(n1.recover_submit(p.onto(&bundles), sealed(&foreign), "t").await.is_err());
+        assert_eq!(raw().await, untouched, "nothing committed");
+        for (device, pw) in [(&c, "admin-c"), (&d, "admin-d")] {
+            assert!(p.node_keys(device, pw).is_empty(), "no node key left on {}", device.serial());
+        }
+
+        // A tampered KEK recovery copy: the right shares, still refused, and
+        // raised as a security event.
+        let mut record = HsmSealRecord::decode(&untouched).unwrap().record;
+        record.kek.as_mut().unwrap().recovery.as_mut().unwrap().payload_ciphertext[3] ^= 0x40;
+        n1.store_record(&record).await.unwrap();
+        let tampered = raw().await;
+        for i in [0, 2, 4] {
+            n1.recover_submit(share(&shares, i), sealed(&barrier), "t").await.unwrap();
+        }
+        let err = n1.recover_submit(p.onto(&bundles), sealed(&barrier), "t").await.unwrap_err();
+        assert!(err.to_string().contains("did not open"), "{err}");
+        assert_eq!(raw().await, tampered, "nothing committed");
+        assert!(p.seen.count(PoolEventKind::CryptoFailure) > 0, "a security event");
+        assert!(barrier.sealed().unwrap() && foreign.sealed().unwrap());
+    }
+
+    #[tokio::test]
+    async fn rotation_and_repair_carry_the_recovery_copies() {
+        let p = Pool::with_recovery(1).await;
+        let (n1, shares) = p.init_recovering(RecoverySplit::default()).await;
+        let barrier = p.barrier().await;
+        let (handle, public) = p.custody(&n1, barrier.clone()).await.create(PqcKeyKind::MlDsa65).await.unwrap();
+        let ckey = format!("{CUSTODY_STORE_PREFIX}{}", handle.key_id);
+
+        // Sets without a copy (made before the key existed, say): repair adds it.
+        let mut record = n1.pool_record().await.unwrap();
+        record.kek.as_mut().unwrap().recovery = None;
+        n1.store_record(&record).await.unwrap();
+        let entry = barrier.get(&ckey).await.unwrap().unwrap();
+        let mut custody = CustodyRecord::decode(&handle.key_id, &entry.value).unwrap();
+        custody.set.recovery = None;
+        barrier.put(&StorageEntry { key: ckey.clone(), value: custody.encode().unwrap() }).await.unwrap();
+        let report = n1.repair(Some(barrier.clone()), None).await.unwrap();
+        assert_eq!(report.recovery_copies_added, 2, "{report:?}");
+        assert!(n1.pool_record().await.unwrap().kek.unwrap().recovery.is_some());
+
+        // Rotation re-seals both at the new epoch instead of refusing.
+        let out = n1.rotate_epoch(&p.both(), Some(barrier.clone()), "root").await.unwrap();
+        assert_eq!(out["epoch"], 1, "{out}");
+        let after = n1.pool_record().await.unwrap();
+        let key = recombined(&shares, &[1, 3, 4], &after);
+        let kek = after.kek.as_ref().unwrap();
+        assert!(key.open(kek.recovery.as_ref().unwrap(), &kek_recovery_aad(&after.cluster_uuid, 0)).is_err(), "old epoch");
+        assert_eq!(
+            key.open(kek.recovery.as_ref().unwrap(), &kek_recovery_aad(&after.cluster_uuid, 1)).unwrap().as_slice(),
+            &KEK
+        );
+        let entry = barrier.get(&ckey).await.unwrap().unwrap();
+        let custody = CustodyRecord::decode(&handle.key_id, &entry.value).unwrap();
+        assert_eq!(custody.set.epoch, 1);
+        let aad = custody_recovery_aad(&after.cluster_uuid, PqcKeyKind::MlDsa65, 1, &handle.key_id);
+        let seed = key.open(custody.set.recovery.as_ref().unwrap(), &aad).unwrap();
+        assert_eq!(PqcKeypair::from_seed(PqcKeyKind::MlDsa65, &seed).unwrap().public_key(), public.as_slice());
+    }
+
+    #[tokio::test]
+    async fn migration_refuses_a_recovery_config_and_per_node_init_refuses_a_split() {
+        let p = Pool::with_recovery(1).await;
+        let mut per_node = p.config("n1");
+        per_node.pool = None;
+        per_node.state_path = std::env::temp_dir().join(format!("bv-recovery-pn-{}.json", rand_tag())).to_string_lossy().to_string();
+        let backend: Arc<dyn HsmBackend> = Arc::new(MockHsmBackend::open(&per_node).await.unwrap());
+        let n = p.provider("n1").with_migration_source(backend.clone());
+        let err = n.migrate_to_pool("root").await.unwrap_err();
+        assert!(err.to_string().contains("init only"), "{err}");
+
+        let provider = HsmSealProvider::new(backend, p.physical.clone(), per_node);
+        let err = provider.check_init_recovery(Some(RecoverySplit::default())).await.unwrap_err();
+        assert!(err.to_string().contains("per-node"), "{err}");
+        let err = provider.recover_submit(RecoverySubmission::default(), sealed(&kek_barrier("pn").await), "t");
+        assert!(err.await.is_err(), "no ceremony per node");
     }
 }

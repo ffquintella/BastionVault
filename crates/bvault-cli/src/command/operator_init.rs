@@ -58,6 +58,25 @@ omit for an HSM (auto-unseal) vault."#
     )]
     key_threshold: Option<u8>,
 
+    #[arg(
+        long,
+        next_line_help = true,
+        value_name = "int",
+        long_help = r#"Number of recovery shares to split the recovery key into. Only for an
+HSM pool configured with recovery = "shamir-ceremony" (default 5); any
+other seal refuses it. The shares are printed once and stored nowhere."#
+    )]
+    recovery_shares: Option<u8>,
+
+    #[arg(
+        long,
+        next_line_help = true,
+        value_name = "int",
+        long_help = r#"Number of recovery shares the recovery ceremony needs (default 3).
+Provide it together with -recovery-shares."#
+    )]
+    recovery_threshold: Option<u8>,
+
     #[deref]
     #[command(flatten, next_help_heading = "HTTP Options")]
     http_options: command::HttpOptions,
@@ -91,16 +110,32 @@ impl CommandExecutor for Init {
             }
             _ => {}
         }
+        if self.recovery_shares.is_some() != self.recovery_threshold.is_some() {
+            return Err(bv_error_string!("--recovery-shares and --recovery-threshold must be provided together"));
+        }
 
         let client = self.client()?;
         let sys = client.sys();
 
-        let init_req = InitRequest { secret_shares: self.key_shares, secret_threshold: self.key_threshold };
+        let init_req = InitRequest {
+            secret_shares: self.key_shares,
+            secret_threshold: self.key_threshold,
+            recovery_shares: self.recovery_shares,
+            recovery_threshold: self.recovery_threshold,
+        };
 
         match sys.init(&init_req) {
             Ok(ret) => {
                 if ret.response_status == 200 {
                     self.output.print_value(ret.response_data.as_ref().unwrap(), true)?;
+                    let recovery = ret.response_data.as_ref().and_then(|d| d.get("recovery_keys"));
+                    if recovery.and_then(|k| k.as_array()).is_some_and(|k| !k.is_empty()) {
+                        eprintln!(
+                            "\nThese are HSM pool RECOVERY shares, not unseal keys. They are shown once and stored \
+                             nowhere: hand one to each holder now. A quorum of holders together with a copy of \
+                             storage can decrypt everything (`bvault operator hsm recover`)."
+                        );
+                    }
                 } else if ret.response_status == 204 {
                     println!("ok");
                 } else {

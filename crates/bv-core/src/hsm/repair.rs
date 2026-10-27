@@ -84,6 +84,8 @@ pub struct RepairReport {
     pub sets_scanned: usize,
     pub copies_added: usize,
     pub copies_removed: usize,
+    /// Recovery copies sealed for sets that had none (T454 phase 5).
+    pub recovery_copies_added: usize,
     /// Sets still missing a copy for an active or joining member.
     pub under_replicated: usize,
     pub failures: Vec<String>,
