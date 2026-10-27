@@ -54,6 +54,10 @@ pub use host::{Host, HostError, LogLevel};
 #[cfg(feature = "provider")]
 pub mod provider;
 
+/// Process-runtime runner and the ABI 1.4 host calls (`process` feature).
+#[cfg(all(feature = "process", not(target_arch = "wasm32")))]
+pub mod process;
+
 /// Extensibility v2 (Phase 6): app-module authoring surface.
 #[cfg(feature = "app")]
 pub mod app;

@@ -2730,6 +2730,8 @@ plugins-test: require-nextest ## Run plugin unit tests: testkit, host ABI parity
 	cargo nextest run --test test_plugin_testkit_parity
 	@echo "==> host plugin substrate unit tests (src/plugins/*)"
 	cargo nextest run --lib -E 'test(/^plugins::/)'
+	@echo "==> bastion-plugin-sdk process runner (ABI 1.4 protocols)"
+	cargo nextest run -p bastion-plugin-sdk --lib --features process
 	@echo "==> bastion-plugin-self-accounts: handlers (host stubs), manifest + surface, wasm end to end"
 	cd $(PLUGINS_DIR) && cargo build --release --target $(PLUGINS_WASM_TARGET) -p bastion-plugin-self-accounts
 	cd $(PLUGINS_DIR) && cargo test --release -p bastion-plugin-self-accounts --features host_test

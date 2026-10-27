@@ -71,9 +71,12 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::time::timeout;
 
-use crate::kernel_api::VaultCtx;
-use crate::{audit, storage::StorageEntry};
+use zeroize::Zeroizing;
 
+use crate::kernel_api::VaultCtx;
+use crate::storage::StorageEntry;
+
+use super::invocation::InvocationCaller;
 use super::manifest::PluginManifest;
 use super::runtime::{InvokeOutcome, InvokeOutput};
 
@@ -93,6 +96,10 @@ pub enum ProcessRuntimeError {
     Protocol(&'static str),
     #[error("subprocess timed out after {0:?}")]
     Timeout(Duration),
+    #[error("subprocess has {0} invocations in flight; none freed up before the deadline")]
+    Busy(u32),
+    #[error("subprocess invocation failed: {0}")]
+    InvocationFailed(String),
 }
 
 /// Execute a registered plugin as a subprocess. Mirrors `WasmRuntime`'s
@@ -132,6 +139,21 @@ impl ProcessRuntime {
         input: &[u8],
         core: Option<Arc<dyn VaultCtx>>,
         config: std::collections::BTreeMap<String, String>,
+    ) -> Result<InvokeOutput, ProcessRuntimeError> {
+        self.invoke_bound(manifest, binary, input, core, config, None).await
+    }
+
+    /// Like `invoke_with_config`, on behalf of `caller` (ABI 1.4): the
+    /// caller-bound host calls are evaluated against it, and refused when it
+    /// is `None`.
+    pub async fn invoke_bound(
+        &self,
+        manifest: &PluginManifest,
+        binary: &[u8],
+        input: &[u8],
+        core: Option<Arc<dyn VaultCtx>>,
+        config: std::collections::BTreeMap<String, String>,
+        caller: Option<InvocationCaller>,
     ) -> Result<InvokeOutput, ProcessRuntimeError> {
         // Write the binary to a uniquely-named temp file so concurrent
         // invocations don't clobber each other. Mark executable on Unix.
@@ -197,8 +219,11 @@ impl ProcessRuntime {
         let mut child = cmd.spawn().map_err(|e| ProcessRuntimeError::Spawn(format!("{e}")))?;
 
         let result =
-            match timeout(self.invoke_timeout, drive_invocation(&mut child, manifest, &bootstrap, input, core, config))
-                .await
+            match timeout(
+                self.invoke_timeout,
+                drive_invocation(&mut child, manifest, &bootstrap, input, core, config, caller.as_ref()),
+            )
+            .await
             {
                 Ok(Ok(out)) => Ok(out),
                 Ok(Err(e)) => Err(e),
@@ -248,6 +273,7 @@ async fn drive_invocation(
     input: &[u8],
     core: Option<Arc<dyn VaultCtx>>,
     config: std::collections::BTreeMap<String, String>,
+    caller: Option<&InvocationCaller>,
 ) -> Result<InvokeOutput, ProcessRuntimeError> {
     let mut stdin = child.stdin.take().ok_or(ProcessRuntimeError::Protocol("stdin"))?;
     let stdout = child.stdout.take().ok_or(ProcessRuntimeError::Protocol("stdout"))?;
@@ -304,12 +330,16 @@ async fn drive_invocation(
 
         match msg {
             PluginMessage::HostCall { id, method, params } => {
-                let result = handle_host_call(manifest, core.as_ref(), &config, &method, &params).await;
-                let reply = match result {
+                let result = handle_host_call(manifest, core.as_ref(), &config, &method, &params, caller).await;
+                let mut reply = match result {
                     Ok(v) => HostMessage::HostReply { id, result: v },
                     Err(e) => HostMessage::HostReplyError { id, error: e },
                 };
-                write_msg(&mut stdin, &reply).await?;
+                let written = write_msg(&mut stdin, &reply).await;
+                if let HostMessage::HostReply { result, .. } = &mut reply {
+                    scrub(result);
+                }
+                written?;
             }
             PluginMessage::SetResponse { data_b64 } => {
                 response = base64::engine::general_purpose::STANDARD
@@ -335,7 +365,10 @@ async fn write_msg<W>(writer: &mut W, msg: &HostMessage<'_>) -> Result<(), Proce
 where
     W: AsyncWriteExt + Unpin,
 {
-    let mut line = serde_json::to_vec(msg).map_err(|_| ProcessRuntimeError::Protocol("host message serialization"))?;
+    // Zeroized once written: a host reply can carry a released credential.
+    let mut line = Zeroizing::new(
+        serde_json::to_vec(msg).map_err(|_| ProcessRuntimeError::Protocol("host message serialization"))?,
+    );
     line.push(b'\n');
     writer.write_all(&line).await.map_err(|e| ProcessRuntimeError::Io(format!("{e}")))?;
     writer.flush().await.map_err(|e| ProcessRuntimeError::Io(format!("{e}")))?;
@@ -352,6 +385,7 @@ pub(super) async fn handle_host_call(
     config: &std::collections::BTreeMap<String, String>,
     method: &str,
     params: &Value,
+    caller: Option<&InvocationCaller>,
 ) -> Result<Value, String> {
     match method {
         "config_get" => {
@@ -472,20 +506,39 @@ pub(super) async fn handle_host_call(
                 None => return Err("no core".to_string()),
             };
             let payload = params.get("payload").cloned().unwrap_or(Value::Null);
-            let mut body = serde_json::Map::new();
-            body.insert("plugin_event".to_string(), payload);
-            audit::emit_sys_audit(
-                core.as_ref(),
-                "",
-                &format!("sys/plugins/{}/event", manifest.name),
-                crate::logical::Operation::Write,
-                Some(body),
-                None,
-            )
-            .await;
+            super::plugin_audit::emit(core.as_ref(), manifest, caller, payload).await;
             Ok(Value::Null)
         }
+        m if super::sql_host::METHODS.contains(&m) => super::sql_host::handle(manifest, core, m, params, caller).await,
         _ => Err("unknown_method".to_string()),
+    }
+}
+
+/// Every host-call method the process runtimes answer. The testkit mirrors
+/// this list; `tests/test_plugin_testkit_parity.rs` compares the two.
+pub const HOST_CALL_METHODS: &[&str] = &[
+    "config_get",
+    "log",
+    "now_unix_ms",
+    "storage_get",
+    "storage_put",
+    "storage_delete",
+    "storage_list",
+    "audit_emit",
+    "resource_sql_target",
+    "resource_sql_authorize",
+    "resource_sql_credential",
+    "connect_ticket_redeem",
+];
+
+/// Overwrite every string of a sent reply before it is dropped.
+pub(super) fn scrub(v: &mut Value) {
+    use zeroize::Zeroize;
+    match v {
+        Value::String(s) => s.zeroize(),
+        Value::Object(m) => m.values_mut().for_each(scrub),
+        Value::Array(a) => a.iter_mut().for_each(scrub),
+        _ => {}
     }
 }
 

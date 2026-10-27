@@ -35,10 +35,27 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use serde_json::{json, Value};
 
-use crate::{data_key, envelope, InvokeOutcome, LogLine, TestClock, TestHost, TestInvocation, TestkitError};
+use crate::{data_key, envelope, InvokeOutcome, LogLine, TestCaller, TestClock, TestHost, TestInvocation, TestkitError};
 
 /// Same default as `process_runtime::DEFAULT_INVOKE_TIMEOUT`.
 pub const DEFAULT_PROCESS_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Every host call the mock answers. Must equal the host's
+/// `process_runtime::HOST_CALL_METHODS` (checked by the parity test).
+pub const PROCESS_HOST_CALLS: &[&str] = &[
+    "config_get",
+    "log",
+    "now_unix_ms",
+    "storage_get",
+    "storage_put",
+    "storage_delete",
+    "storage_list",
+    "audit_emit",
+    "resource_sql_target",
+    "resource_sql_authorize",
+    "resource_sql_credential",
+    "connect_ticket_redeem",
+];
 
 impl TestHost {
     /// Run a process-runtime plugin executable through one invocation
@@ -51,6 +68,36 @@ impl TestHost {
         data: Value,
     ) -> Result<TestInvocation, TestkitError> {
         self.invoke_process_raw(exe, &envelope(op, path, data), DEFAULT_PROCESS_TIMEOUT)
+    }
+
+    /// [`invoke_process`](Self::invoke_process) on behalf of `caller`: the
+    /// envelope carries the caller block, and the ABI 1.4 caller-bound host
+    /// calls are answered for it (they are refused without one).
+    pub fn invoke_process_as(
+        &self,
+        exe: &Path,
+        caller: &TestCaller,
+        op: &str,
+        path: &str,
+        data: Value,
+    ) -> Result<TestInvocation, TestkitError> {
+        let mut env: Value = serde_json::from_slice(&envelope(op, path, data)).expect("envelope is valid JSON");
+        env["caller"] = caller.json();
+        self.state.lock().unwrap().invocation_caller = Some(caller.clone());
+        let input = serde_json::to_vec(&env).expect("envelope serialise");
+        let out = self.invoke_process_raw(exe, &input, DEFAULT_PROCESS_TIMEOUT);
+        self.state.lock().unwrap().invocation_caller = None;
+        out
+    }
+
+    /// Answer one host call as the server would, inside an invocation by
+    /// `caller` (`None`: outside any invocation). Drives the mock without a
+    /// plugin executable.
+    pub fn process_host_call(&self, caller: Option<&TestCaller>, method: &str, params: &Value) -> Result<Value, String> {
+        self.state.lock().unwrap().invocation_caller = caller.cloned();
+        let out = self.handle_process_call(method, params);
+        self.state.lock().unwrap().invocation_caller = None;
+        out
     }
 
     /// Like [`invoke_process`](Self::invoke_process) with raw input
@@ -249,11 +296,20 @@ impl TestHost {
                     return Err("forbidden".into());
                 }
                 let payload = params.get("payload").cloned().unwrap_or(Value::Null);
-                self.state.lock().unwrap().audit.push(json!({
+                let mut st = self.state.lock().unwrap();
+                let mut event = json!({
                     "path": format!("sys/plugins/{}/event", self.name),
                     "data": {"plugin_event": payload},
-                }));
+                });
+                // ABI 1.4: the host, not the payload, names the actor.
+                if let Some(c) = st.invocation_caller.as_ref().filter(|_| self.stamps_actor()) {
+                    event["actor"] = c.json();
+                }
+                st.audit.push(event);
                 Ok(Value::Null)
+            }
+            "resource_sql_target" | "resource_sql_authorize" | "resource_sql_credential" | "connect_ticket_redeem" => {
+                self.sql_call(method, params)
             }
             _ => Err("unknown_method".into()),
         }

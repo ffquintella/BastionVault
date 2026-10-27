@@ -290,6 +290,17 @@ async fn sys_hsm_status_request_handler(
     handle_request(core, &mut r).await
 }
 
+/// GET `/v2/sys/policy-schema` — the `sql_*` write gate (read-only).
+async fn sys_policy_schema_request_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, HttpError> {
+    let mut r = request_auth(&req);
+    r.path = "sys/policy-schema".to_string();
+    r.operation = Operation::Read;
+    handle_request(core, &mut r).await
+}
+
 /// POST `/sys/audit/{path}` — enable a new audit device.
 async fn sys_audit_enable_request_handler(
     req: HttpRequest,
@@ -1763,16 +1774,11 @@ async fn sys_restore_request_handler(
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
     let body = authz.into_body();
-
-    let hmac_key = core.barrier().derive_hmac_key()?;
     let mut reader = std::io::Cursor::new(body.as_ref());
 
-    let count = crate::backup::restore::restore_backup(
-        core.physical().as_ref(),
-        &hmac_key,
-        &mut reader,
-    )
-    .await?;
+    // A running vault: policy documents in the backup are refused while the
+    // `sql_*` write gate is closed (features/sql-browser.md §13).
+    let count = crate::backup::restore::restore_backup_live(&core, &mut reader).await?;
 
     Ok(response_json_ok(None, serde_json::json!({ "entries_restored": count })))
 }
@@ -2195,6 +2201,18 @@ sys_route! {
     SysPluginProviderGrantWrite { op: Write, path: "sys/plugins/{name}/grants/credential-provider", body: WithBody, denial: Recorded }
     /// `DELETE /v2/sys/plugins/{name}/grants/credential-provider`.
     SysPluginProviderGrantDelete { op: Delete, path: "sys/plugins/{name}/grants/credential-provider", body: NoBody, denial: Recorded }
+    /// `GET /v2/sys/plugins/{name}/grants/sql-gate` (ABI 1.4).
+    SysPluginSqlGateGrantRead { op: Read, path: "sys/plugins/{name}/grants/sql-gate", body: NoBody, denial: Recorded }
+    /// `PUT /v2/sys/plugins/{name}/grants/sql-gate`.
+    SysPluginSqlGateGrantWrite { op: Write, path: "sys/plugins/{name}/grants/sql-gate", body: WithBody, denial: Recorded }
+    /// `DELETE /v2/sys/plugins/{name}/grants/sql-gate`.
+    SysPluginSqlGateGrantDelete { op: Delete, path: "sys/plugins/{name}/grants/sql-gate", body: NoBody, denial: Recorded }
+    /// `GET /v2/sys/plugins/{name}/grants/resource-credentials` (ABI 1.4).
+    SysPluginResourceCredentialsGrantRead { op: Read, path: "sys/plugins/{name}/grants/resource-credentials", body: NoBody, denial: Recorded }
+    /// `PUT /v2/sys/plugins/{name}/grants/resource-credentials`.
+    SysPluginResourceCredentialsGrantWrite { op: Write, path: "sys/plugins/{name}/grants/resource-credentials", body: WithBody, denial: Recorded }
+    /// `DELETE /v2/sys/plugins/{name}/grants/resource-credentials`.
+    SysPluginResourceCredentialsGrantDelete { op: Delete, path: "sys/plugins/{name}/grants/resource-credentials", body: NoBody, denial: Recorded }
     /// `DELETE /v2/sys/plugins/{name}/entity-data/{entity_id}` — purge.
     SysPluginEntityDataPurge { op: Delete, path: "sys/plugins/{name}/entity-data/{entity_id}", body: NoBody, denial: Recorded }
     /// `GET /v2/sys/plugins/{name}/entity-data` — per-entity record counts.
@@ -2844,6 +2862,115 @@ async fn sys_plugins_provider_grant_delete_handler(
     audit.finish(&result).await;
     result
 }
+
+// ── ABI 1.4 grants: sql-gate and resource-credentials (v2 only) ──
+//
+// features/sql-browser.md §9.2. Same shape as the credential-provider grant:
+// the PUT approves exactly what the active manifest requests, pinned to the
+// SHA-256 of its whole capability block.
+
+async fn sql_grant_get(
+    core: &Arc<Core>,
+    kind: crate::plugins::sql_grants::SqlGrantKind,
+    name: &str,
+) -> Result<HttpResponse, HttpError> {
+    let barrier = core.barrier();
+    let storage = barrier.as_storage();
+    let manifest = match crate::plugins::PluginCatalog::new().get_manifest(storage, name).await? {
+        Some(m) => m,
+        None => return Ok(response_error(StatusCode::NOT_FOUND, "plugin not found")),
+    };
+    let record = crate::plugins::sql_grants::get(storage, kind, name).await?;
+    let live = crate::plugins::sql_grants::is_live(storage, kind, &manifest).await;
+    Ok(response_json_ok(
+        None,
+        json!({
+            "requested": kind.requested_by(&manifest),
+            "capability_sha256": manifest.capabilities.canonical_sha256(),
+            "grant": record,
+            "live": live,
+        }),
+    ))
+}
+
+async fn sql_grant_put(
+    core: &Arc<Core>,
+    kind: crate::plugins::sql_grants::SqlGrantKind,
+    name: &str,
+    token: &str,
+) -> Result<HttpResponse, HttpError> {
+    let barrier = core.barrier();
+    let storage = barrier.as_storage();
+    let manifest = match crate::plugins::PluginCatalog::new().get_manifest(storage, name).await? {
+        Some(m) => m,
+        None => return Ok(response_error(StatusCode::NOT_FOUND, "plugin not found")),
+    };
+    let actor = resolve_actor_entity_id(core.as_ref(), token).await;
+    let granted_at = chrono::Utc::now().to_rfc3339();
+    match crate::plugins::sql_grants::put(storage, kind, &manifest, &actor, granted_at).await {
+        Ok(g) => Ok(response_json_ok(None, json!({ "grant": g }))),
+        Err(RvError::ErrString(msg)) => Ok(response_error(StatusCode::BAD_REQUEST, &msg)),
+        Err(e) => Err(e.into()),
+    }
+}
+
+macro_rules! sql_grant_handlers {
+    ($kind:ident, $get:ident: $read:ident, $put:ident: $write:ident, $del:ident: $delete:ident) => {
+        async fn $get(
+            authz: Authorized<$read>,
+            req: HttpRequest,
+            core: web::Data<Arc<Core>>,
+        ) -> Result<HttpResponse, HttpError> {
+            let audit = SysAuditCtx::new(&authz, &req, &core);
+            let name = req.match_info().get("name").unwrap_or("").to_string();
+            let kind = crate::plugins::sql_grants::SqlGrantKind::$kind;
+            let result = sql_grant_get(&core, kind, &name).await;
+            audit.finish(&result).await;
+            result
+        }
+
+        async fn $put(
+            authz: Authorized<$write>,
+            req: HttpRequest,
+            core: web::Data<Arc<Core>>,
+        ) -> Result<HttpResponse, HttpError> {
+            // No body is read; the witness still records one in the audit.
+            let audit = SysAuditCtx::new(&authz, &req, &core);
+            let name = req.match_info().get("name").unwrap_or("").to_string();
+            let token = request_auth(&req).client_token;
+            let kind = crate::plugins::sql_grants::SqlGrantKind::$kind;
+            let result = sql_grant_put(&core, kind, &name, &token).await;
+            audit.finish(&result).await;
+            result
+        }
+
+        async fn $del(
+            authz: Authorized<$delete>,
+            req: HttpRequest,
+            core: web::Data<Arc<Core>>,
+        ) -> Result<HttpResponse, HttpError> {
+            let audit = SysAuditCtx::new(&authz, &req, &core);
+            let name = req.match_info().get("name").unwrap_or("").to_string();
+            let kind = crate::plugins::sql_grants::SqlGrantKind::$kind;
+            let result: Result<HttpResponse, HttpError> = async {
+                crate::plugins::sql_grants::delete(core.barrier().as_storage(), kind, &name).await?;
+                Ok(response_ok(None, None))
+            }
+            .await;
+            audit.finish(&result).await;
+            result
+        }
+    };
+}
+
+sql_grant_handlers!(SqlGate,
+    sys_plugins_sql_gate_grant_get_handler: SysPluginSqlGateGrantRead,
+    sys_plugins_sql_gate_grant_put_handler: SysPluginSqlGateGrantWrite,
+    sys_plugins_sql_gate_grant_delete_handler: SysPluginSqlGateGrantDelete);
+sql_grant_handlers!(ResourceCredentials,
+    sys_plugins_resource_credentials_grant_get_handler: SysPluginResourceCredentialsGrantRead,
+    sys_plugins_resource_credentials_grant_put_handler: SysPluginResourceCredentialsGrantWrite,
+    sys_plugins_resource_credentials_grant_delete_handler: SysPluginResourceCredentialsGrantDelete);
 
 /// DELETE `/v2/sys/plugins/{name}/entity-data/{entity_id}` — offboarding and
 /// entity-merge cleanup. Deletes that entity's data under `{name}` only. There
@@ -4668,6 +4795,98 @@ mod sys_privileged_route_auth_tests {
 
         let (status, resp) = server.read("sys/scheduled-exports", Some(&token)).unwrap();
         assert_eq!(status, 200, "a root token must still list schedules: {resp:?}");
+    }
+}
+
+#[cfg(test)]
+mod sql_grant_route_tests {
+    //! `v2/sys/plugins/{name}/grants/{sql-gate,resource-credentials}`
+    //! (features/sql-browser.md §9.2): approve, read back live, void on a
+    //! capability change, revoke; refuse what the manifest does not request.
+
+    use crate::kernel_api::VaultCtx;
+    use crate::plugins::manifest::{PluginManifest, ResourceCredentialKind, RuntimeKind};
+    use crate::test_utils::TestHttpServer;
+
+    fn manifest(version: &str, credentials: bool, max_concurrent: Option<u32>) -> (PluginManifest, Vec<u8>) {
+        let bin = format!("dbms-{version}").into_bytes();
+        let mut m = PluginManifest {
+            name: "dbms-management".into(),
+            version: version.into(),
+            plugin_type: "sql-browser".into(),
+            runtime: RuntimeKind::Process,
+            abi_version: "1.4".into(),
+            sha256: bastion_vault::utils::sha256(&bin),
+            size: bin.len() as u64,
+            capabilities: Default::default(),
+            description: String::new(),
+            config_schema: vec![],
+            signature: String::new(),
+            signing_key: String::new(),
+            surface: None,
+            client_assets: vec![],
+        };
+        let c = &mut m.capabilities;
+        c.long_lived = true;
+        c.concurrent = true;
+        c.max_concurrent = max_concurrent;
+        c.caller_identity = true;
+        c.sql_gate = true;
+        if credentials {
+            c.resource_credentials = vec![ResourceCredentialKind::Sql];
+        }
+        (m, bin)
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn sql_grants_are_pinned_to_the_capability_block() {
+        let mut server = TestHttpServer::new("test_sql_grant_routes", true).await;
+        server.token = server.root_token.clone();
+        server.url_prefix = server.url_prefix.replace("/v1", "/v2");
+        let storage = server.core.barrier();
+        let storage = storage.as_storage();
+        crate::plugins::verifier::write_accept_unsigned(storage, true).await.unwrap();
+        let catalog = crate::plugins::PluginCatalog::new();
+        let (m1, b1) = manifest("0.1.0", false, None);
+        catalog.put(storage, &m1, &b1).await.unwrap();
+
+        let gate = "sys/plugins/dbms-management/grants/sql-gate";
+        let creds = "sys/plugins/dbms-management/grants/resource-credentials";
+        let (status, v) = server.read(gate, None).unwrap();
+        assert_eq!(status, 200, "{v:?}");
+        assert_eq!((v["requested"].as_bool(), v["live"].as_bool()), (Some(true), Some(false)), "{v:?}");
+        assert!(v["grant"].is_null());
+
+        let (status, v) = server.request("PUT", gate, None, None, None).unwrap();
+        assert_eq!(status, 200, "{v:?}");
+        assert_eq!(v["grant"]["capability_sha256"], m1.capabilities.canonical_sha256());
+        let (_, v) = server.read(gate, None).unwrap();
+        assert_eq!(v["live"], true, "{v:?}");
+
+        // The manifest does not request credentials: nothing to grant.
+        let (status, v) = server.request("PUT", creds, None, None, None).unwrap();
+        assert_eq!(status, 400, "{v:?}");
+
+        // Anonymous callers are refused like every privileged route.
+        let (status, _) = server.read(gate, Some("")).unwrap();
+        assert_eq!(status, 403);
+
+        // A new version with a different capability block voids the grant.
+        let (m2, b2) = manifest("0.2.0", false, Some(8));
+        catalog.put(storage, &m2, &b2).await.unwrap();
+        catalog.set_active(storage, "dbms-management", "0.2.0").await.unwrap();
+        let (_, v) = server.read(gate, None).unwrap();
+        assert_eq!(v["live"], false, "a changed capability block must void the grant: {v:?}");
+
+        let (status, _) = server.request("PUT", gate, None, None, None).unwrap();
+        assert_eq!(status, 200);
+        let (status, _) = server.delete(gate, None, None).unwrap();
+        assert!(status == 200 || status == 204, "{status}");
+        let (_, v) = server.read(gate, None).unwrap();
+        assert!(v["grant"].is_null() && v["live"] == false, "{v:?}");
+
+        let (status, _) = server.read("sys/plugins/no-such-plugin/grants/sql-gate", None).unwrap();
+        assert_eq!(status, 404);
     }
 }
 

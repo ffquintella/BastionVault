@@ -986,10 +986,12 @@ dependencies = [
 name = "bastion-plugin-sdk"
 version = "0.41.2"
 dependencies = [
+ "base64 0.22.1",
  "bv_plugin_surface",
  "serde",
  "serde_json",
  "serial_test",
+ "zeroize",
 ]
 
 [[package]]

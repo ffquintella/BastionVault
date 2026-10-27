@@ -352,6 +352,17 @@ pub(crate) const V2_ONLY: &[ResourceSpec] = &[
         route!(privileged SysPluginProviderGrantWrite: Put => sys_plugins_provider_grant_put_handler),
         route!(privileged SysPluginProviderGrantDelete: Delete => sys_plugins_provider_grant_delete_handler),
     ]),
+    // ABI 1.4 grants (features/sql-browser.md §9.2).
+    resource!("/plugins/{name}/grants/sql-gate" => [
+        route!(privileged SysPluginSqlGateGrantRead: Get => sys_plugins_sql_gate_grant_get_handler),
+        route!(privileged SysPluginSqlGateGrantWrite: Put => sys_plugins_sql_gate_grant_put_handler),
+        route!(privileged SysPluginSqlGateGrantDelete: Delete => sys_plugins_sql_gate_grant_delete_handler),
+    ]),
+    resource!("/plugins/{name}/grants/resource-credentials" => [
+        route!(privileged SysPluginResourceCredentialsGrantRead: Get => sys_plugins_resource_credentials_grant_get_handler),
+        route!(privileged SysPluginResourceCredentialsGrantWrite: Put => sys_plugins_resource_credentials_grant_put_handler),
+        route!(privileged SysPluginResourceCredentialsGrantDelete: Delete => sys_plugins_resource_credentials_grant_delete_handler),
+    ]),
     resource!("/plugins/{name}/entity-data" => [
         route!(privileged SysPluginEntityDataUsage: Get => sys_plugins_entity_data_get_handler),
     ]),
@@ -360,6 +371,9 @@ pub(crate) const V2_ONLY: &[ResourceSpec] = &[
     ]),
     // HSM seal status (features/hsm-support.md). Read-only.
     resource!("/hsm/status" => [route!(routed Get => sys_hsm_status_request_handler, "sys/hsm/status")]),
+    // The `sql_*` rolling-upgrade write gate and each node's policy schema
+    // (features/sql-browser.md §13). Read-only.
+    resource!("/policy-schema" => [route!(routed Get => sys_policy_schema_request_handler, "sys/policy-schema")]),
     // Per-principal default resource accounts (Resource Connect). The `self`
     // and bare-list resources precede the `{path:.*}` wildcard so they win.
     resource!("/identity/default-account" => [

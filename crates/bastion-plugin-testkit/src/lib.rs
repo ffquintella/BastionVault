@@ -71,6 +71,7 @@ pub mod artifact;
 mod assertions;
 pub mod hooks;
 pub mod process;
+pub mod sql;
 
 /// Default per-invocation fuel budget — matches
 /// `bastion_vault::plugins::runtime::DEFAULT_FUEL`.
@@ -208,6 +209,10 @@ struct HostState {
     rng: SplitMix64,
     /// Process-runtime plugins only; see `TestHost::process_stderr`.
     stderr: Vec<String>,
+    /// ABI 1.4 SQL substrate mocks (see [`sql`]).
+    sql: sql::SqlMock,
+    /// The caller of the process invocation in flight, if any.
+    invocation_caller: Option<TestCaller>,
 }
 
 /// Per-invocation store context — the testkit's `PluginCtx`.
@@ -303,6 +308,9 @@ pub struct TestHostBuilder {
     rng_seed: u64,
     fuel_budget: u64,
     memory_budget: usize,
+    sql: sql::SqlMock,
+    abi_minor: u32,
+    caller_identity: bool,
 }
 
 impl TestHostBuilder {
@@ -397,6 +405,8 @@ impl TestHostBuilder {
             allowed_keys: self.allowed_keys,
             fuel_budget: self.fuel_budget,
             memory_budget: self.memory_budget,
+            abi_minor: self.abi_minor,
+            caller_identity: self.caller_identity,
             state: Arc::new(Mutex::new(HostState {
                 storage,
                 config: self.config,
@@ -405,6 +415,8 @@ impl TestHostBuilder {
                 clock: self.clock,
                 rng: SplitMix64(self.rng_seed),
                 stderr: Vec::new(),
+                sql: self.sql,
+                invocation_caller: None,
             })),
         }
     }
@@ -423,6 +435,8 @@ pub struct TestHost {
     allowed_keys: BTreeSet<String>,
     fuel_budget: u64,
     memory_budget: usize,
+    abi_minor: u32,
+    caller_identity: bool,
     state: Arc<Mutex<HostState>>,
 }
 
@@ -440,6 +454,9 @@ impl TestHost {
             rng_seed: 0x0000_BA57_1011,
             fuel_budget: DEFAULT_FUEL,
             memory_budget: DEFAULT_MEMORY_BYTES,
+            sql: sql::SqlMock::default(),
+            abi_minor: 0,
+            caller_identity: false,
         }
     }
 

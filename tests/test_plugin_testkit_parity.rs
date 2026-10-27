@@ -82,3 +82,134 @@ async fn invoke_semantics_match_between_runtimes() {
     assert!(real.fuel_consumed > 0);
     assert!(mock.fuel_consumed > 0);
 }
+
+// ── ABI 1.4: process host calls ─────────────────────────────────────────
+
+use bastion_plugin_testkit::sql::{check_release as mock_check_release, MockRelease};
+use bastion_plugin_testkit::TestCaller;
+use bastion_vault::plugins::manifest::ResourceCredentialKind;
+use bastion_vault::plugins::sql_host::{self, check_release, SqlEndpoint, SqlReleaseMaterial};
+use serde_json::{json, Value};
+
+const SQL_METHODS: [&str; 4] =
+    ["resource_sql_target", "resource_sql_authorize", "resource_sql_credential", "connect_ticket_redeem"];
+
+fn sql_params(method: &str) -> Value {
+    match method {
+        "resource_sql_authorize" => json!({"resource": "db", "checks": [{"capability": "sql_select", "target": "server"}]}),
+        "resource_sql_credential" => json!({"resource": "db", "profile": "ro", "session_ref": "s-1"}),
+        "connect_ticket_redeem" => json!({"resource": "db", "profile": "ro", "ticket": "t-1"}),
+        _ => json!({"resource": "db"}),
+    }
+}
+
+fn sql_manifest(declared: bool) -> PluginManifest {
+    let mut m = manifest_for("dbms-management", b"x");
+    m.runtime = RuntimeKind::Process;
+    m.abi_version = "1.4".to_string();
+    m.capabilities.caller_identity = true;
+    if declared {
+        m.capabilities.sql_gate = true;
+        m.capabilities.resource_credentials = vec![ResourceCredentialKind::Sql];
+    }
+    m
+}
+
+fn code(e: &str) -> &str {
+    e.split(':').next().unwrap_or(e)
+}
+
+/// The testkit mirrors every process host call the runtimes answer.
+#[test]
+fn process_host_call_surfaces_match() {
+    let host: std::collections::BTreeSet<_> =
+        bastion_vault::plugins::process_runtime::HOST_CALL_METHODS.iter().collect();
+    let mock: std::collections::BTreeSet<_> = bastion_plugin_testkit::process::PROCESS_HOST_CALLS.iter().collect();
+    assert_eq!(host, mock);
+    for m in SQL_METHODS {
+        assert!(sql_host::METHODS.contains(&m) && host.contains(&m), "{m}");
+    }
+}
+
+/// Without the manifest capability, and outside an invocation, both refuse
+/// with the same code — before any grant or vault is consulted.
+#[tokio::test]
+async fn sql_host_calls_refuse_in_the_same_order() {
+    let caller = {
+        let mut req = bastion_vault::logical::Request::new("dbms/v2/sessions");
+        req.auth = Some(bastion_vault::logical::Auth::default());
+        bastion_vault::plugins::invocation::InvocationCaller::from_request(&req).unwrap()
+    };
+    let bare = TestHost::builder("dbms-management").build();
+    let declared = TestHost::builder("dbms-management").sql_gate(true).resource_credentials(true).build();
+    let ana = TestCaller::new("ent-ana");
+    for m in SQL_METHODS {
+        let p = sql_params(m);
+        let real = sql_host::handle(&sql_manifest(false), None, m, &p, Some(&caller)).await.unwrap_err();
+        let mock = bare.process_host_call(Some(&ana), m, &p).unwrap_err();
+        assert_eq!((code(&real), code(&mock)), ("forbidden", "forbidden"), "{m}");
+
+        let real = sql_host::handle(&sql_manifest(true), None, m, &p, None).await.unwrap_err();
+        let mock = declared.process_host_call(None, m, &p).unwrap_err();
+        assert_eq!((code(&real), code(&mock)), ("no_invocation", "no_invocation"), "{m}");
+    }
+}
+
+/// §5.4 rules 3–5 decide the same on both sides.
+#[test]
+fn release_rules_agree() {
+    let cases: Vec<(&str, &str, Option<Value>, &str)> = vec![
+        ("sql", "direct", Some(json!("db1:5432")), "db1:5432"),
+        ("sql", "rustion-preferred", Some(json!(["x:1", "DB1:5432"])), "db1:5432"),
+        ("ssh", "direct", Some(json!("db1:5432")), "db1:5432"),
+        ("sql", "rustion-required", Some(json!("db1:5432")), "db1:5432"),
+        ("sql", "bastion", Some(json!("db1:5432")), "db1:5432"),
+        ("sql", "direct", None, "db1:5432"),
+        ("sql", "direct", Some(json!([])), "db1:5432"),
+        ("sql", "direct", Some(json!(5432)), "db1:5432"),
+        ("sql", "direct", Some(json!(["db1"])), "db1:5432"),
+        ("sql", "direct", Some(json!("db1:5433")), "db1:5432"),
+        ("sql", "direct", Some(json!("[::1]:5432")), "[::1]:5432"),
+    ];
+    for (protocol, transport, bound, endpoint) in cases {
+        let real = check_release(&SqlReleaseMaterial {
+            protocol: protocol.into(),
+            endpoint: SqlEndpoint::parse(endpoint).unwrap(),
+            transport: transport.into(),
+            transport_source: "tier".into(),
+            secret_id: "s".into(),
+            sql_endpoint: bound.clone(),
+            username: "u".into(),
+            password: zeroize::Zeroizing::new("p".into()),
+            require_mfa: false,
+        })
+        .map_err(|r| r.reason());
+        let mock = mock_check_release(&MockRelease {
+            protocol: protocol.into(),
+            endpoint: endpoint.into(),
+            transport: transport.into(),
+            secret_id: "s".into(),
+            sql_endpoint: bound.clone(),
+            username: "u".into(),
+            password: "p".into(),
+            require_mfa: false,
+        });
+        assert_eq!(real, mock, "{protocol} {transport} {bound:?} {endpoint}");
+    }
+}
+
+/// Actor stamping is decided the same way: ABI 1.4 with caller_identity.
+#[test]
+fn audit_actor_stamping_agrees() {
+    for (minor, caller_identity) in [(3u32, true), (4, false), (4, true)] {
+        let mut m = sql_manifest(false);
+        m.abi_version = format!("1.{minor}");
+        m.capabilities.caller_identity = caller_identity;
+        let real = bastion_vault::plugins::plugin_audit::stamps_actor(&m);
+        let mock_host =
+            TestHost::builder("p").audit_emit(true).abi_minor(minor).caller_identity(caller_identity).build();
+        mock_host.process_host_call(Some(&TestCaller::new("e")), "audit_emit", &json!({"payload": {}})).unwrap();
+        let mock = mock_host.audit_events()[0].get("actor").is_some();
+        assert_eq!(real, mock, "1.{minor} caller_identity={caller_identity}");
+    }
+}

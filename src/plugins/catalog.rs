@@ -413,6 +413,24 @@ impl PluginCatalog {
                 "capability widening: credential_provider cannot be added on re-register; DELETE + re-register".into(),
             ));
         }
+        // ABI minor 4: the SQL host calls are capabilities. Gaining one, or
+        // a resource-credential kind, needs DELETE + re-register; a changed
+        // block otherwise voids the admin grants (pinned to its hash).
+        if !p.sql_gate && n.sql_gate {
+            return Err(RvError::ErrString(
+                "capability widening: sql_gate cannot be enabled on re-register; DELETE + re-register".into(),
+            ));
+        }
+        if let Some(k) = n.resource_credentials.iter().find(|k| !p.resource_credentials.contains(k)) {
+            return Err(RvError::ErrString(format!(
+                "capability widening: resource_credentials gained `{k:?}`; DELETE + re-register",
+            )));
+        }
+        if !p.sql_console && n.sql_console {
+            return Err(RvError::ErrString(
+                "capability widening: sql_console cannot be enabled on re-register; DELETE + re-register".into(),
+            ));
+        }
         let prev_notify = pa.notify.unwrap_or_default();
         if let Some(new_notify) = na.notify {
             if (new_notify.read && !prev_notify.read) || (new_notify.windows && !prev_notify.windows) {
@@ -1130,6 +1148,52 @@ mod tests {
             secret_kinds: vec!["password".into()],
         });
         m
+    }
+
+    fn sql_manifest_with(name: &str, version: &str, binary: &[u8]) -> PluginManifest {
+        use crate::plugins::manifest::ResourceCredentialKind;
+        let mut m = manifest_with(name, version, binary);
+        m.runtime = RuntimeKind::Process;
+        m.abi_version = "1.4".to_string();
+        let c = &mut m.capabilities;
+        c.long_lived = true;
+        c.concurrent = true;
+        c.caller_identity = true;
+        c.sql_gate = true;
+        c.resource_credentials = vec![ResourceCredentialKind::Sql];
+        m
+    }
+
+    /// ABI 1.4 registers here, and the SQL capabilities cannot be gained on
+    /// re-register.
+    #[tokio::test]
+    async fn sql_capability_widening_refused() {
+        let s = MemStorage::default();
+        enable_unsigned(&s).await;
+        let cat = PluginCatalog::new();
+        let bin = b"sql-1".to_vec();
+        let mut first = sql_manifest_with("dbms", "0.1.0", &bin);
+        first.capabilities.sql_gate = false;
+        first.capabilities.resource_credentials.clear();
+        cat.put(&s, &first, &bin).await.unwrap();
+
+        let bin2 = b"sql-2".to_vec();
+        let mut gate = sql_manifest_with("dbms", "0.2.0", &bin2);
+        gate.capabilities.resource_credentials.clear();
+        let err = cat.put(&s, &gate, &bin2).await.unwrap_err();
+        assert!(format!("{err:?}").contains("sql_gate"), "{err:?}");
+
+        let bin3 = b"sql-3".to_vec();
+        let mut creds = sql_manifest_with("dbms", "0.3.0", &bin3);
+        creds.capabilities.sql_gate = false;
+        let err = cat.put(&s, &creds, &bin3).await.unwrap_err();
+        assert!(format!("{err:?}").contains("resource_credentials"), "{err:?}");
+
+        // A 1.4 manifest declared at 1.3 is invalid on this host.
+        let bin4 = b"sql-4".to_vec();
+        let mut old = sql_manifest_with("dbms-old", "0.1.0", &bin4);
+        old.abi_version = "1.3".to_string();
+        assert!(cat.put(&s, &old, &bin4).await.is_err());
     }
 
     #[tokio::test]

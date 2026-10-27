@@ -221,6 +221,70 @@ pub struct Capabilities {
     /// Requires `abi_version` minor >= 3 and `storage_scope = "entity"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_provider: Option<CredentialProviderCap>,
+
+    /// ABI 1.4: a long-lived process plugin served over the multiplexed
+    /// stdio protocol (features/sql-browser.md §9.4). A timed-out invocation
+    /// is cancelled instead of tearing the child down. Requires
+    /// `runtime = "process"` and `long_lived = true`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub concurrent: bool,
+    /// ABI 1.4: in-flight cap for a `concurrent` plugin. `None` means
+    /// [`DEFAULT_MAX_CONCURRENT`]; outside `1..=`[`MAX_CONCURRENT_HARD_CAP`]
+    /// is refused at registration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent: Option<u32>,
+    /// ABI 1.4: the caller-bound `resource_sql_target`,
+    /// `resource_sql_authorize` and `connect_ticket_redeem` host calls.
+    /// Usable only under the admin grant `sql-gate`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub sql_gate: bool,
+    /// ABI 1.4: credentials the plugin may ask the host to release
+    /// (`resource_sql_credential`). Unknown kinds fail parsing. Usable only
+    /// under the admin grant `resource-credentials`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resource_credentials: Vec<ResourceCredentialKind>,
+    /// ABI 1.4: the GUI renders its SQL workspace against this plugin's
+    /// mounts. Grants no server authority; requires `sql_gate`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub sql_console: bool,
+}
+
+/// A resource credential kind (`[capabilities] resource_credentials`). A
+/// closed set: an unknown kind fails parsing rather than being ignored.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceCredentialKind {
+    /// The login of a resource's `sql` connection profile (sql-browser §5.4).
+    Sql,
+}
+
+/// Default for [`Capabilities::max_concurrent`] (features/sql-browser.md §9.4).
+pub const DEFAULT_MAX_CONCURRENT: u32 = 32;
+/// Highest [`Capabilities::max_concurrent`] a manifest may declare.
+pub const MAX_CONCURRENT_HARD_CAP: u32 = 256;
+
+impl Capabilities {
+    /// The in-flight cap the host applies to a `concurrent` plugin.
+    pub fn effective_max_concurrent(&self) -> u32 {
+        self.max_concurrent.unwrap_or(DEFAULT_MAX_CONCURRENT)
+    }
+
+    /// Does the plugin request the release of `kind` credentials?
+    pub fn requests_resource_credentials(&self, kind: ResourceCredentialKind) -> bool {
+        self.resource_credentials.contains(&kind)
+    }
+
+    /// SHA-256 (hex) of the whole `[capabilities]` block in canonical JSON.
+    /// The ABI 1.4 grants are pinned to it: their requesting keys are flat
+    /// flags, so a pin over them alone could never change. Any change to the
+    /// block voids those approvals until an administrator re-approves.
+    pub fn canonical_sha256(&self) -> String {
+        let value = serde_json::to_value(self).expect("Capabilities always serialises");
+        let mut canonical = String::new();
+        write_canonical(&value, &mut canonical);
+        let digest = Sha256::digest(canonical.as_bytes());
+        digest.iter().map(|b| format!("{b:02x}")).collect()
+    }
 }
 
 /// Storage scope a plugin's `bv.storage_*` calls are confined to.
@@ -525,8 +589,10 @@ pub const HOST_ABI_MAJOR: u32 = 1;
 /// the `caller` envelope block, `storage_scope = "entity"` and
 /// `[capabilities.credential_provider]`. Older hosts refuse a newer minor
 /// cleanly via [`check_abi_compatibility`] — the intended downgrade
-/// behavior.
-pub const HOST_ABI_MINOR: u32 = 3;
+/// behavior. Minor `4` adds the SQL browser substrate (sql-browser §9.2):
+/// multiplexed process invocations, `sql_gate`, `resource_credentials`,
+/// `sql_console`, lifecycle messages and actor-stamped `audit_emit`.
+pub const HOST_ABI_MINOR: u32 = 4;
 
 /// Phase 5.4 — parse `"major.minor"` from a manifest. Returns
 /// `Err(_)` for any non-numeric or missing component so a typo'd
@@ -659,6 +725,58 @@ impl PluginManifest {
         self.validate_app_capabilities()?;
         self.validate_notify_capabilities()?;
         self.validate_provider_capabilities()?;
+        self.validate_sql_capabilities()?;
+        Ok(())
+    }
+
+    /// Static invariants on the ABI 1.4 keys. Each requires minor >= 4, so
+    /// a host that does not implement them refuses the plugin outright.
+    fn validate_sql_capabilities(&self) -> Result<(), &'static str> {
+        let caps = &self.capabilities;
+        let declared = caps.concurrent
+            || caps.max_concurrent.is_some()
+            || caps.sql_gate
+            || !caps.resource_credentials.is_empty()
+            || caps.sql_console;
+        if !declared {
+            return Ok(());
+        }
+        let (_maj, min) = parse_abi(&self.abi_version).map_err(|_| "abi_version must be MAJOR.MINOR")?;
+        if min < 4 {
+            return Err(
+                "concurrent / max_concurrent / sql_gate / resource_credentials / sql_console require abi_version minor >= 4 (\"1.4\")",
+            );
+        }
+        if caps.concurrent && (self.runtime != RuntimeKind::Process || !caps.long_lived) {
+            return Err("concurrent = true requires runtime = \"process\" and long_lived = true");
+        }
+        if let Some(n) = caps.max_concurrent {
+            if !caps.concurrent {
+                return Err("max_concurrent requires concurrent = true");
+            }
+            if n == 0 || n > MAX_CONCURRENT_HARD_CAP {
+                return Err("max_concurrent must be between 1 and 256");
+            }
+        }
+        let caller_bound = caps.sql_gate || !caps.resource_credentials.is_empty();
+        if caller_bound && self.runtime != RuntimeKind::Process {
+            return Err("sql_gate / resource_credentials are process-runtime host calls");
+        }
+        if caller_bound && !caps.caller_identity {
+            return Err("sql_gate / resource_credentials require caller_identity = true");
+        }
+        let mut kinds = std::collections::BTreeSet::new();
+        if !caps.resource_credentials.iter().all(|k| kinds.insert(*k)) {
+            return Err("resource_credentials entries must be unique");
+        }
+        // A serialized long-lived child cannot receive the seal lifecycle
+        // message, so it could keep released credentials across a seal.
+        if !caps.resource_credentials.is_empty() && caps.long_lived && !caps.concurrent {
+            return Err("resource_credentials on a long_lived plugin requires concurrent = true");
+        }
+        if caps.sql_console && !caps.sql_gate {
+            return Err("sql_console requires sql_gate = true");
+        }
         Ok(())
     }
 
@@ -978,6 +1096,211 @@ mod tests {
         assert!(v.get("caller_identity").is_none());
         assert!(v.get("storage_scope").is_none());
         assert!(v.get("credential_provider").is_none());
+    }
+
+    // ── ABI 1.4: SQL browser substrate ──
+
+    fn sql_manifest() -> PluginManifest {
+        let mut m = fixture();
+        m.name = "dbms-management".into();
+        m.runtime = RuntimeKind::Process;
+        m.abi_version = "1.4".into();
+        m.capabilities.long_lived = true;
+        m.capabilities.concurrent = true;
+        m.capabilities.caller_identity = true;
+        m.capabilities.audit_emit = true;
+        m.capabilities.storage_prefix = Some("dbms/".into());
+        m.capabilities.sql_gate = true;
+        m.capabilities.resource_credentials = vec![ResourceCredentialKind::Sql];
+        m.capabilities.sql_console = true;
+        m
+    }
+
+    #[test]
+    fn host_abi_minor_is_four() {
+        assert_eq!(HOST_ABI_MINOR, 4);
+        assert!(check_abi_compatibility("1.4").is_ok());
+        assert!(check_abi_compatibility("1.3").is_ok());
+        assert!(check_abi_compatibility("1.0").is_ok());
+        assert!(check_abi_compatibility("1.5").unwrap_err().contains("minor 5"));
+    }
+
+    #[test]
+    fn sql_manifest_validates() {
+        sql_manifest().validate().unwrap();
+    }
+
+    /// Every ABI 1.4 key on its own is refused below minor 4: a 1.3 host
+    /// ignores the unknown key, so only the ABI refusal keeps authority off.
+    #[test]
+    fn every_abi_1_4_key_requires_minor_4() {
+        type Set = fn(&mut Capabilities);
+        let setters: [(&str, Set); 5] = [
+            ("concurrent", |c| {
+                c.long_lived = true;
+                c.concurrent = true
+            }),
+            ("max_concurrent", |c| {
+                c.long_lived = true;
+                c.concurrent = true;
+                c.max_concurrent = Some(4)
+            }),
+            ("sql_gate", |c| {
+                c.caller_identity = true;
+                c.sql_gate = true
+            }),
+            ("resource_credentials", |c| {
+                c.caller_identity = true;
+                c.resource_credentials = vec![ResourceCredentialKind::Sql]
+            }),
+            ("sql_console", |c| {
+                c.caller_identity = true;
+                c.sql_gate = true;
+                c.sql_console = true
+            }),
+        ];
+        for (name, set) in setters {
+            let mut m = fixture();
+            m.runtime = RuntimeKind::Process;
+            m.abi_version = "1.4".into();
+            set(&mut m.capabilities);
+            m.validate().unwrap_or_else(|e| panic!("{name} at 1.4: {e}"));
+            m.abi_version = "1.3".into();
+            assert!(m.validate().unwrap_err().contains("minor >= 4"), "{name} at 1.3");
+        }
+    }
+
+    #[test]
+    fn concurrent_needs_a_long_lived_process() {
+        let mut m = sql_manifest();
+        m.capabilities.long_lived = false;
+        m.capabilities.resource_credentials.clear();
+        assert!(m.validate().is_err());
+        let mut m = sql_manifest();
+        m.runtime = RuntimeKind::Wasm;
+        assert!(m.validate().is_err());
+    }
+
+    #[test]
+    fn max_concurrent_is_bounded_and_needs_concurrent() {
+        let mut m = sql_manifest();
+        for bad in [0, MAX_CONCURRENT_HARD_CAP + 1] {
+            m.capabilities.max_concurrent = Some(bad);
+            assert!(m.validate().is_err(), "{bad}");
+        }
+        m.capabilities.max_concurrent = Some(MAX_CONCURRENT_HARD_CAP);
+        m.validate().unwrap();
+        assert_eq!(m.capabilities.effective_max_concurrent(), MAX_CONCURRENT_HARD_CAP);
+        m.capabilities.max_concurrent = None;
+        assert_eq!(m.capabilities.effective_max_concurrent(), DEFAULT_MAX_CONCURRENT);
+        let mut m = fixture();
+        m.runtime = RuntimeKind::Process;
+        m.abi_version = "1.4".into();
+        m.capabilities.max_concurrent = Some(8);
+        assert!(m.validate().unwrap_err().contains("requires concurrent"));
+    }
+
+    #[test]
+    fn caller_bound_calls_need_caller_identity_and_the_process_runtime() {
+        let mut m = sql_manifest();
+        m.capabilities.caller_identity = false;
+        assert!(m.validate().is_err());
+        let mut m = sql_manifest();
+        m.runtime = RuntimeKind::Wasm;
+        m.capabilities.long_lived = false;
+        m.capabilities.concurrent = false;
+        assert!(m.validate().is_err());
+    }
+
+    #[test]
+    fn credential_release_on_a_serialized_long_lived_child_is_refused() {
+        let mut m = sql_manifest();
+        m.capabilities.concurrent = false;
+        assert!(m.validate().unwrap_err().contains("requires concurrent"));
+        // A single-shot child holds nothing between invocations.
+        m.capabilities.long_lived = false;
+        m.validate().unwrap();
+    }
+
+    #[test]
+    fn sql_console_requires_sql_gate_and_kinds_are_unique() {
+        let mut m = sql_manifest();
+        m.capabilities.sql_gate = false;
+        assert!(m.validate().is_err());
+        let mut m = sql_manifest();
+        m.capabilities.resource_credentials = vec![ResourceCredentialKind::Sql, ResourceCredentialKind::Sql];
+        assert!(m.validate().is_err());
+    }
+
+    /// Strict parsing of the new keys: a wrong type or an unknown credential
+    /// kind fails the whole manifest instead of being coerced or dropped.
+    #[test]
+    fn abi_1_4_keys_parse_strictly() {
+        let base = |caps: &str| {
+            format!(
+                r#"{{"name":"p","version":"1","runtime":"process","abi_version":"1.4",
+                    "sha256":"{}","size":1,"capabilities":{caps}}}"#,
+                "0".repeat(64)
+            )
+        };
+        let good = base(r#"{"long_lived":true,"concurrent":true,"max_concurrent":8,"caller_identity":true,
+            "sql_gate":true,"resource_credentials":["sql"],"sql_console":true}"#);
+        let m: PluginManifest = serde_json::from_str(&good).unwrap();
+        m.validate().unwrap();
+        assert_eq!(m.capabilities.resource_credentials, vec![ResourceCredentialKind::Sql]);
+        for bad in [
+            r#"{"concurrent":"yes"}"#,
+            r#"{"concurrent":1}"#,
+            r#"{"max_concurrent":"32"}"#,
+            r#"{"max_concurrent":-1}"#,
+            r#"{"max_concurrent":4294967296}"#,
+            r#"{"sql_gate":"true"}"#,
+            r#"{"sql_console":null}"#,
+            r#"{"resource_credentials":["ssh"]}"#,
+            r#"{"resource_credentials":["SQL"]}"#,
+            r#"{"resource_credentials":"sql"}"#,
+            r#"{"resource_credentials":[true]}"#,
+        ] {
+            assert!(serde_json::from_str::<PluginManifest>(&base(bad)).is_err(), "{bad}");
+        }
+    }
+
+    /// Off, the new keys stay out of the signed bytes: an already-signed
+    /// plugin keeps verifying.
+    #[test]
+    fn abi_1_4_keys_omitted_from_signing_message_when_off() {
+        let v = serde_json::to_value(&fixture().capabilities).unwrap();
+        for k in ["concurrent", "max_concurrent", "sql_gate", "resource_credentials", "sql_console"] {
+            assert!(v.get(k).is_none(), "{k}");
+        }
+    }
+
+    /// The grant pin covers the whole block and ignores serialisation order.
+    #[test]
+    fn capability_pin_changes_with_any_capability() {
+        let base = sql_manifest().capabilities;
+        let pin = base.canonical_sha256();
+        assert_eq!(pin, base.clone().canonical_sha256());
+        assert_eq!(pin.len(), 64);
+        let mut changed = Vec::new();
+        let mut c = base.clone();
+        c.audit_emit = false;
+        changed.push(c);
+        let mut c = base.clone();
+        c.storage_prefix = Some("dbms/x/".into());
+        changed.push(c);
+        let mut c = base.clone();
+        c.max_concurrent = Some(31);
+        changed.push(c);
+        let mut c = base.clone();
+        c.sql_console = false;
+        changed.push(c);
+        let mut c = base.clone();
+        c.resource_credentials.clear();
+        changed.push(c);
+        for c in changed {
+            assert_ne!(c.canonical_sha256(), pin);
+        }
     }
 
     #[test]

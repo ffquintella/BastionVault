@@ -187,6 +187,9 @@ mod core_tests;
 #[ctor::ctor(unsafe)]
 fn maybe_act_as_test_subprocess_plugin() {
     if std::env::var("BV_PLUGIN_MODE").ok().as_deref() == Some("1") {
+        if std::env::var("BV_PLUGIN_LONG_LIVED").ok().as_deref() == Some("1") {
+            crate::plugins::process_mux::run_test_long_lived_plugin();
+        }
         crate::plugins::process_runtime::run_test_subprocess_plugin();
     }
 }
@@ -311,6 +314,11 @@ impl BastionVault {
         // runtime is not a module. See src/plugins/kernel_service.rs.
         core.kernel_services.set_plugin_host(crate::plugins::PluginRuntimeHost::new(core.clone()));
 
+        // The SQL browser's host calls read database resources through the
+        // resource engine's `sql` protocol (features/sql-browser.md §9.5).
+        // Stateless and process-wide: every vault in the process shares it.
+        crate::plugins::sql_host::set_sql_resource_source(Arc::new(crate::plugins::sql_resource::ResourceEngineSqlSource));
+
         // MCP brokered sessions (features/mcp-brokered-sessions.md §11-12):
         // the resource engine's session handler reads the server config's
         // switches and limits, the runtime switch and the vault's own
@@ -365,6 +373,11 @@ impl BastionVault {
         // add credential module: ferrogate (Phase 1 — config + admin lifecycle; login stubbed)
         let ferrogate_module = FerroGateModule::new(core.clone());
         core.module_manager().add_module(Arc::new(ferrogate_module), &core.kernel_services)?;
+
+        // Seal tells every multiplexed plugin child to close its sessions
+        // (features/sql-browser.md §6.7).
+        let plugin_lifecycle = crate::plugins::lifecycle::PluginLifecycleModule::new();
+        core.module_manager().add_module(Arc::new(plugin_lifecycle), &core.kernel_services)?;
 
         Ok(Self { core: ArcSwap::new(core), token: ArcSwap::new(Arc::new(String::new())) })
     }

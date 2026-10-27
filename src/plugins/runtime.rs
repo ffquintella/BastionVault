@@ -69,7 +69,7 @@ use std::sync::Arc;
 use wasmtime::{AsContextMut, Caller, Linker, Memory, Store, StoreLimits, StoreLimitsBuilder, TypedFunc};
 
 use crate::kernel_api::VaultCtx;
-use crate::{audit, storage::StorageEntry};
+use crate::storage::StorageEntry;
 
 use super::manifest::PluginManifest;
 use super::module_cache::ModuleCache;
@@ -206,6 +206,10 @@ struct PluginCtx {
     /// via `bv.notify_list` / `bv.notify_get`? Gated from
     /// `capabilities.notify_read`.
     notify_read: bool,
+    /// ABI 1.4: the invocation's caller, for actor-stamped `bv.audit_emit`.
+    caller: Option<super::invocation::InvocationCaller>,
+    /// The plugin's manifest, for the stamping rule.
+    manifest: PluginManifest,
 }
 
 impl PluginCtx {
@@ -324,6 +328,21 @@ impl WasmRuntime {
         config: std::collections::BTreeMap<String, String>,
         entity_id: Option<&str>,
     ) -> Result<InvokeOutput, RuntimeError> {
+        self.invoke_bound(manifest, wasm_bytes, input, core, config, entity_id, None).await
+    }
+
+    /// [`invoke_scoped`](Self::invoke_scoped) on behalf of `caller` (ABI
+    /// 1.4): `bv.audit_emit` is stamped with the caller as its actor.
+    pub async fn invoke_bound(
+        &self,
+        manifest: &PluginManifest,
+        wasm_bytes: &[u8],
+        input: &[u8],
+        core: Option<Arc<dyn VaultCtx>>,
+        config: std::collections::BTreeMap<String, String>,
+        entity_id: Option<&str>,
+        caller: Option<super::invocation::InvocationCaller>,
+    ) -> Result<InvokeOutput, RuntimeError> {
         let data_root = if manifest.capabilities.storage_scope == super::manifest::StorageScope::Entity {
             entity_data_root(&manifest.name, entity_id.unwrap_or("")).ok_or_else(|| {
                 RuntimeError::Engine("entity-scoped plugin invoked without a valid caller entity".to_string())
@@ -365,6 +384,8 @@ impl WasmRuntime {
             net_https_only,
             notify_emit: manifest.capabilities.notify_emit,
             notify_read: manifest.capabilities.notify_read,
+            caller,
+            manifest: manifest.clone(),
         };
 
         let mut store: Store<PluginCtx> = Store::new(self.cache.engine(), ctx);
@@ -1041,17 +1062,15 @@ async fn audit_emit_impl(caller: &mut Caller<'_, PluginCtx>, ptr: i32, len: i32)
         Some(c) => c,
         None => return AUDIT_FORBIDDEN,
     };
-    let plugin_name = caller.data().plugin_name.clone();
-    let path = format!("sys/plugins/{plugin_name}/event");
     // If the payload parses as JSON, embed it as the "plugin_event"
     // field (so HMAC-redaction handles string leaves); otherwise embed
     // the UTF-8 form.
-    let mut body = serde_json::Map::new();
     let payload_str = String::from_utf8_lossy(&payload).into_owned();
     let parsed =
         serde_json::from_str::<serde_json::Value>(&payload_str).unwrap_or(serde_json::Value::String(payload_str));
-    body.insert("plugin_event".to_string(), parsed);
-    audit::emit_sys_audit(core.as_ref(), "", &path, crate::logical::Operation::Write, Some(body), None).await;
+    let manifest = caller.data().manifest.clone();
+    let invocation = caller.data().caller.clone();
+    super::plugin_audit::emit(core.as_ref(), &manifest, invocation.as_ref(), parsed).await;
     0
 }
 

@@ -155,6 +155,11 @@ impl Backend for PluginLogicalBackend {
             ));
         }
 
+        // ABI 1.4: the host-side half of the caller, for caller-bound host
+        // calls and actor-stamped audit. Never sent to the plugin.
+        let invocation_caller =
+            if manifest.capabilities.caller_identity { super::invocation::InvocationCaller::from_request(req) } else { None };
+
         let envelope = build_envelope(req, caller.as_ref())?;
         let envelope_bytes = serde_json::to_vec(&envelope)
             .map_err(|e| RvError::ErrOther(::anyhow::anyhow!("envelope serialise failed: {e}")))?;
@@ -167,13 +172,14 @@ impl Backend for PluginLogicalBackend {
                 let runtime =
                     WasmRuntime::new().map_err(|e| RvError::ErrOther(::anyhow::anyhow!("wasm runtime: {e:?}")))?;
                 runtime
-                    .invoke_scoped(
+                    .invoke_bound(
                         &manifest,
                         &binary,
                         &envelope_bytes,
                         Some(self.core.clone()),
                         config,
                         entity_id.as_deref(),
+                        invocation_caller,
                     )
                     .await
                     .map_err(|e| {
@@ -182,12 +188,14 @@ impl Backend for PluginLogicalBackend {
             }
             RuntimeKind::Process => {
                 if manifest.capabilities.long_lived {
-                    super::process_supervisor::invoke_with_config(
+                    super::process_supervisor::invoke_bound(
                         &manifest,
                         &binary,
                         &envelope_bytes,
                         Some(self.core.clone()),
                         config,
+                        invocation_caller,
+                        super::process_supervisor::DEFAULT_INVOKE_TIMEOUT,
                     )
                     .await
                     .map_err(|e| {
@@ -199,7 +207,14 @@ impl Backend for PluginLogicalBackend {
                 } else {
                     let runtime = ProcessRuntime::new();
                     runtime
-                        .invoke_with_config(&manifest, &binary, &envelope_bytes, Some(self.core.clone()), config)
+                        .invoke_bound(
+                            &manifest,
+                            &binary,
+                            &envelope_bytes,
+                            Some(self.core.clone()),
+                            config,
+                            invocation_caller,
+                        )
                         .await
                         .map_err(|e| {
                             RvError::ErrOther(::anyhow::anyhow!(
