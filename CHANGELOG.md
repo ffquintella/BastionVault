@@ -127,6 +127,12 @@ EXAMPLE ENTRY:
 - Add the `sql` Connect protocol to `database` resources with strict profile parsing, endpoint-bound credential release from a secret's `sql_endpoint`, MFA for `sql` profiles, and `resources/v2/sql/privileges/<resource>`. (T124, S109)
 - Offer the SQL capabilities in the GUI: chips and validator messages in the policy builder, chips and presets on resource and asset-group shares, a SQL profile editor on database resources, and a consent panel for the two plugin grants. (T124, S109)
 
+#### HSM pool HA (pool of one)
+
+- Start an HSM pool with one device and add the second later: `topology = "pool"` takes one or two `member` blocks; bootstrap and init with one write a one-member seal record and one copy of each secret, every node (a node on the HSM host through `connector = "http://127.0.0.1:<port>"` with no mTLS, the others through the member's gateway) unseals through it, and `bvault operator hsm member add` followed by `repair --run` and an admin-credentialed repair gives every set its second copy and promotes the device, after which either device alone unseals the cluster (T454, S114)
+- Require `acknowledge_single_member_without_recovery = true` in the pool `hsm` block to bootstrap, initialize or migrate onto a pool of one with `recovery = "none"`, or to retire down to one member without a recovery key: losing that one device would make the vault unrecoverable, so without the setting these are refused before any device or record changes; the setting is refused with `recovery = "shamir-ceremony"` and in a per-node block (T454, S114)
+- Report a pool of one as having no redundancy: `v2/sys/hsm/status` adds `redundancy` (`full` or `none`), `members_active`, `members_expected` and `redundancy_warning` (also before init), `v2/sys/hsm/members` adds the first three, every start and unseal raises `hsm.pool_not_redundant` (a `warn` on the `security` log and an audit entry), the startup line says `redundancy none`, and `bv_hsm_pool_redundancy{level="none"}` is 1. Its single-copy sets are not reported as under-replicated (T454, S114)
+
 #### HSM pool HA (phase 7 of 7, prepared: hardware validation)
 
 - Attest YubiHSM 2 pool members against the Yubico attestation chain: set `attestation_roots_file` in the `hsm "yubihsm2"` block to a PEM file of the Yubico YubiHSM attestation root and intermediates, which you download from Yubico and check against its published fingerprints (BastionVault neither ships nor fetches them); `bootstrap`, `member add` and `recover` then verify each key certificate up to a root in that file, with the device's serial, on-device generation, and the exact domains, capabilities, label and object id `provision` created, and log the root fingerprint reached; without the file every YubiHSM 2 attestation is refused, naming the setting (T454, S114)
@@ -169,6 +175,10 @@ EXAMPLE ENTRY:
 - Run `bvault hsm-gateway --config gateway.hcl` on a host with a YubiHSM 2 to expose its localhost `yubihsm-connector` to vault nodes over mutual TLS: only TLS 1.3 clients whose certificate chains to `client_ca_file` and carries a DNS SAN exactly equal to one of `allowed_clients` get through; each client may have one request in flight and `max_rps_per_client` requests per second (default 50); only `POST /connector/api` (3–3139-byte body) and `GET /connector/status` are forwarded, bodies verbatim and client headers dropped, with a 5 s connector timeout; chunked, duplicated-length, pipelined and other malformed requests are refused before reaching the connector; a non-loopback `connector`, an empty or invalid `allowed_clients` or an unknown field stops the command at startup; logs name the peer and client and never contain a request or response body. The node-side loopback relay ships in the new `bv-hsm-link` crate but is not used by the HSM seal yet, so a `yubihsm2` pool is still refused (T454, S114)
 
 ### Changed
+
+#### HSM pool HA (pool of one)
+
+- Hold at most two HSMs per cluster: `bvault operator hsm member add` refuses a device while two members are not retired, so a failed device is now replaced by retiring it first (the pool runs as a pool of one meanwhile; set `min_wrap_copies = 1` first if it is 2) and then adding the replacement; a seal record that already holds a joining third member still repairs and promotes. `member retire` refuses the pool's last active member with its own error, `min_wrap_copies = 2` with one `member` block is a startup error, and pool init with two members configured and one unreachable now says to list only the present device to start a pool of one (T454, S114)
 
 #### HSM pool HA (phase 7, prepared)
 

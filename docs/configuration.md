@@ -253,8 +253,11 @@ hsm "yubihsm2" {
 
 ### HSM pool topology (`topology = "pool"`)
 
-Two devices serve the whole cluster ([HSM pool HA](../features/hsm-pool-ha.md),
-T454). Pool nodes authenticate with per-node credentials that node enrollment
+One or two devices serve the whole cluster ([HSM pool HA](../features/hsm-pool-ha.md),
+T454): a cluster may start with one device (a *pool of one*, without redundancy)
+and add the second later; it never has more than two
+([starting with one HSM](hsm.md#starting-with-one-hsm-a-pool-of-one)). Pool nodes
+authenticate with per-node credentials that node enrollment
 delivers. A `yubihsm2` pool reaches its members through the HSM link and
 attests them against `attestation_roots_file`; its device path is validated on
 hardware by T454 phase 7 ([runbook](hsm.md#phase-7-hardware-validation-t454)),
@@ -281,13 +284,14 @@ hsm "mock" {
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `member "<name>"` | | Exactly two. `<name>` is 1–64 characters of `[A-Za-z0-9._-]`. |
+| `member "<name>"` | | One or two. One is a pool of one: init writes one member and one copy of each secret. `<name>` is 1–64 characters of `[A-Za-z0-9._-]`. |
 | `member.serial` | | Required. The device serial; with the backend it forms the member's `hsm_id`. A new mock device is created with it. |
 | `member.gateway` | | (yubihsm2) `https://` mTLS HSM gateway. Exactly one of `gateway` / `connector`. |
 | `member.connector` | | (yubihsm2) Local `yubihsm-connector` URL or `usb`, on the node that hosts the device. |
 | `member.state_path` | | (mock, required) File backing that mock device; the two must differ. |
 | `member.prefer` | `false` | At most one member. Otherwise each node orders members by `SHA-256(node_id ‖ hsm_id)`. |
-| `min_wrap_copies` | `1` | Copies a new key needs before it is stored. `2` refuses key creation while a member is down. |
+| `min_wrap_copies` | `1` | Copies a new key needs before it is stored, each on a distinct active member. `2` refuses key creation while a member is down, and is refused with one `member` block (a pool of one holds one copy). |
+| `acknowledge_single_member_without_recovery` | `false` | Required, with `recovery = "none"`, to initialize a pool of one (or migrate onto one member, or retire down to one): it accepts that losing that one device makes the vault **unrecoverable**. Without it those operations are refused. Refused with `recovery = "shamir-ceremony"` and in a per-node block. Read when the operation runs; not stored. |
 | `link { ca_file, cert_file, key_file }` | | (yubihsm2) This node's mTLS identity for the gateways; required when any member uses `gateway`. |
 | `credential_dir` | | (yubihsm2, required) Where this node's per-member credentials live. |
 | `repair_rate` | `2` | Blob sets the repair job re-wraps per second, 1–100. |
@@ -305,8 +309,15 @@ Validation, all at startup:
   naming the field; only where this node reaches the device (`connector`,
   `state_path`) is taken from config.
 - Pool-only settings (`member`, `link`, `min_wrap_copies`, `repair_rate`,
-  `device_audit`, `migrate_from`, `credential_dir`) in a per-node block are
+  `device_audit`, `migrate_from`, `credential_dir`,
+  `acknowledge_single_member_without_recovery`) in a per-node block are
   refused rather than ignored.
+- Zero or three `member` blocks are refused. With two, init needs both
+  devices reachable; it never falls back to a pool of one.
+- `link` is needed only when a member is reached through `gateway`. A node on
+  the HSM host that uses `connector = "http://127.0.0.1:<port>"` for every
+  member it lists needs none; once a member on another host is added, that
+  node needs a `link` block to reach it.
 
 ## Metrics Access (optional)
 

@@ -28,8 +28,10 @@ use crate::{
 
 /// How often each member is probed with `device-info`.
 pub const PROBE_INTERVAL: Duration = Duration::from_secs(10);
-/// Members one pool can hold: the two devices, plus a replacement while it
-/// is joining and until the failed device is retired (spec § Replace).
+/// Members one pool object accepts. New records hold at most two that are not
+/// retired (`MAX_POOL_MEMBERS`, spec § Pool of one, R3); three remain readable
+/// so a record written before that rule, with a replacement still joining,
+/// can be repaired and promoted.
 pub const MAX_LIVE_MEMBERS: usize = 3;
 /// Consecutive transport or session failures that open a member's breaker.
 pub const BREAKER_THRESHOLD: u32 = 3;
@@ -84,6 +86,9 @@ pub enum PoolEventKind {
     DeviceLog,
     /// An index jump, chain break, reset or unlogged events in a device log.
     DeviceLogGap,
+    /// The seal record has one active member: a pool of one, without
+    /// redundancy (spec § Pool of one). Raised at start, unseal and init.
+    PoolNotRedundant,
 }
 
 impl PoolEventKind {
@@ -106,6 +111,7 @@ impl PoolEventKind {
             PoolEventKind::RecoveryCeremony => "hsm.recovery_ceremony",
             PoolEventKind::DeviceLog => "hsm.device_log",
             PoolEventKind::DeviceLogGap => "hsm.device_log_gap",
+            PoolEventKind::PoolNotRedundant => "hsm.pool_not_redundant",
         }
     }
 }
@@ -145,7 +151,8 @@ impl PoolEventSink for LogEventSink {
             PoolEventKind::NodeRevoked
             | PoolEventKind::MemberRetired
             | PoolEventKind::RevocationPending
-            | PoolEventKind::RecoveryCeremony => {
+            | PoolEventKind::RecoveryCeremony
+            | PoolEventKind::PoolNotRedundant => {
                 log::warn!(target: "security", "{name}: member={member} hsm_id={hsm_id} {detail}")
             }
             PoolEventKind::SetUnderReplicated => {
@@ -323,7 +330,12 @@ impl HsmPool {
             return Err(invalid("at most one member may be preferred".into()));
         }
         if min_wrap_copies == 0 || min_wrap_copies > specs.len() {
-            return Err(invalid(format!("min_wrap_copies {min_wrap_copies} with {} members", specs.len())));
+            return Err(invalid(format!(
+                "min_wrap_copies = {min_wrap_copies} needs {min_wrap_copies} members, but the pool has {}; a pool of \
+                 one holds one copy of each set, so set min_wrap_copies = 1 on this node until the second member is \
+                 active",
+                specs.len()
+            )));
         }
 
         let mut faulted = Vec::new();

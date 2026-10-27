@@ -6,7 +6,8 @@
 > migration) done 2026-10-27 on the mock, phase 5 (recovery) done 2026-10-27
 > on the mock, phase 6 (audit and observability) done 2026-10-27 on the mock,
 > phase 7 (hardware validation) prepared 2026-10-27 and awaiting the hardware
-> run; see [Current state](#current-state). Spec
+> run; the [pool of one](#pool-of-one-a-single-member-pool) (operator decision
+> 2026-10-27) done on the mock the same day; see [Current state](#current-state). Spec
 > written 2026-10-19. Extends
 > [HSM Support (YubiHSM 2)](hsm-support.md) (S17), whose non-negotiable security
 > rules apply here unchanged unless a section below says otherwise and why.
@@ -20,9 +21,11 @@ device, and nodes replicate secrets HSM-to-HSM.
 This feature adds a second topology, the **HSM pool**:
 
 - A BastionVault cluster of any size N (≥ 1, practically 3–12 nodes) depends on
-  exactly **two** YubiHSM 2 devices.
+  at most **two** YubiHSM 2 devices. It can start with **one** (a *pool of
+  one*, explicitly reported as having no redundancy) and gain the second later,
+  see [Pool of one](#pool-of-one-a-single-member-pool).
 - Any node can unseal and perform HSM-gated operations as long as **at least one**
-  of the two devices is reachable.
+  of the pool's devices is reachable.
 - Nodes without a local device reach the pool over the network. They go through an
   mTLS **HSM gateway**, and each node keeps its own end-to-end-encrypted,
   device-authenticated session with each HSM.
@@ -45,7 +48,8 @@ mutually exclusive per cluster.
 
 | Decision | Choice | Made by |
 |---|---|---|
-| Number of devices | Exactly two online devices for any cluster size | User |
+| Number of devices | Exactly two online devices for any cluster size. **Amended 2026-10-27:** one or two; a cluster starts with one and adds the second as redundancy, and never holds more than two (see [Pool of one](#pool-of-one-a-single-member-pool)) | User |
+| Pool of one without a recovery key | Refused unless the node's `hsm` block sets `acknowledge_single_member_without_recovery = true` (init, `migrate-to-pool`, and a retire that leaves one member) | User (requirement), Claude (mechanism) |
 | Key sharing between the two devices | **Dual-wrap**: independent non-exportable wrap keys, one blob per device. Cloned wrap key (FW 2.4 RSA-OAEP export) rejected, see [Rejected alternatives](#rejected-alternatives) | User |
 | Recovery if both devices are lost | **Shamir ceremony** (existing opt-in `recovery = "shamir-ceremony"`), defined concretely here as an ML-KEM-768 recovery copy | User |
 | Key creation with one device down | **Allowed**. One copy, flagged under-replicated, alerted, repaired later (`min_wrap_copies = 1` default; `2` available) | User |
@@ -345,8 +349,10 @@ pending transport key (see [Node enrollment](#node-enrollment-and-revocation)).
 All other nodes enroll afterwards through `node add`, which needs an unsealed cluster
 and a sudo token.
 
-`init` in pool mode requires **both** members to be reachable. Starting a cluster with
-one copy is refused, and the error names the unreachable member. It also requires an
+`init` in pool mode requires **every configured** member to be reachable. With two
+configured, starting with one copy is refused, and the error names the unreachable
+member. (A pool configured with one member starts with one copy by design; see
+[Pool of one](#pool-of-one-a-single-member-pool).) It also requires an
 explicit `recovery` value (`none` or `shamir-ceremony`) in the config. Pool init never
 falls back to a default recovery posture.
 
@@ -467,6 +473,62 @@ creating a key and repairing it. Losing the surviving device inside that window
 loses those keys, unless the recovery copy exists. Docs, `operator hsm status` and
 the GUI show the under-replicated count prominently.
 
+## Pool of one: a single-member pool
+
+**Operator decision, 2026-10-27.** T454 and the mTLS gateway link stay. The pool
+environment must be able to come up with **one** HSM; the second device is
+redundancy added later. Requirements as the operator stated them:
+
+- **R1.** A vault can be initialized, started and unsealed with only one HSM
+  present, and, once two are enrolled, unsealed with either one of them present.
+- **R2.** Nodes without a local HSM never need one of their own: they use a member
+  through the mTLS gateway and relay (`bv-hsm-link`). A node with a local device
+  uses `connector = "http://127.0.0.1:<port>"` and needs no mTLS.
+- **R3.** The cluster as a whole has at most two HSMs.
+
+> **Risk, stated loudly.** A pool of one is a single point of failure. Losing
+> that device (hardware failure, a factory reset, loss or theft) loses every
+> HSM-protected secret, the barrier KEK included, and therefore the vault,
+> **unless a recovery copy exists** (`recovery = "shamir-ceremony"`, chosen at
+> init). A pool of one with `recovery = "none"` is accepted only with an explicit
+> acknowledgement, and is reported as non-redundant for as long as it lasts.
+
+What a pool of one is, precisely:
+
+| Aspect | Rule |
+|---|---|
+| Config | `topology = "pool"` takes **one or two** `member` blocks. Zero or three are refused. The blocks stay a bootstrap list; after init the seal record decides. |
+| Members in the record | At most **two** members that are not `retired`. `member add` refuses a third (R3). |
+| Init / bootstrap | `operator hsm bootstrap` attests the members the config lists; init needs **every configured member** reachable and writes a seal record with exactly those members `active`. One block: a one-member record and a one-copy KEK set. Two blocks and one device unreachable: init is **refused**, naming the device; it never becomes a pool of one by itself. To start with one device, list only that one. |
+| `min_wrap_copies` | Copies a new set needs, each on a distinct active member. A pool of one can hold only one, so `min_wrap_copies = 2` with one `member` block is a config error. A node whose `min_wrap_copies` is larger than the record's active members cannot build its pool and stays sealed with an error naming both numbers (never a lower value picked for it). |
+| Sets | Single-copy. A set is fully replicated when it holds a copy for every **active** member, so in a pool of one a one-copy set is *not* under-replicated: no `hsm.set_under_replicated`, no `bv_hsm_under_replicated_sets`, nothing for repair to do. The missing redundancy is reported once, at pool level (next row), not as per-set repair noise. |
+| Signals | `v2/sys/hsm/status`: `redundancy` (`"none"` or `"full"`), `members_active`, `members_expected` (2), and `redundancy_warning` (text, only when `none`). Event `hsm.pool_not_redundant` and a `warn` in the `security` log at every start (provider open) and every unseal of a pool of one, and at the init that creates one. Metric `bv_hsm_pool_redundancy{level="none"|"full"}` (the current level is 1, the other 0). |
+| `recovery = "none"` | Init of a pool of one is refused unless the node's `hsm` block sets `acknowledge_single_member_without_recovery = true`. The same applies to `migrate-to-pool` onto one member and to a `member retire` that leaves one active member in a record without a recovery key. The flag is refused with `recovery = "shamir-ceremony"` and in the per-node topology. |
+| Adding the second device | The existing `member add` ceremony: attest, enroll every enrolled node on it, write it `joining`. Repair then wraps the second copy of the KEK and of every custody set; during that window the sets are counted under-replicated against the joining member (real, pending work). An admin-credentialed repair promotes it to `active`, and status reports `redundancy: "full"`. The recovery copy, if any, is unchanged: it does not depend on members. |
+| Retire | Refused for the **last** active member, whatever `min_wrap_copies` says; below `min_wrap_copies` active members; when a set would keep no copy on another active member; and (see above) into a pool of one without a recovery key unless acknowledged. |
+| Replacing a failed device | Retire first, then add (R3): retire the failed member (the survivor must hold every set), run as a pool of one, `member add` the replacement, repair, promote. With `min_wrap_copies = 2`, set it to 1 on the nodes first (a failed member already refuses key creation at 2). |
+| mTLS | Only for a node that reaches a member over the network: that member's block has `gateway = "https://…"` and the node has a `link` block. A node on the HSM host uses `connector = "http://127.0.0.1:<port>"` and needs no `link`. A record written by a node that reached the device through its local connector names no gateway for it; other nodes then use the `gateway` in their own `member` block. |
+| Persisted formats | None change. Seal record v2 already holds one or more members; redundancy is derived from member states, never stored; the acknowledgement is config, read at the moment of the transition. Two-member records written before this change load and encode byte for byte (fixture `crates/bv-core/src/seal/testdata/hsm-seal-pool-v2/`, captured from commit 7e0a8c45). |
+
+Rejected alternatives:
+
+- **Init falling back to the reachable member** when two are configured. That is
+  the silent downgrade the anti-goals forbid; a pool of one must be asked for.
+- **The acknowledgement as a `v2/sys/init` request field.** The frozen `v1/sys/init`
+  cannot carry it, so a v1 client could never init a pool of one; the config sits
+  next to `recovery`, which is init-time too; and one setting also covers
+  `migrate-to-pool` and retire, which have no init request.
+- **Keeping a transient third member** (the replacement joining while the failed
+  device is still a member). R3 rules it out, and the pool of one it is replaced
+  by is now a reported, first-class state. Records written before this change
+  that already hold a third, joining member still load, repair and promote; only
+  new additions are refused.
+- **Reporting single-copy sets in a pool of one as under-replicated.** It would
+  page operators for "repair needed" when there is nothing to repair, and bury the
+  real signal, which is the pool's missing redundancy.
+- **A redundancy field in the seal record.** It would be a second source of truth
+  for what the member states already say.
+
 ## Node enrollment and revocation
 
 Each node needs its own credential on **each** device. Credentials are random
@@ -571,6 +633,12 @@ yet enforced":
 
 **Replace a failed device:**
 
+*Amended 2026-10-27 (R3, at most two devices):* step 6 now comes first. Retire
+the failed B, which leaves a [pool of one](#pool-of-one-a-single-member-pool),
+then run steps 1–5; `member add` refuses B′ while A and B are both still
+members. The steps below are kept as written for records that already hold a
+joining third member.
+
 1. `provision` the new device B′.
 2. `bvault operator hsm member add hsm-b2 --bundle b2.json`, with admin
    credentials. B′ is attested, then added as `joining`.
@@ -586,7 +654,9 @@ The failed physical device should be reset or destroyed. Its blobs are useless
 without it, and retiring removes them anyway.
 
 **Retire a healthy device.** Only step 6. Retiring is refused if it would leave no
-active member, or fewer active members than `min_wrap_copies`.
+active member, or fewer active members than `min_wrap_copies`, or (amended
+2026-10-27) a pool of one without a recovery key and without
+`acknowledge_single_member_without_recovery = true`.
 
 **HSM key epoch rotation** (`operator hsm rotate-epoch`) reuses the repair machinery:
 new wrap keys are generated on every member, every set is re-wrapped to epoch + 1,
@@ -732,8 +802,11 @@ hsm "yubihsm2" {
 
 Validation rules:
 
-- `topology = "pool"` requires exactly two `member` blocks, each with exactly one of
-  `gateway` / `connector`, and a `serial`.
+- `topology = "pool"` requires one or two `member` blocks (amended 2026-10-27; it
+  was exactly two), each with exactly one of `gateway` / `connector`, and a
+  `serial`. `min_wrap_copies = 2` needs two. `acknowledge_single_member_without_recovery`
+  (bool, default false) is accepted only with `recovery = "none"`; see
+  [Pool of one](#pool-of-one-a-single-member-pool).
 - `link` is required when any member uses `gateway`.
 - `password` / `auth_key_id` are rejected in pool mode, because credentials come
   from `credential_dir`.
@@ -892,7 +965,72 @@ sections; the drain runs on the mock and is refused on a YubiHSM 2 until
 phase 7. Phase 7 is **prepared, awaiting the hardware run**: the Yubico
 attestation chain is verified against an operator-supplied trust file, and a
 hardware suite that only an operator runs is in place; nothing has been run
-on a device yet.
+on a device yet. The **pool of one** (operator decision 2026-10-27) is
+implemented on the mock: a cluster starts with one device and adds the second
+later.
+
+Pool of one (mock; the YubiHSM 2 path compiles, unverified on hardware like
+the rest of phase 7). Supersedes the "exactly two `member` blocks" rule of
+phase 2 and the "at most three members not retired" decision of phase 4 part 1:
+
+- **Config** (`hsm/mod.rs`). One or two `member` blocks (`MAX_POOL_MEMBERS =
+  2`; zero and three refused); `min_wrap_copies = 2` with one block refused;
+  `acknowledge_single_member_without_recovery` (pool only, refused with
+  `shamir-ceremony`, false by default).
+- **Init and bootstrap** (`seal/hsm.rs`, `seal/hsm/pool_admin.rs`). Unchanged
+  machinery over one member: bootstrap attests and enrolls on the one
+  configured member, init writes a one-member record and a one-copy KEK set.
+  With `recovery = "none"` and one member, bootstrap, init and
+  `migrate-to-pool` are refused (`ErrHsmConfigInvalid`, naming the setting and
+  the risk) unless acknowledged, before any device or record changes. A
+  two-member config with one device down still refuses init, now with a hint
+  to list only the present device.
+- **Signals.** Status `redundancy`, `members_active`, `members_expected`,
+  `redundancy_warning` (also before init, from the config); `GET
+  v2/sys/hsm/members` adds the first three and reports `max_live_members: 2`.
+  Event `hsm.pool_not_redundant` (`warn`) at start (`HsmSealProvider::open`),
+  at every unseal, at init / migration, after a retire into one member and on
+  promotion while still one; the startup line says `redundancy none|full`.
+  Metric `bv_hsm_pool_redundancy{level}` in `bv-metrics` (no series until a
+  pool reports). Single-copy sets of a pool of one are fully replicated: no
+  `hsm.set_under_replicated`, no under-replicated count, nothing to repair.
+- **Membership.** `member add` refuses a third member that is not retired
+  (`HsmPool` still accepts three, so a record that already holds a joining
+  replacement repairs and promotes). `member retire` refuses the last active
+  member explicitly, and a retire into a pool of one without a recovery key
+  unless acknowledged. Replacing a failed device is now retire, then add.
+- **No format change.** Redundancy is derived from member states. Fixture
+  `seal/testdata/hsm-seal-pool-v2/` (a two-member record and its two mock
+  device states, captured from commit 7e0a8c45) loads, re-encodes byte for
+  byte, reports `redundancy: "full"` and unseals through either member alone.
+- **Tests** (mock): init and unseal of a pool of one, with and without the
+  acknowledgement and with a recovery key; a second node without a device
+  unseals through it; the second device added, repaired and promoted, then A
+  down → B unseals and B down → A unseals (and a custody key opens through B);
+  a third device refused; last-member and unacknowledged retires refused;
+  status, events and the metric; config rules (one or two members, `link` only
+  for a gateway member, the flag); the old two-member fixture; the
+  replacement test rewritten as retire-then-add.
+
+Decisions made where the operator's brief left room:
+
+- The acknowledgement is a config setting, not a `v2/sys/init` field
+  (rejected: the frozen `v1/sys/init` cannot carry it, and it must also cover
+  `migrate-to-pool` and retire, which have no init request). It applies to
+  every transition into a pool of one without a recovery key, not to init
+  only, so a retire cannot drop to one device silently.
+- R3 is enforced as "at most two members not retired" on writes. Rejected:
+  keeping the three-member replacement window (R3), and refusing to read
+  records that already hold three (read-old).
+- `min_wrap_copies` is never lowered for the operator: two with one member is
+  a config error, and a node whose value exceeds the record's active members
+  stays sealed with an error naming both.
+- The redundancy metric is a labelled gauge, so a vault without a pool never
+  exports a `none` that would page someone.
+
+Still open: the GUI's HSM / Seal page does not show `redundancy` yet (the
+fields are in the status it reads); the YubiHSM 2 pool of one is verified on
+hardware only with the rest of phase 7.
 
 Phase 7 (hardware validation, prepared; compiled and tested against the
 mock and generated certificates only):
@@ -1262,6 +1400,8 @@ Decisions made in phase 4 part 1 where this spec left room:
   node is never enrolled on one device only. Rejected: a pending enrollment.
 - A pool holds at most three members that are not retired (two plus a
   replacement while it joins); the config still takes exactly two.
+  *Superseded 2026-10-27 by the [pool of one](#pool-of-one-a-single-member-pool):
+  at most two, and the config takes one or two.*
 - Device object ids stay the configured `HsmObjectIds` (the released defaults),
   because auth keys are a separate id namespace: `bv-admin` is auth key 2 and
   node keys are `0x100 + slot` without colliding with wrap key 2.
@@ -1589,6 +1729,7 @@ Not done in phase 2, deliberately:
 | 4. Ceremonies and repair | `provision`, attestation chain pinning, node enroll/revoke with credential delivery, member add/retire, repair job, epoch rotation, `migrate-to-pool`, v2 routes, CLI | `crates/bv-core/src/hsm/{admin,ceremony,node_creds,repair}.rs`, `crates/bv-core/src/seal/hsm/pool_admin.rs`, `crates/bv-kernel/src/modules/system/`, `crates/bvault-cli` | Done (mock; Yubico attestation pinning and device validation moved to phase 7) |
 | 5. Recovery | Recovery keypair, Shamir split, recovery copies, `recover` route | `crates/bv-core/src/hsm/recovery.rs`, `crates/bv-core/src/seal/hsm/recovery_ceremony.rs`, `crates/bv-server/src/sys.rs`, `crates/bvault-cli` | Done (mock; the YubiHSM 2 ceremony waits on phase 7 attestation) |
 | 6. Audit and observability | Device-log drain, events, metrics, status, GUI page, `docs/hsm.md`, `docs/api.md` | `crates/bv-core/src/hsm/device_audit.rs`, `crates/bv-core/src/seal/hsm/device_drain.rs`, `gui/src/routes/HsmStatusPage.tsx` | Done (mock; the YubiHSM 2 drain waits on phase 7) |
+| Amendment: pool of one (2026-10-27) | One or two members; init, bootstrap and unseal with one; `acknowledge_single_member_without_recovery`; at most two members not retired; redundancy status, event and metric | `crates/bv-core/src/hsm/{mod,pool}.rs`, `crates/bv-core/src/seal/hsm.rs`, `crates/bv-core/src/seal/hsm/pool_admin.rs`, `crates/bv-metrics/src/hsm_metrics.rs` | Done (mock; YubiHSM 2 with phase 7) |
 | 7. Hardware validation | Two physical devices plus three nodes; pin the Yubico attestation chain and lift the YubiHSM 2 attestation refusal; validate `provision`, bootstrap, enrollment and the relay; confirm the device log layout, digest chain and forced audit, and lift the YubiHSM 2 drain refusal; measure latencies; confirm the FIPS Ed25519 question; **end every run by factory-resetting both devices and checking they provision again** (see [Resetting the test devices](#resetting-the-test-devices)) | `crates/bv-core/src/hsm/{attestation,yubihsm2}.rs`, `crates/bv-core/src/hsm/hw_validation/`, `crates/bv-core/tests/hsm_pool_hardware.rs` (feature `hsm_hardware_tests`, behind `BVAULT_TEST_YUBIHSM_POOL=1`), `docs/hsm.md` | Prepared, awaiting hardware run (attestation pinning and the suite done on the mock; no device run yet) |
 
 **What happens to the existing modules:**
@@ -1624,6 +1765,12 @@ Phases 1–2 change persisted formats and the seal path. Per AGENTS.md they need
 - Recovery refused while any member is reachable.
 - Revocation with one member down leaves `revocation_pending` and blocks
   re-activation.
+- Pool of one: init and unseal with one member; a node without a device
+  unseals through it; `recovery = "none"` without the acknowledgement refused;
+  the second member added later and repaired, then either device alone
+  unseals; a third member refused; the last member never retires; status,
+  events and metric report `redundancy: "none"`; an old two-member record
+  loads unchanged.
 
 **Format and migration:**
 

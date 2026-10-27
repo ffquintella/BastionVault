@@ -38,11 +38,11 @@ use crate::{
         clock::{self, Clock},
         context,
         node_creds::{self, NodeCredentialStore},
-        pool::{check_pool_storage_backend, HsmPool, PoolEventSink, PoolMember, PoolMemberSpec},
+        pool::{check_pool_storage_backend, HsmPool, PoolEventKind, PoolEventSink, PoolMember, PoolMemberSpec},
         recovery::{self, RecoverySplit, ShareSet},
         repair::RepairReport,
         validate_node_id, ConfigMemberOpener, HsmBackend, MemberOpener, MemberTarget, RecoveryMode, ResolvedHsmConfig,
-        ResolvedPoolConfig,
+        ResolvedPoolConfig, MAX_POOL_MEMBERS,
     },
     seal::SealProvider,
     storage::{Backend as PhysicalBackend, BackendEntry},
@@ -282,7 +282,9 @@ fn warn_config_disagreements(pool_cfg: &ResolvedPoolConfig, record: &HsmSealReco
                 member.serial
             );
         }
-        if !block.gateway.is_empty() && member.gateway != block.gateway {
+        // A record written through a local connector names no gateway; this
+        // node then reaches the member through its own block's `gateway`.
+        if !block.gateway.is_empty() && !member.gateway.is_empty() && member.gateway != block.gateway {
             log::warn!(
                 target: "security",
                 "HSM config `member \"{}\"` field `gateway` disagrees with the seal record; the record wins",
@@ -298,6 +300,35 @@ fn warn_config_disagreements(pool_cfg: &ResolvedPoolConfig, record: &HsmSealReco
             );
         }
     }
+}
+
+/// `"full"` with [`MAX_POOL_MEMBERS`] active members, `"none"` for a pool of
+/// one (spec § Pool of one). Derived from member states, never stored.
+fn redundancy_level(active_members: usize) -> &'static str {
+    if active_members >= MAX_POOL_MEMBERS {
+        "full"
+    } else {
+        "none"
+    }
+}
+
+/// What an operator must know about a pool of one; `None` with redundancy.
+/// Names and ids only.
+fn redundancy_warning(record: &HsmSealRecord) -> Option<String> {
+    let active: Vec<String> = record.active_members().map(|(id, m)| format!("{} ({id})", m.name)).collect();
+    if active.len() >= MAX_POOL_MEMBERS {
+        return None;
+    }
+    let consequence = if record.recovery_pub.is_some() {
+        "losing that device leaves only the recovery ceremony (the recovery shares) to rebuild the vault"
+    } else {
+        "losing that device loses the vault: there is no recovery key (recovery = \"none\")"
+    };
+    Some(format!(
+        "pool of one: every HSM-protected secret has a single copy, on {}; {consequence}. Add the second device with \
+         `operator hsm member add`",
+        active.join(", ")
+    ))
 }
 
 /// Auto-unseal provider backed by one [`HsmBackend`] or an [`HsmPool`].
@@ -439,6 +470,7 @@ impl HsmSealProvider {
         if let Err(e) = provider.refresh_membership().await {
             log::error!(target: "security", "HSM pool membership refresh failed at startup: {e}");
         }
+        provider.report_redundancy_at_start().await;
         #[cfg(not(feature = "sync_handler"))]
         {
             provider.start_health_probe();
@@ -490,6 +522,68 @@ impl HsmSealProvider {
         Ok(())
     }
 
+    /// Spec § Pool of one: the redundancy metric follows the record, and a
+    /// pool of one raises `hsm.pool_not_redundant` (a `warn` in the `security`
+    /// log, an audit entry once attached) every time `when` happens: start,
+    /// unseal, init, retire.
+    fn report_redundancy(&self, record: &HsmSealRecord, when: &str) {
+        if record.topology != Topology::Pool {
+            return;
+        }
+        let Some(warning) = redundancy_warning(record) else {
+            hsm_metrics().set_pool_redundancy(true);
+            return;
+        };
+        hsm_metrics().set_pool_redundancy(false);
+        let (member, hsm_id) =
+            record.active_members().next().map(|(id, m)| (m.name.clone(), id.to_string())).unwrap_or_default();
+        self.event(PoolEventKind::PoolNotRedundant, &member, &hsm_id, &format!("{when}: {warning}"));
+    }
+
+    /// At every start: report a pool of one from the record, or, before init,
+    /// that this node's config would create one.
+    #[maybe_async::maybe_async]
+    async fn report_redundancy_at_start(&self) {
+        let Some(pool_cfg) = &self.config.pool else { return };
+        match self.load_record().await {
+            Ok(Some(stored)) => self.report_redundancy(&stored.record, "start"),
+            Ok(None) if pool_cfg.members.len() < MAX_POOL_MEMBERS => log::warn!(
+                target: "security",
+                "HSM pool not initialized; this node's config lists one member ({}), so init here creates a pool of \
+                 one, without redundancy, until the second device is added with `operator hsm member add`",
+                pool_cfg.members.iter().map(|m| m.name.as_str()).collect::<Vec<_>>().join(", ")
+            ),
+            Ok(None) => {}
+            Err(e) => log::error!(target: "security", "HSM seal record unreadable at startup: {e}"),
+        }
+    }
+
+    /// Spec § Pool of one: entering a pool of one with no recovery key needs
+    /// the operator's acknowledgement in this node's config; refused, never
+    /// assumed, without it. `members`: active members after `action`.
+    fn refuse_unacknowledged_single_member(
+        &self,
+        members: usize,
+        has_recovery_key: bool,
+        action: &str,
+    ) -> Result<(), RvError> {
+        let acknowledged = self.config.pool.as_ref().is_some_and(|p| p.acknowledge_single_member_without_recovery);
+        if members >= MAX_POOL_MEMBERS || has_recovery_key || acknowledged {
+            return Ok(());
+        }
+        log::error!(
+            target: "security",
+            "{action} refused: it would leave a pool of one without a recovery key, and this node's config does not \
+             acknowledge that"
+        );
+        Err(RvError::ErrHsmConfigInvalid(format!(
+            "{action} would leave a pool of one with no recovery key: losing that single device would make the vault \
+             UNRECOVERABLE. Keep or add a second member, use a recovery key (recovery = \"shamir-ceremony\", chosen at \
+             init), or accept the risk explicitly with `acknowledge_single_member_without_recovery = true` in this \
+             node's pool `hsm` block (features/hsm-pool-ha.md § Pool of one)"
+        )))
+    }
+
     /// The per-node device `migrate-to-pool` reads the KEK from.
     pub fn with_migration_source(mut self, device: Arc<dyn HsmBackend>) -> Self {
         self.migration_source = Some(device);
@@ -529,7 +623,12 @@ impl HsmSealProvider {
             Devices::Pool(d) => {
                 let members: Vec<String> =
                     d.pool().member_status().iter().map(|m| format!("{} {}", m.name, m.hsm_id)).collect();
-                format!("pool of `{}` devices: {}", self.config.backend_type, members.join(", "))
+                format!(
+                    "pool of `{}` devices: {} (redundancy {})",
+                    self.config.backend_type,
+                    members.join(", "),
+                    redundancy_level(members.len())
+                )
             }
         }
     }
@@ -636,11 +735,14 @@ impl HsmSealProvider {
         }
     }
 
-    /// Pool init requires both members reachable (spec § Bootstrap at init).
+    /// Pool init requires every configured member reachable (spec § Bootstrap
+    /// at init), and a pool of one without a recovery key acknowledged.
     #[maybe_async::maybe_async]
     async fn check_pool_init(&self, devices: &PoolDevices) -> Result<(), RvError> {
         self.refuse_pool_recovery()?;
         let pool = devices.pool();
+        let makes_recovery_key = self.config.recovery == RecoveryMode::ShamirCeremony;
+        self.refuse_unacknowledged_single_member(pool.members().len(), makes_recovery_key, "pool init")?;
         let mut unreachable = Vec::new();
         for member in pool.members() {
             let reachable = match member.backend() {
@@ -652,8 +754,16 @@ impl HsmSealProvider {
             }
         }
         if !unreachable.is_empty() {
+            // Never a pool of one by accident: the operator listed these.
+            let hint = if pool.members().len() > 1 {
+                "; to start with only the device that is present, list only its `member` block (a pool of one, \
+                 without redundancy; features/hsm-pool-ha.md § Pool of one)"
+            } else {
+                ""
+            };
             return Err(RvError::ErrHsmPoolUnavailable(format!(
-                "pool init needs every member reachable, so that no secret starts with one copy; unreachable: {}",
+                "pool init needs every configured member reachable, so that no secret starts with fewer copies than \
+                 configured; unreachable: {}{hint}",
                 unreachable.join("; ")
             )));
         }
@@ -801,11 +911,16 @@ impl HsmSealProvider {
         }
         hsm_metrics().set_under_replicated(UnderReplicatedScope::SealRecord, 0);
         let copies_on = record.members.values().map(|m| m.name.as_str()).collect::<Vec<_>>().join(", ");
+        let losing = if record.members.len() < MAX_POOL_MEMBERS {
+            "losing its only device (a pool of one, acknowledged in the config)"
+        } else {
+            "losing both pool devices"
+        };
         match &record.recovery_pub {
             None => log::warn!(
                 target: "security",
-                "HSM pool seal initialized with recovery=none: losing both pool devices makes this vault \
-                 UNRECOVERABLE (intended posture); KEK copies on {copies_on}"
+                "HSM pool seal initialized with recovery=none: {losing} makes this vault UNRECOVERABLE (intended \
+                 posture); KEK copies on {copies_on}"
             ),
             Some(r) => log::warn!(
                 target: "security",
@@ -818,6 +933,7 @@ impl HsmSealProvider {
                 r.threshold
             ),
         }
+        self.report_redundancy(&record, if replacing.is_some() { "migration" } else { "init" });
         Ok(())
     }
 
@@ -905,6 +1021,7 @@ impl HsmSealProvider {
         let missing = kek.missing_copies(&pool.active_ids());
         hsm_metrics().set_under_replicated(UnderReplicatedScope::SealRecord, usize::from(!missing.is_empty()));
         pool.report_under_replicated("the barrier KEK", &missing);
+        self.report_redundancy(record, "unseal");
 
         let ctx = self.barrier_context(&record.cluster_uuid, record.epoch);
         let mut attempt = pool.read(|id| kek.copy_for(id).is_some());
@@ -1024,9 +1141,31 @@ impl HsmSealProvider {
                     .collect()
             })
             .unwrap_or_default();
+        // Spec § Pool of one: redundancy from the record's active members
+        // (before init: the members this node's config would initialize).
+        let (members_active, warning) = match pool_record {
+            Some(record) => {
+                let warning = redundancy_warning(record);
+                hsm_metrics().set_pool_redundancy(warning.is_none());
+                (record.active_members().count(), warning)
+            }
+            None => {
+                let configured = pool.members().len();
+                let warning = (configured < MAX_POOL_MEMBERS).then(|| {
+                    "not initialized; init on this node creates a pool of one, without redundancy, until the second \
+                     device is added with `operator hsm member add`"
+                        .to_string()
+                });
+                (configured, warning)
+            }
+        };
         let mut out = json!({
             "topology": Topology::Pool.as_str(),
             "min_wrap_copies": pool.min_wrap_copies(),
+            "redundancy": redundancy_level(members_active),
+            "members_active": members_active,
+            "members_expected": MAX_POOL_MEMBERS,
+            "redundancy_warning": warning,
             "members": members,
             "under_replicated_sets": usize::from(kek_under),
             "kek_under_replicated": kek_under,
@@ -1614,6 +1753,7 @@ mod tests {
                     migrate_from: None,
                     members: vec![member(&self.name_a, &self.a, true), member(&self.name_b, &self.b, false)],
                     device_audit: crate::hsm::device_audit::DeviceAuditMode::Drain,
+                    acknowledge_single_member_without_recovery: false,
                 }),
                 recovery_explicit: true,
                 attestation_roots_file: None,
@@ -1644,6 +1784,126 @@ mod tests {
             provider.init_kek(kek, &seal_config()).await.unwrap();
             provider
         }
+
+        /// A node whose config lists only A: a pool of one.
+        fn provider_of_one(&self, node: &str, acknowledged: bool) -> HsmSealProvider {
+            let mut config = self.config(node, 1);
+            let pool = config.pool.as_mut().unwrap();
+            pool.members.retain(|m| m.name == self.name_a);
+            pool.acknowledge_single_member_without_recovery = acknowledged;
+            let mut opened = self.opened(node);
+            opened.remove(&self.name_b);
+            HsmSealProvider::new_pool(opened, self.physical.clone(), config, self.clock.clone(), self.events.clone())
+                .unwrap()
+        }
+    }
+
+    // ── Pool of one (spec § Pool of one) ─────────────────────────────────
+
+    /// Captured from the code at commit 7e0a8c45, before the pool of one:
+    /// two unprovisioned mock devices (throwaway keys), `hsm-a` preferred,
+    /// pool init by `fixture-node` with KEK `0, 1, …, 31`.
+    const POOL_FIXTURE_RECORD: &[u8] = include_bytes!("testdata/hsm-seal-pool-v2/core-hsm-seal.json");
+    const POOL_FIXTURE_STATE_A: &[u8] = include_bytes!("testdata/hsm-seal-pool-v2/mock-hsm-a.json");
+    const POOL_FIXTURE_STATE_B: &[u8] = include_bytes!("testdata/hsm-seal-pool-v2/mock-hsm-b.json");
+
+    /// The fixture's devices (from copies of their state files) and storage
+    /// holding the fixture's seal record exactly as the old code wrote it.
+    async fn pool_fixture() -> Cluster {
+        let clock = ManualClock::new();
+        let device = |state: &[u8], tag: &str| {
+            let path = std::env::temp_dir().join(format!("bv-seal-pool-fixture-{tag}-{}.json", rand_id()));
+            std::fs::write(&path, state).unwrap();
+            MockHsmDevice::open(&path.to_string_lossy(), None, clock.clone()).unwrap()
+        };
+        let c = Cluster {
+            a: device(POOL_FIXTURE_STATE_A, "a"),
+            b: device(POOL_FIXTURE_STATE_B, "b"),
+            clock: clock.clone(),
+            physical: temp_file_backend(),
+            events: Arc::new(Recorder::default()),
+            name_a: "hsm-a".into(),
+            name_b: "hsm-b".into(),
+        };
+        let entry = BackendEntry { key: HSM_SEAL_RECORD_PATH.into(), value: POOL_FIXTURE_RECORD.to_vec() };
+        c.physical.put(&entry).await.unwrap();
+        c
+    }
+
+    /// Read-old: a two-member record written before the pool of one loads,
+    /// re-encodes byte for byte, reports full redundancy and unseals through
+    /// either member alone; unsealing writes nothing.
+    #[tokio::test]
+    async fn an_old_two_member_record_loads_unchanged_and_unseals_through_either_member() {
+        let c = pool_fixture().await;
+        let stored = HsmSealRecord::decode(POOL_FIXTURE_RECORD).unwrap();
+        assert_eq!(stored.stored_version, record::HSM_SEAL_RECORD_VERSION);
+        assert_eq!(stored.record.active_members().count(), 2);
+        assert_eq!(stored.record.encode().unwrap(), POOL_FIXTURE_RECORD, "written back byte for byte");
+        assert_eq!(redundancy_warning(&stored.record), None);
+
+        let provider = c.provider(FIXTURE_NODE);
+        let status = provider.status().await.unwrap();
+        assert_eq!(status["redundancy"], "full", "{status}");
+        assert_eq!(status["members_active"], 2);
+        assert!(status["redundancy_warning"].is_null());
+
+        c.a.set_offline(true);
+        assert_eq!(c.provider("n2").recover_kek().await.unwrap().as_slice(), fixture_kek().as_slice(), "via B");
+        c.a.set_offline(false);
+        c.b.set_offline(true);
+        assert_eq!(c.provider("n3").recover_kek().await.unwrap().as_slice(), fixture_kek().as_slice(), "via A");
+        assert_eq!(raw(&c.physical, HSM_SEAL_RECORD_PATH).await.unwrap(), POOL_FIXTURE_RECORD, "never rewritten");
+        assert_eq!(c.events.count(PoolEventKind::PoolNotRedundant), 0, "two members: nothing to warn about");
+    }
+
+    /// The unprovisioned-mock path (no node credentials): one member,
+    /// acknowledged, initializes, unseals and says it has no redundancy.
+    #[tokio::test]
+    async fn a_pool_of_one_initializes_unseals_and_reports_no_redundancy() {
+        let c = Cluster::new("one");
+        let refused = c.provider_of_one("n1", false);
+        let err = refused.check_init(&seal_config()).await.unwrap_err();
+        assert!(err.to_string().contains("acknowledge_single_member_without_recovery"), "{err}");
+        assert!(refused.init_kek(&[3u8; 32], &seal_config()).await.is_err());
+        assert_eq!(raw(&c.physical, HSM_SEAL_RECORD_PATH).await, None, "nothing is written");
+
+        let n1 = c.provider_of_one("n1", true);
+        n1.check_init(&seal_config()).await.unwrap();
+        n1.init_kek(&[3u8; 32], &seal_config()).await.unwrap();
+        let r = HsmSealRecord::decode(&raw(&c.physical, HSM_SEAL_RECORD_PATH).await.unwrap()).unwrap().record;
+        assert_eq!(r.members.keys().cloned().collect::<Vec<_>>(), vec![c.id_a()]);
+        assert_eq!(r.kek.as_ref().unwrap().copies.keys().cloned().collect::<Vec<_>>(), vec![c.id_a()]);
+        assert_eq!(c.b.open_sessions(), 0, "B, unlisted, is never used");
+
+        // A node whose config still lists both reads the record: B is ignored.
+        assert_eq!(c.provider("n2").recover_kek().await.unwrap().as_slice(), &[3u8; 32]);
+        let status = n1.status().await.unwrap();
+        assert_eq!(status["redundancy"], "none");
+        assert_eq!((status["members_active"].as_u64(), status["members_expected"].as_u64()), (Some(1), Some(2)));
+        assert_eq!(
+            (status["under_replicated_sets"].as_u64(), status["kek_under_replicated"].as_bool()),
+            (Some(0), Some(false))
+        );
+        assert!(status["redundancy_warning"].as_str().unwrap().contains("losing that device loses the vault"));
+        assert_eq!(c.events.count(PoolEventKind::SetUnderReplicated), 0, "a single copy is not a repair backlog");
+        assert_eq!(c.events.count(PoolEventKind::PoolNotRedundant), 2, "at init and at the unseal");
+        assert!(n1.describe().contains("redundancy none"), "{}", n1.describe());
+
+        // A down: the pool of one stays sealed and says why; nothing else is tried.
+        c.a.set_offline(true);
+        assert!(matches!(c.provider("n3").recover_kek().await, Err(RvError::ErrHsmPoolUnavailable(_))));
+    }
+
+    /// Before init, status says what init on this node would create.
+    #[tokio::test]
+    async fn status_before_init_says_init_would_create_a_pool_of_one() {
+        let c = Cluster::new("one-pre");
+        let status = c.provider_of_one("n1", true).status().await.unwrap();
+        assert_eq!(status["redundancy"], "none");
+        assert!(status["redundancy_warning"].as_str().unwrap().contains("not initialized"), "{status}");
+        let status = c.provider("n1").status().await.unwrap();
+        assert_eq!(status["redundancy"], "full");
     }
 
     /// A custody store on a fresh barrier over `provider`'s pool.

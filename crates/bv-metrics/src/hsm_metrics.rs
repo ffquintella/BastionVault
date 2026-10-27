@@ -95,6 +95,19 @@ pub const LINK_REQUESTS: &str = "bv_hsm_link_requests";
 pub const LINK_REQUESTS_HELP: &str =
     "Requests this node's HSM link relay sent to a member's gateway, by member and outcome (ok, failed)";
 
+/// Gauge family: the pool's redundancy level from the seal record's active
+/// members (T454, pool of one). The current level is 1 and the other 0; no
+/// series exists until a pool reports, so a vault without an HSM pool never
+/// exports a misleading `none`.
+pub const POOL_REDUNDANCY: &str = "bv_hsm_pool_redundancy";
+pub const POOL_REDUNDANCY_HELP: &str =
+    "HSM pool redundancy: level=\"full\" is 1 with two active members, level=\"none\" is 1 for a pool of one";
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct RedundancyLabel {
+    pub level: String,
+}
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct CommandLabels {
     pub member: String,
@@ -132,11 +145,13 @@ pub struct HsmMetrics {
     /// Last cumulative relay totals seen per (member, code), to turn the
     /// relay's running totals into counter increments.
     link_last: Mutex<HashMap<(String, String), u64>>,
+    pool_redundancy: Family<RedundancyLabel, Gauge>,
 }
 
 impl Default for HsmMetrics {
     fn default() -> Self {
         Self {
+            pool_redundancy: Family::default(),
             member_up: Family::default(),
             session_errors: Family::default(),
             under_replicated: Gauge::default(),
@@ -167,6 +182,20 @@ impl HsmMetrics {
         registry.register(REPAIR, REPAIR_HELP, self.repair.clone());
         registry.register(DEVICE_LOG_GAP, DEVICE_LOG_GAP_HELP, self.device_log_gap.clone());
         registry.register(LINK_REQUESTS, LINK_REQUESTS_HELP, self.link_requests.clone());
+        registry.register(POOL_REDUNDANCY, POOL_REDUNDANCY_HELP, self.pool_redundancy.clone());
+    }
+
+    /// `full`: the seal record has two active members; otherwise a pool of one.
+    pub fn set_pool_redundancy(&self, full: bool) {
+        for (level, current) in [("full", full), ("none", !full)] {
+            self.pool_redundancy.get_or_create(&RedundancyLabel { level: level.into() }).set(i64::from(current));
+        }
+    }
+
+    /// `Some(true)` for full redundancy, `Some(false)` for a pool of one,
+    /// `None` before any pool reported.
+    pub fn pool_redundancy(&self) -> Option<bool> {
+        self.pool_redundancy.get(&RedundancyLabel { level: "full".into() }).map(|g| g.get() == 1)
     }
 
     /// One member operation took `seconds` (`op`: a closed set chosen by the
@@ -296,5 +325,30 @@ mod tests {
         assert_eq!(metrics.link_requests("hsm-a", "ok"), 10);
         assert_eq!(metrics.link_requests("hsm-a", "failed"), 1);
         assert!(text.contains("bv_hsm_link_requests_total{member=\"hsm-a\",code=\"ok\"}"), "{text}");
+    }
+
+    #[test]
+    fn pool_redundancy_exports_one_current_level_and_nothing_before_a_pool_reports() {
+        let metrics = HsmMetrics::default();
+        let mut registry = Registry::default();
+        metrics.register(&mut registry);
+        let mut text = String::new();
+        encode(&mut text, &registry).unwrap();
+        assert!(!text.contains("bv_hsm_pool_redundancy{"), "no series without a pool: {text}");
+        assert_eq!(metrics.pool_redundancy(), None);
+
+        metrics.set_pool_redundancy(false);
+        let mut text = String::new();
+        encode(&mut text, &registry).unwrap();
+        assert!(text.contains("bv_hsm_pool_redundancy{level=\"none\"} 1"), "{text}");
+        assert!(text.contains("bv_hsm_pool_redundancy{level=\"full\"} 0"), "{text}");
+        assert_eq!(metrics.pool_redundancy(), Some(false));
+
+        metrics.set_pool_redundancy(true);
+        let mut text = String::new();
+        encode(&mut text, &registry).unwrap();
+        assert!(text.contains("bv_hsm_pool_redundancy{level=\"none\"} 0"), "{text}");
+        assert!(text.contains("bv_hsm_pool_redundancy{level=\"full\"} 1"), "{text}");
+        assert_eq!(metrics.pool_redundancy(), Some(true));
     }
 }

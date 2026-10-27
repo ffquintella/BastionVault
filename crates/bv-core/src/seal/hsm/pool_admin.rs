@@ -41,10 +41,10 @@ use crate::{
             self, discard_node_entries, list_pending, read_delivery, read_pending, seal_credential, write_delivery,
             CredentialDelivery,
         },
-        pool::{HsmPool, PoolEvent, PoolEventKind, PoolMember, MAX_LIVE_MEMBERS},
+        pool::{HsmPool, PoolEvent, PoolEventKind, PoolMember},
         recovery::{custody_recovery_aad, kek_recovery_aad, seal_copy as seal_recovery_copy},
         repair::{drop_retired, plan, Pacer, RepairReport, SetPlan, HSM_REPAIR_LOCK, REPAIR_INTERVAL},
-        validate_member_name, validate_node_id, verify_identity_signature, HsmObjectId, MemberTarget,
+        validate_member_name, validate_node_id, verify_identity_signature, HsmObjectId, MemberTarget, MAX_POOL_MEMBERS,
     },
     storage::{Storage, StorageEntry},
 };
@@ -202,7 +202,14 @@ impl HsmSealProvider {
                 })
             })
             .collect();
-        Ok(json!({ "members": members, "max_live_members": MAX_LIVE_MEMBERS }))
+        let active = record.active_members().count();
+        Ok(json!({
+            "members": members,
+            "max_live_members": MAX_POOL_MEMBERS,
+            "members_active": active,
+            "members_expected": MAX_POOL_MEMBERS,
+            "redundancy": super::redundancy_level(active),
+        }))
     }
 
     /// `GET v2/sys/hsm/nodes`: enrolled and pending nodes.
@@ -386,6 +393,10 @@ impl HsmSealProvider {
             RvError::ErrHsmConfigInvalid("bootstrap enrollment needs `credential_dir` in the pool `hsm` block".into())
         })?;
         let node_id = self.config.node_id.as_str();
+        // Init (or migration) after this would be refused; refuse before any
+        // device is touched.
+        let makes_recovery_key = self.config.recovery == crate::hsm::RecoveryMode::ShamirCeremony;
+        self.refuse_unacknowledged_single_member(pool_cfg.members.len(), makes_recovery_key, "bootstrap")?;
         let physical = self.physical.as_ref();
         let _custody_lock = physical.lock(HSM_CUSTODY_LOCK).await?;
         // Allowed over a per-node record only when this node is set up to
@@ -901,11 +912,15 @@ impl HsmSealProvider {
                 existing.name, existing.state
             )));
         }
+        // Spec § Pool of one, R3: a cluster has at most two HSMs, counting a
+        // failed member until it is retired.
         let live_members = record.members.values().filter(|m| m.state != MemberState::Retired).count();
-        if live_members >= MAX_LIVE_MEMBERS {
+        if live_members >= MAX_POOL_MEMBERS {
+            log::error!(target: "security", "member add of {name} refused: the pool already has {live_members} members");
             return Err(RvError::ErrHsm(format!(
-                "the pool has {live_members} members that are not retired, the most it holds; retire the device \
-                 being replaced first"
+                "the pool already has {live_members} members that are not retired, and a cluster has at most \
+                 {MAX_POOL_MEMBERS} HSMs; to replace a failed device, retire it first (`operator hsm member retire`), \
+                 then add the replacement"
             )));
         }
         let target = MemberTarget { name: name.to_string(), hsm_id: hsm_id.clone(), gateway: gateway.to_string() };
@@ -1004,8 +1019,10 @@ impl HsmSealProvider {
         }))
     }
 
-    /// `member retire`: refused if it would leave fewer active members than
-    /// `min_wrap_copies` (at least one), or strand a set without another copy.
+    /// `member retire`: refused for the last active member, if it would leave
+    /// fewer active members than `min_wrap_copies`, strand a set without
+    /// another copy, or leave an unacknowledged pool of one without a recovery
+    /// key (spec § Pool of one).
     #[maybe_async::maybe_async]
     pub async fn retire_member(
         &self,
@@ -1026,6 +1043,13 @@ impl HsmSealProvider {
         if member.state == MemberState::Active {
             let others: BTreeSet<HsmId> =
                 record.active_members().map(|(id, _)| id.clone()).filter(|id| *id != hsm_id).collect();
+            if others.is_empty() {
+                log::error!(target: "security", "retiring {name} refused: it is the pool's last active member");
+                return Err(RvError::ErrHsm(format!(
+                    "{name} is the last active member of the pool (0 active member(s) would remain): every node \
+                     unseals through it. Add and promote another member first"
+                )));
+            }
             if others.len() < min_copies {
                 return Err(RvError::ErrHsm(format!(
                     "retiring {name} would leave {} active member(s); min_wrap_copies = {min_copies} needs at least \
@@ -1056,12 +1080,18 @@ impl HsmSealProvider {
                     stranded_sets.join(", ")
                 )));
             }
+            self.refuse_unacknowledged_single_member(
+                others.len(),
+                record.recovery_pub.is_some(),
+                &format!("retiring {name}"),
+            )?;
         }
         if let Some(m) = record.members.get_mut(&hsm_id) {
             m.state = MemberState::Retired;
         }
         self.store_record(&record).await?;
         self.event(PoolEventKind::MemberRetired, name, hsm_id.as_str(), &format!("by={actor}"));
+        self.report_redundancy(&record, "retire");
         Ok(json!({
             "name": name,
             "hsm_id": hsm_id,
@@ -1464,12 +1494,17 @@ impl HsmSealProvider {
         }
         self.store_record(&record).await?;
         let name = record.members.get(hsm_id).map(|m| m.name.clone()).unwrap_or_default();
+        let active = record.active_members().count();
         self.event(
             PoolEventKind::MemberPromoted,
             &name,
             hsm_id.as_str(),
-            &format!("sets={sets_checked} joining -> active"),
+            &format!("sets={sets_checked} joining -> active; active_members={active}"),
         );
+        if active >= MAX_POOL_MEMBERS {
+            log::info!(target: "security", "HSM pool redundancy is full again: {active} active members");
+        }
+        self.report_redundancy(&record, "promotion");
         Ok(())
     }
 }
@@ -1608,12 +1643,23 @@ mod tests {
         min_wrap_copies: usize,
         recovery: RecoveryMode,
         device_audit: DeviceAuditMode,
+        /// The config lists only `a`: a pool of one. `b` is provisioned and
+        /// reachable, ready to be added with `member add`.
+        single: bool,
+        /// `acknowledge_single_member_without_recovery` in every node's config.
+        acknowledged: bool,
     }
 
     impl Pool {
         /// A pool whose nodes run `recovery = "shamir-ceremony"`.
         async fn with_recovery(min_wrap_copies: usize) -> Self {
             Self { recovery: RecoveryMode::ShamirCeremony, ..Self::new(min_wrap_copies).await }
+        }
+
+        /// A pool of one (config lists `a` only), `recovery = "none"`,
+        /// with or without the operator's acknowledgement.
+        async fn of_one(acknowledged: bool) -> Self {
+            Self { single: true, acknowledged, ..Self::new(1).await }
         }
 
         async fn new(min_wrap_copies: usize) -> Self {
@@ -1642,6 +1688,8 @@ mod tests {
                 min_wrap_copies,
                 recovery: RecoveryMode::None,
                 device_audit: DeviceAuditMode::Drain,
+                single: false,
+                acknowledged: false,
             }
         }
 
@@ -1698,8 +1746,13 @@ mod tests {
                     credential_dir: self.dir(node),
                     link: None,
                     migrate_from: None,
-                    members: vec![member("a", &self.a), member("b", &self.b)],
+                    members: if self.single {
+                        vec![member("a", &self.a)]
+                    } else {
+                        vec![member("a", &self.a), member("b", &self.b)]
+                    },
                     device_audit: self.device_audit,
+                    acknowledge_single_member_without_recovery: self.acknowledged,
                 }),
                 recovery_explicit: true,
                 attestation_roots_file: None,
@@ -1901,9 +1954,11 @@ mod tests {
         assert_eq!(again.copies_added, 0, "converged");
     }
 
+    /// Spec § Pool of one (R3): the failed device is retired first, the pool
+    /// runs as a pool of one, then the replacement is added and promoted.
     #[tokio::test]
     async fn a_failed_device_is_replaced_without_downtime() {
-        let p = Pool::new(1).await;
+        let p = Pool { acknowledged: true, ..Pool::new(1).await };
         let n1 = p.init().await;
         let n2 = p.join("n2", &n1).await;
         let barrier = p.barrier().await;
@@ -1913,7 +1968,20 @@ mod tests {
         p.b.set_offline(true);
         let (b2, bundle) = provisioned(&format!("C{}", p.tag), "admin-b2", &p.clock).await;
         p.registry.lock().unwrap().insert(id_of(&b2), b2.clone());
-        let out = n1.add_member(&p.name("b2"), &bundle, "", &p.admin(&[("b2", "admin-b2")]), "root").await.unwrap();
+        let b2_admin = p.admin(&[("b2", "admin-b2")]);
+        let err = n1.add_member(&p.name("b2"), &bundle, "", &b2_admin, "root").await.unwrap_err();
+        assert!(err.to_string().contains("at most 2 HSMs") && err.to_string().contains("retire it first"), "{err}");
+        assert!(p.node_keys(&b2, "admin-b2").is_empty(), "refused before the device is touched");
+
+        n1.retire_member(&p.name("b"), Some(barrier.as_ref()), "root").await.unwrap();
+        assert_eq!(n1.status().await.unwrap()["redundancy"], "none");
+        let report = n1.repair(Some(barrier.clone()), None).await.unwrap();
+        assert_eq!(report.copies_removed, 2, "{report:?}");
+        assert_eq!(report.under_replicated, 0, "a pool of one has nothing to repair: {report:?}");
+        let record = n1.pool_record().await.unwrap();
+        assert!(!record.kek.as_ref().unwrap().copies.contains_key(&id_of(&p.b)));
+
+        let out = n1.add_member(&p.name("b2"), &bundle, "", &b2_admin, "root").await.unwrap();
         assert_eq!(out["state"], "joining");
         assert_eq!(out["nodes_enrolled"].as_array().unwrap().len(), 2);
 
@@ -1923,12 +1991,7 @@ mod tests {
         let report =
             n1.repair(Some(barrier.clone()), Some(&p.admin(&[("a", "admin-a"), ("b2", "admin-b2")]))).await.unwrap();
         assert_eq!(report.promoted, vec![p.name("b2")], "{report:?}");
-
-        n1.retire_member(&p.name("b"), Some(barrier.as_ref()), "root").await.unwrap();
-        let report = n1.repair(Some(barrier.clone()), None).await.unwrap();
-        assert_eq!(report.copies_removed, 2, "{report:?}");
-        let record = n1.pool_record().await.unwrap();
-        assert!(!record.kek.as_ref().unwrap().copies.contains_key(&id_of(&p.b)));
+        assert_eq!(n1.status().await.unwrap()["redundancy"], "full");
 
         p.a.set_offline(true);
         n2.refresh_membership().await.unwrap();
@@ -1946,7 +2009,8 @@ mod tests {
 
     #[tokio::test]
     async fn member_add_refuses_another_devices_bundle_and_an_exportable_layout() {
-        let p = Pool::new(1).await;
+        // A pool of one, so the second slot is free and attestation decides.
+        let p = Pool::of_one(true).await;
         let n1 = p.init().await;
         let (c, _) = provisioned(&format!("C{}", p.tag), "admin-c", &p.clock).await;
         p.registry.lock().unwrap().insert(id_of(&c), c.clone());
@@ -1963,7 +2027,7 @@ mod tests {
         let err = n1.add_member(&p.name("e"), &bundle, "", &p.admin(&[("e", "admin-e")]), "root").await.unwrap_err();
         assert!(err.to_string().contains("bv-wrap-barrier"), "{err}");
         assert!(p.node_keys(&e, "admin-e").is_empty(), "no node key was created");
-        assert_eq!(n1.pool_record().await.unwrap().members.len(), 2, "nothing was added");
+        assert_eq!(n1.pool_record().await.unwrap().members.len(), 1, "nothing was added");
     }
 
     #[tokio::test]
@@ -1974,7 +2038,7 @@ mod tests {
         let err = n1.retire_member(&p.name("a"), Some(barrier.as_ref()), "root").await.unwrap_err();
         assert!(err.to_string().contains("min_wrap_copies"), "{err}");
 
-        let p = Pool::new(1).await;
+        let p = Pool { acknowledged: true, ..Pool::new(1).await };
         let n1 = p.init().await;
         let barrier = p.barrier().await;
         p.b.set_offline(true);
@@ -1987,6 +2051,148 @@ mod tests {
         n1.retire_member(&p.name("b"), Some(barrier.as_ref()), "root").await.unwrap();
         let err = n1.retire_member(&p.name("a"), Some(barrier.as_ref()), "root").await.unwrap_err();
         assert!(err.to_string().contains("0 active member"), "{err}");
+    }
+
+    // ── Pool of one (spec § Pool of one) ─────────────────────────────────
+
+    /// R1 + R2: init, start and unseal with one device; a second node with
+    /// no device of its own unseals through it with its own credential.
+    #[tokio::test]
+    async fn a_pool_of_one_initializes_and_a_node_without_a_device_unseals_through_it() {
+        let p = Pool::of_one(true).await;
+        let n1 = p.init().await;
+        let record = n1.pool_record().await.unwrap();
+        assert_eq!(record.members.keys().cloned().collect::<Vec<_>>(), vec![id_of(&p.a)]);
+        assert_eq!(record.kek.as_ref().unwrap().copies.len(), 1, "one copy, on the only member");
+        assert!(p.node_keys(&p.b, "admin-b").is_empty(), "the unlisted device is never touched");
+        assert_eq!(n1.recover_kek().await.unwrap().as_slice(), &KEK);
+
+        let n2 = p.join("n2", &n1).await;
+        assert_eq!(n2.recover_kek().await.unwrap().as_slice(), &KEK, "through the pool, no local device");
+
+        // Single-copy sets are fully replicated in a pool of one: no repair
+        // noise. The missing redundancy is reported once, at pool level.
+        let barrier = p.barrier().await;
+        let store = p.custody(&n1, barrier.clone()).await;
+        store.create(PqcKeyKind::MlKem768).await.unwrap();
+        assert!(store.replication_report().await.unwrap().under_replicated.is_empty());
+        let report = n1.repair(Some(barrier), None).await.unwrap();
+        assert_eq!((report.sets_scanned, report.copies_added, report.under_replicated), (2, 0, 0), "{report:?}");
+        assert_eq!(p.seen.count(PoolEventKind::SetUnderReplicated), 0);
+
+        let status = n2.status().await.unwrap();
+        assert_eq!(status["redundancy"], "none", "{status}");
+        assert_eq!((status["members_active"].as_u64(), status["members_expected"].as_u64()), (Some(1), Some(2)));
+        assert_eq!(status["under_replicated_sets"], 0);
+        let warning = status["redundancy_warning"].as_str().unwrap();
+        assert!(warning.contains("pool of one") && warning.contains("no recovery key"), "{warning}");
+        assert!(warning.contains(&p.name("a")), "names the device: {warning}");
+        let members = n1.hsm_members().await.unwrap();
+        assert_eq!((members["redundancy"].as_str(), members["max_live_members"].as_u64()), (Some("none"), Some(2)));
+        // Raised at init and at each unseal (each start unseals).
+        assert!(p.seen.count(PoolEventKind::PoolNotRedundant) >= 3, "init, n1 and n2 unseal");
+        assert!(n1.describe().contains("redundancy none"), "{}", n1.describe());
+    }
+
+    /// `recovery = "none"` with one member: refused without the operator's
+    /// acknowledgement, before any device or record changes.
+    #[tokio::test]
+    async fn a_pool_of_one_without_recovery_needs_the_acknowledgement() {
+        let p = Pool::of_one(false).await;
+        let n1 = p.provider("n1");
+        let err = n1.bootstrap_enroll(&p.both(), &p.bundles, "root").await.unwrap_err();
+        assert!(err.to_string().contains("acknowledge_single_member_without_recovery = true"), "{err}");
+        assert!(err.to_string().contains("UNRECOVERABLE"), "{err}");
+        let err = n1.check_init(&seal_config()).await.unwrap_err();
+        assert!(matches!(&err, RvError::ErrHsmConfigInvalid(m) if m.contains("pool init")), "{err}");
+        assert!(n1.init_kek(&KEK, &seal_config()).await.is_err());
+        assert!(p.node_keys(&p.a, "admin-a").is_empty(), "no device was touched");
+        assert!(n1.load_record().await.unwrap().is_none(), "nothing was written");
+
+        // With a recovery key the pool of one is recoverable: no flag needed.
+        let p = Pool { single: true, ..Pool::with_recovery(1).await };
+        let n1 = p.provider("n1");
+        n1.bootstrap_enroll(&p.both(), &p.bundles, "root").await.unwrap();
+        n1.check_init(&seal_config()).await.unwrap();
+        let shares = n1.init_kek(&KEK, &seal_config()).await.unwrap();
+        assert_eq!(shares.len(), 5, "recovery shares handed out once");
+        let warning = n1.status().await.unwrap()["redundancy_warning"].as_str().unwrap().to_string();
+        assert!(warning.contains("recovery ceremony"), "{warning}");
+    }
+
+    /// The second device is added later; repair gives every set its second
+    /// copy, and then either device alone unseals (A down → B, B down → A).
+    #[tokio::test]
+    async fn the_second_device_joins_a_pool_of_one_and_either_one_then_unseals_alone() {
+        let p = Pool::of_one(true).await;
+        let n1 = p.init().await;
+        let n2 = p.join("n2", &n1).await;
+        let barrier = p.barrier().await;
+        let store = p.custody(&n1, barrier.clone()).await;
+        let (handle, _) = store.create(PqcKeyKind::MlKem768).await.unwrap();
+        store.create(PqcKeyKind::MlDsa65).await.unwrap();
+
+        let b_admin = p.admin(&[("b", "admin-b")]);
+        let out = n1.add_member(&p.name("b"), &p.bundles[&p.name("b")], "", &b_admin, "root").await.unwrap();
+        assert_eq!(out["state"], "joining");
+        assert_eq!(out["nodes_enrolled"].as_array().unwrap().len(), 2, "n1 and n2 get keys on B");
+        assert_eq!(n1.status().await.unwrap()["redundancy"], "none", "joining is not yet redundancy");
+
+        let report = n1.repair(Some(barrier.clone()), None).await.unwrap();
+        assert_eq!((report.sets_scanned, report.copies_added), (3, 3), "KEK and both custody sets: {report:?}");
+        assert_eq!(report.ready_to_promote, vec![p.name("b")]);
+        let report = n1.repair(Some(barrier.clone()), Some(&p.both())).await.unwrap();
+        assert_eq!(report.promoted, vec![p.name("b")], "{report:?}");
+        let status = n1.status().await.unwrap();
+        assert_eq!((status["redundancy"].as_str(), status["members_active"].as_u64()), (Some("full"), Some(2)));
+        assert!(status["redundancy_warning"].is_null(), "{status}");
+        assert_eq!(hsm_metrics().pool_redundancy(), Some(true));
+        let record = n1.pool_record().await.unwrap();
+        assert_eq!(record.kek.as_ref().unwrap().copies.len(), 2);
+
+        n2.refresh_membership().await.unwrap();
+        p.a.set_offline(true);
+        assert_eq!(n2.recover_kek().await.unwrap().as_slice(), &KEK, "A down: B alone unseals");
+        p.a.set_offline(false);
+        p.b.set_offline(true);
+        let fresh = p.provider("n2");
+        assert_eq!(fresh.recover_kek().await.unwrap().as_slice(), &KEK, "B down: A alone unseals");
+        p.b.set_offline(false);
+        p.a.set_offline(true);
+        let n1_again = p.provider("n1");
+        n1_again.recover_kek().await.unwrap();
+        let store = p.custody(&n1_again, barrier).await;
+        store.with_private(&handle, |_| ()).await.unwrap();
+
+        // R3: never a third device.
+        p.a.set_offline(false);
+        let (c, bundle) = provisioned(&format!("C{}", p.tag), "admin-c", &p.clock).await;
+        p.registry.lock().unwrap().insert(id_of(&c), c.clone());
+        let err = n1.add_member(&p.name("c"), &bundle, "", &p.admin(&[("c", "admin-c")]), "root").await.unwrap_err();
+        assert!(err.to_string().contains("at most 2 HSMs"), "{err}");
+        assert!(p.node_keys(&c, "admin-c").is_empty(), "no node key on the refused device");
+        assert_eq!(n1.pool_record().await.unwrap().members.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn the_last_member_never_retires_and_retiring_into_one_needs_the_acknowledgement() {
+        let p = Pool::of_one(true).await;
+        let n1 = p.init().await;
+        let barrier = p.barrier().await;
+        let err = n1.retire_member(&p.name("a"), Some(barrier.as_ref()), "root").await.unwrap_err();
+        assert!(err.to_string().contains("last active member"), "{err}");
+        assert_eq!(n1.pool_record().await.unwrap().active_members().count(), 1, "unchanged");
+
+        // Two members, recovery = "none", no acknowledgement: retiring down
+        // to one is a silent loss of redundancy and of recoverability. Refused.
+        let p = Pool::new(1).await;
+        let n1 = p.init().await;
+        let barrier = p.barrier().await;
+        let before = n1.pool_record().await.unwrap();
+        let err = n1.retire_member(&p.name("b"), Some(barrier.as_ref()), "root").await.unwrap_err();
+        assert!(err.to_string().contains("acknowledge_single_member_without_recovery"), "{err}");
+        assert_eq!(n1.pool_record().await.unwrap(), before, "nothing was written");
+        assert_eq!(p.seen.count(PoolEventKind::MemberRetired), 0);
     }
 
     #[tokio::test]

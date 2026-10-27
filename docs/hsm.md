@@ -225,8 +225,9 @@ Returns the active seal type and, for an HSM seal, the backend, device serial
 and `hsm_id`, cluster epoch, topology, enrolled-node count, the recovery mode
 requested in config and whether a recovery key actually exists, the stored
 seal-record version, and the cache TTL. In the pool topology it lists each
-member (`state`, `up`, `serial`, `last_error`) with `min_wrap_copies` and
-`under_replicated_sets` instead of one device. Read-only; never returns secret
+member (`state`, `up`, `serial`, `last_error`) with `min_wrap_copies`,
+`under_replicated_sets` and the pool's `redundancy` (`full`, or `none` for a
+pool of one, with a `redundancy_warning`) instead of one device. Read-only; never returns secret
 material. See the [API reference](api.md#hsm-seal-status).
 
 ### Upgrading to the T454 formats
@@ -264,14 +265,17 @@ seeds) is stored **once per node**, each copy wrapped by that node's own HSM.
 
 ### Pool topology (two devices for the cluster)
 
-`topology = "pool"` lets every node use the same two devices
-([HSM pool HA](../features/hsm-pool-ha.md), T454). This build implements the
-pool itself on the **mock** backend (phase 2 of 7); the network link to remote
-devices, node enrollment, repair and recovery come in later phases.
+`topology = "pool"` lets every node use the same devices, at most two
+([HSM pool HA](../features/hsm-pool-ha.md), T454). A cluster can start with one
+and add the second later ([Starting with one HSM](#starting-with-one-hsm-a-pool-of-one)).
+This build implements the pool on the **mock** backend; the YubiHSM 2 path
+compiles and waits for the [phase 7 run](#phase-7-hardware-validation-t454).
 
-- **Init** needs both members reachable and an explicit `recovery`. The KEK is
-  wrapped on each member at once and stored as a two-copy set in a v2 seal
-  record with `topology = pool` and both members `active`. With `recovery =
+- **Init** needs every configured member reachable and an explicit `recovery`.
+  The KEK is wrapped on each member at once and stored as a set with one copy
+  per member in a v2 seal record with `topology = pool` and the members
+  `active`. With two members configured and one unreachable, init is refused:
+  it never becomes a pool of one on its own. With `recovery =
   "shamir-ceremony"` it also creates the recovery key and returns its shares
   (see [Recovery](#recovery-pool-topology-shamir-ceremony)).
 - **Unseal** tries the members in this node's preference order
@@ -305,6 +309,96 @@ devices, node enrollment, repair and recovery come in later phases.
 The mock pool is for dev and homolog. Its session limit is per process: two
 processes that open the same `state_path` are two devices as far as sessions go.
 
+#### Starting with one HSM (a pool of one)
+
+A pool can come up with **one** device and get the second one later as
+redundancy. The cluster never holds more than two.
+
+> **A pool of one is a single point of failure.** Losing that device (failure,
+> a factory reset, loss) loses every HSM-protected secret and so the vault,
+> unless a recovery copy exists (`recovery = "shamir-ceremony"`, chosen at
+> init). Add the second device as soon as you can.
+
+1. **Config: list only the device you have.** One `member` block,
+   `min_wrap_copies = 1` (the default; `2` is refused with one member), and an
+   explicit `recovery`. With `recovery = "none"`, also set
+   `acknowledge_single_member_without_recovery = true`, which states that
+   you accept losing the vault with that device; without it bootstrap and init
+   are refused.
+
+   ~~~hcl
+   # On the HSM host: the device is local, so no mTLS.
+   hsm "yubihsm2" {
+     topology       = "pool"
+     node_id        = "vault-1"
+     credential_dir = "/var/lib/bastionvault/hsm"
+     attestation_roots_file = "/etc/bastionvault/yubico-attestation.pem"
+     recovery       = "shamir-ceremony"     # or "none" plus the acknowledgement
+     member "hsm-a" {
+       connector = "http://127.0.0.1:12345"
+       serial    = "0012345678"
+     }
+   }
+
+   # On every node without a local device: through the gateway, with mTLS.
+   hsm "yubihsm2" {
+     topology       = "pool"
+     node_id        = "vault-2"
+     credential_dir = "/var/lib/bastionvault/hsm"
+     attestation_roots_file = "/etc/bastionvault/yubico-attestation.pem"
+     recovery       = "shamir-ceremony"
+     link {
+       ca_file   = "/etc/bastionvault/hsm-link/ca.pem"
+       cert_file = "/etc/bastionvault/hsm-link/vault-2.pem"   # SAN = node_id
+       key_file  = "/etc/bastionvault/hsm-link/vault-2.key"
+     }
+     member "hsm-a" {
+       gateway = "https://hsm-a.internal:8250"
+       serial  = "0012345678"
+     }
+   }
+   ~~~
+
+2. **Provision, bootstrap and init** as for two devices, with one bundle:
+   `operator hsm provision` on the HSM host, `operator hsm bootstrap --bundle
+   hsm-a=a.json --admin hsm-a` and `operator init` on the init node. Run
+   `bvault hsm-gateway` on the HSM host for the nodes without a device, and
+   enroll them with `operator hsm node add`.
+3. **What you see.** `v2/sys/hsm/status` reports `redundancy: "none"`,
+   `members_active: 1`, `members_expected: 2` and a `redundancy_warning`;
+   every start and every unseal raises `hsm.pool_not_redundant` (a `warn` on
+   the `security` log, an audit entry once the audit device is up); the
+   metric is `bv_hsm_pool_redundancy{level="none"} 1`. Alert on that. Each
+   secret has one copy, which is complete for a pool of one: nothing is
+   reported as under-replicated and repair has nothing to do.
+4. **Add the second device** when it arrives: provision it on its host, then
+
+   ~~~bash
+   bvault operator hsm member add hsm-b --bundle b.json --gateway https://hsm-b.internal:8250 --admin hsm-b
+   bvault operator hsm repair --run                                # second copy of the KEK and every key
+   bvault operator hsm repair --run --admin hsm-a --admin hsm-b    # promotes hsm-b to active
+   ~~~
+
+   `member add` enrolls every enrolled node on the new device. Until the
+   promotion the new member is `joining` and the sets count as
+   under-replicated against it (real work for repair). After it, status
+   reports `redundancy: "full"` and either device alone unseals every node.
+   The recovery copy, if any, is unchanged. Every node that reaches the new
+   device through its gateway needs a `link` block, including the first HSM
+   host if it had none.
+5. **A third device is refused.** To replace a failed one, retire it first
+   (`operator hsm member retire hsm-b`; the survivor must hold every set), run
+   as a pool of one, then add the replacement as in step 4. With
+   `min_wrap_copies = 2`, set it to 1 on the nodes before retiring. Retiring
+   the last active member is always refused, and retiring down to one member
+   without a recovery key needs the acknowledgement above.
+
+**mTLS, in short.** A node that reaches a device on its own host uses
+`connector = "http://127.0.0.1:<port>"` and needs no `link` and no gateway.
+A node without a device of its own never needs one: it uses the member's
+`gateway` (`bvault hsm-gateway` on the HSM host) with its `link` certificate.
+The connector itself is never exposed beyond loopback.
+
 #### Ceremonies (phase 4 part 1, mock)
 
 A provisioned device (factory key deleted, `bv-admin` created) takes only
@@ -327,12 +421,13 @@ bvault operator hsm node add vault-2 --fingerprint <fp> --admin hsm-a --admin hs
 bvault operator hsm node list
 bvault operator hsm node revoke vault-2 --admin hsm-a --admin hsm-b
 
-# Replace a failed device: attest and add it, repair, promote, retire the old one.
+# Replace a failed device: retire it (a pool of one meanwhile), then attest
+# and add the replacement, repair, promote. A third member is refused.
+bvault operator hsm member retire hsm-b
+bvault operator hsm repair --run                                # drops hsm-b's copies
 bvault operator hsm member add hsm-b2 --bundle b2.json --admin hsm-b2
 bvault operator hsm repair --run
 bvault operator hsm repair --run --admin hsm-a --admin hsm-b2   # promotes hsm-b2
-bvault operator hsm member retire hsm-b
-bvault operator hsm repair --run                                # drops hsm-b's copies
 ~~~
 
 - **At most 12 nodes** are enrolled at once (the device session budget); the
@@ -419,7 +514,8 @@ Metrics (`/metrics`):
 | `bv_hsm_member_up` | `member` | 1 while the member answers from this node |
 | `bv_hsm_command_duration_seconds` | `member`, `op` (`wrap`, `read`, `probe`, `get_log_entries`) | Wall time of a member operation; a high tail means device or link saturation |
 | `bv_hsm_session_errors_total` | `member`, `kind` (`transport`, `sessions_full`, `device`, `crypto`) | Failed member operations |
-| `bv_hsm_under_replicated_sets` | — | Sets missing a copy on an active or joining member |
+| `bv_hsm_under_replicated_sets` | — | Sets missing a copy on an active or joining member (never the single copy of a pool of one) |
+| `bv_hsm_pool_redundancy` | `level` (`full`, `none`) | The current level is 1, the other 0: `none` is a pool of one. No series before a pool reports. Alert on `bv_hsm_pool_redundancy{level="none"} == 1` |
 | `bv_hsm_repair_total` | `result` (`added`, `removed`, `recovery_added`, `failed`) | Repair outcomes |
 | `bv_hsm_device_log_gap_total` | `member` | Device-log gaps found by the drain |
 | `bv_hsm_link_requests_total` | `member`, `code` (`ok`, `failed`) | Requests this node's HSM link relay sent to the member's gateway (YubiHSM 2 through a gateway only) |

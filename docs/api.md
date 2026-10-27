@@ -169,6 +169,10 @@ HSM pool response (`topology = "pool"`; T454 phase 2). There is no single
   "node_id": "vault-3",
   "topology": "pool",
   "min_wrap_copies": 1,
+  "redundancy": "full",
+  "members_active": 2,
+  "members_expected": 2,
+  "redundancy_warning": null,
   "members": [
     {
       "name": "hsm-a",
@@ -231,6 +235,15 @@ HSM pool response (`topology = "pool"`; T454 phase 2). There is no single
   it is `faulted` (the device behind its path is not the recorded one).
 - `under_replicated_sets` counts the KEK set only; custody sets are counted by
   the custody store and exported as `bv_hsm_under_replicated_sets`.
+- `redundancy` (pool of one, T454): `"full"` when the seal record has two
+  active members, `"none"` for a pool of one. `members_active` counts the
+  record's active members (before init: the members this node's config would
+  initialize); `members_expected` is the most a pool holds (2).
+  `redundancy_warning` is `null` with full redundancy, otherwise a sentence
+  naming the single device and whether a recovery key exists. In a pool of one
+  every set has one copy and is **not** under-replicated; the missing
+  redundancy is reported here, by `hsm.pool_not_redundant` events and by
+  `bv_hsm_pool_redundancy{level="none"}`.
 - `last_error` is the member's last failure (operation and error class); it
   never carries key material.
 - `latency_ms` is the wall time of the member's last successful command from
@@ -261,10 +274,10 @@ request; they are never stored, logged by the server or returned.
 
 | Method | Path | Body | Purpose |
 |---|---|---|---|
-| POST | `/v2/sys/hsm/bootstrap` | `bundles` (`{member: bundle JSON}`), `admin_credentials` (both members) | Before init, **loopback peer only, no token**: attest both members and enroll this node; refused once initialized |
-| GET | `/v2/sys/hsm/members` | — | Members from the seal record: `state` (`joining`/`active`/`retired`/`faulted`), `pending_revocations`, `attestation_fps`, `holds_kek_copy`, this node's `up` / `last_error` |
-| POST | `/v2/sys/hsm/members/{name}` | `bundle` (the JSON `provision` wrote), `gateway`, `admin_credentials` (for `{name}`) | Attest the device and add it as `joining`; every enrolled node gets a key on it |
-| POST | `/v2/sys/hsm/members/{name}/retire` | — | Retire a member; refused below `min_wrap_copies` active members or when a set has no copy elsewhere |
+| POST | `/v2/sys/hsm/bootstrap` | `bundles` (`{member: bundle JSON}`), `admin_credentials` (every configured member) | Before init, **loopback peer only, no token**: attest the configured members (one or two) and enroll this node; refused once initialized, and for a pool of one with `recovery = "none"` unless the config acknowledges it |
+| GET | `/v2/sys/hsm/members` | — | Members from the seal record: `state` (`joining`/`active`/`retired`/`faulted`), `pending_revocations`, `attestation_fps`, `holds_kek_copy`, this node's `up` / `last_error`; plus `max_live_members` (2), `members_active`, `members_expected` and `redundancy` |
+| POST | `/v2/sys/hsm/members/{name}` | `bundle` (the JSON `provision` wrote), `gateway`, `admin_credentials` (for `{name}`) | Attest the device and add it as `joining`; every enrolled node gets a key on it. Refused when two members are not retired: a cluster has at most two HSMs (retire a failed one first) |
+| POST | `/v2/sys/hsm/members/{name}/retire` | — | Retire a member; refused for the last active member, below `min_wrap_copies` active members, when a set has no copy elsewhere, and, without a recovery key, down to one member unless the config sets `acknowledge_single_member_without_recovery` |
 | GET | `/v2/sys/hsm/nodes` | — | `enrolled` (auth key per member, `signatures_valid`, `revoked`, `credentials_waiting`), `pending` (transport fingerprints), `enrolled_count`, `max_nodes` (12) |
 | POST | `/v2/sys/hsm/nodes/{node_id}` | `transport_fp`, `admin_credentials` (every live member) | Enroll a node |
 | DELETE | `/v2/sys/hsm/nodes/{node_id}` | `admin_credentials` | Revoke a node; unreachable members get a pending revocation |

@@ -167,6 +167,16 @@ bvault operator hsm recover --member <name>=<bundle.json> [--member …] [--gate
 bvault operator hsm recover --reset   # discard the shares submitted so far
 ~~~
 
+A pool may start with one device (a *pool of one*: one `member` block, one
+`--bundle` to `bootstrap`) and gain the second with `member add`; `status`
+then moves from `redundancy: "none"` to `"full"` after the repair that
+promotes it. `member add` refuses a third device (a cluster has at most two):
+`member retire` a failed one first. `member retire` refuses the last active
+member. With `recovery = "none"`, `bootstrap`, `init` and a retire down to one
+member are refused unless the node's `hsm` block sets
+`acknowledge_single_member_without_recovery = true`
+([docs/hsm.md](hsm.md#starting-with-one-hsm-a-pool-of-one)).
+
 `recover` submits each share on its own (`--share env:VAR`, repeatable, or a
 hidden TTY prompt per share until the threshold is reached; a literal share is
 refused), then the new members and their admin credentials. It needs no token:

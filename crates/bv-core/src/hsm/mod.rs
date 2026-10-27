@@ -274,8 +274,10 @@ impl ResolvedHsmConfig {
     }
 }
 
-/// Members a pool has, exactly (spec § Configuration, validation rules).
-pub const POOL_MEMBER_COUNT: usize = 2;
+/// The most devices a pool holds: `member` blocks in the config, and members
+/// that are not retired in the seal record (spec § Pool of one, R3). One is a
+/// pool of one, which runs without redundancy until the second is added.
+pub const MAX_POOL_MEMBERS: usize = 2;
 /// `min_wrap_copies` when the config leaves it out.
 pub const DEFAULT_MIN_WRAP_COPIES: usize = 1;
 const MAX_MEMBER_NAME_LEN: usize = 64;
@@ -341,12 +343,17 @@ pub struct ResolvedPoolConfig {
     pub repair_rate: u32,
     pub credential_dir: String,
     pub link: Option<ResolvedLink>,
-    /// Exactly [`POOL_MEMBER_COUNT`], sorted by name.
+    /// One to [`MAX_POOL_MEMBERS`], sorted by name.
     pub members: Vec<ResolvedPoolMember>,
     /// The per-node device to migrate the KEK from (`migrate-to-pool`).
     pub migrate_from: Option<ResolvedMigrateFrom>,
     /// The device-log drain (T454 phase 6); `drain` by default.
     pub device_audit: device_audit::DeviceAuditMode,
+    /// `acknowledge_single_member_without_recovery`: the operator accepts that
+    /// a pool of one without a recovery key is lost with its device. Needed
+    /// (only with `recovery = "none"`) to init or migrate onto one member, or
+    /// to retire down to one; refused otherwise (spec § Pool of one).
+    pub acknowledge_single_member_without_recovery: bool,
 }
 
 /// Raw `migrate_from { ... }` block inside a pool `hsm` block.
@@ -415,6 +422,10 @@ pub struct HsmConfigBlock {
     /// Pool only: repair job rate, sets per second (default 2).
     #[serde(default)]
     pub repair_rate: Option<u64>,
+    /// Pool only, with `recovery = "none"`: accept a pool of one that is
+    /// lost with its single device (spec § Pool of one).
+    #[serde(default)]
+    pub acknowledge_single_member_without_recovery: bool,
     #[serde(default)]
     pub connector: String,
     #[serde(default)]
@@ -590,6 +601,9 @@ fn refuse_pool_only_settings(raw: &HsmConfigBlock) -> Result<(), RvError> {
     if !raw.credential_dir.is_empty() {
         stray.push("credential_dir");
     }
+    if raw.acknowledge_single_member_without_recovery {
+        stray.push("acknowledge_single_member_without_recovery");
+    }
     if stray.is_empty() {
         Ok(())
     } else {
@@ -620,9 +634,11 @@ fn resolve_pool(backend_type: &str, raw: &HsmConfigBlock) -> Result<ResolvedPool
             "with topology = \"pool\", set `connector` / `state_path` inside each `member` block, not at the top level",
         ));
     }
-    if raw.member.len() != POOL_MEMBER_COUNT {
+    if raw.member.is_empty() || raw.member.len() > MAX_POOL_MEMBERS {
         return Err(config_err(format!(
-            "topology = \"pool\" requires exactly {POOL_MEMBER_COUNT} `member` blocks, found {}",
+            "topology = \"pool\" takes one or {MAX_POOL_MEMBERS} `member` blocks, found {}: a cluster has at most \
+             {MAX_POOL_MEMBERS} HSMs, and one is a pool of one (no redundancy; add the second device later with \
+             `operator hsm member add`)",
             raw.member.len()
         )));
     }
@@ -717,6 +733,24 @@ fn resolve_pool(backend_type: &str, raw: &HsmConfigBlock) -> Result<ResolvedPool
         n @ (1 | 2) => n as usize,
         other => return Err(config_err(format!("`min_wrap_copies` must be 1 or 2, got {other}"))),
     };
+    // Each copy is on a distinct member: a pool of one cannot hold two, and
+    // a lower value is never picked for the operator.
+    if min_wrap_copies > members.len() {
+        return Err(config_err(format!(
+            "`min_wrap_copies = {min_wrap_copies}` needs {min_wrap_copies} members, but this pool has {} `member` \
+             block(s); a pool of one stores one copy of each set (set min_wrap_copies = 1, or list both members)",
+            members.len()
+        )));
+    }
+
+    // The acknowledgement qualifies `recovery = "none"`, and only that.
+    let acknowledge_single_member_without_recovery = raw.acknowledge_single_member_without_recovery;
+    if acknowledge_single_member_without_recovery && RecoveryMode::parse(&raw.recovery)? != RecoveryMode::None {
+        return Err(config_err(
+            "`acknowledge_single_member_without_recovery` accepts a pool of one without a recovery key; it \
+             contradicts recovery = \"shamir-ceremony\", which makes one. Remove one of the two",
+        ));
+    }
 
     let repair_rate = match raw.repair_rate {
         None => repair::DEFAULT_REPAIR_RATE,
@@ -756,7 +790,16 @@ fn resolve_pool(backend_type: &str, raw: &HsmConfigBlock) -> Result<ResolvedPool
 
     let device_audit = device_audit::DeviceAuditMode::parse(&raw.device_audit, is_production_env())?;
 
-    Ok(ResolvedPoolConfig { min_wrap_copies, repair_rate, credential_dir, link, members, migrate_from, device_audit })
+    Ok(ResolvedPoolConfig {
+        min_wrap_copies,
+        repair_rate,
+        credential_dir,
+        link,
+        members,
+        migrate_from,
+        device_audit,
+        acknowledge_single_member_without_recovery,
+    })
 }
 
 /// Longest node id accepted; generous for FQDN-style ids.
@@ -1164,12 +1207,74 @@ mod tests {
         assert!(cfg.recovery_explicit);
     }
 
+    /// Spec § Pool of one: one or two `member` blocks, never zero or three.
     #[test]
-    fn pool_config_validation_rules() {
+    fn a_pool_takes_one_or_two_members() {
         let mut one = mock_pool();
         one.member.remove("hsm-b");
-        rejects("mock", &one, "exactly 2");
+        let pool = resolve_config("mock", &one).unwrap().pool.unwrap();
+        assert_eq!(pool.members.len(), 1);
+        assert_eq!(pool.min_wrap_copies, 1);
+        assert!(!pool.acknowledge_single_member_without_recovery, "never on by default");
 
+        let mut none = mock_pool();
+        none.member.clear();
+        rejects("mock", &none, "one or 2 `member` blocks, found 0");
+        let mut three = mock_pool();
+        three.member.insert("hsm-c".into(), mock_member("MOCK-C", "/tmp/c.json"));
+        rejects("mock", &three, "at most 2 HSMs");
+
+        // Two copies cannot fit on one device, and nothing lowers the value.
+        let mut strict_one = one.clone();
+        strict_one.min_wrap_copies = 2;
+        rejects("mock", &strict_one, "a pool of one stores one copy");
+    }
+
+    /// R2: a node on the HSM host reaches it through its loopback connector
+    /// with no `link`; a node without a local device needs the mTLS link.
+    #[test]
+    fn a_pool_of_one_needs_mtls_only_for_a_remote_member() {
+        let mut local = yubi_pool();
+        local.member.remove("hsm-b");
+        local.link = None;
+        let a = local.member.get_mut("hsm-a").unwrap();
+        a.gateway.clear();
+        a.connector = "http://127.0.0.1:12345".into();
+        let pool = resolve_config("yubihsm2", &local).unwrap().pool.unwrap();
+        assert!(pool.link.is_none());
+        assert_eq!(pool.members[0].connector, "http://127.0.0.1:12345");
+
+        let mut remote = yubi_pool();
+        remote.member.remove("hsm-b");
+        resolve_config("yubihsm2", &remote).unwrap();
+        remote.link = None;
+        rejects("yubihsm2", &remote, "`link` block is required");
+    }
+
+    #[test]
+    fn the_single_member_acknowledgement_qualifies_recovery_none_only() {
+        let mut ack = mock_pool();
+        ack.member.remove("hsm-b");
+        ack.recovery = "none".into();
+        ack.acknowledge_single_member_without_recovery = true;
+        assert!(resolve_config("mock", &ack).unwrap().pool.unwrap().acknowledge_single_member_without_recovery);
+        // Implicit recovery is `none` too; init still demands it be explicit.
+        ack.recovery.clear();
+        resolve_config("mock", &ack).unwrap();
+
+        ack.recovery = "shamir-ceremony".into();
+        rejects("mock", &ack, "contradicts recovery = \"shamir-ceremony\"");
+
+        let per_node = HsmConfigBlock {
+            node_id: "n".into(),
+            acknowledge_single_member_without_recovery: true,
+            ..Default::default()
+        };
+        rejects("mock", &per_node, "acknowledge_single_member_without_recovery require topology = \"pool\"");
+    }
+
+    #[test]
+    fn pool_config_validation_rules() {
         let mut no_serial = mock_pool();
         no_serial.member.get_mut("hsm-a").unwrap().serial.clear();
         rejects("mock", &no_serial, "no `serial`");

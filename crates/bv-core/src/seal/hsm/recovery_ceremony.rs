@@ -30,7 +30,7 @@ use crate::{
         pool::{HsmPool, PoolEventKind},
         recovery::{custody_recovery_aad, kek_recovery_aad, RecoveryKey, ShareSet},
         repair::HSM_REPAIR_LOCK,
-        validate_member_name, MemberTarget, POOL_MEMBER_COUNT,
+        validate_member_name, MemberTarget, MAX_POOL_MEMBERS,
     },
     storage::{barrier::SecurityBarrier, Storage, StorageEntry},
 };
@@ -213,9 +213,9 @@ impl HsmSealProvider {
         min_wrap_copies: usize,
     ) -> Result<Vec<MemberTarget>, RvError> {
         let min_copies = min_wrap_copies.max(1);
-        if members.len() < min_copies || members.len() > POOL_MEMBER_COUNT {
+        if members.len() < min_copies || members.len() > MAX_POOL_MEMBERS {
             return Err(RvError::ErrHsm(format!(
-                "recover onto {min_copies} to {POOL_MEMBER_COUNT} new devices (min_wrap_copies = {min_copies}); {} given",
+                "recover onto {min_copies} to {MAX_POOL_MEMBERS} new devices (min_wrap_copies = {min_copies}); {} given",
                 members.len()
             )));
         }
