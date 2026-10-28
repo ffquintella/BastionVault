@@ -242,6 +242,8 @@ EXAMPLE ENTRY:
 
 - **Show the authenticator-code field only for accounts that need it** (T467) -- The GUI password step no longer asks every user for an authenticator code. It signs in with the password alone and reveals the code field when the server answers that the account requires one; that prompt no longer counts as a failed attempt toward lockout, since the password was already verified.
 
+- **Show the real reason when a remote sign-in is refused, so MFA accounts get the code prompt instead of "No token in response"** (T467) -- Signing in to a remote vault as an account that requires an authenticator code failed with "No token in response" and never revealed the code field, because the refusal reason in the server's data-only response was dropped. The remote login now reports it (e.g. "a TOTP code is required for this account"), matching the embedded vault.
+
 #### Userpass TOTP in a child namespace
 
 - **Verify the login TOTP code against the namespace's own TOTP mount** (T467) -- A user restricted to a child namespace whose TOTP key lived in that namespace's `totp/` mount was refused at login with "TOTP MFA misconfigured: key not found in `totp/`", because the second factor looked only in the root namespace's mount. Login now resolves the login namespace first and reads the key from that namespace's mount, and the connect-time TOTP step-up does the same for the caller's namespace. Root logins are unchanged, and a missing key in the namespace is still a refusal, never a fall back to root.

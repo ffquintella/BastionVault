@@ -774,12 +774,23 @@ pub async fn remote_login_userpass(
 
     let response_data = resp.response_data.ok_or("No response data")?;
 
-    let token = response_data
-        .get("auth")
-        .and_then(|a| a.get("client_token"))
-        .and_then(|t| t.as_str())
-        .ok_or("No token in response")?
-        .to_string();
+    let token = match response_data.get("auth").and_then(|a| a.get("client_token")).and_then(|t| t.as_str()) {
+        Some(t) => t.to_string(),
+        None => {
+            // A refused login (bad credentials, missing/invalid TOTP code,
+            // lockout) is a data-only response carrying `error`. Surface the
+            // reason: the login page keys its code prompt on it.
+            let reason = response_data
+                .get("data")
+                .and_then(|d| d.get("error"))
+                .or_else(|| response_data.get("error"))
+                .and_then(|v| v.as_str());
+            return Err(match reason {
+                Some(reason) => format!("Login failed: {reason}").into(),
+                None => CommandError::from("No token in response"),
+            });
+        }
+    };
 
     let policies: Vec<String> = response_data
         .get("auth")
