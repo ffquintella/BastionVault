@@ -613,7 +613,11 @@ fn provision_yubihsm2(
     objects: &bastion_vault::hsm::HsmObjectIds,
     adopt: bool,
 ) -> Result<bastion_vault::hsm::ceremony::AttestationBundle, RvError> {
-    bastion_vault::hsm::yubihsm2::provision(connector, factory, admin, objects, adopt)
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| RvError::ErrString(e.to_string()))?;
+    runtime.block_on(bastion_vault::hsm::yubihsm2::provision(connector, factory, admin, objects, adopt))
 }
 
 #[cfg(not(feature = "hsm_yubihsm2"))]
