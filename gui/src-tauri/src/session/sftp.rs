@@ -113,7 +113,7 @@ pub async fn open_sftp_session(
     state: &crate::state::AppState,
     args: SftpOpenArgs,
 ) -> Result<SftpOpenOutcome, String> {
-    let handle = connect_authenticated(
+    let (handle, _disconnect) = connect_authenticated(
         &args.host,
         args.port,
         &args.username,

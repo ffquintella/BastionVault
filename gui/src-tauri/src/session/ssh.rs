@@ -177,7 +177,7 @@ pub async fn open_ssh_session(
     let stdout_event = stdout_event_name(&token);
     let closed_event = closed_event_name(&token);
 
-    let session = connect_authenticated(
+    let (session, disconnect_slot) = connect_authenticated(
         &args.host,
         args.port,
         &args.username,
@@ -369,12 +369,17 @@ pub async fn open_ssh_session(
                             break;
                         }
                         None => {
-                            close_reason = if received_output {
-                                "ssh connection lost (TCP closed or keepalive timed out with no EOF from the remote shell)"
-                            } else {
-                                "ssh transport closed before the shell produced any output"
-                            }
-                            .into();
+                            // The transport task records why it stopped
+                            // (`HostKeyHandler::disconnected`); a generic
+                            // guess is only the fallback.
+                            let recorded = disconnect_slot.lock().ok().and_then(|g| g.clone());
+                            close_reason = match recorded {
+                                Some(why) => format!("ssh connection lost: {why}"),
+                                None if received_output => {
+                                    "ssh connection lost (transport ended without a recorded reason)".to_string()
+                                }
+                                None => "ssh transport closed before the shell produced any output".to_string(),
+                            };
                             break;
                         }
                         Some(ChannelMsg::ExitStatus { exit_status }) => {
@@ -511,7 +516,7 @@ pub(super) async fn connect_authenticated(
     credential: SshCredential,
     host_key_fingerprint: &str,
     log_tag: &str,
-) -> Result<client::Handle<HostKeyHandler>, String> {
+) -> Result<(client::Handle<HostKeyHandler>, DisconnectSlot), String> {
     // Without keepalives a silent drop on the path (firewall/NAT idle
     // timeout) is only noticed on the next write, and an idle server-side
     // session is never reaped. Probe every 30 s; give up after 3 misses.
@@ -521,7 +526,13 @@ pub(super) async fn connect_authenticated(
         ..Config::default()
     });
     let observed = Arc::new(std::sync::Mutex::new(String::new()));
-    let handler = HostKeyHandler { expected_fp: host_key_fingerprint.to_string(), observed: observed.clone() };
+    let disconnect: DisconnectSlot = Arc::new(std::sync::Mutex::new(None));
+    let handler = HostKeyHandler {
+        expected_fp: host_key_fingerprint.to_string(),
+        observed: observed.clone(),
+        disconnect: disconnect.clone(),
+        log_tag: log_tag.to_string(),
+    };
     let mut session =
         client::connect(cfg, (host, port), handler).await.map_err(|e| format!("connect {host}:{port}: {e}"))?;
 
@@ -588,7 +599,7 @@ pub(super) async fn connect_authenticated(
         }
     }
 
-    Ok(session)
+    Ok((session, disconnect))
 }
 
 #[derive(Serialize, Clone)]
@@ -616,9 +627,16 @@ pub fn decode_b64(b64: &str) -> Result<Vec<u8>, String> {
     STANDARD.decode(b64.as_bytes()).map_err(|e| format!("base64 decode: {e}"))
 }
 
+/// Why the russh transport task ended, written by
+/// [`HostKeyHandler::disconnected`] and read by the session pump when
+/// its channel closes without an EOF.
+pub(super) type DisconnectSlot = Arc<std::sync::Mutex<Option<String>>>;
+
 pub(super) struct HostKeyHandler {
     expected_fp: String,
     observed: Arc<std::sync::Mutex<String>>,
+    disconnect: DisconnectSlot,
+    log_tag: String,
 }
 
 // russh ≥ 0.59 dropped `#[async_trait]` on `Handler` in favour of
@@ -635,6 +653,25 @@ impl Handler for HostKeyHandler {
             return Ok(true);
         }
         Ok(fp == self.expected_fp)
+    }
+
+    async fn disconnected(&mut self, reason: client::DisconnectReason<Self::Error>) -> Result<(), Self::Error> {
+        let why = match &reason {
+            client::DisconnectReason::ReceivedDisconnect(info) => format!("server sent disconnect: {info:?}"),
+            client::DisconnectReason::Error(russh::Error::KeepaliveTimeout) => {
+                "server did not answer keepalives".to_string()
+            }
+            client::DisconnectReason::Error(russh::Error::InactivityTimeout) => "inactivity timeout".to_string(),
+            client::DisconnectReason::Error(e) => format!("transport error: {e}"),
+        };
+        log::warn!("{}: ssh transport ended: {why}", self.log_tag);
+        if let Ok(mut g) = self.disconnect.lock() {
+            *g = Some(why);
+        }
+        match reason {
+            client::DisconnectReason::ReceivedDisconnect(_) => Ok(()),
+            client::DisconnectReason::Error(e) => Err(e),
+        }
     }
 }
 
