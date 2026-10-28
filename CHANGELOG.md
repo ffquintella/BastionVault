@@ -238,6 +238,10 @@ EXAMPLE ENTRY:
 
 ### Fixed
 
+#### Userpass TOTP in a child namespace
+
+- **Verify the login TOTP code against the namespace's own TOTP mount** (T467) -- A user restricted to a child namespace whose TOTP key lived in that namespace's `totp/` mount was refused at login with "TOTP MFA misconfigured: key not found in `totp/`", because the second factor looked only in the root namespace's mount. Login now resolves the login namespace first and reads the key from that namespace's mount, and the connect-time TOTP step-up does the same for the caller's namespace. Root logins are unchanged, and a missing key in the namespace is still a refusal, never a fall back to root.
+
 #### GUI navigation
 
 - **Show the PKI menu to a user whose custom policy grants PKI access** (T466, S113) -- The PKI and Cert Lifecycle sidebar entries appeared only for a fixed list of policy names, so a user holding an operator-authored policy such as `esi-pki-issue` could issue certificates through the API but never saw the menu. They now also appear when the server lists the mount for that token, which it does only if the token's ACL reaches it. A failed mount lookup still does not widen the menu.

@@ -312,4 +312,66 @@ mod test {
         let resp = core.handle_request(&mut req).await.unwrap().unwrap();
         assert!(resp.auth.is_some(), "valid TOTP code should mint a token");
     }
+
+    /// Regression: the TOTP key lives in the login namespace's own `totp/`
+    /// mount, while root also has a `totp/` mount that lacks it. The login
+    /// second factor used to look only in the root router and refuse with
+    /// "key not found in `totp/`".
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_totp_mfa_login_uses_the_login_namespace_mount() {
+        use crate::modules::totp::{crypto, policy::Algorithm};
+        use std::collections::HashMap;
+
+        let (_bvault, core, root_token) =
+            new_unseal_test_bastion_vault("test_totp_mfa_login_namespace").await;
+        test_mount_auth_api(&core, &root_token, "userpass", "pass").await;
+        test_mount_api(&core, &root_token, "totp", "totp").await;
+        test_write_user(&core, &root_token, "pass", "bob", "pw-bob-123", 0).await;
+        assert!(test_write_api(&core, &root_token, "sys/namespaces/tenant-a", true, json!({}).as_object().cloned())
+            .await
+            .is_ok());
+
+        async fn ns_write(
+            core: &dyn VaultCtx,
+            token: &str,
+            path: &str,
+            body: Option<serde_json::Map<String, serde_json::Value>>,
+        ) {
+            let mut req = Request::new(path);
+            req.operation = Operation::Write;
+            req.client_token = token.to_string();
+            req.body = body;
+            let mut h = HashMap::new();
+            h.insert("x-bastionvault-namespace".to_string(), "tenant-a".to_string());
+            req.headers = Some(h);
+            core.handle_request(&mut req).await.unwrap();
+        }
+
+        // The key exists only inside tenant-a.
+        ns_write(&core, &root_token, "sys/mounts/totp/", json!({ "type": "totp" }).as_object().cloned()).await;
+        let seed: Vec<u8> = (0u8..20).collect();
+        let key_body = json!({
+            "generate": false, "key": crypto::otpauth::encode_secret(&seed), "digits": 6, "period": 30,
+            "algorithm": "SHA1", "issuer": "BastionVault", "account_name": "bob"
+        })
+        .as_object()
+        .cloned();
+        ns_write(&core, &root_token, "totp/keys/bobkey", key_body).await;
+
+        let mfa_user = json!({ "totp_mfa_enabled": true, "totp_key": "bobkey" }).as_object().cloned();
+        assert!(test_write_api(&core, &root_token, "auth/pass/users/bob", true, mfa_user).await.is_ok());
+        let mfa_cfg = json!({ "enabled": true }).as_object().cloned();
+        assert!(test_write_api(&core, &root_token, "auth/pass/config/mfa", true, mfa_cfg).await.is_ok());
+
+        let now = crate::modules::credential::userpass::path_users::now_secs() as u64;
+        let code = crypto::totp(&seed, now, Algorithm::Sha1, 6, 30);
+        let mut req = Request::new("auth/pass/login/bob");
+        req.operation = Operation::Write;
+        req.body = json!({ "password": "pw-bob-123", "totp_code": code }).as_object().cloned();
+        let mut h = HashMap::new();
+        h.insert("x-bastionvault-namespace".to_string(), "tenant-a".to_string());
+        req.headers = Some(h);
+        let resp = core.handle_request(&mut req).await.unwrap().unwrap();
+        assert!(resp.auth.is_some(), "TOTP key in the login namespace's totp/ mount must verify");
+    }
 }

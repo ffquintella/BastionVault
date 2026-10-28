@@ -303,6 +303,9 @@ impl UserPassBackendInner {
             }
             m => m,
         };
+        // The key lives in the caller's namespace, not root's.
+        let ns_prefix = crate::kernel_api::namespace::caller_namespace_prefix(&self.core, req).await?;
+        let mount = format!("{ns_prefix}{mount}");
 
         let now = super::path_users::now_secs().max(0) as u64;
         if !totp.verify_code(&mount, &user.totp_key, &code, now).await? {

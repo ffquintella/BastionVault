@@ -196,37 +196,8 @@ impl UserPassBackendInner {
             return Ok(Some(resp));
         }
 
-        // Second factor. When TOTP MFA is enabled globally *and* for this
-        // user, a valid code is mandatory. Fails closed: a missing engine,
-        // missing key, or wrong/absent code refuses the login. A failed
-        // code feeds the same lockout counter as a bad password so a
-        // brute-force of the second factor is throttled too.
-        let mfa = self.get_mfa_config(req).await?;
-        if mfa.enabled && user.totp_mfa_enabled {
-            let code = req
-                .get_data("totp_code")
-                .ok()
-                .and_then(|v| v.as_str().map(|s| s.trim().to_string()))
-                .unwrap_or_default();
-            if code.is_empty() {
-                self.record_failed_attempt(req, &username, &mut user, &lockout).await?;
-                return Ok(Some(Response::error_response("a TOTP code is required for this account")));
-            }
-            let ok = self.verify_totp_mfa(&user, &mfa, &code).await?;
-            if !ok {
-                log::warn!(target: "security", "userpass login failed: bad TOTP code for '{username}'");
-                self.record_failed_attempt(req, &username, &mut user, &lockout).await?;
-                return Ok(Some(Response::error_response("invalid TOTP code")));
-            }
-        }
-
-        // Success: reset the failed-attempt counter / lock if either is set.
-        if user.failed_login_count != 0 || user.locked_until != 0 {
-            user.failed_login_count = 0;
-            user.locked_until = 0;
-            self.set_user(req, &username, &user).await?;
-        }
-
+        // The login namespace is resolved before the second factor because the
+        // TOTP key lives in that namespace's own `totp/` mount, not root's.
         // Multi-tenancy: bind this session to the namespace named by the
         // request header. The credential lives in the root auth mount, but the
         // resulting identity, group expansion, and token are scoped to the login
@@ -243,6 +214,37 @@ impl UserPassBackendInner {
                 &username,
             )
             .await?;
+
+        // Second factor. When TOTP MFA is enabled globally *and* for this
+        // user, a valid code is mandatory. Fails closed: a missing engine,
+        // missing key, or wrong/absent code refuses the login. A failed
+        // code feeds the same lockout counter as a bad password so a
+        // brute-force of the second factor is throttled too.
+        let mfa = self.get_mfa_config(req).await?;
+        if mfa.enabled && user.totp_mfa_enabled {
+            let code = req
+                .get_data("totp_code")
+                .ok()
+                .and_then(|v| v.as_str().map(|s| s.trim().to_string()))
+                .unwrap_or_default();
+            if code.is_empty() {
+                self.record_failed_attempt(req, &username, &mut user, &lockout).await?;
+                return Ok(Some(Response::error_response("a TOTP code is required for this account")));
+            }
+            let ok = self.verify_totp_mfa(&user, &mfa, &code, &ns_path, &ns_uuid).await?;
+            if !ok {
+                log::warn!(target: "security", "userpass login failed: bad TOTP code for '{username}'");
+                self.record_failed_attempt(req, &username, &mut user, &lockout).await?;
+                return Ok(Some(Response::error_response("invalid TOTP code")));
+            }
+        }
+
+        // Success: reset the failed-attempt counter / lock if either is set.
+        if user.failed_login_count != 0 || user.locked_until != 0 {
+            user.failed_login_count = 0;
+            user.locked_until = 0;
+            self.set_user(req, &username, &user).await?;
+        }
 
         // Multi-tenancy: refuse the login if this principal is assigned to a set
         // of namespaces that does not include the login namespace. No assignment
@@ -378,6 +380,8 @@ impl UserPassBackendInner {
         user: &UserEntry,
         mfa: &TotpMfaConfig,
         code: &str,
+        ns_path: &str,
+        ns_uuid: &str,
     ) -> Result<bool, RvError> {
         if user.totp_key.trim().is_empty() {
             return Err(RvError::ErrResponse(
@@ -394,6 +398,7 @@ impl UserPassBackendInner {
             m if m.is_empty() => totp.normalize_mount(&mfa.default_mount),
             m => m,
         };
+        let mount = crate::kernel_api::namespace::scoped_mount(&self.core, ns_path, ns_uuid, &mount).await?;
 
         let now = super::path_users::now_secs().max(0) as u64;
         totp.verify_code(&mount, &user.totp_key, code, now).await

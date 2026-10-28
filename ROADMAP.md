@@ -333,6 +333,7 @@ Next-up list recorded before the migration, in its order:
 - [ ] T52 Broker workforce identity to downstream systems (S19)
   - source: roadmap.md feature row "Identity Provider (workforce identity brokering to downstream systems)", status `[ ]` Todo
   - old-notes: [spec](features/identity-provider.md) — BastionVault as an **outbound** IdP so admins reach targets *as themselves*: canonical workforce identity with an immutable, env-consistent, never-reused POSIX `(login, uid, gid)`; entitlement-gated issuance; SSH cert principals + RADIUS (FortiGate) + SAML-IdP + OIDC-OP + read-only LDAP-compat projections; lifecycle-driven revocation (KRL + signed/versioned deny feed). 7 phases, all Pending.
+- [x] T467 Verify the userpass TOTP second factor against the login namespace's own TOTP mount
 
 ## [M7] Secret engines
 > outcome: Done when PKI, transit, TOTP, SSH, LDAP and the import plugins are feature-complete and a dynamic-secrets framework hosts engine plugins.

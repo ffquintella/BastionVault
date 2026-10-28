@@ -342,6 +342,31 @@ pub async fn caller_namespace_prefix(ctx: &dyn VaultCtx, req: &Request) -> Resul
     Ok(ns.request_prefix())
 }
 
+/// Scope a mount path to the namespace `ns_path`/`ns_uuid`, wiring that
+/// namespace's mount router first. Returns `mount` unchanged for root.
+///
+/// For callers that read a sibling engine's storage through the shared router
+/// (`matching_view`) rather than dispatching a request: a namespace's mounts
+/// are keyed `<ns path>/<mount>` there, so a bare `totp/` only ever reaches
+/// the root namespace's mount.
+#[maybe_async::maybe_async]
+pub async fn scoped_mount(
+    ctx: &dyn VaultCtx,
+    ns_path: &str,
+    ns_uuid: &str,
+    mount: &str,
+) -> Result<String, RvError> {
+    let ns_path = ns_path.trim_matches('/');
+    if ns_path.is_empty() {
+        return Ok(mount.to_string());
+    }
+    let Some(registry) = ctx.namespaces() else {
+        return Err(bv_error_string!("namespace module is unavailable"));
+    };
+    registry.ensure_router(ns_uuid, ns_path).await?;
+    Ok(format!("{ns_path}/{mount}"))
+}
+
 /// Shared front half: header → resolved namespace. `None` when the request
 /// names no namespace, names an unknown one, or names root.
 #[maybe_async::maybe_async]
