@@ -815,3 +815,115 @@ async fn test_policy_write_warns_on_unknown_groups() {
     assert!(w.contains("other-typo"), "warning did not mention other-typo: {w}");
     assert!(!w.contains("\"real\""), "warning should not flag the real group: {w}");
 }
+
+/// A tenant user who is neither the group's owner nor an admin must see the
+/// members their tenant policy lets them read. The redaction probe used to
+/// test the bare `resources/resources/<name>`, which no tenant policy can
+/// match (tenant rules must carry the `<ns>/` prefix), so every member came
+/// back as `<hidden>` and the GUI had no groups to show.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn test_asset_group_member_redaction_honors_namespace_prefix() {
+    use crate::test_utils::test_mount_auth_api;
+
+    let (_bvault, core, root) =
+        new_unseal_test_bastion_vault("test_asset_group_member_redaction_honors_namespace_prefix").await;
+
+    async fn ns_req(
+        core: &dyn VaultCtx,
+        token: &str,
+        op: Operation,
+        path: &str,
+        ns: &str,
+        body: Option<serde_json::Map<String, Value>>,
+    ) -> Result<Option<crate::logical::Response>, RvError> {
+        let mut req = Request::new(path);
+        req.operation = op;
+        req.client_token = token.to_string();
+        req.body = body;
+        let mut h = HashMap::new();
+        h.insert("x-bastionvault-namespace".to_string(), ns.to_string());
+        req.headers = Some(h);
+        core.handle_request(&mut req).await
+    }
+
+    test_write_api(&core, &root, "sys/namespaces/tenant-a", true, json!({}).as_object().cloned()).await.unwrap();
+    // A namespace created through `sys/namespaces` already carries `resources/`
+    // and `resource-group/`; mounting either again is `ErrMountPathExist`.
+    for name in ["web1", "db1"] {
+        ns_req(
+            &core,
+            &root,
+            Operation::Write,
+            &format!("resources/resources/{name}"),
+            "tenant-a",
+            json!({ "name": name, "type": "server", "hostname": "h.example" }).as_object().cloned(),
+        )
+        .await
+        .unwrap();
+    }
+    ns_req(
+        &core,
+        &root,
+        Operation::Write,
+        "resource-group/groups/g",
+        "tenant-a",
+        json!({ "description": "g", "members": "web1,db1" }).as_object().cloned(),
+    )
+    .await
+    .unwrap();
+
+    // dave may read the group and `web1` only, written the way a tenant
+    // policy must be: with the namespace prefix.
+    ns_req(
+        &core,
+        &root,
+        Operation::Write,
+        "sys/policy/dave-p",
+        "tenant-a",
+        json!({ "policy": r#"
+            path "tenant-a/resource-group/groups/*" { capabilities = ["read", "list"] }
+            path "tenant-a/resources/resources/web1" { capabilities = ["read"] }
+        "# })
+        .as_object()
+        .cloned(),
+    )
+    .await
+    .unwrap();
+    test_mount_auth_api(&core, &root, "userpass", "userpass").await;
+    test_write_api(&core, &root, "auth/userpass/users/dave", true, json!({ "password": "pw-123456" }).as_object().cloned())
+        .await
+        .unwrap();
+    ns_req(
+        &core,
+        &root,
+        Operation::Write,
+        "identity/group/user/devs",
+        "tenant-a",
+        json!({ "members": ["dave"], "policies": ["dave-p"] }).as_object().cloned(),
+    )
+    .await
+    .unwrap();
+
+    let mut login = Request::new("auth/userpass/login/dave");
+    login.operation = Operation::Write;
+    login.body = json!({ "password": "pw-123456" }).as_object().cloned();
+    let mut h = HashMap::new();
+    h.insert("x-bastionvault-namespace".to_string(), "tenant-a".to_string());
+    login.headers = Some(h);
+    let dave = core.handle_request(&mut login).await.unwrap().unwrap().auth.unwrap().client_token;
+
+    let body = ns_req(&core, &dave, Operation::Read, "resource-group/groups/g", "tenant-a", None)
+        .await
+        .unwrap()
+        .unwrap()
+        .data
+        .unwrap();
+    let mut members: Vec<String> =
+        body["members"].as_array().unwrap().iter().map(|v| v.as_str().unwrap_or("").to_string()).collect();
+    members.sort();
+    assert_eq!(
+        members,
+        vec![REDACTED_MEMBER.to_string(), "web1".to_string()],
+        "web1 is readable through the tenant policy and must show; db1 is not and must stay hidden",
+    );
+}

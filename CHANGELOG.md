@@ -238,6 +238,10 @@ EXAMPLE ENTRY:
 
 ### Fixed
 
+#### Asset groups in a namespace
+
+- **Show the members a tenant user can read when they open a group, so groups appear on the Resources page** (T468, S47) -- Reading `resource-group/groups/<name>` in a namespace replaced every member with `<hidden>` for any caller who was neither the group's owner nor an admin. The redaction probe checked the bare `resources/resources/<name>` (and the bare KV path), which no tenant policy can match because a tenant rule must carry the `<ns>/` prefix, so the Resources page and the Secrets page found no group members and showed no groups. The probe now checks `<ns>/resources/resources/<name>` (and the namespaced KV path, in both canonical and KV-v2 forms) and hands the namespace to the policy evaluator, so a member the caller's own policy lets them read is shown and one it does not stays `<hidden>`. Root-namespace behaviour is unchanged. Not fixed here: `handle_read` still treats only the `root` and `admin` policy names as admin, while the group list also accepts `administrator` and `super-admin`.
+
 #### Userpass login prompt
 
 - **Show the authenticator-code field only for accounts that need it** (T467) -- The GUI password step no longer asks every user for an authenticator code. It signs in with the password alone and reveals the code field when the server answers that the account requires one; that prompt no longer counts as a failed attempt toward lockout, since the password was already verified.

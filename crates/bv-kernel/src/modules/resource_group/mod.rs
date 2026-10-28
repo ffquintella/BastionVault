@@ -224,6 +224,11 @@ struct WritePayload {
 /// (which bypasses this helper entirely) avoids the per-member cost
 /// for the common case where a caller sees their own groups in full.
 ///
+/// Inside a namespace the probe path carries the `<ns>/` prefix, the only form
+/// a tenant policy may use (`refuse_cross_namespace_paths`), and `ns_path` is
+/// handed to `can_operate` so owner and share lookups resolve the target's
+/// namespaced key. A bare path matches no tenant rule and hid every member.
+///
 /// Silent on any probe failure: if the policy module or subsystem is
 /// unavailable, the helper returns without modifying the entry, which
 /// preserves the pre-redaction behavior. Callers who want fail-closed
@@ -231,6 +236,7 @@ struct WritePayload {
 async fn redact_inaccessible_members(
     core: &Arc<Core>,
     auth: &crate::logical::Auth,
+    ns_path: Option<&str>,
     entry: &mut ResourceGroupEntry,
 ) {
     use crate::modules::policy::PolicyModule;
@@ -245,8 +251,8 @@ async fn redact_inaccessible_members(
         if m == REDACTED_MEMBER {
             continue;
         }
-        let path = format!("resources/resources/{m}");
-        if !store.can_operate(auth, &path, Operation::Read, None).await {
+        let path = namespaced_probe_path(ns_path, &format!("resources/resources/{m}"));
+        if !store.can_operate(auth, &path, Operation::Read, ns_path).await {
             *m = REDACTED_MEMBER.to_string();
         }
     }
@@ -261,13 +267,29 @@ async fn redact_inaccessible_members(
         if s == REDACTED_MEMBER {
             continue;
         }
-        let allowed = store.can_operate(auth, s, Operation::Read, None).await
+        let allowed = store
+            .can_operate(auth, &namespaced_probe_path(ns_path, s), Operation::Read, ns_path)
+            .await
             || store
-                .can_operate(auth, &kv_v2_data_form(s), Operation::Read, None)
+                .can_operate(
+                    auth,
+                    &namespaced_probe_path(ns_path, &kv_v2_data_form(s)),
+                    Operation::Read,
+                    ns_path,
+                )
                 .await;
         if !allowed {
             *s = REDACTED_MEMBER.to_string();
         }
+    }
+}
+
+/// Prefix a mount-relative probe path with the request's namespace, the form
+/// the ACL sees for a namespaced request. Root (no namespace) is unchanged.
+fn namespaced_probe_path(ns_path: Option<&str>, path: &str) -> String {
+    match ns_path.map(|n| n.trim().trim_matches('/')).filter(|n| !n.is_empty()) {
+        Some(ns) => format!("{ns}/{}", path.trim_start_matches('/')),
+        None => path.to_string(),
     }
 }
 
@@ -611,7 +633,7 @@ impl ResourceGroupBackendInner {
 
                 if !caller_is_owner && !caller_is_admin {
                     if let Some(auth) = req.auth.clone() {
-                        redact_inaccessible_members(&self.core, &auth, &mut entry).await;
+                        redact_inaccessible_members(&self.core, &auth, req.namespace_path.as_deref(), &mut entry).await;
                     }
                 }
 

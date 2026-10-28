@@ -286,6 +286,8 @@ Next-up list recorded before the migration, in its order:
 - [!] T130 Open SQL browser sessions with dynamic database credentials (S109, S13)
   - blocked-by: T62 (the dynamic-secrets framework, which also needs host-mediated issuance, early revoke, a revoke-failed state and engines for all five DBMSs — features/sql-browser.md §5.5)
   - initiative: Phase 9 of the [SQL Browser](features/sql-browser.md): session-owned leases revoked at close, per-tier roles matched to profile ceilings, preferred over stored secrets when a dynamic profile can serve the caller.
+- [x] T468 Show a group's readable members to tenant callers, so groups appear in a namespace's Resources page (S47, S2)
+  - note: the member redaction on `resource-group/groups/<name>` probed `resources/resources/<member>` without the `<ns>/` prefix a tenant policy must carry, so every member of every group read as `<hidden>` for a non-owner, non-admin tenant caller and the GUI built no group chips. The probe is now namespace-qualified and passes the namespace to the policy evaluator; pinned by `test_asset_group_member_redaction_honors_namespace_prefix`.
 
 ## [M6] Authentication
 > outcome: Done when every listed auth method (token, AppID, userpass, cert, OIDC, SAML, FIDO2, FerroGate) is shipped and workforce identity can be brokered downstream.
