@@ -228,7 +228,10 @@ impl UserPassBackendInner {
                 .and_then(|v| v.as_str().map(|s| s.trim().to_string()))
                 .unwrap_or_default();
             if code.is_empty() {
-                self.record_failed_attempt(req, &username, &mut user, &lockout).await?;
+                // The password was already verified, so asking for the code
+                // gives an attacker nothing to guess and must not burn a
+                // lockout attempt: clients (the GUI) send the first login
+                // without a code and only prompt for it on this refusal.
                 return Ok(Some(Response::error_response("a TOTP code is required for this account")));
             }
             let ok = self.verify_totp_mfa(&user, &mfa, &code, &ns_path, &ns_uuid).await?;

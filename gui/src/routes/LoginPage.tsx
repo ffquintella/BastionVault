@@ -165,6 +165,8 @@ export function LoginPage() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [totpCode, setTotpCode] = useState("");
+  // The code field is only shown once the server says this account needs one.
+  const [totpRequired, setTotpRequired] = useState(false);
   const [loginStep, setLoginStep] = useState<LoginStep>("username");
   const [fido2Status, setFido2Status] = useState<string | null>(null);
 
@@ -386,7 +388,13 @@ export function LoginPage() {
       await finalizeLogin(result.token, result.policies);
       navigate("/dashboard");
     } catch (err: unknown) {
-      setError(extractError(err));
+      const msg = extractError(err);
+      if (!totpCode && /TOTP code is required/i.test(msg)) {
+        setTotpRequired(true);
+        setError("Enter the code from your authenticator app.");
+      } else {
+        setError(msg);
+      }
     } finally {
       setLoading(false);
     }
@@ -396,6 +404,7 @@ export function LoginPage() {
     setLoginStep("username");
     setPassword("");
     setTotpCode("");
+    setTotpRequired(false);
     setError(null);
   }
 
@@ -611,9 +620,10 @@ export function LoginPage() {
               autoFocus
             />
           </div>
+          {totpRequired && (
           <div>
             <label className="block text-sm text-[var(--color-text-muted)] mb-1">
-              Authenticator code <span className="opacity-70">(only if MFA is enabled)</span>
+              Authenticator code
             </label>
             <input
               type="text"
@@ -623,8 +633,10 @@ export function LoginPage() {
               onChange={(e) => setTotpCode(e.target.value)}
               placeholder="123456"
               className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[var(--color-primary)]"
+              autoFocus
             />
           </div>
+          )}
           <button
             type="submit"
             disabled={loading || !password}
