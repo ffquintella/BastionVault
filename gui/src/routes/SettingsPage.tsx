@@ -462,7 +462,9 @@ export function SettingsPage() {
             </div>
             <div className="flex justify-between">
               <span className="text-[var(--color-text-muted)]">GUI Version</span>
-              <span className="font-mono">0.1.0</span>
+              <span className="font-mono">
+                {(import.meta.env?.VITE_APP_VERSION as string | undefined) ?? "dev"}
+              </span>
             </div>
           </div>
         </Card>
