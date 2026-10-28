@@ -1773,7 +1773,7 @@ dependencies = [
 
 [[package]]
 name = "bv-core"
-version = "0.42.1"
+version = "0.42.2"
 dependencies = [
  "aes-gcm 0.10.3",
  "arc-swap",
@@ -2009,7 +2009,7 @@ dependencies = [
 
 [[package]]
 name = "bv-engine-resource"
-version = "0.43.2"
+version = "0.43.3"
 dependencies = [
  "async-trait",
  "base32",
@@ -2225,7 +2225,7 @@ dependencies = [
 
 [[package]]
 name = "bv-kernel"
-version = "0.42.3"
+version = "0.42.4"
 dependencies = [
  "actix-rt",
  "arc-swap",
@@ -2301,7 +2301,7 @@ dependencies = [
 
 [[package]]
 name = "bv-logical"
-version = "0.42.1"
+version = "0.42.2"
 dependencies = [
  "actix-rt",
  "async-trait",
@@ -2325,7 +2325,7 @@ dependencies = [
 
 [[package]]
 name = "bv-mcp"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2345,7 +2345,7 @@ dependencies = [
 
 [[package]]
 name = "bv-metrics"
-version = "0.41.1"
+version = "0.41.2"
 dependencies = [
  "prometheus-client",
  "sysinfo",
