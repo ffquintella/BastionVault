@@ -140,12 +140,12 @@ pub struct UsesPassCliHandler {
 
 impl LoginHandler for UsesPassCliHandler {
     fn auth(&self, client: &Client, data: &Map<String, Value>) -> Result<HttpResponse, RvError> {
-        if data["username"].as_str().is_none() {
+        // `Map` indexing panics on a missing key, so every optional field is read with `get`.
+        let Some(username) = data.get("username").and_then(|v| v.as_str()) else {
             return Err(bv_error_response!("'username' must be specified"));
-        }
-        let username = data["username"].as_str().unwrap();
+        };
 
-        let mut password = data["password"].as_str().unwrap_or("").to_string();
+        let mut password = data.get("password").and_then(|v| v.as_str()).unwrap_or("").to_string();
         if password.is_empty() {
             let mut writer = io::stdout();
             write!(writer, "Password (will be hidden): ")?;
@@ -166,7 +166,7 @@ impl LoginHandler for UsesPassCliHandler {
             }
         }
 
-        let mut mount = data["mount"].as_str().unwrap_or("");
+        let mut mount = data.get("mount").and_then(|v| v.as_str()).unwrap_or("");
         if mount.is_empty() {
             mount = &self.default_mount;
         }
