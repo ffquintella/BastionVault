@@ -203,12 +203,18 @@ has_lib = {
 #
 # Both mirror `default-filter` in .config/nextest.toml and both have their own
 # make target (`test-cucumber`, `test-hiqlite`).
+#
+# A target with `required-features` (bv-core's `hsm_pool_hardware`) is never
+# built by a default run, and naming it with `--test` makes cargo refuse the
+# whole invocation, so it is skipped here too.
 NEXTEST_CANNOT_RUN = {"cucumber_hiqlite", "hiqlite_ha_fault_injection"}
 test_bins = {
     p["name"]: sorted(
         t["name"]
         for t in p["targets"]
-        if "test" in t["kind"] and t["name"] not in NEXTEST_CANNOT_RUN
+        if "test" in t["kind"]
+        and t["name"] not in NEXTEST_CANNOT_RUN
+        and not t.get("required-features")
     )
     for p in members.values()
 }
