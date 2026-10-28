@@ -15,6 +15,7 @@ import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 
 import * as api from "../lib/api";
+import { extractError } from "../lib/error";
 // Not the `./ui` barrel: this file is in the session-only bundle
 // (session.html, T110), whose import graph `sessionBundle.test.ts` keeps
 // free of the barrel's vault-admin components.
@@ -167,7 +168,7 @@ export function ConnectMfaPrompt({
     } catch (e) {
       setPinOpen(false);
       setError(
-        `Your security key's PIN could not be passed on (${e instanceof Error ? e.message : String(e)}). ` +
+        `Your security key's PIN could not be passed on (${extractError(e)}). ` +
           "Connect from the main BastionVault window, or use an authenticator code.",
       );
     }
@@ -220,8 +221,7 @@ export function ConnectMfaPrompt({
       // Stay open on failure: a mistyped code or a missed touch should be
       // retryable without re-clicking Connect. The ticket is only minted on
       // success, so there is nothing to clean up.
-      const msg = e instanceof Error ? e.message : String(e);
-      setError(msg);
+      setError(extractError(e));
       setKeyStatus(null);
       setBusy(false);
     }
