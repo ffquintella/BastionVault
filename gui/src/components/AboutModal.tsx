@@ -1,4 +1,6 @@
+import { useEffect, useState } from "react";
 import { Button, Modal } from "./ui";
+import { getServerInfo, type ServerInfo } from "../lib/api";
 
 interface AboutModalProps {
   open: boolean;
@@ -17,6 +19,20 @@ export function AboutModal({ open, onClose }: AboutModalProps) {
   // fall back gracefully so a missing inject doesn't render "undefined".
   const version =
     (import.meta.env?.VITE_APP_VERSION as string | undefined) ?? "dev";
+
+  // Server facts are best-effort: the About dialog is also reachable from
+  // the connect/login screens, where no backend is attached yet.
+  const [server, setServer] = useState<ServerInfo | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    getServerInfo()
+      .then((info) => !cancelled && setServer(info?.version ? info : null))
+      .catch(() => !cancelled && setServer(null));
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
 
   async function openRepo() {
     try {
@@ -45,6 +61,20 @@ export function AboutModal({ open, onClose }: AboutModalProps) {
             <div className="text-[var(--color-text-muted)]">Version {version}</div>
           </div>
         </div>
+        <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-xs">
+          <dt className="text-[var(--color-text-muted)]">Client version</dt>
+          <dd className="font-mono min-w-0 truncate">{version}</dd>
+          {server && (
+            <>
+              <dt className="text-[var(--color-text-muted)]">Server version</dt>
+              <dd className="font-mono min-w-0 truncate">{server.version}</dd>
+              <dt className="text-[var(--color-text-muted)]">Connection</dt>
+              <dd className="min-w-0 truncate">
+                {server.connection_kind === "embedded" ? "Embedded (this process)" : server.endpoint}
+              </dd>
+            </>
+          )}
+        </dl>
         <p className="text-[var(--color-text-muted)]">
           Identity-based secrets management with post-quantum cryptography.
         </p>
