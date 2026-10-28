@@ -804,12 +804,15 @@ mod tests {
     #[serial_test::serial]
     async fn multiplexed_invocations_run_concurrently() {
         let m = mux_manifest("test-mux-concurrent", None);
-        let bin = test_binary();
+        // Shared, not cloned per task: the test binary is hundreds of MB, and
+        // copying it 8 times inside the timed window made the bound measure
+        // memcpy instead of concurrency.
+        let bin = std::sync::Arc::new(test_binary());
         call(&m, &bin, json!({"echo": "warm"}), None, LONG).await.unwrap();
         let started = Instant::now();
         let mut tasks = Vec::new();
         for i in 0..8 {
-            let (m, bin) = (m.clone(), bin.clone());
+            let (m, bin) = (m.clone(), std::sync::Arc::clone(&bin));
             tasks.push(tokio::spawn(async move {
                 call(&m, &bin, json!({"echo": format!("n{i}"), "sleep_ms": 600}), None, LONG).await.unwrap()
             }));
@@ -817,9 +820,7 @@ mod tests {
         for (i, t) in tasks.into_iter().enumerate() {
             assert_eq!(t.await.unwrap()["echo"], format!("n{i}"));
         }
-        // Fully serial would take 8 * 600 ms; the bound sits below that with
-        // headroom for a loaded CI runner (3.1 s observed against a 2.4 s limit).
-        assert!(started.elapsed() < Duration::from_millis(8 * 600 * 3 / 4), "serialized: {:?}", started.elapsed());
+        assert!(started.elapsed() < Duration::from_millis(8 * 600 / 2), "serialized: {:?}", started.elapsed());
         assert_eq!(crash_count(&m.name).await, 0);
         shutdown_for(&m.name).await;
     }
