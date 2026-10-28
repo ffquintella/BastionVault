@@ -140,9 +140,15 @@ pub async fn login_userpass(
     state: State<'_, AppState>,
     username: String,
     password: String,
+    totp_code: Option<String>,
 ) -> CmdResult<LoginResponse> {
     let mut body = Map::new();
     body.insert("password".to_string(), Value::String(password));
+    // Second factor for accounts with TOTP MFA enabled; the server ignores it
+    // otherwise, and refuses the login when it is required but absent.
+    if let Some(code) = totp_code.map(|c| c.trim().to_string()).filter(|c| !c.is_empty()) {
+        body.insert("totp_code".to_string(), Value::String(code));
+    }
 
     // The username is a URI path segment. Trim accidental surrounding
     // whitespace (a stray space/newline from paste or autofill would
@@ -173,7 +179,13 @@ pub async fn login_userpass(
                 *state.token.lock().await = Some(token.clone());
                 Ok(LoginResponse { token, policies })
             } else {
-                Err("Login failed: no auth in response".into())
+                // A refused login (bad credentials, missing/invalid TOTP code,
+                // lockout) comes back as a data-only response carrying `error`.
+                let reason = r.data.as_ref().and_then(|d| d.get("error")).and_then(|v| v.as_str());
+                match reason {
+                    Some(reason) => Err(format!("Login failed: {reason}").into()),
+                    None => Err("Login failed: no auth in response".into()),
+                }
             }
         }
         None => Err("Login failed: empty response".into()),

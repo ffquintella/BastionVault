@@ -164,6 +164,7 @@ export function LoginPage() {
   // Unified login form
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [totpCode, setTotpCode] = useState("");
   const [loginStep, setLoginStep] = useState<LoginStep>("username");
   const [fido2Status, setFido2Status] = useState<string | null>(null);
 
@@ -380,8 +381,8 @@ export function LoginPage() {
     try {
       const result =
         mode === "Remote"
-          ? await api.remoteLoginUserpass(username, password)
-          : await api.loginUserpass(username, password);
+          ? await api.remoteLoginUserpass(username, password, totpCode)
+          : await api.loginUserpass(username, password, totpCode);
       await finalizeLogin(result.token, result.policies);
       navigate("/dashboard");
     } catch (err: unknown) {
@@ -394,6 +395,7 @@ export function LoginPage() {
   function handleBack() {
     setLoginStep("username");
     setPassword("");
+    setTotpCode("");
     setError(null);
   }
 
@@ -607,6 +609,20 @@ export function LoginPage() {
               onChange={(e) => setPassword(e.target.value)}
               className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[var(--color-primary)]"
               autoFocus
+            />
+          </div>
+          <div>
+            <label className="block text-sm text-[var(--color-text-muted)] mb-1">
+              Authenticator code <span className="opacity-70">(only if MFA is enabled)</span>
+            </label>
+            <input
+              type="text"
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              value={totpCode}
+              onChange={(e) => setTotpCode(e.target.value)}
+              placeholder="123456"
+              className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[var(--color-primary)]"
             />
           </div>
           <button

@@ -753,6 +753,7 @@ pub async fn remote_login_userpass(
     state: State<'_, AppState>,
     username: String,
     password: String,
+    totp_code: Option<String>,
 ) -> CmdResult<crate::commands::auth::LoginResponse> {
     let client_guard = state.remote_client.lock().await;
     let client = client_guard.as_ref().ok_or("Not connected to remote server")?;
@@ -763,7 +764,10 @@ pub async fn remote_login_userpass(
     // legitimate special character can't break URL construction.
     let username = urlencoding::encode(username.trim());
 
-    let data = serde_json::json!({ "password": password });
+    let mut data = serde_json::json!({ "password": password });
+    if let Some(code) = totp_code.map(|c| c.trim().to_string()).filter(|c| !c.is_empty()) {
+        data["totp_code"] = serde_json::Value::String(code);
+    }
     let resp = client
         .request_write(format!("{}/auth/userpass/login/{username}", client.api_prefix()), data.as_object().cloned())
         .map_err(|e| CommandError::from(format!("Login failed: {e}")))?;

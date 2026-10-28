@@ -206,8 +206,8 @@ export const setPasswordPolicy = (policy: PasswordPolicy) =>
   invoke<void>("set_password_policy", { policy });
 export const remoteLoginToken = (token: string) =>
   invoke<LoginResponse>("remote_login_token", { token });
-export const remoteLoginUserpass = (username: string, password: string) =>
-  invoke<LoginResponse>("remote_login_userpass", { username, password });
+export const remoteLoginUserpass = (username: string, password: string, totpCode?: string) =>
+  invoke<LoginResponse>("remote_login_userpass", { username, password, totpCode: totpCode || null });
 
 // System
 export const initVault = () => invoke<InitResponse>("init_vault");
@@ -490,8 +490,8 @@ export const dashboardSummary = () =>
 // Auth
 export const loginToken = (token: string) =>
   invoke<LoginResponse>("login_token", { token });
-export const loginUserpass = (username: string, password: string) =>
-  invoke<LoginResponse>("login_userpass", { username, password });
+export const loginUserpass = (username: string, password: string, totpCode?: string) =>
+  invoke<LoginResponse>("login_userpass", { username, password, totpCode: totpCode || null });
 export const getCurrentToken = () => invoke<string | null>("get_current_token");
 export const tokenStatus = () => invoke<TokenStatus>("token_status");
 export const logout = () => invoke<void>("logout");
