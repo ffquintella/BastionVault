@@ -343,6 +343,25 @@ pub struct McpBinding {
     /// token's own namespace only.
     #[serde(default)]
     pub policy_namespaces: Vec<String>,
+    /// Where this token's policy names resolve when that is not its bound
+    /// namespace (T470): set only by `mint_mcp_token`, on a pairing narrowed
+    /// elsewhere, from the exchanging session's stored binding, so the token
+    /// can do there at most what that session can. Typed, so no body, `meta`
+    /// or IdP claim reaches it. `None` (old or non-narrowed tokens) resolves
+    /// names in the bound namespace. Not `policy_namespaces`.
+    #[serde(default)]
+    pub policy_namespace: Option<McpPolicyNamespace>,
+}
+
+/// [`McpBinding::policy_namespace`]: the canonical path (`""` = root) and the
+/// id the session's binding carried for it (`""` if none; feeds only
+/// `{{namespace.id}}` templates).
+#[derive(Debug, Clone, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct McpPolicyNamespace {
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub id: String,
 }
 
 /// Most namespaces a binding's [`McpBinding::policy_namespaces`] records.
@@ -454,12 +473,36 @@ mod mcp_binding_tests {
         assert!(!b.confirm_connect);
         assert_eq!(b.operator, None);
         assert!(b.policy_namespaces.is_empty(), "an old token reads policies in its own namespace only");
+        assert_eq!(b.policy_namespace, None, "an old token resolves its policy names where it is bound");
         assert!(b.reveal_allowed, "the existing fields are untouched");
+    }
+
+    /// T470: a binding written before `policy_namespace` existed (it has
+    /// `policy_namespaces`, the previous addition) decodes with `None`; a
+    /// narrowed one round-trips, and a partial record decodes with the
+    /// missing key empty rather than failing.
+    #[test]
+    fn the_policy_namespace_reads_old_and_round_trips() {
+        let before = r#"{"kind":{"Pairing":"p"},"catalogue_hash":"h","tool_allowlist":[],"path_scope":[],
+            "operator":{"username":"felipe","namespace":"dti/esi"},"policy_namespaces":["","dti/esi"]}"#;
+        let b: McpBinding = serde_json::from_str(before).unwrap();
+        assert_eq!(b.policy_namespace, None);
+        assert_eq!(b.policy_namespaces, vec![String::new(), "dti/esi".to_string()]);
+
+        let narrowed = McpBinding {
+            policy_namespace: Some(McpPolicyNamespace { path: "dti".into(), id: "ns-1".into() }),
+            ..b
+        };
+        let json = serde_json::to_string(&narrowed).unwrap();
+        assert_eq!(serde_json::from_str::<McpBinding>(&json).unwrap(), narrowed);
+        let partial: McpPolicyNamespace = serde_json::from_str(r#"{"path":""}"#).unwrap();
+        assert_eq!(partial, McpPolicyNamespace::default());
     }
 
     #[test]
     fn a_binding_with_an_operator_round_trips() {
         let b = McpBinding {
+            policy_namespace: None,
             policy_namespaces: Vec::new(),
             kind: McpBindingKind::Pairing("p-1".into()),
             catalogue_hash: "h".into(),

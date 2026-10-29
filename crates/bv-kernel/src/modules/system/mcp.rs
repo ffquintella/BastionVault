@@ -259,10 +259,6 @@ pub const MCP_PAIRING_NAMESPACE_PREFIX: &str = "mcp/pairing-namespaces/";
 /// vault cannot resolve. Never answered by falling back to root.
 pub const MCP_NAMESPACE_UNAVAILABLE: &str = "mcp_namespace_unavailable";
 
-/// The stable refusal for a narrowed exchange whose policies do not exist
-/// in the target namespace (T457 Phase 2).
-pub const MCP_POLICY_NOT_IN_NAMESPACE: &str = "mcp_policy_not_in_namespace";
-
 fn default_token_kind() -> String {
     "app".to_string()
 }
@@ -1115,7 +1111,10 @@ impl SystemBackend {
         };
         let namespace = target.as_ref().map_or(session_namespace, |t| t.path.clone());
         if target.is_some() {
-            self.check_policies_resolve_in(auth, &requested_policies, &namespace).await?;
+            // No policy needs to exist in the target (T470): a narrowed
+            // token's names resolve where this session's do, which
+            // `mint_mcp_token` records on the binding.
+            //
             // The operator's MFA ticket must be bound where this token's
             // calls run (`connect_mfa`): the narrowed namespace, which the
             // session may operate in.
@@ -1132,6 +1131,8 @@ impl SystemBackend {
             Vec::new()
         };
         let binding = McpBinding {
+            // Decided by `mint_mcp_token` from the stored entries alone.
+            policy_namespace: None,
             policy_namespaces,
             kind: McpBindingKind::Pairing(id.clone()),
             catalogue_hash,
@@ -1196,34 +1197,6 @@ impl SystemBackend {
             }),
         );
         Ok(Some(Response::data_response(Some(data))))
-    }
-
-    /// T457 Phase 2: every policy the narrowed token would carry (the
-    /// requested set, else the session's) must exist in `namespace`'s store,
-    /// or the token's grants would evaluate to nothing there.
-    async fn check_policies_resolve_in(
-        &self,
-        auth: &Auth,
-        requested_policies: &[String],
-        namespace: &str,
-    ) -> Result<(), RvError> {
-        let mut names = if requested_policies.is_empty() { auth.policies.clone() } else { requested_policies.to_vec() };
-        crate::utils::policy::sanitize_policies(&mut names, false);
-        let policy_module = self.get_module::<PolicyModule>("policy")?;
-        let missing = policy_module.policy_store.load().unresolved_in_namespace(&names, namespace).await?;
-        if missing.is_empty() {
-            return Ok(());
-        }
-        Err(crate::bv_error_response_status!(
-            400,
-            "{}: {} {:?} {} not exist in namespace {:?}; create {} there or request policies that do",
-            MCP_POLICY_NOT_IN_NAMESPACE,
-            if missing.len() == 1 { "policy" } else { "policies" },
-            missing,
-            if missing.len() == 1 { "does" } else { "do" },
-            namespace,
-            if missing.len() == 1 { "it" } else { "them" }
-        ))
     }
 
     /// Compares the pairing's previous exchange with this one's `namespace`
@@ -1339,6 +1312,7 @@ impl SystemBackend {
         // superset (mint_mcp_token enforces the subset rule again).
         let ttl_secs = requested_ttl_secs.unwrap_or(app.ttl_secs).min(app.ttl_secs).min(86400);
         let binding = McpBinding {
+            policy_namespace: None,
             policy_namespaces: Vec::new(),
             kind: McpBindingKind::App(app.name.clone()),
             catalogue_hash,

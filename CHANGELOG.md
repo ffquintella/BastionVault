@@ -238,6 +238,10 @@ EXAMPLE ENTRY:
 
 ### Fixed
 
+#### MCP namespace narrowing
+
+- **Give an AI assistant narrowed to a namespace your own permissions there, not policies that must exist by name in that namespace** (T470, S115) -- Narrowing a pairing to a namespace beneath your sign-in (`bvault mcp serve --namespace`, or the desktop selector) failed with `400 mcp_policy_not_in_namespace` unless every policy on your sign-in also existed by name in the target, and when it did exist the target's copy decided what the assistant could do, even where that was more than you can do there yourself. The token now looks up its policy names where your sign-in does and checks them against the target's paths, so it can do there at most what your own session can, narrowed further by the pairing's tools and path scope. The refusal is gone and the target needs no policy of its own. **Behaviour change:** same-named policies you created inside a tenant for narrowing no longer apply to narrowed tokens; grant the tenant's paths in your own policies (for a root sign-in, rules on `dti/esi/...` paths). Tokens minted before the upgrade keep the old evaluation until they expire (24 hours at most).
+
 #### SSH session drops
 
 - **Name the real cause when an SSH session is lost** -- A dropped shell always read "ssh connection lost (TCP closed or keepalive timed out ...)", a guess that hid whether the server disconnected, stopped answering keepalives or the socket failed. The closed banner now states which one happened, and the same reason is logged at warn level.

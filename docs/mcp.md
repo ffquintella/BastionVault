@@ -593,11 +593,21 @@ when your sign-in is child-visible, or a namespace an administrator has
 assigned to you (the route the namespace picker takes when you sign in at
 root), and refuses anything else with
 `mcp_namespace_not_permitted` — it never binds the token somewhere else
-instead. Every policy the token will carry must exist, by name, in the target
-namespace (`mcp_policy_not_in_namespace` names the missing ones): a
-narrowed token is evaluated against that namespace's policies, and a
-root-namespace policy name would grant nothing there. A narrowing is a
+instead. A narrowed token carries **your own permissions** in that
+namespace: its policy names are read where your sign-in reads them (root, for
+a root sign-in), and checked against the target's paths, exactly as when you
+work there yourself through the namespace picker. So the target needs no
+policy of its own, and a policy with the same name written inside it is not
+used: the token can never do more there than your session can, and the
+pairing's tools and path scope narrow it further. A narrowing is a
 namespace change like any other: audited, and shown in the dialogs.
+
+*Changed in T470.* Earlier releases required every policy the token carried to
+exist by name in the target and evaluated the target's copies
+(`mcp_policy_not_in_namespace` otherwise). If you created same-named
+policies inside a tenant for narrowing, they no longer apply to narrowed
+tokens; grant the paths in your own policies instead (for a root sign-in,
+rules on `dti/esi/...` paths).
 
 **Seeing it.** The approval dialog names the namespace the tokens will be
 bound to; each per-call confirmation names the namespace the vault actually
@@ -611,9 +621,9 @@ in the namespace the token's call runs in.
 written inside a namespace cannot name a `sys/` path (`sys/policy` refuses
 it), so a session signed in *to* a tenant namespace has no supported way to
 be granted the exchange today. The route that works is the one above: sign
-in to a child-visible ancestor whose own policy grants `sys/mcp/token`, and
-narrow to the tenant, with the tenant's policies (tenant-authored,
-tenant-prefixed paths) named in the token.
+in to a child-visible ancestor (or at root with the tenant assigned to you)
+whose own policy grants `sys/mcp/token`, and narrow to the tenant; the token
+then acts there with that sign-in's own policies.
 
 ## The limits, stated plainly
 
@@ -699,7 +709,7 @@ CSS, so text a page hides is returned.
 | `mcp_session_profile_not_agent_enabled` | The type's `agent_sessions_max` or the profile's `agent_access` is not `allow` |
 | `mcp_session_mfa_required` / `mcp_session_mfa_unavailable` | The profile requires MFA and the call carried no ticket (a gatekeeper older than this release) / you cannot complete it here: not a userpass user, no factor enrolled, or only a security key at `bvault mcp serve` |
 | `mcp_namespace_not_permitted` | The exchange asked for a namespace your sign-in may not narrow to: not your own, nor beneath it with a child-visible sign-in, nor one assigned to you, or not a well-formed path. Nothing was minted |
-| `mcp_policy_not_in_namespace` | A narrowed token would carry a policy that does not exist in the target namespace (named in the message); create it there, or request policies that exist |
+| `mcp_policy_not_in_namespace` | Only from a vault older than T470, which required a narrowed token's policies to exist by name in the target namespace. Current vaults never send it: the token uses your sign-in's own policies |
 | `mcp_namespace_unavailable` | The token's (or the requested) namespace was deleted or cannot be resolved; calls are refused, never run at root. Sign in again, or pair again |
 | `mcp_namespace_conflict` | `bvault mcp serve --namespace` names another namespace than the one the pairing was narrowed to in the desktop app; drop the flag or pair again |
 | `mcp_namespace_mismatch` | The vault bound a narrowed token somewhere else (a vault without narrowing ignores the field); the token was discarded |

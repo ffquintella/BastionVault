@@ -317,6 +317,7 @@ mod tests {
     #[test]
     fn the_key_is_the_pairing_not_the_token() {
         let binding = |kind| McpBinding {
+            policy_namespace: None,
             policy_namespaces: Vec::new(),
             kind,
             catalogue_hash: String::new(),

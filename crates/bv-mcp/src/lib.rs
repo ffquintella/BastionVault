@@ -99,6 +99,7 @@ mod dispatch_tests {
 
     fn binding(tool_allowlist: &[&str], path_scope: &[&str]) -> McpBinding {
         McpBinding {
+            policy_namespace: None,
             policy_namespaces: Vec::new(),
             kind: McpBindingKind::App("test-app".into()),
             catalogue_hash: catalogue::catalogue_hash(),

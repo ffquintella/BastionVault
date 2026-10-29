@@ -2473,23 +2473,6 @@ impl PolicyStore {
         Ok((acl, unresolved))
     }
 
-    /// The names in `policy_names` that would resolve to nothing for a token
-    /// bound to `ns_path`: the same lookup [`Self::build_acl`] makes. `default`
-    /// is never reported; outside root it is the implicit namespace pair.
-    pub async fn unresolved_in_namespace(
-        &self,
-        policy_names: &[String],
-        ns_path: &str,
-    ) -> Result<Vec<String>, RvError> {
-        let mut missing = Vec::new();
-        for name in policy_names.iter().filter(|n| n.as_str() != DEFAULT_POLICY_NAME) {
-            if self.get_policy_ns(name, PolicyType::Token, ns_path).await?.is_none() {
-                missing.push(name.clone());
-            }
-        }
-        Ok(missing)
-    }
-
     async fn new_acl_inner(
         &self,
         policy_names: &[String],
@@ -2508,9 +2491,13 @@ impl PolicyStore {
         // then a policy authored in that tenant does not resolve at all — see
         // the warning below and `SHARED_ACCESS_POLICY`, which is the supported
         // way to grant such a principal reach into a namespace.
-        let ns_path = auth
-            .map(|a| crate::modules::namespace::token_binding::binding_from_metadata(&a.metadata).0)
-            .unwrap_or_default();
+        //
+        // A narrowed MCP token is the one exception: its names resolve where
+        // its issuing session's do (`acl_namespace`, T470).
+        let ns_path = match auth {
+            Some(a) => crate::modules::namespace::token_binding::acl_namespace(a)?.0,
+            None => String::new(),
+        };
         let mut unresolved = Vec::new();
         self.build_acl(policy_names, additional_policies, auth, request_ns, &ns_path, &mut unresolved).await
     }
@@ -3375,10 +3362,11 @@ async fn caller_policies_opt_in_group_shared(core: &crate::core::Core, req: &Req
     else {
         return false;
     };
-    // Policies resolve from the token's binding namespace, the same keyspace
-    // the ACL itself was built from (`new_acl_inner`).
-    let (binding_ns, _) =
-        crate::modules::namespace::token_binding::binding_from_metadata(&auth.metadata);
+    // Policies resolve from the same keyspace the ACL itself was built from
+    // (`new_acl_inner` through `acl_namespace`).
+    let Ok((binding_ns, _)) = crate::modules::namespace::token_binding::acl_namespace(auth) else {
+        return false;
+    };
     let pstore = pmodule.policy_store.load();
     for name in &auth.policies {
         if let Ok(Some(p)) = pstore
@@ -3486,12 +3474,18 @@ fn apply_templates(
     auth: &crate::logical::Auth,
     request_ns: Option<&str>,
 ) -> Option<Arc<Policy>> {
+    // A narrowed MCP token reads its session's policies (T470); those must
+    // not see `{{username}}` as the token's display name, which would point a
+    // per-user rule at `mcp-pairing-<id>` in the target namespace. Unresolved
+    // instead, so the rule drops.
+    let narrowed_mcp = auth.mcp_binding.as_ref().is_some_and(|b| b.policy_namespace.is_some());
     let username = auth
         .metadata
         .get("username")
         .cloned()
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| auth.display_name.clone());
+        .or_else(|| (!narrowed_mcp).then(|| auth.display_name.clone()))
+        .unwrap_or_default();
     let entity_id = auth
         .metadata
         .get("entity_id")
@@ -3502,19 +3496,11 @@ fn apply_templates(
         .get("mount_path")
         .cloned()
         .unwrap_or_default();
-    // Multi-tenancy templates: the namespace the request's token is bound to.
+    // Multi-tenancy templates: the namespace the token's policies resolve in
+    // (its binding, or a narrowed MCP token's recorded one, `acl_namespace`).
     // `namespace.path` defaults to the root namespace (empty string), which is
     // a legitimate value; `namespace.id` is opaque and fail-closed when absent.
-    let namespace_path = auth
-        .metadata
-        .get(crate::modules::namespace::token_binding::NS_PATH_META)
-        .cloned()
-        .unwrap_or_default();
-    let namespace_id = auth
-        .metadata
-        .get(crate::modules::namespace::token_binding::NS_ID_META)
-        .cloned()
-        .unwrap_or_default();
+    let (namespace_path, namespace_id) = crate::modules::namespace::token_binding::acl_namespace(auth).ok()?;
 
     let mut cloned: Policy = Policy::clone(policy);
     let mut kept: Vec<crate::modules::policy::PolicyPathRules> =
@@ -3701,10 +3687,9 @@ impl AuthHandler for PolicyStore {
             // Built through `build_acl` directly rather than
             // `new_acl_for_request` so a name that does not resolve in this
             // token's namespace can be reported on the denial path. The
-            // resolution rule itself is unchanged: the token's *binding*
-            // namespace, exactly as before.
-            let binding_ns =
-                crate::modules::namespace::token_binding::binding_from_metadata(&auth.metadata).0;
+            // resolution rule is `new_acl_inner`'s: the token's binding, or
+            // a narrowed MCP token's recorded policy namespace (T470).
+            let binding_ns = crate::modules::namespace::token_binding::acl_namespace(auth)?.0;
             let mut unresolved: Vec<String> = Vec::new();
             let acl = self
                 .build_acl(
@@ -5740,5 +5725,139 @@ mod policy_cache_ttl_tests {
     #[test]
     fn the_default_ttl_is_a_short_positive_bound() {
         assert!(POLICY_CACHE_TTL >= Duration::from_secs(1) && POLICY_CACHE_TTL <= Duration::from_secs(300));
+    }
+}
+
+/// T470: a narrowed MCP token's ACL is the signed-in user's, read where the
+/// user's session reads it, never the target namespace's same-named policies.
+#[cfg(test)]
+mod mcp_policy_namespace_tests {
+    use std::str::FromStr;
+
+    use super::*;
+    use crate::logical::{Auth, McpBinding, McpBindingKind, McpPolicyNamespace};
+    use crate::modules::namespace::token_binding::{acl_namespace, stamp_binding};
+    use crate::test_utils::new_unseal_test_bastion_vault;
+
+    fn named(name: &str, hcl: &str) -> Policy {
+        let mut p = Policy::from_str(hcl).unwrap();
+        p.name = name.to_string();
+        p
+    }
+
+    fn binding(policy_namespace: Option<McpPolicyNamespace>) -> McpBinding {
+        McpBinding {
+            policy_namespace,
+            policy_namespaces: Vec::new(),
+            kind: McpBindingKind::Pairing("p".into()),
+            catalogue_hash: String::new(),
+            tool_allowlist: Vec::new(),
+            path_scope: Vec::new(),
+            reveal_allowed: false,
+            destructive_allowed: false,
+            client_name: String::new(),
+            client_version: String::new(),
+            waived_until: None,
+            connect_allowed: false,
+            confirm_connect: false,
+            operator: None,
+        }
+    }
+
+    /// An MCP token bound to `dti/esi`, as `mint_mcp_token` leaves it.
+    fn mcp_auth(policy_namespace: Option<McpPolicyNamespace>) -> Auth {
+        let mut auth = Auth {
+            policies: vec!["esi-reader".into()],
+            display_name: "mcp-pairing-claude-code".into(),
+            mcp_binding: Some(binding(policy_namespace)),
+            ..Default::default()
+        };
+        stamp_binding(&mut auth.metadata, "dti/esi", "u-esi", false);
+        auth
+    }
+
+    fn caps(acl: &ACL, path: &str) -> Vec<String> {
+        acl.capabilities(path.to_string())
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn a_narrowed_mcp_token_carries_the_sessions_policies_not_the_targets() {
+        let (_bvault, core, _root) = new_unseal_test_bastion_vault("test_mcp_policy_namespace_acl").await;
+        let store = PolicyStore::new(&core).await.unwrap();
+        // The user's own policy, at root: one path in `dti/esi`, a rule that
+        // is inert at root, and a per-user rule.
+        let root_hcl = r#"
+            path "dti/esi/secret/data/a" { capabilities = ["read"] }
+            path "{{namespace.path}}/secret/data/inert" { capabilities = ["read"] }
+            path "{{request.namespace}}/secret/data/home/{{username}}" { capabilities = ["read"] }
+        "#;
+        store.set_policy(named("esi-reader", root_hcl)).await.unwrap();
+        // A same-named, wider policy authored in the target.
+        let tenant_hcl = r#"path "dti/esi/secret/data/*" { capabilities = ["read", "list"] }"#;
+        store.set_policy_ns(named("esi-reader", tenant_hcl), "dti/esi").await.unwrap();
+
+        let mut session = Auth { policies: vec!["esi-reader".into()], ..Default::default() };
+        session.metadata.insert("username".into(), "felipe".into());
+        let session_acl = store.new_acl_for_request(&session.policies, None, &session, Some("dti/esi")).await.unwrap();
+
+        let narrowed = mcp_auth(Some(McpPolicyNamespace::default()));
+        let token_acl = store.new_acl_for_request(&narrowed.policies, None, &narrowed, Some("dti/esi")).await.unwrap();
+
+        let read = vec!["read".to_string()];
+        let deny = vec!["deny".to_string()];
+        assert_eq!(caps(&token_acl, "dti/esi/secret/data/a"), read, "the user's own grant in the target");
+        assert_eq!(caps(&token_acl, "dti/esi/secret/data/b"), deny, "the target's same-named policy is not used");
+        assert_eq!(caps(&token_acl, "dti/esi/secret/data/inert"), deny, "`namespace.path` is the session's (root)");
+        assert_eq!(
+            caps(&token_acl, "dti/esi/secret/data/home/mcp-pairing-claude-code"),
+            deny,
+            "`{{username}}` never falls back to the token's display name"
+        );
+        assert_eq!(caps(&token_acl, "cubbyhole/x"), caps(&session_acl, "cubbyhole/x"), "no tenant implicit policy");
+        for path in [
+            "dti/esi/secret/data/a",
+            "dti/esi/secret/data/b",
+            "dti/esi/secret/data/inert",
+            "dti/esi/secret/data/home/felipe",
+            "dti/esi/secret/data/home/mcp-pairing-claude-code",
+            "secret/data/inert",
+            "cubbyhole/x",
+        ] {
+            let (token, user) = (caps(&token_acl, path), caps(&session_acl, path));
+            assert!(
+                token.iter().all(|c| c == "deny" || user.contains(c)),
+                "{path}: the token ({token:?}) must not exceed the user ({user:?})"
+            );
+        }
+
+        // Read-old: a binding without the field resolves where it is bound,
+        // exactly as before the change.
+        let old = mcp_auth(None);
+        let old_acl = store.new_acl_for_request(&old.policies, None, &old, Some("dti/esi")).await.unwrap();
+        assert!(caps(&old_acl, "dti/esi/secret/data/b").contains(&"read".to_string()));
+    }
+
+    /// The recorded namespace is read only from the typed binding: a
+    /// metadata key of the same name is ignored, and a recorded path that is
+    /// not canonical refuses the ACL rather than reading another namespace.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn the_policy_namespace_cannot_be_forged_or_malformed() {
+        let mut forged = Auth { policies: vec!["default".into()], ..Default::default() };
+        stamp_binding(&mut forged.metadata, "dti/esi", "u-esi", false);
+        forged.metadata.insert("policy_namespace".into(), String::new());
+        assert_eq!(acl_namespace(&forged).unwrap(), ("dti/esi".to_string(), "u-esi".to_string()));
+
+        let recorded = McpPolicyNamespace { path: "dti".into(), id: "u-dti".into() };
+        assert_eq!(acl_namespace(&mcp_auth(Some(recorded))).unwrap(), ("dti".to_string(), "u-dti".to_string()));
+
+        let (_bvault, core, _root) = new_unseal_test_bastion_vault("test_mcp_policy_namespace_malformed").await;
+        let store = PolicyStore::new(&core).await.unwrap();
+        for bad in ["a/../b", "/dti/", "dti/*"] {
+            let auth = mcp_auth(Some(McpPolicyNamespace { path: bad.into(), id: String::new() }));
+            let err = acl_namespace(&auth).unwrap_err().to_string();
+            assert!(err.contains("mcp_namespace_unavailable"), "{bad:?}: {err}");
+            let refused = store.new_acl_for_request(&auth.policies, None, &auth, Some("dti/esi")).await;
+            assert!(refused.is_err(), "{bad:?}: no ACL is built");
+        }
     }
 }

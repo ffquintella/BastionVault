@@ -608,6 +608,7 @@ mod executor {
         #[test]
         fn only_a_userpass_operator_can_step_up_for_an_agent() {
             let mut binding = McpBinding {
+                policy_namespace: None,
                 policy_namespaces: Vec::new(),
                 kind: McpBindingKind::Pairing("p".into()),
                 catalogue_hash: String::new(),
@@ -645,6 +646,7 @@ mod tests {
 
     fn binding(kind: McpBindingKind, connect: bool, confirm: bool) -> McpBinding {
         McpBinding {
+            policy_namespace: None,
             policy_namespaces: Vec::new(),
             kind,
             catalogue_hash: String::new(),

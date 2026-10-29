@@ -166,6 +166,27 @@ pub fn binding_from_metadata(meta: &HashMap<String, String>) -> (String, bool) {
     (ns_path, child_visible)
 }
 
+/// The namespace `auth`'s policy names resolve in, as `(path, id)`: also the
+/// one its `{{namespace.path|id}}` templates and implicit tenant policies
+/// follow. An MCP token narrowed to another namespace carries its issuing
+/// session's (`McpBinding::policy_namespace`, T470); every other token uses
+/// its own binding, exactly as before. A recorded path that is not canonical
+/// is refused, never read as another namespace.
+pub fn acl_namespace(auth: &crate::logical::Auth) -> Result<(String, String), RvError> {
+    if let Some(recorded) = auth.mcp_binding.as_ref().and_then(|b| b.policy_namespace.as_ref()) {
+        if crate::kernel_api::namespace::normalize_path(&recorded.path).ok().as_deref() != Some(recorded.path.as_str()) {
+            return Err(crate::bv_error_response_status!(
+                403,
+                "mcp_namespace_unavailable: the MCP token's policy namespace is malformed; no ACL is built for it"
+            ));
+        }
+        return Ok((recorded.path.clone(), recorded.id.clone()));
+    }
+    let (path, _) = binding_from_metadata(&auth.metadata);
+    let id = auth.metadata.get(NS_ID_META).cloned().unwrap_or_default();
+    Ok((path, id))
+}
+
 /// Stamp a namespace binding into a token metadata map at create time.
 pub fn stamp_binding(
     meta: &mut HashMap<String, String>,

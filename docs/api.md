@@ -2549,10 +2549,12 @@ Send the login token in `X-BastionVault-Token`, `X-Vault-Token` or
   read live; an unreadable record is `403 mcp_namespace_unavailable`. Anything else — a parent, a sibling, an unrelated
   or malformed path — is refused with `403 mcp_namespace_not_permitted`; a
   permitted descendant that does not exist with `403 mcp_namespace_unavailable`.
-  Nothing is minted in another namespace instead. Every policy the token would
-  carry (`policies`, or the caller's own when absent; `default` excepted) must
-  exist in the target namespace's policy store, else `400
-  mcp_policy_not_in_namespace` naming the missing ones. Sent with `app`, it is
+  Nothing is minted in another namespace instead. The token's policies
+  (`policies`, or the caller's own when absent, always a subset of the
+  caller's) resolve where the caller's own do, not in the target (T470): it
+  can do in the target at most what the caller's session can there, and the
+  target needs no policy of its own. Before T470 a missing name was `400
+  mcp_policy_not_in_namespace`; that refusal is gone. Sent with `app`, it is
   refused (`400`). When narrowed, the recorded operator namespace is the
   target's, so the operator's MFA step-up binds where the calls run.
 - A pairing whose token lands in another namespace than its previous

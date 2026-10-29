@@ -552,6 +552,7 @@ mod mod_test {
         // Expiry. Minted directly so the test does not have to wait a day.
         let op = operator_token(core, &root_token, "felipe").await;
         let binding = |waived_until: Option<u64>| crate::logical::McpBinding {
+            policy_namespace: None,
             policy_namespaces: Vec::new(),
             kind: crate::logical::McpBindingKind::App("x".into()),
             catalogue_hash: String::new(),
@@ -1744,28 +1745,29 @@ mod mod_test {
         ns_call(core, root, Operation::Write, "dti/esi", "resources/resources/gw-esi", Some(record)).await.unwrap();
     }
 
-    /// T457 Phase 2: a child-visible operator narrows a pairing to a
-    /// descendant. Policies must exist there first
-    /// (`mcp_policy_not_in_namespace`, naming them); then the token is bound
-    /// there, never child-visible, acts there, and the move from the
-    /// session's namespace is recorded like any other. The operator's MFA
-    /// reference follows the token, so a ticket binds where its calls run.
+    /// T457 Phase 2, T470: a child-visible operator narrows a pairing to a
+    /// descendant that holds no policy of its own. The token is bound there,
+    /// never child-visible, and carries the operator's `dti` policies read in
+    /// `dti` (`policy_namespace`), so it acts there as far as her session
+    /// does. The move from the session's namespace is recorded like any
+    /// other; the operator's MFA reference follows the token.
     #[tokio::test]
     async fn test_mcp_pairing_narrows_to_a_descendant() {
         let (_bvault, core_arc, root) = new_unseal_test_bastion_vault("test_mcp_ns_narrow").await;
         let core: &crate::core::Core = &core_arc;
         let (dir, log) = audit_device(core, "narrow", "", true).await;
         dti_tree(core, &root).await;
+        // Her own `dti` policy reaches into `dti/esi`; `dti/esi` has none.
+        let reach = format!(
+            "{}\npath \"dti/esi/resources/resources/*\" {{ capabilities = [\"read\", \"list\"] }}",
+            tenant_operator_policy("dti")
+        );
+        tenant_policy(core, "dti", "mcp-tenant", &reach).await;
         let alice = login_in(core, "alice", "dti").await;
 
         let (_, reported) = pair_as(core, &alice, "narrow").await;
         assert_eq!(reported, json!("dti"), "no `namespace`: the session's own");
 
-        let err = narrow_as(core, &alice, "narrow", "dti/esi").await.unwrap_err();
-        assert!(err.contains("mcp_policy_not_in_namespace") && err.contains("mcp-tenant"), "{err}");
-        assert!(err.contains("dti/esi"), "{err}");
-
-        tenant_policy(core, "dti/esi", "mcp-tenant", &tenant_operator_policy("dti/esi")).await;
         let data = narrow_as(core, &alice, "narrow", "/dti/esi/").await.unwrap();
         assert_eq!(data["auth"]["metadata"]["namespace"], json!("dti/esi"), "the answer names the narrowed namespace");
         let token = data["auth"]["client_token"].as_str().unwrap().to_string();
@@ -1774,7 +1776,11 @@ mod mod_test {
         let auth = store.check_token("mcp/dispatch", &token, "", true).await.unwrap().unwrap();
         assert_eq!(auth.metadata.get(NS_PATH_META).map(String::as_str), Some("dti/esi"));
         assert_eq!(auth.metadata.get(CHILD_VISIBLE_META).map(String::as_str), Some("false"));
-        let operator = auth.mcp_binding.unwrap().operator.unwrap();
+        let binding = auth.mcp_binding.unwrap();
+        let recorded = binding.policy_namespace.clone().expect("a narrowed token records its policy namespace");
+        assert_eq!(recorded.path, "dti", "the session's namespace, where its policy names resolve");
+        assert!(!recorded.id.is_empty(), "with the id the session's binding carried");
+        let operator = binding.operator.unwrap();
         assert_eq!((operator.username.as_str(), operator.namespace.as_str()), ("alice", "dti/esi"));
 
         let guard = SingleUseGuard::new();
@@ -1868,7 +1874,7 @@ mod mod_test {
         let (_bvault, core_arc, root) = new_unseal_test_bastion_vault("test_mcp_ns_narrow_assigned").await;
         let core: &crate::core::Core = &core_arc;
         dti_tree(core, &root).await;
-        tenant_policy(core, "dti/esi", "mcp-root", &tenant_operator_policy("dti/esi")).await;
+        // No `mcp-root` in `dti/esi`: none is needed since T470.
         // Signed in before the assignment exists: a record also limits login.
         let felipe = login_in(core, "felipe", "").await;
 
@@ -1897,6 +1903,79 @@ mod mod_test {
         assignments.delete("userpass/", "felipe").await.unwrap();
         let err = narrow_as(core, &felipe, "assigned-revoked", "dti/esi").await.unwrap_err();
         assert!(err.contains("mcp_namespace_not_permitted"), "a revoked assignment grants nothing: {err}");
+    }
+
+    /// T470 regression, the reported case: an operator signed in at root
+    /// narrows to `dti/esi`, which holds none of their policy names. The
+    /// exchange succeeds (it used to fail with `mcp_policy_not_in_namespace`)
+    /// and the token can do in `dti/esi` exactly what the operator's own
+    /// session can there: a wider same-named policy authored in `dti/esi`
+    /// grants it nothing, and a namespace out of reach is still refused.
+    #[tokio::test]
+    async fn test_mcp_narrowed_token_carries_the_signed_in_users_permissions() {
+        use crate::modules::namespace::{ns_assignment::NsAssignmentStore, NamespaceModule, NAMESPACE_MODULE_NAME};
+
+        let (_bvault, core_arc, root) = new_unseal_test_bastion_vault("test_mcp_ns_narrow_user_perms").await;
+        let core: &crate::core::Core = &core_arc;
+        dti_tree(core, &root).await;
+        let record = json!({ "type": "server", "hostname": "gw-secret.example" });
+        ns_call(core, &root, Operation::Write, "dti/esi", "resources/resources/gw-secret", Some(record)).await.unwrap();
+        // The operator's own root policy: list `dti/esi`'s resources, read one.
+        let esi = r#"
+            path "dti/esi/resources/resources/*"      { capabilities = ["list"] }
+            path "dti/esi/resources/resources/gw-esi" { capabilities = ["read"] }
+        "#;
+        let _ = test_write_api(core, &root, "sys/policy/esi-reader", true, json!({ "policy": esi }).as_object().cloned())
+            .await;
+        let user = json!({ "password": "pw", "policies": "mcp-root,esi-reader" }).as_object().cloned();
+        let _ = test_write_api(core, &root, "auth/userpass/users/felipe", true, user).await;
+        // A wider, same-named policy authored in the target: what the old
+        // rule resolved the token's names to.
+        tenant_policy(core, "dti/esi", "esi-reader", &tenant_operator_policy("dti/esi")).await;
+        let felipe = login_in(core, "felipe", "").await;
+        let ns_store =
+            core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME).and_then(|m| m.store()).unwrap();
+        NsAssignmentStore::new(core)
+            .unwrap()
+            .set(&ns_store, "userpass/", "felipe", vec!["dti/esi".into()])
+            .await
+            .unwrap()
+            .unwrap();
+
+        let data = narrow_as(core, &felipe, "esi", "dti/esi").await.expect("`mcp-root` is not in dti/esi, and need not be");
+        assert_eq!(data["auth"]["metadata"]["namespace"], json!("dti/esi"));
+        let token = data["auth"]["client_token"].as_str().unwrap().to_string();
+        let auth_module = core.module_manager().get_module::<crate::modules::auth::AuthModule>("auth").unwrap();
+        let store = auth_module.token_store.load_full().unwrap();
+        let auth = store.check_token("mcp/dispatch", &token, "", true).await.unwrap().unwrap();
+        let recorded = auth.mcp_binding.unwrap().policy_namespace;
+        assert_eq!(recorded, Some(crate::logical::McpPolicyNamespace::default()), "names resolve at root");
+
+        let guard = SingleUseGuard::new();
+        let ep = McpEndpoint {
+            core: &core_arc,
+            client_ip: "",
+            tool_timeout: std::time::Duration::from_secs(30),
+            server_version: "9.9",
+            request_state_key: b"ns-user-perms",
+            single_use_guard: &guard,
+        };
+        // What the operator's own session can do in `dti/esi`.
+        let own_list = ns_call(core, &felipe, Operation::List, "dti/esi", "resources/resources/", None).await.unwrap();
+        let own_keys = own_list.and_then(|r| r.data).map(|d| d["keys"].clone()).unwrap();
+        assert!(ns_call(core, &felipe, Operation::Read, "dti/esi", "resources/resources/gw-esi", None).await.is_ok());
+        assert!(ns_call(core, &felipe, Operation::Read, "dti/esi", "resources/resources/gw-secret", None).await.is_err());
+
+        let listed = ok(tool_call(&ep, &token, "bv_resource_list", json!({})).await);
+        assert_eq!((listed["keys"].clone(), listed["namespace"].clone()), (own_keys, json!("dti/esi")));
+        let gw = ok(tool_call(&ep, &token, "bv_resource_describe", json!({ "name": "gw-esi" })).await);
+        assert_eq!(gw["hostname"], json!("gw-esi.example"));
+        let answer = tool_call(&ep, &token, "bv_resource_describe", json!({ "name": "gw-secret" })).await;
+        assert_eq!(refusal_code(&answer), "mcp_backend_error", "the tenant's same-named policy must not apply: {answer}");
+
+        // Out of the operator's reach: still refused, nothing minted.
+        let err = narrow_as(core, &felipe, "esi-out", "dti/ops").await.unwrap_err();
+        assert!(err.contains("mcp_namespace_not_permitted"), "{err}");
     }
 
     /// `bv_policy_read` through the real endpoint: a root-signed-in operator

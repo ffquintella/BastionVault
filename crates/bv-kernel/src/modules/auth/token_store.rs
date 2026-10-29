@@ -250,6 +250,30 @@ fn mcp_namespace_binding(
     Ok(meta)
 }
 
+/// T470: where an MCP token's policy names resolve
+/// ([`crate::logical::McpBinding::policy_namespace`]). Bound where the parent
+/// is: `None`, its own namespace, as before. Bound elsewhere (a narrowing):
+/// the parent's stored binding, so the token carries the signed-in user's
+/// policies as that user's session reads them, never the target's
+/// same-named ones. Derived only from stored entries, never from a request.
+fn mcp_policy_namespace(
+    parent_meta: &HashMap<String, String>,
+    token_meta: &HashMap<String, String>,
+) -> Result<Option<crate::logical::McpPolicyNamespace>, RvError> {
+    use crate::modules::namespace::token_binding::{NS_ID_META, NS_PATH_META};
+    let parent_ns = crate::kernel_api::namespace::bound_namespace(parent_meta).map_err(|_| {
+        crate::bv_error_response_status!(
+            403,
+            "mcp_namespace_unavailable: the exchanging token's namespace binding is malformed; no MCP token is minted"
+        )
+    })?;
+    if token_meta.get(NS_PATH_META).map(String::as_str).unwrap_or_default() == parent_ns {
+        return Ok(None);
+    }
+    let id = parent_meta.get(NS_ID_META).cloned().unwrap_or_default();
+    Ok(Some(crate::logical::McpPolicyNamespace { path: parent_ns, id }))
+}
+
 #[derive(Serialize, Deserialize)]
 struct TokenReqData {
     #[serde(default)]
@@ -1240,6 +1264,11 @@ impl TokenStore {
         )?
         .as_secs();
 
+        let meta = mcp_namespace_binding(&parent.meta, target)?;
+        // The only writer of `policy_namespace`: whatever the caller put on
+        // the binding is replaced by what the stored entries say.
+        let mut binding = binding;
+        binding.policy_namespace = mcp_policy_namespace(&parent.meta, &meta)?;
         let mut te = TokenEntry {
             parent: parent_token.to_string(),
             path: "mcp/token".into(),
@@ -1248,7 +1277,7 @@ impl TokenStore {
             ttl: clamped_ttl,
             num_uses: 0,
             bound_cidrs: parent.bound_cidrs.clone(),
-            meta: mcp_namespace_binding(&parent.meta, target)?,
+            meta,
             mcp_binding: Some(binding),
             ..TokenEntry::default()
         };
@@ -2224,6 +2253,7 @@ mod mod_token_store_tests {
 
     fn test_mcp_binding() -> McpBinding {
         McpBinding {
+            policy_namespace: None,
             policy_namespaces: Vec::new(),
             kind: crate::logical::McpBindingKind::App("ci-secrets-reader".into()),
             catalogue_hash: "test-hash".into(),
@@ -2432,6 +2462,60 @@ mod mod_token_store_tests {
         let malformed = HashMap::from([(NS_PATH_META.to_string(), "a/../b".to_string())]);
         let err = mcp_namespace_binding(&malformed, Some(&target(true))).unwrap_err().to_string();
         assert!(err.contains("mcp_namespace_unavailable"), "{err}");
+    }
+
+    /// T470: a token bound where its parent is records no policy namespace
+    /// (it resolves where it is bound, as before); one bound elsewhere
+    /// records the parent's canonical binding and id. A malformed parent
+    /// binding is refused, never read as root.
+    #[test]
+    fn a_narrowed_mcp_token_records_the_parents_policy_namespace() {
+        use crate::logical::{McpPolicyNamespace, NS_ID_META};
+        let meta = |ns: &str, id: &str| {
+            HashMap::from([(NS_PATH_META.to_string(), ns.to_string()), (NS_ID_META.to_string(), id.to_string())])
+        };
+        let token = |ns: &str| HashMap::from([(NS_PATH_META.to_string(), ns.to_string())]);
+        let recorded = |path: &str, id: &str| Some(McpPolicyNamespace { path: path.into(), id: id.into() });
+
+        assert_eq!(mcp_policy_namespace(&meta("dti", "u-dti"), &token("dti")).unwrap(), None);
+        assert_eq!(mcp_policy_namespace(&meta("/dti/", "u-dti"), &token("dti")).unwrap(), None, "compared canonical");
+        assert_eq!(mcp_policy_namespace(&HashMap::new(), &token("")).unwrap(), None, "a root parent stays root");
+        assert_eq!(mcp_policy_namespace(&HashMap::new(), &token("dti/esi")).unwrap(), recorded("", ""));
+        assert_eq!(mcp_policy_namespace(&meta("dti", "u-dti"), &token("dti/esi")).unwrap(), recorded("dti", "u-dti"));
+        let err = mcp_policy_namespace(&meta("a/../b", ""), &token("dti")).unwrap_err().to_string();
+        assert!(err.contains("mcp_namespace_unavailable"), "{err}");
+    }
+
+    /// T470 forgery check: `mint_mcp_token` is the only writer of
+    /// `policy_namespace`. A value the caller put on the binding is replaced
+    /// by what the stored entries say, narrowed or not.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn mint_mcp_token_derives_the_policy_namespace_from_stored_entries_only() {
+        use crate::logical::McpPolicyNamespace;
+        let token_store = mock_token_store!();
+        let mut parent = TokenEntry {
+            policies: vec!["default".to_string()],
+            meta: HashMap::from([
+                (NS_PATH_META.to_string(), String::new()),
+                (CHILD_VISIBLE_META.to_string(), "true".to_string()),
+            ]),
+            ..TokenEntry::default()
+        };
+        token_store.create(&mut parent).await.unwrap();
+        let mut forged = test_mcp_binding();
+        forged.policy_namespace = Some(McpPolicyNamespace { path: "tenant-x".into(), id: "u-x".into() });
+
+        let plain = token_store.mint_mcp_token(&parent.id, &[], 600, "t".into(), forged.clone(), None).await.unwrap();
+        assert_eq!(plain.mcp_binding.unwrap().policy_namespace, None, "not narrowed: nothing recorded");
+
+        let target = McpNamespaceTarget { path: "dti".into(), id: "u-dti".into(), assignment_granted: false };
+        let narrowed =
+            token_store.mint_mcp_token(&parent.id, &[], 600, "t".into(), forged, Some(&target)).await.unwrap();
+        assert_eq!(narrowed.metadata.get(NS_PATH_META).map(String::as_str), Some("dti"));
+        let recorded = narrowed.mcp_binding.unwrap().policy_namespace;
+        assert_eq!(recorded, Some(McpPolicyNamespace::default()), "the parent's root binding, not the forged one");
+        let stored = token_store.check_token("mcp/dispatch", &narrowed.client_token, "", true).await.unwrap().unwrap();
+        assert_eq!(stored.mcp_binding.unwrap().policy_namespace, recorded, "persisted as minted");
     }
 
     /// T457 forgery check: a namespace-bound, non-root caller cannot write
