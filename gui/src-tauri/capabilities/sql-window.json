@@ -1,0 +1,11 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicerdicer/tauri-docs/refs/heads/v2/tooling/cli/schema.json",
+  "identifier": "sql-window",
+  "description": "A SQL browser session's own window (session.html#/session/sql). Event subscription for its native close request and the `sql-window` command set — nothing else (features/sql-browser.md §10, T125).",
+  "windows": ["sql-*"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "sql-window"
+  ]
+}

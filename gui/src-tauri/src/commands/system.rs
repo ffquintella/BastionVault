@@ -804,7 +804,7 @@ pub async fn hsm_status(state: State<'_, AppState>) -> CmdResult<Value> {
 /// Read `sys/internal/ui/mounts` through the full request pipeline
 /// so the ACL filter applies, and return the map under the given
 /// top-level field (`"secret"` or `"auth"`).
-async fn read_ui_mounts(
+pub(crate) async fn read_ui_mounts(
     state: &State<'_, AppState>,
     field: &str,
 ) -> Result<serde_json::Map<String, Value>, CommandError> {

@@ -655,7 +655,13 @@ pub async fn stop_all_sessions(state: &crate::state::AppState) -> Vec<(String, O
             .await
             .iter()
             .filter(|(_, s)| {
-                matches!(s, super::SessionState::Ssh(_) | super::SessionState::Rdp(_) | super::SessionState::Sftp(_))
+                matches!(
+                    s,
+                    super::SessionState::Ssh(_)
+                        | super::SessionState::Rdp(_)
+                        | super::SessionState::Sftp(_)
+                        | super::SessionState::Sql(_)
+                )
             })
             .map(|(t, _)| t.clone()),
     );
@@ -1093,6 +1099,12 @@ mod tests {
         assert!(may_render(ProfileProtocol::Sftp, "sess_ab", "sftp-sess_ab"));
         assert!(!may_render(ProfileProtocol::Sftp, "sess_ab", WORKSPACE_WINDOW_LABEL));
         assert!(!may_render(ProfileProtocol::Sftp, "sess_ab", "ssh-sess_ab"));
+        // A SQL session renders in its own window or as a workspace pane.
+        assert_eq!(own_window_label(ProfileProtocol::Sql, "sess_ab"), "sql-sess_ab");
+        assert!(may_render(ProfileProtocol::Sql, "sess_ab", "sql-sess_ab"));
+        assert!(may_render(ProfileProtocol::Sql, "sess_ab", WORKSPACE_WINDOW_LABEL));
+        assert!(!may_render(ProfileProtocol::Sql, "sess_ab", "ssh-sess_ab"));
+        assert!(!may_render(ProfileProtocol::Sql, "sess_ab", "main"));
     }
 }
 
@@ -1153,7 +1165,72 @@ mod teardown_tests {
     fn account(c: &Option<SessionCleanup>) -> Option<String> {
         c.as_ref().map(|c| match &c.kind {
             SessionCleanupKind::LdapLibraryCheckIn { account, .. } => account.clone(),
+            SessionCleanupKind::SqlSessionClose { session_id, .. } => format!("sql:{session_id}"),
         })
+    }
+
+    const SQL_SID: &str = "0123456789abcdef-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    /// A SQL session held in the workspace: the host keeps only the plugin's
+    /// address of it, and every stop path hands back the close of exactly
+    /// that plugin session, once.
+    #[tokio::test]
+    async fn a_sql_session_stops_with_its_window_and_closes_the_plugin_session_once() {
+        let state = AppState::new();
+        state.connect_sessions.lock().await.insert(
+            "sess_sql".into(),
+            SessionState::Sql(crate::session::sql::SqlSessionState {
+                mount: "dbms/".into(),
+                session_id: SQL_SID.into(),
+                namespace: None,
+                resource: "db1".into(),
+                catalog: "app".into(),
+                opened_on: "2026-10-29".into(),
+            }),
+        );
+        let d = SessionDescriptor {
+            token: "sess_sql".into(),
+            protocol: ProfileProtocol::Sql,
+            label: "sql db1/app · ro".into(),
+            resource_name: "db1".into(),
+            profile_id: "ro".into(),
+            stdout_event: None,
+            closed_event: String::new(),
+            resize_event: None,
+            cursor_event: None,
+            width: None,
+            height: None,
+            opened_at: String::new(),
+            placement: Placement::WorkspaceTab,
+            pane_ref: None,
+            namespace: String::new(),
+            vault_id: "v1".into(),
+        };
+        state.session_attachments.lock().await.register(d, Some(WORKSPACE_WINDOW_LABEL), Instant::now()).unwrap();
+        let stopped = stop_window_sessions(&state, WORKSPACE_WINDOW_LABEL, None).await;
+        assert_eq!(stopped.len(), 1);
+        assert_eq!(account(&stopped[0].1), Some(format!("sql:{SQL_SID}")));
+        assert!(state.connect_sessions.lock().await.is_empty());
+        assert!(stop_all_sessions(&state).await.iter().all(|(_, c)| c.is_none()));
+
+        // App exit finds one the registry lost track of, too.
+        state.connect_sessions.lock().await.insert(
+            "sess_sql2".into(),
+            SessionState::Sql(crate::session::sql::SqlSessionState {
+                mount: "dbms/".into(),
+                session_id: SQL_SID.into(),
+                namespace: Some("team".into()),
+                resource: "db1".into(),
+                catalog: "app".into(),
+                opened_on: "2026-10-29".into(),
+            }),
+        );
+        let exited = stop_all_sessions(&state).await;
+        assert_eq!(exited.len(), 1);
+        match &exited[0].1.as_ref().unwrap().kind {
+            SessionCleanupKind::SqlSessionClose { namespace, .. } => assert_eq!(namespace.as_deref(), Some("team")),
+            other => panic!("unexpected cleanup {other:?}"),
+        }
     }
 
     /// The spec's fan-out case: three sessions attached to one window,

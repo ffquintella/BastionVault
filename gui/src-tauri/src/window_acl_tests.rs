@@ -86,6 +86,18 @@ const WORKSPACE_EXTRA: &[&str] = &[
     "rustion_recording_read",
     "rustion_recording_replay_log",
     "session_replay_take",
+    // T125: the SQL pane — opening one from the palette, and the commands a
+    // SQL pane drives (each bound by the host to the session it holds). A
+    // pane closes through `session_close`, like every other pane.
+    "sql_session_open",
+    "sql_session_status",
+    "sql_privileges",
+    "sql_execute",
+    "sql_run",
+    "sql_cancel",
+    "sql_objects",
+    "sql_rows",
+    "sql_history",
 ];
 
 /// An SFTP session's own window (features/sftp-connect.md): its session's
@@ -111,6 +123,25 @@ const SFTP_WINDOW: &[&str] = &[
     "sftp_remove",
     "sftp_rename",
     "sftp_transfer",
+];
+
+/// A SQL browser session's own window (features/sql-browser.md §10): the
+/// `sql_*` commands of its one session and its window lifecycle. No session
+/// open, no vault read, no move. `sql_script` / `sql_export_to_file` join
+/// with T126.
+const SQL_WINDOW: &[&str] = &[
+    "session_heartbeat",
+    "session_window_close",
+    "session_window_closing",
+    "sql_cancel",
+    "sql_execute",
+    "sql_history",
+    "sql_objects",
+    "sql_privileges",
+    "sql_rows",
+    "sql_run",
+    "sql_session_close",
+    "sql_session_status",
 ];
 
 const REPLAY_WINDOW: &[&str] = &[
@@ -424,6 +455,25 @@ fn an_sftp_window_gets_exactly_its_set() {
 }
 
 #[test]
+fn a_sql_window_gets_exactly_its_set() {
+    let acl = Acl::load();
+    let label = format!("sql-{TOKEN}");
+    assert_eq!(acl.window(&label), set_of(&[SQL_WINDOW]));
+    assert_eq!(
+        acl.plugin_permissions(&label, &label),
+        set_of(&[&["core:event:allow-listen", "core:event:allow-unlisten"]])
+    );
+    // It cannot open sessions (SQL or any other) or reach another kind's input.
+    let granted = acl.window(&label);
+    assert!(granted.iter().all(|c| !c.starts_with("session_open") && c != "sql_session_open"));
+    assert!(granted.iter().all(|c| !c.starts_with("sftp_") && !c.starts_with("session_input")));
+    // And the SQL commands reach no SSH, RDP or SFTP window.
+    for other in session_window_labels().into_iter().chain([format!("sftp-{TOKEN}")]) {
+        assert!(acl.window(&other).iter().all(|c| !c.starts_with("sql_")), "{other}");
+    }
+}
+
+#[test]
 fn a_replay_window_gets_exactly_its_set() {
     let acl = Acl::load();
     assert_eq!(acl.window("replay-rec_01"), set_of(&[REPLAY_WINDOW]));
@@ -449,6 +499,7 @@ fn no_session_window_reaches_a_sensitive_command() {
     labels.push(crate::session::workspace::WORKSPACE_WINDOW_LABEL.to_string());
     labels.push("replay-rec_01".to_string());
     labels.push(format!("sftp-{TOKEN}"));
+    labels.push(format!("sql-{TOKEN}"));
     for label in labels {
         let granted = acl.window(&label);
         for command in NEVER_IN_A_SESSION_WINDOW {
@@ -461,7 +512,9 @@ fn no_session_window_reaches_a_sensitive_command() {
 #[test]
 fn an_unknown_window_gets_nothing() {
     let acl = Acl::load();
-    for label in ["evil", "workspace", "session-workspace2", "sessions", "replay", "ssh", "sftp", "web-x"] {
+    for label in
+        ["evil", "workspace", "session-workspace2", "sessions", "replay", "ssh", "sftp", "sql", "sqlx", "web-x"]
+    {
         assert!(acl.window(label).is_empty(), "{label}");
         assert!(acl.plugin_permissions(label, label).is_empty(), "{label}");
     }
@@ -521,6 +574,7 @@ fn session_windows_load_the_session_page_at_a_session_route() {
         (crate::commands::connect::own_window_url(&descriptor(ProfileProtocol::Ssh)), "/session/ssh"),
         (crate::commands::connect::own_window_url(&descriptor(ProfileProtocol::Rdp)), "/session/rdp"),
         (crate::commands::connect::own_window_url(&descriptor(ProfileProtocol::Sftp)), "/session/sftp"),
+        (crate::commands::connect::own_window_url(&descriptor(ProfileProtocol::Sql)), "/session/sql"),
         (crate::commands::rustion::replay_window_url("rec_01", Some(5)), "/session-replay"),
     ];
     for (url, route) in urls {
@@ -581,6 +635,7 @@ fn tauri_resolves_the_same_acl_from_the_build_inputs() {
         .collect();
     views.extend(session_window_labels().into_iter().map(|l| (l.clone(), l)));
     views.push((format!("sftp-{TOKEN}"), format!("sftp-{TOKEN}")));
+    views.push((format!("sql-{TOKEN}"), format!("sql-{TOKEN}")));
     views.push((web_window.clone(), web_window.clone()));
     views.push((web_window.clone(), toolbar.clone()));
     for command in registered() {

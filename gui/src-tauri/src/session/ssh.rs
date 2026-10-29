@@ -756,6 +756,11 @@ pub async fn drop_session(state: &crate::state::AppState, token: &str) -> Option
             s.shut_down();
             on_close
         }
+        // The plugin holds the session; its close hook `DELETE`s it there.
+        Some(SessionState::Sql(s)) => {
+            log::info!("resource-connect/ssh: dropped SQL session token={token}");
+            Some(s.cleanup())
+        }
         None => None,
     }
 }

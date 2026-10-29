@@ -53,6 +53,7 @@ import { CloseConfirm } from "../components/session/CloseConfirm";
 import { RdpPane } from "../components/session/RdpPane";
 import { ReplayPane } from "../components/session/ReplayPane";
 import { SshPane } from "../components/session/SshPane";
+import { SqlPane } from "../components/sql/SqlPane";
 import type { SessionPaneStatus } from "../components/session/SessionPaneHeader";
 import { SplitView } from "../components/session/workspace/SplitView";
 import { TabStrip } from "../components/session/workspace/TabStrip";
@@ -823,6 +824,15 @@ function WorkspacePane({
     </>
   );
 
+  if (row.protocol === "sql") {
+    // The SQL workspace (features/sql-browser.md §10): no terminal or
+    // canvas, so no focus or keyboard hand-off; it is not saved in layouts.
+    return (
+      <div style={{ height: "100%", minWidth: 0 }}>
+        <SqlPane token={token} label={pane.label} onStatusChange={(s) => setStatus(token, s)} headerExtra={actions} />
+      </div>
+    );
+  }
   if (row.protocol === "ssh") {
     return (
       <SshPane

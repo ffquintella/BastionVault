@@ -58,6 +58,18 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### SQL browser workspace
+
+- **Browse, query and edit PostgreSQL databases from a SQL workspace in the desktop app** (T125, S109) -- Open a database resource from the Connect menu, ⌘K, the Resources context menu or a SQL profile, and get a session tree, query editor, result grid, messages, history and an enforcement panel showing which `sql_*` privileges you hold. Grid edits report conflicts, and an `UPDATE` or `DELETE` without `WHERE` asks for confirmation. Every statement is authorized by the plugin and the host; the window never sees credentials or the plugin session id. The editor is a plain text box for now, and export and scripts arrive with T126.
+
+#### SQL browser plugin
+
+- **Open PostgreSQL sessions from the `dbms-management` plugin, with every statement authorized by the vault first** (T125, S109) -- The new `bastion-plugin-dbms-management` process plugin opens sessions under profile ceilings with endpoint binding, TLS modes and weak-authentication refusal, and runs statements asynchronously with paging, cancel, transactions and read-only guards. Its object browser, describe, structured row edits, audit events and statement journal are included. Code that sends unauthorized SQL to the driver does not compile. The GUI workspace is not yet shipped.
+
+#### SQL browser classifier
+
+- **Classify PostgreSQL statements into the `sql_*` privileges each one needs, refusing anything it cannot prove** (T125, S109) -- The new `bv-sql-classify` crate reads statement boundaries with its own PostgreSQL lexer, requires the parser to agree on them, and walks the whole statement tree. It returns the capabilities and targets required, or an `Unclassifiable` refusal (`Unknown` for a `sql_admin` holder, `Never` for nothing); no statement defaults to `sql_select`. Phase 2 of the SQL browser; the plugin and GUI workspace are not yet shipped.
+
 #### MCP audit read
 
 - **Let a paired AI assistant read the audit trail, only when you grant it and only if your own sign-in may read it** (T464, S26, S115) -- The opt-in `bv_audit_read` tool (optional `from`, `to`, `limit`) reads `sys/audit/events` in the token's namespace, newest first, at most 200 events per call (100 by default; 24 hours back when `from` is omitted). It is read-only, is left out of a pairing's default tools, and is refused unless the grant's path scope covers `sys/audit/events`. The vault applies your policies to the call, so an audit trail you cannot read stays unreadable to the assistant. The catalogue hash is now `cd1f12af722e7c191d5033f9087cbbf98ba1daad1aabfae62b605d5dcd8f32f5`; an operator who pinned the previous hash in `sys/mcp/config` must pin this one.
@@ -238,6 +250,10 @@ EXAMPLE ENTRY:
 
 ### Fixed
 
+#### Web connect
+
+- **Open a web session on a resource whose stored name differs from the typed name only in case** -- Connect refused with `bundle_mismatch` ("the server's launch does not match this profile") because the host compared the resource name it sent with the stored spelling the server echoes back, byte for byte; the server resolves names case-insensitively, so the host now does too. A name that differs by more than case is still refused.
+
 #### MCP namespace narrowing
 
 - **Give an AI assistant narrowed to a namespace your own permissions there, not policies that must exist by name in that namespace** (T470, S115) -- Narrowing a pairing to a namespace beneath your sign-in (`bvault mcp serve --namespace`, or the desktop selector) failed with `400 mcp_policy_not_in_namespace` unless every policy on your sign-in also existed by name in the target, and when it did exist the target's copy decided what the assistant could do, even where that was more than you can do there yourself. The token now looks up its policy names where your sign-in does and checks them against the target's paths, so it can do there at most what your own session can, narrowed further by the pairing's tools and path scope. The refusal is gone and the target needs no policy of its own. **Behaviour change:** same-named policies you created inside a tenant for narrowing no longer apply to narrowed tokens; grant the tenant's paths in your own policies (for a root sign-in, rules on `dti/esi/...` paths). Tokens minted before the upgrade keep the old evaluation until they expire (24 hours at most).
@@ -245,10 +261,6 @@ EXAMPLE ENTRY:
 #### SSH session drops
 
 - **Name the real cause when an SSH session is lost** -- A dropped shell always read "ssh connection lost (TCP closed or keepalive timed out ...)", a guess that hid whether the server disconnected, stopped answering keepalives or the socket failed. The closed banner now states which one happened, and the same reason is logged at warn level.
-
-#### Web connect
-
-- **Open a web session on a resource whose stored name differs from the typed name only in case** -- Connect refused with `bundle_mismatch` ("the server's launch does not match this profile") because the host compared the resource name it sent with the stored spelling the server echoes back, byte for byte; the server resolves names case-insensitively, so the host now does too. A name that differs by more than case is still refused.
 
 #### Asset groups in a namespace
 

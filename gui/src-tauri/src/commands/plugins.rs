@@ -129,6 +129,29 @@ async fn is_remote(state: &State<'_, AppState>) -> bool {
     matches!(*state.mode.lock().await, VaultMode::Remote)
 }
 
+/// Whether the registered plugin `name` declares `sql_console` (ABI 1.4,
+/// features/sql-browser.md §10): the GUI renders its SQL workspace against
+/// that plugin's mount. Embedded: the catalog. Remote: `sys/plugins/<name>`,
+/// which the caller's token must be allowed to read; a refusal is an error,
+/// never a guess.
+pub(crate) async fn plugin_declares_sql_console(state: &State<'_, AppState>, name: &str) -> Result<bool, CommandError> {
+    if name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+        return Ok(false);
+    }
+    if is_remote(state).await {
+        let Some(json) = remote_call_opt(state, "GET", &format!("sys/plugins/{name}"), None).await? else {
+            return Ok(false);
+        };
+        return Ok(json.pointer("/manifest/capabilities/sql_console").and_then(Value::as_bool) == Some(true));
+    }
+    let vault_guard = state.vault.lock().await;
+    let vault = vault_guard.as_ref().ok_or("Vault not open")?;
+    let core = vault.core.load();
+    let manifest =
+        PluginCatalog::new().get_manifest(core.barrier.as_storage(), name).await.map_err(CommandError::from)?;
+    Ok(manifest.is_some_and(|m| m.capabilities.sql_console))
+}
+
 // ── Public command surface ────────────────────────────────────────
 
 #[derive(Debug, Serialize)]

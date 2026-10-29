@@ -15,6 +15,8 @@ import {
   mergeTypeConfig,
 } from "../lib/resourceTypes";
 import { connectProfile } from "../lib/connectFlow";
+import { launchableSqlProfiles, openSqlBrowser, type SqlLaunchProfile } from "../lib/sqlLaunch";
+import { sqlOfferedByType } from "../lib/sqlProfile";
 import { CONNECT_PALETTE_OPEN_EVENT, type ConnectPaletteOpenDetail } from "../lib/connectPaletteEvents";
 import type {
   ConnectionProfile,
@@ -51,11 +53,19 @@ import { useProviderAccountPicker, type ProviderAccountsLink } from "./ProviderA
  * A credential-provider profile (`provider` source, SSH / RDP / web
  * `form`) is launched here: its host-rendered account picker opens over
  * the palette, like the MFA prompt does, before the MFA gate.
+ *
+ * SQL browser entries (features/sql-browser.md §10): resource × valid `sql`
+ * profile, when the type offers `sql`; they open `sql_session_open`.
  */
 interface PaletteEntry {
   resource: ResourceMetadata;
-  profile: ConnectionProfile;
-  protocol: SessionProtocol;
+  /** The connection profile; absent for a SQL entry. */
+  profile?: ConnectionProfile;
+  /** A SQL browser entry. */
+  sql?: SqlLaunchProfile;
+  profileId: string;
+  profileName: string;
+  protocol: SessionProtocol | "sql";
   /** Lower-cased haystack assembled once for fuzzy matching. */
   haystack: string;
   /** Display strings precomputed so render stays cheap. */
@@ -168,6 +178,26 @@ export function ConnectPalette({ armed, accountsLink, submitPin }: ConnectPalett
         for (const meta of metas) {
           if (!meta) continue;
           const typeDef = getTypeDef(typeConfig, String(meta.type || ""));
+          if (sqlOfferedByType(typeDef).offered) {
+            const resourceLabel = String(meta.name || "");
+            const host = String(meta.hostname || "") || String(meta.ip_address || "") || "—";
+            for (const sp of launchableSqlProfiles(meta as Record<string, unknown>)) {
+              next.push({
+                resource: meta,
+                sql: sp,
+                profileId: sp.id,
+                profileName: sp.name,
+                protocol: "sql",
+                haystack: [resourceLabel, sp.name, "sql database", host, String(meta["tags"] || "")]
+                  .join(" ")
+                  .toLowerCase(),
+                resourceLabel,
+                targetLabel: `${host} · SQL browser`,
+                needsOperatorPrompt: false,
+                picksAccount: false,
+              });
+            }
+          }
           const offered = connectProtocols(typeDef);
           if (offered.length === 0) continue;
           const osType = String(meta["os_type"] ?? "");
@@ -189,6 +219,8 @@ export function ConnectPalette({ armed, accountsLink, submitPin }: ConnectPalett
               next.push({
                 resource: meta,
                 profile: p,
+                profileId: p.id,
+                profileName: p.name,
                 protocol: "web",
                 haystack: [resourceLabel, p.name, "web", origin, String(meta["tags"] || "")]
                   .join(" ")
@@ -233,6 +265,8 @@ export function ConnectPalette({ armed, accountsLink, submitPin }: ConnectPalett
             next.push({
               resource: meta,
               profile: p,
+              profileId: p.id,
+              profileName: p.name,
               protocol: osProtocol,
               haystack,
               resourceLabel,
@@ -246,7 +280,7 @@ export function ConnectPalette({ armed, accountsLink, submitPin }: ConnectPalett
         // palette is predictable when the search box is empty.
         next.sort((a, b) => {
           const r = a.resourceLabel.localeCompare(b.resourceLabel);
-          return r !== 0 ? r : a.profile.name.localeCompare(b.profile.name);
+          return r !== 0 ? r : a.profileName.localeCompare(b.profileName);
         });
         setEntries(next);
       } catch (e) {
@@ -287,6 +321,21 @@ export function ConnectPalette({ armed, accountsLink, submitPin }: ConnectPalett
   }, [filtered.length, active]);
 
   async function launch(entry: PaletteEntry) {
+    if (entry.sql) {
+      const key = `${entry.resourceLabel}/${entry.profileId}`;
+      setConnecting(key);
+      try {
+        // MFA gate for the profile, then the session (`lib/sqlLaunch.ts`).
+        const opened = await openSqlBrowser(gateConnect, entry.resourceLabel, entry.sql, placement);
+        if (opened) setOpen(false);
+      } catch (e) {
+        toast("error", extractError(e));
+      } finally {
+        setConnecting(null);
+      }
+      return;
+    }
+    if (!entry.profile) return;
     if (entry.needsOperatorPrompt) {
       // These profiles may need a typed credential before opening (LDAP
       // operator-bind, or an RDP default-account with no stored password).
@@ -381,7 +430,7 @@ export function ConnectPalette({ armed, accountsLink, submitPin }: ConnectPalett
           {!loading && filtered.length > 0 && (
             <ul>
               {filtered.map((e, i) => {
-                const key = `${e.resourceLabel}/${e.profile.id}`;
+                const key = `${e.resourceLabel}/${e.profileId}`;
                 const isActive = i === active;
                 const isConnecting = connecting === key;
                 return (
@@ -402,13 +451,13 @@ export function ConnectPalette({ armed, accountsLink, submitPin }: ConnectPalett
                         <div className="flex items-center gap-2 text-sm">
                           <strong className="truncate">{e.resourceLabel}</strong>
                           <span className="text-[var(--color-text-muted)]">·</span>
-                          <span className="truncate">{e.profile.name}</span>
+                          <span className="truncate">{e.profileName}</span>
                         </div>
                         <div className="text-xs text-[var(--color-text-muted)] font-mono truncate">
-                          {!e.picksAccount && e.profile.username ? `${e.profile.username}@` : ""}
+                          {!e.picksAccount && e.profile?.username ? `${e.profile.username}@` : ""}
                           {e.targetLabel}
                           {e.needsOperatorPrompt
-                            ? e.profile.credential_source.kind === "default-account"
+                            ? e.profile?.credential_source.kind === "default-account"
                               ? " · prompts for password"
                               : " · LDAP operator bind"
                             : ""}

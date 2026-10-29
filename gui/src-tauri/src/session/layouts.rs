@@ -200,7 +200,9 @@ fn convert(
             let protocol = match src.protocol {
                 ProfileProtocol::Ssh => PaneProtocol::Ssh,
                 ProfileProtocol::Rdp => PaneProtocol::Rdp,
-                ProfileProtocol::Web | ProfileProtocol::Sftp => return Ok(None),
+                // A SQL pane is not saved: restoring it would reopen a database
+                // session (and a released login) the operator did not ask for.
+                ProfileProtocol::Web | ProfileProtocol::Sftp | ProfileProtocol::Sql => return Ok(None),
             };
             vaults.insert(src.vault_id);
             Ok(Some(SavedNode::Pane(SavedPane {

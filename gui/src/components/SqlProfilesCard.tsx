@@ -31,6 +31,7 @@ import {
   type SqlPrivileges,
 } from "../lib/sqlPrivileges";
 import { useCanWriteResource } from "../hooks/useCanWriteResource";
+import type { SqlLaunchProfile } from "../lib/sqlLaunch";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
 
@@ -63,6 +64,7 @@ export function SqlProfilesCard({
   typeDef,
   onUpdated,
   onTypeUpdated,
+  onOpenSql,
   toast,
 }: {
   resource: ResourceMetadata;
@@ -71,6 +73,8 @@ export function SqlProfilesCard({
   onUpdated: () => void;
   /** Called after the type configuration was changed from here. */
   onTypeUpdated?: () => void;
+  /** Open the SQL browser: with a profile, or (null) letting the plugin pick. */
+  onOpenSql?: (profile: SqlLaunchProfile | null) => void;
   toast: Toast;
 }) {
   const name = String(resource.name ?? "");
@@ -197,13 +201,25 @@ export function SqlProfilesCard({
               use (its ceiling) and where the login comes from.
             </p>
           </div>
-          <Button
-            onClick={() => engine && setEditing({ form: blankSqlProfile(), isNew: true, problems: [] })}
-            disabled={newDisabled}
-            title={newTitle}
-          >
-            + Add SQL profile
-          </Button>
+          <div className="flex shrink-0 flex-wrap gap-2">
+            {onOpenSql && (
+              <Button
+                variant="secondary"
+                onClick={() => onOpenSql(null)}
+                disabled={!engine || !gate.offered || sqlEntries.length === 0}
+                title="Open a SQL session; BastionVault picks the smallest profile that covers your grant"
+              >
+                Open SQL browser
+              </Button>
+            )}
+            <Button
+              onClick={() => engine && setEditing({ form: blankSqlProfile(), isNew: true, problems: [] })}
+              disabled={newDisabled}
+              title={newTitle}
+            >
+              + Add SQL profile
+            </Button>
+          </div>
         </div>
 
         {!gate.offered && (
@@ -295,6 +311,11 @@ export function SqlProfilesCard({
               disabled={readOnly || !engine}
               onEdit={(form, problems) => setEditing({ form, isNew: false, problems })}
               onDelete={(form) => setDeleting(form)}
+              onOpen={
+                onOpenSql && engine && gate.offered
+                  ? (form) => onOpenSql({ id: form.id, name: form.name || form.id, requireMfa: form.requireMfa })
+                  : undefined
+              }
             />
           ))}
         </div>
@@ -345,12 +366,15 @@ function SqlProfileRow({
   disabled,
   onEdit,
   onDelete,
+  onOpen,
 }: {
   raw: unknown;
   engine: SqlEngineInfo | null;
   disabled: boolean;
   onEdit: (form: SqlProfileForm, problems: string[]) => void;
   onDelete: (form: SqlProfileForm) => void;
+  /** Open the SQL browser with this profile (valid profiles only). */
+  onOpen?: (form: SqlProfileForm) => void;
 }) {
   const { form, problems } = readSqlProfile(raw, engine?.id ?? "postgresql");
   return (
@@ -390,6 +414,11 @@ function SqlProfileRow({
         )}
       </div>
       <div className="flex shrink-0 gap-1">
+        {onOpen && problems.length === 0 && form.id && (
+          <Button size="sm" variant="secondary" onClick={() => onOpen(form)} aria-label={`Open SQL browser with ${form.name || form.id}`}>
+            Open
+          </Button>
+        )}
         <Button size="sm" variant="ghost" disabled={disabled} onClick={() => onEdit(form, problems)}>
           Edit
         </Button>

@@ -4,7 +4,7 @@
  *
  * Every window that renders a live session or a recording loads this
  * bundle instead of the vault UI: a session's own window (`ssh-<token>` /
- * `rdp-<token>` / `sftp-<token>`), the Session Workspace (`session-workspace`) and a
+ * `rdp-<token>` / `sftp-<token>` / `sql-<token>`), the Session Workspace (`session-workspace`) and a
  * recording replay (`replay-<id>`). It mounts only the routes those windows
  * use — no admin page, no auth store, no session monitor — and never asks
  * the host for the vault token, so a renderer compromise in one pane of the
@@ -27,6 +27,7 @@ import { ToastProvider } from "../components/ui/Toast";
 import { SessionRdpWindow } from "../routes/SessionRdpWindow";
 import { SessionReplayWindow } from "../routes/SessionReplayWindow";
 import { SessionSftpWindow } from "../routes/SessionSftpWindow";
+import { SessionSqlWindow } from "../routes/SessionSqlWindow";
 import { SessionSshWindow } from "../routes/SessionSshWindow";
 import { SessionWorkspaceWindow } from "../routes/SessionWorkspaceWindow";
 
@@ -67,6 +68,8 @@ export const SESSION_ROUTES: ReadonlyArray<{ path: string; element: ReactNode }>
   // An SFTP session's dual-pane file window (features/sftp-connect.md);
   // always its own window, never a workspace pane.
   { path: "/session/sftp", element: <SessionSftpWindow /> },
+  // A SQL browser session's own window (features/sql-browser.md §10).
+  { path: "/session/sql", element: <SessionSqlWindow /> },
   // The singleton Session Workspace (T38): tabs and splits of SSH / RDP
   // panes, each placed by the host.
   { path: "/workspace", element: <WorkspaceWindow /> },

@@ -1,0 +1,35 @@
+[package]
+name = "bv-sql-classify"
+version = "0.41.0"
+edition = "2021"
+description = "Pure SQL statement classifier for BastionVault's SQL browser: maps each statement to the sql_* privileges it needs, or refuses it"
+license = "Apache-2.0"
+repository = "https://github.com/ffquintella/BastionVault"
+
+publish = ["uox-bastionvault"]
+# The cargo-fuzz harness is its own workspace and is not part of the package.
+exclude = ["fuzz"]
+
+# features/sql-browser.md §4.1 (T125, Phase 2). A pure function: no I/O, no
+# async, no driver types, and no BastionVault dependency at all. The
+# `dbms-management` plugin depends on the published crate; the vault server
+# does not link it, so its TCB does not grow. The capability and target types
+# mirror `bv_kernel_api::policy::sql` by name instead of importing them, so
+# this crate never depends on a kernel tier.
+[dependencies]
+# The SQL parser the spec names (§4.1; Phase 0 measured 0.63.0 against the
+# corpus). Default features are off on purpose: `recursive-protection` pulls
+# `recursive` -> `stacker` -> `psm`, a C/asm build. The parser's own recursion
+# counter (always on) bounds depth, and this crate lowers it further. `visitor`
+# is what lets the classifier walk every node rather than the leading keyword
+# (§4.3 data-modifying CTEs).
+sqlparser = { version = "0.63", default-features = false, features = ["std", "visitor"] }
+
+[dev-dependencies]
+# Property tests (Phase 2): every input yields classified statements with a
+# non-empty requirement set, or Unclassifiable. Same version and feature set as
+# bv-kernel's dev-dependency, so no new crate enters the lockfile.
+proptest = { version = "1.11", default-features = false, features = ["std"] }
+
+[lints.rust]
+unsafe_code = "forbid"

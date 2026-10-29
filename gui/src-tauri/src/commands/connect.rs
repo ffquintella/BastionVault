@@ -1717,7 +1717,7 @@ pub(super) async fn require_session_window(
 /// is not lost.
 ///
 /// Any failure stops the session: nothing would render or close it.
-async fn place_in_workspace(
+pub(super) async fn place_in_workspace(
     app: &AppHandle,
     state: &State<'_, AppState>,
     descriptor: SessionDescriptor,
@@ -1811,6 +1811,13 @@ pub(crate) fn own_window_url(d: &SessionDescriptor) -> String {
             urlencoding::encode(&d.closed_event),
             urlencoding::encode(&d.label),
         ),
+        // The SQL workspace (features/sql-browser.md §10): every call names
+        // the token; there is no output stream or closed event.
+        session::ProfileProtocol::Sql => format!(
+            "{SESSION_PAGE}#/session/sql?token={}&label={}",
+            urlencoding::encode(&d.token),
+            urlencoding::encode(&d.label),
+        ),
         // We use HashRouter on the frontend, so the route fragment sits
         // inside the URL hash. Tauri's WebviewUrl::App takes a path
         // relative to the app's root — `session.html#/path` gets the React
@@ -1831,6 +1838,7 @@ fn own_window_size(d: &SessionDescriptor) -> (f64, f64) {
             (f64::from(d.width.unwrap_or(1024)) + 8.0, f64::from(d.height.unwrap_or(768)) + 50.0)
         }
         session::ProfileProtocol::Sftp => (1200.0, 760.0),
+        session::ProfileProtocol::Sql => (1280.0, 800.0),
         _ => (900.0, 540.0),
     }
 }
@@ -1927,6 +1935,13 @@ pub(crate) async fn run_cleanup(state: &State<'_, AppState>, cleanup: crate::ses
                 Err(e) => log::warn!(
                     "resource-connect: ldap library check-in failed (mount={ldap_mount} set={library_set} account={account} lease={lease_id}): {e:?}"
                 ),
+            }
+        }
+        crate::session::SessionCleanupKind::SqlSessionClose { mount, session_id, namespace } => {
+            match super::sql_workspace::close_plugin_session(state, &mount, &session_id, namespace.as_deref()).await {
+                Ok(_) => log::info!("resource-connect/sql: plugin session closed (mount={mount})"),
+                // The plugin also closes it on idle, lifetime and seal.
+                Err(e) => log::warn!("resource-connect/sql: closing the plugin session failed (mount={mount}): {e:?}"),
             }
         }
     }

@@ -24,7 +24,7 @@
 
 import type { LayoutSaveNode, SavedLayout, SavedLayoutNode, SavedLayoutPane, SessionPlacement } from "./api";
 
-export type PaneKind = "ssh" | "rdp" | "replay";
+export type PaneKind = "ssh" | "rdp" | "sql" | "replay";
 
 export interface PaneNode {
   kind: "pane";

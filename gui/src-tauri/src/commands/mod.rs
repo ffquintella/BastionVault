@@ -143,6 +143,7 @@ pub mod scheduled_exports;
 pub mod secrets;
 pub mod session_workspace;
 pub mod sharing;
+pub mod sql_workspace;
 pub mod ssh;
 pub mod ssh_security_key;
 pub mod sso_admin;

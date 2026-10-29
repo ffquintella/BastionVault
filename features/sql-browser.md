@@ -1,7 +1,7 @@
 # Feature: SQL Browser — query and change data on database resources (`dbms-management` plugin)
 
-**Status: In progress (2026-10-26). Phase 0 and Phase 1 (T124) closed; Phases
-2–9 (T125–T130) not started.** Proposed
+**Status: In progress (2026-10-29). Phase 0 and Phase 1 (T124) closed; Phases
+2 and 3 (T125) in progress; Phases 4–9 (T125–T130) not started.** Proposed
 2026-10-13. Tracked as ROADMAP
 T124–T130 under M5 (see *Tracking*). Written against the tree at 0.44.31; every
 "today" statement below was verified by reading the code on that date and
@@ -146,16 +146,31 @@ Subsystem 4 (the rolling-upgrade write gate for `sql_*`) and subsystem 5 (the
 resource engine's `sql` protocol: strict profiles, credential resolution with
 endpoint binding, the privileges read, connect MFA for `sql` profiles, and the
 gate on `.bvx` import and BVBK restore) are in the tree; see *Phase 1,
-subsystem 4* and *Phase 1, subsystem 5*. The GUI half (subsystem 6) is not.
+subsystem 4* and *Phase 1, subsystem 5*. The GUI half (subsystem 6) followed,
+and T124 closed on 2026-10-26 (see *Phase 1 exit gate*). Phase 2 (T125) is in
+progress: the `bv-sql-classify` crate is in the tree with the PostgreSQL
+dialect, the hazard corpus as tests, property tests and a cargo-fuzz target;
+the fuzz campaign has not been run (see *Phase 2, the classifier crate*). The
+plugin (Phase 3) is in the tree at `plugins-ext/bastion-plugin-dbms-management`,
+not registered on any host and not released; its five subsystems are verified
+with unit tests, the testkit and live PostgreSQL 16 containers, but not on a
+running vault or a cluster (see *Phase 3, the plugin*). The GUI workspace
+(Phase 4) is in the tree: the `sql-<token>` window and the Session Workspace
+`sql` pane, the host-side `sql_*` Tauri commands with their pinned window
+set, tree, editor, grid, messages, history, info and enforcement panels, grid
+editing with conflict reporting, confirmations, and the Connect menu, profile
+row and ⌘K entries. It is verified with unit and component tests and a
+browser check against a mocked host, not against a registered plugin (see
+*Phase 4, the GUI workspace*).
 The Phase table maps each phase to its ROADMAP task.
 
 | Phase | Task | Status |
 |---|---|---|
 | Phase 0 — verification spike and decisions | T124 | Done (2026-10-21) |
-| Phase 1 — host substrate: SQL capabilities, plugin ABI 1.4, `sql` protocol | T124 | In progress (subsystems 1–5 of 6) |
-| Phase 2 — `bv-sql-classify` classifier crate | T125 | Todo |
-| Phase 3 — the `dbms-management` plugin with PostgreSQL | T125 | Todo |
-| Phase 4 — GUI SQL workspace | T125 | Todo |
+| Phase 1 — host substrate: SQL capabilities, plugin ABI 1.4, `sql` protocol | T124 | Done (2026-10-26) |
+| Phase 2 — `bv-sql-classify` classifier crate | T125 | In progress (PostgreSQL crate, corpus, property tests and fuzz target in the tree; fuzz campaign not run) |
+| Phase 3 — the `dbms-management` plugin with PostgreSQL | T125 | In progress (plugin in the tree; verified with the testkit and PostgreSQL 16 containers; not run on a real host, cluster or TLS-cancel path) |
+| Phase 4 — GUI SQL workspace | T125 | In progress (in the tree; unit, component and mocked-host browser checks; not run against a registered plugin; editor is a textarea, not CodeMirror) |
 | Phase 5 — export, scripts and per-action step-up | T126 | Todo |
 | Phase 6 — MySQL and MariaDB | T127 | Todo |
 | Phase 7 — Microsoft SQL Server | T128 | Todo |
@@ -2426,3 +2441,448 @@ of which the new files are `sqlPrivileges`, `sqlProfile`, `policySql`,
 - `make test-release`, in pieces: suites 1–5 (unit 2511/2511, integration 2613/2613, doctests, hiqlite, cucumber) in one run, after the `bvault-cli` fixture gained the `self-accounts-user` baseline; suites 6–9 (`plugins-test`, `gui-check`, `gui-test`, `test-pki-composite`, `check-hsm DEEP=1`) in a second run, once the worktree's `plugins-ext` submodule was initialised. All exited 0.
 - Not run: the 1,000,000-case differential suite; a browser check of the GUI; a multi-node hiqlite run of the closed gate.
 - Open, outside T124's gate: the `root_privs` disagreement between ACLs built from identical text (see subsystem 2), TCPS cancellation (D2), the real-driver 50-session measurement (D5).
+
+## Phase 2, the classifier crate
+
+`crates/bv-sql-classify` (T125, Phase 2; workspace member, Tier 0 leaf,
+`publish = ["uox-bastionvault"]`, version 0.41.0). It depends on `sqlparser`
+0.63 only (`default-features = false`, `std` + `visitor`: the default
+`recursive-protection` feature would pull `stacker`/`psm`, a C/asm build) and,
+for tests, `proptest`. It depends on no BastionVault crate: `SqlCapability`
+mirrors `bv_kernel_api::policy::sql::SqlCapability` by spelling, pinned by a
+test.
+
+**API.** `classify(Dialect, LexerSettings, &str, &NameContext) ->
+Result<Vec<ClassifiedStatement>, Unclassifiable>` as §4.1, all or nothing;
+`classify_each` returns one result per statement for display. Deviations from
+the §4.1 sketch: `NameContext` also carries the search path,
+`max_identifier_length` and `database_read_only` (the §4.2 user-function rule
+needs it); `SqlTarget::Object` holds an `ObjectRef { kind, catalog, schema:
+Option, name }`, where `schema: None` is an unqualified reference the plugin
+must resolve through the catalog (§4.4), and a name it cannot resolve must be
+checked as unaddressable; `Unclassifiable` carries the statement index, the
+span, a `Reason` (no statement text, safe to log) and a `Refusal`:
+`Unknown` (a `sql_admin` holder may run it as `unclassified`) or `Never`.
+
+**How a statement is classified.**
+
+1. A lexer that follows PostgreSQL's `scan.l` splits the input (strings in
+   every prefix form, `standard_conforming_strings`, nested comments, dollar
+   quotes, `--` ending at `\r`, psql's `BEGIN ATOMIC` rule) and refuses what
+   the server reads version-dependently: NUL, `\v`, `\` outside literals,
+   number junk, non-alphanumeric non-ASCII outside literals, `U&` literals.
+2. sqlparser's tokenizer must agree with that lexer on the start and end of
+   every string, quoted identifier, dollar quote and comment; otherwise the
+   statement is refused (`LexerDisagreement`, `Never`). The parser then runs
+   on exactly the checked tokens and must find exactly one statement.
+3. A statement table maps each statement to its own targets; a full AST walk
+   (sqlparser's `Visitor`) classifies every relation, nested statement,
+   table factor, expression and function call. Unknown statements, clauses,
+   table factors and expressions refuse; nothing defaults to `sql_select`.
+   CTE names shadow tables only in PostgreSQL's scope (a non-recursive CTE's
+   own body sees the real table).
+4. Statements sqlparser does not cover, or that need one rule only, are
+   classified from tokens with a strict grammar first: `DO`, `VACUUM`,
+   `ANALYZE`, `REINDEX`, `CLUSTER`, `REFRESH MATERIALIZED VIEW`,
+   `CHECKPOINT`, `ABORT`, `MOVE`, `ALTER SYSTEM`, `ALTER SEQUENCE / VIEW /
+   MATERIALIZED VIEW`, `LOAD`, and the `sql_admin` families (`GRANT`,
+   `REVOKE`, roles, databases, extensions, servers, FDWs, publications,
+   rules, casts, operators, languages, tablespaces, two-phase commit).
+5. A non-transaction-control statement with no requirement is refused
+   (`EmptyRequirementSet`). An `Unknown` refusal whose tokens name `COPY`,
+   `LOAD`, `PROGRAM`, an always-refused function or an untrusted language is
+   raised to `Never`.
+
+**Decisions where §4.2 is silent or a sketch** (each covered by a test):
+`CREATE INDEX`, `CREATE/DROP TRIGGER` and `CREATE/DROP POLICY` check the
+table's path; a foreign key needs `sql_alter` on the referenced table;
+schema-level DDL checks `sql/server`; `CASCADE` (`DROP`, `TRUNCATE`) adds
+`sql_drop` on `sql/server`; `UPDATE`/`DELETE` add `sql_select` on the target
+only when they read it (`WHERE`, `FROM`/`USING`, `RETURNING`, a non-literal
+`SET` value); plan-only `EXPLAIN` keeps `sql_execute` for user functions (the
+planner runs IMMUTABLE ones); `COPY … TO STDOUT` is `sql_select`, `COPY … FROM
+STDIN` is `sql_insert`; advisory locks are `sql_update` on `sql/server`;
+`NOTIFY`/`pg_notify` are `sql_execute` on `sql/server`; `nextval`/`setval`
+need a literal sequence name (an OID or a run-time value refuses). Always
+refused, beyond §4.2's list: the `pg_ls_*`/`pg_stat_file`/adminpack file
+functions, `dblink*` whatever its schema (a second connection no read-only
+transaction covers), `LOAD`, `CREATE TABLESPACE`, and functions or `DO`
+blocks in C or an untrusted language. Refused as lexer changes:
+`standard_conforming_strings`, `backslash_quote`, `client_encoding`/`SET
+NAMES`, `RESET ALL`, `DISCARD ALL`, `ALTER SYSTEM RESET ALL`, and those names
+through `set_config` or `ALTER SYSTEM`. Refused as read-only-guard changes:
+`READ WRITE` transaction modes and `(default_)transaction_read_only`. When a
+user schema precedes `pg_catalog` on the search path, every unqualified
+function and operator counts as user code.
+
+**Security findings while building it.**
+
+- sqlparser 0.63 reads `DELETE FROM ONLY t` (and `FROM ONLY t`, `UPDATE ONLY
+  t`) as table `only` aliased `t`. With a quoted table `"only"` in reach, a
+  caller allowed to delete from it would have deleted from `t`. An unquoted
+  PostgreSQL reserved keyword is never accepted as an object name
+  (`ReservedWordAsName`); regression test
+  `regression_reserved_word_parsed_as_a_name_is_refused`.
+- sqlparser's frames are large enough in an unoptimised build that `NOT`×40,
+  nested `CASE`×40 or 16 nested subqueries overflow a 2 MiB stack inside its
+  own recursion budget, and a stack overflow aborts the process.
+  Classification therefore runs on a scoped thread with a 64 MiB (virtual)
+  stack; a panic there refuses the input (`InternalError`) instead of
+  crashing the caller.
+
+**What the plugin (Phase 3) must do with it.**
+
+- Execute exactly the returned spans, one per extended-protocol round trip;
+  run an `Unknown` refusal as `unclassified` only for a `sql_admin` holder,
+  and never a `Never` one.
+- Fill `NameContext` from `current_database()`, `current_schema()`,
+  `current_schemas(true)` and `max_identifier_length`, and set
+  `database_read_only` only when the database enforces it (§5.3). Re-read
+  them after a `SetSession` statement and after any `opaque` one (a user
+  function can call `set_config`).
+- Pass `standard_conforming_strings` as read at session start, keep
+  `client_encoding` at UTF8, and watch `ParameterStatus` for both: a change
+  the classifier did not see (a user function, `ALTER SYSTEM` plus reload)
+  must stop classification for the session.
+- Resolve `schema: None` references through the catalog; check an
+  unresolvable one as unaddressable (fail closed).
+
+**Not done.** The fuzz target (`crates/bv-sql-classify/fuzz`, its own
+workspace, `cargo +nightly fuzz run classify`) is written and type-checks but
+has not been run under libFuzzer; the same invariants ran as property tests
+(50,000 cases each, once). The corpus is about 280 hand-written PostgreSQL
+statements, below Phase 0's 500 (Phase 0's generated corpus was never
+committed). sqlparser cannot parse, so the classifier refuses as `Unknown`:
+`TABLE t`, PostgreSQL's `CREATE PROCEDURE … AS $$…$$`, SQL-standard `BEGIN
+ATOMIC` bodies, `ROWS FROM`, `xmlelement(name …)`, `FOR NO KEY UPDATE`,
+`ATTACH PARTITION`, `OVERRIDING … VALUE`, `CREATE VIEW … WITH (…)` and custom
+operators such as `===`. MySQL / MariaDB, T-SQL and Oracle tables are for
+Phases 6–8.
+
+### Phase 2 validation
+
+Run one at a time from the repository root: `cargo check -p bv-sql-classify`
+(exit 0); `cargo clippy -p bv-sql-classify --lib --tests` (exit 0, no
+warnings); `cargo fmt -p bv-sql-classify` (exit 0); `cargo nextest run -p
+bv-sql-classify --lib` (47 passed); `BV_SQL_CLASSIFY_CASES=50000 cargo
+nextest run -p bv-sql-classify --lib props` (6 passed); `cargo check
+--manifest-path crates/bv-sql-classify/fuzz/Cargo.toml` (exit 0).
+
+## Phase 3, the plugin
+
+`plugins-ext/bastion-plugin-dbms-management` (T125, Phase 3), a member of the
+`plugins-ext` workspace (the submodule), `publish = false`, version 0.1.0,
+`plugin.toml` at ABI 1.4 with `long_lived`, `concurrent`, `caller_identity`,
+`audit_emit`, `log_emit`, `storage_prefix = "dbms/"`, `sql_gate`,
+`resource_credentials = ["sql"]` and `sql_console`, and no declared egress.
+It depends on `bastion-plugin-sdk` (`process`), `bv-sql-classify` and
+`bv-sql-guard` by path, `tokio-postgres` 0.7.18 without TLS features, rustls
+and tokio-rustls on the `ring` provider, `rustls-native-certs`, and `ring` for
+session ids and HMACs. `cargo tree -i` finds neither `openssl-sys` nor
+`aws-lc-sys` (`make test-dbms` checks it). The classifier gained one public
+function, `redact` (literals to `?`, comments dropped, by its own lexer), for
+the journal.
+
+**Subsystem 1: sessions, profiles, TLS.**
+- `POST v2/sessions {resource, profile?, catalog?, mfa_ticket?}`, strict
+  fields. The caller needs an identity entity. `resource_sql_target` is
+  parsed strictly (an unknown enforcement mode or a malformed profile is never
+  selected). §5.2 selection over the server-level capabilities the target
+  reports: the smallest `secret` profile whose ceiling covers the grant; a
+  read-only grant under `database-first` only an exactly-`sql_select` login;
+  a requested profile must itself qualify; `dynamic` profiles are skipped.
+  `db_enforced` is true when the ceiling adds nothing to the grant, and
+  `vault_only` lists the excess. An MFA profile redeems the ticket before the
+  release. The released endpoint must equal the profile's, and the login is
+  zeroized right after the connection opens, not at close.
+- TLS (`src/tls.rs`): `verify-full` (chain and name), `verify-ca` (chain;
+  only a name error is forgiven), `require` (encrypted, handshake signatures
+  still checked), `disable`. An encrypted mode uses `SslMode::Require`, so a
+  server that answers `N` ends the connection; nothing falls back.
+- A wire watcher (`src/wire.rs`) sits on the decrypted backend stream. Without
+  TLS it fails the read on `AuthenticationCleartextPassword` or
+  `…MD5Password` before the driver holds the whole message, so the password is
+  never sent (MD5 is refused too: it hands a replayable verifier to whoever is
+  on the path). It also tracks `ReadyForQuery` (transaction state) and
+  `ParameterStatus`.
+- `allowed_networks` / `denied_networks` (`src/netpolicy.rs`) are applied to
+  every resolved address, IPv4-mapped IPv6 judged as IPv4, deny wins, and the
+  connection goes to the checked address (no second resolution).
+
+**Subsystem 2: `AuthorizedStatement`.** `authz::prepare` classifies (the
+`execute` rule: one statement plus transaction control, else `use_script`;
+`Never` refusals stop there; `Unknown` ones need `sql_admin` on `sql/server`);
+the session resolves `schema: None` names through the catalog (`to_regclass`,
+`to_regtype`, and exactly-one-schema lookups for routines and collations; an
+unresolved name is checked with an empty schema, which the host evaluates on
+the objects root); `authz::authorize` sends the whole batch, requires one
+verdict per check in order, and only when every check is allowed builds the
+statements: private fields, not `Clone`, bound to the session id, each holding
+exactly its classified span. `driver::PgConn` keeps the `Client` private and
+its only path for caller SQL is `send_authorized(AuthorizedStatement)` (one
+Parse per statement, so the server refuses a second command). Plugin SQL is
+`PluginSql`, built only from `bv_sql_guard` literals or the row-edit builder.
+`src/invariants.md` holds seven compile-fail doctests for these properties.
+
+**Subsystem 3: runs.** `execute` returns `{run_id, state, statements}` at once
+and the run continues on the plugin's runtime. `runs/<id>` pages (500 rows /
+2,000,000 bytes by default, hard maximum 2,750,000 because a reply travels
+base64-encoded in the host's 4 MiB line) out of a bounded buffer: the producer
+stops reading while it is full. The grid cap and the optional row budget
+cancel the query and keep what was read. Cancel and the run deadline send a
+`CancelRequest` on a fresh connection to the same checked address. The
+statement timeout is set at connect; read-only sessions connect with
+`default_transaction_read_only = on`. One operation per session at a time
+(`session_busy`). A sweep every 5 s closes idle, over-lifetime and lost
+sessions and rolls back a transaction idle past `idle_tx_secs` (the server's
+own `idle_in_transaction_session_timeout` is set 60 s later as a backstop).
+Limits per user, resource and node count opens in progress. Values are typed
+per §6.3 (`int8` and `numeric` as strings, binary as base64, 64 KiB cells).
+After a `SetSession` or opaque statement the name context is re-read; if that
+fails (an aborted transaction) only transaction control runs until it succeeds.
+A watched setting changed behind the classifier's back taints the session,
+which is closed on its next request.
+
+**Subsystem 4: browser and edits.** `LIST objects` (schemas), `LIST
+objects/<schema>` (relations, sequences, indexes, routines; a resource-wide
+`sql_select`, checked on the objects root, shows all, otherwise one check per
+object), `READ objects/<schema>/<object>` (columns, constraints, indexes,
+triggers, view and routine definitions, editability), `POST rows` (structured
+insert / update / delete, identifiers `SqlIdent`-checked and double-quoted,
+values bound in text format, the key must be the table's primary or non-null
+unique key exactly, the original values guard the `WHERE`, exactly one row or
+a conflict, in a transaction or a savepoint), `READ ceiling` (the advisory
+probe: role attributes, `has_*_privilege`, ownership, membership; `undeclared`
+lists what the login can do beyond its declared ceiling).
+
+**Subsystem 5: audit, journal, lifecycle, HA.** Events `dbms.session.open`
+(also on failure), `.close`, `dbms.statement` (kinds, required checks,
+objects, outcome, rows, duration, HMAC digest, `unclassified`, SQLSTATE),
+`dbms.tx`, `dbms.row_edit` (key HMAC, column names), `dbms.cancel`,
+`dbms.row_budget`, `dbms.config`; every one carries `db_enforced`, none carries
+statement text, a value or a credential. The journal record (`v: 1`) is
+written per session under `dbms/journal/<ns>/<date>/<session>`, text per
+`journal_text` (`redacted` by default), errors as SQLSTATE only; `v2/journal/
+self/…` filters by the caller's entity and namespace, `v2/journal/all/…` is
+for auditors; days past retention are purged at most once a day. Seal, reload
+and shutdown close every session in parallel within 8 s (rolling back open
+transactions) and acknowledge. A session id is a per-process instance prefix
+and 256 random bits; a request for another instance's session gets
+`session_on_other_node`, and a session of another owner reads as absent.
+
+Decisions where the spec is silent or could not be followed:
+
+- **No token binding.** The host does not pass the token-accessor HMAC §6.1
+  assumes, so a session is bound to entity, namespace and login (mount and
+  name). Revocation still applies per statement, because every authorization
+  is decided against the token of the request in flight. Rejected: deriving a
+  binding from anything in the envelope the caller controls.
+- **Selection uses the server-level capabilities only** (the target's Display
+  probe). A resource-wide probe would go through `resource_sql_authorize`,
+  which records a denial for every capability not held on every open.
+  Object-scoped grants therefore never widen the chosen login (fail closed).
+- **Background events wait in a per-owner outbox.** The multiplexed host
+  refuses host calls outside an invocation, so a run's outcome, an idle close
+  or a seal is emitted (and journalled) during the owner's next invocation,
+  under the owner's identity. Rejected: emitting them in whichever invocation
+  comes next, which would stamp another user as the actor.
+- **Errors are plugin errors.** The host maps every non-zero plugin status to
+  a 500 with the message, so codes are the message prefix
+  (`session_on_other_node: …`, `use_script: …`); refused statements are a
+  normal reply with `state: "refused"` and the verdicts.
+- **The node is a plugin instance.** The host gives a plugin no node identity;
+  the prefix names the process, so a restarted child also answers
+  `session_on_other_node` for its old sessions.
+- **COPY is refused by `execute`**; scripts and exports answer
+  `unsupported` until T126.
+
+Security findings while building it:
+
+- **Catalog queries could run user code.** The plugin's own SQL runs on the
+  caller's session, so an unqualified `=` or `IN` resolves through the
+  caller's `search_path`; a user-defined `=(oid, regclass)` in a schema ahead
+  of `pg_catalog` ran inside the name-resolution query (confirmed against
+  PostgreSQL 16). Every operator in plugin catalog SQL is now
+  `OPERATOR(pg_catalog.…)`, and a grid edit pins `search_path` to
+  `pg_catalog, pg_temp` for its own duration (restoring the caller's inside a
+  transaction). Regression test `live_internal_queries_ignore_user_operators`.
+- **An aborted transaction would have stranded a session** whose name context
+  could not be re-read; it now admits transaction control only, and recovers
+  after `ROLLBACK` (`live_aborted_transaction_recovers_after_rollback`).
+
+Residual risks:
+
+- The plugin is not registered on a running vault in any test; the host half
+  is the testkit mock plus the parity test of Phase 1. No cluster test.
+- tokio-postgres keeps its own copy of the password in its `Config` until the
+  connection is open, and SCRAM state inside the driver; neither is zeroized.
+- The `plugins-ext` release profile sets `panic = "abort"`: a panic in the
+  classifier ends the plugin process (every session closes, fail closed)
+  instead of refusing one statement as the classifier intends.
+- Browsing without a resource-wide grant records a denial for every object it
+  hides. Grid edits on columns whose equality operator is outside `pg_catalog`
+  (extension types) fail. Cell values over 64 KiB are not fetchable in full.
+- Not done in Phase 3: per-resource or per-profile lowering of limits (the
+  target view carries none), token-expiry capping of the session lifetime,
+  step-up for `unclassified` (Phase 5), `docs/api.md` and the operator guide,
+  the real-driver 50-session measurement (D5), TCPS cancel (D2, Oracle).
+
+### Phase 3 validation
+
+Run one at a time; the plugin commands from `plugins-ext/`, the classifier and
+`make` targets from the repository root:
+
+1. `cargo check -p bastion-plugin-dbms-management` (exit 0);
+   `cargo clippy -p bastion-plugin-dbms-management --lib --tests` (exit 0, no
+   warnings); `cargo fmt -p bastion-plugin-dbms-management --check` (exit 0).
+2. `cargo nextest run -p bastion-plugin-dbms-management`: 74 passed (68 unit
+   tests with a scripted host, a fake PostgreSQL server for the weak-auth and
+   no-fallback cases, and the multiplexed seal acknowledgement; 6 running the
+   built binary through the testkit, including the manifest against the
+   host's rules and a planted password absent from responses, stderr, logs,
+   storage and audit).
+3. `cargo test -p bastion-plugin-dbms-management --doc`: 8 passed (7
+   compile-fail invariants with pinned error codes).
+4. `make test-dbms` (docker, `postgres:16` = 16.15): 7 live tests passed —
+   sessions and enforcement (read-only login refusing a write the vault was
+   told to allow, smuggling refused, binding, paging, grid cap, deadline,
+   cancel, transactions, rollback on close, `SET search_path`, taint by
+   `set_config` in a function, seal), TLS modes and cleartext-password
+   refusal, limits / row budget / idle-in-transaction rollback, browser /
+   describe / edits / probe, audit and journal, the operator-hijack
+   regression, and recovery from an aborted transaction; then the
+   `openssl-sys` / `aws-lc-sys` ban (exit 0).
+5. `cargo check`, `cargo clippy --lib --tests`, `cargo fmt` and `cargo nextest
+   run -p bv-sql-classify --lib` (48 passed); `make test-changed
+   PKG=bv-sql-classify` (seeded, because `Cargo.toml` / `Cargo.lock` are
+   already modified in the tree; 48 passed).
+
+Not run: `make plugins-test` as a whole, `make test-release`, a registered
+plugin on a running vault, a multi-node cluster.
+
+## Phase 4, the GUI workspace
+
+Host code in `gui/` (T125, Phase 4). Nothing in the plugin changed.
+
+**Tauri host (`gui/src-tauri`).**
+- A SQL session is a session kind: `ProfileProtocol::Sql`,
+  `SessionState::Sql` (`session/sql.rs`) holding only the plugin mount, the
+  plugin's session id (checked against the plugin's id shape before it is
+  stored or used in a path), the namespace and resource at open, and the
+  catalog. The webview gets a local `sess_…` token and nothing else: no vault
+  token, no plugin session id, no credential.
+- `commands/sql_workspace.rs`: `sql_session_open` (main window and workspace
+  palette) resolves the console mount itself — the `plugin:<name>` mounts in
+  the caller's ACL-filtered `sys/internal/ui/mounts` whose plugin declares
+  `sql_console`, exactly one or an explicit error — posts `v2/sessions` with
+  the host-held token, and places the session in its own `sql-<token>` window
+  or as a workspace pane. `sql_session_status`, `sql_privileges` (display only,
+  `resources/v2/sql/privileges/<r>` with object triples), `sql_execute`,
+  `sql_run`, `sql_cancel`, `sql_objects` (schemas, objects, describe; names
+  percent-encoded per segment), `sql_rows` (the plugin's structured edit
+  shape only), `sql_history` (`v2/journal/self/…`) and `sql_session_close`
+  each take the token and are refused unless the calling window holds the
+  session (`require_session_window`); every call is pinned to the namespace
+  of the open. Every stop path (pane close, window destroyed, watchdog, app
+  exit) hands back a `SqlSessionClose` cleanup that `DELETE`s the plugin
+  session once.
+- Window ACL: capability `sql-window` (`sql-*`) and set `sql-window` =
+  the nine `sql_*` commands above minus `sql_session_open`, plus
+  `session_heartbeat` and the two window-close commands. The workspace set
+  gains `sql_session_open` and the eight pane commands (a pane closes through
+  `session_close`). Pinned in `window_acl_tests.rs` (`SQL_WINDOW`,
+  `WORKSPACE_EXTRA`, Tauri's own resolver) and in
+  `gui/src/test/sessionBundle.test.tsx` (exactly what the routes call).
+- SQL panes are not saved in workspace layouts (restoring one would reopen a
+  database session nobody asked for) and do not move between windows.
+
+**Frontend (`gui/src`).** `routes/SessionSqlWindow.tsx` (`/session/sql` in
+`session.html`), `components/sql/` (`SqlPane` lazy-loads `SqlWorkspace`,
+D3), `lib/sqlWorkspace.ts` (lexer, statement at the cursor, confirmation
+guard, formatter, plugin error codes, verdict text, structured edits),
+`lib/sqlLaunch.ts` (MFA gate then open), API wrappers in `lib/api.ts`.
+- Layout per §10: object tree with filter (Open, Describe); editor tabs;
+  toolbar with Run (statement at the cursor), Run selection, Stop, Explain,
+  Format and the commit mode (auto, or manual with BEGIN / Commit /
+  Rollback and the transaction badge); result tabs per statement, Messages
+  and History; info panel with resource, profile, timers, effective
+  privilege chips and the enforcement panel (`db_enforced`, ceiling,
+  vault-only capabilities, read-only, transport, TLS).
+- Refused statements show the vault's verdict ("needs `sql_update` on
+  `app.public.permission_to_user`"). Buttons and grid editing are disabled
+  for capabilities the caller is known to lack (object-level when the table
+  was opened from the tree); unknown privileges disable nothing. Convenience
+  only.
+- Grid: virtualised rows, `NULL` apart from `""`, copy of the selected cell.
+  A table opened from the tree is editable when describe says so and the
+  result holds its key: update (changed columns plus their originals),
+  delete by key, insert of filled columns; binary, JSON and truncated cells
+  are read-only; conflict, refusal and database error are shown on the row.
+- Confirmations before `DROP`, `TRUNCATE`, and `DELETE` / `UPDATE` without a
+  top-level `WHERE`, and before a grid delete. UX guards, stated as such.
+- Entries: "Open SQL browser" in a database resource's card context menu
+  (its only valid `sql` profile, else the plugin picks), an Open button per
+  valid `sql` profile and an "Open SQL browser" button on the Connection
+  tab's SQL card, and ⌘K entries for resource × valid `sql` profile (with the
+  workspace's placement).
+
+Deviations from §10 and the API table:
+- **Pinned set.** `sql_script` and `sql_export_to_file` are not registered:
+  the plugin answers `unsupported` until T126, and a granted command no route
+  calls would widen the set. `sql_session_status`, `sql_privileges` and
+  `sql_history` were added; the timers, chips and History tab need them.
+- **Discovery.** `GET v2/sys/plugins/active-surfaces` does not report
+  `sql_console` (it lists only plugins with a surface manifest), so the host
+  resolves the mount from the caller's mounts and the plugin manifest. In
+  remote mode reading `sys/plugins/<name>` needs a policy that grants it; a
+  token without it gets an explicit error, never a guessed mount. The entry
+  points are shown without that probe; opening fails with the reason.
+- **Editor and grid libraries.** No CodeMirror 6 or TanStack Virtual: the
+  editor is a plain textarea (no highlighting, no autocomplete) and the grid
+  does its own windowing. Adding the packages needs a dependency change and
+  a registry download not made in this phase.
+- **HA.** On `session_on_other_node` the workspace says the session has
+  ended and offers no automatic reconnect to the named node (D6: no
+  failover); the operator opens a new session.
+
+Security notes: the webview cannot name a path, mount or plugin session —
+the host builds every path from its own record and validated or escaped
+segments, and `sql_rows` forwards only the five structured keys. Nothing the
+GUI disables is a control. Logs carry resource, profile, mount, token and
+window label, never statement text, values or credentials.
+
+### Phase 4 validation
+
+Run one at a time from `gui/` and the repository root:
+
+1. `npx tsc --noEmit` (exit 0).
+2. `npx vitest run` over the whole GUI: 112 files, 1353 tests passed. New:
+   `sqlWorkspace.test.ts` (lexer, guard, formatter, errors, edits),
+   `sqlWorkspaceUi.test.tsx` (chips and enforcement panel, token-only calls,
+   NULL vs empty, refused verdict, confirmation, structured edit and
+   conflict, read-only results, session ended, manual commit and the
+   transaction badge), `sqlEntries.test.tsx` (launcher and MFA gate, ⌘K
+   entry with placement, Connection tab buttons, workspace adoption), and
+   `sessionBundle.test.tsx` extended (route table, `sql-window` set equal to
+   what `/session/sql` calls).
+3. `cargo check -p bastion-vault-gui` and `--all-targets` (exit 0);
+   `cargo clippy -p bastion-vault-gui --lib` (exit 0, no warning in the new
+   code).
+4. `cargo nextest run -p bastion-vault-gui --lib`: 775 run, 773 passed; the
+   two failures are `local_keystore` tests racing on the macOS keychain when
+   run in parallel (file untouched; all six pass with `-j 1`). Includes the
+   new `session::sql` tests, the SQL window-ACL test and the SQL stop-path
+   test in `attachments`.
+5. `make test-plan PKG=bastion-vault-gui`: no Rust test target is affected
+   (the GUI crate is outside `test-changed`), so `make test-changed` was not
+   run for this phase.
+6. Browser check: `session.html#/session/sql` served by `npm run dev`, with
+   the Tauri IPC mocked in the page (no Tauri shell, no vault, no plugin):
+   tree, Open, grid, a cell edit reported as a conflict, the confirmation
+   for `UPDATE` without `WHERE`, the refused verdict and the History tab
+   rendered as intended.
+
+Not done or not verified: a registered `dbms-management` plugin behind a real
+vault (embedded or remote), the Tauri shell itself (window creation, the ACL
+at run time, closing a window closing the plugin session), the workspace pane
+and the ⌘K palette in a real window, remote-mode discovery, `docs/api.md`.

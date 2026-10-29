@@ -43,6 +43,10 @@ members = [
     "crates/bv-context",
     "crates/bv-metrics",
     "crates/bv-sql-guard",
+    # The SQL browser's statement classifier (T125 Phase 2): a pure leaf the
+    # dbms-management plugin links and the vault server does not.
+    # features/sql-browser.md §4.1.
+    "crates/bv-sql-classify",
     # The model-checked decision core of the ACL evaluator (T31 Phase 3);
     # dependency-free, like bv-sql-guard, so `cargo kani -p bv-policy-core`
     # verifies it in isolation.

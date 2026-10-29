@@ -54,7 +54,7 @@ interface SessionWorkspaceState {
 }
 
 function paneKind(protocol: string): PaneKind | null {
-  return protocol === "ssh" || protocol === "rdp" ? protocol : null;
+  return protocol === "ssh" || protocol === "rdp" || protocol === "sql" ? protocol : null;
 }
 
 export const useSessionWorkspaceStore = create<SessionWorkspaceState>((set, get) => ({

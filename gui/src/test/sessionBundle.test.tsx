@@ -174,6 +174,7 @@ const SESSION_ROUTE_MODULES = [
   "/src/routes/SessionRdpWindow.tsx",
   "/src/routes/SessionReplayWindow.tsx",
   "/src/routes/SessionSftpWindow.tsx",
+  "/src/routes/SessionSqlWindow.tsx",
   "/src/routes/SessionSshWindow.tsx",
   "/src/routes/SessionWorkspaceWindow.tsx",
 ];
@@ -181,9 +182,9 @@ const SESSION_ROUTE_MODULES = [
 // ── Tests ───────────────────────────────────────────────────────────────
 
 describe("session.html route table", () => {
-  it("mounts the five session routes and nothing else", () => {
+  it("mounts the six session routes and nothing else", () => {
     expect(sorted(SESSION_ROUTES.map((r) => r.path))).toEqual(
-      sorted(["/session/ssh", "/session/rdp", "/session/sftp", "/workspace", "/session-replay"]),
+      sorted(["/session/ssh", "/session/rdp", "/session/sftp", "/session/sql", "/workspace", "/session-replay"]),
     );
   });
 
@@ -202,7 +203,7 @@ describe("session.html route table", () => {
   it("is the only place the session routes are mounted", () => {
     const app = SOURCES["/src/App.tsx"];
     expect(app).not.toMatch(/path="\/(session|workspace)/);
-    expect(app).not.toMatch(/Session(Ssh|Rdp|Sftp|Replay|Workspace)Window/);
+    expect(app).not.toMatch(/Session(Ssh|Rdp|Sftp|Sql|Replay|Workspace)Window/);
   });
 });
 
@@ -242,6 +243,7 @@ describe("session.html import graph", () => {
       ...granted("session-workspace"),
       ...granted("session-replay"),
       ...granted("sftp-window"),
+      ...granted("sql-window"),
     ]);
     expect(sorted([...graph.commands].filter((c) => !allSets.has(c)))).toEqual([]);
   });
@@ -262,6 +264,20 @@ describe("each session window's command set is exactly what its routes call", ()
   it("the Session Workspace (with its ⌘K palette): session-workspace", () => {
     const used = walk(["/src/routes/SessionWorkspaceWindow.tsx", "/src/components/ConnectPalette.tsx"]).commands;
     expect(sorted(used)).toEqual(sorted(granted("session-workspace")));
+  });
+
+  it("own SQL window: sql-window", () => {
+    // The lazily loaded workspace is followed through its dynamic import.
+    const used = walk(["/src/routes/SessionSqlWindow.tsx"]).commands;
+    expect(sorted(used)).toEqual(sorted(granted("sql-window")));
+  });
+
+  it("the SQL pane calls nothing its own window could not", () => {
+    const pane = walk(["/src/components/sql/SqlPane.tsx"]).commands;
+    const own = granted("sql-window");
+    expect(sorted([...pane].filter((c) => !own.has(c)))).toEqual([]);
+    // Opening a session is the main window's and the workspace palette's alone.
+    expect(pane.has("sql_session_open")).toBe(false);
   });
 
   it("a recording replay: session-replay", () => {

@@ -262,7 +262,8 @@ pub async fn session_move(
         ProfileProtocol::Ssh => {
             crate::session::ssh::detach_output(&state, token).await;
         }
-        ProfileProtocol::Web | ProfileProtocol::Sftp => {}
+        // No output channel to re-home: a SQL pane's data are command replies.
+        ProfileProtocol::Web | ProfileProtocol::Sftp | ProfileProtocol::Sql => {}
     }
 
     let built = match request.to {

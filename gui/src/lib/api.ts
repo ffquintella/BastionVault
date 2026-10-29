@@ -3382,6 +3382,237 @@ export const sftpLocalList = (token: string, path: string) =>
 export const sftpLocalMkdir = (token: string, path: string, name: string) =>
   invoke<string>("sftp_local_mkdir", { request: { token, path, name } });
 
+// ── SQL workspace (features/sql-browser.md §10, T125 Phase 4) ─────────
+// The session lives in the `dbms-management` plugin on the server. Every
+// call below except the open names the local session token; the host refuses
+// it unless the calling window holds that SQL session, and addresses the
+// plugin with the host-held vault token. The webview never sees that token,
+// the plugin's session id or a database credential. Authorization is the
+// plugin's and the vault's, per statement: nothing here is a control.
+
+export type SqlColumnKind = "string" | "number" | "boolean" | "null" | "binary" | "json" | "datetime";
+
+export interface SqlColumn {
+  name: string;
+  /** The native type name, e.g. `int8`, `timestamptz`. */
+  type: string;
+  kind: SqlColumnKind;
+}
+
+/** One check the vault decided for a statement. `target` is `"server"` or
+ *  `{catalog, schema, object}`. */
+export interface SqlCheckVerdict {
+  capability: string;
+  target: unknown;
+  allowed: boolean;
+  denied_by_deny?: boolean;
+}
+
+export interface SqlStatementReport {
+  index: number;
+  kinds: string[];
+  unclassified: boolean;
+  required: SqlCheckVerdict[];
+  verdict: "allowed" | "refused";
+}
+
+export interface SqlExecuteReply {
+  /** Set when the run started. */
+  run_id?: string;
+  state: "running" | "refused";
+  /** Refused: the vault's verdict, e.g. "needs `sql_update` on `app.public.t`". */
+  message?: string;
+  statements: SqlStatementReport[];
+}
+
+export interface SqlStatementMessage {
+  index: number;
+  kind: string;
+  outcome: string;
+  rows_affected: number | null;
+  rows_returned: number;
+  duration_ms: number;
+  truncated: boolean;
+  /** The database's own message; may echo values, so it is never stored. */
+  error: { sqlstate: string | null; message: string } | null;
+}
+
+export interface SqlRunPage {
+  run_id: string;
+  state: "running" | "done" | "failed" | "cancelled";
+  statement_index: number | null;
+  columns: SqlColumn[];
+  rows: unknown[][];
+  truncated_cells: { row: number; column: number; full_length: number }[];
+  has_more: boolean;
+  rows_read: number;
+  row_budget_exhausted: boolean;
+  messages: SqlStatementMessage[];
+  elapsed_ms: number;
+}
+
+export interface SqlSessionStatus {
+  resource: string;
+  profile: string;
+  catalog: string;
+  engine: string;
+  server_version: string;
+  enforcement: "database-first" | "classifier-only";
+  /** False when the login can do more than the vault grants (§5.1). */
+  db_enforced: boolean;
+  read_only: boolean;
+  database_read_only: boolean;
+  /** The caller's server-level SQL grant the session was opened with. */
+  privileges: string[];
+  /** What the profile's login can do. */
+  ceiling: string[];
+  /** Capabilities only the vault enforces (the ceiling's excess). */
+  vault_only: string[];
+  transport: string;
+  tls_mode: string;
+  search_path?: string;
+  current_schema?: string;
+  transaction: { open: boolean; failed: boolean; statements: number; open_secs: number | null };
+  active_run: string | null;
+  idle_secs: number;
+  age_secs: number;
+  rows_read: number;
+  closed: string | null;
+  taint: string | null;
+  invalid_profiles?: { id: string; reason: string }[];
+}
+
+export interface SqlSchemaList {
+  catalog: string;
+  keys: string[];
+}
+
+export interface SqlObjectList {
+  catalog: string;
+  schema: string;
+  objects: { name: string; kind: string }[];
+  truncated: boolean;
+}
+
+export interface SqlDescribe {
+  catalog: string;
+  schema: string;
+  name: string;
+  kind: string;
+  definition: string | null;
+  columns: { name: string | null; type: string | null; not_null: boolean | null; default: string | null }[];
+  constraints: { name: string | null; type: string | null; definition: string | null }[];
+  indexes: { name: string | null; definition: string | null }[];
+  triggers: { name: string | null; definition: string | null }[];
+  routines: { kind: string | null; definition: string | null }[];
+  /** Whether the grid may edit it, its key, and why not. */
+  edit: { editable: boolean; key: string[] | null; reason: string | null };
+}
+
+export type SqlEditOp = "insert" | "update" | "delete";
+
+/** A structured grid edit: never SQL text. */
+export interface SqlRowEdit {
+  object: { schema: string; name: string };
+  op: SqlEditOp;
+  key?: Record<string, unknown>;
+  values?: Record<string, unknown>;
+  original?: Record<string, unknown>;
+}
+
+export type SqlRowEditReply =
+  | { state: "done"; rows_affected: number }
+  | { state: "conflict"; rows_affected: number; message: string }
+  | { state: "refused"; message: string; verdicts: { capability: string; allowed: boolean }[] }
+  | { state: "error"; error: { sqlstate: string | null; message: string } };
+
+export interface SqlJournalEntry {
+  run?: string;
+  index?: number;
+  at_ms: number;
+  kinds: string[];
+  unclassified?: boolean;
+  /** Per the resource's `journal_text`: redacted (literals as `?`) by default. */
+  text?: string | null;
+  outcome: string;
+  rows_affected?: number | null;
+  rows_returned?: number | null;
+  duration_ms?: number | null;
+  op?: string;
+  object?: string;
+  columns?: string[];
+}
+
+export interface SqlJournalRecord {
+  v: number;
+  session: string;
+  resource: string;
+  profile: string;
+  opened_at_ms: number;
+  closed_at_ms: number | null;
+  close_reason: string | null;
+  statements: SqlJournalEntry[];
+  statements_dropped: number;
+}
+
+export interface SqlOpenRequest {
+  resource_name: string;
+  /** Absent: the plugin picks the smallest profile that covers the grant. */
+  profile_id?: string;
+  catalog?: string;
+  /** From the connect-time MFA ceremony, for a `require_mfa` profile. */
+  connect_ticket?: string;
+  placement?: SessionPlacement;
+}
+
+export interface SqlOpenResponse {
+  token: string;
+  window_label: string;
+  label: string;
+  status: SqlSessionStatus;
+}
+
+export const sqlSessionOpen = (request: SqlOpenRequest) =>
+  invoke<SqlOpenResponse>("sql_session_open", { request });
+
+export const sqlSessionStatus = (token: string) =>
+  invoke<SqlSessionStatus>("sql_session_status", { request: { token } });
+
+/** The caller's own effective SQL capabilities (display only). */
+export const sqlPrivileges = (token: string, objects: { schema: string; object: string }[] = []) =>
+  invoke<import("./sqlPrivileges").SqlPrivileges>("sql_privileges", { request: { token, objects } });
+
+export const sqlExecute = (token: string, sql: string) =>
+  invoke<SqlExecuteReply>("sql_execute", { request: { token, sql } });
+
+export const sqlRun = (token: string, runId: string) =>
+  invoke<SqlRunPage>("sql_run", { request: { token, run_id: runId } });
+
+export const sqlCancel = (token: string, runId: string) =>
+  invoke<{ run_id: string; state: string; cancel_requested: boolean }>("sql_cancel", {
+    request: { token, run_id: runId },
+  });
+
+export const sqlSchemas = (token: string) => invoke<SqlSchemaList>("sql_objects", { request: { token } });
+
+export const sqlSchemaObjects = (token: string, schema: string) =>
+  invoke<SqlObjectList>("sql_objects", { request: { token, schema } });
+
+export const sqlDescribe = (token: string, schema: string, object: string) =>
+  invoke<SqlDescribe>("sql_objects", { request: { token, schema, object } });
+
+export const sqlRows = (token: string, edit: SqlRowEdit) =>
+  invoke<SqlRowEditReply>("sql_rows", { request: { token, edit } });
+
+/** This session's journal record (no date), a day's sessions (date), or one record. */
+export const sqlHistory = (token: string, date?: string, session?: string) =>
+  invoke<SqlJournalRecord & { sessions?: unknown[]; keys?: string[] }>("sql_history", {
+    request: { token, date, session },
+  });
+
+export const sqlSessionClose = (token: string) =>
+  invoke<{ closed?: boolean }>("sql_session_close", { request: { token } });
+
 export type SessionOpenRdpRequest = {
   resource_name: string;
   profile_id: string;
@@ -3436,7 +3667,8 @@ export const setSessionWorkspacePrefs = (prefs: SessionWorkspacePrefs) =>
  *  and routing only — never a credential or session output. */
 export type OpenSessionListing = {
   token: string;
-  protocol: "ssh" | "rdp";
+  /** `sql`: a SQL browser pane (features/sql-browser.md §10). */
+  protocol: "ssh" | "rdp" | "sql";
   label: string;
   resource_name: string;
   profile_id: string;

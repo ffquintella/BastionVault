@@ -1,0 +1,27 @@
+[package]
+name = "bv-sql-classify-fuzz"
+version = "0.0.0"
+edition = "2021"
+description = "cargo-fuzz target for bv-sql-classify: the classifier never panics and never yields an empty requirement set for a non-transaction-control statement"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# A workspace of its own, deliberately outside the main one: it needs
+# libFuzzer and a nightly toolchain to run, and no `make` target or CI job of
+# the main workspace builds it. Run from this directory:
+#   cargo +nightly fuzz run classify
+[workspace]
+members = ["."]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+bv-sql-classify = { path = ".." }
+
+[[bin]]
+name = "classify"
+path = "fuzz_targets/classify.rs"
+test = false
+doc = false
+bench = false

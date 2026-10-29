@@ -120,7 +120,7 @@ endif
 # affect cargo's own internal parallelism, which is where the cores actually go.
 .NOTPARALLEL:
 
-.PHONY: help build run-dev run-dev-gui run-dev-gui-proxy gui-deps gui-build gui-test gui-check require-nextest test-bin test test-changed test-plan ci-plan check-isolated check-hsm test-pki-composite test-pki-composite-lib test-pki-composite-integration test-integration test-doc test-cucumber test-hiqlite test-all test-release verify-gates verify-routes verify-fast verify-kani verify-differential verify verify-full verification-report docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugins-test dynamic-plugins-test dynamic-plugins-live plugin-bump container-image container-image-run container-image-test downloads-image downloads-image-run downloads-image-test container-deps-key container-deps-ref container-deps-image container-deps-push container-cache-clean container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages windows-cli-msi windows-cli-nupkg windows-cli-packages macos-cli-pkg cli-packages cli-packages-all install uninstall gui-linux-packages gui-windows-msi gui-windows-nsis windows-gui-nupkg gui-macos-pkg gui-packages macos-client-install sign-packages crates-login crates-publish-dry crates-publish crates-verify crates-plan crates-bump crates-publish-changed crates-publish-changed-dry crates-tag-push bench-build bench-build-quick deps-unused deps-unused-warn build-timings release release-version-check release-dispatch release-linux-appimage release-macos-pkg release-windows-msi release-local release-checksums
+.PHONY: help build run-dev run-dev-gui run-dev-gui-proxy gui-deps gui-build gui-test gui-check require-nextest test-bin test test-changed test-plan ci-plan check-isolated check-hsm test-pki-composite test-pki-composite-lib test-pki-composite-integration test-integration test-doc test-cucumber test-hiqlite test-all test-release verify-gates verify-routes verify-fast verify-kani verify-differential verify verify-full verification-report docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugins-test test-dbms dynamic-plugins-test dynamic-plugins-live plugin-bump container-image container-image-run container-image-test downloads-image downloads-image-run downloads-image-test container-deps-key container-deps-ref container-deps-image container-deps-push container-cache-clean container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages windows-cli-msi windows-cli-nupkg windows-cli-packages macos-cli-pkg cli-packages cli-packages-all install uninstall gui-linux-packages gui-windows-msi gui-windows-nsis windows-gui-nupkg gui-macos-pkg gui-packages macos-client-install sign-packages crates-login crates-publish-dry crates-publish crates-verify crates-plan crates-bump crates-publish-changed crates-publish-changed-dry crates-tag-push bench-build bench-build-quick deps-unused deps-unused-warn build-timings release release-version-check release-dispatch release-linux-appimage release-macos-pkg release-windows-msi release-local release-checksums
 
 # Number of rustc incremental sessions to keep per crate. Anything
 # older than the Nth most recent is reaped by `prune-stale`. Override
@@ -2668,14 +2668,17 @@ plugins-process: plugins-init plugins-process-target ## Compile the process-runt
 	cd $(PLUGINS_DIR) && $(_plugins_cross_env) $(PLUGINS_CARGO) build --release $(_target_arg) -p bastion-plugin-pmp
 	@echo "==> building bastion-plugin-email ($(if $(PLUGINS_PROCESS_TARGET),$(PLUGINS_PROCESS_TARGET),native)) via $(PLUGINS_CARGO)"
 	cd $(PLUGINS_DIR) && $(_plugins_cross_env) $(PLUGINS_CARGO) build --release $(_target_arg) -p bastion-plugin-email
+	@echo "==> building bastion-plugin-dbms-management ($(if $(PLUGINS_PROCESS_TARGET),$(PLUGINS_PROCESS_TARGET),native)) via $(PLUGINS_CARGO)"
+	cd $(PLUGINS_DIR) && $(_plugins_cross_env) $(PLUGINS_CARGO) build --release $(_target_arg) -p bastion-plugin-dbms-management
 	@mkdir -p $(PLUGINS_OUT)
 	@cp $(DYNAMIC_PLUGINS_DIR)/$(_target_dir)/bastion-plugin-postgres$(_exe) $(PLUGINS_OUT)/
 	@cp $(PLUGINS_DIR)/$(_target_dir)/bastion-plugin-xca$(_exe)      $(PLUGINS_OUT)/
 	@cp $(PLUGINS_DIR)/$(_target_dir)/bastion-plugin-pmp$(_exe)      $(PLUGINS_OUT)/
 	@cp $(PLUGINS_DIR)/$(_target_dir)/bastion-plugin-email$(_exe)    $(PLUGINS_OUT)/
+	@cp $(PLUGINS_DIR)/$(_target_dir)/bastion-plugin-dbms-management$(_exe) $(PLUGINS_OUT)/
 	@echo ""
 	@echo "==> Process plugins ready in $(PLUGINS_OUT)/"
-	@ls -lh $(PLUGINS_OUT)/bastion-plugin-postgres* $(PLUGINS_OUT)/bastion-plugin-xca* $(PLUGINS_OUT)/bastion-plugin-pmp* $(PLUGINS_OUT)/bastion-plugin-email* 2>/dev/null || true
+	@ls -lh $(PLUGINS_OUT)/bastion-plugin-postgres* $(PLUGINS_OUT)/bastion-plugin-xca* $(PLUGINS_OUT)/bastion-plugin-pmp* $(PLUGINS_OUT)/bastion-plugin-email* $(PLUGINS_OUT)/bastion-plugin-dbms-management* 2>/dev/null || true
 
 plugins: plugins-pack plugins-process ## Build every reference plugin (WASM + .bvplugin bundle + process). Cross-compile with PLUGINS_PROCESS_TARGET=<triple>
 	@echo ""
@@ -2743,8 +2746,22 @@ plugins-test: require-nextest ## Run plugin unit tests: testkit, host ABI parity
 	cd $(PLUGINS_DIR) && cargo test --release -p bastion-plugin-self-accounts --features host_test
 	@echo "==> bastion-plugin-self-accounts on the REAL host, and Connect through it (needs the wasm built above)"
 	cargo nextest run -p bastion_vault --lib --run-ignored only -E 'test(/self_accounts_(host|connect)/)'
+	@echo "==> bastion-plugin-dbms-management: unit tests, the binary through the testkit, type-level invariants"
+	cd $(PLUGINS_DIR) && cargo nextest run -p bastion-plugin-dbms-management
+	cd $(PLUGINS_DIR) && cargo test -p bastion-plugin-dbms-management --doc
 	@echo ""
 	@echo "==> plugins-test complete."
+
+# Not part of plugins-test or `make test`: starts throwaway postgres:16
+# containers through docker (features/sql-browser.md, Testing Plan). Without
+# docker the tests skip; BV_TEST_REQUIRE_CONTAINER=1 makes that a failure.
+test-dbms: require-nextest ## SQL browser plugin against live PostgreSQL containers (docker) + dependency ban
+	cd $(PLUGINS_DIR) && cargo nextest run -p bastion-plugin-dbms-management --lib --run-ignored only
+	@echo "==> no openssl-sys / aws-lc-sys in the dbms-management plugin graph"
+	@cd $(PLUGINS_DIR) && for c in openssl-sys aws-lc-sys; do \
+		if cargo tree -p bastion-plugin-dbms-management --target all -i $$c >/dev/null 2>&1; then echo "$$c is in the plugin graph"; exit 1; fi; \
+	done
+	@echo "==> test-dbms complete."
 
 # ── Dynamic-secret engine plugins (dynamic-engine-plugins/, T62) ────────
 # A separate Cargo workspace with its own target/, like plugins-ext. The SDK

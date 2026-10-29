@@ -3,7 +3,8 @@ import { Link } from "react-router";
 import { Layout } from "../components/Layout";
 import { ObjectSharingCard } from "../components/ObjectSharingCard";
 import { SqlProfilesCard } from "../components/SqlProfilesCard";
-import { isSqlProfileEntry } from "../lib/sqlProfile";
+import { isSqlProfileEntry, sqlOfferedByType } from "../lib/sqlProfile";
+import { defaultSqlProfile, launchableSqlProfiles, openSqlBrowser, type SqlLaunchProfile } from "../lib/sqlLaunch";
 import {
   Button,
   Card,
@@ -32,7 +33,7 @@ import {
   type SecretHistoryVersion,
   useToast,
 } from "../components/ui";
-import { Copy, ExternalLink, Pencil, Plug, Share2, Trash2 } from "lucide-react";
+import { Copy, Database, ExternalLink, Pencil, Plug, Share2, Trash2 } from "lucide-react";
 import type {
   ResourceMetadata,
   ResourceTypeConfig,
@@ -812,6 +813,24 @@ export function ResourcesPage() {
     }
   }
 
+  /**
+   * Open the SQL browser on a database resource (features/sql-browser.md
+   * §10). `undefined`: the only valid `sql` profile, else the plugin picks;
+   * `null`: the plugin picks; a profile: that one, MFA gate first.
+   */
+  async function openSql(name: string, profile?: SqlLaunchProfile | null) {
+    try {
+      let chosen = profile ?? null;
+      if (profile === undefined) {
+        const info = await api.readResource(name);
+        chosen = defaultSqlProfile(launchableSqlProfiles(info as Record<string, unknown>));
+      }
+      await openSqlBrowser(gateConnect, name, chosen);
+    } catch (e: unknown) {
+      toast("error", extractError(e));
+    }
+  }
+
   async function handleDelete() {
     if (!deleteTarget) return;
     try {
@@ -1019,6 +1038,7 @@ export function ResourcesPage() {
                 <SqlProfilesCard
                   resource={resourceInfo}
                   typeDef={typeDef}
+                  onOpenSql={(p) => void openSql(String(resourceInfo.name), p)}
                   onUpdated={() => void selectResource(selected)}
                   onTypeUpdated={() => void loadTypeConfig()}
                   toast={toast}
@@ -1220,6 +1240,15 @@ export function ResourcesPage() {
                   label: "Connect",
                   icon: <Plug size={14} />,
                   onSelect: () => void connectResource(entry.name),
+                }]
+              : []),
+            // The SQL browser (T125): database resources whose type offers
+            // `sql`. The vault decides each statement; this is an entry point.
+            ...(entry.type === "database" && sqlOfferedByType(td).offered
+              ? [{
+                  label: "Open SQL browser",
+                  icon: <Database size={14} />,
+                  onSelect: () => void openSql(entry.name),
                 }]
               : []),
             {
