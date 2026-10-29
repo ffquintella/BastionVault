@@ -233,6 +233,12 @@ pub async fn delete_resource(
     Ok(())
 }
 
+/// True for the router's "no engine mounted at this path" error
+/// (`RvError::ErrRouterMountNotFound`, rendered as `Router mount not found.`).
+fn is_mount_not_found(message: &str) -> bool {
+    message.contains("Router mount not found")
+}
+
 /// Rename a resource, moving its identity and every piece of associated
 /// data to `new_name`. Two engine calls, orchestrated here because they
 /// live in separate mounts:
@@ -271,7 +277,16 @@ pub async fn rename_resource(state: State<'_, AppState>, old_name: String, new_n
     repoint.insert("new_resource".to_string(), Value::String(canonical.clone()));
     // The files engine is mounted at `files/` and its backend paths repeat
     // the `files/` segment, so the full path is `files/files/...`.
-    make_request(&state, Operation::Write, "files/files/repoint-resource".to_string(), Some(repoint)).await?;
+    //
+    // When the files engine is not mounted (or not mounted in the active
+    // namespace) no file can be attached to this resource, so the router's
+    // "mount not found" means there is nothing to re-point. Any other error
+    // still surfaces: the resource is already renamed and the caller retries.
+    match make_request(&state, Operation::Write, "files/files/repoint-resource".to_string(), Some(repoint)).await {
+        Ok(_) => {}
+        Err(e) if is_mount_not_found(&e.message) => {}
+        Err(e) => return Err(e),
+    }
 
     Ok(canonical)
 }
@@ -460,4 +475,17 @@ pub async fn delete_resource_secret(
     let path = format!("{RESOURCE_MOUNT}secrets/{name}/{key}");
     make_request(&state, Operation::Delete, path, None).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_mount_not_found;
+
+    #[test]
+    fn mount_not_found_matches_router_error_only() {
+        assert!(is_mount_not_found("HTTP 404: Router mount not found."));
+        assert!(is_mount_not_found("Router mount not found."));
+        assert!(!is_mount_not_found("HTTP 404: file not found"));
+        assert!(!is_mount_not_found("permission denied"));
+    }
 }

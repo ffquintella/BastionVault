@@ -250,6 +250,10 @@ EXAMPLE ENTRY:
 
 ### Fixed
 
+#### Resources
+
+- **Renaming a resource no longer reports "Router mount not found" when no files engine is mounted** -- the rename itself succeeded, but the follow-up step that re-points attached files hit a missing `files/` mount, so the GUI showed "Rename failed" and kept the old name until a manual refresh. A missing files mount now means there are no files to move; any other error from that step still surfaces. (T32, T33)
+
 #### Web connect
 
 - **Open a web session on a resource whose stored name differs from the typed name only in case** -- Connect refused with `bundle_mismatch` ("the server's launch does not match this profile") because the host compared the resource name it sent with the stored spelling the server echoes back, byte for byte; the server resolves names case-insensitively, so the host now does too. A name that differs by more than case is still refused.
