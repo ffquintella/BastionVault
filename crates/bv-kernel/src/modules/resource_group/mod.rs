@@ -251,8 +251,7 @@ async fn redact_inaccessible_members(
         if m == REDACTED_MEMBER {
             continue;
         }
-        let path = namespaced_probe_path(ns_path, &format!("resources/resources/{m}"));
-        if !store.can_operate(auth, &path, Operation::Read, ns_path).await {
+        if !resource_member_readable(&store, auth, ns_path, m).await {
             *m = REDACTED_MEMBER.to_string();
         }
     }
@@ -267,21 +266,74 @@ async fn redact_inaccessible_members(
         if s == REDACTED_MEMBER {
             continue;
         }
-        let allowed = store
-            .can_operate(auth, &namespaced_probe_path(ns_path, s), Operation::Read, ns_path)
-            .await
-            || store
-                .can_operate(
-                    auth,
-                    &namespaced_probe_path(ns_path, &kv_v2_data_form(s)),
-                    Operation::Read,
-                    ns_path,
-                )
-                .await;
-        if !allowed {
+        if !secret_member_readable(&store, auth, ns_path, s).await {
             *s = REDACTED_MEMBER.to_string();
         }
     }
+}
+
+/// `Read` probe on one resource member, in the namespaced form the ACL sees.
+async fn resource_member_readable(
+    store: &crate::modules::policy::PolicyStore,
+    auth: &crate::logical::Auth,
+    ns_path: Option<&str>,
+    member: &str,
+) -> bool {
+    let path = namespaced_probe_path(ns_path, &format!("resources/resources/{member}"));
+    store.can_operate(auth, &path, Operation::Read, ns_path).await
+}
+
+/// `Read` probe on one KV-secret member. Members are stored canonically (no
+/// `data/` segment) while KV-v2 policies are usually written against the
+/// `<mount>/data/...` form, so either shape allowing `Read` is enough.
+async fn secret_member_readable(
+    store: &crate::modules::policy::PolicyStore,
+    auth: &crate::logical::Auth,
+    ns_path: Option<&str>,
+    secret: &str,
+) -> bool {
+    store
+        .can_operate(auth, &namespaced_probe_path(ns_path, secret), Operation::Read, ns_path)
+        .await
+        || store
+            .can_operate(
+                auth,
+                &namespaced_probe_path(ns_path, &kv_v2_data_form(secret)),
+                Operation::Read,
+                ns_path,
+            )
+            .await
+}
+
+/// True when `auth` can `Read` at least one member of `entry`. A caller who may
+/// read a member of a group is shown the group in listings, so the listing and
+/// the member redaction in `handle_read` apply the same rule. Fails closed: if
+/// the policy module is unavailable the group stays hidden, since this only
+/// widens visibility.
+async fn caller_reads_any_member(
+    core: &Arc<Core>,
+    auth: &crate::logical::Auth,
+    ns_path: Option<&str>,
+    entry: &ResourceGroupEntry,
+) -> bool {
+    use crate::modules::policy::PolicyModule;
+
+    let Some(policy_module) = core.module_manager().get_module::<PolicyModule>("policy") else {
+        return false;
+    };
+    let store = policy_module.policy_store.load();
+
+    for m in entry.members.iter().filter(|m| m.as_str() != REDACTED_MEMBER) {
+        if resource_member_readable(&store, auth, ns_path, m).await {
+            return true;
+        }
+    }
+    for sec in entry.secrets.iter().filter(|s| s.as_str() != REDACTED_MEMBER) {
+        if secret_member_readable(&store, auth, ns_path, sec).await {
+            return true;
+        }
+    }
+    false
 }
 
 /// Prefix a mount-relative probe path with the request's namespace, the form
@@ -543,10 +595,11 @@ impl ResourceGroupBackendInner {
         let mut visible: Vec<String> = Vec::new();
         for name in keys {
             // Owner pass: cheap, single read against the group entry.
-            let owned = match store.get_group(&name).await {
-                Ok(Some(g)) => !g.owner_entity_id.is_empty() && g.owner_entity_id == caller_id,
-                _ => false,
-            };
+            let entry = store.get_group(&name).await.ok().flatten();
+            let owned = entry
+                .as_ref()
+                .map(|g| !g.owner_entity_id.is_empty() && g.owner_entity_id == caller_id)
+                .unwrap_or(false);
             if owned {
                 visible.push(name);
                 continue;
@@ -590,6 +643,17 @@ impl ResourceGroupBackendInner {
             }
             if has_share {
                 visible.push(name);
+                continue;
+            }
+
+            // Member pass: a caller whose policy reads any member of the group
+            // sees the group, the same rule `handle_read` uses to decide which
+            // members to redact. Without it a tenant user with read access to
+            // the resources, but neither owner nor grantee, gets an empty list.
+            if let Some(entry) = &entry {
+                if caller_reads_any_member(&self.core, &auth, req.namespace_path.as_deref(), entry).await {
+                    visible.push(name);
+                }
             }
         }
 

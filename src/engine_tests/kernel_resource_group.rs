@@ -926,4 +926,57 @@ async fn test_asset_group_member_redaction_honors_namespace_prefix() {
         vec![REDACTED_MEMBER.to_string(), "web1".to_string()],
         "web1 is readable through the tenant policy and must show; db1 is not and must stay hidden",
     );
+
+    // Listing: dave is neither owner nor grantee, but reads a member, so the
+    // group is listed. Before, the list was empty and the GUI had no groups.
+    let listed = ns_req(&core, &dave, Operation::List, "resource-group/groups/", "tenant-a", None)
+        .await
+        .unwrap()
+        .unwrap()
+        .data
+        .unwrap();
+    assert_eq!(listed["keys"], json!(["g"]), "a caller who reads a member must see the group");
+
+    // eve may list and read groups but reads no member: nothing to show, and
+    // the group name must not leak to her.
+    ns_req(
+        &core,
+        &root,
+        Operation::Write,
+        "sys/policy/eve-p",
+        "tenant-a",
+        json!({ "policy": r#"
+            path "tenant-a/resource-group/groups/*" { capabilities = ["read", "list"] }
+        "# })
+        .as_object()
+        .cloned(),
+    )
+    .await
+    .unwrap();
+    test_write_api(&core, &root, "auth/userpass/users/eve", true, json!({ "password": "pw-123456" }).as_object().cloned())
+        .await
+        .unwrap();
+    ns_req(
+        &core,
+        &root,
+        Operation::Write,
+        "identity/group/user/others",
+        "tenant-a",
+        json!({ "members": ["eve"], "policies": ["eve-p"] }).as_object().cloned(),
+    )
+    .await
+    .unwrap();
+    let mut login = Request::new("auth/userpass/login/eve");
+    login.operation = Operation::Write;
+    login.body = json!({ "password": "pw-123456" }).as_object().cloned();
+    let mut h = HashMap::new();
+    h.insert("x-bastionvault-namespace".to_string(), "tenant-a".to_string());
+    login.headers = Some(h);
+    let eve = core.handle_request(&mut login).await.unwrap().unwrap().auth.unwrap().client_token;
+    let listed = ns_req(&core, &eve, Operation::List, "resource-group/groups/", "tenant-a", None).await;
+    let keys = listed.ok().flatten().and_then(|r| r.data).and_then(|d| d.get("keys").cloned());
+    assert!(
+        keys.map(|k| k.as_array().map(|a| a.is_empty()).unwrap_or(true)).unwrap_or(true),
+        "a caller who reads no member must not see the group",
+    );
 }

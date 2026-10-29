@@ -396,5 +396,6 @@ label is "Group").
   dependency for most of those; the two features compose (`groups`
   and `scopes` OR together on a single rule).
 - **Member redaction in a namespace: shipped.** The probe that decides whether a caller may see a member is namespace-qualified (`<ns>/resources/resources/<name>`, and the namespaced KV path in canonical and KV-v2 form) and passes the request namespace to `PolicyStore::can_operate`. Before this a tenant caller who was not the owner or an admin saw every member as `<hidden>`, because tenant policies must use `<ns>/`-prefixed paths (`test_asset_group_member_redaction_honors_namespace_prefix`).
+- **Group listing for tenant callers: shipped.** `resource-group/groups/` lists a group to an admin, its owner, a grantee of an active share, or any caller who can `Read` at least one of its members (the namespace-qualified probe used for redaction). A caller who reads no member does not see the group name (`test_asset_group_member_redaction_honors_namespace_prefix`).
 - **GUI: design only.** No Asset Groups / Resource Groups page, no
   chips on object pages, no sidebar filter.

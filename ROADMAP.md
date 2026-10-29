@@ -288,6 +288,8 @@ Next-up list recorded before the migration, in its order:
   - initiative: Phase 9 of the [SQL Browser](features/sql-browser.md): session-owned leases revoked at close, per-tier roles matched to profile ceilings, preferred over stored secrets when a dynamic profile can serve the caller.
 - [x] T468 Show a group's readable members to tenant callers, so groups appear in a namespace's Resources page (S47, S2)
   - note: the member redaction on `resource-group/groups/<name>` probed `resources/resources/<member>` without the `<ns>/` prefix a tenant policy must carry, so every member of every group read as `<hidden>` for a non-owner, non-admin tenant caller and the GUI built no group chips. The probe is now namespace-qualified and passes the namespace to the policy evaluator; pinned by `test_asset_group_member_redaction_honors_namespace_prefix`.
+- [x] T469 List a group to a tenant caller who can read one of its members, so groups appear in a namespace's Resources page (S47, S2)
+  - note: `resource-group/groups/` listed a group only to an admin, its owner or a grantee, so a tenant user whose policy reads the resources but who owns no group and holds no share got an empty list and the GUI had nothing to read. The list now also shows a group when the caller can `Read` at least one of its members, using the same namespace-qualified probe as the member redaction; pinned by the list assertions in `test_asset_group_member_redaction_honors_namespace_prefix`.
 
 ## [M6] Authentication
 > outcome: Done when every listed auth method (token, AppID, userpass, cert, OIDC, SAML, FIDO2, FerroGate) is shipped and workforce identity can be brokered downstream.
