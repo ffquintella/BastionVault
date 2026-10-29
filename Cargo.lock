@@ -1721,7 +1721,7 @@ dependencies = [
 
 [[package]]
 name = "bv-auth-userpass"
-version = "0.41.5"
+version = "0.41.6"
 dependencies = [
  "async-trait",
  "bcrypt",
@@ -2009,7 +2009,7 @@ dependencies = [
 
 [[package]]
 name = "bv-engine-resource"
-version = "0.43.3"
+version = "0.43.4"
 dependencies = [
  "async-trait",
  "base32",
@@ -2225,7 +2225,7 @@ dependencies = [
 
 [[package]]
 name = "bv-kernel"
-version = "0.42.4"
+version = "0.42.5"
 dependencies = [
  "actix-rt",
  "arc-swap",
@@ -2276,7 +2276,7 @@ dependencies = [
 
 [[package]]
 name = "bv-kernel-api"
-version = "0.42.1"
+version = "0.42.2"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -2301,7 +2301,7 @@ dependencies = [
 
 [[package]]
 name = "bv-logical"
-version = "0.42.2"
+version = "0.42.3"
 dependencies = [
  "actix-rt",
  "async-trait",
@@ -2325,7 +2325,7 @@ dependencies = [
 
 [[package]]
 name = "bv-mcp"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
