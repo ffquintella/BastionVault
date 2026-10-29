@@ -246,6 +246,10 @@ EXAMPLE ENTRY:
 
 - **Name the real cause when an SSH session is lost** -- A dropped shell always read "ssh connection lost (TCP closed or keepalive timed out ...)", a guess that hid whether the server disconnected, stopped answering keepalives or the socket failed. The closed banner now states which one happened, and the same reason is logged at warn level.
 
+#### Web connect
+
+- **Open a web session on a resource whose stored name differs from the typed name only in case** -- Connect refused with `bundle_mismatch` ("the server's launch does not match this profile") because the host compared the resource name it sent with the stored spelling the server echoes back, byte for byte; the server resolves names case-insensitively, so the host now does too. A name that differs by more than case is still refused.
+
 #### Asset groups in a namespace
 
 - **List a group to a tenant user who can read one of its members** (T469, S47) -- Listing `resource-group/groups/` showed a group only to an admin, its owner or a grantee of an active share, so a tenant user whose policy reads the resources but who neither owns a group nor was given one saw an empty list, and the Resources page showed no groups or group chips even after T468. The list now also includes a group when the caller can read at least one member, with the same namespace-qualified check the member redaction uses, so listing and reading agree on what a caller may see. A caller who can read no member still does not see the group name.

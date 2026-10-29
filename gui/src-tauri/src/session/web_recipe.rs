@@ -729,7 +729,9 @@ pub enum ExpectedLogin<'a> {
 /// Cross-check the bundle against the profile the host is about to run.
 /// `Err` carries the `aborted:<check>` name the launch is closed with.
 pub fn check_bundle(bundle: &LaunchBundle, expect: &BundleExpectation<'_>) -> Result<(), &'static str> {
-    if bundle.resource != expect.resource || bundle.profile_id != expect.profile_id {
+    // The server resolves a resource name ASCII-case-insensitively and echoes
+    // the stored spelling, so only a difference beyond case is another resource.
+    if !bundle.resource.eq_ignore_ascii_case(expect.resource) || bundle.profile_id != expect.profile_id {
         return Err("bundle_mismatch");
     }
     let c = &bundle.credential;
@@ -1245,6 +1247,10 @@ mod tests {
         assert_eq!(check_bundle(&b, &other), Err("bundle_mismatch"));
         let other = BundleExpectation { resource: "fw02", ..expect };
         assert_eq!(check_bundle(&b, &other), Err("bundle_mismatch"));
+        // The server resolves resource names case-insensitively and returns the
+        // stored spelling, so a difference in case alone is the same resource.
+        let other = BundleExpectation { resource: "FW01", ..expect };
+        assert_eq!(check_bundle(&b, &other), Ok(()));
 
         // The server saying "heuristic" for an explicit recipe (or the
         // reverse) is never run.
