@@ -58,6 +58,11 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### SQL browser: exports, scripts and per-action step-up
+
+- **Export query results and run SQL scripts only with their own grants, and step up with MFA per action** (T126, S109) -- `dbms/v2/sessions/<id>/export` streams one SELECT-only statement as CSV (RFC 4180, formula guard on by default), JSON Lines or SQL `INSERT`s in 1 MiB chunks pulled from `exports/<job>/<offset>`, straight from the database cursor and never staged on the vault host. It needs `sql_export` on every object read (on the server when none), refuses DML with `RETURNING`, data-modifying CTEs and `FOR UPDATE`, stops at 1,000,000 rows / 512 MiB by default, drops a job nobody pulls for 5 minutes, and audits `dbms.export` with the row and byte counts and the SHA-256 of the stream. `dbms/v2/sessions/<id>/script` needs `sql_script` on `sql/server` and authorizes every statement before the first runs (one refusal runs nothing and names the statement), with `on_error: stop | continue`, `transaction: none | single`, per-statement progress through the run, a 1,000-statement / 4 MiB default limit and a `dbms.script` audit event. A profile's `step_up` list now asks for a fresh MFA ticket bound to the exact action before a request uses one of those capabilities.
+- **Export, run scripts and step up from the SQL workspace** (T126, S109) -- The desktop SQL workspace gains *Run script* (with *On error* and *One transaction*), *Load .sql*, *Export* for the statement at the cursor and *Export* on tables in the object tree, and a step-up prompt that retries the request once a factor is verified. The app writes an export to the file you pick in a save dialog, checks it against the server's SHA-256 and keeps no partial file; the window never holds the data, the path or the step-up ticket. New SQL profiles start with `sql_drop`, `sql_admin`, `sql_export` and `sql_script` in their step-up list.
+
 #### SQL browser workspace
 
 - **Browse, query and edit PostgreSQL databases from a SQL workspace in the desktop app** (T125, S109) -- Open a database resource from the Connect menu, ⌘K, the Resources context menu or a SQL profile, and get a session tree, query editor, result grid, messages, history and an enforcement panel showing which `sql_*` privileges you hold. Grid edits report conflicts, and an `UPDATE` or `DELETE` without `WHERE` asks for confirmation. Every statement is authorized by the plugin and the host; the window never sees credentials or the plugin session id. The editor is a plain text box for now, and export and scripts arrive with T126.
@@ -206,6 +211,11 @@ EXAMPLE ENTRY:
 - Run `bvault hsm-gateway --config gateway.hcl` on a host with a YubiHSM 2 to expose its localhost `yubihsm-connector` to vault nodes over mutual TLS: only TLS 1.3 clients whose certificate chains to `client_ca_file` and carries a DNS SAN exactly equal to one of `allowed_clients` get through; each client may have one request in flight and `max_rps_per_client` requests per second (default 50); only `POST /connector/api` (3–3139-byte body) and `GET /connector/status` are forwarded, bodies verbatim and client headers dropped, with a 5 s connector timeout; chunked, duplicated-length, pipelined and other malformed requests are refused before reaching the connector; a non-loopback `connector`, an empty or invalid `allowed_clients` or an unknown field stops the command at startup; logs name the peer and client and never contain a request or response body. The node-side loopback relay ships in the new `bv-hsm-link` crate but is not used by the HSM seal yet, so a `yubihsm2` pool is still refused (T454, S114)
 
 ### Changed
+
+#### SQL browser: step-up tickets
+
+- Bind connect-MFA tickets to an optional SQL step-up `action`: `resources/v2/connect/mfa/begin` and `/verify` accept `action` (`sql_*` names, refused unless the `sql` profile's `step_up` lists every one), and the plugin host call `connect_ticket_redeem` now redeems an action ticket instead of refusing every `action`. A ticket without an action, including every ticket minted before this release, is never accepted for one, and an action ticket never opens a session or unlocks a `require_mfa` credential release; existing ticket records keep their meaning. (T126, S109)
+- Store the `dbms-management` plugin config as `v: 2` with script and export limits; a stored `v: 1` record is still read, keeps its values and is written back as `v: 2`. (T126, S109)
 
 #### HSM pool HA (pool of one)
 
@@ -638,6 +648,7 @@ EXAMPLE ENTRY:
 - **Read transcripts at `v2/sys/mcp/transcripts`** -- list and read need `read` plus `sudo`, and every list or read is itself audited (`mcp.transcript.accessed`); when an audit device is enabled and that event cannot be written, the read is refused. Transcripts can contain secrets a command printed. (T136, S111)
 - **Record MCP context on every tool call in the audit log** -- each routed `tools/call` carries an `mcp` block (principal, client, tool, argument hash, transport, and whether the local host asserted an operator confirmation). Refused session-tool calls also emit `connect.agent.refused`. (T136, S3, S111)
 - **Show where the brokered-session destination list comes from** -- `sys/mcp/config` reads report the effective list, its source (`runtime`, `hcl` or `default`), the server-level switches and the always-denied ranges. (T136, S111)
+- **Turn on MCP brokered sessions and edit their destination list from Admin → MCP Apps → Settings** -- the page now shows the runtime switch, the destination list (blank resets to the server config or default, `none` denies all), the list in force with its source, and the always-refused ranges, saved through `sys/mcp/config` (sudo, audited). (T136, S111)
 
 ### Changed
 

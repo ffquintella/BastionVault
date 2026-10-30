@@ -5,7 +5,7 @@ import { profilesForWrite, readProfiles, readUnknownProfiles } from "../lib/conn
 import {
   SQL_ENGINES,
   SQL_TLS_MODES,
-  blankSqlProfile,
+  newSqlProfile,
   connectWithSql,
   isSqlProfileEntry,
   readSqlEnforcement,
@@ -213,7 +213,7 @@ export function SqlProfilesCard({
               </Button>
             )}
             <Button
-              onClick={() => engine && setEditing({ form: blankSqlProfile(), isNew: true, problems: [] })}
+              onClick={() => engine && setEditing({ form: newSqlProfile(), isNew: true, problems: [] })}
               disabled={newDisabled}
               title={newTitle}
             >
@@ -664,8 +664,9 @@ function SqlProfileEditor({
           <label className="block text-sm font-medium text-[var(--color-text-muted)] mb-1">Step-up (optional)</label>
           <CapabilityChips label="Step-up" value={f.stepUp} onChange={(v) => set("stepUp", v)} />
           <p className="text-xs text-[var(--color-text-muted)] mt-1.5">
-            Capabilities whose use will need a fresh MFA ticket. Stored now; it takes effect with the step-up phase
-            (T126), until then it is not enforced.
+            Capabilities whose use needs a fresh MFA step-up bound to that action, on every request that uses them
+            (for example an export, a script or a DROP). Only userpass logins with a second factor can step up. Read
+            when a SQL session opens.
           </p>
         </div>
 

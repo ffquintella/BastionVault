@@ -6,7 +6,12 @@
 //! never the vault token, the plugin session id or a database credential.
 //! Paths are the resolved mount plus validated or escaped segments.
 
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
 use serde_json::{Map, Value};
+use zeroize::Zeroizing;
 
 use super::{SessionCleanup, SessionCleanupKind};
 
@@ -25,6 +30,167 @@ pub struct SqlSessionState {
     pub catalog: String,
     /// UTC date (`YYYY-MM-DD`) the session was opened on, for the journal.
     pub opened_on: String,
+    /// The profile the plugin chose (step-up tickets are bound to it).
+    pub profile: String,
+    /// State every clone of this record shares (T126).
+    pub shared: Arc<SqlShared>,
+}
+
+/// How long a verified step-up ticket is held for its request: under the
+/// server's 120 s ticket lifetime, so an expired one is never sent.
+pub const STEP_UP_HOLD: Duration = Duration::from_secs(110);
+
+/// A step-up ticket the operator just verified (features/sql-browser.md
+/// §8.3). The host holds it and attaches it to the session's next request;
+/// the webview never receives it.
+pub struct PendingStepUp {
+    pub action: String,
+    ticket: Zeroizing<String>,
+    at: Instant,
+}
+
+impl std::fmt::Debug for PendingStepUp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingStepUp").field("action", &self.action).field("ticket", &"<redacted>").finish()
+    }
+}
+
+/// What the host keeps for a SQL session beyond its address.
+#[derive(Debug, Default)]
+pub struct SqlShared {
+    step_up: Mutex<Option<PendingStepUp>>,
+    /// Set by `sql_export_cancel`; a running `sql_export_to_file` checks it
+    /// between chunks.
+    pub export_cancel: AtomicBool,
+}
+
+impl SqlShared {
+    /// Hold `ticket` for the next request (replacing any older one).
+    pub fn hold_step_up(&self, action: &str, ticket: String) {
+        let pending = PendingStepUp { action: action.to_string(), ticket: Zeroizing::new(ticket), at: Instant::now() };
+        *self.step_up.lock().unwrap_or_else(|p| p.into_inner()) = Some(pending);
+    }
+
+    /// The held ticket, once, unless it is older than [`STEP_UP_HOLD`].
+    pub fn take_step_up(&self) -> Option<Zeroizing<String>> {
+        let held = self.step_up.lock().unwrap_or_else(|p| p.into_inner()).take()?;
+        (held.at.elapsed() < STEP_UP_HOLD).then(|| held.ticket.clone())
+    }
+}
+
+/// Put a held step-up ticket into a plugin request body (`step_up_ticket`).
+pub fn attach_step_up(body: &mut Map<String, Value>, shared: &SqlShared) {
+    if let Some(t) = shared.take_step_up() {
+        body.insert("step_up_ticket".into(), Value::String(t.as_str().to_string()));
+    }
+}
+
+/// A step-up action as the server binds it: one or more `sql_*` names,
+/// comma-separated, nothing else. The server canonicalizes and decides.
+pub fn step_up_action_ok(action: &str) -> bool {
+    !action.is_empty()
+        && action.len() <= 160
+        && action.split(',').all(|a| {
+            a.len() > 4 && a.starts_with("sql_") && a[4..].bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+        })
+}
+
+/// The body of `POST v2/sessions/<id>/script`: the text and the two options.
+pub fn script_body(sql: &str, on_error: Option<&str>, transaction: Option<&str>) -> Result<Map<String, Value>, String> {
+    if sql.trim().is_empty() {
+        return Err("the script is empty".to_string());
+    }
+    let mut body = Map::new();
+    body.insert("sql".into(), Value::String(sql.to_string()));
+    match on_error {
+        None => {}
+        Some(v @ ("stop" | "continue")) => {
+            body.insert("on_error".into(), Value::String(v.to_string()));
+        }
+        Some(_) => return Err("`on_error` is stop or continue".to_string()),
+    }
+    match transaction {
+        None => {}
+        Some(v @ ("none" | "single")) => {
+            body.insert("transaction".into(), Value::String(v.to_string()));
+        }
+        Some(_) => return Err("`transaction` is none or single".to_string()),
+    }
+    Ok(body)
+}
+
+/// Export formats and the file extension each is saved with.
+pub fn export_extension(format: &str) -> Option<&'static str> {
+    match format {
+        "csv" => Some("csv"),
+        "jsonl" => Some("jsonl"),
+        "sql-insert" => Some("sql"),
+        _ => None,
+    }
+}
+
+/// The body of `POST v2/sessions/<id>/export`. `table` (`{schema?, name}`)
+/// only for `sql-insert`; the plugin checks every value again.
+pub fn export_body(
+    sql: &str,
+    format: &str,
+    max_rows: Option<u64>,
+    formula_guard: Option<bool>,
+    table: Option<&Map<String, Value>>,
+) -> Result<Map<String, Value>, String> {
+    if sql.trim().is_empty() {
+        return Err("nothing to export".to_string());
+    }
+    if export_extension(format).is_none() {
+        return Err("`format` is csv, jsonl or sql-insert".to_string());
+    }
+    let mut body = Map::new();
+    body.insert("sql".into(), Value::String(sql.to_string()));
+    body.insert("format".into(), Value::String(format.to_string()));
+    if let Some(n) = max_rows {
+        body.insert("max_rows".into(), Value::from(n));
+    }
+    if let Some(g) = formula_guard {
+        body.insert("formula_guard".into(), Value::Bool(g));
+    }
+    if let Some(t) = table {
+        if t.keys().any(|k| k != "schema" && k != "name") || !t.values().all(Value::is_string) {
+            return Err("`table` is {schema?, name}".to_string());
+        }
+        body.insert("table".into(), Value::Object(t.clone()));
+    }
+    Ok(body)
+}
+
+/// An export job id from the plugin (`e<n>` today): short and plain.
+pub fn export_job_ok(id: &str) -> bool {
+    run_id_ok(id)
+}
+
+/// The default file name offered in the save dialog.
+pub fn export_file_name(resource: &str, format: &str) -> String {
+    let safe: String =
+        resource.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
+    format!("{}-export.{}", if safe.is_empty() { "sql" } else { &safe }, export_extension(format).unwrap_or("txt"))
+}
+
+/// One pulled chunk: its bytes, the next offset, whether it was the last.
+/// The offset must be the one asked for and the length must match, or the
+/// reply is refused (the file would be wrong).
+pub fn decode_chunk(reply: &Map<String, Value>, asked: u64) -> Result<(Vec<u8>, u64, bool), String> {
+    use base64::Engine as _;
+    let offset = reply.get("offset").and_then(Value::as_u64).ok_or("the chunk has no offset")?;
+    if offset != asked {
+        return Err(format!("the plugin answered offset {offset} for {asked}"));
+    }
+    let b64 = reply.get("chunk").and_then(Value::as_str).ok_or("the chunk has no data")?;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(b64).map_err(|_| "the chunk is not base64")?;
+    let len = reply.get("length").and_then(Value::as_u64).ok_or("the chunk has no length")?;
+    let next = reply.get("next_offset").and_then(Value::as_u64).ok_or("the chunk has no next offset")?;
+    if bytes.len() as u64 != len || next != asked + len {
+        return Err("the chunk's length does not match its offsets".to_string());
+    }
+    Ok((bytes, next, reply.get("eof").and_then(Value::as_bool).unwrap_or(false)))
 }
 
 impl SqlSessionState {
@@ -364,6 +530,59 @@ mod tests {
         assert_eq!(privileges_triple("app", "pub,lic", "a/b%"), "app/pub%2Clic/a%2Fb%25");
     }
 
+    /// T126: a verified step-up ticket is held by the host, attached once,
+    /// never past its hold, and never printed.
+    #[test]
+    fn step_up_tickets_are_held_once_and_redacted() {
+        let shared = SqlShared::default();
+        let mut body = Map::new();
+        attach_step_up(&mut body, &shared);
+        assert!(body.is_empty());
+        shared.hold_step_up("sql_drop", "tkt-secret".into());
+        assert!(format!("{shared:?}").contains("sql_drop"));
+        assert!(!format!("{shared:?}").contains("tkt-secret"));
+        attach_step_up(&mut body, &shared);
+        assert_eq!(body["step_up_ticket"], "tkt-secret");
+        let mut again = Map::new();
+        attach_step_up(&mut again, &shared);
+        assert!(again.is_empty(), "attached once");
+        assert!(step_up_action_ok("sql_drop,sql_script"));
+        for bad in ["", "drop", "sql_", "sql_Drop", "sql_drop;x", "sql_drop, sql_script"] {
+            assert!(!step_up_action_ok(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn script_and_export_bodies_carry_only_the_plugins_fields() {
+        let b = script_body("SELECT 1; SELECT 2", Some("continue"), Some("none")).unwrap();
+        assert_eq!(Value::Object(b), json!({"sql": "SELECT 1; SELECT 2", "on_error": "continue", "transaction": "none"}));
+        assert!(script_body(" ", None, None).is_err());
+        assert!(script_body("SELECT 1", Some("ignore"), None).is_err());
+        assert!(script_body("SELECT 1", None, Some("nested")).is_err());
+        let t = json!({"schema": "public", "name": "t"});
+        let b = export_body("SELECT 1", "sql-insert", Some(5), None, t.as_object()).unwrap();
+        assert_eq!(Value::Object(b), json!({"sql": "SELECT 1", "format": "sql-insert", "max_rows": 5, "table": t}));
+        assert!(export_body("SELECT 1", "xlsx", None, None, None).is_err());
+        assert!(export_body("SELECT 1", "csv", None, None, json!({"name": "t", "path": "/x"}).as_object()).is_err());
+        assert_eq!(export_file_name("net risk/db", "sql-insert"), "net_risk_db-export.sql");
+        assert!(export_job_ok("e1") && !export_job_ok("../x"));
+    }
+
+    #[test]
+    fn chunks_must_match_their_offsets() {
+        let ok = json!({"offset": 4, "chunk": "AAEC", "length": 3, "next_offset": 7, "eof": true});
+        assert_eq!(decode_chunk(ok.as_object().unwrap(), 4).unwrap(), (vec![0, 1, 2], 7, true));
+        for bad in [
+            json!({"offset": 0, "chunk": "AAEC", "length": 3, "next_offset": 3}),
+            json!({"offset": 4, "chunk": "AAEC", "length": 4, "next_offset": 8}),
+            json!({"offset": 4, "chunk": "AAEC", "length": 3, "next_offset": 9}),
+            json!({"offset": 4, "chunk": "!!", "length": 1, "next_offset": 5}),
+            json!({"offset": 4, "length": 0, "next_offset": 4}),
+        ] {
+            assert!(decode_chunk(bad.as_object().unwrap(), 4).is_err(), "{bad}");
+        }
+    }
+
     #[test]
     fn the_cleanup_deletes_exactly_this_session() {
         let s = SqlSessionState {
@@ -373,6 +592,8 @@ mod tests {
             resource: "db1".into(),
             catalog: "app".into(),
             opened_on: "2026-10-29".into(),
+            profile: "ro".into(),
+            shared: Default::default(),
         };
         match s.cleanup().kind {
             SessionCleanupKind::SqlSessionClose { mount, session_id, namespace } => {

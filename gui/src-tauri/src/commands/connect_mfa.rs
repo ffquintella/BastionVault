@@ -84,8 +84,13 @@ pub async fn begin(
     let body = target_body(resource_name, profile_id);
     let resp = make_request(state, Operation::Write, begin_path(), Some(body)).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
+    Ok(challenge_from(&data))
+}
 
-    Ok(ConnectMfaChallenge {
+/// A `connect/mfa/begin` reply as the prompt needs it. Shared with the SQL
+/// browser's per-action step-up (`sql_step_up_begin`, T126).
+pub fn challenge_from(data: &Map<String, Value>) -> ConnectMfaChallenge {
+    ConnectMfaChallenge {
         required: data.get("required").and_then(|v| v.as_bool()).unwrap_or(false),
         methods: data
             .get("methods")
@@ -93,7 +98,7 @@ pub async fn begin(
             .map(|a| a.iter().filter_map(|m| m.as_str().map(str::to_string)).collect())
             .unwrap_or_default(),
         fido2: data.get("fido2").cloned(),
-    })
+    }
 }
 
 /// Prove a TOTP code and collect the ticket.

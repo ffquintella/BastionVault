@@ -3,6 +3,12 @@
 //! token; every other command names the local session token and is refused
 //! unless the calling window holds that session (`require_session_window`).
 //! The vault and the plugin decide every statement: nothing here gates SQL.
+//!
+//! T126 adds scripts (`sql_script`), exports written by the host to a file
+//! the operator picks in a native dialog (`sql_export_to_file`; the webview
+//! never holds the exported data or names a path), and the per-action
+//! step-up (`sql_step_up_begin` / `_verify`), whose ticket the host holds and
+//! attaches to the session's next request.
 
 use bv_client::Operation;
 use serde::{Deserialize, Serialize};
@@ -153,6 +159,8 @@ pub async fn sql_session_open(
         resource: resource.clone(),
         catalog,
         opened_on: sqls::utc_date(chrono::Utc::now().timestamp_millis()),
+        profile: profile.clone(),
+        shared: Default::default(),
     };
     state.connect_sessions.lock().await.insert(token.clone(), SessionState::Sql(st));
     let descriptor = SessionDescriptor {
@@ -266,6 +274,7 @@ pub async fn sql_execute(
     }
     let mut body = Map::new();
     body.insert("sql".into(), Value::String(request.sql));
+    sqls::attach_step_up(&mut body, &s.shared);
     call(&state, s.namespace.as_deref(), Operation::Write, s.path("execute"), Some(body)).await
 }
 
@@ -346,7 +355,349 @@ pub async fn sql_rows(
 ) -> CmdResult<Map<String, Value>> {
     let s = session_for(&state, &webview, &request.token).await?;
     sqls::check_edit(&request.edit).map_err(CommandError::from)?;
-    call(&state, s.namespace.as_deref(), Operation::Write, s.path("rows"), Some(request.edit)).await
+    let mut edit = request.edit;
+    sqls::attach_step_up(&mut edit, &s.shared);
+    call(&state, s.namespace.as_deref(), Operation::Write, s.path("rows"), Some(edit)).await
+}
+
+#[derive(Deserialize)]
+pub struct SqlScriptRequest {
+    pub token: String,
+    pub sql: String,
+    /// `stop` (default) or `continue`.
+    #[serde(default)]
+    pub on_error: Option<String>,
+    /// `none` (default) or `single`.
+    #[serde(default)]
+    pub transaction: Option<String>,
+}
+
+/// Run a multi-statement script (§8.2). The plugin authorizes every
+/// statement before the first runs; the reply is `{run_id, …}` (progress
+/// through `sql_run`), `{state: "refused", …}` naming the statement, or
+/// `{state: "step_up_required", action}`.
+#[tauri::command]
+pub async fn sql_script(
+    state: State<'_, AppState>,
+    webview: Webview,
+    request: SqlScriptRequest,
+) -> CmdResult<Map<String, Value>> {
+    let s = session_for(&state, &webview, &request.token).await?;
+    if request.sql.len() > MAX_SQL_BYTES {
+        return Err(CommandError::from("the script is larger than 4 MiB".to_string()));
+    }
+    let mut body = sqls::script_body(&request.sql, request.on_error.as_deref(), request.transaction.as_deref())
+        .map_err(CommandError::from)?;
+    sqls::attach_step_up(&mut body, &s.shared);
+    call(&state, s.namespace.as_deref(), Operation::Write, s.path("script"), Some(body)).await
+}
+
+#[derive(Deserialize)]
+pub struct SqlStepUpRequest {
+    pub token: String,
+    /// One or more `sql_*` names, comma-separated, as the plugin's
+    /// `step_up_required` reply named them.
+    pub action: String,
+}
+
+fn step_up_target(s: &SqlSessionState, action: &str) -> CmdResult<Map<String, Value>> {
+    if !sqls::step_up_action_ok(action) {
+        return Err(CommandError::from("the step-up action names sql_* capabilities only".to_string()));
+    }
+    if s.resource.is_empty() || s.profile.is_empty() {
+        return Err(CommandError::from("this SQL session has no profile to step up for".to_string()));
+    }
+    let mut body = Map::new();
+    body.insert("resource".into(), Value::String(s.resource.clone()));
+    body.insert("profile_id".into(), Value::String(s.profile.clone()));
+    body.insert("action".into(), Value::String(action.to_string()));
+    Ok(body)
+}
+
+/// Start the step-up for an action on this session's resource and profile
+/// (`resources/v2/connect/mfa/begin` with `action`): which factors the
+/// operator can use, and the FIDO2 challenge when they have a key.
+#[tauri::command]
+pub async fn sql_step_up_begin(
+    state: State<'_, AppState>,
+    webview: Webview,
+    request: SqlStepUpRequest,
+) -> CmdResult<super::connect_mfa::ConnectMfaChallenge> {
+    let s = session_for(&state, &webview, &request.token).await?;
+    let body = step_up_target(&s, &request.action)?;
+    let data = call(&state, s.namespace.as_deref(), Operation::Write, "resources/v2/connect/mfa/begin".into(), Some(body))
+        .await?;
+    Ok(super::connect_mfa::challenge_from(&data))
+}
+
+#[derive(Deserialize)]
+pub struct SqlStepUpVerifyRequest {
+    pub token: String,
+    pub action: String,
+    /// `totp` or `fido2`.
+    pub method: String,
+    #[serde(default)]
+    pub code: Option<String>,
+    /// The `fido2` challenge from `sql_step_up_begin`, handed back as is.
+    #[serde(default)]
+    pub challenge: Option<Value>,
+}
+
+#[derive(Serialize)]
+pub struct SqlStepUpVerified {
+    pub action: String,
+    pub method: String,
+    pub expires_at: String,
+}
+
+/// Prove a factor for an action and hold the ticket for the session's next
+/// request. The webview gets the action and expiry, never the ticket.
+#[tauri::command]
+pub async fn sql_step_up_verify(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    webview: Webview,
+    request: SqlStepUpVerifyRequest,
+) -> CmdResult<SqlStepUpVerified> {
+    let s = session_for(&state, &webview, &request.token).await?;
+    let mut body = step_up_target(&s, &request.action)?;
+    match request.method.as_str() {
+        "totp" => {
+            let code = request.code.as_deref().map(str::trim).unwrap_or_default();
+            if code.is_empty() {
+                return Err(CommandError::from("enter the current code from your authenticator app".to_string()));
+            }
+            body.insert("method".into(), Value::String("totp".into()));
+            body.insert("totp_code".into(), Value::String(code.to_string()));
+        }
+        "fido2" => {
+            let challenge = request.challenge.as_ref().ok_or_else(|| CommandError::from("no FIDO2 challenge".to_string()))?;
+            let credential = super::fido2_native::assert_webauthn(&state, &app, challenge).await?;
+            body.insert("method".into(), Value::String("fido2".into()));
+            body.insert("credential".into(), Value::String(credential));
+        }
+        _ => return Err(CommandError::from("`method` is totp or fido2".to_string())),
+    }
+    let data = call(&state, s.namespace.as_deref(), Operation::Write, "resources/v2/connect/mfa/verify".into(), Some(body))
+        .await?;
+    let text = |k: &str| data.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
+    let ticket = text("connect_ticket");
+    if ticket.is_empty() || text("action").is_empty() {
+        // A verify without an action-bound ticket is a contract break: refuse
+        // rather than hold something the plugin will not accept.
+        return Err(CommandError::from("the step-up returned no action-bound ticket".to_string()));
+    }
+    let action = text("action");
+    s.shared.hold_step_up(&action, ticket);
+    log::info!(target: "audit", "sql.step_up.verified: resource={} profile={} action={action}", s.resource, s.profile);
+    Ok(SqlStepUpVerified { action, method: text("method"), expires_at: text("expires_at") })
+}
+
+#[derive(Deserialize)]
+pub struct SqlExportRequest {
+    pub token: String,
+    pub sql: String,
+    /// `csv`, `jsonl` or `sql-insert`.
+    pub format: String,
+    #[serde(default)]
+    pub max_rows: Option<u64>,
+    #[serde(default)]
+    pub formula_guard: Option<bool>,
+    /// `sql-insert` only: `{schema?, name}`.
+    #[serde(default)]
+    pub table: Option<Map<String, Value>>,
+}
+
+/// What an export ended with. `reply` is the plugin's own answer when the
+/// export did not start (refused, step-up required).
+#[derive(Serialize, Default)]
+pub struct SqlExportOutcome {
+    pub state: String,
+    pub rows: u64,
+    pub bytes: u64,
+    pub sha256: Option<String>,
+    /// The file name written (not the directory), for the message pane.
+    pub file: Option<String>,
+    pub limit: Option<String>,
+    pub reply: Option<Map<String, Value>>,
+}
+
+/// Start an export, ask the operator where to save it (a native dialog
+/// the host opens), and write the chunks there as they are pulled: to
+/// `<file>.part`, checked against the plugin's SHA-256 of the stream, then
+/// renamed. The webview never holds the data or names the path. A cancelled
+/// dialog or a failure cancels the export and leaves no file behind.
+#[tauri::command]
+pub async fn sql_export_to_file(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    webview: Webview,
+    request: SqlExportRequest,
+) -> CmdResult<SqlExportOutcome> {
+    let s = session_for(&state, &webview, &request.token).await?;
+    if request.sql.len() > MAX_SQL_BYTES {
+        return Err(CommandError::from("the statement is larger than 4 MiB".to_string()));
+    }
+    let mut body = sqls::export_body(
+        &request.sql,
+        &request.format,
+        request.max_rows,
+        request.formula_guard,
+        request.table.as_ref(),
+    )
+    .map_err(CommandError::from)?;
+    sqls::attach_step_up(&mut body, &s.shared);
+    s.shared.export_cancel.store(false, std::sync::atomic::Ordering::SeqCst);
+    let reply = call(&state, s.namespace.as_deref(), Operation::Write, s.path("export"), Some(body)).await?;
+    let job = reply.get("job").and_then(Value::as_str).unwrap_or_default().to_string();
+    if reply.get("state").and_then(Value::as_str) != Some("running") {
+        let state = reply.get("state").and_then(Value::as_str).unwrap_or("refused").to_string();
+        return Ok(SqlExportOutcome { state, reply: Some(reply), ..Default::default() });
+    }
+    if !sqls::export_job_ok(&job) {
+        // Cannot be addressed safely, so it is not pulled or cancelled from
+        // here; the plugin drops it when nobody pulls.
+        log::warn!("resource-connect/sql: the plugin returned a malformed export id (mount={})", s.mount);
+        return Err(CommandError::from("the SQL browser plugin returned a malformed export id".to_string()));
+    }
+    let ext = sqls::export_extension(&request.format).unwrap_or("txt");
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    {
+        use tauri_plugin_dialog::DialogExt;
+        app.dialog()
+            .file()
+            .set_title("Save the SQL export")
+            .set_file_name(sqls::export_file_name(&s.resource, &request.format))
+            .add_filter(ext.to_uppercase(), &[ext])
+            .save_file(move |p| {
+                let _ = tx.send(p);
+            });
+    }
+    let target = match rx.await.ok().flatten().map(|p| p.into_path()) {
+        Some(Ok(p)) => p,
+        Some(Err(_)) => {
+            cancel_export(&state, &s, &job).await;
+            return Err(CommandError::from("the chosen location is not a local file".to_string()));
+        }
+        None => {
+            cancel_export(&state, &s, &job).await;
+            return Ok(SqlExportOutcome { state: "cancelled".into(), ..Default::default() });
+        }
+    };
+    let part = {
+        let mut p = target.clone().into_os_string();
+        p.push(".part");
+        std::path::PathBuf::from(p)
+    };
+    let written = pull_to_file(&state, &s, &job, &part).await;
+    match written {
+        Ok(end) => {
+            let state_name = end.get("state").and_then(Value::as_str).unwrap_or_default().to_string();
+            if !matches!(state_name.as_str(), "done" | "limit_reached") {
+                let _ = tokio::fs::remove_file(&part).await;
+                let why = end
+                    .get("error")
+                    .and_then(|e| e.get("message"))
+                    .and_then(Value::as_str)
+                    .map(|m| format!(": {m}"))
+                    .unwrap_or_default();
+                return Err(CommandError::from(format!("the export ended {state_name}{why}; no file was kept")));
+            }
+            tokio::fs::rename(&part, &target).await.map_err(|e| {
+                CommandError::from(format!("could not move the export into place: {}", e.kind()))
+            })?;
+            let file = target.file_name().map(|n| n.to_string_lossy().to_string());
+            log::info!(
+                target: "audit",
+                "sql.export.saved: resource={} profile={} job={job} rows={} bytes={}",
+                s.resource,
+                s.profile,
+                end.get("rows").and_then(Value::as_u64).unwrap_or(0),
+                end.get("bytes").and_then(Value::as_u64).unwrap_or(0)
+            );
+            Ok(SqlExportOutcome {
+                state: state_name,
+                rows: end.get("rows").and_then(Value::as_u64).unwrap_or(0),
+                bytes: end.get("bytes").and_then(Value::as_u64).unwrap_or(0),
+                sha256: end.get("sha256").and_then(Value::as_str).map(str::to_string),
+                file,
+                limit: end.get("limit").and_then(Value::as_str).map(str::to_string),
+                reply: None,
+            })
+        }
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&part).await;
+            cancel_export(&state, &s, &job).await;
+            Err(e)
+        }
+    }
+}
+
+/// Best effort: stop the plugin's export job (its statement and buffer).
+async fn cancel_export(state: &State<'_, AppState>, s: &SqlSessionState, job: &str) {
+    let path = s.path(&format!("exports/{job}/cancel"));
+    if let Err(e) = call(state, s.namespace.as_deref(), Operation::Write, path, None).await {
+        log::warn!("resource-connect/sql: cancelling export {job} failed: {e}");
+    }
+}
+
+/// Pull every chunk of `job` into `part` and check the stream's SHA-256.
+/// Returns the last pull (state, rows, bytes, sha256, limit, error).
+async fn pull_to_file(
+    state: &State<'_, AppState>,
+    s: &SqlSessionState,
+    job: &str,
+    part: &std::path::Path,
+) -> CmdResult<Map<String, Value>> {
+    use sha2::{Digest, Sha256};
+    use tokio::io::AsyncWriteExt;
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(part)
+        .await
+        .map_err(|e| CommandError::from(format!("could not create the export file: {}", e.kind())))?;
+    let mut hasher = Sha256::new();
+    let mut offset = 0u64;
+    loop {
+        if s.shared.export_cancel.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(CommandError::from("the export was cancelled".to_string()));
+        }
+        let reply = call(state, s.namespace.as_deref(), Operation::Read, s.path(&format!("exports/{job}/{offset}")), None)
+            .await?;
+        let (mut bytes, next, eof) = sqls::decode_chunk(&reply, offset).map_err(CommandError::from)?;
+        hasher.update(&bytes);
+        file.write_all(&bytes)
+            .await
+            .map_err(|e| CommandError::from(format!("could not write the export file: {}", e.kind())))?;
+        zeroize::Zeroize::zeroize(&mut bytes);
+        offset = next;
+        if eof {
+            file.flush().await.map_err(|e| CommandError::from(format!("could not write the export file: {}", e.kind())))?;
+            let ok = matches!(reply.get("state").and_then(Value::as_str), Some("done" | "limit_reached"));
+            let want = reply.get("sha256").and_then(Value::as_str).unwrap_or_default();
+            let got = hex::encode(hasher.finalize());
+            if ok && want != got {
+                return Err(CommandError::from(
+                    "the written export does not match the plugin's SHA-256 of the stream; the file was removed"
+                        .to_string(),
+                ));
+            }
+            return Ok(reply);
+        }
+    }
+}
+
+/// Stop the calling window's running export (`sql_export_to_file`).
+#[tauri::command]
+pub async fn sql_export_cancel(
+    state: State<'_, AppState>,
+    webview: Webview,
+    request: SqlTokenRequest,
+) -> CmdResult<()> {
+    let s = session_for(&state, &webview, &request.token).await?;
+    s.shared.export_cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+    Ok(())
 }
 
 #[derive(Deserialize)]

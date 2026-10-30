@@ -79,6 +79,17 @@ export interface SqlProfileForm {
   credential: SqlCredential;
 }
 
+/** The step-up list a new profile starts with (features/sql-browser.md §8.3):
+ *  the suggested default. Stored explicitly; a stored profile without
+ *  `step_up` steps up for nothing. */
+export const DEFAULT_STEP_UP: SqlCapability[] = ["sql_drop", "sql_admin", "sql_export", "sql_script"];
+
+/** A profile the operator adds: {@link blankSqlProfile} with the default
+ *  step-up list. */
+export function newSqlProfile(secretId = ""): SqlProfileForm {
+  return { ...blankSqlProfile(secretId), stepUp: [...DEFAULT_STEP_UP] };
+}
+
 /** A new profile: verify-full TLS, SELECT-only ceiling, no credential picked yet. */
 export function blankSqlProfile(secretId = ""): SqlProfileForm {
   return {

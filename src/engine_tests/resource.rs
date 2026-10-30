@@ -475,6 +475,7 @@ mod ticket_store_tests {
             resource: "web01".into(),
             profile_id: "p_abc".into(),
             mcp_call: None,
+            action: None,
         }
     }
 

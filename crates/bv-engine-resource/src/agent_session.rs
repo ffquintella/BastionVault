@@ -413,6 +413,8 @@ mod executor {
                 tool: tool.to_string(),
                 args_hash: call.args_hash.clone(),
             }),
+            // An agent call is not a SQL step-up: an action ticket is refused.
+            action: None,
         };
         let store = ConnectMfaTicketStore::new(backend.core.as_ref())
             .map_err(|error| CallError::Vault { reason: "mfa_ticket_store_unavailable", error })?;

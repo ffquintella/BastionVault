@@ -72,6 +72,9 @@ pub(crate) struct SqlMock {
     pub releases: BTreeMap<(String, String), MockRelease>,
     /// (resource, profile) → tickets that redeem once.
     pub tickets: BTreeMap<(String, String), BTreeSet<String>>,
+    /// (resource, profile, canonical action) → step-up tickets that redeem
+    /// once, only for exactly that action (§8.3, T126).
+    pub action_tickets: BTreeMap<(String, String, String), BTreeSet<String>>,
     /// Redemptions not yet spent by a release: (entity, namespace,
     /// resource, profile). The host scopes them to one invocation.
     pub redeemed: BTreeSet<(String, String, String, String)>,
@@ -118,6 +121,15 @@ impl TestHostBuilder {
         self
     }
 
+    /// A step-up ticket bound to `action` (one or more `sql_*` names,
+    /// comma-separated; stored canonical) that `connect_ticket_redeem`
+    /// accepts once, for exactly that action.
+    pub fn connect_action_ticket(mut self, resource: &str, profile: &str, action: &str, ticket: &str) -> Self {
+        let action = canonical_action(action).expect("a well-formed step-up action");
+        self.sql.action_tickets.entry((canonical(resource), profile.to_string(), action)).or_default().insert(ticket.into());
+        self
+    }
+
     /// `abi_version` minor and `caller_identity` of the mocked manifest:
     /// together they decide whether `audit_emit` is actor-stamped.
     pub fn abi_minor(mut self, minor: u32) -> Self {
@@ -137,6 +149,27 @@ fn canonical(resource: &str) -> String {
 
 fn err(code: &str, detail: impl std::fmt::Display) -> String {
     format!("{code}: {detail}")
+}
+
+/// Mirror of `connect_mfa::canonical_sql_action`: one or more known `sql_*`
+/// names, comma-separated, each once, rewritten in policy-language order.
+pub fn canonical_action(raw: &str) -> Result<String, String> {
+    if raw.is_empty() || raw.len() > 160 {
+        return Err("`action` must name 1-11 sql_* capabilities, comma-separated".into());
+    }
+    let mut seen: Vec<&str> = Vec::new();
+    for part in raw.split(',') {
+        let cap = SQL_CAPABILITIES
+            .iter()
+            .copied()
+            .find(|c| *c == part)
+            .ok_or("`action` may name only the eleven sql_* capabilities, comma-separated")?;
+        if seen.contains(&cap) {
+            return Err(format!("`action` names `{cap}` twice"));
+        }
+        seen.push(cap);
+    }
+    Ok(SQL_CAPABILITIES.iter().filter(|c| seen.contains(c)).copied().collect::<Vec<_>>().join(","))
 }
 
 /// Mirror of `sql_host::SqlEndpoint::parse`: `(host lower-cased, port)`.
@@ -224,14 +257,18 @@ impl TestHost {
         if credentials && (profile.is_empty() || text("session_ref").unwrap_or_default().is_empty()) {
             return Err(err("bad_request", "`profile` and `session_ref` are required"));
         }
-        if method == "connect_ticket_redeem" {
-            if profile.is_empty() || text("ticket").unwrap_or_default().is_empty() {
-                return Err(err("bad_request", "`profile` and `ticket` are required"));
-            }
-            if params.get("action").and_then(Value::as_str).is_some_and(|a| !a.is_empty()) {
-                return Err(err("bad_request", "action-bound tickets are not supported by this host"));
-            }
+        if method == "connect_ticket_redeem" && (profile.is_empty() || text("ticket").unwrap_or_default().is_empty()) {
+            return Err(err("bad_request", "`profile` and `ticket` are required"));
         }
+        // The step-up action is parsed with the parameters, as on the host.
+        let action = match params.get("action") {
+            None | Some(Value::Null) if method == "connect_ticket_redeem" => None,
+            Some(Value::String(a)) if method == "connect_ticket_redeem" => {
+                Some(canonical_action(a).map_err(|m| err("bad_request", m))?)
+            }
+            Some(_) if method == "connect_ticket_redeem" => return Err(err("bad_request", "`action` must be a string")),
+            _ => None,
+        };
         let held: Vec<String> = sql.privileges.get(&resource).map(|s| s.iter().cloned().collect()).unwrap_or_default();
         match method {
             "resource_sql_authorize" => {
@@ -260,6 +297,18 @@ impl TestHost {
                 Some(t) => Ok(json!({"namespace": caller.namespace, "resource": resource, "privileges": held, "target": t})),
                 None => Err(err("not_found", "resource_not_found: no SQL target for this resource")),
             },
+            "connect_ticket_redeem" if action.is_some() => {
+                // Always demands a ticket bound to exactly this action, and
+                // records no connect redemption (a release still needs one).
+                let ticket = text("ticket").unwrap_or_default();
+                let action = action.unwrap_or_default();
+                let key = (resource.clone(), profile.clone(), action.clone());
+                if sql.action_tickets.get_mut(&key).is_some_and(|t| t.remove(&ticket)) {
+                    Ok(json!({"redeemed": true, "method": "totp", "action": action}))
+                } else {
+                    Err(err("refused", "mfa_required: the step-up ticket is unknown, used, expired or bound to another action"))
+                }
+            }
             "connect_ticket_redeem" => {
                 let ticket = text("ticket").unwrap_or_default();
                 match sql.tickets.get_mut(&(resource.clone(), profile.clone())) {
@@ -440,14 +489,46 @@ mod tests {
     }
 
     #[test]
-    fn tickets_redeem_once_and_action_tickets_are_refused() {
-        let host = TestHost::builder("dbms").sql_gate(true).sql_privileges("db", &["sql_select"]).connect_ticket("db", "ro", "t-1").build();
+    fn tickets_redeem_once_and_are_bound_to_their_action() {
+        let host = TestHost::builder("dbms")
+            .sql_gate(true)
+            .resource_credentials(true)
+            .sql_privileges("db", &["sql_select"])
+            .sql_release("db", "ro", MockRelease { require_mfa: true, ..MockRelease::bound("db1:5432", "svc", "pw") })
+            .connect_ticket("db", "ro", "t-1")
+            .connect_action_ticket("db", "ro", "sql_script,sql_drop", "a-1")
+            .build();
         let p = params("connect_ticket_redeem");
+        let with = |ticket: &str, action: Value| {
+            let mut a = json!({"resource": "db", "profile": "ro", "ticket": ticket});
+            a["action"] = action;
+            a
+        };
+        // A connect ticket is never accepted for an action.
+        assert_eq!(code(host.process_host_call(Some(&ana()), "connect_ticket_redeem", &with("t-1", json!("sql_drop"))) ), "refused");
         assert_eq!(host.process_host_call(Some(&ana()), "connect_ticket_redeem", &p).unwrap()["redeemed"], true);
         assert_eq!(code(host.process_host_call(Some(&ana()), "connect_ticket_redeem", &p)), "refused");
-        let mut a = p.clone();
-        a["action"] = json!("sql_drop");
-        assert_eq!(code(host.process_host_call(Some(&ana()), "connect_ticket_redeem", &a)), "bad_request");
+        for bad in [json!(""), json!("drop"), json!("sql_drop,sql_drop"), json!(["sql_drop"])] {
+            assert_eq!(code(host.process_host_call(Some(&ana()), "connect_ticket_redeem", &with("a-1", bad))), "bad_request");
+        }
+        // Another action, then the action in any order (once).
+        assert_eq!(code(host.process_host_call(Some(&ana()), "connect_ticket_redeem", &with("a-1", json!("sql_drop")))), "refused");
+        let ok = host.process_host_call(Some(&ana()), "connect_ticket_redeem", &with("a-1", json!("sql_drop,sql_script"))).unwrap();
+        assert_eq!((ok["redeemed"].clone(), ok["action"].clone()), (json!(true), json!("sql_drop,sql_script")));
+        assert_eq!(code(host.process_host_call(Some(&ana()), "connect_ticket_redeem", &with("a-1", json!("sql_drop,sql_script")))), "refused");
+        // The connect redemption above was spent by nothing yet; the action
+        // redemption added none: one release, then mfa_required.
+        let release = params("resource_sql_credential");
+        assert!(host.process_host_call(Some(&ana()), "resource_sql_credential", &release).is_ok());
+        assert_eq!(host.process_host_call(Some(&ana()), "resource_sql_credential", &release).unwrap_err(), "refused: mfa_required");
+    }
+
+    #[test]
+    fn step_up_actions_are_canonical() {
+        assert_eq!(canonical_action("sql_script,sql_drop").unwrap(), "sql_drop,sql_script");
+        for bad in ["", "sql_drop,", "sql_drop, sql_script", "SQL_DROP", "sql_nope"] {
+            assert!(canonical_action(bad).is_err(), "{bad:?}");
+        }
     }
 
     /// The actor is stamped by the host on ABI 1.4 with caller_identity, and

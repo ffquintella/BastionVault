@@ -1171,6 +1171,20 @@ holding any `sql_*` capability on `…/sql/server` may call them without
 the ticket itself; `resources/v2/connect/authorize` refuses an `sql` profile
 with `400 sql_profile_not_direct` and does not touch its ticket.
 
+**Per-action step-up (T126, features/sql-browser.md §8.3).** Both calls take
+an optional `action`: one or more `sql_*` names, comma-separated or as a list
+(`"sql_drop,sql_script"`, `["sql_script", "sql_drop"]`). It applies to an
+`sql` profile only (`400` otherwise) and every name must be in the profile's
+`sql.step_up` (`400 step_up_not_required: …` otherwise, before any factor);
+with an action the gate is `step_up`, whatever `require_mfa` says. `verify`
+then mints a ticket bound to the canonical action (names in policy-language
+order), which it echoes as `action`; it cannot be combined with `mcp_call`.
+Such a ticket is redeemed only by the SQL browser for exactly that action; a
+ticket without an action (a connect ticket, or one minted before this
+release) is refused for an action, and an action ticket is refused at every
+connect. Single use, 120 s, bound to principal, namespace, resource and
+profile as before.
+
 #### Rolling upgrades: the `sql_*` write gate
 
 A node built before T124 cannot parse a policy that names a `sql_*`
@@ -3204,7 +3218,7 @@ the plugin's mount, against that caller's token, which the plugin never sees:
 | `resource_sql_target {resource}` | `sql_gate` + grant `sql-gate` | the resource's SQL view, if the caller holds any `sql_*` capability on it |
 | `resource_sql_authorize {resource, checks[]}` | same | `PolicyGate::sql_privileges` with `SqlPurpose::Enforce`; refusals go to the denial store |
 | `resource_sql_credential {resource, profile, session_ref}` | `resource_credentials = ["sql"]` + grant `resource-credentials` | releases the profile's login under the §5.4 rules (endpoint binding, `sql` profile, not `rustion-required`) and, for a `sql.require_mfa` profile, only after this invocation redeemed a ticket for it (one ticket, one release); audited as `resource-credential-release`, never with the value |
-| `connect_ticket_redeem {resource, profile, ticket}` | `sql_gate` + grant `sql-gate` | burns a connect-MFA ticket; an `action` is refused |
+| `connect_ticket_redeem {resource, profile, ticket, action?}` | `sql_gate` + grant `sql-gate` | without `action`: burns a connect-MFA ticket for a `require_mfa` profile and records the redemption the release needs (`{redeemed: false}` when the profile is not gated). With `action` (T126): always demands and burns a ticket minted for exactly that canonical action (`bad_request` for a malformed one, `refused` for any other ticket), answers `{redeemed: true, method, action}`, and records nothing a release could use |
 
 Errors are `code` or `code: detail`, checked in this order: `forbidden` (the
 manifest does not declare the capability), `no_invocation` (no caller-bound
@@ -3235,6 +3249,84 @@ not parse (`invalid_profiles`, with `reason` and `error`).
 With ABI 1.4 or later and `caller_identity = true`, `audit_emit` inside a caller-bound
 invocation is stamped by the host with the caller's entity, principal,
 namespace and token HMAC, and written to that namespace's chain.
+
+The SDK's `connect_ticket_redeem_action` sends `action`. A host older than
+T126 answers it with `bad_request` (it refused every `action`), so a plugin
+needing step-up fails closed there; the ABI minor is unchanged.
+
+### SQL browser plugin (`dbms-management`, v2)
+
+The `bastion-plugin-dbms-management` process plugin, mounted at `dbms/` by
+convention; paths are mount-relative, and every request needs an
+identity-backed token (features/sql-browser.md, API surface). Errors are the
+plugin's `code: message` (the host answers them as `500` with that text).
+
+| Path | Op | Purpose |
+|---|---|---|
+| `v2/config` | read, update | limits, networks, journal settings (admin) |
+| `v2/sessions` | create, list | open a session `{resource, profile?, catalog?, mfa_ticket?}`; the caller's own sessions |
+| `v2/sessions/{id}` | read, delete | status (incl. `step_up`, `active_export`); close |
+| `v2/sessions/{id}/execute` | create | `{sql, step_up_ticket?}`: one statement plus transaction control; more is `use_script` |
+| `v2/sessions/{id}/script` | create | `{sql, on_error?, transaction?, step_up_ticket?}` (T126) |
+| `v2/sessions/{id}/runs/{run}`, `…/cancel` | read, create | next page and per-statement messages; cancel |
+| `v2/sessions/{id}/objects[/{schema}[/{object}]]` | list, read | object browser and describe |
+| `v2/sessions/{id}/rows` | create | structured grid edit `{object, op, key, values, original, step_up_ticket?}` |
+| `v2/sessions/{id}/export` | create | `{sql, format, max_rows?, formula_guard?, table?, step_up_ticket?}` (T126) |
+| `v2/sessions/{id}/exports/{job}` | read | the job's state, rows, bytes and (when ended) SHA-256 |
+| `v2/sessions/{id}/exports/{job}/{offset}` | read | the next chunk, from byte `offset` (T126) |
+| `v2/sessions/{id}/exports/{job}/cancel` | create | stop the export (T126) |
+| `v2/journal/self/…`, `v2/journal/all/…` | list, read | the caller's / everyone's statement journal |
+
+**Scripts** (§8.2). Need `sql_script` on `…/sql/server` plus every
+statement's own privileges, decided in one batch before the first statement
+runs: one refusal runs nothing and the reply is `{state: "refused", message,
+statements, request, refused_statement}`. `on_error` is `stop` (default) or
+`continue`; `transaction` is `none` (default) or `single`, which wraps the
+script in the plugin's own `BEGIN` … `COMMIT` (or `ROLLBACK` on any failure)
+and refuses transaction control in the script (`script_tx_control`), an open
+transaction (`transaction_open`) and `on_error: continue`. Limits:
+`script_statements` (default 1,000, max 10,000) and `script_bytes` (default
+and max 4 MiB, the classifier's cap; §12's 32 MiB is not reachable yet).
+After a statement that may move the search path, later unqualified names are
+checked as unaddressable (only a resource-wide grant allows them). The reply
+is `{run_id, state: "running", statements, request, digest, warnings,
+on_error, transaction}`; `runs/{run}` reports each statement's outcome, rows
+and timing, counts result rows without returning them, and carries `script
+{statements, completed, tx_outcome}`. Audited as `dbms.script` (started,
+refused, and ended with outcome counts and `skipped`) plus `dbms.statement`
+per statement.
+
+**Exports** (§8.1). Exactly one `SELECT`, `VALUES`, `SHOW` or plan-only
+`EXPLAIN` that needs nothing but `sql_select`; each `sql_select` check also
+needs `sql_export` on the same target (on `sql/server` when it reads no
+object). `RETURNING`, data-modifying CTEs, `FOR UPDATE`, sequence writes and
+unclassifiable statements are refused before the host is asked
+(`export_not_select`, `export_one_statement`). `format`: `csv` (RFC 4180,
+CRLF, text quoted, `NULL` an empty field, formula guard on unless
+`formula_guard: false`), `jsonl` (one object per row in column order;
+`bigint` and `numeric` stay strings) or `sql-insert` (needs `table {schema?,
+name}`; identifiers and literals quoted, `bytea` as `decode(…, 'base64')`).
+The reply is `{job, state: "running", chunk_bytes, max_rows, max_bytes,
+statements, digest}`. Pull `exports/{job}/{offset}` from `0`: each reply has
+`offset`, `length` (at most 1 MiB), base64 `chunk`, `next_offset`, `eof`,
+`state`, `rows`, `bytes` and, at the end, `sha256` of the whole stream. Pull
+again at `next_offset`; the previous offset returns the same chunk again;
+any other is `bad_request offset_mismatch`. A pull waits up to 2 s for data.
+The offset is a path segment, not `?offset=`: a GET's query never reaches a
+process plugin. Limits: `export_rows` (default 1,000,000, max 10,000,000;
+`max_rows` may lower it), `export_bytes` (512 MiB, max 4 GiB) end the job as
+`limit_reached` with `limit: row_limit | byte_limit`; a job not pulled for
+`export_idle_secs` (5 min) is `expired` and dropped (`export_expired`). While
+an export reads, the session is busy. Audited as `dbms.export` (started,
+refused, and the outcome with rows, bytes, SHA-256 and the statement
+digest; never row data).
+
+**Step-up** (§8.3). When an allowed request uses a capability in the
+session profile's `step_up` list (read at open), it answers `{state:
+"step_up_required", action, actions}` and runs nothing. Verify a factor with
+`resources/v2/connect/mfa/verify` and that `action`, then resend with
+`step_up_ticket`; a ticket that is not redeemed for exactly that action is
+`step_up_failed`. Audited as `dbms.step_up`.
 
 ### Dynamic-secret plugin mounts (ABI 1.5)
 

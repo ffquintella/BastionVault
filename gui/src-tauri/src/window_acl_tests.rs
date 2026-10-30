@@ -98,6 +98,12 @@ const WORKSPACE_EXTRA: &[&str] = &[
     "sql_objects",
     "sql_rows",
     "sql_history",
+    // T126: scripts, host-written exports and the per-action step-up.
+    "sql_script",
+    "sql_export_to_file",
+    "sql_export_cancel",
+    "sql_step_up_begin",
+    "sql_step_up_verify",
 ];
 
 /// An SFTP session's own window (features/sftp-connect.md): its session's
@@ -127,21 +133,26 @@ const SFTP_WINDOW: &[&str] = &[
 
 /// A SQL browser session's own window (features/sql-browser.md §10): the
 /// `sql_*` commands of its one session and its window lifecycle. No session
-/// open, no vault read, no move. `sql_script` / `sql_export_to_file` join
-/// with T126.
+/// open, no vault read, no move. T126 adds scripts, exports the host writes
+/// to a file it asks for, and the step-up for the session's own profile.
 const SQL_WINDOW: &[&str] = &[
     "session_heartbeat",
     "session_window_close",
     "session_window_closing",
     "sql_cancel",
     "sql_execute",
+    "sql_export_cancel",
+    "sql_export_to_file",
     "sql_history",
     "sql_objects",
     "sql_privileges",
     "sql_rows",
     "sql_run",
+    "sql_script",
     "sql_session_close",
     "sql_session_status",
+    "sql_step_up_begin",
+    "sql_step_up_verify",
 ];
 
 const REPLAY_WINDOW: &[&str] = &[

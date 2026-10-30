@@ -61,6 +61,9 @@ fn err(code: &str, detail: impl std::fmt::Display) -> String {
 /// A database endpoint, `host:port`. The resource engine's parser: the
 /// profile's endpoint and the secret's binding are read by the same code.
 pub use crate::modules::resource::sql_profile::SqlEndpoint;
+/// The step-up action's canonical form and its redemption: the resource
+/// engine owns the ticket store, so the action binding is decided there.
+use crate::modules::resource::connect_mfa::{canonical_sql_action, redeem_sql_action_ticket};
 
 /// What the host needs to decide one release (§5.4), read by the resource
 /// engine. Zeroized on drop.
@@ -539,17 +542,28 @@ async fn ticket_redeem(
     let resource = resource_name(&p.resource)?;
     bounded_text("profile", &p.profile, MAX_PROFILE_LEN)?;
     bounded_text("ticket", &p.ticket, MAX_TICKET_LEN)?;
-    // Per-action step-up (§8.3) binds a ticket to an action. This host's
-    // tickets carry no action, so honouring one would let a session-open
-    // ticket stand in for a step-up: refuse instead.
-    if p.action.as_deref().is_some_and(|a| !a.is_empty()) {
-        return Err(err(codes::BAD_REQUEST, "action-bound tickets are not supported by this host"));
-    }
+    // Per-action step-up (§8.3, T126): a ticket bound to the canonical
+    // action, never a connect ticket. Parsed before any privilege read, so
+    // a malformed action costs nothing. An empty string is malformed, not
+    // "no action": absent and `null` are the only connect forms.
+    let action = match p.action.as_deref() {
+        None => None,
+        Some(a) => Some(canonical_sql_action(a).map_err(|m| err(codes::BAD_REQUEST, m))?),
+    };
     let req = caller.request();
     let gate = policy_gate(core.as_ref())?;
     require_any_sql_privilege(gate.as_ref(), req, &manifest.name, &resource, "connect_ticket_redeem").await?;
-    let mfa = core.connect_mfa().ok_or_else(|| err(codes::NOT_AVAILABLE, "no connect-MFA gate"))?;
     let ns = caller_namespace(core.as_ref(), req).await?;
+    if let Some(action) = action {
+        // Always burns a ticket bound to this exact action. It records no
+        // MFA redemption, so it can never unlock a `require_mfa` release.
+        let record =
+            redeem_sql_action_ticket(core.as_ref(), req, &resource, &p.profile, p.ticket.as_str(), &action)
+                .await
+                .map_err(|e| kernel_error("connect_ticket_redeem", e))?;
+        return Ok(json!({ "redeemed": true, "method": record.method, "action": action }));
+    }
+    let mfa = core.connect_mfa().ok_or_else(|| err(codes::NOT_AVAILABLE, "no connect-MFA gate"))?;
     let ns_prefix = if ns.is_empty() { String::new() } else { format!("{ns}/") };
     match mfa.enforce(req, &ns_prefix, &resource, &p.profile, Some(p.ticket.as_str())).await {
         Ok(Some(g)) => {

@@ -3419,10 +3419,50 @@ export interface SqlStatementReport {
 export interface SqlExecuteReply {
   /** Set when the run started. */
   run_id?: string;
-  state: "running" | "refused";
+  /** `step_up_required` (T126): the profile wants a fresh factor for `action`;
+   *  nothing ran and no ticket was spent. */
+  state: "running" | "refused" | "step_up_required";
   /** Refused: the vault's verdict, e.g. "needs `sql_update` on `app.public.t`". */
   message?: string;
   statements: SqlStatementReport[];
+  /** step_up_required: the `sql_*` names, comma-separated, to step up for. */
+  action?: string;
+}
+
+/** `sql_script` (§8.2). Refused scripts name the first refused statement. */
+export interface SqlScriptReply extends SqlExecuteReply {
+  /** The request's own checks (`sql_script` on the server). */
+  request?: SqlCheckVerdict[];
+  refused_statement?: number | null;
+  warnings?: string[];
+  on_error?: "stop" | "continue";
+  transaction?: "none" | "single";
+}
+
+export type SqlExportFormat = "csv" | "jsonl" | "sql-insert";
+
+export interface SqlExportRequest {
+  sql: string;
+  format: SqlExportFormat;
+  max_rows?: number;
+  /** CSV only; on unless turned off. */
+  formula_guard?: boolean;
+  /** sql-insert only: the table the INSERTs name. */
+  table?: { schema?: string; name: string };
+}
+
+/** What `sql_export_to_file` ended with. The host wrote the file; the
+ *  webview gets counts, the stream's SHA-256 and the file's name only. */
+export interface SqlExportOutcome {
+  state: "done" | "limit_reached" | "cancelled" | "refused" | "step_up_required" | string;
+  rows: number;
+  bytes: number;
+  sha256: string | null;
+  file: string | null;
+  /** limit_reached: `row_limit` or `byte_limit`. */
+  limit: string | null;
+  /** The plugin's own reply when the export did not start. */
+  reply: SqlExecuteReply | null;
 }
 
 export interface SqlStatementMessage {
@@ -3449,6 +3489,14 @@ export interface SqlRunPage {
   row_budget_exhausted: boolean;
   messages: SqlStatementMessage[];
   elapsed_ms: number;
+  /** A script run's progress (T126). */
+  script?: {
+    statements: number;
+    completed: number;
+    on_error: "stop" | "continue";
+    transaction: "none" | "single";
+    tx_outcome: string | null;
+  };
 }
 
 export interface SqlSessionStatus {
@@ -3474,6 +3522,10 @@ export interface SqlSessionStatus {
   current_schema?: string;
   transaction: { open: boolean; failed: boolean; statements: number; open_secs: number | null };
   active_run: string | null;
+  /** A running export job (T126). */
+  active_export?: string | null;
+  /** Capabilities whose use asks for a fresh MFA step-up (§8.3, T126). */
+  step_up?: string[];
   idle_secs: number;
   age_secs: number;
   rows_read: number;
@@ -3524,6 +3576,7 @@ export type SqlRowEditReply =
   | { state: "done"; rows_affected: number }
   | { state: "conflict"; rows_affected: number; message: string }
   | { state: "refused"; message: string; verdicts: { capability: string; allowed: boolean }[] }
+  | { state: "step_up_required"; action: string; message: string }
   | { state: "error"; error: { sqlstate: string | null; message: string } };
 
 export interface SqlJournalEntry {
@@ -3612,6 +3665,37 @@ export const sqlHistory = (token: string, date?: string, session?: string) =>
 
 export const sqlSessionClose = (token: string) =>
   invoke<{ closed?: boolean }>("sql_session_close", { request: { token } });
+
+/** Run a multi-statement script (§8.2): every statement is authorized
+ *  before the first runs; progress comes through `sqlRun`. */
+export const sqlScript = (
+  token: string,
+  sql: string,
+  opts: { on_error?: "stop" | "continue"; transaction?: "none" | "single" } = {},
+) => invoke<SqlScriptReply>("sql_script", { request: { token, sql, ...opts } });
+
+/** Export (§8.1): the host asks where to save and writes the chunks there;
+ *  this resolves when the file is complete, cancelled or refused. */
+export const sqlExportToFile = (token: string, req: SqlExportRequest) =>
+  invoke<SqlExportOutcome>("sql_export_to_file", { request: { token, ...req } });
+
+export const sqlExportCancel = (token: string) => invoke<void>("sql_export_cancel", { request: { token } });
+
+/** Per-action step-up (§8.3): factors for `action` on this session's profile. */
+export const sqlStepUpBegin = (token: string, action: string) =>
+  invoke<ConnectMfaChallenge>("sql_step_up_begin", { request: { token, action } });
+
+/** Prove a factor for `action`. The host keeps the ticket and attaches it to
+ *  the session's next request; it is never returned here. */
+export const sqlStepUpVerify = (
+  token: string,
+  action: string,
+  method: "totp" | "fido2",
+  proof: { code?: string; challenge?: unknown } = {},
+) =>
+  invoke<{ action: string; method: string; expires_at: string }>("sql_step_up_verify", {
+    request: { token, action, method, ...proof },
+  });
 
 export type SessionOpenRdpRequest = {
   resource_name: string;
@@ -4281,6 +4365,9 @@ export const mcpWriteConfig = (cfg: {
   maxTtlSecs: number;
   waiverMaxDays: number;
   cataloguePin: string;
+  brokeredSessionsEnabled: boolean;
+  /** null resets to the server config / default; [] denies every destination. */
+  allowedTargetCidrs: string[] | null;
 }) => invoke<void>("mcp_write_config", cfg);
 export const mcpCatalogue = () => invoke<McpCatalogue>("mcp_catalogue");
 export const mcpPairingsPath = () => invoke<string>("mcp_pairings_path");

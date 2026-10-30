@@ -388,6 +388,25 @@ impl ProcessHost {
         let v = self.call("connect_ticket_redeem", json!({"resource": resource, "profile": profile, "ticket": ticket}))?;
         Ok(v.get("redeemed").and_then(Value::as_bool).unwrap_or(false))
     }
+
+    /// Burn a step-up ticket bound to `action` (features/sql-browser.md
+    /// §8.3): one or more `sql_*` names, comma-separated. The host always
+    /// demands a ticket minted for exactly that action; a connect ticket is
+    /// refused. `Ok(true)` only when the host says it redeemed one, so a
+    /// reply without `redeemed: true` reads as not redeemed (fail closed).
+    pub fn connect_ticket_redeem_action(
+        &self,
+        resource: &str,
+        profile: &str,
+        ticket: &str,
+        action: &str,
+    ) -> Result<bool, HostCallError> {
+        let v = self.call(
+            "connect_ticket_redeem",
+            json!({"resource": resource, "profile": profile, "ticket": ticket, "action": action}),
+        )?;
+        Ok(v.get("redeemed").and_then(Value::as_bool).unwrap_or(false))
+    }
 }
 
 // ── the runner ──────────────────────────────────────────────────────────

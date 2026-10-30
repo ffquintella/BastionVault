@@ -262,6 +262,35 @@ export function selectAllFrom(schema: string, object: string, limit = 500): stri
   return `SELECT * FROM ${quoteIdent(schema)}.${quoteIdent(object)} LIMIT ${limit};`;
 }
 
+/** "Export table" (§8.1): every row of the qualified name, as ordinary SQL. */
+export function exportTableSql(schema: string, object: string): string {
+  return `SELECT * FROM ${quoteIdent(schema)}.${quoteIdent(object)}`;
+}
+
+/** The capabilities of a step-up action (`sql_drop,sql_script`). */
+export function stepUpActions(action: string | undefined): string[] {
+  return (action ?? "").split(",").filter((a) => a.startsWith("sql_"));
+}
+
+/** The message-pane line for a finished export. */
+export function exportSummary(o: {
+  state: string;
+  rows: number;
+  bytes: number;
+  sha256: string | null;
+  file: string | null;
+  limit: string | null;
+}): string {
+  const size = o.bytes >= 1024 * 1024 ? `${(o.bytes / 1024 / 1024).toFixed(1)} MiB` : `${o.bytes} bytes`;
+  const where = o.file ? ` to ${o.file}` : "";
+  const hash = o.sha256 ? ` · SHA-256 ${o.sha256.slice(0, 16)}…` : "";
+  const cut =
+    o.state === "limit_reached"
+      ? ` · stopped at the ${o.limit === "byte_limit" ? "byte" : "row"} limit: the file is incomplete`
+      : "";
+  return `Exported ${o.rows} row${o.rows === 1 ? "" : "s"} (${size})${where}${hash}${cut}`;
+}
+
 // ── plugin errors and verdicts ──────────────────────────────────────────
 
 export interface PluginError {
@@ -286,7 +315,15 @@ const CODE_HINTS: Record<string, string> = {
   session_closed: "The SQL session has been closed. Open a new one.",
   session_tainted: "The session was closed because a setting changed behind the classifier's back.",
   session_busy: "Another statement or edit is still running in this session; wait for it or stop it.",
-  use_script: "Run one statement at a time; scripts arrive with sql_script (T126).",
+  use_script: "Run one statement at a time, or run the editor as a script (needs sql_script).",
+  step_up_failed: "The step-up ticket was not accepted; verify a factor for this action again.",
+  export_not_select: "Only a statement that needs nothing but sql_select can be exported.",
+  export_one_statement: "An export runs exactly one statement.",
+  export_expired: "The export was abandoned (nothing pulled for too long) and dropped.",
+  script_tx_control: "A single-transaction script may not hold BEGIN, COMMIT, ROLLBACK or SAVEPOINT.",
+  script_too_long: "The script has more statements than this server allows.",
+  script_too_large: "The script is larger than this server allows.",
+  transaction_open: "A transaction is open; commit or roll it back before a single-transaction script.",
   mfa_required: "This SQL profile needs a second factor. Open it from its profile so the prompt can run.",
   row_budget: "This session's row budget is spent.",
   context_stale: "The transaction is aborted: only ROLLBACK (or COMMIT) runs now.",
@@ -317,9 +354,13 @@ export function targetLabel(target: unknown): string {
   return "the server";
 }
 
-/** Each refused check as "needs `cap` on `target`". */
-export function refusals(statements: readonly SqlStatementReport[]): string[] {
+/** Each refused check as "needs `cap` on `target`", the request's own
+ *  checks (a script's `sql_script`) first. */
+export function refusals(statements: readonly SqlStatementReport[], request: readonly SqlCheckVerdict[] = []): string[] {
   const out: string[] = [];
+  for (const r of request) {
+    if (!r.allowed) out.push(`needs \`${r.capability}\` on \`${targetLabel(r.target)}\` for the script`);
+  }
   for (const s of statements) {
     for (const r of s.required as SqlCheckVerdict[]) {
       if (r.allowed) continue;

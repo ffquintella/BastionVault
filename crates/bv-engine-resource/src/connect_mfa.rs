@@ -129,6 +129,15 @@ pub struct ConnectMfaTicket {
     /// ticket's record is byte-for-byte what earlier releases wrote.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_call: Option<McpCallBinding>,
+    /// Present on a ticket minted for one SQL browser step-up action
+    /// (features/sql-browser.md §8.3): the canonical set of `sql_*`
+    /// capabilities whose use it unlocks ([`canonical_sql_action`]). Absent
+    /// on a connect ticket and on every record written before T126, which
+    /// therefore can never stand in for an action. Not written when absent,
+    /// so a connect ticket's record is byte-for-byte what earlier releases
+    /// wrote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
 }
 
 /// The tuple a ticket must match to be redeemable. Every field is compared;
@@ -137,6 +146,7 @@ pub struct ConnectMfaTicket {
 /// `mcp_call` is compared like the rest, which makes the human/agent split
 /// structural: a human Connect path expects `None` and so refuses an agent
 /// ticket, and the agent route expects `Some` and so refuses a human one.
+/// `action` splits connect tickets from SQL step-up tickets the same way.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TicketBinding {
     pub mount: String,
@@ -145,6 +155,65 @@ pub struct TicketBinding {
     pub resource: String,
     pub profile_id: String,
     pub mcp_call: Option<McpCallBinding>,
+    /// The canonical step-up action ([`canonical_sql_action`]), or `None`
+    /// for a connect.
+    pub action: Option<String>,
+}
+
+/// Longest step-up action accepted: the eleven names joined by commas.
+const MAX_ACTION_LEN: usize = 160;
+
+/// Canonical form of a SQL step-up action: one or more `sql_*` capability
+/// names, comma-separated, each known and named once, rewritten in
+/// policy-language order (`sql_drop,sql_script`). Strict: whitespace, an
+/// empty element, an unknown name or a repeat is refused, never dropped.
+pub fn canonical_sql_action(raw: &str) -> Result<String, String> {
+    use crate::kernel_api::policy::SqlCapability;
+    if raw.is_empty() || raw.len() > MAX_ACTION_LEN {
+        return Err("`action` must name 1-11 sql_* capabilities, comma-separated".into());
+    }
+    let mut seen: Vec<SqlCapability> = Vec::new();
+    for part in raw.split(',') {
+        let cap = SqlCapability::parse(part)
+            .ok_or_else(|| "`action` may name only the eleven sql_* capabilities, comma-separated".to_string())?;
+        if seen.contains(&cap) {
+            return Err(format!("`action` names `{cap}` twice"));
+        }
+        seen.push(cap);
+    }
+    Ok(SqlCapability::ALL.iter().filter(|c| seen.contains(c)).map(|c| c.as_str()).collect::<Vec<_>>().join(","))
+}
+
+/// The `action` of a `connect/mfa/begin|verify` body: absent or `null` is a
+/// connect; a string or a list of strings is canonicalized; anything else
+/// is refused (never read as absent, which would mint a connect ticket for
+/// a caller that asked for an action one).
+fn sql_action_field(req: &Request) -> Result<Option<String>, RvError> {
+    let raw = match req.get_data("action") {
+        Err(RvError::ErrRequestFieldNotFound | RvError::ErrRequestNoData) | Ok(Value::Null) => return Ok(None),
+        Ok(Value::String(s)) => s,
+        Ok(Value::Array(items)) => {
+            let names: Option<Vec<&str>> = items.iter().map(Value::as_str).collect();
+            names.ok_or_else(|| bv_error_response_status!(400, "`action` must be a string or a list of strings"))?.join(",")
+        }
+        _ => return Err(bv_error_response_status!(400, "`action` must be a string or a list of strings")),
+    };
+    canonical_sql_action(&raw).map(Some).map_err(|m| bv_error_response_status!(400, &m))
+}
+
+/// Every capability of `action` must be in the profile's `sql.step_up`: a
+/// step-up ticket is minted only for an action the stored profile gates.
+fn require_step_up(profile: &crate::sql_profile::SqlProfile, action: &str) -> Result<(), RvError> {
+    match action.split(',').find(|a| !profile.step_up.iter().any(|s| s.as_str() == *a)) {
+        Some(missing) => Err(bv_error_response_status!(
+            400,
+            &format!(
+                "step_up_not_required: the profile `{}` does not require step-up for `{missing}`; no ticket is needed",
+                profile.id
+            )
+        )),
+        None => Ok(()),
+    }
 }
 
 /// Why a ticket could not be redeemed. Every variant is a refusal — there is
@@ -246,6 +315,7 @@ impl ConnectMfaTicketStore {
             issued_at: now.to_rfc3339(),
             expires_at: (now + ChronoDuration::seconds(ttl)).to_rfc3339(),
             mcp_call: binding.mcp_call.clone(),
+            action: binding.action.clone(),
         };
 
         let value = serde_json::to_vec(&record)?;
@@ -303,6 +373,21 @@ impl ConnectMfaTicketStore {
             }
             (Some(minted), Some(expected)) if minted != expected => {
                 return Err(TicketError::Mismatch("MCP agent call"))
+            }
+            (Some(_), Some(_)) => {}
+        }
+        // A ticket written before T126 has no action, so it can never stand
+        // in for a step-up; an action ticket never opens a connect.
+        match (&record.action, &expect.action) {
+            (None, None) => {}
+            (Some(_), None) => {
+                return Err(TicketError::Mismatch("connect (it was issued for a SQL step-up action)"))
+            }
+            (None, Some(_)) => {
+                return Err(TicketError::Mismatch("SQL step-up action (it was issued for a connect)"))
+            }
+            (Some(minted), Some(expected)) if minted != expected => {
+                return Err(TicketError::Mismatch("SQL step-up action"))
             }
             (Some(_), Some(_)) => {}
         }
@@ -514,11 +599,51 @@ pub async fn enforce(
         profile_id: profile_id.to_string(),
         // A human connect path: an agent ticket is refused here.
         mcp_call: None,
+        // A connect: a step-up action ticket is refused (and burnt) here.
+        action: None,
     };
 
     let store = ConnectMfaTicketStore::new(core)?;
     let record = store.consume(ticket, &binding).await?;
     Ok(Some(record))
+}
+
+/// Redeem a SQL browser step-up ticket for exactly `action`
+/// (features/sql-browser.md §8.3). Unlike [`enforce`] there is no "not
+/// gated" pass: the SQL browser asks only when the session's profile gates
+/// the action, and this always demands and burns a ticket bound to the
+/// caller, namespace, resource, profile and that canonical action. A ticket
+/// without an action (a connect ticket, or any record written before T126)
+/// is refused.
+pub async fn redeem_sql_action_ticket(
+    core: &dyn VaultCtx,
+    req: &Request,
+    resource: &str,
+    profile_id: &str,
+    ticket: &str,
+    action: &str,
+) -> Result<ConnectMfaTicket, RvError> {
+    let action = canonical_sql_action(action).map_err(|m| bv_error_response_status!(400, &m))?;
+    let ticket = ticket.trim();
+    if ticket.is_empty() {
+        return Err(bv_error_response_status!(
+            403,
+            "mfa_required: this SQL action requires a step-up ticket. Run `resources/v2/connect/mfa/begin` + \
+             `/verify` with the `action` and pass the resulting `connect_ticket`."
+        ));
+    }
+    let (mount, principal) = caller_principal(req)?;
+    let binding = TicketBinding {
+        mount,
+        principal,
+        namespace: caller_namespace(core, req).await?,
+        resource: resource.to_string(),
+        profile_id: profile_id.to_string(),
+        mcp_call: None,
+        action: Some(action),
+    };
+    let store = ConnectMfaTicketStore::new(core)?;
+    Ok(store.consume(ticket, &binding).await?)
 }
 
 // ── Resource-mount handlers ────────────────────────────────────────
@@ -592,8 +717,12 @@ impl super::ResourceBackendInner {
     /// connect grant, or any SQL capability on the resource's `sql/server`
     /// (the SQL browser needs no `connect`, §3.3). A caller with neither
     /// gets the connect grant's own refusal. An `sql` profile must parse
-    /// strictly first, so a broken one costs no factor.
-    async fn mfa_target(&self, req: &mut Request) -> Result<(String, String, Option<Value>), RvError> {
+    /// strictly first, so a broken one costs no factor; the parsed profile is
+    /// returned for the step-up action check.
+    async fn mfa_target(
+        &self,
+        req: &mut Request,
+    ) -> Result<(String, String, Option<Value>, Option<crate::sql_profile::SqlProfile>), RvError> {
         let (raw, profile_id) = target_fields(req)?;
         let resource = super::resolve_resource_name(req, &raw).await?;
         // Read before the grant is checked, so nothing here may answer
@@ -609,10 +738,28 @@ impl super::ResourceBackendInner {
         if !sql_grant {
             self.require_connect_grant(req, &resource).await?;
         }
-        if let (true, Some(meta), Some(p)) = (sql, meta.as_ref(), profile.as_ref()) {
-            crate::sql_resource::validate_sql_profile(meta, p).map_err(|r| r.into_rv())?;
-        }
-        Ok((resource, profile_id, profile))
+        let parsed = match (sql, meta.as_ref(), profile.as_ref()) {
+            (true, Some(meta), Some(p)) => {
+                Some(crate::sql_resource::validate_sql_profile(meta, p).map_err(|r| r.into_rv())?)
+            }
+            _ => None,
+        };
+        Ok((resource, profile_id, profile, parsed))
+    }
+
+    /// The step-up `action` of a begin/verify body, checked against the
+    /// stored profile before any factor is asked for: only an `sql` profile
+    /// has actions, and every capability named must be in its `step_up`.
+    fn step_up_action(
+        req: &Request,
+        sql_profile: Option<&crate::sql_profile::SqlProfile>,
+    ) -> Result<Option<String>, RvError> {
+        let Some(action) = sql_action_field(req)? else { return Ok(None) };
+        let profile = sql_profile.ok_or_else(|| {
+            bv_error_response_status!(400, "`action` applies only to the step-up of an `sql` connection profile")
+        })?;
+        require_step_up(profile, &action)?;
+        Ok(Some(action))
     }
 
     /// Shared front half of the connect pre-flights: `resource` and
@@ -674,6 +821,7 @@ impl super::ResourceBackendInner {
             // Every caller of this is a human connect path: an agent ticket
             // is refused (and burnt) here.
             mcp_call: None,
+            action: None,
         };
         let store = ConnectMfaTicketStore::new(&self.core)?;
         Ok(store.consume(ticket.as_str(), &binding).await?)
@@ -690,19 +838,25 @@ impl super::ResourceBackendInner {
         _backend: &dyn crate::logical::Backend,
         req: &mut Request,
     ) -> Result<Option<crate::logical::Response>, RvError> {
-        let (resource, profile_id, profile) = self.mfa_target(req).await?;
+        let (resource, profile_id, profile, sql_profile) = self.mfa_target(req).await?;
         let profile = profile.ok_or_else(|| {
             bv_error_response_status!(
                 404,
                 &format!("profile `{profile_id}` not found on resource `{resource}`")
             )
         })?;
+        // A step-up action (features/sql-browser.md §8.3) is gated by the
+        // profile's `sql.step_up`, whatever `require_mfa` says.
+        let action = Self::step_up_action(req, sql_profile.as_ref())?;
 
         let mut data = Map::new();
         data.insert("resource".into(), Value::String(resource));
         data.insert("profile_id".into(), Value::String(profile_id));
+        if let Some(a) = &action {
+            data.insert("action".into(), Value::String(a.clone()));
+        }
 
-        if !profile_gate_flag(&profile) {
+        if action.is_none() && !profile_gate_flag(&profile) {
             data.insert("required".into(), Value::Bool(false));
             data.insert("methods".into(), Value::Array(Vec::new()));
             return Ok(Some(crate::logical::Response::data_response(Some(data))));
@@ -754,14 +908,17 @@ impl super::ResourceBackendInner {
         _backend: &dyn crate::logical::Backend,
         req: &mut Request,
     ) -> Result<Option<crate::logical::Response>, RvError> {
-        let (resource, profile_id, profile) = self.mfa_target(req).await?;
+        let (resource, profile_id, profile, sql_profile) = self.mfa_target(req).await?;
         let profile = profile.ok_or_else(|| {
             bv_error_response_status!(
                 404,
                 &format!("profile `{profile_id}` not found on resource `{resource}`")
             )
         })?;
-        if !profile_gate_flag(&profile) {
+        // Read before the ceremony: a malformed or ungated action must not
+        // cost the operator a factor.
+        let action = Self::step_up_action(req, sql_profile.as_ref())?;
+        if action.is_none() && !profile_gate_flag(&profile) {
             return Err(bv_error_response_status!(
                 400,
                 "this connection profile does not require MFA re-validation; \
@@ -793,6 +950,12 @@ impl super::ResourceBackendInner {
                 Some(McpCallBinding::from_request_block(&block).map_err(|m| bv_error_response_status!(400, &m))?)
             }
         };
+        if mcp_call.is_some() && action.is_some() {
+            return Err(bv_error_response_status!(
+                400,
+                "a ticket binds either one MCP agent call or one SQL step-up action, not both"
+            ));
+        }
 
         let (mount, principal) = caller_principal(req)?;
 
@@ -828,6 +991,7 @@ impl super::ResourceBackendInner {
             resource: resource.clone(),
             profile_id: profile_id.clone(),
             mcp_call,
+            action,
         };
         let store = ConnectMfaTicketStore::new(&self.core)?;
         let (ticket, record) = store.mint(&binding, &method).await?;
@@ -838,6 +1002,9 @@ impl super::ResourceBackendInner {
         data.insert("method".into(), Value::String(record.method));
         data.insert("resource".into(), Value::String(resource));
         data.insert("profile_id".into(), Value::String(profile_id));
+        if let Some(a) = record.action {
+            data.insert("action".into(), Value::String(a));
+        }
         Ok(Some(crate::logical::Response::data_response(Some(data))))
     }
 
@@ -1046,6 +1213,77 @@ mod tests {
         let record: ConnectMfaTicket = serde_json::from_str(old).unwrap();
         assert!(record.mcp_call.is_none());
         assert!(!serde_json::to_string(&record).unwrap().contains("mcp_call"));
+    }
+
+    /// T126 compatibility: a record written before step-up actions existed
+    /// reads with no action (so it can never stand in for one), a connect
+    /// ticket is still written without the key, and an action ticket round
+    /// trips with it.
+    #[test]
+    fn a_ticket_without_action_is_a_connect_ticket_on_disk_and_off() {
+        let old = r#"{"mount":"userpass/","principal":"felipe","namespace":"","resource":"db",
+                      "profile_id":"ro","method":"totp","issued_at":"x","expires_at":"y"}"#;
+        let record: ConnectMfaTicket = serde_json::from_str(old).unwrap();
+        assert!(record.action.is_none());
+        let text = serde_json::to_string(&record).unwrap();
+        assert!(!text.contains("action"), "{text}");
+        let with = ConnectMfaTicket { action: Some("sql_drop,sql_script".into()), ..record };
+        let back: ConnectMfaTicket = serde_json::from_str(&serde_json::to_string(&with).unwrap()).unwrap();
+        assert_eq!(back.action.as_deref(), Some("sql_drop,sql_script"));
+        // A malformed action value on disk does not parse as a ticket at all.
+        let bad = r#"{"mount":"u","principal":"p","resource":"r","profile_id":"p","method":"totp",
+                      "issued_at":"x","expires_at":"y","action":["sql_drop"]}"#;
+        assert!(serde_json::from_str::<ConnectMfaTicket>(bad).is_err());
+    }
+
+    #[test]
+    fn step_up_actions_are_canonical_and_strict() {
+        assert_eq!(canonical_sql_action("sql_drop").unwrap(), "sql_drop");
+        assert_eq!(canonical_sql_action("sql_script,sql_drop").unwrap(), "sql_drop,sql_script");
+        assert_eq!(
+            canonical_sql_action("sql_script,sql_export,sql_admin,sql_drop").unwrap(),
+            "sql_drop,sql_admin,sql_export,sql_script"
+        );
+        for bad in [
+            "",
+            "drop",
+            "sql_drop,",
+            ",sql_drop",
+            "sql_drop, sql_script",
+            "sql_drop,sql_drop",
+            "SQL_DROP",
+            "sql_drop;sql_script",
+            "sql_nope",
+        ] {
+            assert!(canonical_sql_action(bad).is_err(), "{bad:?}");
+        }
+        assert!(canonical_sql_action(&"sql_drop,".repeat(40)).is_err(), "over-long");
+    }
+
+    #[test]
+    fn the_step_up_list_decides_which_actions_mint() {
+        use crate::kernel_api::policy::SqlCapability;
+        let profile = crate::sql_profile::SqlProfile {
+            id: "rw".into(),
+            label: None,
+            target_host: None,
+            target_port: None,
+            catalog: None,
+            instance: None,
+            tls: crate::sql_profile::SqlTls {
+                mode: crate::sql_profile::SqlTlsMode::VerifyFull,
+                server_name: None,
+                ca_pem: None,
+            },
+            ceiling: vec![SqlCapability::Select],
+            require_mfa: false,
+            step_up: vec![SqlCapability::Drop, SqlCapability::Script],
+            credential_source: crate::sql_profile::SqlCredentialSource::Secret { secret_id: "s".into() },
+        };
+        assert!(require_step_up(&profile, "sql_drop").is_ok());
+        assert!(require_step_up(&profile, "sql_drop,sql_script").is_ok());
+        let e = require_step_up(&profile, "sql_drop,sql_export").unwrap_err().to_string();
+        assert!(e.contains("step_up_not_required") && e.contains("sql_export"), "{e}");
     }
 
     /// Regression (0.44.28, and T457 Decision 1): the step-up goes to the

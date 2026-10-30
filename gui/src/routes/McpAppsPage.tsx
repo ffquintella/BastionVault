@@ -89,6 +89,8 @@ export function McpAppsPage() {
   const [cMaxTtl, setCMaxTtl] = useState("86400");
   const [cWaiverDays, setCWaiverDays] = useState("90");
   const [cPin, setCPin] = useState("");
+  const [cBrokered, setCBrokered] = useState(false);
+  const [cCidrs, setCCidrs] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -107,6 +109,8 @@ export function McpAppsPage() {
       setCMaxTtl(String(c.max_ttl_secs || 86_400));
       setCWaiverDays(String(c.waiver_max_days || 90));
       setCPin(c.catalogue_pin ?? "");
+      setCBrokered(!!c.brokered_sessions_enabled);
+      setCCidrs((c.brokered_sessions_allowed_target_cidrs ?? []).join("\n"));
     } catch (e) {
       toast("error", extractError(e));
     } finally {
@@ -266,8 +270,23 @@ export function McpAppsPage() {
       return;
     }
     const pin = (pinOverride ?? cPin).trim();
+    // Blank resets to the server config / built-in default; "none" denies all.
+    const rawCidrs = cCidrs.trim();
+    const cidrs =
+      rawCidrs === ""
+        ? null
+        : rawCidrs.toLowerCase() === "none"
+          ? []
+          : rawCidrs.split(/[\s,]+/).filter(Boolean);
     try {
-      await api.mcpWriteConfig({ defaultTtlSecs: d, maxTtlSecs: m, waiverMaxDays: w, cataloguePin: pin });
+      await api.mcpWriteConfig({
+        defaultTtlSecs: d,
+        maxTtlSecs: m,
+        waiverMaxDays: w,
+        cataloguePin: pin,
+        brokeredSessionsEnabled: cBrokered,
+        allowedTargetCidrs: cidrs,
+      });
       toast("success", "MCP settings saved");
       await load();
     } catch (e) {
@@ -548,6 +567,44 @@ export function McpAppsPage() {
                     placeholder="hash from the Catalogue tab"
                   />
                 </div>
+              </div>
+              <div className="space-y-3 border-t border-[var(--color-border)] pt-3">
+                <h3 className="text-sm font-medium">Brokered sessions</h3>
+                <p className="text-xs text-[var(--color-text-muted)]">
+                  Lets a paired assistant open SSH sessions from the vault itself, after a per-call
+                  confirmation. Off by default. Changing these needs sudo and is audited.
+                </p>
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={cBrokered}
+                    onChange={(e) => setCBrokered(e.target.checked)}
+                    aria-label="Enable brokered sessions"
+                  />
+                  Enable brokered sessions
+                </label>
+                {config && !config.brokered_sessions_server_enabled && (
+                  <p className="text-xs text-[var(--color-text-muted)]">
+                    The server config (<span className="font-mono">mcp.brokered_sessions.enabled</span>) has
+                    not enabled them, so sessions stay refused even with this switch on.
+                  </p>
+                )}
+                <Textarea
+                  label="Allowed destinations — CIDRs, one per line (blank = server config / default, “none” = deny all)"
+                  value={cCidrs}
+                  onChange={(e) => setCCidrs(e.target.value)}
+                  placeholder={"10.0.0.0/8\n192.168.0.0/16"}
+                />
+                {config && (
+                  <div className="min-w-0 text-xs text-[var(--color-text-muted)]">
+                    In force ({config.brokered_sessions_target_cidrs_source}):{" "}
+                    <span className="break-words font-mono">
+                      {(config.brokered_sessions_effective_target_cidrs ?? []).join(", ") || "none"}
+                    </span>
+                    <br />
+                    Always refused: {(config.brokered_sessions_always_denied ?? []).join(", ") || "—"}
+                  </div>
+                )}
               </div>
               <div className="flex justify-end">
                 <Button onClick={() => void saveConfig()}>Save settings</Button>

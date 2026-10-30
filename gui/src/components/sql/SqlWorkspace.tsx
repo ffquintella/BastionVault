@@ -1,18 +1,22 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { Play, Square, TextSelect, Wand2, ListTree, Plus, X } from "lucide-react";
+import { Play, Square, TextSelect, Wand2, ListTree, Plus, X, ScrollText, FileUp, Download } from "lucide-react";
 
 import {
   sqlCancel,
   sqlDescribe,
   sqlExecute,
+  sqlExportCancel,
+  sqlExportToFile,
   sqlHistory,
   sqlPrivileges,
   sqlRows,
   sqlRun,
+  sqlScript,
   sqlSessionStatus,
   type SqlColumn,
   type SqlDescribe,
+  type SqlExportRequest,
   type SqlJournalRecord,
   type SqlRowEdit,
   type SqlSessionStatus,
@@ -27,18 +31,23 @@ import {
   describeSqlError,
   editCapabilities,
   explainOf,
+  exportSummary,
+  exportTableSql,
   formatSql,
   gridEditBlocker,
   isSessionGone,
   refusals,
   selectAllFrom,
+  splitStatements,
   statementAtCursor,
   type Danger,
   type EditTarget,
 } from "../../lib/sqlWorkspace";
 import type { SessionPaneStatus } from "../session/SessionPaneHeader";
 import { SqlConfirmDialog } from "./SqlDialog";
+import { SqlExportDialog } from "./SqlExportDialog";
 import { SqlInfoPanel } from "./SqlInfoPanel";
+import { SqlStepUpDialog } from "./SqlStepUpDialog";
 import { SqlObjectTree } from "./SqlObjectTree";
 import { SqlResultGrid, type GridEditing, type RowOutcome } from "./SqlResultGrid";
 
@@ -46,6 +55,8 @@ import { SqlResultGrid, type GridEditing, type RowOutcome } from "./SqlResultGri
 export const STATUS_REFRESH_MS = 20_000;
 const POLL_IDLE_MS = 200;
 const MAX_RESULT_TABS = 12;
+/** Largest `.sql` file loaded into an editor tab (the script limit). */
+export const MAX_SQL_FILE_BYTES = 4 * 1024 * 1024;
 
 interface EditorTab {
   id: string;
@@ -127,9 +138,15 @@ export default function SqlWorkspace({
   const [history, setHistory] = useState<SqlJournalRecord | null>(null);
   const [historyError, setHistoryError] = useState("");
   const [running, setRunning] = useState<{ resultId: string; runId: string | null } | null>(null);
-  const [confirm, setConfirm] = useState<{ dangers: Danger[]; run: () => void } | null>(null);
+  const [confirm, setConfirm] = useState<{ dangers: Danger[]; run: () => void; script?: number } | null>(null);
   const [manualTx, setManualTx] = useState(false);
+  const [stepUp, setStepUp] = useState<{ action: string; resolve: (ok: boolean) => void } | null>(null);
+  const [exportReq, setExportReq] = useState<{ sql: string; table?: { schema: string; name: string } } | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [scriptOnError, setScriptOnError] = useState<"stop" | "continue">("stop");
+  const [scriptSingle, setScriptSingle] = useState(false);
   const textRef = useRef<HTMLTextAreaElement | null>(null);
+  const fileRef = useRef<HTMLInputElement | null>(null);
   const aliveRef = useRef(true);
   const runningRef = useRef(running);
   runningRef.current = running;
@@ -186,6 +203,17 @@ export default function SqlWorkspace({
     // onStatusChange is a fresh closure per render; the poll must not restart.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token]);
+
+  /** Per-action step-up (§8.3): ask, and resolve true once the host holds
+   *  a ticket for the retry. */
+  const askStepUp = useCallback(
+    (action: string) =>
+      new Promise<boolean>((resolve) => {
+        addLog("info", `Step-up required for ${action}.`);
+        setStepUp({ action, resolve });
+      }),
+    [addLog],
+  );
 
   const updateResult = useCallback((id: string, f: (r: ResultTab) => ResultTab) => {
     setResults((rs) => rs.map((r) => (r.id === id ? f(r) : r)));
@@ -280,6 +308,13 @@ export default function SqlWorkspace({
         setRunning(null);
         return;
       }
+      if (reply.state === "step_up_required" && reply.action) {
+        const action = reply.action;
+        updateResult(id, (r) => ({ ...r, state: "refused", refusal: { message: `needs a fresh MFA step-up for ${action}`, lines: [] } }));
+        setRunning(null);
+        if (await askStepUp(action)) await execute(sql, { ...opts, confirmed: true });
+        return;
+      }
       if (reply.state === "refused" || !reply.run_id) {
         const lines = refusals(reply.statements ?? []);
         const message = reply.message ?? "refused";
@@ -293,7 +328,108 @@ export default function SqlWorkspace({
       setRunning({ resultId: id, runId });
       await poll(id, runId);
     },
-    [token, gone, addResult, addLog, updateResult, markGone, poll],
+    [token, gone, addResult, addLog, updateResult, markGone, poll, askStepUp],
+  );
+
+  /** A script (§8.2): always confirmed first; every statement is authorized
+   *  before the first runs, and a refusal names the statement. */
+  const runScript = useCallback(
+    async (sql: string, confirmed = false) => {
+      const text = sql.trim();
+      if (!text || runningRef.current || gone) return;
+      if (!confirmed) {
+        const count = splitStatements(text).length;
+        setConfirm({ dangers: dangerousStatements(text), script: count, run: () => void runScript(sql, true) });
+        return;
+      }
+      const id = nextId("r");
+      addResult({
+        id,
+        title: `Script: ${preview(text)}`,
+        state: "running",
+        runId: null,
+        columns: [],
+        rows: [],
+        truncated: new Set(),
+        messages: [],
+        refusal: null,
+        error: null,
+        elapsedMs: 0,
+        budgetExhausted: false,
+        target: null,
+        targetCaps: null,
+      });
+      setRunning({ resultId: id, runId: null });
+      addLog("info", `▶ script (${scriptOnError === "stop" ? "stop on error" : "continue on error"}${scriptSingle ? ", one transaction" : ""})`);
+      let reply;
+      try {
+        reply = await sqlScript(token, text, { on_error: scriptOnError, transaction: scriptSingle ? "single" : "none" });
+      } catch (e) {
+        const msg = describeSqlError(e);
+        updateResult(id, (r) => ({ ...r, state: "error", error: msg }));
+        addLog("error", msg);
+        if (isSessionGone(e)) markGone(e);
+        setRunning(null);
+        return;
+      }
+      if (reply.state === "step_up_required" && reply.action) {
+        const action = reply.action;
+        updateResult(id, (r) => ({ ...r, state: "refused", refusal: { message: `needs a fresh MFA step-up for ${action}`, lines: [] } }));
+        setRunning(null);
+        if (await askStepUp(action)) await runScript(sql, true);
+        return;
+      }
+      if (reply.state === "refused" || !reply.run_id) {
+        const lines = refusals(reply.statements ?? [], reply.request ?? []);
+        const message = reply.message ?? "refused";
+        updateResult(id, (r) => ({ ...r, state: "refused", refusal: { message: `${message} — nothing ran`, lines } }));
+        addLog("refused", `Script refused by the vault: ${message}; nothing ran.`);
+        setRunning(null);
+        return;
+      }
+      for (const w of reply.warnings ?? []) addLog("error", w);
+      const runId = reply.run_id;
+      updateResult(id, (r) => ({ ...r, runId }));
+      setRunning({ resultId: id, runId });
+      await poll(id, runId);
+    },
+    [token, gone, addResult, addLog, updateResult, markGone, poll, askStepUp, scriptOnError, scriptSingle],
+  );
+
+  /** An export (§8.1): the host asks where to save and writes the file. */
+  const runExport = useCallback(
+    async (req: SqlExportRequest) => {
+      if (runningRef.current || gone) return;
+      setExporting(true);
+      addLog("info", `⇩ export ${req.format}: ${preview(req.sql)}`);
+      try {
+        let out = await sqlExportToFile(token, req);
+        if (out.state === "step_up_required" && out.reply?.action) {
+          if (!(await askStepUp(out.reply.action))) {
+            addLog("info", "Export not started: the step-up was cancelled.");
+            return;
+          }
+          out = await sqlExportToFile(token, req);
+        }
+        if (out.state === "refused") {
+          const message = out.reply?.message ?? "refused";
+          addLog("refused", `Export refused by the vault: ${message}`);
+          for (const l of refusals(out.reply?.statements ?? [])) addLog("refused", l);
+        } else if (out.state === "cancelled") {
+          addLog("info", "Export cancelled; no file was kept.");
+        } else {
+          addLog(out.state === "limit_reached" ? "error" : "info", exportSummary(out));
+        }
+      } catch (e) {
+        addLog("error", `Export: ${describeSqlError(e)}`);
+        if (isSessionGone(e)) markGone(e);
+      } finally {
+        setExporting(false);
+        setBottom("messages");
+        void refreshStatus();
+      }
+    },
+    [token, gone, addLog, askStepUp, markGone, refreshStatus],
   );
 
   const editor = editors.find((e) => e.id === activeEditor) ?? editors[0];
@@ -335,6 +471,23 @@ export default function SqlWorkspace({
       caps = null;
     }
     await execute(text, { target, targetCaps: caps });
+  };
+
+  const loadFile = (file: File) => {
+    if (file.size > MAX_SQL_FILE_BYTES) {
+      addLog("error", `${file.name} is larger than 4 MiB, the script limit.`);
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const text = typeof reader.result === "string" ? reader.result : "";
+      const id = nextId("e");
+      setEditors((es) => [...es, { id, title: file.name, text }]);
+      setActiveEditor(id);
+      addLog("info", `Loaded ${file.name}; nothing runs until you run it.`);
+    };
+    reader.onerror = () => addLog("error", `Could not read ${file.name}.`);
+    reader.readAsText(file);
   };
 
   const describe = async (schema: string, object: string) => {
@@ -400,6 +553,10 @@ export default function SqlWorkspace({
     const send = async (edit: SqlRowEdit, ok: string, after?: () => void): Promise<RowOutcome> => {
       try {
         const reply = await sqlRows(token, edit);
+        if (reply.state === "step_up_required") {
+          if (await askStepUp(reply.action)) return send(edit, ok, after);
+          return { kind: "refused", text: `Needs a fresh MFA step-up for ${reply.action}` };
+        }
         if (reply.state === "done") {
           after?.();
           addLog("info", `${edit.op} on ${target.schema}.${target.name}: 1 row`);
@@ -493,6 +650,70 @@ export default function SqlWorkspace({
         <ToolButton title="Format" disabled={!editor.text.trim()} onClick={() => setEditorText(formatSql(editor.text))}>
           <Wand2 size={13} /> Format
         </ToolButton>
+        <span className="mx-1 h-4 w-px bg-[var(--color-border)]" aria-hidden />
+        <ToolButton
+          title={has("sql_script") ? "Run the editor as a script" : "Your grant lacks sql_script"}
+          disabled={!live || isRunning || exporting || !editor.text.trim() || !has("sql_script")}
+          onClick={() => void runScript(editor.text)}
+        >
+          <ScrollText size={13} /> Run script
+        </ToolButton>
+        <label className="flex items-center gap-1 text-[var(--color-text-muted)]">
+          <span>On error</span>
+          <select
+            aria-label="On error"
+            value={scriptOnError}
+            disabled={scriptSingle}
+            onChange={(e) => setScriptOnError(e.target.value as "stop" | "continue")}
+            className="rounded border border-[var(--color-border)] bg-transparent px-1 text-[var(--color-text)]"
+          >
+            <option value="stop">Stop</option>
+            <option value="continue">Continue</option>
+          </select>
+        </label>
+        <label className="flex items-center gap-1 text-[var(--color-text-muted)]" title="Wrap the script in one transaction: any failure rolls all of it back">
+          <input
+            type="checkbox"
+            aria-label="One transaction"
+            checked={scriptSingle}
+            onChange={(e) => {
+              setScriptSingle(e.target.checked);
+              if (e.target.checked) setScriptOnError("stop");
+            }}
+          />
+          <span>One transaction</span>
+        </label>
+        <ToolButton title="Load a .sql file into a new tab" disabled={!live} onClick={() => fileRef.current?.click()}>
+          <FileUp size={13} /> Load .sql
+        </ToolButton>
+        <input
+          ref={fileRef}
+          type="file"
+          accept=".sql,text/plain"
+          aria-label="SQL file"
+          className="hidden"
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file) loadFile(file);
+            e.target.value = "";
+          }}
+        />
+        {exporting ? (
+          <ToolButton title="Cancel the export" onClick={() => void sqlExportCancel(token).catch(() => undefined)}>
+            <Square size={13} /> Cancel export
+          </ToolButton>
+        ) : (
+          <ToolButton
+            title={has("sql_export") ? "Export the statement at the cursor (or the selection)" : "Your grant lacks sql_export"}
+            disabled={!live || isRunning || !has("sql_export")}
+            onClick={() => {
+              const sql = (selection() || currentStatement()).trim().replace(/;\s*$/, "");
+              if (sql) setExportReq({ sql });
+            }}
+          >
+            <Download size={13} /> Export
+          </ToolButton>
+        )}
         <label className="ml-2 flex items-center gap-1 text-[var(--color-text-muted)]">
           <span>Commit</span>
           <select
@@ -547,6 +768,7 @@ export default function SqlWorkspace({
             disabled={!live}
             onOpen={(s, o) => void openTable(s, o)}
             onDescribe={(s, o) => void describe(s, o)}
+            onExport={has("sql_export") && !exporting ? (s, o) => setExportReq({ sql: exportTableSql(s, o), table: { schema: s, name: o } }) : undefined}
             onError={(m) => addLog("error", m)}
           />
         </div>
@@ -647,10 +869,33 @@ export default function SqlWorkspace({
           <SqlInfoPanel status={status} effective={effective} readAt={statusAt} />
         </div>
       </div>
+      {stepUp && (
+        <SqlStepUpDialog
+          token={token}
+          action={stepUp.action}
+          onDone={(ok) => {
+            const resolve = stepUp.resolve;
+            setStepUp(null);
+            if (!ok) addLog("info", "Step-up cancelled; nothing ran.");
+            resolve(ok);
+          }}
+        />
+      )}
+      {exportReq && (
+        <SqlExportDialog
+          sql={exportReq.sql}
+          table={exportReq.table}
+          onCancel={() => setExportReq(null)}
+          onExport={(req) => {
+            setExportReq(null);
+            void runExport(req);
+          }}
+        />
+      )}
       {confirm && (
         <SqlConfirmDialog
-          title="Run this statement?"
-          confirm="Run it"
+          title={confirm.script !== undefined ? `Run ${confirm.script} statements as a script?` : "Run this statement?"}
+          confirm={confirm.script !== undefined ? "Run the script" : "Run it"}
           onCancel={() => setConfirm(null)}
           onConfirm={() => {
             const run = confirm.run;
@@ -658,6 +903,12 @@ export default function SqlWorkspace({
             run();
           }}
         >
+          {confirm.script !== undefined && (
+            <p>
+              Every statement is checked by the vault before the first one runs; one refusal runs nothing.{" "}
+              {scriptSingle ? "They run in one transaction: any failure rolls all of them back." : `On error: ${scriptOnError}.`}
+            </p>
+          )}
           {confirm.dangers.map((d, i) => (
             <p key={i}>
               <code className="break-all text-[var(--color-text)]">{d.statement}</code> {DANGER_TEXT[d.kind]}.

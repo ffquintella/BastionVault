@@ -202,6 +202,30 @@ fn release_rules_agree() {
     }
 }
 
+/// T126: a step-up action is canonicalized (or refused) the same way by the
+/// host and the testkit, so a plugin tested against one binds tickets as
+/// the other does.
+#[test]
+fn step_up_actions_canonicalize_the_same() {
+    use bastion_vault::modules::resource::connect_mfa::canonical_sql_action;
+    for raw in [
+        "sql_drop",
+        "sql_script,sql_drop",
+        "sql_script,sql_export,sql_admin,sql_drop",
+        "sql_select,sql_insert,sql_update,sql_delete,sql_alter,sql_create,sql_drop,sql_execute,sql_admin,sql_export,sql_script",
+        "",
+        "drop",
+        "sql_drop,",
+        "sql_drop, sql_script",
+        "sql_drop,sql_drop",
+        "SQL_DROP",
+    ] {
+        let real = canonical_sql_action(raw).is_ok().then(|| canonical_sql_action(raw).unwrap());
+        let mock = bastion_plugin_testkit::sql::canonical_action(raw).ok();
+        assert_eq!(real, mock, "{raw:?}");
+    }
+}
+
 /// Actor stamping is decided the same way: ABI 1.4 or later with
 /// caller_identity.
 #[test]

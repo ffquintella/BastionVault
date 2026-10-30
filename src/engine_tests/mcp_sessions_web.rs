@@ -740,6 +740,7 @@ mod mod_test {
                     tool: TOOL.into(),
                     args_hash: args_hash(arguments),
                 }),
+                action: None,
             };
             ConnectMfaTicketStore::new(self.core.as_ref()).unwrap().mint(&binding, "totp").await.unwrap().0
         }

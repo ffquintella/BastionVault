@@ -99,6 +99,24 @@ pub struct McpConfig {
     pub waiver_max_days: u32,
     #[serde(default)]
     pub catalogue_pin: Option<String>,
+    /// Runtime switch for MCP brokered sessions (`sys/mcp/config`).
+    #[serde(default)]
+    pub brokered_sessions_enabled: bool,
+    /// Runtime destination list; `None` defers to the server config, then the default.
+    #[serde(default)]
+    pub brokered_sessions_allowed_target_cidrs: Option<Vec<String>>,
+    #[serde(default)]
+    pub brokered_sessions_effective_target_cidrs: Vec<String>,
+    /// `runtime`, `hcl` or `default`.
+    #[serde(default)]
+    pub brokered_sessions_target_cidrs_source: String,
+    /// The static `mcp.brokered_sessions.enabled` of the server config.
+    #[serde(default)]
+    pub brokered_sessions_server_enabled: bool,
+    #[serde(default)]
+    pub brokered_sessions_server_protocols: Vec<String>,
+    #[serde(default)]
+    pub brokered_sessions_always_denied: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -252,7 +270,10 @@ pub async fn mcp_read_config(state: State<'_, AppState>) -> CmdResult<McpConfig>
     Ok(resp.and_then(|r| r.data).and_then(|d| serde_json::from_value(Value::Object(d)).ok()).unwrap_or_default())
 }
 
-/// An empty `catalogue_pin` clears the pin.
+/// An empty `catalogue_pin` clears the pin. `allowed_target_cidrs: None`
+/// resets the destination list to the server config / built-in default; an
+/// empty list denies every destination. Changing either brokered-session
+/// field needs sudo, which the server enforces.
 #[tauri::command]
 pub async fn mcp_write_config(
     state: State<'_, AppState>,
@@ -260,12 +281,22 @@ pub async fn mcp_write_config(
     max_ttl_secs: u64,
     waiver_max_days: u64,
     catalogue_pin: String,
+    brokered_sessions_enabled: bool,
+    allowed_target_cidrs: Option<Vec<String>>,
 ) -> CmdResult<()> {
     let mut body = Map::new();
     body.insert("default_ttl_secs".into(), Value::Number(default_ttl_secs.into()));
     body.insert("max_ttl_secs".into(), Value::Number(max_ttl_secs.into()));
     body.insert("waiver_max_days".into(), Value::Number(waiver_max_days.into()));
     body.insert("catalogue_pin".into(), Value::String(catalogue_pin.trim().to_string()));
+    body.insert("brokered_sessions_enabled".into(), Value::Bool(brokered_sessions_enabled));
+    body.insert(
+        "brokered_sessions_allowed_target_cidrs".into(),
+        match allowed_target_cidrs {
+            Some(list) => Value::Array(list.into_iter().map(Value::String).collect()),
+            None => Value::Null,
+        },
+    );
     make_request(&state, Operation::Write, "sys/mcp/config".into(), Some(body)).await?;
     Ok(())
 }

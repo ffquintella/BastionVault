@@ -222,9 +222,10 @@ describe("adding a profile", () => {
     expect(screen.getByText(/not available yet/)).toBeInTheDocument();
   });
 
-  it("marks step-up as not enforced yet", async () => {
+  it("explains step-up as enforced per action", async () => {
     await openEditor();
-    expect(screen.getByText(/it is not enforced/)).toBeInTheDocument();
+    expect(screen.getByText(/fresh MFA step-up bound to that action/)).toBeInTheDocument();
+    expect(screen.queryByText(/not enforced/)).not.toBeInTheDocument();
   });
 });
 

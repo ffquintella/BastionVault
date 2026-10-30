@@ -184,7 +184,12 @@ mod resource_sql_tests {
             sql_profile("missing", ro.clone(), secret("svc_nope")),
             sql_profile("dyn", ro.clone(), json!({ "kind": "dynamic", "mount": "db-mysql/", "role": "netrisk-ro" })),
             sql_profile("broken", json!({ "ceiling": "sql_select" }), secret("svc_ro")),
-            { "id": "shell", "name": "shell", "protocol": "ssh", "credential_source": secret("svc_ro") }
+            { "id": "shell", "name": "shell", "protocol": "ssh", "credential_source": secret("svc_ro") },
+            sql_profile(
+                "stepup",
+                json!({ "catalog": "netrisk", "ceiling": ["sql_select"], "step_up": ["sql_drop", "sql_export", "sql_script"] }),
+                secret("svc_ro")
+            )
         ])
     }
 
@@ -344,7 +349,7 @@ mod resource_sql_tests {
             (json!("direct"), json!("default"))
         );
         let ids: Vec<&str> = target["profiles"].as_array().unwrap().iter().map(|p| p["id"].as_str().unwrap()).collect();
-        assert_eq!(ids, vec!["ro", "gated", "moved", "unbound", "missing", "dyn"]);
+        assert_eq!(ids, vec!["ro", "gated", "moved", "unbound", "missing", "dyn", "stepup"]);
         let ro = &target["profiles"][0];
         assert_eq!(ro["endpoint"], "db1.example.net:3306");
         assert_eq!(ro["tls"]["mode"], "verify-full");
@@ -497,6 +502,7 @@ mod resource_sql_tests {
             resource: RESOURCE.into(),
             profile_id: "gated".into(),
             mcp_call: None,
+            action: None,
         };
         let store = ConnectMfaTicketStore::new(f.core.as_ref()).unwrap();
         let (ticket, _) = store.mint(&binding, "totp").await.unwrap();
@@ -510,6 +516,96 @@ mod resource_sql_tests {
         assert_eq!(code(&e), ("refused", "mfa_required"), "one ticket, one release: {e}");
         let e = f.host(&m, &ana, "connect_ticket_redeem", redeem).await.unwrap_err();
         assert_eq!(code(&e).0, "refused", "the ticket is spent: {e}");
+        assert_never_leaked(&f);
+    }
+
+    /// T126, §8.3: a step-up ticket is bound to its canonical action. A
+    /// ticket without an action (a connect ticket, or one written before
+    /// T126) is never accepted for an action; an action ticket never opens a
+    /// connect nor unlocks a `require_mfa` release; `begin` / `verify` refuse
+    /// an action the stored profile does not gate before any factor.
+    #[tokio::test]
+    async fn step_up_tickets_are_bound_to_their_action() {
+        let f = fixture("sql_step_up_action").await;
+        let m = granted_plugin(&f).await;
+        let (ana_token, ana) = f.user("ana", READER).await;
+        let begin = |profile: &str, action: Value| json!({ "resource": RESOURCE, "profile_id": profile, "action": action });
+        let path = "resources/v2/connect/mfa/begin";
+
+        // Before any factor: an action the profile does not gate, a
+        // malformed one, and an action on a profile that is not `sql`.
+        let e = f.request(&ana_token, Operation::Write, path, Some(begin("ro", json!("sql_drop")))).await.unwrap_err();
+        assert_eq!(e.0, 400, "{e:?}");
+        assert!(e.1.starts_with("step_up_not_required: "), "{e:?}");
+        let e = f.request(&ana_token, Operation::Write, path, Some(begin("stepup", json!("sql_drop,sql_admin")))).await;
+        assert!(e.unwrap_err().1.contains("`sql_admin`"), "sql_admin is not in this profile's step_up");
+        for bad in [json!("sql_nope"), json!(""), json!(5), json!(["sql_drop", 1]), json!("sql_drop,sql_drop")] {
+            let e = f.request(&ana_token, Operation::Write, path, Some(begin("stepup", bad.clone()))).await;
+            assert_eq!(e.unwrap_err().0, 400, "{bad}");
+        }
+        let e = f.request(&f.root, Operation::Write, path, Some(begin("shell", json!("sql_drop")))).await.unwrap_err();
+        assert_eq!(e.0, 400, "an ssh profile has no SQL actions: {e:?}");
+        let verify = json!({ "resource": RESOURCE, "profile_id": "ro", "method": "totp", "totp_code": "000000",
+            "action": "sql_drop" });
+        let e = f.request(&ana_token, Operation::Write, "resources/v2/connect/mfa/verify", Some(verify)).await;
+        assert!(e.unwrap_err().1.starts_with("step_up_not_required: "), "refused before the ceremony");
+        // A gated action reaches the factor check (ana has none enrolled),
+        // in any order and as a list.
+        let e = f.request(&ana_token, Operation::Write, path, Some(begin("stepup", json!(["sql_script", "sql_drop"]))));
+        let (status, text) = e.await.unwrap_err();
+        assert_eq!(status, 403);
+        assert!(text.starts_with("mfa_unavailable: "), "the step-up applies: {text}");
+
+        let store = ConnectMfaTicketStore::new(f.core.as_ref()).unwrap();
+        let bind = |profile: &str, action: Option<&str>| TicketBinding {
+            mount: "userpass/".into(),
+            principal: "ana".into(),
+            namespace: String::new(),
+            resource: RESOURCE.into(),
+            profile_id: profile.into(),
+            mcp_call: None,
+            action: action.map(str::to_string),
+        };
+        let redeem = |profile: &str, ticket: &str, action: Option<&str>| {
+            let mut p = json!({ "resource": RESOURCE, "profile": profile, "ticket": ticket });
+            if let Some(a) = action {
+                p["action"] = json!(a);
+            }
+            p
+        };
+
+        // The action ticket redeems once, for its action in any order.
+        let (t, _) = store.mint(&bind("stepup", Some("sql_drop,sql_script")), "totp").await.unwrap();
+        let r = f.host(&m, &ana, "connect_ticket_redeem", redeem("stepup", &t, Some("sql_script,sql_drop"))).await;
+        let r = r.unwrap();
+        assert_eq!((r["redeemed"].clone(), r["action"].clone()), (json!(true), json!("sql_drop,sql_script")));
+        let e = f.host(&m, &ana, "connect_ticket_redeem", redeem("stepup", &t, Some("sql_drop,sql_script"))).await;
+        assert_eq!(code(&e.unwrap_err()).0, "refused", "spent");
+
+        // Regression: a ticket without an action is not accepted for one.
+        let (t, _) = store.mint(&bind("stepup", None), "totp").await.unwrap();
+        let e = f.host(&m, &ana, "connect_ticket_redeem", redeem("stepup", &t, Some("sql_drop"))).await.unwrap_err();
+        assert_eq!(code(&e).0, "refused", "{e}");
+        assert!(e.contains("issued for a connect"), "{e}");
+        // Nor is one bound to another action, or to a subset.
+        let (t, _) = store.mint(&bind("stepup", Some("sql_drop")), "totp").await.unwrap();
+        let e = f.host(&m, &ana, "connect_ticket_redeem", redeem("stepup", &t, Some("sql_drop,sql_script"))).await;
+        assert_eq!(code(&e.unwrap_err()).0, "refused");
+        let (t, _) = store.mint(&bind("stepup", Some("sql_export")), "totp").await.unwrap();
+        let e = f.host(&m, &ana, "connect_ticket_redeem", redeem("stepup", &t, Some("sql_drop"))).await;
+        assert_eq!(code(&e.unwrap_err()).0, "refused");
+
+        // An action ticket never opens a gated session, and redeeming it
+        // for its action records no connect redemption.
+        let release = json!({ "resource": RESOURCE, "profile": "gated", "session_ref": "s-1" });
+        let (t, _) = store.mint(&bind("gated", Some("sql_drop")), "totp").await.unwrap();
+        let e = f.host(&m, &ana, "connect_ticket_redeem", redeem("gated", &t, None)).await.unwrap_err();
+        assert!(e.contains("issued for a SQL step-up action"), "{e}");
+        let (t, _) = store.mint(&bind("gated", Some("sql_drop")), "totp").await.unwrap();
+        let r = f.host(&m, &ana, "connect_ticket_redeem", redeem("gated", &t, Some("sql_drop"))).await.unwrap();
+        assert_eq!(r["redeemed"], json!(true));
+        let e = f.host(&m, &ana, "resource_sql_credential", release).await.unwrap_err();
+        assert_eq!(code(&e), ("refused", "mfa_required"), "an action ticket is not a connect: {e}");
         assert_never_leaked(&f);
     }
 

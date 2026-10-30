@@ -934,6 +934,7 @@ mod mod_test {
                 resource: "web-01".into(),
                 profile_id: "p_agent".into(),
                 mcp_call,
+                action: None,
             };
             ConnectMfaTicketStore::new(self.core.as_ref()).unwrap().mint(&binding, "totp").await.unwrap().0
         }

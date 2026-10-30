@@ -431,15 +431,29 @@ async fn target_returns_the_seam_view_with_the_held_privileges() {
     assert_eq!(code(&e), codes::NO_SQL_PRIVILEGE);
 }
 
-/// An action-bound ticket is refused rather than redeemed as a plain one.
+/// T126: a malformed step-up action is refused as `bad_request` before any
+/// privilege is read; a well-formed one goes to the action redemption,
+/// which refuses a ticket it cannot bind (here: no userpass principal).
+/// The end-to-end binding cases are in `engine_tests/resource_sql.rs`.
 #[tokio::test]
-async fn ticket_redeem_refuses_action_bound_tickets() {
+async fn ticket_redeem_parses_the_action_strictly() {
     let (_bv, core, root) = new_unseal_test_bastion_vault("sql_host_ticket").await;
     reader_policy(&core, &root).await;
     let vault: Arc<dyn VaultCtx> = core;
     let m = sql_manifest();
     grant_all(&vault, &m).await;
+    let c = caller(&["sql-reader"]);
+    for bad in [json!(""), json!("drop"), json!("sql_drop,sql_drop"), json!("sql_drop, sql_script"), json!(["sql_drop"])]
+    {
+        let p = json!({"resource": "netrisk-db", "profile": "ro", "ticket": "t-1", "action": bad});
+        let e = handle(&m, Some(&vault), "connect_ticket_redeem", &p, Some(&c)).await.unwrap_err();
+        assert_eq!(code(&e), codes::BAD_REQUEST, "{bad}: {e}");
+    }
+    let nobody = caller(&["default"]);
     let p = json!({"resource": "netrisk-db", "profile": "ro", "ticket": "t-1", "action": "sql_drop"});
-    let e = handle(&m, Some(&vault), "connect_ticket_redeem", &p, Some(&caller(&["sql-reader"]))).await.unwrap_err();
-    assert_eq!(code(&e), codes::BAD_REQUEST, "{e}");
+    let e = handle(&m, Some(&vault), "connect_ticket_redeem", &p, Some(&nobody)).await.unwrap_err();
+    assert_eq!(code(&e), codes::NO_SQL_PRIVILEGE, "{e}");
+    let e = handle(&m, Some(&vault), "connect_ticket_redeem", &p, Some(&c)).await.unwrap_err();
+    assert_eq!(code(&e), codes::REFUSED, "{e}");
+    assert!(!c.take_mfa_redemption("", "netrisk-db", "ro"), "a refused action records nothing");
 }

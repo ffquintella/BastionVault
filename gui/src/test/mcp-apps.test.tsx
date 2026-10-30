@@ -289,6 +289,24 @@ describe("McpAppsPage", () => {
     await user.click(screen.getByRole("button", { name: /clear pin/i }));
     await waitFor(() => expect(calls("mcp_write_config")).toHaveLength(1));
     expect(calls("mcp_write_config")[0][1]).toMatchObject({ cataloguePin: "" });
+    expect(calls("mcp_write_config")[0][1]).toMatchObject({
+      brokeredSessionsEnabled: false,
+      allowedTargetCidrs: null,
+    });
+  });
+
+  it("settings save the brokered-session switch and destination list", async () => {
+    const user = userEvent.setup();
+    await mount();
+    await user.click(screen.getByText(/^Settings$/));
+    await user.click(await screen.findByLabelText(/enable brokered sessions/i));
+    await user.type(screen.getByLabelText(/allowed destinations/i), "10.20.0.0/16, 192.168.0.0/16");
+    await user.click(screen.getByRole("button", { name: /save settings/i }));
+    await waitFor(() => expect(calls("mcp_write_config")).toHaveLength(1));
+    expect(calls("mcp_write_config")[0][1]).toMatchObject({
+      brokeredSessionsEnabled: true,
+      allowedTargetCidrs: ["10.20.0.0/16", "192.168.0.0/16"],
+    });
   });
 
   it("settings refuse a default lifetime above the maximum", async () => {

@@ -1186,6 +1186,8 @@ mod teardown_tests {
                 resource: "db1".into(),
                 catalog: "app".into(),
                 opened_on: "2026-10-29".into(),
+                profile: "ro".into(),
+                shared: Default::default(),
             }),
         );
         let d = SessionDescriptor {
@@ -1223,6 +1225,8 @@ mod teardown_tests {
                 resource: "db1".into(),
                 catalog: "app".into(),
                 opened_on: "2026-10-29".into(),
+                profile: "ro".into(),
+                shared: Default::default(),
             }),
         );
         let exited = stop_all_sessions(&state).await;

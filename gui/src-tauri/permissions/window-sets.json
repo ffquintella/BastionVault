@@ -48,7 +48,7 @@
     },
     {
       "identifier": "sql-window",
-      "description": "A SQL browser session's own window (sql-<token>, session.html), and the SQL pane of the Session Workspace. Drives the one SQL session it renders: status and timers, the caller's own effective SQL privileges (display only), one statement per execute, the run's pages, cancel, the object browser and describe, structured grid edits, the caller's own journal history, and closing the session; liveness, asking before its native close and closing itself. Every sql_* command takes the local session token and is refused by the host unless the calling window holds that live SQL session (require_session_window); the host addresses the plugin mount it resolved itself with the host-held token, so the window never names a path, a vault token, the plugin's session id or a database credential. Authorization is the plugin's and the vault's, per statement. No sql_script or sql_export_to_file yet (T126). Derived from what session.html's /session/sql route calls; gui/src/test/sessionBundle.test.tsx keeps the two equal. Features/sql-browser.md §10, T125.",
+      "description": "A SQL browser session's own window (sql-<token>, session.html), and the SQL pane of the Session Workspace. Drives the one SQL session it renders: status and timers, the caller's own effective SQL privileges (display only), one statement per execute, the run's pages, cancel, the object browser and describe, structured grid edits, the caller's own journal history, and closing the session; liveness, asking before its native close and closing itself. Every sql_* command takes the local session token and is refused by the host unless the calling window holds that live SQL session (require_session_window); the host addresses the plugin mount it resolved itself with the host-held token, so the window never names a path, a vault token, the plugin's session id or a database credential. Authorization is the plugin's and the vault's, per statement. T126: multi-statement scripts (sql_script), exports the host writes to a file the operator picks in a native dialog the host opens (sql_export_to_file, sql_export_cancel; the window never holds the data or names a path), and the per-action step-up for its own session's resource and profile (sql_step_up_begin / _verify; the host holds the ticket and attaches it to the next request, the window never sees it). Derived from what session.html's /session/sql route calls; gui/src/test/sessionBundle.test.tsx keeps the two equal. Features/sql-browser.md §10, T125.",
       "permissions": [
         "allow-sql-session-status",
         "allow-sql-privileges",
@@ -59,6 +59,11 @@
         "allow-sql-rows",
         "allow-sql-history",
         "allow-sql-session-close",
+        "allow-sql-script",
+        "allow-sql-export-to-file",
+        "allow-sql-export-cancel",
+        "allow-sql-step-up-begin",
+        "allow-sql-step-up-verify",
         "allow-session-heartbeat",
         "allow-session-window-closing",
         "allow-session-window-close"
@@ -66,7 +71,7 @@
     },
     {
       "identifier": "session-workspace",
-      "description": "The Session Workspace window (session-workspace, session.html). Everything a session window may call, plus: the listing and placement hand-off (session_list_open), the saved layout (session_layout_save / _get / _forget), and the normal connect path its ⌘T palette and explicit layout restore go through — the resource reads that path needs (list_resources, read_resource, resource_types_read), connect-time MFA (connect_mfa_*), the credential-provider account list for the host-rendered picker (connect_provider_candidates: metadata only, features/self-accounts.md §6) and session_open_ssh / _rdp / _web / _sftp (an SFTP session always opens its own window), each still behind the host's connect gate, transport tier and MFA ticket check. T109: replay panes — the queue of recordings the main window handed over (session_replay_take: workspace only, drains once) and the four reads of the recording a pane plays, listed one by one rather than by nesting the session-replay set, so the two sets can diverge. The SQL pane (T125): sql_session_open for its palette, and the sql_* commands a SQL pane drives, each bound by the host to the session the workspace holds (a pane closes through session_close, like every other). No secret reads, no credential release to the frontend, no admin command, no vault token. Derived from what the /workspace route calls; gui/src/test/sessionBundle.test.ts keeps the two equal. Features/session-workspace.md, T110.",
+      "description": "The Session Workspace window (session-workspace, session.html). Everything a session window may call, plus: the listing and placement hand-off (session_list_open), the saved layout (session_layout_save / _get / _forget), and the normal connect path its ⌘T palette and explicit layout restore go through — the resource reads that path needs (list_resources, read_resource, resource_types_read), connect-time MFA (connect_mfa_*), the credential-provider account list for the host-rendered picker (connect_provider_candidates: metadata only, features/self-accounts.md §6) and session_open_ssh / _rdp / _web / _sftp (an SFTP session always opens its own window), each still behind the host's connect gate, transport tier and MFA ticket check. T109: replay panes — the queue of recordings the main window handed over (session_replay_take: workspace only, drains once) and the four reads of the recording a pane plays, listed one by one rather than by nesting the session-replay set, so the two sets can diverge. The SQL pane (T125, T126): sql_session_open for its palette, and the sql_* commands a SQL pane drives (scripts, exports to a host-chosen file and the per-action step-up included), each bound by the host to the session the workspace holds (a pane closes through session_close, like every other). No secret reads, no credential release to the frontend, no admin command, no vault token. Derived from what the /workspace route calls; gui/src/test/sessionBundle.test.ts keeps the two equal. Features/session-workspace.md, T110.",
       "permissions": [
         "session-window",
         "allow-session-list-open",
@@ -97,7 +102,12 @@
         "allow-sql-cancel",
         "allow-sql-objects",
         "allow-sql-rows",
-        "allow-sql-history"
+        "allow-sql-history",
+        "allow-sql-script",
+        "allow-sql-export-to-file",
+        "allow-sql-export-cancel",
+        "allow-sql-step-up-begin",
+        "allow-sql-step-up-verify"
       ]
     },
     {

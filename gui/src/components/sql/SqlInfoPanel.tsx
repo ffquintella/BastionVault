@@ -100,6 +100,14 @@ export function SqlInfoPanel({
         <p className="mt-1 text-[10px] text-[var(--color-text-muted)]">
           Buttons follow these as a convenience; the vault checks every statement.
         </p>
+        {(status.step_up ?? []).length > 0 && (
+          <div className="mt-1 flex flex-wrap items-center gap-1" data-testid="sql-step-up">
+            <span className="text-[var(--color-text-muted)]">Step-up for</span>
+            {ordered(status.step_up ?? []).map((c) => (
+              <CapChip key={c} cap={c} tone="warn" title="Using this asks for a fresh second factor, once per request" />
+            ))}
+          </div>
+        )}
       </section>
 
       <section aria-label="Enforcement" data-testid="sql-enforcement">

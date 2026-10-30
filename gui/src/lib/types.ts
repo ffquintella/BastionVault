@@ -2406,6 +2406,15 @@ export interface McpConfig {
   max_ttl_secs: number;
   waiver_max_days: number;
   catalogue_pin: string | null;
+  brokered_sessions_enabled: boolean;
+  /** Runtime list; null defers to the server config, then the built-in default. */
+  brokered_sessions_allowed_target_cidrs: string[] | null;
+  brokered_sessions_effective_target_cidrs: string[];
+  /** "runtime" | "hcl" | "default". */
+  brokered_sessions_target_cidrs_source: string;
+  brokered_sessions_server_enabled: boolean;
+  brokered_sessions_server_protocols: string[];
+  brokered_sessions_always_denied: string[];
 }
 
 export interface McpCatalogueTool {

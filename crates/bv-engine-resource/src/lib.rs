@@ -544,6 +544,13 @@ impl ResourceBackend {
                             field_type: FieldType::Str,
                             required: true,
                             description: "Connection-profile id."
+                        },
+                        "action": {
+                            field_type: FieldType::CommaStringSlice,
+                            required: false,
+                            description: "SQL browser step-up (features/sql-browser.md §8.3): the sql_* \
+                                          capabilities, comma-separated or a list, whose use the ticket is \
+                                          for. Each must be in the `sql` profile's `step_up`."
                         }
                     },
                     operations: [
@@ -586,6 +593,13 @@ impl ResourceBackend {
                             required: false,
                             description: "MCP gatekeeper only: {pairing_id, tool, args_hash} of the one \
                                           agent call this ticket is for (60 s, agent route only)."
+                        },
+                        "action": {
+                            field_type: FieldType::CommaStringSlice,
+                            required: false,
+                            description: "SQL browser step-up (features/sql-browser.md §8.3): mint a ticket \
+                                          bound to these sql_* capabilities, redeemable only for exactly \
+                                          that action. Each must be in the `sql` profile's `step_up`."
                         }
                     },
                     operations: [

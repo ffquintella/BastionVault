@@ -23,12 +23,15 @@ export function SqlObjectTree({
   disabled,
   onOpen,
   onDescribe,
+  onExport,
   onError,
 }: {
   token: string;
   disabled: boolean;
   onOpen: (schema: string, object: string) => void;
   onDescribe: (schema: string, object: string) => void;
+  /** "Export table" (§8.1): composes `SELECT * FROM` the qualified name. */
+  onExport?: (schema: string, object: string) => void;
   onError: (message: string) => void;
 }) {
   const [catalog, setCatalog] = useState("");
@@ -150,6 +153,17 @@ export function SqlObjectTree({
                           className="shrink-0 text-[10px] text-blue-300 hover:underline disabled:opacity-40"
                         >
                           Open
+                        </button>
+                      )}
+                      {OPENABLE.has(o.kind) && onExport && (
+                        <button
+                          type="button"
+                          aria-label={`Export ${schema}.${o.name}`}
+                          onClick={() => onExport(schema, o.name)}
+                          disabled={disabled}
+                          className="shrink-0 text-[10px] text-[var(--color-text-muted)] hover:underline disabled:opacity-40"
+                        >
+                          Export
                         </button>
                       )}
                       {o.kind !== "index" && (

@@ -341,6 +341,7 @@ mod self_accounts_connect_tests {
             resource: resource.into(),
             profile_id: profile_id.into(),
             mcp_call: None,
+            action: None,
         };
         ConnectMfaTicketStore::new(f.core.as_ref()).unwrap().mint(&binding, "totp").await.unwrap().0
     }

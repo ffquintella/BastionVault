@@ -1,7 +1,8 @@
 # Feature: SQL Browser — query and change data on database resources (`dbms-management` plugin)
 
-**Status: In progress (2026-10-29). Phase 0 and Phase 1 (T124) closed; Phases
-2 and 3 (T125) in progress; Phases 4–9 (T125–T130) not started.** Proposed
+**Status: In progress (2026-10-30). Phase 0 and Phase 1 (T124) closed; Phases
+2–4 (T125) closed by the maintainer with review gates open; Phase 5 (T126) in
+the tree, not yet run end to end; Phases 6–9 (T127–T130) not started.** Proposed
 2026-10-13. Tracked as ROADMAP
 T124–T130 under M5 (see *Tracking*). Written against the tree at 0.44.31; every
 "today" statement below was verified by reading the code on that date and
@@ -161,7 +162,14 @@ set, tree, editor, grid, messages, history, info and enforcement panels, grid
 editing with conflict reporting, confirmations, and the Connect menu, profile
 row and ⌘K entries. It is verified with unit and component tests and a
 browser check against a mocked host, not against a registered plugin (see
-*Phase 4, the GUI workspace*).
+*Phase 4, the GUI workspace*). Phase 5 (T126) is in the tree: action-bound
+step-up tickets in the resource engine and the `connect_ticket_redeem` host
+call, the plugin's `script`, `export` and `exports/<job>/<offset>` endpoints
+with per-action step-up, and the GUI's script, `.sql` load, export-to-file and
+step-up prompt. It is verified with unit tests, live PostgreSQL 16 tests, host
+tests against a test vault and vitest, not against a registered plugin on a
+running vault or in a real Tauri window (see *Phase 5, exports, scripts and
+step-up*).
 The Phase table maps each phase to its ROADMAP task.
 
 | Phase | Task | Status |
@@ -171,7 +179,7 @@ The Phase table maps each phase to its ROADMAP task.
 | Phase 2 — `bv-sql-classify` classifier crate | T125 | In progress (PostgreSQL crate, corpus, property tests and fuzz target in the tree; fuzz campaign not run) |
 | Phase 3 — the `dbms-management` plugin with PostgreSQL | T125 | In progress (plugin in the tree; verified with the testkit and PostgreSQL 16 containers; not run on a real host, cluster or TLS-cancel path) |
 | Phase 4 — GUI SQL workspace | T125 | In progress (in the tree; unit, component and mocked-host browser checks; not run against a registered plugin; editor is a textarea, not CodeMirror) |
-| Phase 5 — export, scripts and per-action step-up | T126 | Todo |
+| Phase 5 — export, scripts and per-action step-up | T126 | In progress (in the tree; unit, live PostgreSQL, host and vitest checks; not run on a registered plugin, a real Tauri window, the cucumber scenarios or `make test-release`) |
 | Phase 6 — MySQL and MariaDB | T127 | Todo |
 | Phase 7 — Microsoft SQL Server | T128 | Todo |
 | Phase 8 — Oracle Database | T129 | Todo |
@@ -1808,7 +1816,7 @@ and seal during a run.
 |---|---|---|
 | T124 Grant SQL privileges in policies and shares, and let plugins ask the host to authorize statements and release database credentials | 0, 1 | `[x]` |
 | T125 Browse, query and edit PostgreSQL databases in the SQL browser through the `dbms-management` plugin | 2, 3, 4 | `[ ]` |
-| T126 Export query results and run SQL scripts only with their own grants | 5 | `[ ]` |
+| T126 Export query results and run SQL scripts only with their own grants | 5 | `[/]` |
 | T127 Add MySQL and MariaDB to the SQL browser | 6 | `[ ]` |
 | T128 Add SQL Server to the SQL browser | 7 | `[ ]` |
 | T129 Add Oracle Database to the SQL browser | 8 | `[ ]` |
@@ -2034,7 +2042,7 @@ Plugin ABI 1.4 on the host (§9.2–§9.4), built on subsystem 2's
   rules 3–5 in the host and audits every attempt as
   `resource-credential-release` (actor stamped, value never recorded).
   `connect_ticket_redeem` refuses an `action`, which this host's tickets
-  cannot bind. The resource engine's half is a seam (`SqlResourceSource`)
+  cannot bind (until T126; see *Phase 5, exports, scripts and step-up*). The resource engine's half is a seam (`SqlResourceSource`)
   whose default answers `not_available` until subsystem 5.
 - **Actor-stamped `audit_emit`** in both runtimes for ABI 1.4 plugins with
   `caller_identity`, inside an invocation that has a caller.
@@ -2886,3 +2894,144 @@ Not done or not verified: a registered `dbms-management` plugin behind a real
 vault (embedded or remote), the Tauri shell itself (window creation, the ACL
 at run time, closing a window closing the plugin session), the workspace pane
 and the ⌘K palette in a real window, remote-mode discovery, `docs/api.md`.
+
+## Phase 5, exports, scripts and step-up
+
+T126, §8. Host, plugin and GUI.
+
+**Step-up tickets (host, `crates/bv-engine-resource/src/connect_mfa.rs`).**
+- The ticket record gains an optional `action`: the canonical set of `sql_*`
+  names (policy-language order, comma-separated). Absent, it is not written,
+  so a connect ticket's record is byte for byte what earlier releases wrote;
+  a record written before T126 reads as no action. `consume` compares it like
+  `mcp_call`: a ticket without an action is refused for an action, and an
+  action ticket is refused at every connect.
+- `connect/mfa/begin|verify` take `action` (a string or a list): `sql`
+  profiles only, every name in the stored profile's `sql.step_up`, checked
+  before any factor. With an action the gate is `step_up`, not `require_mfa`.
+  `verify` refuses `action` with `mcp_call`.
+- `redeem_sql_action_ticket` always demands and burns a ticket: there is no
+  "not gated" pass for an action. The facade's `connect_ticket_redeem`
+  (`src/plugins/sql_host.rs`) calls it directly (the facade may name the
+  engine), so `bv-kernel-api`'s `ConnectMfaGate` is unchanged. It records no
+  connect redemption, so an action ticket never unlocks a `require_mfa`
+  release. The SDK gains `connect_ticket_redeem_action`; the testkit mirrors
+  the binding and `test_plugin_testkit_parity` compares canonicalization.
+
+**Plugin (`plugins-ext/bastion-plugin-dbms-management`).**
+- `authz::Mode` (`Execute`, `Script`, `Export`). A script adds `sql_script` on
+  `sql/server` to the batch; after a statement that may move the name context
+  (`SET`, opaque, unclassified) its later unqualified names are checked with
+  an empty schema, so only a resource-wide grant allows them. An export is
+  checked before the host is asked (`Prepared::check_export`) and mirrors
+  every `sql_select` check with `sql_export`.
+- `script`: limits `script_statements` / `script_bytes`, `on_error`,
+  `transaction: single` (the plugin's own `BEGIN` and `COMMIT` or `ROLLBACK`
+  before the run reads as ended), result rows counted not returned, a
+  per-statement deadline, `dbms.script` at start, refusal and end.
+- `export` (`src/export.rs`): the renderer per format, a job with a 2 MiB
+  high-water buffer the producer waits on, 1 MiB chunks, a retried pull, the
+  SHA-256 of the stream, row and byte limits (`limit_reached`), abandonment
+  after `export_idle_secs` (`expired`, buffer dropped), cancel, and the
+  statement timeout raised to `export_timeout_secs` while it streams. A
+  running export makes the session busy.
+- Step-up on `execute`, `script`, `export` and grid edits: after the vault
+  allowed the request, the capabilities it uses that the profile's `step_up`
+  lists need `step_up_ticket` for exactly that action, redeemed through the
+  host; without it the reply is `step_up_required` and nothing runs or is
+  spent. `dbms.step_up` records each redemption.
+- Config `v: 2` with `script_statements`, `script_bytes`, `export_rows`,
+  `export_bytes`, `export_idle_secs`, `export_timeout_secs`; a `v: 1` record
+  is read (its values kept, the new ones defaulted) and written back as v2.
+- The profile view's `step_up` is parsed strictly; a missing list fails the
+  profile.
+
+**GUI.** Tauri commands `sql_script`, `sql_export_to_file`,
+`sql_export_cancel`, `sql_step_up_begin`, `sql_step_up_verify`, in the
+`sql-window` and workspace sets. The host opens the save dialog itself,
+writes to `<file>.part`, checks the plugin's SHA-256, renames, and deletes the
+part file on any failure or cancel (cancelling the job too). The step-up
+ticket is held by the host (110 s, used once) and attached to the next
+request; the webview gets the action and expiry only. Frontend: *Run script*
+(always confirmed, *On error*, *One transaction*), *Load .sql* (read locally,
+4 MiB), *Export* for the statement at the cursor and on tables in the tree
+(`SELECT * FROM` the quoted name), the export dialog, the step-up prompt, the
+profile's step-up chips in the info panel. New SQL profiles start with
+`sql_drop`, `sql_admin`, `sql_export`, `sql_script` in `step_up`.
+
+Decisions where the spec is silent or could not be followed:
+- **One ticket per request, bound to the set of actions it uses** (a script
+  with a `DROP` steps up once for `sql_drop,sql_script`). Rejected: one
+  ticket per capability, which asks for two factors back to back, and a
+  TOTP code cannot be replayed within its window.
+- **The pull offset is a path segment** (`exports/<job>/<offset>`). A GET's
+  query reaches a handler only through `bv-logical`'s allowlist, and the
+  process-plugin envelope carries the body only. Rejected: widening both,
+  which rebuilds most of the workspace and changes every plugin's envelope.
+- **A stored profile without `step_up` steps up for nothing.** The default
+  list is what the editor puts on a new profile. Rejected: reading an absent
+  list as the default four, which would change profiles the T124 editor
+  saved (it omits an empty list) and lock non-userpass callers out of those
+  actions without notice.
+- **The step-up list is read at session open**, as the ceiling and
+  `require_mfa` are; a change applies to new sessions. Rejected: a target
+  read per request, a host call each time.
+- **Not an ABI bump.** `action` was already in the 1.4 table (§9.2); this
+  host now honours it. A plugin asking for it on an older host gets
+  `bad_request` and fails closed.
+- **`on_error: continue` is refused with `transaction: single`** on
+  PostgreSQL (an error aborts the transaction). **Script rows are not
+  returned** (one run buffer cannot hold several result shapes); run a
+  SELECT with *Run* to see it. **Script size stays at 4 MiB**, the
+  classifier's and the request's cap, below §12's 32 MiB.
+- **Export kinds** are SELECT, VALUES, SHOW and plan-only EXPLAIN; anything
+  needing more than `sql_select` is refused before the host is asked.
+
+Residual risks:
+- Step-up is enforced by the plugin: the host binds and burns tickets but
+  cannot tell which capability a statement uses. A compromised plugin can
+  skip it, as it can use the login it holds (§2).
+- A late PostgreSQL `CancelRequest` (row limit, cancel) can hit the
+  statement after it; the timeout restore is retried once, and the plugin's
+  own run deadline bounds later statements either way.
+- One export cell is materialized whole (a 1 GB `bytea` would be).
+- An export's statement timeout is `export_timeout_secs` (30 min default),
+  not the 60 s run timeout.
+- A failed `transaction: single` COMMIT reads `commit_failed`; the database
+  rolled back.
+
+### Phase 5 validation
+
+Run one at a time; plugin commands from `plugins-ext/`, the rest from the
+repository root or `gui/`:
+
+1. `cargo check -p bv-engine-resource`, `cargo clippy -p bv-engine-resource
+   --lib`, `-p bastion-plugin-testkit --lib`, `-p bastion-plugin-sdk --lib
+   --features process`, `cargo clippy --lib`: exit 0, no warning in a
+   touched file.
+2. `cargo nextest run -p bv-engine-resource --lib connect_mfa` (10 passed),
+   `-p bastion-plugin-testkit` (48 passed), `-p bastion_vault --lib` over the
+   ticket, SQL-host and connect filters (49 passed, including
+   `step_up_tickets_are_bound_to_their_action`), `--test
+   test_plugin_testkit_parity` (9 passed).
+3. Plugin: `cargo check` / `cargo clippy --lib --tests` (exit 0), `cargo
+   nextest run -p bastion-plugin-dbms-management` (86 passed), and the three
+   new live tests `live_exports`, `live_scripts`, `live_step_up` against
+   `postgres:16` (3 passed).
+4. GUI: `npx tsc --noEmit` (exit 0); `npx vitest run` over the SQL files (6
+   files, 187 passed) and the new `sqlScriptExport.test.tsx` (10 passed);
+   `cargo check` / `cargo clippy -p bastion-vault-gui --lib` (exit 0);
+   `cargo nextest run -p bastion-vault-gui --lib` over `session::sql`, the
+   window ACL and connect MFA (30 passed). The whole GUI: 113 files, 1363
+   passed.
+5. `make test-changed` (L3: `bastion-plugin-sdk`, `-testkit`,
+   `bastion_vault`, `bv-engine-resource`, `bv-kernel`, `bv-server`,
+   `bvault-cli`, `bv-plugin-pack`): exit 0, 1305 + 17 passed. `make
+   test-dbms`: all 10 live tests passed and the `openssl-sys` / `aws-lc-sys`
+   ban held; plugin doctests 8 passed, `cargo fmt --check` clean.
+
+Not done: the plugin registered on a running vault (embedded or remote), a
+real Tauri window (the save dialog and the export loop are compiled, not
+run), the cucumber scenarios (`tests/features/sql_browser.feature`), and
+`make test-release` (L4: authn and plugin host-call semantics changed).
+
