@@ -253,6 +253,30 @@ export function explainOf(statement: string): string {
 }
 
 /** A double-quoted identifier, `"` doubled. */
+/**
+ * The statement that opens a transaction in manual-commit mode. T-SQL reads
+ * a bare `BEGIN` as the start of a block, so SQL Server sessions spell it out;
+ * Oracle has no `BEGIN` statement at all (it opens a PL/SQL block), so its
+ * sessions open one with SET TRANSACTION (T129).
+ */
+export function beginStatement(engine: string | undefined): string {
+  if (engine === "mssql") return "BEGIN TRANSACTION";
+  if (engine === "oracle") return "SET TRANSACTION ISOLATION LEVEL READ COMMITTED";
+  return "BEGIN";
+}
+
+/**
+ * Why manual-commit mode is not offered, or null when it is. A read-only
+ * Oracle session runs every statement in the plugin's own
+ * SET TRANSACTION READ ONLY, so the plugin refuses a second one (T129).
+ */
+export function manualCommitUnavailable(engine: string | undefined, readOnly: boolean | undefined): string | null {
+  if (engine === "oracle" && readOnly) {
+    return "A read-only Oracle session runs each statement in its own read-only transaction; manual commit is not available.";
+  }
+  return null;
+}
+
 export function quoteIdent(name: string): string {
   return `"${name.replace(/"/g, '""')}"`;
 }

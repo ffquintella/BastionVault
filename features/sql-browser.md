@@ -2,7 +2,10 @@
 
 **Status: In progress (2026-10-30). Phase 0 and Phase 1 (T124) closed; Phases
 2–4 (T125) closed by the maintainer with review gates open; Phase 5 (T126) in
-the tree, not yet run end to end; Phases 6–9 (T127–T130) not started.** Proposed
+the tree, not yet run end to end; Phase 6 (T127) closed by the maintainer with
+review gates open; Phase 7 (T128) in the tree with deviations awaiting the
+maintainer; Phase 8 (T129) in the tree with a hand-written session layer
+awaiting a second reviewer; Phase 9 (T130) blocked.** Proposed
 2026-10-13. Tracked as ROADMAP
 T124–T130 under M5 (see *Tracking*). Written against the tree at 0.44.31; every
 "today" statement below was verified by reading the code on that date and
@@ -169,7 +172,25 @@ with per-action step-up, and the GUI's script, `.sql` load, export-to-file and
 step-up prompt. It is verified with unit tests, live PostgreSQL 16 tests, host
 tests against a test vault and vitest, not against a registered plugin on a
 running vault or in a real Tauri window (see *Phase 5, exports, scripts and
-step-up*).
+step-up*). Phase 6 (T127) is closed, with its two deviations accepted by the maintainer: the MySQL / MariaDB
+dialect in `bv-sql-classify`, backtick quoting in `bv-sql-guard`, and
+`mysql_async` sessions in the plugin. It is verified with unit tests and live
+`mysql:8.4` and `mariadb:11.4` tests under `make test-dbms`, not with
+`make test-release`, a fuzz campaign or a registered plugin (see *Phase 6,
+MySQL and MariaDB*). Phase 7 (T128) is in the tree: the T-SQL dialect in
+`bv-sql-classify`, bracket quoting in `bv-sql-guard`, and `tiberius` sessions
+in the plugin over a TLS negotiation the plugin does itself. It is verified
+with unit tests and a live `mssql/server:2022-latest` test under
+`make test-dbms`, not with `make test-release`, a fuzz campaign or a
+registered plugin; its deviations are listed in *Phase 7, SQL Server*.
+Phase 8 (T129) is in the tree: the Oracle dialect in `bv-sql-classify`,
+`SqlIdent::oracle_quoted` in `bv-sql-guard`, and Oracle sessions in the
+plugin on its own Oracle Net session layer over a Sans-I/O protocol crate
+(no Oracle client library). It is verified with unit tests and a live
+Oracle AI Database 26ai Free test over TCPS under `make test-dbms`, not with
+`make test-release`, a fuzz campaign, a registered plugin or a second
+review of the session layer; its decisions and limits are in *Phase 8,
+Oracle*.
 The Phase table maps each phase to its ROADMAP task.
 
 | Phase | Task | Status |
@@ -180,9 +201,9 @@ The Phase table maps each phase to its ROADMAP task.
 | Phase 3 — the `dbms-management` plugin with PostgreSQL | T125 | In progress (plugin in the tree; verified with the testkit and PostgreSQL 16 containers; not run on a real host, cluster or TLS-cancel path) |
 | Phase 4 — GUI SQL workspace | T125 | In progress (in the tree; unit, component and mocked-host browser checks; not run against a registered plugin; editor is a textarea, not CodeMirror) |
 | Phase 5 — export, scripts and per-action step-up | T126 | Complete (unit, live PostgreSQL, cucumber, host and vitest checks, `make test-release`; not run on a registered plugin or in a real Tauri window) |
-| Phase 6 — MySQL and MariaDB | T127 | Todo |
-| Phase 7 — Microsoft SQL Server | T128 | Todo |
-| Phase 8 — Oracle Database | T129 | Todo |
+| Phase 6 — MySQL and MariaDB | T127 | Complete (closed by the maintainer 2026-10-30; unit and live MySQL 8.4 / MariaDB 11.4 tests pass; `make test-release`, fuzzing and a registered-plugin run not done; two deviations accepted) |
+| Phase 7 — Microsoft SQL Server | T128 | Complete (unit and live SQL Server 2022 tests pass; `make test-release`, fuzzing and a registered-plugin run not done; deviations await the maintainer) |
+| Phase 8 — Oracle Database | T129 | Complete (unit and live Oracle 26ai Free tests over TCPS pass; `make test-release`, fuzzing, a registered-plugin run and a second review of the session layer not done; 23ai or later only) |
 | Phase 9 — dynamic database credentials | T130 | Blocked by T62 |
 
 ### Context this feature builds on (verified 2026-10-13)
@@ -1530,6 +1551,9 @@ that has not been run, with the acceptance check named.
   D2 is accepted by the maintainer for TCP only (2026-10-21). Cancel over TCPS
   is not verified and must not be treated as working. TCPS stays an open item
   that blocks any production claim about cancellation over TLS.
+  **Superseded 2026-10-30 (Phase 8):** the maintainer chose a pure-Rust path
+  with no Instant Client; ODPI-C was not used. Cancel over TCPS is verified on
+  that path (see *Phase 8, Oracle*).
 - **D3 — no value.** The recommendation was that the maintainer sets the GUI
   bundle budget. No number was given, so the budget stays open and the
   measurement in item 6 is required before Phase 4 merges.
@@ -1817,9 +1841,9 @@ and seal during a run.
 | T124 Grant SQL privileges in policies and shares, and let plugins ask the host to authorize statements and release database credentials | 0, 1 | `[x]` |
 | T125 Browse, query and edit PostgreSQL databases in the SQL browser through the `dbms-management` plugin | 2, 3, 4 | `[ ]` |
 | T126 Export query results and run SQL scripts only with their own grants | 5 | `[x]` |
-| T127 Add MySQL and MariaDB to the SQL browser | 6 | `[ ]` |
-| T128 Add SQL Server to the SQL browser | 7 | `[ ]` |
-| T129 Add Oracle Database to the SQL browser | 8 | `[ ]` |
+| T127 Add MySQL and MariaDB to the SQL browser | 6 | `[x]` |
+| T128 Add SQL Server to the SQL browser | 7 | `[x]` |
+| T129 Add Oracle Database to the SQL browser | 8 | `[x]` |
 | T130 Open SQL browser sessions with dynamic database credentials | 9 | `[!]` blocked by T62 |
 
 All seven tasks are under M5 (Resources) in `ROADMAP.md`; this spec is S109.
@@ -3036,3 +3060,559 @@ repository root or `gui/`:
 Not done: the plugin registered on a running vault (embedded or remote) and a
 real Tauri window (the save dialog and the export loop are compiled, not run).
 
+
+## Phase 6, MySQL and MariaDB
+
+T127, closed with review gates open. Three pieces, all opt-in by the resource's `engine`
+(`mysql` or `mariadb`); the PostgreSQL paths are unchanged (every PostgreSQL
+live test still passes).
+
+**Classifier (`crates/bv-sql-classify/src/my/`).** `Dialect::MySql` and
+`Dialect::MariaDb` with `LexerSettings::MySql { ansi_quotes,
+no_backslash_escapes, fold_table_names }`; `NameContext::mysql(database)`
+uses the catalog `def` and the database as schema (§3.2), so an unqualified
+name is always the current database's and needs no catalog resolution.
+
+1. A lexer that follows `sql_lex.cc`: `'…'` and `"…"` with or without
+   backslash escapes, backtick identifiers, `"…"` identifiers under
+   `ANSI_QUOTES`, `#`, `-- ` (a space required) and `/* */` comments. It
+   refuses NUL, `\v`, `\f`, `\` outside literals, number junk (`2fa` is an
+   identifier to the server) and nested comments (MySQL 8 and MariaDB
+   disagree).
+2. Any executable or hint comment (`/*!`, `/*M!`, `/*+`) refuses the whole
+   input, even one standing alone between statements, which a splitter would
+   otherwise drop.
+3. Server file, OS and network access is `Never` from the words alone,
+   whether or not the statement parses: `LOAD DATA / XML`, `INTO OUTFILE /
+   DUMPFILE`, `LOAD_FILE`, `INFILE`, `SONAME`, `INSTALL`, `CLONE`,
+   `IMPORT TABLE`, `DATA / INDEX DIRECTORY`, `DISCARD / IMPORT TABLESPACE`,
+   `FEDERATED`, `ENGINE = CONNECT`, `CONNECTION =` and the
+   `lib_mysqludf_sys` functions.
+4. `sql_mode`, `NAMES`, `CHARACTER SET`, `character_set_*`,
+   `collation_connection` and MariaDB `SET STATEMENT … FOR` are lexer
+   changes; `transaction_read_only`, `tx_read_only` and `READ WRITE` are
+   read-only guard changes. Both are `Never`, judged before any value is
+   read, and an `Unknown` refusal that names one is raised to `Never`.
+5. Where the parser cannot follow the session (a `"…"` identifier under
+   `ANSI_QUOTES`, a backslash in a string under `NO_BACKSLASH_ESCAPES`) the
+   statement is `Unknown`; the span itself is exact.
+6. A `sql_functions[]` built-in (`SUM`, `COUNT`, …) followed by a space or
+   a comment before `(` is `Unknown`: without `IGNORE_SPACE` the server may
+   call a stored function of that name instead.
+7. Token grammars for `SHOW`, `DESCRIBE`, `USE`, transaction control,
+   `SET`, `LOCK`, `RENAME`, `DROP`, `TRUNCATE`, routine, trigger and
+   sequence DDL, maintenance and the `sql_admin` families; the parser and an
+   AST walk for queries, `INSERT` / `REPLACE` / `ON DUPLICATE KEY UPDATE`,
+   `UPDATE`, `DELETE`, `EXPLAIN [ANALYZE]`, `CALL`, `CREATE TABLE / VIEW /
+   INDEX`, `ALTER TABLE / VIEW` and `SET` of user variables.
+
+Decisions where §4.2 is silent: multi-table `UPDATE` / `DELETE` need the
+write and `sql_select` on every table they join (the targets can be
+aliases); `REPLACE` is `sql_insert` + `sql_delete`; `DROP INDEX … ON t` and
+`CREATE INDEX` check the table; `DROP TRIGGER` checks `sql/server` (trigger
+names are per database); `CREATE TRIGGER` is `sql_create` on the table plus
+opaque `sql_execute` on the server (its body runs on every later write);
+`DEFINER =` adds `sql_admin`; `RENAME TABLE a TO b` is `sql_alter` on `a` +
+`sql_create` on `b`; `SHOW PROCESSLIST`, engine, replication and binary log
+`SHOW`s and `SHOW GRANTS FOR` another account need `sql_admin`; `SHOW … WHERE`
+is `Unknown`. An unqualified function the built-in table does not list needs
+opaque `sql_execute` on `sql/server` in every session (it may be a loadable,
+native function); a qualified one is the stored routine and follows §4.2's
+read-only downgrade. The function table holds only built-ins present in both
+MySQL 8.0 and MariaDB 10.6 (plus per-flavor lists), which is why the plugin
+refuses older servers. MariaDB `NEXTVAL` / `SETVAL` / `LASTVAL` take the
+sequence as an identifier. Compound bodies (`BEGIN … END`) are split at their
+first `;` and no piece passes as a definition. Not read by sqlparser 0.63, so
+`Unknown`: `LOCK IN SHARE MODE`, `TABLE t`, MariaDB `ANALYZE <statement>`,
+`HANDLER`, `DO`, `XA`, `COMMIT AND CHAIN` / `RELEASE`.
+
+**`bv-sql-guard`.** `SqlIdent::backticked` and `SqlIdent::double_quoted`;
+the allow-list already excludes both quote characters, so nothing is
+escaped.
+
+**Plugin (`plugins-ext/bastion-plugin-dbms-management/src/mysql/`).**
+`mysql_async` 0.37.1 with default features off: `minimal-rust`, `rustls-tls`
+on `ring`, `tls12`, `client_ed25519`. `cargo tree -i` finds no
+`openssl-sys`, `aws-lc-sys`, `aws-lc-rs` or `native-tls` (`make test-dbms`
+now checks `native-tls` too). `engine::DbConn` dispatches what is
+engine-specific; runs, exports, audit, journal and the lifecycle are shared.
+
+- **One statement per round trip.** mysql_async always advertises
+  `CLIENT_MULTI_STATEMENTS` (`Opts::get_capabilities`), so the spec's
+  protocol switch cannot be turned off. Instead a span with no `;` byte goes
+  through COM_QUERY, where the server cannot find a second statement, and a
+  span holding a `;` (in a literal or comment) through COM_STMT_PREPARE,
+  whose parser runs with multi-statements off. Deviation from Phase 6's
+  wording, awaiting the maintainer.
+- **No LOCAL INFILE handler** is ever installed: a file request fails in the
+  driver before any local byte is read (and the classifier never lets the
+  statement through).
+- **TLS.** `require` and `verify-full` only. `disable` is refused because the
+  driver gives no hook to refuse a weak authentication on a plaintext
+  connection (caching_sha2 full authentication fetches the RSA key from the
+  network, so a man in the middle can decrypt the password). `verify-ca` is
+  refused because the driver's "skip domain validation" matches an error
+  string rustls 0.23 no longer produces; use `verify-full` with
+  `tls.server_name`. Both are refused before the login is released.
+  `verify-full` trusts only the profile's CA or the OS store (webpki-roots
+  disabled); the checked IP is dialled with `prefer_socket` off and the
+  profile's name as the TLS name.
+- **Pinning.** At open the plugin reads `sql_mode`, `lower_case_table_names`
+  and the four character-set variables, refuses grammar-switching modes
+  (`ORACLE`, `MSSQL`, `DB2`, `POSTGRESQL`, `MAXDB`), requires utf8mb4,
+  refuses MySQL before 8.0 and MariaDB before 10.6 and a server whose flavor
+  differs from the resource's `engine`. After a routine, `USE` or an
+  unclassified statement it reads them again; any change taints the session.
+- **Guards and timeouts.** Read-only sessions run `SET SESSION TRANSACTION
+  READ ONLY` and must read it back; `max_execution_time` (MySQL, SELECT
+  only) or `max_statement_time` (MariaDB) is set to the run timeout.
+- **Cancel.** `KILL QUERY <id>` on a side connection to the same checked
+  address, with the same TLS and login. The login is therefore kept in
+  zeroized buffers until the session closes (PostgreSQL's cancel key needs
+  no login). The driver's own `Opts` copy of the password is not zeroized,
+  as for tokio-postgres.
+- **Transactions** are tracked from the classified kinds (the driver keeps
+  the server's status flag private), erring towards "open"; an
+  `autocommit = 0` session counts every statement as opening one.
+- **Values**: `BIGINT` and `DECIMAL` as strings, other integers and floats
+  as numbers, temporal types as text, `JSON` parsed, the `binary` character
+  set as base64. Grid edits use backticks, `?` and `<=>` for the original
+  values, with `CLIENT_FOUND_ROWS` so an unchanged value is not a conflict.
+- **Browser and probe** read `information_schema`; the probe maps `SHOW
+  GRANTS` lines onto the §3.1 vocabulary (dynamic `*_ADMIN` privileges and
+  `WITH GRANT OPTION` are `sql_admin`; role grants are listed, not expanded).
+- `sql-insert` exports answer `unsupported` for these engines.
+
+### Phase 6 validation
+
+Run one at a time; the plugin commands from `plugins-ext/`, the rest from
+the repository root:
+
+1. `cargo check -p bv-sql-classify --tests`, `cargo clippy -p bv-sql-classify
+   --lib --tests`, `cargo fmt --check` (exit 0, no warnings); `cargo nextest
+   run -p bv-sql-classify --lib`: 86 passed (48 PostgreSQL, 38 MySQL /
+   MariaDB); `BV_SQL_CLASSIFY_CASES=20000 … my::tests::props`: 6 passed;
+   `cargo check --manifest-path crates/bv-sql-classify/fuzz/Cargo.toml`
+   (the target now drives both dialects).
+2. `cargo clippy -p bv-sql-guard --lib --tests` (clean); `cargo nextest run
+   -p bv-sql-guard --lib`: 7 passed.
+3. `cargo check` / `clippy --lib --tests` / `fmt --check` on
+   `bastion-plugin-dbms-management` (clean); `cargo nextest run -p
+   bastion-plugin-dbms-management --lib`: 85 passed; `cargo test --doc`: 8
+   passed.
+4. `make test-dbms` with `BV_TEST_REQUIRE_CONTAINER=1`: 13 live tests passed
+   (the 11 PostgreSQL 16 ones and the new MySQL 8.4 and MariaDB 11.4 ones:
+   sessions, enforcement, smuggling and hazard refusals with the canary
+   unchanged, paging, grid cap, deadline, `KILL QUERY` cancel, transactions
+   with rollback on close, grid edits and conflicts, browser, describe,
+   probe, a single-transaction script rolled back, CSV export,
+   `verify-full` refusing a self-signed server, seal), then the dependency
+   ban.
+
+Not done: `make test-release`, a fuzz campaign, the plugin registered on a
+running vault or a real Tauri window, a positive `verify-full` run with a
+real CA, a MariaDB `client_ed25519` login, MySQL 8.0 and MariaDB 10.6
+servers, and a GUI hint that MySQL / MariaDB profiles need `require` or
+`verify-full`.
+
+
+## Phase 7, SQL Server
+
+T128. Three pieces, opt-in by the resource's `engine` (`mssql`); the other
+engines' paths are unchanged (all their live tests still pass).
+
+**Classifier (`crates/bv-sql-classify/src/tsql/`).** `Dialect::MsSql` with
+`LexerSettings::MsSql { quoted_identifier, names, catalogs }` and
+`NameContext::mssql(database, default_schema)`.
+
+1. A lexer for T-SQL: `'…'` and `N'…'` (`''` escapes, no backslash escapes),
+   `[…]` (`]]` escapes), `"…"` as an identifier under `QUOTED_IDENTIFIER ON`
+   and a string under `OFF`, `--` (no space needed) and nested `/* */`
+   comments, `0x…` binary and `$12.50` money constants. It refuses NUL,
+   control characters, a lone `\r` and any other line separator inside a
+   `--` comment (a reader might end the comment there), `\` outside literals,
+   number junk (`1abc`, `1e`), national digits and non-alphanumeric
+   non-ASCII. The opaque regions are cross-checked against sqlparser's MS SQL
+   tokenizer (`x'1F'` is a word and a string to the server, a hex literal to
+   the parser: refused).
+2. **Statement boundaries.** T-SQL needs no `;`. Spans are split at `;`, then
+   sqlparser parses each with `require_semicolon_stmt_delimiter` off; a span
+   it reads as two statements is `Never` (`SELECT 1 DELETE FROM t`). An
+   unquoted reserved keyword the parser took for a name, an alias or a CTE
+   name is refused (`SELECT * FROM t checkpoint` is two statements to the
+   server). Token grammars end with an explicit end check: transaction
+   control never carries another statement.
+3. `GO` first on a line refuses the whole input (`BatchSeparator`, `Never`):
+   it is a client tool's separator, and the Phase 0 finding said refuse.
+4. `Never` from the words alone, parsed or not: `xp_*`, `sp_OA*`,
+   `OPENROWSET`, `OPENDATASOURCE`, `OPENQUERY`, linked-server (four-part)
+   names, `EXEC … AT`, `BULK`, `BACKUP`, `RESTORE`, `DUMP`, `LOAD`,
+   `EXTERNAL`, `CREATE / ALTER ASSEMBLY`, `sp_execute_external_script`, agent
+   job procedures, `sp_send_dbmail`, `sp_addlinkedserver`, attach / detach
+   and the audit, trace and log file readers. `SET QUOTED_IDENTIFIER` and
+   `SET ANSI_DEFAULTS` are lexer changes (`Never`); an `Unknown` refusal that
+   names one is raised to `Never`.
+5. The statement table: lock hints `UPDLOCK`, `XLOCK`, `HOLDLOCK`,
+   `SERIALIZABLE`, `REPEATABLEREAD`, `TABLOCK`, `TABLOCKX` add `sql_update`;
+   the legacy `t (NOLOCK)` form and unknown hints are `Unknown`. `OUTPUT`
+   adds `sql_select` on the target, `OUTPUT … INTO x` adds `sql_insert` on
+   `x`. `SELECT … INTO` is `sql_create` + `sql_insert` on the new table.
+   `MERGE` needs `sql_select` and each action's capability on the target. A
+   write whose target is a CTE (`WITH c AS (…) DELETE FROM c`) is `Unknown`;
+   `WITH … DML` on a real table classifies the DML and every read.
+   `UPDATE … FROM` / `DELETE x FROM` check every joined table for the write
+   and the read; a derived table, CTE or function there is `Unknown`.
+   Table-valued functions need `sql_execute` and `sql_select` on the routine
+   (a function path must not grant a table read). `EXEC proc` is opaque
+   `sql_execute` on the routine; parameters are constants only. `EXEC (…)`,
+   `sp_executesql` and `EXEC @name` are opaque `sql_execute` on the server.
+   `EXECUTE AS`, `REVERT`, unqualified `sp_*` and `sys.*` procedures, DBCC,
+   GRANT / DENY / REVOKE, KILL, SHUTDOWN, CHECKPOINT, RECONFIGURE and the
+   login / user / role / database DDL are `sql_admin`; their arguments are
+   not read further, since `sql_admin` is the bar `unclassified` already
+   sets. `CREATE / ALTER PROCEDURE / FUNCTION / TRIGGER` bodies are the rest
+   of the batch, stored and not run; `WITH EXECUTE AS` adds `sql_admin`, a
+   DML trigger adds opaque `sql_execute` on the server, a DDL trigger is
+   `sql_admin`. `SET` options: `NOCOUNT`, `DATEFORMAT`, `LANGUAGE`,
+   `LOCK_TIMEOUT`, `XACT_ABORT`, the ANSI group but `ANSI_DEFAULTS`,
+   `STATISTICS`, `ROWCOUNT` and the isolation level are `sql_select`;
+   `IDENTITY_INSERT t` is `sql_alter` on `t`; the rest is `sql_admin`.
+   `IF`, `WHILE`, `BEGIN … END`, `TRY` / `CATCH` and Service Broker are
+   `Unknown`.
+6. **Names.** Paths are `<database>/<schema>/<object>`. Names fold to lower
+   case only under a case-insensitive collation, and only for printable
+   ASCII; a binary collation keeps any name exactly; everything else
+   (non-ASCII under accent, kana or width folding, ignorable characters) is
+   `UnresolvableName`. The plugin refuses sessions on Turkish and Azeri
+   case-insensitive collations. An unqualified existing name gets its schema
+   only when the default schema is `dbo`; otherwise the plugin resolves it
+   with `OBJECT_ID` as the server will. `#temp` tables are `tempdb/dbo/…`;
+   table variables are not catalog objects.
+
+Decisions where §4.2 is silent, for the maintainer: `BACKUP` / `RESTORE` are
+always refused (they read and write server files) rather than `sql_admin`;
+`GO` is refused rather than split; unqualified functions the table does not
+list are opaque `sql_execute` on the server; `DROP TRIGGER` checks
+`sql/server`; `DROP SCHEMA` is `sql_admin`. Not read by sqlparser 0.63, so
+`Unknown`: `UPDATE TOP` / `DELETE TOP`, `NEXT VALUE FOR`, `OPTION (…)` query
+hints, join hints, `INSERT … EXEC`, `DELETE t FROM t …` with two `FROM`s.
+
+**`bv-sql-guard`.** `SqlIdent::bracketed`. The allow-list excludes `[` and
+`]`, so the T-SQL `]]` escape is never needed; tests show a name that would
+need it is refused instead.
+
+**Plugin (`plugins-ext/bastion-plugin-dbms-management/src/mssql/`).**
+`tiberius` 0.13 with default features off (`tds73` only): no TLS backend,
+no Windows or Kerberos authentication. `cargo tree -i` finds no
+`openssl-sys`, `aws-lc-sys`, `aws-lc-rs` or `native-tls` (`make test-dbms`
+checks).
+
+- **TLS (deviation).** The driver's rustls backend pins the `aws_lc_rs`
+  provider, which `plugins-ext/` does not carry, and TDS 8.0 strict mode was
+  refused by SQL Server 2022 on Linux (error 17821) even with a configured
+  certificate. So `src/mssql/tds_tls.rs` does the TDS 7.x negotiation: a
+  PRELOGIN asking for encryption, refused unless the server answers
+  `ENCRYPT_ON` or `ENCRYPT_REQ` (login-only encryption is a downgrade); the
+  rustls handshake inside PRELOGIN packets, with the same verifiers as every
+  engine (`verify-full`, `verify-ca`, `require`); then the driver's own
+  PRELOGIN is answered locally, so its LOGIN7 and everything after go into
+  TLS. No cryptography is done there, only framing. `disable` is refused
+  before the login is released: SQL authentication only obfuscates the
+  password. The server must present a configured X.509 v3 certificate: the
+  one SQL Server generates for itself is v1, which webpki cannot parse, so
+  even `require` (which still checks the handshake signature) is refused.
+- **Named instances.** `sql.instance` is sent in PRELOGIN and the server
+  must confirm it (`instance_mismatch` otherwise) before the login is sent,
+  and `SERVERPROPERTY('InstanceName')` is checked again after. SQL Browser
+  (UDP 1434) is never asked: its answer is unauthenticated and would move
+  the dial away from the endpoint the credential is bound to (§5.4), so the
+  profile's port must be the instance's own.
+- **One statement per batch (§4.3 residual).** Each classified span is sent
+  as its own SQL batch; SQL Server runs whatever a batch holds, so the
+  classifier's boundary check and the login's ceiling are what hold. The
+  session status carries `residuals`, which the GUI's enforcement panel
+  lists: the batch residual, and that SQL Server has no read-only session
+  guard (§5.3), so a read-only grant relies on the read-only login.
+- **Pinning and bookkeeping.** `SET QUOTED_IDENTIFIER ON` at open, checked in
+  `@@OPTIONS`. After every statement the next batch reads `@@ROWCOUNT`,
+  `@@TRANCOUNT`, `XACT_STATE()`, `@@OPTIONS` and a marker: rows affected,
+  the exact transaction state, the pinned option (a change taints the
+  session), and proof the connection is in step (a missing marker closes
+  it). A `USE` into a database whose collation folds names differently
+  taints the session.
+- **Cancel.** The TDS attention signal, sent by the transport between
+  packets of the response being read, on the session's own connection (no
+  login is kept for a side connection). The driver's own `cancel_query`
+  stops at the first end of message and leaves the acknowledgement unread,
+  so the transport swallows the separate acknowledgement message itself; an
+  attention requested after its statement ended is dropped by the next
+  request.
+- **Values**: `bigint`, `decimal`, `numeric` and `money` as strings (money
+  through the driver's `f64`, four places), other integers and floats as
+  numbers, dates and times as text (`datetimeoffset` in its own offset),
+  binary as base64, `sql_variant` and CLR types as base64 bytes.
+- **Edits** use brackets, `@Pn` and `(c = @P OR (c IS NULL AND @P IS
+  NULL))` for the original values, run through `sp_executesql` with
+  `SET NOCOUNT ON` and the count from `@@ROWCOUNT` (a trigger's writes are
+  not counted). T-SQL has no `RELEASE SAVEPOINT`; inside a transaction an
+  edit uses `SAVE TRANSACTION`. Single-transaction scripts and the GUI's
+  manual-commit mode open with `BEGIN TRANSACTION`.
+- **Browser and probe** read `sys.*`; the probe maps `fn_my_permissions` at
+  server and database scope onto §3.1 (`CONTROL` is every capability,
+  unknown permissions are `sql_admin`; object-level grants are not
+  expanded).
+- `sql-insert` exports answer `unsupported`, as for MySQL.
+
+### Phase 7 validation
+
+Run one at a time; the plugin commands from `plugins-ext/`, the rest from
+the repository root:
+
+1. `cargo check -p bv-sql-classify --tests`, `cargo clippy -p bv-sql-classify
+   --lib --tests`, `cargo fmt --check` (clean); `cargo nextest run -p
+   bv-sql-classify --lib`: 124 passed (38 T-SQL);
+   `BV_SQL_CLASSIFY_CASES=20000 … tsql::tests::props`: 6 passed; the fuzz
+   target (bit 128 selects T-SQL) compiles.
+2. `cargo clippy -p bv-sql-guard --lib --tests` (clean); `cargo nextest run
+   -p bv-sql-guard --lib`: 8 passed.
+3. `cargo check` / `clippy --lib --tests` / `fmt --check` on
+   `bastion-plugin-dbms-management` (clean); `cargo nextest run -p
+   bastion-plugin-dbms-management --lib`: 100 passed; `cargo test --doc`: 8
+   passed.
+4. `make test-dbms` with `BV_TEST_REQUIRE_CONTAINER=1`: 14 live tests passed,
+   the new one against `mcr.microsoft.com/mssql/server:2022-latest`
+   (linux/amd64, emulated on arm64) with a test-made certificate: sessions,
+   enforcement, `;`-less smuggling, `GO`, `xp_cmdshell`, `OPENROWSET`,
+   `BACKUP` and linked-server refusals with the canary unchanged, paging,
+   the grid cap, the deadline and cancel by attention with the connection in
+   step after, transactions with rollback on close, grid edits and
+   conflicts, browser, describe, probe, a single-transaction script rolled
+   back, CSV export, a positive `verify-full` with the profile's CA, a
+   refused `verify-full` against the OS store, a refused named instance,
+   seal; then the dependency ban.
+5. GUI: `npx tsc --noEmit`; `npx vitest run src/test/sqlWorkspace.test.ts
+   src/test/sqlWorkspaceUi.test.tsx`: 26 passed.
+
+Not done: `make test-release`, a fuzz campaign, the plugin registered on a
+running vault or a real Tauri window, a real named-instance server, SQL
+Server 2016 / 2019 and Azure SQL, Windows / Kerberos / Entra ID logins, and
+a review of the TDS framing by a second person.
+
+
+
+## Phase 8, Oracle
+
+T129. Three pieces, opt-in by the resource's `engine` (`oracle`); the other
+engines' paths are unchanged (all their live tests still pass).
+
+**Driver decision (maintainer, 2026-10-30).** Pure Rust, no Oracle Instant
+Client or OCI. The survey found no driver that passes the plugin's
+dependency ban: Oracle's `oracledb` 26.0.0-beta.5 and `oracle-rs` 0.1.7 both
+pull `aws-lc-sys` through rustls' default features (upstream issue #34 on
+`oracle/rust-oracledb`), neither has a cancel API, and both dial and do TLS
+themselves; `oraclemcp-driver-cx` needs its own async runtime (`asupersync`,
+non-standard licence, nightly feature). So the plugin uses that project's
+Sans-I/O core, `oraclemcp-driver-cx-protocol` 0.9.2 (MIT / Apache-2.0,
+`forbid(unsafe_code)`, RustCrypto only, no I/O, no TLS), pinned exactly, and
+does the I/O itself (`plugins-ext/bastion-plugin-dbms-management/src/oracle/tns.rs`).
+**Flagged:** that session layer is hand-written protocol code and needs a
+second reviewer; the crate has one maintainer and was renamed once (it was
+`oracledb-protocol`), so every upgrade is a reviewed change. `cargo tree -i`
+finds no `openssl-sys`, `aws-lc-sys`, `aws-lc-rs` or `native-tls`
+(`make test-dbms` checks).
+
+**Classifier (`crates/bv-sql-classify/src/ora/`).** `Dialect::Oracle` with
+`LexerSettings::Oracle` (a unit variant: no Oracle session setting moves a
+literal, identifier or comment boundary) and `NameContext::oracle(service,
+current_schema)`; paths are `<SERVICE>/<SCHEMA>/<OBJECT>`.
+
+1. A lexer for Oracle SQL: `'…'` (`''` escapes, no backslash escapes),
+   `N'…'`, q-quotes with paired or same-character delimiters, `"…"`
+   identifiers (no escape exists; empty refused), `--` and non-nested
+   `/* */`. NUL, control characters, `\`, `&` substitution variables,
+   non-alphanumeric non-ASCII and number junk are refused; opaque regions are
+   cross-checked against sqlparser's `OracleDialect` tokenizer.
+2. **Boundaries.** `;` ends a SQL statement and a line holding only `/` ends
+   any statement (the SQL*Plus convention). A PL/SQL unit (anonymous block,
+   `CREATE … PROCEDURE / FUNCTION / PACKAGE [BODY] / TRIGGER / TYPE [BODY]`)
+   ends only at a `/` line or the end of input, and its span includes its
+   final `END …;`; a SQL statement's span excludes the terminator.
+3. **Refused from the words alone**, parsed or not and inside PL/SQL too
+   (`Never`): `UTL_FILE`, `UTL_HTTP`, `UTL_TCP`, `UTL_SMTP`, `UTL_MAIL`,
+   `UTL_INADDR`, `UTL_DBWS`, `HTTPURITYPE`, `DBURITYPE`, `XDBURITYPE`,
+   `BFILENAME`, the `DBMS_LOB` file readers, `DBMS_SCHEDULER`, `DBMS_JOB`,
+   `DBMS_IJOB`, `DBMS_ISCHED`, `DBMS_PIPE`, `DBMS_LDAP`, `DBMS_JAVA`,
+   `DBMS_FILE_TRANSFER`, `DBMS_DATAPUMP`, `DBMS_BACKUP_RESTORE`,
+   `DBMS_SYS_SQL`, `DBMS_NETWORK_ACL_ADMIN`, `DBMS_CLOUD*`, `DBMS_ADVISOR`,
+   `DBMS_XSLPROCESSOR`, `DBMS_FILE_GROUP`, `DBMS_LOGMNR(_D)`, `DBMS_HPROF`,
+   `DBMS_SYSTEM`, `DBMS_HS_PASSTHROUGH`, `DBMS_DEBUG_JDWP`, `DBMS_AQELM`,
+   `DBMS_XDB*`, `DBMS_EPG`, `DBMS_CREDENTIAL`, directories, `CREATE LIBRARY`,
+   Java (`CREATE JAVA`, `LOADJAVA`, `LANGUAGE C / JAVA / JAVASCRIPT`, MLE
+   modules), the word `EXTERNAL` (external tables and procedures),
+   `CONTROLFILE`, `UNPLUG`, `CREATE PFILE / SPFILE`, database links and any
+   `@` in a name, and `ADMINISTER KEY MANAGEMENT`. Dynamic SQL can build
+   these names at run time, so the scan is best effort; the login's
+   ceiling is the backstop. SQL*Plus / SQLcl client lines (`HOST`, `$`, `!`,
+   `@`, `START`, `SPOOL`, `CONNECT`, `DEFINE`, `EXEC`, …) refuse the whole
+   input. `ALTER SESSION SET CONTAINER` (it moves the session off the service
+   the credential and the paths are bound to) and `SET TRANSACTION READ
+   WRITE` are `Never`.
+4. **Statements.** PL/SQL units are opaque and never parsed for safety: a
+   block needs opaque `sql_execute` on `sql/server`; stored code needs
+   `sql_create` on the new object (plus `sql_alter` for `OR REPLACE`, a
+   `PACKAGE BODY` or a `TYPE BODY`); a DML trigger adds opaque `sql_execute`
+   on the server and a DDL or system trigger is `sql_admin`. `FOR UPDATE` and
+   `LOCK TABLE` add `sql_update`; `seq.NEXTVAL` is `sql_update` on the
+   sequence; `INSERT ALL / FIRST` and `MERGE` need each target's capability
+   (`MERGE … DELETE WHERE` adds `sql_delete`); `TRUNCATE` and `PURGE` are
+   `sql_drop`; `FLASHBACK TABLE` is `sql_alter`; grants, users, roles,
+   profiles, `SET ROLE`, `ALTER SYSTEM`, `ALTER DATABASE`, `AUDIT` and public
+   synonyms are `sql_admin`. `EXECUTE IMMEDIATE`, `DBMS_SQL` and the
+   query-from-string functions (`DBMS_XMLGEN`, `XMLQUERY`, …) are opaque
+   `sql_execute` on the server. `ALTER SESSION SET CURRENT_SCHEMA`, `NLS_*`,
+   `TIME_ZONE` and `ISOLATION_LEVEL` are `sql_select` on the server; every
+   other `ALTER SESSION` is `sql_admin`. Optimizer hints are refused as
+   `Unknown`.
+5. **Names.** Unquoted names fold to ASCII upper case (an unquoted non-ASCII
+   name is `UnresolvableName`); quoted names are kept; over 128 bytes is
+   refused, never truncated.
+
+Decisions where §4.2 is silent, for the maintainer: a bare name is a column
+when a table is in scope, otherwise a parameterless function call (opaque
+`sql_execute`); `a.f` that is not a column needs `sql_execute` on both
+`<svc>/A/F` and `<svc>/?/A` (schema function or package); `DUAL` is no
+object; `CREATE INDEX` checks the table and the index; `ALTER / DROP
+TRIGGER` check `sql/server`; `CASCADE CONSTRAINTS` adds `sql_drop` on the
+server; renames are `sql_alter` on the old name and `sql_create` on the new;
+`EXPLAIN PLAN` is not classified (it writes `PLAN_TABLE`); `CALL` takes
+constant arguments only; `COMMIT / ROLLBACK FORCE` is `sql_admin`. Not read
+by sqlparser 0.63, so `Unknown`: `FOR UPDATE WAIT n`, `AS OF` flashback
+queries, `PARTITION (p)` in `FROM`, `RETURNING … INTO`, `KEEP (DENSE_RANK
+…)`, `CURSOR(…)`, `TREAT`, `ALTER TABLE … ADD (…)`, bitmap indexes, index
+`TABLESPACE` clauses, `FORCE` views, materialized views with `REFRESH` or
+`BUILD`, and aliased `INSERT ALL` targets. More than 4,096 operator tokens in
+one statement is `NestingTooDeep`. Redaction also removes the password after
+`IDENTIFIED BY` / `REPLACE`.
+
+**`bv-sql-guard`.** `SqlIdent::oracle_quoted`: double quotes, the name kept
+exactly as the dictionary stores it. Oracle has no escape for `"`, and the
+allow-list excludes it, so such a name is refused; the allow-list is not
+widened for `$` and `#` (valid in Oracle, but `#` starts a MySQL comment).
+
+**Plugin (`plugins-ext/bastion-plugin-dbms-management/src/oracle/`).**
+
+- **Session layer (`tns.rs`).** TNS framing (16-bit lengths until ACCEPT,
+  32-bit after); CONNECT with RESEND bounded to four; a RESEND flagged for TLS
+  renegotiation (the listener handing the socket to a server process, seen on
+  every connection to the 26ai Free listener) gets a second TLS handshake on
+  the same socket, verified exactly as the first, once; REDIRECT is refused
+  (it would move the dial off the endpoint the credential is bound to, §5.4),
+  as is REFUSE (only the `TNS-` number is kept) and any other packet. Servers
+  without fast authentication and END_OF_RESPONSE framing are refused, which
+  means **Oracle Database 23ai or later**: 19c and 21c need the classic,
+  message-driven framing, which was not built because it could not be tested
+  here. O5LOGON runs in the protocol crate: only the 12c (PBKDF2) verifier
+  is accepted, refused before any password-derived value is sent, and the
+  server must prove it knows the verifier (`AUTH_SVR_RESPONSE`) before the
+  session is used. Native Network Encryption is refused by the crate. The
+  password, the phase-two message and the session keys are zeroized after
+  use; the crate's own internal copies are not.
+- **TLS.** TCPS only (TLS from the first byte), on the same rustls / `ring`
+  configurations as every engine (`require`, `verify-ca`, `verify-full`);
+  `disable` is refused before the login is released, because a plaintext
+  O5LOGON exchange invites offline attack.
+- **One statement per round trip.** An Oracle execute call carries one SQL
+  statement or one PL/SQL block; the span is sent as is, with no binds.
+- **Transactions.** Oracle has no server auto-commit, so the plugin emulates
+  §6.4's default: outside an explicit transaction it commits after each
+  statement and rolls back after a failed one. An explicit transaction opens
+  with `SET TRANSACTION` (the GUI's manual-commit statement for Oracle; the
+  plugin's `BEGIN` for scripts and edits) and is tracked with the server's
+  end-of-call status; DDL commits it implicitly, as Oracle does. A
+  read-only grant runs each statement inside the plugin's own `SET
+  TRANSACTION READ ONLY`, ended right after it; a caller's own `SET
+  TRANSACTION` is refused in such a session (the GUI does not offer manual
+  commit there). Autonomous transactions escape the guard, so the session is
+  never reported `database_read_only` and user functions always need
+  `sql_execute` (§5.3). The guard's snapshot refuses a table whose DDL is a
+  few seconds old (ORA-01466).
+- **Cancel.** An in-band BREAK on the session's own TLS connection (no
+  out-of-band channel exists over TLS); the server answers with a MARKER,
+  the layer resets and reads the ORA-01013 error. A BREAK that crosses the
+  end of its call is answered right after it; that answer is drained before
+  the session is used again, or the session closes. A cancel also stops
+  further fetches. The server notices an in-band BREAK when it polls for
+  one: a busy statement stops at once, one waiting on a sleep or a lock only
+  when its wait ends. Verified over TCPS on 26ai Free (a three-way cross
+  join and a busy PL/SQL loop).
+- **Names.** The catalog path segment is the service name in upper case
+  (service names compare without case); the session checks that
+  `SYS_CONTEXT('USERENV', 'SERVICE_NAME')` is the profile's service, and a
+  session that later finds itself on another service or container is
+  tainted. An unqualified existing name resolves to the current schema when
+  that schema owns a non-synonym object of that name; a synonym (private, or
+  PUBLIC) stays unaddressable, so only a resource-wide grant can read
+  through it (a check on the synonym's path would not be a check on its
+  target). A qualified reference to a synonym is checked on the synonym's
+  path: residual, the login is the backstop (§4.4). Dictionary views reached
+  through PUBLIC synonyms (`ALL_TABLES`) need a resource-wide grant or the
+  `SYS.` prefix.
+- **Values.** `NUMBER` is a JSON number only for integer columns of at most
+  15 digits, otherwise a decimal string; `BINARY_FLOAT / DOUBLE` are numbers;
+  `RAW` is base64; dates, timestamps and intervals are ISO-style text; native
+  JSON is JSON. LOB, BFILE, object, cursor and vector cells are placeholders
+  and are never read.
+- **Edits** use `oracle_quoted` names, `:n` binds each used once, and `(c =
+  :n OR (c IS NULL AND :m IS NULL))` for the original values, under a
+  `SAVEPOINT` inside the caller's transaction or committed on their own.
+  Values are bound as text under NLS formats the plugin pins at session start
+  and again before each edit (`.` decimals, `YYYY-MM-DD HH24:MI:SS`); only
+  character, numeric, `DATE` and `TIMESTAMP` columns are written.
+- **Browser and probe** read `ALL_USERS` (non-Oracle-maintained schemas plus
+  the current one), `ALL_OBJECTS`, `ALL_TAB_COLS` (`DATA_DEFAULT_VC`),
+  `ALL_CONSTRAINTS`, `ALL_INDEXES`, `ALL_TRIGGERS` and `ALL_VIEWS.TEXT_VC`;
+  the probe maps `SESSION_PRIVS`, `SESSION_ROLES` and the object grants
+  received (directly or through an enabled role) onto §3.1 (`DBA`, `SYSDBA`
+  and `GRANT ANY PRIVILEGE` are superuser; unknown privileges are
+  `sql_admin`; object grants are not expanded per object).
+- A failed statement leaves its server cursor open (the crate's error does
+  not carry its id); after 200 failures the session is tainted, before
+  `OPEN_CURSORS` would end it. `sql-insert` exports answer `unsupported`.
+
+### Phase 8 validation
+
+Run one at a time; the plugin commands from `plugins-ext/`, the rest from
+the repository root:
+
+1. `cargo check -p bv-sql-classify --tests`, `cargo clippy -p bv-sql-classify
+   --lib --tests`, `cargo clippy -p bv-sql-guard --lib --tests` (clean);
+   `cargo nextest run -p bv-sql-classify -p bv-sql-guard --lib`: 183 passed
+   (49 Oracle, 10 guard); `BV_SQL_CLASSIFY_CASES=20000 … ora::tests::props`:
+   6 passed; the fuzz target (flag bits 0xB0 select Oracle) compiles.
+2. `cargo check` / `clippy --lib --tests` / `fmt` on
+   `bastion-plugin-dbms-management` (clean); `cargo nextest run -p
+   bastion-plugin-dbms-management --lib`: 114 passed; `cargo test --doc`: 8
+   passed.
+3. `make test-dbms` with `BV_TEST_REQUIRE_CONTAINER=1`: 15 live tests passed,
+   the new one against `gvenzl/oracle-free:23-full` (Oracle AI Database 26ai
+   Free, arm64) with a TCPS listener and wallet made by the test: sessions,
+   the current-schema re-read, q-quotes, enforcement (the vault, then the
+   read-only login), refused manual transactions in a read-only session,
+   `;` and `/` smuggling, `UTL_FILE` in a block, `UTL_HTTP` in a query, a
+   database link, `SET CONTAINER`, `SET TRANSACTION READ WRITE` and `HOST`
+   refused with the canary unchanged, paging, the grid cap, the deadline and
+   cancel by in-band break with the session in step after, a PL/SQL block
+   run and a busy one broken, transactions with rollback on close,
+   auto-commit, grid edits and conflicts, browser, describe, probe, a
+   single-transaction script rolled back, CSV export, a positive
+   `verify-full` with the profile's CA, a refused `verify-full` against the
+   OS store, a refused `disable` profile, an unknown service refused by the
+   listener, seal; then the dependency ban.
+4. GUI: `npx tsc --noEmit`; `npx vitest run src/test/sqlWorkspace.test.ts
+   src/test/sqlWorkspaceUi.test.tsx`: 28 passed.
+
+Not done: `make test-release`, a fuzz campaign, the plugin registered on a
+running vault or a real Tauri window, Oracle 19c / 21c (refused) and
+Enterprise Edition servers, a pre-12c verifier, a listener REDIRECT and a
+real CA chain seen live, the GUI profile editor's hint that Oracle needs
+TCPS, and a review of the session layer by a second person.

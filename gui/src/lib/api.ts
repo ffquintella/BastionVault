@@ -3516,6 +3516,8 @@ export interface SqlSessionStatus {
   ceiling: string[];
   /** Capabilities only the vault enforces (the ceiling's excess). */
   vault_only: string[];
+  /** What this engine cannot enforce at the protocol or database level (§4.3; SQL Server T128, Oracle T129). */
+  residuals?: string[];
   transport: string;
   tls_mode: string;
   search_path?: string;

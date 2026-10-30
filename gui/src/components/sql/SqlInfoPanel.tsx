@@ -137,6 +137,13 @@ export function SqlInfoPanel({
             audit event of this session carries <code>db_enforced: false</code>.
           </p>
         )}
+        {(status.residuals ?? []).length > 0 && (
+          <ul className="mt-1 list-disc space-y-0.5 pl-4 text-[10px] text-yellow-300" data-testid="sql-residuals">
+            {(status.residuals ?? []).map((r) => (
+              <li key={r}>{r}</li>
+            ))}
+          </ul>
+        )}
         {status.taint && <p className="mt-1 text-red-400">Session tainted: {status.taint}</p>}
       </section>
     </aside>

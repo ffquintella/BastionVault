@@ -92,7 +92,8 @@ pub enum ObjectKind {
 
 /// A referenced object, every name already in the engine's canonical case
 /// (PostgreSQL: unquoted names folded to lower case, quoted names kept, both
-/// truncated to `max_identifier_length` bytes, as the server does).
+/// truncated to `max_identifier_length` bytes, as the server does; Oracle:
+/// unquoted names folded to ASCII upper case, and too long a name refused).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ObjectRef {
     pub kind: ObjectKind,
@@ -174,6 +175,12 @@ pub enum StatementKind {
     /// `SET` / `RESET` / `DISCARD` of a session setting. The caller re-reads
     /// the search path and current schema after one runs (§4.4).
     SetSession,
+    /// T-SQL `DECLARE @variable` (T128).
+    Declare,
+    /// T-SQL `PRINT`, `RAISERROR` and `THROW`: a message to the client.
+    Message,
+    /// T-SQL `WAITFOR DELAY` / `WAITFOR TIME`.
+    WaitFor,
 }
 
 /// One statement of the input, classified.
@@ -182,7 +189,8 @@ pub struct ClassifiedStatement {
     /// Byte range in the input, without the terminating `;` and without
     /// leading or trailing comments and whitespace. The caller executes
     /// exactly `&text[span]`, one span per protocol round trip, and never
-    /// the original multi-statement text (§4.3).
+    /// the original multi-statement text (§4.3). Oracle's `/` lines and
+    /// PL/SQL unit spans: see [`Dialect::Oracle`].
     pub span: Range<usize>,
     pub kind: StatementKind,
     /// Every privilege the statement uses, deduplicated and sorted. Never
@@ -265,6 +273,38 @@ pub enum Reason {
     ReservedWordAsName,
     /// The classifier itself failed (a parser panic, no thread to run on).
     InternalError,
+    /// MySQL / MariaDB: a comment the server executes or interprets
+    /// (`/*! … */`, `/*M! … */`, optimizer hints `/*+ … */`), or a nested
+    /// comment, which server versions read differently (§4.3).
+    ExecutableComment,
+    /// MySQL / MariaDB: a construct whose reading depends on a session
+    /// setting the parser cannot follow (a double-quoted identifier under
+    /// `ANSI_QUOTES`, a backslash in a string under `NO_BACKSLASH_ESCAPES`).
+    /// The lexer still delimited the statement exactly.
+    LexerSettingUnsupported,
+    /// MySQL / MariaDB: a built-in function name followed by a space or a
+    /// comment before `(`. Without `IGNORE_SPACE` the server may call a
+    /// stored function of that name instead of the built-in.
+    SpaceBeforeParenthesis,
+    /// T-SQL: a `GO` line. It is a client tool's batch separator, not
+    /// T-SQL; the server would read it as a word, so a script holding one is
+    /// refused rather than split by guess (T128).
+    BatchSeparator,
+    /// Oracle: a SQL*Plus / SQLcl client command (`SET ECHO`, `SPOOL`,
+    /// `@script`, `HOST`, `DEFINE`, `EXEC`, `CONNECT`, …). It is not SQL, the
+    /// server never sees it, and a script holding one was written for a
+    /// client that splits lines its own way, so the whole input is refused
+    /// (T129).
+    ClientCommand,
+    /// Oracle: an optimizer hint (`/*+ … */`, `--+ …`), a comment the server
+    /// reads. Hints change how a statement runs, never which objects it
+    /// touches or with which privilege, so a caller holding `sql_admin` may
+    /// still run it as `unclassified` (T129).
+    OptimizerHint,
+    /// Oracle: moves the session to another container (`ALTER SESSION SET
+    /// CONTAINER`), away from the service the credential and the object
+    /// paths are bound to (T129).
+    SessionScopeChange,
 }
 
 impl Reason {
@@ -278,7 +318,10 @@ impl Reason {
             | Reason::UnsupportedStatement
             | Reason::UnsupportedConstruct
             | Reason::UnresolvableName
-            | Reason::ReservedWordAsName => Refusal::Unknown,
+            | Reason::ReservedWordAsName
+            | Reason::LexerSettingUnsupported
+            | Reason::SpaceBeforeParenthesis
+            | Reason::OptimizerHint => Refusal::Unknown,
             Reason::DialectMismatch
             | Reason::InvalidContext
             | Reason::InputTooLarge
@@ -293,7 +336,11 @@ impl Reason {
             | Reason::LexerSettingChange
             | Reason::ReadOnlyGuardChange
             | Reason::EmptyRequirementSet
-            | Reason::InternalError => Refusal::Never,
+            | Reason::InternalError
+            | Reason::ExecutableComment
+            | Reason::BatchSeparator
+            | Reason::ClientCommand
+            | Reason::SessionScopeChange => Refusal::Never,
         }
     }
 
@@ -322,6 +369,13 @@ impl Reason {
             Reason::EmptyRequirementSet => "no requirement could be derived",
             Reason::ReservedWordAsName => "a reserved keyword was parsed as an object name",
             Reason::InternalError => "the classifier failed internally",
+            Reason::ExecutableComment => "executable, hint or nested comment",
+            Reason::LexerSettingUnsupported => "construct not classified under the session's sql_mode",
+            Reason::SpaceBeforeParenthesis => "space between a built-in function name and its parenthesis",
+            Reason::BatchSeparator => "a GO batch-separator line (a client-tool convention, not T-SQL)",
+            Reason::ClientCommand => "a SQL*Plus or SQLcl client command (not SQL)",
+            Reason::OptimizerHint => "an optimizer hint comment",
+            Reason::SessionScopeChange => "moves the session to another container",
         }
     }
 }
@@ -374,6 +428,21 @@ impl std::error::Error for Unclassifiable {}
 #[non_exhaustive]
 pub enum Dialect {
     PostgreSql,
+    /// MySQL 8.0 and later (T127, Phase 6).
+    MySql,
+    /// MariaDB 10.6 and later (T127, Phase 6). Shares the MySQL lexer; the
+    /// function table differs (sequences, MariaDB-only built-ins).
+    MariaDb,
+    /// Microsoft SQL Server 2022 and later, T-SQL (T128, Phase 7).
+    MsSql,
+    /// Oracle Database 19c and later (T129, Phase 8). Spans follow SQL*Plus:
+    /// a line holding only `/` ends a statement as `;` does, and neither is
+    /// in the span. Inside a PL/SQL unit (anonymous block, `CREATE … {PROCEDURE
+    /// | FUNCTION | PACKAGE [BODY] | TRIGGER | TYPE [BODY]}`, `WITH FUNCTION`)
+    /// `;` ends nothing: only a `/` line or the end of the input does, and the
+    /// span includes the final `END …;` (never the `/`). PL/SQL units are
+    /// opaque: scanned word by word, never parsed for safety.
+    Oracle,
 }
 
 /// The session's lexer-affecting settings, read by the caller at session
@@ -388,6 +457,56 @@ pub enum LexerSettings {
         /// backslash as an escape character.
         standard_conforming_strings: bool,
     },
+    /// MySQL and MariaDB: the session's `sql_mode` flags that change where a
+    /// literal ends, and how the server folds database and table names. The
+    /// caller re-reads them after anything that could change them (a stored
+    /// routine, an unclassified statement) and stops the session when they
+    /// differ (§4.3 pinning).
+    MySql {
+        /// `ANSI_QUOTES`: `"…"` is an identifier, not a string.
+        ansi_quotes: bool,
+        /// `NO_BACKSLASH_ESCAPES`: `\` is an ordinary character in strings.
+        no_backslash_escapes: bool,
+        /// `lower_case_table_names` is 1 or 2: database and table names
+        /// compare in lower case. With 0 they are case-sensitive as written.
+        fold_table_names: bool,
+    },
+    /// SQL Server: `QUOTED_IDENTIFIER` and how the server compares names.
+    /// The caller pins `QUOTED_IDENTIFIER` at session start, re-reads it
+    /// after anything that could change it and stops the session when it
+    /// differs (§4.3 pinning); the name rules come from the collations.
+    MsSql {
+        /// `QUOTED_IDENTIFIER ON`: `"…"` is an identifier, not a string.
+        quoted_identifier: bool,
+        /// How schema and object names compare: the current database's
+        /// collation.
+        names: NameMatch,
+        /// How database names compare: the server's collation.
+        catalogs: NameMatch,
+    },
+    /// Oracle: nothing to pin, because no session setting moves where a
+    /// literal, identifier or comment ends. `'…'` never takes backslash
+    /// escapes and `"…"` is always an identifier; `NLS_*` change formats and
+    /// comparisons, not lexing or identifier case; SQL*Plus `SET DEFINE /
+    /// ESCAPE / SQLTERMINATOR` are client settings the server never sees
+    /// (and every client command is refused).
+    Oracle,
+}
+
+/// How a server compares identifiers, as far as the classifier can follow
+/// it exactly (§4.4: a name it cannot normalize unambiguously matches no
+/// object-scoped rule, and is refused).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NameMatch {
+    /// Binary comparison (`_BIN`, `_BIN2` collations): names as written,
+    /// any character.
+    Exact,
+    /// Case-sensitive, but accent, kana or width folding (or ignorable
+    /// characters) may apply beyond ASCII: names as written, printable ASCII
+    /// only.
+    AsciiCaseSensitive,
+    /// Case-insensitive: printable ASCII only, folded to lower case.
+    AsciiCaseInsensitive,
 }
 
 /// Session state that decides what a name means (§4.4) and whether user
@@ -429,4 +548,70 @@ impl NameContext {
             database_read_only: false,
         }
     }
+
+    /// A MySQL / MariaDB context: the catalog is `def` (what
+    /// `information_schema` reports, §3.2), `current_database` is
+    /// `DATABASE()` (`None` when no database is selected; an unqualified name
+    /// is then refused, as the server refuses it), and there is no search
+    /// path: an unqualified name always means the current database.
+    pub fn mysql(current_database: Option<String>) -> Self {
+        Self {
+            current_catalog: MYSQL_CATALOG.to_string(),
+            current_schema: current_database,
+            search_path: Vec::new(),
+            max_identifier_length: 64,
+            database_read_only: false,
+        }
+    }
 }
+
+impl NameContext {
+    /// A SQL Server context: the catalog is `DB_NAME()`, `default_schema`
+    /// is `SCHEMA_NAME()` (where a new unqualified object is created), and
+    /// an existing unqualified name is looked up in the default schema, then
+    /// `dbo` (`search_path`). When those differ the classifier leaves the
+    /// schema to the caller's catalog resolution (§4.4).
+    pub fn mssql(database: impl Into<String>, default_schema: Option<String>) -> Self {
+        let mut search_path: Vec<String> = default_schema.iter().cloned().collect();
+        if !search_path.iter().any(|s| s == MSSQL_DEFAULT_SCHEMA) {
+            search_path.push(MSSQL_DEFAULT_SCHEMA.to_string());
+        }
+        Self {
+            current_catalog: database.into(),
+            current_schema: default_schema,
+            search_path,
+            max_identifier_length: 128,
+            database_read_only: false,
+        }
+    }
+}
+
+impl NameContext {
+    /// An Oracle context: the catalog is the service (PDB) name as given,
+    /// `current_schema` is `SYS_CONTEXT('USERENV','CURRENT_SCHEMA')` (where
+    /// a new unqualified object goes), and there is no search path: an
+    /// existing unqualified name is the caller's to resolve (current schema,
+    /// then a `PUBLIC` synonym). Never read-only here: an autonomous
+    /// transaction escapes `SET TRANSACTION READ ONLY` (§5.3).
+    pub fn oracle(service: impl Into<String>, current_schema: impl Into<String>) -> Self {
+        Self {
+            current_catalog: service.into(),
+            current_schema: Some(current_schema.into()),
+            search_path: Vec::new(),
+            max_identifier_length: 128,
+            database_read_only: false,
+        }
+    }
+}
+
+/// SQL Server's fallback schema for unqualified names.
+pub const MSSQL_DEFAULT_SCHEMA: &str = "dbo";
+
+/// The database every SQL Server temporary table (`#t`, `##t`) lives in,
+/// used as the catalog of their object paths (§3.2).
+pub const MSSQL_TEMP_CATALOG: &str = "tempdb";
+
+/// The catalog name MySQL and MariaDB report for every object
+/// (`information_schema.tables.table_catalog`), used as the first part of
+/// object paths (§3.2).
+pub const MYSQL_CATALOG: &str = "def";

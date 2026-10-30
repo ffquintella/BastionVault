@@ -73,6 +73,36 @@ impl SqlIdent {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// `"name"`: the identifier quoted for PostgreSQL and standard SQL, so
+    /// its case is kept. Nothing needs escaping: the allow-list excludes `"`.
+    pub fn double_quoted(&self) -> String {
+        format!("\"{}\"", self.0)
+    }
+
+    /// `` `name` ``: the identifier quoted for MySQL and MariaDB, read the
+    /// same under every `sql_mode` (`ANSI_QUOTES` changes `"`, not the
+    /// backtick). Nothing needs escaping: the allow-list excludes `` ` ``.
+    pub fn backticked(&self) -> String {
+        format!("`{}`", self.0)
+    }
+
+    /// `[name]`: the identifier quoted for SQL Server, read the same whether
+    /// `QUOTED_IDENTIFIER` is on or off (it changes `"`, not brackets).
+    /// Nothing needs escaping: the allow-list excludes `[` and `]`, so the
+    /// T-SQL escape (`]` doubled as `]]`) can never be needed here.
+    pub fn bracketed(&self) -> String {
+        format!("[{}]", self.0)
+    }
+
+    /// `"NAME"`: the identifier quoted for Oracle, case kept, so it matches
+    /// the data dictionary exactly (pass the name as the dictionary spells
+    /// it, usually upper case). Oracle has no escape for a `"` inside a
+    /// quoted name at all; the allow-list excludes `"`, so a name that
+    /// would need one is refused, never escaped.
+    pub fn oracle_quoted(&self) -> String {
+        format!("\"{}\"", self.0)
+    }
 }
 
 impl fmt::Display for SqlIdent {
@@ -200,6 +230,80 @@ mod tests {
         let s = sql!("SELECT {} FROM {} WHERE {} = ?", &c, &t, &c);
         assert_eq!(s.as_str(), "SELECT k FROM vault WHERE k = ?");
         assert_eq!(sql!("SELECT 1").as_str(), "SELECT 1");
+    }
+
+    #[test]
+    fn quoting_styles_wrap_the_validated_name_only() {
+        let id = SqlIdent::new("Users_2").unwrap();
+        assert_eq!(id.double_quoted(), "\"Users_2\"");
+        assert_eq!(id.backticked(), "`Users_2`");
+        // A quote of either style can never be inside: the allow-list
+        // refuses it, so quoting needs no escaping.
+        for bad in ["a`b", "a\"b", "a``b"] {
+            assert!(SqlIdent::new(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    /// SQL Server brackets: a `]` inside the name would end the identifier
+    /// early unless doubled (`]]`). The allow-list refuses both brackets, so
+    /// `bracketed` never has to escape, and a name that would need it never
+    /// becomes an identifier at all.
+    #[test]
+    fn bracketed_never_needs_the_close_bracket_escape() {
+        let id = SqlIdent::new("Users_2").unwrap();
+        assert_eq!(id.bracketed(), "[Users_2]");
+        for (bad, why) in [
+            ("a]b", SqlGuardError::IllegalChar),
+            ("a]]b", SqlGuardError::IllegalChar),
+            ("a[b", SqlGuardError::IllegalChar),
+            ("a];DROP TABLE t;--", SqlGuardError::IllegalChar),
+            ("[a]", SqlGuardError::BadLeadingChar),
+            ("]", SqlGuardError::BadLeadingChar),
+        ] {
+            assert_eq!(SqlIdent::new(bad).map(|i| i.bracketed()), Err(why), "{bad:?}");
+        }
+        // Whatever `bracketed` returns holds exactly one `[` and one `]`,
+        // at the ends: the name cannot close the identifier early.
+        for good in ["a", "_x9", &"v".repeat(63)] {
+            let q = SqlIdent::new(good).unwrap().bracketed();
+            assert!(q.starts_with('[') && q.ends_with(']'));
+            assert_eq!(q.matches(']').count(), 1, "{q}");
+            assert_eq!(q.matches('[').count(), 1, "{q}");
+        }
+    }
+
+    /// Oracle quoted names: no escape for `"` exists, so the allow-list must
+    /// keep `"` out, and `oracle_quoted` never has anything to escape.
+    #[test]
+    fn oracle_quoted_keeps_case_and_never_needs_an_escape() {
+        assert_eq!(SqlIdent::new("EMPLOYEES").unwrap().oracle_quoted(), "\"EMPLOYEES\"");
+        // Case is kept: `"Emp"` and `"EMP"` are different Oracle objects.
+        assert_eq!(SqlIdent::new("Emp_2").unwrap().oracle_quoted(), "\"Emp_2\"");
+        for (bad, why) in [
+            ("a\"b", SqlGuardError::IllegalChar),
+            ("a\"\"b", SqlGuardError::IllegalChar),
+            ("A\";DROP TABLE T;--", SqlGuardError::IllegalChar),
+            ("\"A\"", SqlGuardError::BadLeadingChar),
+        ] {
+            assert_eq!(SqlIdent::new(bad).map(|i| i.oracle_quoted()), Err(why), "{bad:?}");
+        }
+        for good in ["A", "_X9", &"V".repeat(63)] {
+            let q = SqlIdent::new(good).unwrap().oracle_quoted();
+            assert!(q.starts_with('"') && q.ends_with('"'));
+            assert_eq!(q.matches('"').count(), 2, "{q}");
+        }
+    }
+
+    /// `$` and `#` are valid in Oracle names (`V$SESSION`, `SYS.OBJ$`,
+    /// `ORDER#`) but stay refused: the allow-list is shared by every
+    /// dialect, and `#` starts a comment in MySQL and `$` a parameter or a
+    /// dollar quote in PostgreSQL, if the name were ever used unquoted. A
+    /// name that needs them is not built from runtime data here.
+    #[test]
+    fn oracle_dollar_and_hash_names_stay_refused() {
+        for bad in ["V$SESSION", "OBJ$", "ORDER#", "A#B"] {
+            assert_eq!(SqlIdent::new(bad), Err(SqlGuardError::IllegalChar), "{bad:?}");
+        }
     }
 
     #[test]

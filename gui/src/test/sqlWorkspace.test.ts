@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import type { SqlColumn, SqlDescribe } from "../lib/api";
 import {
+  beginStatement,
+  manualCommitUnavailable,
   buildDelete,
   buildInsert,
   buildUpdate,
@@ -201,5 +203,24 @@ describe("cells and edits", () => {
     });
     expect(Object.keys(edit).sort()).toEqual(["key", "object", "op", "original", "values"]);
     expect(edit.values).toEqual({ email: "'; DROP TABLE t; --" });
+  });
+});
+
+describe("manual-commit mode", () => {
+  it("opens a transaction in each engine's own words", () => {
+    expect(beginStatement("postgresql")).toBe("BEGIN");
+    expect(beginStatement("mysql")).toBe("BEGIN");
+    // T-SQL reads a bare BEGIN as a block.
+    expect(beginStatement("mssql")).toBe("BEGIN TRANSACTION");
+    // Oracle has no BEGIN statement; a bare BEGIN opens a PL/SQL block.
+    expect(beginStatement("oracle")).toBe("SET TRANSACTION ISOLATION LEVEL READ COMMITTED");
+    expect(beginStatement(undefined)).toBe("BEGIN");
+  });
+
+  it("is not offered in a read-only Oracle session, whose statements each run read-only", () => {
+    expect(manualCommitUnavailable("oracle", true)).toMatch(/read-only transaction/);
+    expect(manualCommitUnavailable("oracle", false)).toBeNull();
+    expect(manualCommitUnavailable("postgresql", true)).toBeNull();
+    expect(manualCommitUnavailable(undefined, undefined)).toBeNull();
   });
 });

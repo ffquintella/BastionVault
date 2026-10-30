@@ -119,6 +119,26 @@ describe("SQL workspace", () => {
     expect(within(screen.getByTestId("sql-vault-only")).getByText("sql_drop")).toBeInTheDocument();
     expect(enforcement).toHaveTextContent("can do more than the grant");
     expect(enforcement).toHaveTextContent("db_enforced: false");
+    expect(screen.queryByTestId("sql-residuals")).toBeNull();
+  });
+
+  it("states the engine's residuals in the enforcement panel", async () => {
+    const residuals = ["SQL Server runs each statement as a T-SQL batch", "SQL Server has no read-only session guard"];
+    setup(base({ sql_session_status: () => status({ engine: "mssql", residuals }) }));
+    render(<SqlWorkspace token={TOKEN} label="sql netrisk-db/app · ro" />);
+    const list = await screen.findByTestId("sql-residuals");
+    expect(within(list).getAllByRole("listitem").map((li) => li.textContent)).toEqual(residuals);
+  });
+
+  it("offers no manual commit in a read-only Oracle session and lists its residuals", async () => {
+    const residuals = ["Oracle has no session-wide read-only mode", "Oracle has no server auto-commit"];
+    setup(base({ sql_session_status: () => status({ engine: "oracle", read_only: true, residuals }) }));
+    render(<SqlWorkspace token={TOKEN} label="sql orcl/FREEPDB1 · ro" />);
+    const list = await screen.findByTestId("sql-residuals");
+    expect(within(list).getAllByRole("listitem")).toHaveLength(2);
+    const mode = screen.getByLabelText("Commit mode");
+    expect(mode).toBeDisabled();
+    expect(mode).toHaveAttribute("title", expect.stringMatching(/manual commit is not available/));
   });
 
   it("runs a statement through the host with only the session token and shows NULL apart from ''", async () => {

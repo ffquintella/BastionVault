@@ -15,11 +15,14 @@
 #![forbid(unsafe_code)]
 
 mod model;
+mod my;
+mod ora;
 mod pg;
+mod tsql;
 
 pub use model::{
-    ClassifiedStatement, Dialect, LexerSettings, NameContext, ObjectKind, ObjectRef, Reason, Refusal, SqlCapability,
-    SqlTarget, StatementKind, Unclassifiable,
+    ClassifiedStatement, Dialect, LexerSettings, NameContext, NameMatch, ObjectKind, ObjectRef, Reason, Refusal,
+    SqlCapability, SqlTarget, StatementKind, Unclassifiable, MSSQL_DEFAULT_SCHEMA, MSSQL_TEMP_CATALOG, MYSQL_CATALOG,
 };
 
 /// Largest input accepted, in bytes: the script limit of §8.2 and the
@@ -66,6 +69,14 @@ pub fn classify_each(
         (Dialect::PostgreSql, LexerSettings::PostgreSql { standard_conforming_strings }) => {
             pg::classify_each(text, standard_conforming_strings, ctx)
         }
+        (Dialect::MySql | Dialect::MariaDb, LexerSettings::MySql { .. }) => {
+            my::classify_each(text, my::Settings::from_lexer(lexer, dialect), ctx)
+        }
+        (Dialect::MsSql, LexerSettings::MsSql { quoted_identifier, names, catalogs }) => {
+            tsql::classify_each(text, tsql::Settings { quoted_identifier, names, catalogs }, ctx)
+        }
+        (Dialect::Oracle, LexerSettings::Oracle) => ora::classify_each(text, ctx),
+        _ => Err(Unclassifiable::whole(Reason::DialectMismatch)),
     };
     // The parser recurses with frames of tens of kilobytes in unoptimised
     // builds, so its recursion budget alone does not keep it inside a 2 MiB
@@ -93,6 +104,14 @@ pub fn redact(dialect: Dialect, lexer: LexerSettings, text: &str) -> Result<Stri
         (Dialect::PostgreSql, LexerSettings::PostgreSql { standard_conforming_strings }) => {
             pg::redact(text, standard_conforming_strings).map_err(Unclassifiable::whole)
         }
+        (Dialect::MySql | Dialect::MariaDb, LexerSettings::MySql { .. }) => {
+            my::redact(text, my::Settings::from_lexer(lexer, dialect)).map_err(Unclassifiable::whole)
+        }
+        (Dialect::MsSql, LexerSettings::MsSql { quoted_identifier, names, catalogs }) => {
+            tsql::redact(text, tsql::Settings { quoted_identifier, names, catalogs }).map_err(Unclassifiable::whole)
+        }
+        (Dialect::Oracle, LexerSettings::Oracle) => ora::redact(text).map_err(Unclassifiable::whole),
+        _ => Err(Unclassifiable::whole(Reason::DialectMismatch)),
     }
 }
 

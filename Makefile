@@ -2752,13 +2752,16 @@ plugins-test: require-nextest ## Run plugin unit tests: testkit, host ABI parity
 	@echo ""
 	@echo "==> plugins-test complete."
 
-# Not part of plugins-test or `make test`: starts throwaway postgres:16
-# containers through docker (features/sql-browser.md, Testing Plan). Without
-# docker the tests skip; BV_TEST_REQUIRE_CONTAINER=1 makes that a failure.
-test-dbms: require-nextest ## SQL browser plugin against live PostgreSQL containers (docker) + dependency ban
+# Not part of plugins-test or `make test`: starts throwaway postgres:16,
+# mysql:8.4, mariadb:11.4, mssql/server:2022 (linux/amd64) and
+# gvenzl/oracle-free:23-full (the full image: it has orapki for the TCPS
+# wallet) containers through docker (features/sql-browser.md, Testing Plan).
+# Without docker the tests skip; BV_TEST_REQUIRE_CONTAINER=1 makes that a
+# failure.
+test-dbms: require-nextest ## SQL browser plugin against live PostgreSQL, MySQL, MariaDB, SQL Server and Oracle Free containers (docker) + dependency ban
 	cd $(PLUGINS_DIR) && cargo nextest run -p bastion-plugin-dbms-management --lib --run-ignored only
-	@echo "==> no openssl-sys / aws-lc-sys in the dbms-management plugin graph"
-	@cd $(PLUGINS_DIR) && for c in openssl-sys aws-lc-sys; do \
+	@echo "==> no openssl-sys / aws-lc-sys / native-tls in the dbms-management plugin graph"
+	@cd $(PLUGINS_DIR) && for c in openssl-sys aws-lc-sys native-tls; do \
 		if cargo tree -p bastion-plugin-dbms-management --target all -i $$c >/dev/null 2>&1; then echo "$$c is in the plugin graph"; exit 1; fi; \
 	done
 	@echo "==> test-dbms complete."

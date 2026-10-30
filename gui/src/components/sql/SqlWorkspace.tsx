@@ -42,6 +42,8 @@ import {
   statementAtCursor,
   type Danger,
   type EditTarget,
+  beginStatement,
+  manualCommitUnavailable,
 } from "../../lib/sqlWorkspace";
 import type { SessionPaneStatus } from "../session/SessionPaneHeader";
 import { SqlConfirmDialog } from "./SqlDialog";
@@ -534,7 +536,7 @@ export default function SqlWorkspace({
       return;
     }
     setManualTx(manual);
-    if (manual) void execute("BEGIN");
+    if (manual) void execute(beginStatement(status?.engine));
   };
 
   const caps = effective ?? status?.privileges ?? null;
@@ -719,7 +721,8 @@ export default function SqlWorkspace({
           <select
             aria-label="Commit mode"
             value={manualTx ? "manual" : "auto"}
-            disabled={!live || isRunning}
+            disabled={!live || isRunning || manualCommitUnavailable(status?.engine, status?.read_only) !== null}
+            title={manualCommitUnavailable(status?.engine, status?.read_only) ?? undefined}
             onChange={(e) => setTxMode(e.target.value === "manual")}
             className="rounded border border-[var(--color-border)] bg-transparent px-1 text-[var(--color-text)]"
           >
