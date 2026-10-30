@@ -179,7 +179,7 @@ The Phase table maps each phase to its ROADMAP task.
 | Phase 2 — `bv-sql-classify` classifier crate | T125 | In progress (PostgreSQL crate, corpus, property tests and fuzz target in the tree; fuzz campaign not run) |
 | Phase 3 — the `dbms-management` plugin with PostgreSQL | T125 | In progress (plugin in the tree; verified with the testkit and PostgreSQL 16 containers; not run on a real host, cluster or TLS-cancel path) |
 | Phase 4 — GUI SQL workspace | T125 | In progress (in the tree; unit, component and mocked-host browser checks; not run against a registered plugin; editor is a textarea, not CodeMirror) |
-| Phase 5 — export, scripts and per-action step-up | T126 | In progress (in the tree; unit, live PostgreSQL, host and vitest checks; not run on a registered plugin, a real Tauri window, the cucumber scenarios or `make test-release`) |
+| Phase 5 — export, scripts and per-action step-up | T126 | Complete (unit, live PostgreSQL, cucumber, host and vitest checks, `make test-release`; not run on a registered plugin or in a real Tauri window) |
 | Phase 6 — MySQL and MariaDB | T127 | Todo |
 | Phase 7 — Microsoft SQL Server | T128 | Todo |
 | Phase 8 — Oracle Database | T129 | Todo |
@@ -1782,7 +1782,7 @@ Phase 0) → migration (§13) → debuggability (§11) → performance (§6).
   part of `make test`, as the hiqlite suites are. Every refused hazard is
   checked to leave a **canary table unchanged**.
 
-### Cucumber (`tests/features/sql_browser.feature`)
+### Cucumber (`plugins-ext/bastion-plugin-dbms-management/tests/features/sql_browser.feature`, run by `make test-dbms`)
 
 - A select-only share cannot update.
 - Revoking a share takes effect on the next statement.
@@ -1816,7 +1816,7 @@ and seal during a run.
 |---|---|---|
 | T124 Grant SQL privileges in policies and shares, and let plugins ask the host to authorize statements and release database credentials | 0, 1 | `[x]` |
 | T125 Browse, query and edit PostgreSQL databases in the SQL browser through the `dbms-management` plugin | 2, 3, 4 | `[ ]` |
-| T126 Export query results and run SQL scripts only with their own grants | 5 | `[/]` |
+| T126 Export query results and run SQL scripts only with their own grants | 5 | `[x]` |
 | T127 Add MySQL and MariaDB to the SQL browser | 6 | `[ ]` |
 | T128 Add SQL Server to the SQL browser | 7 | `[ ]` |
 | T129 Add Oracle Database to the SQL browser | 8 | `[ ]` |
@@ -3030,8 +3030,9 @@ repository root or `gui/`:
    test-dbms`: all 10 live tests passed and the `openssl-sys` / `aws-lc-sys`
    ban held; plugin doctests 8 passed, `cargo fmt --check` clean.
 
-Not done: the plugin registered on a running vault (embedded or remote), a
-real Tauri window (the save dialog and the export loop are compiled, not
-run), the cucumber scenarios (`tests/features/sql_browser.feature`), and
-`make test-release` (L4: authn and plugin host-call semantics changed).
+6. The five cucumber scenarios pass against PostgreSQL 16 (`make test-dbms`, 11
+   live tests), and `make test-release` passed all 9 suites.
+
+Not done: the plugin registered on a running vault (embedded or remote) and a
+real Tauri window (the save dialog and the export loop are compiled, not run).
 
