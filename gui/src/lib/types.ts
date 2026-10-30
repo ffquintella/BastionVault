@@ -493,6 +493,10 @@ export interface ResourceTypeDef {
      *  this to `true`, and by an explicit `false` at either tier (spec §6).
      *  Unset at both tiers means no heuristics. */
     allow_heuristic_fill?: boolean;
+    /** MCP brokered sessions (features/mcp-brokered-sessions.md §11): a
+     *  resource's profile can be used by an assistant only when its saved
+     *  type sets `"allow"`. Absent means deny; the server enforces it. */
+    agent_sessions_max?: "allow" | "deny";
   };
 }
 
@@ -823,6 +827,10 @@ export interface ConnectionProfile {
   host_key_pin?: string;
   /** Opt-in for legacy auth modes; logged at WARN every connect. */
   allow_legacy_auth?: boolean;
+  /** Lets an MCP assistant run commands through this profile (second of
+   *  two opt-ins; the type's `connect.agent_sessions_max` is the first).
+   *  Absent means deny. */
+  agent_access?: "allow" | "deny";
   /**
    * RDP only — opt-in to aggressive performance flags (disable
    * wallpaper / theming / cursor shadow / cursor settings on top of

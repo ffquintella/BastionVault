@@ -2942,6 +2942,29 @@ function ConnectionProfileEditor({
 
         <hr className="border-[var(--color-border)]" />
 
+        {(isSshTransport(profile.protocol) || profile.protocol === "web") && (
+          <label className="flex items-start gap-2 text-sm" data-testid="agent-access">
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              checked={profile.agent_access === "allow"}
+              onChange={(e) =>
+                update("agent_access", e.target.checked ? "allow" : undefined)
+              }
+            />
+            <span>
+              <span className="font-medium">Allow MCP agent sessions</span>
+              <span className="block text-xs text-[var(--color-text-muted)]">
+                Lets a paired AI assistant run commands through this profile.
+                Also needs the resource type&rsquo;s <em>MCP agent sessions</em>{" "}
+                set to Allow and the assistant paired with brokered sessions.
+                {isSshTransport(profile.protocol) &&
+                  " An SSH profile also needs a host-key pin above and a stored-secret or SSH-CA credential; the server refuses the save otherwise."}
+              </span>
+            </span>
+          </label>
+        )}
+
         <label className="flex items-start gap-2 text-sm">
           <input
             type="checkbox"

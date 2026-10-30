@@ -3,10 +3,13 @@ import { Button, Input, Select, Modal, ResourceTypeIcon, RESOURCE_TYPE_ICON_CATA
 import type { ConnectProtocol, ResourceTypeDef, ResourceFieldDef } from "../lib/types";
 import {
   WEB_EXPOSURE_CAPS,
+  agentSessionsChoice,
   connectProtocols,
   heuristicChoice,
   webExposureChoice,
+  withAgentSessions,
   withWebPolicy,
+  type AgentSessionsChoice,
   type HeuristicChoice,
   type WebExposureChoice,
 } from "../lib/resourceTypes";
@@ -99,6 +102,11 @@ export function TypeEditorModal({ typeDef, onSave, onClose }: {
     heuristicChoice(typeDef?.connect),
   );
 
+  // MCP brokered sessions (T136): the type-level opt-in; unset keeps deny.
+  const [agentSessions, setAgentSessions] = useState<AgentSessionsChoice>(() =>
+    agentSessionsChoice(typeDef?.connect),
+  );
+
   function toggleProtocol(p: ConnectProtocol, on: boolean) {
     setProtocols((cur) =>
       (["ssh", "sftp", "rdp", "web"] as const).filter((x) => (x === p ? on : cur.includes(x))),
@@ -132,14 +140,17 @@ export function TypeEditorModal({ typeDef, onSave, onClose }: {
     // No saved list offers `sql` on `database` and on nothing else.
     const sqlIsDefault = sqlOn === isDatabaseType;
     const written: Array<ConnectProtocol | "sql"> = [...protocols, ...(sqlOn ? (["sql"] as const) : [])];
-    const connect: NonNullable<ResourceTypeDef["connect"]> = withWebPolicy(
-      {
-        ...rest,
-        ...(connectEnabled ? {} : { enabled: false }),
-        ...(savedProtocols !== undefined || !sameAsLegacy || !sqlIsDefault ? { protocols: written } : {}),
-      },
-      webExposure,
-      webHeuristic,
+    const connect: NonNullable<ResourceTypeDef["connect"]> = withAgentSessions(
+      withWebPolicy(
+        {
+          ...rest,
+          ...(connectEnabled ? {} : { enabled: false }),
+          ...(savedProtocols !== undefined || !sameAsLegacy || !sqlIsDefault ? { protocols: written } : {}),
+        },
+        webExposure,
+        webHeuristic,
+      ),
+      agentSessions,
     );
     onSave({
       id: resolvedId,
@@ -242,6 +253,29 @@ export function TypeEditorModal({ typeDef, onSave, onClose }: {
             field, which only the Server type carries by default. Web opens
             the application in an isolated in-app window.
           </p>
+          {(protocols.includes("ssh") || protocols.includes("web")) && (
+            <div className="mt-3 pl-6" data-testid="agent-policy">
+              <Select
+                label="MCP agent sessions"
+                disabled={!connectEnabled}
+                value={agentSessions}
+                onChange={(e) => setAgentSessions(e.target.value as AgentSessionsChoice)}
+                options={[
+                  { value: "", label: "(not set \u2014 assistants denied)" },
+                  ...(agentSessions === "keep"
+                    ? [{ value: "keep", label: "(saved value not recognised \u2014 kept; the server refuses it)" }]
+                    : []),
+                  { value: "allow", label: "Allow \u2014 profiles may opt in" },
+                  { value: "deny", label: "Deny" },
+                ]}
+              />
+              <p className="text-xs text-[var(--color-text-muted)] mt-1">
+                Lets an MCP assistant run commands or fetch pages on resources of this type, but only through
+                a profile that also turns on <em>Allow MCP agent sessions</em>. Off by default. The server
+                enforces it.
+              </p>
+            </div>
+          )}
           {protocols.includes("web") && (
             <div className="mt-3 pl-6 grid grid-cols-2 gap-3" data-testid="web-policy">
               <div className="min-w-0">

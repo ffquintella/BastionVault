@@ -58,6 +58,11 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### MCP brokered sessions: opt-in controls in the GUI
+
+- **Turn on assistant sessions for a resource type and a connection profile from the GUI** (T136, S111)
+  -- Settings → Resource Types gains an *MCP agent sessions* choice (`connect.agent_sessions_max`) for types that offer SSH or web, and the profile editor gains *Allow MCP agent sessions* (`agent_access`) for SSH and web profiles. Both stay off until set; the server still enforces them and refuses an SSH profile without a host-key pin.
+
 #### SQL browser: exports, scripts and per-action step-up
 
 - **Export query results and run SQL scripts only with their own grants, and step up with MFA per action** (T126, S109) -- `dbms/v2/sessions/<id>/export` streams one SELECT-only statement as CSV (RFC 4180, formula guard on by default), JSON Lines or SQL `INSERT`s in 1 MiB chunks pulled from `exports/<job>/<offset>`, straight from the database cursor and never staged on the vault host. It needs `sql_export` on every object read (on the server when none), refuses DML with `RETURNING`, data-modifying CTEs and `FOR UPDATE`, stops at 1,000,000 rows / 512 MiB by default, drops a job nobody pulls for 5 minutes, and audits `dbms.export` with the row and byte counts and the SHA-256 of the stream. `dbms/v2/sessions/<id>/script` needs `sql_script` on `sql/server` and authorizes every statement before the first runs (one refusal runs nothing and names the statement), with `on_error: stop | continue`, `transaction: none | single`, per-statement progress through the run, a 1,000-statement / 4 MiB default limit and a `dbms.script` audit event. A profile's `step_up` list now asks for a fresh MFA ticket bound to the exact action before a request uses one of those capabilities.

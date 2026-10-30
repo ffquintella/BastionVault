@@ -451,6 +451,29 @@ export function withWebPolicy(
   return out;
 }
 
+/** The Settings control's value for `connect.agent_sessions_max`: `""` is
+ *  unset (the server denies), `"keep"` leaves an unrecognised saved value. */
+export type AgentSessionsChoice = "allow" | "deny" | "" | "keep";
+
+/** Read the saved `connect.agent_sessions_max` as a Settings choice. */
+export function agentSessionsChoice(connect: ResourceTypeDef["connect"]): AgentSessionsChoice {
+  const v: unknown = connect?.agent_sessions_max;
+  if (v === undefined || v === null) return "";
+  return v === "allow" || v === "deny" ? v : "keep";
+}
+
+/** Write the choice onto a type's `connect` block; unset removes the key. */
+export function withAgentSessions(
+  connect: NonNullable<ResourceTypeDef["connect"]>,
+  choice: AgentSessionsChoice,
+): NonNullable<ResourceTypeDef["connect"]> {
+  if (choice === "keep") return connect;
+  const out = { ...connect };
+  if (choice === "") delete out.agent_sessions_max;
+  else out.agent_sessions_max = choice;
+  return out;
+}
+
 /** True when the type offers `protocol`. */
 export function typeSupportsProtocol(
   typeDef: ResourceTypeDef | undefined | null,

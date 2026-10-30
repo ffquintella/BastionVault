@@ -20,7 +20,14 @@ vi.mock("@tauri-apps/api/event", () => ({
 
 import { WebProfileFields } from "../components/WebProfileFields";
 import { TypeEditorModal } from "../routes/SettingsPage";
-import { DEFAULT_RESOURCE_TYPES, heuristicChoice, webExposureChoice, withWebPolicy } from "../lib/resourceTypes";
+import {
+  DEFAULT_RESOURCE_TYPES,
+  agentSessionsChoice,
+  heuristicChoice,
+  webExposureChoice,
+  withAgentSessions,
+  withWebPolicy,
+} from "../lib/resourceTypes";
 import { WEB_RECIPE_PRESETS } from "../lib/webRecipePresets";
 import { validateWebRecipe } from "../lib/webRecipe";
 import type { ResourceTypeDef, WebProfileSettings } from "../lib/types";
@@ -669,5 +676,54 @@ describe("Settings → Resource Types: web exposure policy controls", () => {
       web_exposure_max: "dom",
       allow_heuristic_fill: true,
     });
+  });
+});
+
+describe("Settings → Resource Types: MCP agent sessions", () => {
+  const sshType: ResourceTypeDef = {
+    id: "server",
+    label: "Server",
+    color: "info",
+    fields: [],
+    connect: { protocols: ["ssh"] },
+  };
+
+  function renderEditor(typeDef: ResourceTypeDef) {
+    const onSave = vi.fn();
+    render(<TypeEditorModal typeDef={typeDef} onSave={onSave} onClose={() => {}} />);
+    return onSave;
+  }
+
+  it("is hidden on a type with neither ssh nor web, and starts unset on one with ssh", () => {
+    renderEditor({ ...DEFAULT_RESOURCE_TYPES.database, connect: { protocols: ["sql"] } });
+    expect(screen.queryByTestId("agent-policy")).toBeNull();
+    document.body.innerHTML = "";
+    renderEditor(sshType);
+    expect(screen.getByLabelText("MCP agent sessions")).toHaveValue("");
+  });
+
+  it("saves allow onto connect, round-trips, and removes the key when unset again", async () => {
+    const user = userEvent.setup();
+    const onSave = renderEditor(sshType);
+    await user.selectOptions(screen.getByLabelText("MCP agent sessions"), "allow");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    const saved = onSave.mock.calls[0][0] as ResourceTypeDef;
+    expect(saved.connect).toMatchObject({ agent_sessions_max: "allow" });
+
+    document.body.innerHTML = "";
+    const again = renderEditor(saved);
+    expect(screen.getByLabelText("MCP agent sessions")).toHaveValue("allow");
+    await userEvent.setup().selectOptions(screen.getByLabelText("MCP agent sessions"), "");
+    await userEvent.setup().click(screen.getByRole("button", { name: "Save" }));
+    expect((again.mock.calls[0][0] as ResourceTypeDef).connect).not.toHaveProperty("agent_sessions_max");
+  });
+
+  it("keeps a saved value it does not recognise, and touches only its own key", () => {
+    const odd = { protocols: ["ssh"], agent_sessions_max: "yes" } as unknown as NonNullable<ResourceTypeDef["connect"]>;
+    expect(agentSessionsChoice(odd)).toBe("keep");
+    expect(withAgentSessions(odd, "keep")).toBe(odd);
+    const base = { enabled: false, protocols: ["ssh" as const], web_exposure_max: "dom" as const };
+    expect(withAgentSessions(base, "allow")).toEqual({ ...base, agent_sessions_max: "allow" });
+    expect(withAgentSessions({ ...base, agent_sessions_max: "deny" }, "")).toEqual(base);
   });
 });
