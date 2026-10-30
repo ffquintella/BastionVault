@@ -804,8 +804,9 @@ stored key does not:**
 
 - **Library.** russh `=0.62.7`, the version the files engine pins
   (`crates/bv-engine-files/Cargo.toml:48`), behind a new feature
-  `mcp_sessions_ssh` (off by default) on `bastion_vault`, `bvault-cli` and the
-  GUI crate.
+  `mcp_sessions_ssh` on `bastion_vault`, `bvault-cli` and the GUI crate (on in
+  the default features of `bastion_vault` and `bvault-cli` since 0.45; off in
+  the GUI crate).
 - **Channel.** The single-channel `exec` sequence of §5.2, with `want_reply`.
   `EOF` is sent immediately, since there is no stdin.
 - **Output capture.**
@@ -1689,9 +1690,10 @@ Still missing:
   reduction is not CSS-aware.
 - **Embedded vault:** no brokered-sessions switch, so sessions work only
   against a remote vault.
-- **Builds:** `mcp_sessions_ssh` and `mcp_sessions_web` are off by default in
-  every build, the desktop app's included; a deployment must be built with
-  them.
+- **Builds:** `mcp_sessions_ssh` is on in the default features of `bvault-cli`
+  and `bastion_vault`, so the server image carries it; the desktop app's
+  embedded vault leaves it off. `mcp_sessions_web` is still off by default in
+  every build; a deployment must be built with it.
 - **Operator MFA:** userpass operators only, in the namespace the agent's
   token is bound to (T457); the CLI offers TOTP only, and its confirmation
   prompt has no timeout on Windows.

@@ -443,7 +443,7 @@ bastion-plugin-testkit = { path = "crates/bastion-plugin-testkit" }
 # ML-DSA-65 from the dropdown pays no runtime cost. Operators who
 # want to ship a smaller binary can override with `--no-default-features
 # --features storage_hiqlite` at their own workspace level.
-default = ["storage_hiqlite", "ssh_pqc"]
+default = ["storage_hiqlite", "ssh_pqc", "mcp_sessions_ssh"]
 # Forwards to `bv-errors/storage_mysql` so the two MySQL-only `RvError`
 # variants (`ErrConnectionPoolCreate`, `ErrDatabaseExecuteEntry`) are
 # compiled in exactly when the backend is.
@@ -531,9 +531,9 @@ files_smb = ["bv-engine-files/files_smb"]
 # See `features/file-resources.md` § "Phase 6 — SFTP / SCP sync".
 files_ssh_sync = ["bv-engine-files/files_ssh_sync"]
 # MCP brokered sessions — the vault-side SSH executor behind the MCP tool
-# `bv_resource_ssh_exec` (features/mcp-brokered-sessions.md §5.3). Off by
-# default: without it the tool is listed and every call is refused with
-# `mcp_session_protocol_disabled`. With it, sessions still need the server
+# `bv_resource_ssh_exec` (features/mcp-brokered-sessions.md §5.3). On by
+# default; a build with `--no-default-features` that omits it lists the tool
+# and refuses every call with `mcp_session_protocol_disabled`. With it, sessions still need the server
 # config's `mcp.brokered_sessions`, the runtime switch, a pairing's
 # `connect_allowed`, and the type and profile opt-ins. Same russh as
 # `files_ssh_sync`, so it adds no crate to the graph.

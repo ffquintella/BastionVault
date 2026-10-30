@@ -128,7 +128,7 @@ bv-server = { path = "../bv-server", features = ["test-support"] }
 serial_test = "3.4"
 
 [features]
-default = ["storage_hiqlite", "ssh_pqc"]
+default = ["storage_hiqlite", "ssh_pqc", "mcp_sessions_ssh"]
 # The storage backends. Every one of these has to reach `bv-server` as well
 # as the library: `bv-server`'s `sys/health`, `sys/info` and
 # `sys/cluster-status` handlers name the backend type behind a
@@ -147,7 +147,8 @@ transit_pqc_hybrid = ["bastion_vault/transit_pqc_hybrid"]
 files_smb = ["bastion_vault/files_smb"]
 files_ssh_sync = ["bastion_vault/files_ssh_sync"]
 # The vault-side SSH executor for the MCP tool `bv_resource_ssh_exec`
-# (features/mcp-brokered-sessions.md §5.3). Off by default.
+# (features/mcp-brokered-sessions.md §5.3). On by default, so the server
+# image and every `bvault` build carry it.
 mcp_sessions_ssh = ["bastion_vault/mcp_sessions_ssh"]
 # The vault-side HTTPS executor for `bv_resource_web_fetch`
 # (features/mcp-brokered-sessions.md §6). Off by default.

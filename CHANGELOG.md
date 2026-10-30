@@ -212,6 +212,10 @@ EXAMPLE ENTRY:
 
 ### Changed
 
+#### MCP brokered sessions: SSH executor on by default
+
+- Compile the vault-side SSH executor behind `bv_resource_ssh_exec` into every default build: `mcp_sessions_ssh` joins the default features of `bvault-cli` and the root crate, so the server image and every `bvault` binary carry it instead of refusing each call with `mcp_session_protocol_disabled`. Sessions stay off until the server config, the runtime switch, a pairing's `connect_allowed` and the type and profile opt-ins are all set; `--no-default-features` still builds without it, and the desktop app's embedded vault is unchanged. (T136, S111)
+
 #### SQL browser: step-up tickets
 
 - Bind connect-MFA tickets to an optional SQL step-up `action`: `resources/v2/connect/mfa/begin` and `/verify` accept `action` (`sql_*` names, refused unless the `sql` profile's `step_up` lists every one), and the plugin host call `connect_ticket_redeem` now redeems an action ticket instead of refusing every `action`. A ticket without an action, including every ticket minted before this release, is never accepted for one, and an action ticket never opens a session or unlocks a `require_mfa` credential release; existing ticket records keep their meaning. (T126, S109)

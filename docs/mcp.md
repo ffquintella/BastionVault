@@ -105,7 +105,8 @@ or "allow for a while" that skips this. See
 [Approving session calls](#approving-session-calls).
 
 **What turns it on.** All of these, and a binary built with the
-`mcp_sessions_ssh` cargo feature:
+`mcp_sessions_ssh` cargo feature (on in the default build; a
+`--no-default-features` build must add it back):
 
 1. The server config:
 

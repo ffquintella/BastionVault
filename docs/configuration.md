@@ -414,7 +414,7 @@ mcp {
 
 The server switch and limits for agent sessions to resources
 ([spec](../features/mcp-brokered-sessions.md)). `ssh` opens sessions in a
-build with the `mcp_sessions_ssh` feature (`bv_resource_ssh_exec`), `web` in
+build with the `mcp_sessions_ssh` feature, on by default (`bv_resource_ssh_exec`), `web` in
 one with `mcp_sessions_web` (`bv_resource_web_fetch`); `rdp` is accepted and
 has no tool yet. Off when absent; an old config parses unchanged. `GET v2/sys/mcp/config` reports
 the block's `enabled` and `protocols`, and the destination list in force with
