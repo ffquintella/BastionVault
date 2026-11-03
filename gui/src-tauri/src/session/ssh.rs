@@ -675,6 +675,42 @@ impl Handler for HostKeyHandler {
     }
 }
 
+/// Handler for [`probe_host_key`]: records the offered key's fingerprint
+/// and then refuses it, so the handshake ends before any authentication
+/// is attempted and no credential is ever presented to an unpinned host.
+struct ProbeHandler {
+    observed: Arc<std::sync::Mutex<String>>,
+}
+
+impl Handler for ProbeHandler {
+    type Error = russh::Error;
+    async fn check_server_key(&mut self, server_public_key: &PublicKey) -> Result<bool, Self::Error> {
+        if let Ok(mut g) = self.observed.lock() {
+            *g = openssh_sha256_fingerprint(server_public_key);
+        }
+        Ok(false)
+    }
+}
+
+/// Fetch the host-key fingerprint (`SHA256:<base64>`) an SSH server offers,
+/// for the profile editor's trust-on-first-use pin helper. Nothing is
+/// authenticated or sent beyond the key exchange.
+pub async fn probe_host_key(host: &str, port: u16) -> Result<String, String> {
+    let observed = Arc::new(std::sync::Mutex::new(String::new()));
+    let handler = ProbeHandler { observed: observed.clone() };
+    let cfg = Arc::new(Config::default());
+    let attempt = tokio::time::timeout(CONNECT_TIMEOUT, client::connect(cfg, (host, port), handler)).await;
+    let fp = observed.lock().map(|g| g.clone()).unwrap_or_default();
+    if !fp.is_empty() {
+        return Ok(fp);
+    }
+    match attempt {
+        Err(_) => Err(format!("{host}:{port} did not complete the SSH key exchange in time")),
+        Ok(Err(e)) => Err(format!("connect {host}:{port}: {e}")),
+        Ok(Ok(_)) => Err(format!("{host}:{port} completed the handshake without offering a host key")),
+    }
+}
+
 fn openssh_sha256_fingerprint(key: &PublicKey) -> String {
     use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
     use russh::keys::PublicKeyBase64;

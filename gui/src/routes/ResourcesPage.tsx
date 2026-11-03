@@ -2677,6 +2677,32 @@ function ConnectionProfileEditor({
   // keeps the last valid recipe meanwhile, which would silently save the
   // wrong thing.
   const [recipeTextError, setRecipeTextError] = useState<string | null>(null);
+
+  // Trust-on-first-use host-key fetch: probes the target from this machine
+  // and fills the pin field; the operator reviews it before saving.
+  const [pinProbe, setPinProbe] = useState<
+    | { kind: "idle" }
+    | { kind: "loading" }
+    | { kind: "error"; message: string }
+    | { kind: "done"; target: string }
+  >({ kind: "idle" });
+  const probeHost = (
+    profile.target_host?.trim() ||
+    (resource["hostname"] as string) ||
+    (resource["ip_address"] as string) ||
+    ""
+  ).trim();
+  const probePort = profile.target_port ?? defaultPort(profile.protocol);
+  async function fetchHostKeyPin() {
+    setPinProbe({ kind: "loading" });
+    try {
+      const fp = await api.sshProbeHostKey(probeHost, probePort);
+      setProfile((p) => ({ ...p, host_key_pin: fp }));
+      setPinProbe({ kind: "done", target: `${probeHost}:${probePort}` });
+    } catch (e: unknown) {
+      setPinProbe({ kind: "error", message: extractError(e) });
+    }
+  }
   const validationError =
     (profile.protocol === "web" ? recipeTextError : null) ??
     validateProfile(profile) ??
@@ -2937,6 +2963,35 @@ function ConnectionProfileEditor({
           }
           hint="Leave empty for TOFU on first connect. The session window will surface the observed fingerprint so you can pin it on the next save."
         />
+        {isSshTransport(profile.protocol) && (
+          <div className="flex flex-wrap items-center gap-2 min-w-0">
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              onClick={() => void fetchHostKeyPin()}
+              disabled={!probeHost || pinProbe.kind === "loading"}
+              loading={pinProbe.kind === "loading"}
+            >
+              Fetch host key from target
+            </Button>
+            {!probeHost && (
+              <span className="text-xs text-[var(--color-text-muted)]">Needs a target host.</span>
+            )}
+            {pinProbe.kind === "error" && (
+              <span role="alert" className="text-xs text-[var(--color-danger)] min-w-0 break-words">
+                {pinProbe.message}
+              </span>
+            )}
+            {pinProbe.kind === "done" && (
+              <span className="text-xs text-[var(--color-text-muted)] min-w-0 break-words">
+                Trust on first use: this is the key that answered at{" "}
+                <span className="font-mono">{pinProbe.target}</span> from this computer just now. Compare it with
+                the server&rsquo;s own fingerprint before saving.
+              </span>
+            )}
+          </div>
+        )}
         </>
         )}
 

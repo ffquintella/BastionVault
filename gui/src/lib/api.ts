@@ -3959,6 +3959,12 @@ export type WebProxyModeSupport = { available: boolean; reason: string | null };
 
 export const webProxyModeSupport = () => invoke<WebProxyModeSupport>("web_proxy_mode_support");
 
+/** The SSH host-key fingerprint (`SHA256:…`) a target offers from this
+ *  machine. **Trust on first use**: nothing is authenticated, and the
+ *  operator confirms it before pinning. */
+export const sshProbeHostKey = (host: string, port: number) =>
+  invoke<string>("ssh_probe_host_key", { request: { host, port } });
+
 /** One certificate an https origin presented to `web_tls_fingerprint`. */
 export type WebPresentedCertificate = {
   /** 0 = the server's own (leaf) certificate. */

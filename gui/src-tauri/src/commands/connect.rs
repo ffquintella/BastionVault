@@ -539,6 +539,26 @@ pub struct SshInputRequest {
     pub bytes_b64: String,
 }
 
+#[derive(Deserialize)]
+pub struct SshHostKeyProbeRequest {
+    pub host: String,
+    pub port: u16,
+}
+
+/// Trust-on-first-use helper for the profile editor's host-key pin: the
+/// fingerprint the target offers from *this* machine. Nothing is
+/// authenticated, and the operator confirms it before pinning.
+#[tauri::command]
+pub async fn ssh_probe_host_key(request: SshHostKeyProbeRequest) -> CmdResult<String> {
+    let host = request.host.trim().trim_start_matches('[').trim_end_matches(']').to_string();
+    if host.is_empty() {
+        return Err(CommandError::from("host-key probe: no target host".to_string()));
+    }
+    let fp = session::ssh::probe_host_key(&host, request.port).await.map_err(CommandError::from)?;
+    log::info!(target: "audit", "connect.ssh.host_key_probe: host={host} port={} fingerprint={fp}", request.port);
+    Ok(fp)
+}
+
 #[tauri::command]
 pub async fn session_input(state: State<'_, AppState>, webview: Webview, request: SshInputRequest) -> CmdResult<()> {
     require_session_window(&state, &webview, &request.token).await?;

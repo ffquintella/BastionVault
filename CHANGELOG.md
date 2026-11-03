@@ -63,6 +63,9 @@ EXAMPLE ENTRY:
 - **Turn on assistant sessions for a resource type and a connection profile from the GUI** (T136, S111)
   -- Settings → Resource Types gains an *MCP agent sessions* choice (`connect.agent_sessions_max`) for types that offer SSH or web, and the profile editor gains *Allow MCP agent sessions* (`agent_access`) for SSH and web profiles. Both stay off until set; the server still enforces them and refuses an SSH profile without a host-key pin.
 
+- **Fetch an SSH target's host key into the profile editor's pin field** (T136, S111)
+  -- The *Host-key pin* field gains *Fetch host key from target*, which reads the fingerprint the target offers from this computer (key exchange only, no login) and fills the field for review before saving. It is trust on first use, so the editor says so; an SSH profile needs the pin before assistant sessions are allowed.
+
 #### SQL browser: MySQL and MariaDB
 
 - **Browse, query and edit MySQL and MariaDB databases in the SQL browser, with every statement classified and authorized by the vault first** (T127, S109)
