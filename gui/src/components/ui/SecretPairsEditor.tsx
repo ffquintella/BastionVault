@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Button } from "./Button";
 import { Input } from "./Input";
 import { SecretInput } from "./SecretInput";
@@ -14,6 +15,54 @@ interface SecretPairsEditorProps {
   label?: string;
   /** Minimum row count to always display (default 1). */
   minRows?: number;
+}
+
+/** Keys whose values are multi-line PEM/OpenSSH blocks. A single-line
+ *  `<input>` strips the newlines on paste and corrupts them (russh then
+ *  fails with "Could not read key"), so these rows get a textarea. */
+const MULTILINE_KEY = /(private_?key|ssh_?key|pem|cert|ca_?bundle|passphrase_?file)/i;
+
+export function isMultilineSecret(pair: SecretPair): boolean {
+  return pair.value.includes("\n") || MULTILINE_KEY.test(pair.key);
+}
+
+/** Masked-by-default textarea that keeps newlines intact. */
+function SecretTextarea({
+  value,
+  onChange,
+  className = "",
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  className?: string;
+}) {
+  const [visible, setVisible] = useState(false);
+  return (
+    <div className={`relative ${className}`}>
+      <textarea
+        rows={6}
+        value={value}
+        placeholder="value (multi-line, newlines are preserved)"
+        autoComplete="off"
+        spellCheck={false}
+        data-lpignore="true"
+        data-1p-ignore="true"
+        onChange={(e) => onChange(e.target.value)}
+        style={visible ? undefined : ({ WebkitTextSecurity: "disc" } as React.CSSProperties)}
+        className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg pl-3 pr-12 py-2 text-sm font-mono
+          focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/40 focus:border-[var(--color-primary)]"
+      />
+      <button
+        type="button"
+        tabIndex={-1}
+        aria-label={visible ? "Hide secret" : "Show secret"}
+        onClick={() => setVisible((v) => !v)}
+        className="absolute top-2 right-0 px-3 text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text)] focus:outline-none"
+      >
+        {visible ? "hide" : "show"}
+      </button>
+    </div>
+  );
 }
 
 /**
@@ -56,14 +105,22 @@ export function SecretPairsEditor({
             value={pair.key}
             onChange={(e) => updateAt(i, { ...pair, key: e.target.value })}
           />
-          <SecretInput
-            placeholder="value"
-            value={pair.value}
-            onChange={(e) => updateAt(i, { ...pair, value: e.target.value })}
-            showGenerator
-            onGenerate={(v) => updateAt(i, { ...pair, value: v })}
-            className="flex-1"
-          />
+          {isMultilineSecret(pair) ? (
+            <SecretTextarea
+              value={pair.value}
+              onChange={(v) => updateAt(i, { ...pair, value: v })}
+              className="flex-1"
+            />
+          ) : (
+            <SecretInput
+              placeholder="value"
+              value={pair.value}
+              onChange={(e) => updateAt(i, { ...pair, value: e.target.value })}
+              showGenerator
+              onGenerate={(v) => updateAt(i, { ...pair, value: v })}
+              className="flex-1"
+            />
+          )}
           {pairs.length > minRows && (
             <Button
               variant="ghost"

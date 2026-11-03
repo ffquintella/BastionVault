@@ -295,6 +295,7 @@ EXAMPLE ENTRY:
 
 #### Resources
 
+- **Pasting an SSH private key into a resource secret no longer collapses it to one line** -- the secret editor's value field was a single-line password input that stripped the newlines, so Connect failed with `parse private key: Could not read key`. Values under keys like `private_key`, `ssh_key`, `pem` or `cert`, and any value that already has a line break, now use a multi-line field that keeps them. A key saved before this fix stays corrupted and must be pasted again.
 - **Renaming a resource no longer reports "Router mount not found" when no files engine is mounted** -- the rename itself succeeded, but the follow-up step that re-points attached files hit a missing `files/` mount, so the GUI showed "Rename failed" and kept the old name until a manual refresh. A missing files mount now means there are no files to move; any other error from that step still surfaces. (T32, T33)
 
 #### Web connect
