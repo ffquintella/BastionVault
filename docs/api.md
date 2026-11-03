@@ -690,6 +690,25 @@ disagreeing with `allowed` is precisely that narrowing. `missing_policies`
 lists named policies that do not exist in the namespace, so a caller is
 never misled by an ACL narrower than the token it models.
 
+`binding_namespace` (optional) is the namespace the modelled token is bound
+to: the namespace under test (the default, the `X-BastionVault-Namespace`
+header) or an ancestor of it, such as `""` for a root sign-in working in the
+namespace through an assignment. Any other value is rejected with `400`. With
+an ancestor, the case is evaluated the way the request pipeline evaluates such
+a token: attached names resolve in the binding namespace first, names missing
+there resolve in the namespace under test with every rule confined to that
+namespace's paths, and the draft is treated as stored in the namespace under
+test, so it is confined too. A draft whose name exists in the binding
+namespace never reaches such a token, and its rows decline
+(`verdict_available: false`). Each row reports `binding_namespace` and
+`request_namespace_policies`, the attached names taken from the namespace
+under test.
+
+~~~json
+{ "policy": "...", "name": "test-sql", "binding_namespace": "",
+  "cases": [ { "path": "resources/resources/db1/sql/server", "capability": "sql_select" } ] }
+~~~
+
 **Read / write saved test cases**
 
 Effectivity test cases attached to a policy (documentation of intent + a

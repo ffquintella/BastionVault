@@ -302,6 +302,10 @@ EXAMPLE ENTRY:
 
 - **Open a web session on a resource whose stored name differs from the typed name only in case** -- Connect refused with `bundle_mismatch` ("the server's launch does not match this profile") because the host compared the resource name it sent with the stored spelling the server echoes back, byte for byte; the server resolves names case-insensitively, so the host now does too. A name that differs by more than case is still refused.
 
+#### Namespace policies for a root sign-in
+
+- **Apply policies written in a namespace to a root sign-in working there** -- A principal who signs in at root and works in a namespace through an assignment (the namespace picker) carried none of that namespace's policies: a policy name on the token that exists only in `dti/esi`, such as `test-sql`, resolved nowhere, every rule in it was ignored with nothing but a warning, and the SQL browser answered `no_sql_privilege`. A name that does not exist where the token's policies live is now also looked up in the namespace the request is addressed to, when that namespace is inside the token's own and the token may operate there, and every rule taken from it applies only to that namespace's paths. A share made in that namespace (`scopes = ["shared"]`, for example `sql_select` on a database) now works for such a principal as well. Names that exist where the token's policies live still win, so a tenant policy called `default` or `administrator` changes nothing for a root sign-in. The 403 detail now says where each missing name was looked for, a name that resolves nowhere is logged at most once every five minutes, and the policy tester accepts `binding_namespace` to check a policy as a root sign-in sees it. **Behaviour change:** a more specific rule in a namespace policy now decides, inside that namespace, over a broader root rule for the same principal, as it already did for principals signed in to the namespace. Tokens narrowed for an AI assistant keep the T470 behaviour. (T471, S27, S44)
+
 #### MCP namespace narrowing
 
 - **Give an AI assistant narrowed to a namespace your own permissions there, not policies that must exist by name in that namespace** (T470, S115) -- Narrowing a pairing to a namespace beneath your sign-in (`bvault mcp serve --namespace`, or the desktop selector) failed with `400 mcp_policy_not_in_namespace` unless every policy on your sign-in also existed by name in the target, and when it did exist the target's copy decided what the assistant could do, even where that was more than you can do there yourself. The token now looks up its policy names where your sign-in does and checks them against the target's paths, so it can do there at most what your own session can, narrowed further by the pairing's tools and path scope. The refusal is gone and the target needs no policy of its own. **Behaviour change:** same-named policies you created inside a tenant for narrowing no longer apply to narrowed tokens; grant the tenant's paths in your own policies (for a root sign-in, rules on `dti/esi/...` paths). Tokens minted before the upgrade keep the old evaluation until they expire (24 hours at most).
@@ -360,6 +364,10 @@ EXAMPLE ENTRY:
 - Keep the expiration register-and-restore benchmark's leases alive for the whole test: their 400 s TTL was shorter than the 10 000-lease registration loop on Windows (453 s alone, ~960 s in a full run), so leases expired before the count.
 
 ### Security
+
+#### Namespace policies stay inside their namespace (T471)
+
+- Confine every rule a namespace's policy contributes to a principal signed in above that namespace to the namespace's own paths: rules naming root paths, `sys/`, another namespace, a bare `*` or a wildcard that could reach a sibling are ignored for that principal, denies included, and are logged; the namespace is consulted only after the same operability check the request pipeline applies (an assignment or a child-visible sign-in), which is evaluated inside policy resolution itself because the pipeline builds the policy set before its namespace check runs (T471, S27)
 
 #### HSM pool HA: YubiHSM 2 attestation pinned to the Yubico chain (T454 phase 7)
 

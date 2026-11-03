@@ -471,6 +471,10 @@ impl SystemBackend {
                         "cases": {
                             field_type: FieldType::Array,
                             description: r#"Array of { path, capability, env?, policies? } cases to evaluate against the draft. `policies` names the policies a real token carries alongside it: absent means ["default"], an empty array means the draft alone."#
+                        },
+                        "binding_namespace": {
+                            field_type: FieldType::Str,
+                            description: r#"The namespace the modelled token is bound to: the namespace under test (the default) or an ancestor of it, e.g. "" for a root sign-in working in the namespace. Names that do not resolve there are looked up in the namespace under test and confined to it, as the request pipeline does (T471)."#
                         }
                     },
                     operations: [

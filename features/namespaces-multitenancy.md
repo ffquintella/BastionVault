@@ -77,6 +77,16 @@ The HTTP surface follows Vault Enterprise's: every endpoint accepts an `X-Bastio
 > single-entry answer falls back to the sudo-gated namespace tree walk
 > (`widenWithAdminWalk`), which a tenant principal is 403'd on.
 >
+> **Policies authored in a namespace reach a root sign-in working there (T471,
+> Unreleased).** A token's policy names resolve in the namespace it is bound
+> to, so a root-bound principal working in `dti/esi` by assignment carried none
+> of `dti/esi`'s policies: a `test-sql` rule written there never applied, the
+> SQL browser answered `no_sql_privilege`, and the only trace was a warning.
+> Names that do not resolve where the token's policies live are now also looked
+> up in the request namespace when it lies beneath that one, every rule they
+> contribute is confined to `<ns>/`, and a share made in that namespace applies
+> too. See "Cross-namespace policy resolution" under Policy Model.
+>
 > **Namespace self-service.** Every authenticated token bound to a non-root
 > namespace now implicitly carries a `namespace-self` ACL policy so it can reach
 > the caller-introspecting / self endpoints (`sys/capabilities-self`,
@@ -225,6 +235,48 @@ namespace's flag is configurable through the self-config route (`GET`/`POST
 Policies are namespace-scoped. A policy named `admin` in `engineering` and a policy named `admin` in `marketing` are unrelated documents. Within a policy, `path "..."` rules match paths *within the same namespace*; cross-namespace path references are syntactically refused at policy-write time with an error pointing at the namespace-spanning path.
 
 Templated policies (the existing `{{username}}` / `{{entity.id}}` / `{{auth.mount}}` from per-user scoping) gain `{{namespace.path}}` and `{{namespace.id}}` for advanced use cases.
+
+#### Cross-namespace policy resolution (T471)
+
+A token's policy names resolve in the namespace its policies live in, `B`
+(its binding; a narrowed MCP token's session namespace, T470). When a request
+is addressed to a namespace `R` strictly beneath `B` — a root sign-in working
+in `dti/esi` through a namespace assignment, or a child-visible token — names
+that resolve nowhere in `B` are also looked up in `R`. Implemented once, in
+`PolicyStore::build_acl`, which the request pipeline, every in-handler ACL
+(`may_connect_target`, `readable_targets`, `sql_privileges`,
+`sys/capabilities-self`, …) and the dry-run all share.
+
+| Rule | Why it cannot widen access |
+|---|---|
+| **Gate first.** `R` is consulted only if `token_operable_checked(auth, R)` says the token may operate there (assignment or `child_visible`), checked inside `build_acl`. An unreadable assignment store fails closed and is logged. | The request pipeline builds the ACL in the pre-route phase, *before* `enforce_request_token_binding` runs, and header-scoped paths (`sys/`, `rustion/`, …) skip that check entirely. Gating inside `build_acl` makes the new resolution depend on the same verdict whichever caller builds the ACL. |
+| **Never shadow.** A name that resolves in `B` is never looked up again, so a tenant `default` or `administrator` neither replaces nor merges into root's. `root` and the immutable baselines are never taken from `R`. A token carrying `root` is untouched. | The tenant can only supply documents for names the operator put on the token and `B` does not define. |
+| **Confine.** Every rule taken from `R` is kept only if its path, *after* templating, starts with the literal `"<R>/"`; everything else — root paths, `sys/`, siblings (`dti/outro/…`, `dti/esix/…`), bare `*`, `dti/+/…`, a `{{namespace.path}}` rule that substituted to root — is dropped, denies included. `R` must be canonical with no `+` segment, so each of its segments is matched literally by the exact, prefix and segment-wildcard matchers. | A dropped grant grants nothing; a dropped deny guarded only paths the document could not reach. A deny inside `R` still wins. |
+| **Shares.** `namespace-shared`, with every `{{namespace.path}}` read as `{{request.namespace}}`, is injected under the same gate and confined the same way. `namespace-self` is not: its rules are all global, so confinement would drop every one, and the token keeps its own namespace's self-service grants. | Every data rule is `scopes = ["shared"]`, inert without a share a grantor made for this grantee; the ungated ones (`resource-group/groups` list, connect gates, SQL privilege chips) re-authorize per resource in their handlers. |
+
+**Decision recorded against `SHARED_ACCESS_POLICY`.** That policy was made
+opt-in because injecting share access for the request namespace "would
+silently grant it to every principal ever assigned to a namespace, on
+upgrade". T471 accepts that for `R` beneath the token's own namespace only:
+what becomes usable is exactly the shares R-side grantors already made to that
+principal (they listed in "Shared with me" and 403'd), after an operator
+assigned the principal into `R`. `shared-access` remains the route into a
+sibling or unrelated namespace.
+
+Rules from `R` cover `R`'s descendants' paths too (`dti/esi/*` matches
+`dti/esi/child/…`), exactly as they do for a token bound to `R`; entering a
+descendant is still gated by `enforce_request_token_binding` on the resolved
+path. Not carried over from `R`: policy-level metadata such as
+`group_shared_resources` (read from `B` only), and narrowed MCP tokens, which
+keep T470's "the session's policies, never the target's".
+
+Diagnostics: a name that resolves nowhere is logged at most once per five
+minutes per (names, `B`, `R`, reason) with the count suppressed since, the 403
+detail names where each name was looked for and why `R` was not consulted,
+names taken from `R` are logged on the `security` target, and the dry-run
+models a token bound above the namespace under test with `binding_namespace`.
+Tokens bound to `R` itself and requests addressed to their own namespace build
+exactly the ACL they built before.
 
 ### Identity Model
 
@@ -517,6 +569,7 @@ Land the data model and the routing path. No identity/policy/audit scoping yet �
 | Per-namespace policy *storage* (separate policy documents per namespace, `src/modules/policy/policy_store.rs`) | Tenant ACL policies live in their own keyspace (`policy-ns/<b64(path)>/…`); root keeps the legacy keyspace. `get/set/list/delete/history` gain `_ns` variants; the `sys/policy*` handlers scope by the request namespace header. | ✅ Done |
 | `crates/bv-audit/src/broker.rs` — per-namespace *broadcasters* + root mirror | Devices carry a `namespace` + root-only `mirror` flag; `log` partitions fan-out by `entry.namespace` with a per-namespace hash chain and a superuser mirror on the root chain; `sys/audit` enable/disable/list scope by header. | ✅ Done |
 | `src/modules/policy/policy_store.rs` `new_acl_inner` (extension) | Compiles policies against the calling token's bound namespace (loads each named policy from that namespace's store). | ✅ Done |
+| `crates/bv-kernel/src/modules/policy/policy_store.rs` `build_acl` cross-namespace step (T471) | A token working beneath its own namespace also resolves, in the request namespace, the names its own namespace lacks — confined to `<ns>/`, gated on `token_operable_checked`, never shadowing — plus a confined request-namespace `namespace-shared`. Modelled by the dry-run (`binding_namespace`). See "Cross-namespace policy resolution". | ✅ Done |
 
 ### Phase 3 — Per-Namespace Identity + Cross-Tenant Linking
 

@@ -219,3 +219,70 @@ async fn test_sql_privileges_inside_a_namespace() {
     assert_eq!(denials[0].namespace, "tenant");
     assert_eq!(denials[0].capability, "sql_script");
 }
+
+/// T471, in the production shape: a root sign-in working in `dti/esi` by
+/// namespace assignment. The tenant's own `sql_select` policy and a share made
+/// in the tenant both reach the SQL browser's check there; without an
+/// assignment covering the namespace, neither does.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn test_sql_privileges_for_a_root_bound_principal_in_a_namespace() {
+    use std::str::FromStr;
+
+    use crate::modules::{
+        namespace::{
+            ns_assignment::NsAssignmentStore,
+            store::NamespaceQuotas,
+            token_binding::{stamp_binding, MOUNT_PATH_META},
+            NamespaceModule, NAMESPACE_MODULE_NAME,
+        },
+        policy::Policy,
+    };
+
+    const DB: &str = "apldc1vds0044-db";
+    let (_bvault, core, _root) = new_unseal_test_bastion_vault("test_sql_privileges_root_bound_in_ns").await;
+    let ns_store =
+        core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME).and_then(|m| m.store()).unwrap();
+    ns_store.create("dti", NamespaceQuotas::default(), false).await.unwrap();
+    ns_store.create("dti/esi", NamespaceQuotas::default(), false).await.unwrap();
+    let assignments = NsAssignmentStore::new(&core).unwrap();
+    for user in ["felipe", "ana"] {
+        assignments.set(&ns_store, "userpass/", user, vec!["".into(), "dti/esi".into()]).await.unwrap();
+    }
+    let mut test_sql = Policy::from_str(
+        r#"path "dti/esi/resources/resources/apldc1vds0044-db/sql/*" { capabilities = ["sql_select"] }"#,
+    )
+    .unwrap();
+    test_sql.name = "test-sql".into();
+    gate(&core).policy_store.load().set_policy_ns(test_sql, "dti/esi").await.unwrap();
+
+    // Root-bound, not child-visible, identified the way userpass stamps it.
+    let principal = |name: &str, policies: &[&str]| {
+        let mut req = caller(policies, &format!("ent-{name}"));
+        let auth = req.auth.as_mut().unwrap();
+        stamp_binding(&mut auth.metadata, "", "", false);
+        auth.metadata.insert(MOUNT_PATH_META.into(), "userpass/".into());
+        auth.metadata.insert("username".into(), name.into());
+        req.namespace_path = Some("dti/esi".into());
+        req
+    };
+    let batch = checks(&[(SqlCapability::Select, SqlTarget::Server)]);
+    let g = gate(&core);
+
+    // The policy route: the incident (`no_sql_privilege` for felipe).
+    let felipe = principal("felipe", &["default", "test-sql"]);
+    let v = g.sql_privileges(&felipe, SqlPurpose::Display, DB, &batch).await.unwrap();
+    assert_eq!(allowed(&v), [true], "the tenant's policy must reach a root-bound principal working there");
+    assert_eq!(v[0].path, "dti/esi/resources/resources/apldc1vds0044-db/sql/server");
+
+    // The share route: inert until a share names `sql_select`.
+    let ana = principal("ana", &["default"]);
+    assert_eq!(allowed(&g.sql_privileges(&ana, SqlPurpose::Display, DB, &batch).await.unwrap()), [false]);
+    share(&core, "resource", "dti/esi/apldc1vds0044-db", "ent-ana", &["sql_select"]).await.unwrap();
+    let v = g.sql_privileges(&ana, SqlPurpose::Display, DB, &batch).await.unwrap();
+    assert_eq!(allowed(&v), [true], "a share made in the tenant applies");
+
+    // No assignment covering `dti/esi`: neither the policy nor a share applies.
+    share(&core, "resource", "dti/esi/apldc1vds0044-db", "ent-bob", &["sql_select"]).await.unwrap();
+    let bob = principal("bob", &["default", "test-sql"]);
+    assert_eq!(allowed(&g.sql_privileges(&bob, SqlPurpose::Display, DB, &batch).await.unwrap()), [false]);
+}

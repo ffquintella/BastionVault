@@ -69,12 +69,27 @@ request-shape table; `qualify_path_tests` (`namespace/router.rs`) pins the
 canonical path space; `gui/src/lib/policyHcl.lint.test.ts` covers the lint.
 
 **Not changed:** authorization itself. No deny became an allow. One asymmetry
-the divergence had been masking is pinned but deliberately left alone — a
-root-bound principal reaching a namespace by cross-namespace assignment
-resolves its named policies from the *root* keyspace, so a policy authored
-inside the tenant is invisible to it. See
-`named_namespace_policy_reaches_only_namespace_bound_tokens` and the
-`SHARED_ACCESS_POLICY` comment in `policy_store.rs`.
+the divergence had been masking was pinned and left alone here — a root-bound
+principal reaching a namespace by assignment resolved its named policies from
+the *root* keyspace only, so a policy authored inside the tenant was invisible
+to it. T471 changed that deliberately: see "Cross-namespace policy resolution"
+in [namespaces-multitenancy.md](namespaces-multitenancy.md).
+
+### Modelling a token bound above the namespace (T471)
+
+The dry-run models a token bound to the namespace under test unless the
+request carries `binding_namespace` — that namespace or an ancestor of it
+(`""` for a root sign-in); anything else is a `400`, since a token bound there
+could not operate in it at all. With an ancestor, the case is built the way the
+pipeline builds it for such a token: attached names resolve in the binding
+first, the rest in the namespace under test confined to its prefix, and the
+draft — a policy being saved in the namespace under test — takes the same
+confined step. The modelled token is presumed operable there (one that is not
+is refused before any policy verdict matters). A draft whose name already
+exists in the binding namespace is shadowed for that token, so the row
+declines. Each row reports `binding_namespace` and
+`request_namespace_policies` (names taken from the namespace under test).
+Coverage: `the_tester_models_a_root_bound_token_as_the_pipeline_treats_it`.
 
 ### Original draft note
 

@@ -387,6 +387,29 @@ impl PolicyModule {
 
         let ns = crate::modules::namespace::policy_scope::writer_namespace_path(req.headers.as_ref());
 
+        // The namespace the modelled token is bound to (T471): `ns` itself by
+        // default, or an ancestor of it to model a principal working in `ns`
+        // from above (a root sign-in assigned into the tenant). Anything else
+        // could not operate in `ns` at all, so there is no verdict to model.
+        let binding_ns = match req.get_data("binding_namespace").ok().and_then(|v| v.as_str().map(str::to_string)) {
+            None => ns.clone(),
+            Some(raw) => {
+                let b = crate::kernel_api::namespace::normalize_path(&raw)
+                    .map_err(|e| bv_error_response_status!(400, &format!("invalid binding_namespace {raw:?}: {e}")))?;
+                if b != ns && !crate::modules::namespace::token_binding::is_descendant(&ns, &b) {
+                    return Err(bv_error_response_status!(
+                        400,
+                        &format!(
+                            "binding_namespace {b:?} is neither the namespace under test ({ns:?}) nor an \
+                             ancestor of it; a token bound there cannot operate in it"
+                        )
+                    ));
+                }
+                b
+            }
+        };
+        let cross_namespace = binding_ns != ns;
+
         // Cases parse independently of the policy so the GUI can still
         // render rows when the draft fails to parse.
         let cases: Vec<DryRunCase> = match req.get_data("cases") {
@@ -501,10 +524,19 @@ impl PolicyModule {
         let modelled_auth = {
             let mut a = req.auth.clone().unwrap_or_default();
             use crate::modules::namespace::token_binding::NS_PATH_META;
-            a.metadata.insert(NS_PATH_META.to_string(), ns.clone());
+            a.metadata.insert(NS_PATH_META.to_string(), binding_ns.clone());
             a
         };
         let request_ns_opt = Some(ns.as_str());
+
+        // Modelling a token bound above `ns` (T471): the draft is a policy
+        // being saved in `ns`, so it reaches that token only through the
+        // cross-namespace step — confined to `<ns>/`, and only if no policy of
+        // the same name exists where the token's names resolve first, which
+        // would win. A shadowed draft is never evaluated by the pipeline, so
+        // there is no verdict to render for it.
+        let draft_shadowed = cross_namespace
+            && store.get_policy_ns(&draft_name, policy::PolicyType::Token, &binding_ns).await?.is_some();
 
         // Throwaway ACLs, all built from the draft. Never stored.
         //
@@ -512,7 +544,14 @@ impl PolicyModule {
         // the verdict the single-policy dry-run used to give, kept so the
         // GUI can point at the difference instead of just reporting a
         // narrower answer than the operator's draft says.
-        let draft_acl = ACL::new(std::slice::from_ref(&draft))?;
+        // For a token bound above `ns`, the draft alone is the draft as it
+        // would reach that token: confined to `<ns>/`.
+        let draft_acl = if cross_namespace {
+            let (kept, _) = policy_store::confine_policy_to_namespace(&draft, &ns_prefix);
+            ACL::new(&kept.into_iter().collect::<Vec<_>>())?
+        } else {
+            ACL::new(std::slice::from_ref(&draft))?
+        };
         // One ACL per distinct attached-policy set, keyed by that set.
         // Cases usually share one set, so this reads each attached policy
         // from the store once.
@@ -532,15 +571,22 @@ impl PolicyModule {
                     // could ever carry.
                     let attached: Vec<String> =
                         case.attached.iter().filter(|n| **n != draft_name).cloned().collect();
-                    let (acl, unresolved) = store
+                    // Bound in `ns`, the draft rides along as an additional
+                    // policy, as before. Bound above it, it is a policy
+                    // stored in `ns` and must take the cross-namespace step.
+                    let (additional, draft_in_request_ns) =
+                        if cross_namespace { (None, Some(draft.clone())) } else { (Some(vec![draft.clone()]), None) };
+                    let (acl, resolution) = store
                         .new_acl_in_namespace(
                             &attached,
-                            Some(vec![draft.clone()]),
+                            additional,
                             &modelled_auth,
                             request_ns_opt,
-                            &ns,
+                            &binding_ns,
+                            draft_in_request_ns,
                         )
                         .await?;
+                    let unresolved = resolution.unresolved;
                     let mut evaluated: Vec<String> = vec![draft_name.clone()];
                     evaluated.extend(attached.iter().filter(|n| !unresolved.contains(n)).cloned());
                     // A `default` that does not exist in a non-root namespace
@@ -551,16 +597,45 @@ impl PolicyModule {
                     // rendering a verdict anyway) told operators their test
                     // ran against a policy set it had not actually used.
                     let substituted_default =
-                        !ns.is_empty() && unresolved.iter().any(|n| n == policy_store::DEFAULT_POLICY_NAME);
+                        !binding_ns.is_empty() && unresolved.iter().any(|n| n == policy_store::DEFAULT_POLICY_NAME);
                     if substituted_default {
                         evaluated.push("namespace-self".into());
+                        evaluated.push("namespace-shared".into());
+                    }
+                    if resolution.request_ns_shared && !evaluated.iter().any(|n| n == "namespace-shared") {
                         evaluated.push("namespace-shared".into());
                     }
                     let missing: Vec<String> = unresolved
                         .into_iter()
                         .filter(|n| !(substituted_default && n == policy_store::DEFAULT_POLICY_NAME))
                         .collect();
-                    acl_cache.push(AttachedAcl { key, acl, evaluated, missing });
+                    let blocked = if draft_shadowed {
+                        Some(format!(
+                            "cannot evaluate: a policy named {draft_name:?} already exists in the token's \
+                             namespace {}, and a token bound there resolves that one, never this draft",
+                            ns_display(&binding_ns),
+                        ))
+                    } else if cross_namespace && resolution.lookup != policy_store::RequestNamespaceLookup::Consulted {
+                        let why = match resolution.lookup {
+                            policy_store::RequestNamespaceLookup::Skipped(s) => s.reason(),
+                            _ => "it was not consulted",
+                        };
+                        Some(format!(
+                            "cannot evaluate: namespace {} would not be consulted for a token bound to {}: {why}",
+                            ns_display(&ns),
+                            ns_display(&binding_ns),
+                        ))
+                    } else {
+                        None
+                    };
+                    acl_cache.push(AttachedAcl {
+                        key,
+                        acl,
+                        evaluated,
+                        missing,
+                        from_request_ns: resolution.from_request_ns,
+                        blocked,
+                    });
                     acl_cache.len() - 1
                 }
             };
@@ -582,13 +657,29 @@ impl PolicyModule {
             row.insert("capability".into(), Value::String(case.capability.clone()));
             row.insert("evaluated_policies".into(), string_array(&entry.evaluated));
             row.insert("missing_policies".into(), string_array(&entry.missing));
+            row.insert("binding_namespace".into(), Value::String(binding_ns.clone()));
+            row.insert("request_namespace_policies".into(), string_array(&entry.from_request_ns));
 
             // Fail closed and loudly. A named policy that does not resolve in
             // this namespace makes the modelled ACL strictly narrower than the
             // token it claims to represent, so any verdict computed from it is
             // a guess. Render the row without one rather than print an answer
             // the pipeline may contradict.
-            if !entry.missing.is_empty() {
+            let refusal = entry.blocked.clone().or_else(|| {
+                (!entry.missing.is_empty()).then(|| {
+                    let where_ = if cross_namespace {
+                        format!("namespace {} nor in {}", ns_display(&binding_ns), ns_display(&ns))
+                    } else {
+                        format!("namespace {:?}", if ns.is_empty() { "(root)" } else { ns.as_str() })
+                    };
+                    format!(
+                        "cannot evaluate: {} does not exist in {where_}, so the modelled policy set is not \
+                         the one a real token would carry",
+                        entry.missing.iter().map(|n| format!("policy {n:?}")).collect::<Vec<_>>().join(", "),
+                    )
+                })
+            });
+            if let Some(refusal) = refusal {
                 row.insert("verdict_available".into(), Value::Bool(false));
                 row.insert("allowed".into(), Value::Null);
                 row.insert("denied_by_deny".into(), Value::Null);
@@ -596,20 +687,7 @@ impl PolicyModule {
                 row.insert("matched_path".into(), Value::Null);
                 row.insert("granting_policies".into(), Value::Array(vec![]));
                 row.insert("draft_only_allowed".into(), Value::Null);
-                row.insert(
-                    "error".into(),
-                    Value::String(format!(
-                        "cannot evaluate: {} does not exist in namespace {:?}, so the modelled \
-                         policy set is not the one a real token would carry",
-                        entry
-                            .missing
-                            .iter()
-                            .map(|n| format!("policy {n:?}"))
-                            .collect::<Vec<_>>()
-                            .join(", "),
-                        if ns.is_empty() { "(root)" } else { ns.as_str() },
-                    )),
-                );
+                row.insert("error".into(), Value::String(refusal));
                 results.push(Value::Object(row));
                 continue;
             }
@@ -781,6 +859,15 @@ struct DryRunCase {
     attached: Vec<String>,
 }
 
+/// A namespace path as an operator reads it: root is `(root)`.
+fn ns_display(ns: &str) -> String {
+    if ns.is_empty() {
+        "(root)".to_string()
+    } else {
+        format!("{ns:?}")
+    }
+}
+
 /// An ACL built for one distinct attached-policy set, memoized across the
 /// cases that share that set.
 struct AttachedAcl {
@@ -793,6 +880,11 @@ struct AttachedAcl {
     evaluated: Vec<String>,
     /// Attached names that do not exist in this namespace.
     missing: Vec<String>,
+    /// Attached names resolved in the namespace under test for a token bound
+    /// above it, and confined to it (T471).
+    from_request_ns: Vec<String>,
+    /// Why no verdict can be rendered for this set, when one cannot.
+    blocked: Option<String>,
 }
 
 /// Parse one wire case. Rows missing `path` or `capability` are dropped
@@ -1763,36 +1855,112 @@ path "dti/esi/secret/data/docker/hub/*" { capabilities = ["create","read","updat
         }
     }
 
-    /// The authorization gap the divergence was hiding, pinned on its own so
-    /// it is not mistaken for a tester bug and cannot change unnoticed.
-    ///
-    /// Same principal, same policy names, same policy document, same request.
-    /// The only difference is whether the token bound to the namespace at login
-    /// or reaches it through a namespace assignment: `new_acl_inner` resolves a
-    /// token's named policies from its *binding* namespace, so the root-bound
-    /// form silently carries none of `dti/esi`'s policies.
-    ///
-    /// This is current, deliberate behaviour — the supported way to give a
-    /// root-bound principal reach into a namespace is a root-authored
-    /// `{{request.namespace}}`-templated policy (`SHARED_ACCESS_POLICY`), not
-    /// a policy authored inside the tenant. The test exists to make the
-    /// asymmetry explicit rather than to bless it; changing it is a
-    /// privilege expansion and must be a deliberate, separately reviewed call.
+    /// T471, through the real pipeline. A root-bound token working in `NS` by
+    /// assignment resolves `NS`'s policy (it does not exist at root), confined
+    /// to `NS/`: same verdicts as the namespace-bound token inside `NS`, and
+    /// nothing in a sibling namespace or at root. This test used to pin the
+    /// opposite, as a privilege expansion needing a deliberate call; T471 is
+    /// that call (features/namespaces-multitenancy.md).
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
-    async fn named_namespace_policy_reaches_only_namespace_bound_tokens() {
+    async fn a_namespace_policy_reaches_a_root_bound_token_only_inside_that_namespace() {
         let f = setup("tester_pipeline_ns_binding").await;
 
         for leaf in GRANTED {
+            assert!(pipeline_allows(&f, &f.ns_bound, leaf), "namespace-bound token must read secret/data/{leaf}");
+            assert!(pipeline_allows(&f, &f.root_bound, leaf), "root-bound token in {NS} must read secret/data/{leaf}");
+        }
+        for leaf in UNGRANTED {
+            assert!(!pipeline_allows(&f, &f.root_bound, leaf), "secret/data/{leaf} is granted by no rule");
+        }
+
+        // A sibling the assignment also covers (`dti` and its descendants),
+        // holding the same keys: the policy lives in `NS` and must not reach it.
+        let sibling = "dti/outro";
+        let (s, r) = f
+            .server
+            .write(&format!("v1/sys/namespaces/{sibling}"), json!({}).as_object().cloned(), Some(&f.root))
+            .unwrap();
+        assert!((200..300).contains(&s), "ns create {sibling}: {s} {r:?}");
+        let headers = [("X-BastionVault-Namespace", sibling)];
+        for leaf in GRANTED {
+            let path = format!("v1/secret/data/{leaf}");
+            let (s, r) = f
+                .server
+                .request_with_headers(
+                    "POST",
+                    &path,
+                    json!({ "data": { "k": "v" } }).as_object().cloned(),
+                    Some(&f.root),
+                    None,
+                    &headers,
+                )
+                .unwrap();
+            assert!((200..300).contains(&s), "seed {sibling} {leaf}: {s} {r:?}");
+            let (status, body) =
+                f.server.request_with_headers("GET", &path, None, Some(&f.root_bound), None, &headers).unwrap();
+            assert_eq!(status, 403, "{sibling} secret/data/{leaf} must stay out of reach: {body:?}");
+
+            // And at root, where the same relative path names root's mount.
+            let (status, body) =
+                f.server.request_with_headers("GET", &path, None, Some(&f.root_bound), None, &[]).unwrap();
             assert!(
-                pipeline_allows(&f, &f.ns_bound, leaf),
-                "a namespace-bound token carrying {POLICY_NAME} must read secret/data/{leaf}"
-            );
-            assert!(
-                !pipeline_allows(&f, &f.root_bound, leaf),
-                "a root-bound token reaching {NS} by assignment does NOT resolve {POLICY_NAME} \
-                 (it lives in the {NS} keyspace); if this now passes, authorization was widened \
-                 — see the doc comment"
+                status == 403 || status == 404,
+                "root secret/data/{leaf} must stay out of reach: {status} {body:?}"
             );
         }
+    }
+
+    /// One tester row for `path` in `NS`, modelling a token bound to `binding`.
+    fn tester_row_bound(f: &Fixture, path: &str, binding: &str, name: &str) -> (u16, serde_json::Value) {
+        let (status, body) = f
+            .server
+            .request_with_headers(
+                "POST",
+                "v2/sys/policies/acl/test",
+                json!({
+                    "policy": POLICY_HCL,
+                    "name": name,
+                    "binding_namespace": binding,
+                    "cases": [ { "path": path, "capability": "read" } ],
+                })
+                .as_object()
+                .cloned(),
+                Some(&f.root),
+                None,
+                &[("X-BastionVault-Namespace", NS)],
+            )
+            .unwrap();
+        (status, body)
+    }
+
+    /// The tester models the root-bound token too, and agrees with the
+    /// pipeline about it: the draft is confined to `NS/` as the stored
+    /// policy is, a draft shadowed at root is declined, and a binding that
+    /// could not operate in `NS` is refused.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn the_tester_models_a_root_bound_token_as_the_pipeline_treats_it() {
+        let f = setup("tester_pipeline_root_bound").await;
+
+        for leaf in GRANTED.iter().chain(UNGRANTED.iter()) {
+            let pipeline = pipeline_allows(&f, &f.root_bound, leaf);
+            let (status, body) = tester_row_bound(&f, &format!("secret/data/{leaf}"), "", POLICY_NAME);
+            assert_eq!(status, 200, "{body:?}");
+            let row = &body["results"][0];
+            assert_eq!(row["verdict_available"], json!(true), "{row}");
+            assert_eq!(row["binding_namespace"], json!(""), "{row}");
+            assert_eq!(row["allowed"], json!(pipeline), "secret/data/{leaf}: tester and pipeline disagree: {row}");
+        }
+
+        // `default` exists at root, so a draft by that name never reaches a
+        // root-bound token: declined, not answered.
+        let (status, body) = tester_row_bound(&f, "secret/data/docker/hub", "", "default");
+        assert_eq!(status, 200, "{body:?}");
+        let row = &body["results"][0];
+        assert_eq!(row["verdict_available"], json!(false), "{row}");
+        assert!(row["error"].as_str().unwrap_or_default().contains("already exists"), "{row}");
+
+        // A token bound to a sibling could never operate in `NS`.
+        let (status, body) = tester_row_bound(&f, "secret/data/docker/hub", "dti/outro", POLICY_NAME);
+        assert_eq!(status, 400, "{body:?}");
     }
 }

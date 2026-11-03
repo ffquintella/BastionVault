@@ -765,6 +765,11 @@ path "{{namespace.path}}/resources/v2/sql/privileges/+" { capabilities = ["read"
 // covers `secret/*` and `dti/esi/secret/*` alike. The caller still has to be
 // allowed into the namespace at all — `token_operable_resolved` gates that
 // independently, and this policy does not confer it.
+// T471 narrowed the gap above for the request namespace only: beneath the
+// token's own namespace, `build_acl` injects a confined copy of
+// `namespace-shared` once the token may operate there. This policy remains
+// the route into a sibling or unrelated namespace. Rationale:
+// features/namespaces-multitenancy.md, "Cross-namespace policy resolution".
 pub static SHARED_ACCESS_POLICY_NAME: &str = "shared-access";
 pub static SHARED_ACCESS_POLICY: &str = r#"
 # KV secrets shared with the caller, in the namespace being addressed.
@@ -1544,6 +1549,26 @@ lazy_static! {
         p.templated = true;
         Arc::new(p)
     };
+    /// `namespace-shared` for a token working *beneath* the namespace its
+    /// policies resolve in (T471): the same rule text with every
+    /// `{{namespace.path}}` read as `{{request.namespace}}`, so the rules land
+    /// on the request namespace's mounts rather than the binding's. Injected
+    /// only by `build_acl`'s cross-namespace step, and confined to `<ns>/`
+    /// like every other policy that step contributes. Derived, not
+    /// hand-copied, so the two can never disagree about what a share conveys.
+    static ref NAMESPACE_SHARED_FOR_REQUEST_POLICY_PARSED: Arc<Policy> = {
+        let text = NAMESPACE_SHARED_POLICY.replace("{{namespace.path}}", "{{request.namespace}}");
+        let mut p = Policy::from_str(&text)
+            .expect("built-in request-namespace shared-target policy must parse");
+        p.name = NAMESPACE_SHARED_POLICY_NAME.to_string();
+        p.policy_type = PolicyType::Acl;
+        p.templated = true;
+        Arc::new(p)
+    };
+    /// Last emission time and suppressed count per unresolved-policy key, so
+    /// a name that resolves nowhere is logged once per interval rather than
+    /// on every request that carries it. See `log_rate_limited`.
+    static ref POLICY_RESOLUTION_LOG: DashMap<String, (i64, u64)> = DashMap::new();
 }
 
 /// Represents a policy entry in the policy store.
@@ -2458,6 +2483,13 @@ impl PolicyStore {
     /// confirmed by the tester and refused by every real request. Callers must
     /// decide what an unresolved name means for them; this function only
     /// reports it.
+    ///
+    /// `ns_path` is where the modelled token's names resolve; `request_ns`
+    /// is where the request is addressed. When the request namespace lies
+    /// beneath `ns_path`, the modelled token is presumed operable there (a
+    /// token that is not never reaches a policy verdict) and
+    /// `draft_in_request_ns` is treated as stored in that namespace, so it is
+    /// confined exactly as a stored tenant policy would be (T471).
     pub async fn new_acl_in_namespace(
         &self,
         policy_names: &[String],
@@ -2465,12 +2497,17 @@ impl PolicyStore {
         auth: &crate::logical::Auth,
         request_ns: Option<&str>,
         ns_path: &str,
-    ) -> Result<(ACL, Vec<String>), RvError> {
-        let mut unresolved = Vec::new();
-        let acl = self
-            .build_acl(policy_names, additional_policies, Some(auth), request_ns, ns_path, &mut unresolved)
-            .await?;
-        Ok((acl, unresolved))
+        draft_in_request_ns: Option<Arc<Policy>>,
+    ) -> Result<(ACL, AclResolution), RvError> {
+        self.build_acl(
+            policy_names,
+            additional_policies,
+            Some(auth),
+            request_ns,
+            ns_path,
+            CrossNamespaceMode::Model { draft: draft_in_request_ns },
+        )
+        .await
     }
 
     async fn new_acl_inner(
@@ -2486,11 +2523,9 @@ impl PolicyStore {
         // preserves the pre-namespace hot path exactly.
         //
         // Note this is the token's *binding* namespace, not the namespace the
-        // request is addressed to. The two differ for a root-bound principal
-        // operating inside a tenant through a cross-namespace assignment, and
-        // then a policy authored in that tenant does not resolve at all — see
-        // the warning below and `SHARED_ACCESS_POLICY`, which is the supported
-        // way to grant such a principal reach into a namespace.
+        // request is addressed to. Beneath it, names that resolve nowhere here
+        // are also looked up in the request namespace, confined to its paths
+        // (`build_acl`, T471).
         //
         // A narrowed MCP token is the one exception: its names resolve where
         // its issuing session's do (`acl_namespace`, T470).
@@ -2498,12 +2533,18 @@ impl PolicyStore {
             Some(a) => crate::modules::namespace::token_binding::acl_namespace(a)?.0,
             None => String::new(),
         };
-        let mut unresolved = Vec::new();
-        self.build_acl(policy_names, additional_policies, auth, request_ns, &ns_path, &mut unresolved).await
+        let (acl, _) = self
+            .build_acl(policy_names, additional_policies, auth, request_ns, &ns_path, CrossNamespaceMode::Resolve)
+            .await?;
+        Ok(acl)
     }
 
-    /// The one place a policy set becomes an [`ACL`]. Shared by the request
-    /// pipeline and by the dry-run so the two cannot drift.
+    /// The one place a policy set becomes an [`ACL`], shared by the request
+    /// pipeline and the dry-run so the two cannot drift. Names resolve in
+    /// `ns_path`; beneath it, the rest are looked up in the request namespace
+    /// and confined to `<request ns>/` (T471, [`cross_namespace_candidate`],
+    /// [`confine_policy_to_namespace`]). A name found in `ns_path` is never
+    /// looked up again, so a tenant can neither shadow nor extend it.
     async fn build_acl(
         &self,
         policy_names: &[String],
@@ -2511,32 +2552,86 @@ impl PolicyStore {
         auth: Option<&crate::logical::Auth>,
         request_ns: Option<&str>,
         ns_path: &str,
-        unresolved: &mut Vec<String>,
-    ) -> Result<ACL, RvError> {
+        mode: CrossNamespaceMode,
+    ) -> Result<(ACL, AclResolution), RvError> {
         let ns_path = ns_path.to_string();
+        let mut resolution = AclResolution { binding_ns: ns_path.clone(), ..Default::default() };
         let mut all_policies: Vec<Arc<Policy>> = vec![];
+        let mut pending: Vec<&String> = Vec::new();
         for policy_name in policy_names.iter() {
             match self.get_policy_ns(policy_name.as_str(), PolicyType::Token, &ns_path).await? {
                 Some(policy) => all_policies.push(policy),
-                None => {
-                    // Previously silent, and the silence is what made the
-                    // incident undiagnosable: a token can carry a policy name
-                    // that resolves to nothing in its own namespace, and every
-                    // rule the operator wrote is then unreachable with no
-                    // error, no audit line and no lint finding. `default` in a
-                    // non-root namespace is the expected case — the implicit
-                    // `namespace-self` / `namespace-shared` pair injected below
-                    // is that namespace's effective default — so it is not
-                    // worth a warning.
-                    if !(ns_path.is_empty() || policy_name == DEFAULT_POLICY_NAME) {
-                        log::warn!(
-                            "policy {policy_name:?} named by this token does not exist in namespace \
-                             {ns_path:?}; every rule it contains is unreachable for this caller"
-                        );
+                None => pending.push(policy_name),
+            }
+        }
+
+        // Cross-namespace step (T471), decided before anything is read from
+        // the request namespace and fail-closed at every branch: a name that
+        // is not consulted stays unresolved, exactly as before.
+        // `modelled`: the dry-run's hypothetical token, presumed operable and
+        // kept out of the operator log, which is about real callers.
+        let (draft, modelled) = match mode {
+            CrossNamespaceMode::Resolve => (None, false),
+            CrossNamespaceMode::Model { draft } => (draft, true),
+        };
+        let mut from_request_ns: Vec<Arc<Policy>> = Vec::new();
+        let mut confine_prefix: Option<String> = None;
+        match cross_namespace_candidate(&ns_path, request_ns, auth, policy_names) {
+            Ok(None) => resolution.unresolved.extend(pending.into_iter().cloned()),
+            Err(skip) => {
+                resolution.request_ns = request_ns.map(str::to_string);
+                resolution.lookup = RequestNamespaceLookup::Skipped(skip);
+                resolution.unresolved.extend(pending.into_iter().cloned());
+            }
+            Ok(Some(request_ns_path)) => {
+                resolution.request_ns = Some(request_ns_path.clone());
+                let operable = match (modelled, auth) {
+                    (true, _) => Ok(true),
+                    (false, Some(a)) => self.may_operate_in(a, &request_ns_path).await,
+                    (false, None) => Ok(false),
+                };
+                match operable {
+                    Ok(true) => {
+                        resolution.lookup = RequestNamespaceLookup::Consulted;
+                        for name in pending {
+                            // Root's synthetic and immutable baselines: no
+                            // tenant document may stand in for one.
+                            if IMMUTABLE_POLICIES.contains(&self.sanitize_name(name).as_str()) {
+                                resolution.unresolved.push(name.clone());
+                                continue;
+                            }
+                            match self.get_policy_ns(name.as_str(), PolicyType::Token, &request_ns_path).await? {
+                                Some(policy) => {
+                                    from_request_ns.push(policy);
+                                    resolution.from_request_ns.push(name.clone());
+                                }
+                                None => resolution.unresolved.push(name.clone()),
+                            }
+                        }
+                        if let Some(draft) = draft {
+                            from_request_ns.push(draft);
+                        }
+                        // Share access there, confined like the rest. Not
+                        // `namespace-self`: its rules are all global (`sys/`,
+                        // `auth/`, ...), so confinement would drop every one,
+                        // and the token keeps its own namespace's grants.
+                        from_request_ns.push(NAMESPACE_SHARED_FOR_REQUEST_POLICY_PARSED.clone());
+                        resolution.request_ns_shared = true;
+                        confine_prefix = Some(format!("{request_ns_path}/"));
                     }
-                    unresolved.push(policy_name.clone());
+                    Ok(false) => {
+                        resolution.lookup = RequestNamespaceLookup::Skipped(CrossNamespaceSkip::NotOperable);
+                        resolution.unresolved.extend(pending.into_iter().cloned());
+                    }
+                    Err(()) => {
+                        resolution.lookup = RequestNamespaceLookup::Skipped(CrossNamespaceSkip::OperabilityUnknown);
+                        resolution.unresolved.extend(pending.into_iter().cloned());
+                    }
                 }
             }
+        }
+        if !modelled {
+            report_resolution(&resolution);
         }
 
         // Multi-tenancy: a namespace-bound token's named policies resolve from
@@ -2563,32 +2658,79 @@ impl PolicyStore {
         // Apply templating substitution to any policy flagged `templated`
         // when we have a caller context. Produces a parallel Vec of
         // Arc<Policy> that ACL::new consumes.
-        let materialized: Vec<Arc<Policy>> = all_policies
-            .into_iter()
-            .filter_map(|p| {
-                if p.templated {
-                    match auth {
-                        Some(a) => apply_templates(&p, a, request_ns),
-                        // No caller context: drop templated policies
-                        // fail-closed rather than let literal `{{...}}`
-                        // strings reach path matching where they would
-                        // never hit a real request.
-                        None => {
-                            log::warn!(
-                                "dropping templated policy '{}' because no caller \
-                                 context is available for substitution",
-                                p.name,
-                            );
-                            None
-                        }
+        let materialize = |p: Arc<Policy>| -> Option<Arc<Policy>> {
+            if p.templated {
+                match auth {
+                    Some(a) => apply_templates(&p, a, request_ns),
+                    // No caller context: drop templated policies
+                    // fail-closed rather than let literal `{{...}}`
+                    // strings reach path matching where they would
+                    // never hit a real request.
+                    None => {
+                        log::warn!(
+                            "dropping templated policy '{}' because no caller \
+                             context is available for substitution",
+                            p.name,
+                        );
+                        None
                     }
-                } else {
-                    Some(p)
                 }
-            })
-            .collect();
+            } else {
+                Some(p)
+            }
+        };
+        let mut materialized: Vec<Arc<Policy>> = all_policies.into_iter().filter_map(materialize).collect();
 
-        ACL::new(&materialized)
+        // Confinement runs on the *materialized* rule, so no template value
+        // can carry a rule out of the request namespace.
+        if let Some(prefix) = confine_prefix.as_deref() {
+            for policy in from_request_ns.into_iter().filter_map(materialize) {
+                let (kept, dropped) = confine_policy_to_namespace(&policy, prefix);
+                if dropped > 0 && !modelled {
+                    log_rate_limited(
+                        format!("confine\u{1f}{prefix}\u{1f}{}\u{1f}{dropped}", policy.name),
+                        |suppressed| {
+                            log::warn!(
+                                target: "security",
+                                "policy {:?} from namespace {:?}: {dropped} rule(s) outside {prefix:?} \
+                                 ignored for a token working there from {}; a policy resolved from \
+                                 the request namespace applies only to that namespace's paths{suppressed}",
+                                policy.name,
+                                prefix.trim_end_matches('/'),
+                                ns_label(&resolution.binding_ns),
+                            )
+                        },
+                    );
+                }
+                if let Some(kept) = kept {
+                    materialized.push(kept);
+                }
+            }
+        }
+
+        Ok((ACL::new(&materialized)?, resolution))
+    }
+
+    /// May `auth` operate in `ns`? The request pipeline's own verdict
+    /// (`token_operable_checked`), so the cross-namespace step can never
+    /// reach a namespace the binding check would refuse, whichever caller
+    /// builds the ACL. `Err` is "unknown" (the assignment store could not be
+    /// read): logged, and treated as not operable.
+    async fn may_operate_in(&self, auth: &crate::logical::Auth, ns: &str) -> Result<bool, ()> {
+        let Some(core) = self.core.upgrade() else {
+            return Ok(false);
+        };
+        match crate::modules::namespace::token_binding::token_operable_checked(core.as_ref(), auth, ns).await {
+            Ok(operable) => Ok(operable),
+            Err(e) => {
+                log::warn!(
+                    target: "security",
+                    "policies in namespace {ns:?} not consulted: the namespace assignment could not \
+                     be read ({e}); failing closed"
+                );
+                Err(())
+            }
+        }
     }
 
     /// Every write of a policy document goes through here or
@@ -3690,26 +3832,22 @@ impl AuthHandler for PolicyStore {
             // resolution rule is `new_acl_inner`'s: the token's binding, or
             // a narrowed MCP token's recorded policy namespace (T470).
             let binding_ns = crate::modules::namespace::token_binding::acl_namespace(auth)?.0;
-            let mut unresolved: Vec<String> = Vec::new();
-            let acl = self
+            let (acl, resolution) = self
                 .build_acl(
                     &auth.policies,
                     None,
                     Some(auth),
                     req.namespace_path.as_deref(),
                     &binding_ns,
-                    &mut unresolved,
+                    CrossNamespaceMode::Resolve,
                 )
                 .await?;
             acl_result = acl.allow_operation(req, false)?;
             if !acl_result.allowed {
                 // Denial diagnostics. Computed only when the request is being
                 // refused, so the allow path pays nothing.
-                deny_diagnostics = Some(DenyDiagnostics {
-                    binding_ns,
-                    unresolved,
-                    scope_gated: acl.scope_gated_non_contributors(req),
-                });
+                deny_diagnostics =
+                    Some(DenyDiagnostics { resolution, scope_gated: acl.scope_gated_non_contributors(req) });
             }
         }
 
@@ -3740,18 +3878,11 @@ impl AuthHandler for PolicyStore {
                     " (authorized path \"{}\"; token bound to namespace {}; request addressed to {}; \
                      policies carried: [{}]",
                     req.path,
-                    ns_label(&d.binding_ns),
+                    ns_label(&d.resolution.binding_ns),
                     ns_label(req.namespace_path.as_deref().unwrap_or("")),
                     auth.policies.join(", "),
                 ));
-                if !d.unresolved.is_empty() {
-                    detail.push_str(&format!(
-                        "; NOT FOUND in namespace {}: [{}] — every rule in those policies is \
-                         unreachable for this token",
-                        ns_label(&d.binding_ns),
-                        d.unresolved.join(", "),
-                    ));
-                }
+                detail.push_str(&describe_resolution(&d.resolution, &d.resolution.unresolved));
                 if !d.scope_gated.is_empty() {
                     detail.push_str(&format!(
                         "; matched but granted nothing because their scope gate did not pass \
@@ -3783,11 +3914,9 @@ impl AuthHandler for PolicyStore {
 /// five-second diagnosis and a five-reproduction one.
 #[derive(Debug, Default)]
 struct DenyDiagnostics {
-    /// The namespace the token is bound to, which is where its named policies
-    /// are resolved from.
-    binding_ns: String,
-    /// Names the token carries that resolved to no policy document there.
-    unresolved: Vec<String>,
+    /// Where the token's names resolved, and which did not (T471: including
+    /// the request namespace, when it was consulted).
+    resolution: AclResolution,
     /// Scope-gated rules that matched the path but whose gate did not pass.
     scope_gated: Vec<String>,
 }
@@ -3799,6 +3928,251 @@ fn ns_label(ns: &str) -> String {
     } else {
         format!("{ns:?}")
     }
+}
+
+/// Whether the request namespace's policy keyspace was consulted for names
+/// that did not resolve where the token's policies live (T471).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RequestNamespaceLookup {
+    /// Nothing else to consult: the request is addressed to the token's own
+    /// namespace (or none), or the token carries `root`. Every pre-T471 case.
+    #[default]
+    NotApplicable,
+    /// Consulted; what it contributed is confined to `<request ns>/`.
+    Consulted,
+    /// Not consulted, for the stated reason.
+    Skipped(CrossNamespaceSkip),
+}
+
+/// Why the request namespace was not consulted. Operator-facing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CrossNamespaceSkip {
+    /// The request namespace is not strictly beneath the token's.
+    NotDescendant,
+    /// No assignment or `child_visible` binding lets the token work there.
+    NotOperable,
+    /// The assignment store could not be read; failed closed.
+    OperabilityUnknown,
+    /// A narrowed MCP token reads only its session's policies (T470).
+    NarrowedMcpToken,
+    /// The request namespace is not a canonical, wildcard-free path.
+    NonCanonical,
+    /// No caller to resolve operability for.
+    NoCaller,
+}
+
+impl CrossNamespaceSkip {
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::NotDescendant => "it is not inside the namespace the token's policies resolve in",
+            Self::NotOperable => {
+                "the token may not operate there (no namespace assignment or child-visible binding covers it)"
+            }
+            Self::OperabilityUnknown => "the namespace assignment could not be read",
+            Self::NarrowedMcpToken => "a narrowed MCP token uses only its session's policies",
+            Self::NonCanonical => "the request namespace is not a canonical path",
+            Self::NoCaller => "there is no authenticated caller",
+        }
+    }
+}
+
+/// How the policy set behind an [`ACL`] was resolved: what
+/// [`PolicyStore::build_acl`] reports alongside it.
+#[derive(Debug, Clone, Default)]
+pub struct AclResolution {
+    /// Where the token's names resolve first.
+    pub binding_ns: String,
+    /// The request namespace, when the cross-namespace step considered it.
+    pub request_ns: Option<String>,
+    pub lookup: RequestNamespaceLookup,
+    /// Names that resolved nowhere.
+    pub unresolved: Vec<String>,
+    /// Names resolved only in the request namespace, confined to it.
+    pub from_request_ns: Vec<String>,
+    /// `namespace-shared` was injected for the request namespace.
+    pub request_ns_shared: bool,
+}
+
+/// How `build_acl` decides that a token may operate in the request namespace
+/// before reading any policy from it (T471).
+enum CrossNamespaceMode {
+    /// Every real caller: the pipeline's own `token_operable_checked`.
+    Resolve,
+    /// The policy dry-run: the modelled token is presumed operable (one that
+    /// is not is refused before any policy verdict matters), and `draft` is
+    /// treated as stored in the request namespace.
+    Model { draft: Option<Arc<Policy>> },
+}
+
+/// The namespace whose keyspace may supply names that did not resolve in
+/// `binding_ns`: the request namespace, when strictly beneath it. `Ok(None)`
+/// when there is nothing to consult (pre-T471 behaviour); `Err` when the
+/// request namespace is beneath-or-elsewhere but must not be consulted.
+/// Operability is checked by the caller, after this.
+fn cross_namespace_candidate(
+    binding_ns: &str,
+    request_ns: Option<&str>,
+    auth: Option<&crate::logical::Auth>,
+    policy_names: &[String],
+) -> Result<Option<String>, CrossNamespaceSkip> {
+    let Some(request_ns) = request_ns else {
+        return Ok(None);
+    };
+    // `root` already allows everything, and `ACL::new` refuses it beside any
+    // other policy: a root token is left exactly as it was.
+    if request_ns == binding_ns || policy_names.iter().any(|n| n.eq_ignore_ascii_case("root")) {
+        return Ok(None);
+    }
+    let Some(auth) = auth else {
+        return Err(CrossNamespaceSkip::NoCaller);
+    };
+    if !crate::modules::namespace::token_binding::is_descendant(request_ns, binding_ns) {
+        return Err(CrossNamespaceSkip::NotDescendant);
+    }
+    if auth.mcp_binding.as_ref().is_some_and(|b| b.policy_namespace.is_some()) {
+        return Err(CrossNamespaceSkip::NarrowedMcpToken);
+    }
+    // A `+` segment would make the confinement prefix itself a wildcard.
+    let canonical = crate::kernel_api::namespace::normalize_path(request_ns).ok().as_deref() == Some(request_ns);
+    if !canonical || request_ns.split('/').any(|s| s == "+") {
+        return Err(CrossNamespaceSkip::NonCanonical);
+    }
+    Ok(Some(request_ns.to_string()))
+}
+
+/// `policy` with only the rules that cannot match outside `ns_prefix`
+/// (`"<ns>/"`), and how many were dropped. `None` when no rule survives.
+/// Dropping is never widening: a dropped grant grants nothing and a dropped
+/// deny guarded only paths this policy could not reach.
+pub(super) fn confine_policy_to_namespace(policy: &Arc<Policy>, ns_prefix: &str) -> (Option<Arc<Policy>>, usize) {
+    let mut confined = Policy::clone(policy);
+    let before = confined.paths.len();
+    confined.paths.retain(|rule| rule_confined_to(rule, ns_prefix));
+    let dropped = before - confined.paths.len();
+    if confined.paths.is_empty() {
+        return (None, dropped);
+    }
+    (Some(Arc::new(confined)), dropped)
+}
+
+/// Can `rule` match only paths beneath `ns_prefix`? A literal leading
+/// `<ns>/` decides it: the namespace is canonical with no `+` segment, so the
+/// exact, prefix and segment-wildcard matchers all compare those segments
+/// literally, and the trailing `/` excludes a sibling sharing a name prefix.
+fn rule_confined_to(rule: &crate::modules::policy::PolicyPathRules, ns_prefix: &str) -> bool {
+    ns_prefix.ends_with('/') && rule.path.starts_with(ns_prefix)
+}
+
+const POLICY_RESOLUTION_LOG_INTERVAL_SECS: i64 = 300;
+const POLICY_RESOLUTION_LOG_MAX_KEYS: usize = 4096;
+
+/// Call `emit` at most once per interval per `key`, handing it a suffix that
+/// counts what was suppressed since. Bounded: past the key cap, expired keys
+/// are dropped first and everything if that is not enough.
+fn log_rate_limited(key: String, emit: impl FnOnce(&str)) {
+    let now = chrono::Utc::now().timestamp();
+    if POLICY_RESOLUTION_LOG.len() >= POLICY_RESOLUTION_LOG_MAX_KEYS {
+        POLICY_RESOLUTION_LOG.retain(|_, (at, _)| now - *at < POLICY_RESOLUTION_LOG_INTERVAL_SECS);
+        if POLICY_RESOLUTION_LOG.len() >= POLICY_RESOLUTION_LOG_MAX_KEYS {
+            POLICY_RESOLUTION_LOG.clear();
+        }
+    }
+    let suppressed = {
+        let mut entry = POLICY_RESOLUTION_LOG.entry(key).or_insert((0, 0));
+        let (at, count) = entry.value_mut();
+        if *at > 0 && now - *at < POLICY_RESOLUTION_LOG_INTERVAL_SECS {
+            *count += 1;
+            return;
+        }
+        let suppressed = *count;
+        *at = now;
+        *count = 0;
+        suppressed
+    };
+    let suffix = if suppressed > 0 {
+        format!(" ({suppressed} more in the last {POLICY_RESOLUTION_LOG_INTERVAL_SECS}s not logged)")
+    } else {
+        String::new()
+    };
+    emit(&suffix);
+}
+
+/// One line, shared by the log and the 403 detail, on where a token's
+/// policy names did and did not resolve. Empty when there is nothing to say.
+fn describe_resolution(r: &AclResolution, unresolved: &[String]) -> String {
+    let mut out = String::new();
+    let request_ns = r.request_ns.as_deref().unwrap_or("");
+    if !r.from_request_ns.is_empty() {
+        out.push_str(&format!(
+            "; resolved in request namespace {} and confined to \"{request_ns}/\": [{}]",
+            ns_label(request_ns),
+            r.from_request_ns.join(", "),
+        ));
+    }
+    if unresolved.is_empty() {
+        return out;
+    }
+    match r.lookup {
+        RequestNamespaceLookup::Consulted => out.push_str(&format!(
+            "; NOT FOUND in namespace {} nor in request namespace {}: [{}] — every rule in those \
+             policies is unreachable for this token",
+            ns_label(&r.binding_ns),
+            ns_label(request_ns),
+            unresolved.join(", "),
+        )),
+        RequestNamespaceLookup::Skipped(skip) => out.push_str(&format!(
+            "; NOT FOUND in namespace {}: [{}] — every rule in those policies is unreachable for \
+             this token; request namespace {} not consulted: {}",
+            ns_label(&r.binding_ns),
+            unresolved.join(", "),
+            ns_label(request_ns),
+            skip.reason(),
+        )),
+        RequestNamespaceLookup::NotApplicable => out.push_str(&format!(
+            "; NOT FOUND in namespace {}: [{}] — every rule in those policies is unreachable for \
+             this token",
+            ns_label(&r.binding_ns),
+            unresolved.join(", "),
+        )),
+    }
+    out
+}
+
+/// Log, rate-limited, what `build_acl` resolved: names taken from the
+/// request namespace (a cross-tenant effect, so `security`, info), and names
+/// that resolved nowhere (warn). `default` in a non-root namespace is not
+/// reported: the implicit `namespace-self` / `namespace-shared` pair is that
+/// namespace's effective default. A root token's name that is unresolved at
+/// root, with nothing else to consult, stays at debug as before T471.
+fn report_resolution(r: &AclResolution) {
+    let request_ns = r.request_ns.as_deref().unwrap_or("");
+    if !r.from_request_ns.is_empty() {
+        let key = format!("from\u{1f}{}\u{1f}{request_ns}\u{1f}{}", r.binding_ns, r.from_request_ns.join(","));
+        log_rate_limited(key, |suppressed| {
+            log::info!(
+                target: "security",
+                "token policies [{}] resolved in request namespace {} for a token whose policies \
+                 resolve in {}; their rules apply only beneath \"{request_ns}/\"{suppressed}",
+                r.from_request_ns.join(", "),
+                ns_label(request_ns),
+                ns_label(&r.binding_ns),
+            )
+        });
+    }
+    let unresolved: Vec<String> =
+        r.unresolved.iter().filter(|n| r.binding_ns.is_empty() || n.as_str() != DEFAULT_POLICY_NAME).cloned().collect();
+    if unresolved.is_empty() {
+        return;
+    }
+    let detail = describe_resolution(&AclResolution { from_request_ns: Vec::new(), ..r.clone() }, &unresolved);
+    let detail = detail.trim_start_matches("; ").to_string();
+    if r.binding_ns.is_empty() && r.lookup == RequestNamespaceLookup::NotApplicable {
+        log::debug!("{detail}");
+        return;
+    }
+    let key =
+        format!("unresolved\u{1f}{}\u{1f}{request_ns}\u{1f}{:?}\u{1f}{}", r.binding_ns, r.lookup, unresolved.join(","));
+    log_rate_limited(key, |suppressed| log::warn!("{detail}{suppressed}"));
 }
 
 #[maybe_async::maybe_async]
@@ -5859,5 +6233,325 @@ mod mcp_policy_namespace_tests {
             let refused = store.new_acl_for_request(&auth.policies, None, &auth, Some("dti/esi")).await;
             assert!(refused.is_err(), "{bad:?}: no ACL is built");
         }
+    }
+}
+
+/// T471: a token whose policies resolve in an ancestor of the request
+/// namespace (a root sign-in working in `dti/esi`) also resolves, in the
+/// request namespace, the names its own namespace lacks, and nothing those
+/// documents say can reach a path outside `dti/esi/`.
+#[cfg(test)]
+mod cross_namespace_resolution_tests {
+    use std::str::FromStr;
+
+    use super::super::{policy::Capability, sql_privileges::evaluate_sql_checks};
+    use super::*;
+    use crate::kernel_api::policy::{sql_check_path, SqlCapability, SqlCheck, SqlTarget};
+    use crate::logical::Auth;
+    use crate::modules::namespace::token_binding::{acl_namespace, stamp_binding};
+    use crate::test_utils::new_unseal_test_bastion_vault;
+
+    const NS: &str = "dti/esi";
+    const DB: &str = "apldc1vds0044-db";
+
+    /// Every shape a tenant document can hold once stored, including those the
+    /// write-time guard refuses today (legacy or replicated documents): one
+    /// confined grant per kind, a deny inside and outside, and every way out.
+    const TENANT_TEST_SQL: &str = r#"
+path "dti/esi/resources/resources/apldc1vds0044-db/sql/*" { capabilities = ["sql_select"] }
+path "dti/esi/secret/data/app/*"      { capabilities = ["read"] }
+path "dti/esi/secret/data/blocked"    { capabilities = ["deny"] }
+path "secret/data/root-only"          { capabilities = ["deny"] }
+path "transit/*"                      { capabilities = ["read", "update"] }
+path "sys/policies/acl/*"             { capabilities = ["create", "update", "sudo"] }
+path "dti/outro/*"                    { capabilities = ["read"] }
+path "dti/esi*"                       { capabilities = ["read"] }
+path "dti/+/secret/*"                 { capabilities = ["read"] }
+path "+/esi/*"                        { capabilities = ["read"] }
+path "*"                              { capabilities = ["read"] }
+path "{{namespace.path}}/tpl-binding/*"    { capabilities = ["read"] }
+path "{{request.namespace}}/tpl-request/*" { capabilities = ["read"] }
+"#;
+
+    const ROOT_OPS: &str = r#"
+path "secret/data/*"               { capabilities = ["read"] }
+path "dti/esi/secret/data/blocked" { capabilities = ["read"] }
+"#;
+
+    fn named(name: &str, hcl: &str) -> Policy {
+        let mut p = Policy::from_str(hcl).unwrap();
+        p.name = name.to_string();
+        p
+    }
+
+    /// Store a tenant document as-is, bypassing the write-time guards.
+    async fn put_raw(store: &PolicyStore, ns: &str, name: &str, raw: &str) {
+        let templated = Policy::from_str(raw).unwrap().templated;
+        let entry = PolicyEntry {
+            version: 2,
+            raw: raw.to_string(),
+            templated,
+            policy_type: PolicyType::Acl,
+            ..Default::default()
+        };
+        store.acl_view_for(ns).unwrap().put(&StorageEntry::new(name, &entry).unwrap()).await.unwrap();
+    }
+
+    /// A root-bound principal that may operate beneath root. `child_visible`
+    /// stands in for an assignment here; the engine test resolves a real one.
+    fn root_bound(policies: &[&str]) -> Auth {
+        let mut a = Auth { policies: policies.iter().map(|p| p.to_string()).collect(), ..Default::default() };
+        stamp_binding(&mut a.metadata, "", "", true);
+        a.metadata.insert("entity_id".into(), "ent-felipe".into());
+        a
+    }
+
+    fn bound_to(ns: &str, child_visible: bool, policies: &[&str]) -> Auth {
+        let mut a = root_bound(policies);
+        stamp_binding(&mut a.metadata, ns, "uuid", child_visible);
+        a
+    }
+
+    async fn build(store: &PolicyStore, auth: &Auth, request_ns: Option<&str>) -> (ACL, AclResolution) {
+        let binding = acl_namespace(auth).unwrap().0;
+        store
+            .build_acl(&auth.policies, None, Some(auth), request_ns, &binding, CrossNamespaceMode::Resolve)
+            .await
+            .unwrap()
+    }
+
+    fn allows(acl: &ACL, path: &str, cap: Capability) -> bool {
+        acl.explain_capability(path, cap).allowed
+    }
+
+    /// The SQL browser's own check: one `sql_select` probe on the server.
+    fn sql_select(acl: &ACL, auth: &Auth, shared: &[&str]) -> bool {
+        let path = sql_check_path(NS, DB, &SqlTarget::Server).unwrap();
+        let mut probe = Request::new(path.as_str());
+        probe.auth = Some(auth.clone());
+        probe.namespace_path = Some(NS.to_string());
+        probe.target_shared_caps = shared.iter().map(|s| s.to_string()).collect();
+        let checks = [SqlCheck { capability: SqlCapability::Select, target: SqlTarget::Server }];
+        evaluate_sql_checks(acl, &mut probe, &checks, vec![path]).unwrap()[0].allowed
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn a_tenant_only_policy_applies_to_a_root_bound_token_only_inside_the_tenant() {
+        let (_bvault, core, _root) = new_unseal_test_bastion_vault("test_t471_confined").await;
+        let store = PolicyStore::new(&core).await.unwrap();
+        put_raw(&store, NS, "test-sql", TENANT_TEST_SQL).await;
+        store.set_policy(named("ops", ROOT_OPS)).await.unwrap();
+
+        let felipe = root_bound(&["default", "ops", "test-sql"]);
+        let (acl, resolution) = build(&store, &felipe, Some(NS)).await;
+        assert_eq!(resolution.lookup, RequestNamespaceLookup::Consulted);
+        assert_eq!(resolution.from_request_ns, vec!["test-sql".to_string()]);
+        assert!(resolution.unresolved.is_empty(), "{resolution:?}");
+
+        // Inside the tenant: the grants apply, and a deny inside still wins
+        // over the root policy's grant on the same path.
+        assert!(allows(&acl, "dti/esi/resources/resources/apldc1vds0044-db/sql/server", Capability::SqlSelect));
+        assert!(sql_select(&acl, &felipe, &[]), "the policy's sql_select reaches the SQL browser check");
+        assert!(allows(&acl, "dti/esi/secret/data/app/config", Capability::Read));
+        assert!(allows(&acl, "dti/esi/tpl-request/x", Capability::Read), "templated against the request namespace");
+        let blocked = acl.explain_capability("dti/esi/secret/data/blocked", Capability::Read);
+        assert!(!blocked.allowed && blocked.denied_by_deny, "a tenant deny inside the prefix must win: {blocked:?}");
+
+        // Outside it nothing the tenant wrote applies, deny included.
+        let root_only = acl.explain_capability("secret/data/root-only", Capability::Read);
+        assert!(root_only.allowed && !root_only.denied_by_deny, "an out-of-prefix deny is dropped: {root_only:?}");
+        for (path, cap) in [
+            ("transit/keys/k", Capability::Read),
+            ("transit/encrypt/k", Capability::Update),
+            ("sys/policies/acl/administrator", Capability::Update),
+            ("sys/policies/acl/administrator", Capability::Sudo),
+            ("dti/outro/secret/data/x", Capability::Read),
+            ("dti/outro/secret/x", Capability::Read),
+            ("dti/esix/secret/data/x", Capability::Read),
+            ("dti/esi", Capability::Read),
+            ("other/esi/secret/x", Capability::Read),
+            ("kv/data/x", Capability::Read),
+            ("tpl-binding/x", Capability::Read),
+            ("/tpl-binding/x", Capability::Read),
+        ] {
+            assert!(!allows(&acl, path, cap), "{path} ({cap:?}) must not be granted outside {NS}/");
+        }
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn a_tenant_policy_never_shadows_or_extends_a_root_policy_of_the_same_name() {
+        let (_bvault, core, _root) = new_unseal_test_bastion_vault("test_t471_no_shadow").await;
+        let store = PolicyStore::new(&core).await.unwrap();
+        assert!(store.get_policy("default", PolicyType::Acl).await.unwrap().is_some(), "root default must exist");
+        store
+            .set_policy(named("administrator", r#"path "dti/esi/secret/data/admin-only" { capabilities = ["read"] }"#))
+            .await
+            .unwrap();
+        put_raw(
+            &store,
+            NS,
+            "administrator",
+            r#"path "dti/esi/*" { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }"#,
+        )
+        .await;
+        put_raw(&store, NS, "default", r#"path "dti/esi/secret/*" { capabilities = ["read", "list"] }"#).await;
+
+        let felipe = root_bound(&["administrator", "default"]);
+        let (acl, resolution) = build(&store, &felipe, Some(NS)).await;
+        assert!(resolution.from_request_ns.is_empty(), "both names resolve at root: {resolution:?}");
+        assert!(allows(&acl, "dti/esi/secret/data/admin-only", Capability::Read));
+        for (path, cap) in [
+            ("dti/esi/secret/data/admin-only", Capability::Update),
+            ("dti/esi/secret/data/admin-only", Capability::Sudo),
+            ("dti/esi/secret/data/other", Capability::Read),
+            ("dti/esi/transit/keys/k", Capability::Read),
+        ] {
+            assert!(!allows(&acl, path, cap), "{path} ({cap:?}): the tenant's same-named policy must not apply");
+        }
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn names_stay_unresolved_where_the_request_namespace_may_not_be_consulted() {
+        let (_bvault, core, _root) = new_unseal_test_bastion_vault("test_t471_unresolved").await;
+        let store = PolicyStore::new(&core).await.unwrap();
+        put_raw(&store, NS, "test-sql", TENANT_TEST_SQL).await;
+        put_raw(&store, "dti/outro", "outro-only", r#"path "dti/outro/*" { capabilities = ["read"] }"#).await;
+        put_raw(&store, "dti", "dti-only", r#"path "dti/*" { capabilities = ["read"] }"#).await;
+        let skipped = |s| RequestNamespaceLookup::Skipped(s);
+
+        // Resolves nowhere, even with the request namespace consulted.
+        let (_, r) = build(&store, &root_bound(&["nowhere"]), Some(NS)).await;
+        assert_eq!((r.lookup, r.unresolved.clone()), (RequestNamespaceLookup::Consulted, vec!["nowhere".to_string()]));
+
+        // Not beneath the binding: a sibling, the parent, root.
+        let esi = bound_to(NS, true, &["outro-only", "dti-only"]);
+        for request_ns in ["dti/outro", "dti", ""] {
+            let (acl, r) = build(&store, &esi, Some(request_ns)).await;
+            assert_eq!(r.lookup, skipped(CrossNamespaceSkip::NotDescendant), "{request_ns:?}");
+            assert_eq!(r.unresolved.len(), 2, "{request_ns:?}: {r:?}");
+            assert!(!allows(&acl, "dti/outro/secret/x", Capability::Read), "{request_ns:?}");
+            assert!(!allows(&acl, "dti/x", Capability::Read), "{request_ns:?}");
+        }
+
+        // Beneath it but not operable there: no assignment, not child-visible.
+        let stranger = bound_to("", false, &["default", "test-sql"]);
+        let (acl, r) = build(&store, &stranger, Some(NS)).await;
+        assert_eq!(r.lookup, skipped(CrossNamespaceSkip::NotOperable));
+        assert!(!r.request_ns_shared);
+        assert!(!allows(&acl, "dti/esi/secret/data/app/config", Capability::Read));
+        assert!(!acl.has_mount_access("dti/esi/resources/"), "no share access without operability");
+        assert!(!sql_select(&acl, &stranger, &["sql_select"]));
+
+        // A request namespace that is not a canonical, wildcard-free path.
+        for bad in ["dti/+", "dti//esi", "dti/esi/"] {
+            let (_, r) = build(&store, &root_bound(&["test-sql"]), Some(bad)).await;
+            assert_eq!(r.lookup, skipped(CrossNamespaceSkip::NonCanonical), "{bad:?}");
+        }
+
+        // A root token is left exactly as it was.
+        let (acl, r) = build(&store, &root_bound(&["root", "test-sql"]), Some(NS)).await;
+        assert_eq!(r.lookup, RequestNamespaceLookup::NotApplicable);
+        assert!(acl.explain_capability("anything", Capability::Sudo).allowed);
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn a_share_or_a_policy_conveys_sql_select_to_a_root_bound_token_in_the_tenant() {
+        let (_bvault, core, _root) = new_unseal_test_bastion_vault("test_t471_sql").await;
+        let store = PolicyStore::new(&core).await.unwrap();
+        put_raw(&store, NS, "test-sql", TENANT_TEST_SQL).await;
+
+        // Share route: the implicit `namespace-shared`, templated against the
+        // request namespace, is inert without a share naming `sql_select`.
+        let ana = root_bound(&["default"]);
+        let (acl, r) = build(&store, &ana, Some(NS)).await;
+        assert!(r.request_ns_shared);
+        assert!(acl.has_mount_access("dti/esi/resources/"), "the tenant's Resources mount is visible");
+        assert!(!sql_select(&acl, &ana, &[]), "no share, no privilege");
+        assert!(!sql_select(&acl, &ana, &["read", "connect"]), "read and connect convey no SQL");
+        assert!(sql_select(&acl, &ana, &["sql_select"]), "a share naming sql_select conveys it");
+
+        // Policy route: the tenant's `capabilities = ["sql_select"]`.
+        let felipe = root_bound(&["default", "test-sql"]);
+        let (acl, _) = build(&store, &felipe, Some(NS)).await;
+        assert!(sql_select(&acl, &felipe, &[]));
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn tokens_bound_to_the_request_namespace_and_root_requests_are_unchanged() {
+        let (_bvault, core, _root) = new_unseal_test_bastion_vault("test_t471_unchanged").await;
+        let store = PolicyStore::new(&core).await.unwrap();
+        put_raw(&store, NS, "test-sql", TENANT_TEST_SQL).await;
+        store.set_policy(named("ops", ROOT_OPS)).await.unwrap();
+
+        // Bound to the tenant: its own document, unconfined, as before T471.
+        let tenant = bound_to(NS, false, &["default", "test-sql"]);
+        let (acl, r) = build(&store, &tenant, Some(NS)).await;
+        assert_eq!(r.lookup, RequestNamespaceLookup::NotApplicable);
+        assert!(r.from_request_ns.is_empty() && !r.request_ns_shared);
+        assert_eq!(r.unresolved, vec!["default".to_string()]);
+        assert!(allows(&acl, "transit/keys/k", Capability::Read), "confinement is only for the cross-namespace step");
+
+        // A root request from a root-bound token: tenant names stay unresolved.
+        for request_ns in [None, Some("")] {
+            let (acl, r) = build(&store, &root_bound(&["ops", "test-sql"]), request_ns).await;
+            assert_eq!(r.lookup, RequestNamespaceLookup::NotApplicable, "{request_ns:?}");
+            assert_eq!(r.unresolved, vec!["test-sql".to_string()], "{request_ns:?}");
+            assert!(allows(&acl, "secret/data/root-only", Capability::Read));
+            assert!(!allows(&acl, "transit/keys/k", Capability::Read));
+        }
+    }
+
+    #[test]
+    fn the_request_namespace_shared_policy_is_namespace_shared_retargeted() {
+        // Rules come out of a map, so compare them as sorted sets.
+        let rules = |p: &Policy, from: &str| {
+            let mut v: Vec<String> = p
+                .paths
+                .iter()
+                .map(|r| format!("{} {:?} {:?}", r.path.replace(from, "{{ns}}"), r.capabilities, r.scopes))
+                .collect();
+            v.sort();
+            v
+        };
+        let derived = &*NAMESPACE_SHARED_FOR_REQUEST_POLICY_PARSED;
+        assert!(derived.templated);
+        assert!(derived.paths.iter().all(|r| r.path.starts_with("{{request.namespace}}/")));
+        assert_eq!(
+            rules(derived, "{{request.namespace}}"),
+            rules(&NAMESPACE_SHARED_POLICY_PARSED, "{{namespace.path}}")
+        );
+    }
+
+    #[test]
+    fn confinement_keeps_exactly_the_rules_beneath_the_namespace() {
+        let mut p = named("t", TENANT_TEST_SQL);
+        p.templated = false;
+        let (kept, dropped) = confine_policy_to_namespace(&Arc::new(p), "dti/esi/");
+        let kept: Vec<String> = kept.unwrap().paths.iter().map(|r| r.path.clone()).collect();
+        assert_eq!(dropped, 10, "{kept:?}");
+        let mut kept_sorted = kept.clone();
+        kept_sorted.sort();
+        assert_eq!(
+            kept_sorted,
+            [
+                "dti/esi/resources/resources/apldc1vds0044-db/sql/",
+                "dti/esi/secret/data/app/",
+                "dti/esi/secret/data/blocked"
+            ]
+        );
+        let none = named("n", r#"path "secret/*" { capabilities = ["read"] }"#);
+        assert_eq!(confine_policy_to_namespace(&Arc::new(none), "dti/esi/").0.map(|p| p.paths.len()), None);
+        assert!(!rule_confined_to(&named("x", r#"path "dti/esi/*" { capabilities = ["read"] }"#).paths[0], "dti/esi"));
+    }
+
+    #[test]
+    fn unresolved_names_are_logged_once_per_interval() {
+        let key = "test\u{1f}t471-rate-limit".to_string();
+        let mut emitted: Vec<String> = Vec::new();
+        for _ in 0..3 {
+            log_rate_limited(key.clone(), |suffix| emitted.push(suffix.to_string()));
+        }
+        assert_eq!(emitted, vec![String::new()], "one line per interval, the rest counted");
+        assert_eq!(POLICY_RESOLUTION_LOG.get(&key).map(|e| e.1), Some(2));
     }
 }

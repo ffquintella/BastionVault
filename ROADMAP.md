@@ -459,6 +459,8 @@ Next-up list recorded before the migration, in its order:
   - note: split out of T73. The Namespaces page lists the full tree but renders it flat; needs an indented recursive view, plus server-side namespace rename, which is not implemented.
 - [ ] T114 Let a namespace admin manage mounts inside the tenant (S27)
   - note: split out of T73. Tenant self-service of `sys/*` beyond the introspection endpoints (`sys/namespaces-self`) is reachable today only by root/sudo tokens carrying the namespace header.
+- [x] T471 Apply policies authored in a namespace to a root sign-in working there, confined to that namespace's paths (S27, S44)
+  - note: [spec](features/namespaces-multitenancy.md) "Cross-namespace policy resolution". `PolicyStore::build_acl` looks names unresolved in the token's own namespace up in the request namespace when it lies beneath it, gated on `token_operable_checked`, never shadowing, every rule confined to `<ns>/` after templating; injects a confined request-namespace `namespace-shared`. Narrowed MCP tokens excluded (T470). Dry-run models it via `binding_namespace`.
 - [ ] T74 Integrate with Kubernetes (S22)
   - source: roadmap.md feature row "Kubernetes Integration", status `[ ]` Todo
   - old-notes: [spec](features/kubernetes-integration.md) — `kubernetes` auth backend + CSI driver + agent injector.
