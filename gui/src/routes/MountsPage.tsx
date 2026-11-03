@@ -137,6 +137,9 @@ const MOUNTABLE_PLUGIN_TYPES = new Set<string>([
   "secret",
   "database",
   "transform",
+  // dbms-management: the SQL browser's server half is mounted like an
+  // engine (suggested `dbms/`), features/sql-browser.md §9, §10.
+  "sql-browser",
 ]);
 
 const AUTH_TYPES = [
