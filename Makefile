@@ -2554,6 +2554,11 @@ plugins-pack: plugins-wasm plugins-process plugins-pack-build ## Pack each plugi
 		--manifest $(PLUGINS_DIR)/bastion-plugin-email/plugin.toml \
 		--binary   $(PLUGINS_OUT)/bastion-plugin-email$(_exe) \
 		--out      $(PLUGINS_OUT)/bastion-plugin-email.bvplugin
+	@echo "==> packing bastion-plugin-dbms-management (process) into .bvplugin"
+	$(BV_PLUGIN_PACK) \
+		--manifest $(PLUGINS_DIR)/bastion-plugin-dbms-management/plugin.toml \
+		--binary   $(PLUGINS_OUT)/bastion-plugin-dbms-management$(_exe) \
+		--out      $(PLUGINS_OUT)/bastion-plugin-dbms-management.bvplugin
 	@echo "==> packing bastion-plugin-webhook-notify (wasm app-module) into .bvplugin"
 	$(BV_PLUGIN_PACK) \
 		--manifest $(PLUGINS_DIR)/bastion-plugin-webhook-notify/plugin.toml \
@@ -2620,6 +2625,13 @@ plugins-sign: plugins-wasm plugins-process plugins-pack-build ## Repack each plu
 		--manifest          $(PLUGINS_DIR)/bastion-plugin-email/plugin.toml \
 		--binary            $(PLUGINS_OUT)/bastion-plugin-email$(_exe) \
 		--out               $(PLUGINS_OUT)/bastion-plugin-email.bvplugin \
+		--signing-seed-file $(PLUGINS_SIGNING_KEY).seed \
+		--signing-key-name  $(PLUGINS_SIGNING_KEY_NAME)
+	@echo "==> signing bastion-plugin-dbms-management (process)"
+	$(BV_PLUGIN_PACK) \
+		--manifest          $(PLUGINS_DIR)/bastion-plugin-dbms-management/plugin.toml \
+		--binary            $(PLUGINS_OUT)/bastion-plugin-dbms-management$(_exe) \
+		--out               $(PLUGINS_OUT)/bastion-plugin-dbms-management.bvplugin \
 		--signing-seed-file $(PLUGINS_SIGNING_KEY).seed \
 		--signing-key-name  $(PLUGINS_SIGNING_KEY_NAME)
 	@echo "==> signing bastion-plugin-webhook-notify (wasm app-module)"
@@ -2700,7 +2712,7 @@ plugins: plugins-pack plugins-process ## Build every reference plugin (WASM + .b
 # Override the bump kind on the command line: `make plugin-bump type=minor`
 # (defaults to patch). Each plugin's current version is read from its own
 # Cargo.toml so plugins that have drifted out of lockstep stay independent.
-PLUGIN_NAMES := bastion-plugin-totp bastion-plugin-postgres bastion-plugin-xca bastion-plugin-pmp bastion-plugin-email bastion-plugin-webhook-notify bastion-plugin-self-accounts
+PLUGIN_NAMES := bastion-plugin-totp bastion-plugin-postgres bastion-plugin-xca bastion-plugin-pmp bastion-plugin-email bastion-plugin-dbms-management bastion-plugin-webhook-notify bastion-plugin-self-accounts
 type ?= patch
 
 plugin-bump: ## Bump plugin versions across plugins-ext (type=major|minor|patch, default patch)
