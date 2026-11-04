@@ -984,7 +984,7 @@ dependencies = [
 
 [[package]]
 name = "bastion-plugin-sdk"
-version = "0.41.3"
+version = "0.41.4"
 dependencies = [
  "base64 0.22.1",
  "bv_plugin_surface",
@@ -996,7 +996,7 @@ dependencies = [
 
 [[package]]
 name = "bastion-plugin-testkit"
-version = "0.41.3"
+version = "0.41.4"
 dependencies = [
  "base64 0.22.1",
  "serde_json",
@@ -2009,7 +2009,7 @@ dependencies = [
 
 [[package]]
 name = "bv-engine-resource"
-version = "0.43.4"
+version = "0.43.5"
 dependencies = [
  "async-trait",
  "base32",
@@ -2225,7 +2225,7 @@ dependencies = [
 
 [[package]]
 name = "bv-kernel"
-version = "0.42.5"
+version = "0.42.6"
 dependencies = [
  "actix-rt",
  "arc-swap",
@@ -2417,7 +2417,7 @@ dependencies = [
 
 [[package]]
 name = "bv-sql-classify"
-version = "0.41.0"
+version = "0.41.1"
 dependencies = [
  "proptest",
  "sqlparser",
@@ -2425,7 +2425,7 @@ dependencies = [
 
 [[package]]
 name = "bv-sql-guard"
-version = "0.41.1"
+version = "0.41.2"
 dependencies = [
  "trybuild",
 ]
