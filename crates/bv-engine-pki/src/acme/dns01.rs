@@ -67,9 +67,7 @@ fn txt_lookup(qname: &str, resolvers: &[String]) -> Result<Vec<String>, String> 
             .map_err(|e| format!("dns: tokio runtime build: {e}"))?;
         rt.block_on(async move { txt_lookup_async(&qname, &resolvers).await })
     });
-    handle
-        .join()
-        .map_err(|_| "dns: lookup thread panicked".to_string())?
+    handle.join().map_err(|_| "dns: lookup thread panicked".to_string())?
 }
 
 async fn txt_lookup_async(qname: &str, resolvers: &[String]) -> Result<Vec<String>, String> {
@@ -87,8 +85,7 @@ async fn txt_lookup_async(qname: &str, resolvers: &[String]) -> Result<Vec<Strin
         // default suffixes.
         let mut cfg = ResolverConfig::from_parts(None, Vec::new(), Vec::<NameServerConfig>::new());
         for r in resolvers {
-            let sa = parse_resolver(r)
-                .ok_or_else(|| format!("dns: invalid resolver `{r}`"))?;
+            let sa = parse_resolver(r).ok_or_else(|| format!("dns: invalid resolver `{r}`"))?;
             let mut udp = ConnectionConfig::udp();
             udp.port = sa.port();
             let mut tcp = ConnectionConfig::tcp();
@@ -102,25 +99,16 @@ async fn txt_lookup_async(qname: &str, resolvers: &[String]) -> Result<Vec<Strin
 
     let mut builder = TokioResolver::builder_with_config(config, TokioRuntimeProvider::default());
     *builder.options_mut() = opts;
-    let resolver = builder
-        .build()
-        .map_err(|e| format!("dns: resolver build: {e}"))?;
-    let lookup = resolver
-        .txt_lookup(qname)
-        .await
-        .map_err(|e| format!("dns: txt lookup `{qname}`: {e}"))?;
+    let resolver = builder.build().map_err(|e| format!("dns: resolver build: {e}"))?;
+    let lookup = resolver.txt_lookup(qname).await.map_err(|e| format!("dns: txt lookup `{qname}`: {e}"))?;
     let mut out = Vec::new();
     for record in lookup.answers() {
         // A TXT record can be split across multiple character
         // strings; concatenate them per RFC 1035 §3.3.14 before
         // matching.
         if let RData::TXT(txt) = &record.data {
-            let joined: String = txt
-                .txt_data
-                .iter()
-                .filter_map(|seg| std::str::from_utf8(seg).ok())
-                .collect::<Vec<_>>()
-                .join("");
+            let joined: String =
+                txt.txt_data.iter().filter_map(|seg| std::str::from_utf8(seg).ok()).collect::<Vec<_>>().join("");
             out.push(joined);
         }
     }
@@ -158,14 +146,8 @@ mod tests {
 
     #[test]
     fn parse_resolver_accepts_ip_or_socket() {
-        assert_eq!(
-            parse_resolver("8.8.8.8").unwrap().port(),
-            53
-        );
-        assert_eq!(
-            parse_resolver("8.8.8.8:5353").unwrap().port(),
-            5353
-        );
+        assert_eq!(parse_resolver("8.8.8.8").unwrap().port(), 53);
+        assert_eq!(parse_resolver("8.8.8.8:5353").unwrap().port(), 5353);
         assert!(parse_resolver("not-an-ip").is_none());
     }
 }

@@ -3,10 +3,11 @@ use derive_more::Deref;
 use sysexits::ExitCode;
 
 use crate::{
+    api::sys::InitRequest,
+    bv_error_string,
     command::{self, CommandExecutor},
     errors::RvError,
-    api::sys::InitRequest,
-    bv_error_string, EXIT_CODE_OK,
+    EXIT_CODE_OK,
 };
 
 #[derive(Parser, Deref)]
@@ -157,12 +158,7 @@ mod test {
     use serde_json::Value;
     use zeroize::Zeroizing;
 
-    use crate::{
-        core::SealConfig,
-        errors::RvError,
-        seal::SealProvider,
-        test_utils::TestHttpServer,
-    };
+    use crate::{core::SealConfig, errors::RvError, seal::SealProvider, test_utils::TestHttpServer};
 
     /// Minimal auto-unseal seal provider so the init path can be exercised
     /// without a real (or mock-feature-gated) HSM backend.

@@ -123,11 +123,7 @@ impl AuditEntry {
     /// is used to redact the client token and request body values.
     /// `log_raw` disables redaction (dev/debug only).
     pub fn from_request(req: &Request, hmac_key: &[u8], log_raw: bool) -> Self {
-        let socket_addr = req
-            .connection
-            .as_ref()
-            .map(|c| c.peer_addr.clone())
-            .unwrap_or_default();
+        let socket_addr = req.connection.as_ref().map(|c| c.peer_addr.clone()).unwrap_or_default();
         // Phase 1.5: prefer the derived address (after trusted-proxy
         // resolution) when present. Falls back to the socket peer for
         // back-compat with pre-1.5 entries and for code paths that
@@ -152,27 +148,15 @@ impl AuditEntry {
             metadata: req
                 .auth
                 .as_ref()
-                .map(|a| {
-                    a.metadata
-                        .iter()
-                        .map(|(k, v)| (k.clone(), Value::String(v.clone())))
-                        .collect()
-                })
+                .map(|a| a.metadata.iter().map(|(k, v)| (k.clone(), Value::String(v.clone()))).collect())
                 .unwrap_or_default(),
             remote_address: derived_addr.clone(),
             remote_address_socket: socket_addr.clone(),
             remote_address_derived: derived_addr.clone(),
         };
 
-        let namespace = req
-            .auth
-            .as_ref()
-            .and_then(|a| {
-                a.metadata
-                    .get(bv_logical::NS_PATH_META)
-                    .cloned()
-            })
-            .unwrap_or_default();
+        let namespace =
+            req.auth.as_ref().and_then(|a| a.metadata.get(bv_logical::NS_PATH_META).cloned()).unwrap_or_default();
 
         Self {
             time: Utc::now().to_rfc3339(),
@@ -301,12 +285,7 @@ fn operation_str(op: Operation) -> &'static str {
 fn audit_request_data(req: &Request, hmac_key: &[u8], log_raw: bool) -> Option<Value> {
     let redacted = redact_body(req.body.as_ref(), hmac_key, log_raw);
 
-    let env = req
-        .data
-        .as_ref()
-        .and_then(|d| d.get("env"))
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty());
+    let env = req.data.as_ref().and_then(|d| d.get("env")).and_then(|v| v.as_str()).filter(|s| !s.is_empty());
 
     let Some(env) = env else {
         return redacted;
@@ -320,11 +299,7 @@ fn audit_request_data(req: &Request, hmac_key: &[u8], log_raw: bool) -> Option<V
     Some(Value::Object(obj))
 }
 
-fn redact_body(
-    body: Option<&Map<String, Value>>,
-    hmac_key: &[u8],
-    log_raw: bool,
-) -> Option<Value> {
+fn redact_body(body: Option<&Map<String, Value>>, hmac_key: &[u8], log_raw: bool) -> Option<Value> {
     let body = body?;
     if body.is_empty() {
         return None;
@@ -332,10 +307,7 @@ fn redact_body(
     if log_raw {
         return Some(Value::Object(body.clone()));
     }
-    let redacted: Map<String, Value> = body
-        .iter()
-        .map(|(k, v)| (k.clone(), redact_value(v, hmac_key)))
-        .collect();
+    let redacted: Map<String, Value> = body.iter().map(|(k, v)| (k.clone(), redact_value(v, hmac_key))).collect();
     Some(Value::Object(redacted))
 }
 
@@ -343,11 +315,7 @@ fn redact_value(v: &Value, hmac_key: &[u8]) -> Value {
     match v {
         Value::String(s) if s.is_empty() => Value::String(String::new()),
         Value::String(s) => Value::String(format!("hmac:{}", hmac_redact(hmac_key, s.as_bytes()))),
-        Value::Object(m) => Value::Object(
-            m.iter()
-                .map(|(k, v)| (k.clone(), redact_value(v, hmac_key)))
-                .collect(),
-        ),
+        Value::Object(m) => Value::Object(m.iter().map(|(k, v)| (k.clone(), redact_value(v, hmac_key))).collect()),
         Value::Array(a) => Value::Array(a.iter().map(|v| redact_value(v, hmac_key)).collect()),
         // Numbers, booleans, null pass through — not secret-bearing.
         other => other.clone(),

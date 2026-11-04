@@ -91,41 +91,17 @@ impl SamlConfig {
     /// they are populated without the bytes surfacing in logs.
     fn to_public_map(&self) -> Map<String, Value> {
         let mut m = Map::new();
-        m.insert(
-            "idp_metadata_url".into(),
-            Value::String(self.idp_metadata_url.clone()),
-        );
-        m.insert(
-            "idp_metadata_xml_set".into(),
-            Value::Bool(!self.idp_metadata_xml.is_empty()),
-        );
+        m.insert("idp_metadata_url".into(), Value::String(self.idp_metadata_url.clone()));
+        m.insert("idp_metadata_xml_set".into(), Value::Bool(!self.idp_metadata_xml.is_empty()));
         m.insert("entity_id".into(), Value::String(self.entity_id.clone()));
         m.insert("acs_url".into(), Value::String(self.acs_url.clone()));
-        m.insert(
-            "idp_sso_url".into(),
-            Value::String(self.idp_sso_url.clone()),
-        );
-        m.insert(
-            "idp_slo_url".into(),
-            Value::String(self.idp_slo_url.clone()),
-        );
-        m.insert(
-            "idp_cert_set".into(),
-            Value::Bool(!self.idp_cert.is_empty()),
-        );
-        m.insert(
-            "default_role".into(),
-            Value::String(self.default_role.clone()),
-        );
+        m.insert("idp_sso_url".into(), Value::String(self.idp_sso_url.clone()));
+        m.insert("idp_slo_url".into(), Value::String(self.idp_slo_url.clone()));
+        m.insert("idp_cert_set".into(), Value::Bool(!self.idp_cert.is_empty()));
+        m.insert("default_role".into(), Value::String(self.default_role.clone()));
         m.insert(
             "allowed_redirect_uris".into(),
-            Value::Array(
-                self.allowed_redirect_uris
-                    .iter()
-                    .cloned()
-                    .map(Value::String)
-                    .collect(),
-            ),
+            Value::Array(self.allowed_redirect_uris.iter().cloned().map(Value::String).collect()),
         );
         m
     }
@@ -187,22 +163,14 @@ impl SamlBackend {
 
 #[maybe_async::maybe_async]
 impl SamlBackendInner {
-    pub async fn read_config(
-        &self,
-        _backend: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn read_config(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let Some(cfg) = SamlConfig::load(req).await? else {
             return Ok(None);
         };
         Ok(Some(Response::data_response(Some(cfg.to_public_map()))))
     }
 
-    pub async fn write_config(
-        &self,
-        _backend: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn write_config(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         // Load existing (if any) so a partial write doesn't clear
         // fields the caller didn't provide. This lets an operator
         // rotate only the IdP cert without re-entering the ACS URL.
@@ -242,17 +210,13 @@ impl SamlBackendInner {
         // (metadata URL, inline XML, or a raw SSO URL + cert pair)
         // must be present so Phase 3 has something to work with.
         if cfg.entity_id.trim().is_empty() {
-            return Err(RvError::ErrString(
-                "saml: `entity_id` is required".into(),
-            ));
+            return Err(RvError::ErrString("saml: `entity_id` is required".into()));
         }
         if cfg.acs_url.trim().is_empty() {
             return Err(RvError::ErrString("saml: `acs_url` is required".into()));
         }
-        let has_metadata = !cfg.idp_metadata_url.trim().is_empty()
-            || !cfg.idp_metadata_xml.trim().is_empty();
-        let has_manual_idp =
-            !cfg.idp_sso_url.trim().is_empty() && !cfg.idp_cert.trim().is_empty();
+        let has_metadata = !cfg.idp_metadata_url.trim().is_empty() || !cfg.idp_metadata_xml.trim().is_empty();
+        let has_manual_idp = !cfg.idp_sso_url.trim().is_empty() && !cfg.idp_cert.trim().is_empty();
         if !has_metadata && !has_manual_idp {
             return Err(RvError::ErrString(
                 "saml: must set either `idp_metadata_url`/`idp_metadata_xml` or both \
@@ -262,11 +226,7 @@ impl SamlBackendInner {
         }
 
         let bytes = serde_json::to_vec(&cfg)?;
-        req.storage_put(&StorageEntry {
-            key: CONFIG_KEY.to_string(),
-            value: bytes,
-        })
-        .await?;
+        req.storage_put(&StorageEntry { key: CONFIG_KEY.to_string(), value: bytes }).await?;
         Ok(None)
     }
 }
@@ -278,16 +238,10 @@ impl SamlBackendInner {
 /// the other depending on the request shape.
 fn parse_string_list(v: &Value) -> Vec<String> {
     match v {
-        Value::Array(a) => a
-            .iter()
-            .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
-            .filter(|s| !s.is_empty())
-            .collect(),
-        Value::String(s) => s
-            .split(',')
-            .map(|p| p.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect(),
+        Value::Array(a) => {
+            a.iter().filter_map(|x| x.as_str().map(|s| s.trim().to_string())).filter(|s| !s.is_empty()).collect()
+        }
+        Value::String(s) => s.split(',').map(|p| p.trim().to_string()).filter(|s| !s.is_empty()).collect(),
         _ => Vec::new(),
     }
 }
@@ -310,46 +264,25 @@ mod tests {
             allowed_redirect_uris: vec!["http://localhost/cb".into()],
         };
         let m = cfg.to_public_map();
-        assert_eq!(
-            m.get("idp_cert_set").and_then(Value::as_bool),
-            Some(true)
-        );
-        assert_eq!(
-            m.get("idp_metadata_xml_set").and_then(Value::as_bool),
-            Some(true)
-        );
+        assert_eq!(m.get("idp_cert_set").and_then(Value::as_bool), Some(true));
+        assert_eq!(m.get("idp_metadata_xml_set").and_then(Value::as_bool), Some(true));
         let rendered = serde_json::to_string(&m).unwrap();
-        assert!(
-            !rendered.contains("SECRET"),
-            "IdP cert bytes leaked into serialized output"
-        );
-        assert!(
-            !rendered.contains("...private..."),
-            "Inline metadata XML leaked into serialized output"
-        );
+        assert!(!rendered.contains("SECRET"), "IdP cert bytes leaked into serialized output");
+        assert!(!rendered.contains("...private..."), "Inline metadata XML leaked into serialized output");
     }
 
     #[test]
     fn to_public_map_surfaces_absence() {
         let cfg = SamlConfig::default();
         let m = cfg.to_public_map();
-        assert_eq!(
-            m.get("idp_cert_set").and_then(Value::as_bool),
-            Some(false)
-        );
-        assert_eq!(
-            m.get("idp_metadata_xml_set").and_then(Value::as_bool),
-            Some(false)
-        );
+        assert_eq!(m.get("idp_cert_set").and_then(Value::as_bool), Some(false));
+        assert_eq!(m.get("idp_metadata_xml_set").and_then(Value::as_bool), Some(false));
     }
 
     #[test]
     fn parse_string_list_accepts_array_and_comma_string() {
         assert_eq!(
-            parse_string_list(&Value::Array(vec![
-                Value::String("a".into()),
-                Value::String("b".into())
-            ])),
+            parse_string_list(&Value::Array(vec![Value::String("a".into()), Value::String("b".into())])),
             vec!["a".to_string(), "b".to_string()]
         );
         assert_eq!(

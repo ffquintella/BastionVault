@@ -24,19 +24,19 @@ use serde_json::{json, Map, Value};
 
 use crate::kernel_api::VaultCtx;
 use crate::{
+    bv_error_response_status, bv_error_string,
     context::Context,
     core::Core,
     errors::RvError,
     logical::{
-        field::FieldTrait, optional_param, page_response, paginate, Backend, Field, FieldType,
-        LogicalBackend, Operation, PageLimits, Path, PathOperation, Request, Response,
+        field::FieldTrait, optional_param, page_response, paginate, Backend, Field, FieldType, LogicalBackend,
+        Operation, PageLimits, Path, PathOperation, Request, Response,
     },
     modules::{
         auth::{AuthModule, AUTH_TABLE_TYPE},
         identity::IdentityModule,
         namespace::{
-            router::namespace_header_from_map, NamespaceModule, NamespaceQuotas, NamespaceStore,
-            NAMESPACE_MODULE_NAME,
+            router::namespace_header_from_map, NamespaceModule, NamespaceQuotas, NamespaceStore, NAMESPACE_MODULE_NAME,
         },
         policy::{acl::ACL, PolicyModule},
         resource_group::ResourceGroupModule,
@@ -44,7 +44,6 @@ use crate::{
     },
     mount::{MountEntry, MOUNT_TABLE_TYPE},
     new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path, new_path_internal,
-    bv_error_response_status, bv_error_string,
     storage::StorageEntry,
 };
 
@@ -79,15 +78,7 @@ impl AuditEventBuilder {
         m.insert("op".into(), Value::String(self.op));
         m.insert("category".into(), Value::String(self.category));
         m.insert("target".into(), Value::String(self.target));
-        m.insert(
-            "changed_fields".into(),
-            Value::Array(
-                self.changed_fields
-                    .into_iter()
-                    .map(Value::String)
-                    .collect(),
-            ),
-        );
+        m.insert("changed_fields".into(), Value::Array(self.changed_fields.into_iter().map(Value::String).collect()));
         m.insert("summary".into(), Value::String(self.summary));
         Value::Object(m)
     }
@@ -1728,8 +1719,7 @@ impl SystemBackend {
         // header; otherwise the root mount table.
         if let Some((uuid, path)) = self.resolve_request_namespace(_req).await? {
             let registry = self.namespace_registry()?;
-            for (mount_path, logical_type, description) in
-                registry.list_mounts(self.core.clone(), &uuid, &path).await?
+            for (mount_path, logical_type, description) in registry.list_mounts(self.core.clone(), &uuid, &path).await?
             {
                 data.insert(mount_path, json!({ "type": logical_type, "description": description }));
             }
@@ -1774,11 +1764,7 @@ impl SystemBackend {
                 let store = self.resolve_namespace_store()?;
                 if let Some(ns) = store.get_by_path(&ns_path).await? {
                     let current = self.namespace_registry()?.mount_count(&uuid);
-                    crate::modules::namespace::quota::check_capacity(
-                        "mounts",
-                        current,
-                        ns.quotas.max_mounts,
-                    )?;
+                    crate::modules::namespace::quota::check_capacity("mounts", current, ns.quotas.max_mounts)?;
                 }
                 self.namespace_registry()?.mount(self.core.clone(), &uuid, &ns_path, &me).await?;
             }
@@ -2018,11 +2004,7 @@ impl SystemBackend {
         _backend: &dyn Backend,
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        let path = req
-            .get_data("path")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_default();
+        let path = req.get_data("path").ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
         let new_owner = req
             .get_data("new_owner_entity_id")
             .ok()
@@ -2030,16 +2012,12 @@ impl SystemBackend {
             .unwrap_or_default();
 
         if path.trim().is_empty() || new_owner.trim().is_empty() {
-            return Err(bv_error_response_status!(
-                400,
-                "path and new_owner_entity_id are required"
-            ));
+            return Err(bv_error_response_status!(400, "path and new_owner_entity_id are required"));
         }
 
         let identity = self.get_module::<IdentityModule>("identity")?;
-        let store = identity.owner_store().ok_or_else(|| {
-            bv_error_response_status!(500, "owner store not initialized")
-        })?;
+        let store =
+            identity.owner_store().ok_or_else(|| bv_error_response_status!(500, "owner store not initialized"))?;
 
         // Scope to the namespace-qualified key so a transfer performed while a
         // child namespace is active reassigns the same record the owner-read,
@@ -2069,27 +2047,19 @@ impl SystemBackend {
         _backend: &dyn Backend,
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        let path = req
-            .get_data("path")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_default();
+        let path = req.get_data("path").ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
         if path.trim().is_empty() {
             return Err(bv_error_response_status!(400, "path is required"));
         }
 
         let caller_id = crate::modules::identity::caller_audit_actor(req);
         if caller_id.is_empty() {
-            return Err(bv_error_response_status!(
-                400,
-                "caller has no entity_id; cannot claim ownership"
-            ));
+            return Err(bv_error_response_status!(400, "caller has no entity_id; cannot claim ownership"));
         }
 
         let identity = self.get_module::<IdentityModule>("identity")?;
-        let store = identity.owner_store().ok_or_else(|| {
-            bv_error_response_status!(500, "owner store not initialized")
-        })?;
+        let store =
+            identity.owner_store().ok_or_else(|| bv_error_response_status!(500, "owner store not initialized"))?;
 
         // Claim under the namespace-qualified key so the "Claim ownership"
         // action captures the record the badge/ACL/share paths read (the GUI
@@ -2105,10 +2075,7 @@ impl SystemBackend {
             // to reassign an existing owner.
             return Err(bv_error_response_status!(
                 409,
-                format!(
-                    "path is already owned by entity_id={}; use kv-owner/transfer to reassign",
-                    existing.entity_id
-                )
+                format!("path is already owned by entity_id={}; use kv-owner/transfer to reassign", existing.entity_id)
             ));
         }
 
@@ -2127,11 +2094,7 @@ impl SystemBackend {
         _backend: &dyn Backend,
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        let id = req
-            .get_data("id")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_default();
+        let id = req.get_data("id").ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
         let new_owner = req
             .get_data("new_owner_entity_id")
             .ok()
@@ -2139,24 +2102,18 @@ impl SystemBackend {
             .unwrap_or_default();
 
         if id.trim().is_empty() || new_owner.trim().is_empty() {
-            return Err(bv_error_response_status!(
-                400,
-                "id and new_owner_entity_id are required"
-            ));
+            return Err(bv_error_response_status!(400, "id and new_owner_entity_id are required"));
         }
 
         let identity = self.get_module::<IdentityModule>("identity")?;
-        let store = identity.owner_store().ok_or_else(|| {
-            bv_error_response_status!(500, "owner store not initialized")
-        })?;
+        let store =
+            identity.owner_store().ok_or_else(|| bv_error_response_status!(500, "owner store not initialized"))?;
 
         // Namespace-scope the key: the transfer must land on the caller's own
         // namespace's file, never on a root file that happens to share the id.
-        let key = crate::modules::identity::owner_store::OwnerStore::scope_target_name(
-            &id,
-            req.namespace_path.as_deref(),
-        )
-        .ok_or_else(|| bv_error_response_status!(400, "invalid file id"))?;
+        let key =
+            crate::modules::identity::owner_store::OwnerStore::scope_target_name(&id, req.namespace_path.as_deref())
+                .ok_or_else(|| bv_error_response_status!(400, "invalid file id"))?;
         store.set_file_owner(&key, &new_owner).await?;
 
         let mut data = Map::new();
@@ -2172,11 +2129,8 @@ impl SystemBackend {
         _backend: &dyn Backend,
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        let resource = req
-            .get_data("resource")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_default();
+        let resource =
+            req.get_data("resource").ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
         let new_owner = req
             .get_data("new_owner_entity_id")
             .ok()
@@ -2184,16 +2138,12 @@ impl SystemBackend {
             .unwrap_or_default();
 
         if resource.trim().is_empty() || new_owner.trim().is_empty() {
-            return Err(bv_error_response_status!(
-                400,
-                "resource and new_owner_entity_id are required"
-            ));
+            return Err(bv_error_response_status!(400, "resource and new_owner_entity_id are required"));
         }
 
         let identity = self.get_module::<IdentityModule>("identity")?;
-        let store = identity.owner_store().ok_or_else(|| {
-            bv_error_response_status!(500, "owner store not initialized")
-        })?;
+        let store =
+            identity.owner_store().ok_or_else(|| bv_error_response_status!(500, "owner store not initialized"))?;
 
         let key = crate::modules::identity::owner_store::OwnerStore::scope_target_name(
             &resource,
@@ -2216,11 +2166,7 @@ impl SystemBackend {
         _backend: &dyn Backend,
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        let name = req
-            .get_data("name")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_default();
+        let name = req.get_data("name").ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
         let new_owner = req
             .get_data("new_owner_entity_id")
             .ok()
@@ -2228,16 +2174,12 @@ impl SystemBackend {
             .unwrap_or_default();
 
         if name.trim().is_empty() || new_owner.trim().is_empty() {
-            return Err(bv_error_response_status!(
-                400,
-                "name and new_owner_entity_id are required"
-            ));
+            return Err(bv_error_response_status!(400, "name and new_owner_entity_id are required"));
         }
 
         let module = self.get_module::<ResourceGroupModule>("resource-group")?;
-        let store = module.store().ok_or_else(|| {
-            bv_error_response_status!(500, "resource-group store not initialized")
-        })?;
+        let store =
+            module.store().ok_or_else(|| bv_error_response_status!(500, "resource-group store not initialized"))?;
 
         store.set_owner(&name, &new_owner).await?;
 
@@ -2260,8 +2202,7 @@ impl SystemBackend {
 
         // Multi-tenancy: list only the caller's namespace devices (plus the
         // root superuser mirror, which every namespace is shown).
-        let namespace =
-            crate::modules::namespace::policy_scope::writer_namespace_path(req.headers.as_ref());
+        let namespace = crate::modules::namespace::policy_scope::writer_namespace_path(req.headers.as_ref());
         let entries = broker.list(&namespace);
         let mut arr: Vec<Value> = Vec::with_capacity(entries.len());
         for d in entries {
@@ -2319,19 +2260,15 @@ impl SystemBackend {
         let supplied = |name: &str| -> Result<Option<Value>, RvError> {
             match req.get_data(name) {
                 Ok(v) => Ok(Some(v)),
-                Err(RvError::ErrRequestFieldInvalid) => Err(bv_error_response_status!(
-                    400,
-                    "`{}` has the wrong type",
-                    name
-                )),
+                Err(RvError::ErrRequestFieldInvalid) => {
+                    Err(bv_error_response_status!(400, "`{}` has the wrong type", name))
+                }
                 Err(_) => Ok(None),
             }
         };
 
         let parse_bound = |name: &str| -> Result<Option<String>, RvError> {
-            let Some(raw) = supplied(name)?
-                .and_then(|v| v.as_str().map(|s| s.to_string()))
-                .filter(|s| !s.is_empty())
+            let Some(raw) = supplied(name)?.and_then(|v| v.as_str().map(|s| s.to_string())).filter(|s| !s.is_empty())
             else {
                 return Ok(None);
             };
@@ -2369,18 +2306,9 @@ impl SystemBackend {
         // becoming the 500 default.
         let limit = match supplied("limit")? {
             None | Some(Value::Null) => 500,
-            Some(v) => match v
-                .as_u64()
-                .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
-                .filter(|n| *n > 0)
-            {
+            Some(v) => match v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok())).filter(|n| *n > 0) {
                 Some(n) => n,
-                None => {
-                    return Err(bv_error_response_status!(
-                        400,
-                        "`limit` must be a positive integer"
-                    ))
-                }
+                None => return Err(bv_error_response_status!(400, "`limit` must be a positive integer")),
             },
         } as usize;
 
@@ -2390,9 +2318,8 @@ impl SystemBackend {
         // not "everything": it is the default window ending at `to` (or
         // now). An unbounded read of every audit store on every call is
         // what took a 184k-row deployment's dashboard down.
-        let parse_utc = |raw: &str| {
-            chrono::DateTime::parse_from_rfc3339(raw).ok().map(|dt| dt.with_timezone(&chrono::Utc))
-        };
+        let parse_utc =
+            |raw: &str| chrono::DateTime::parse_from_rfc3339(raw).ok().map(|dt| dt.with_timezone(&chrono::Utc));
         let since = match from.as_deref().and_then(parse_utc) {
             Some(explicit) => explicit,
             None => {
@@ -2507,9 +2434,9 @@ impl SystemBackend {
             }
         };
         let retention_days = match supplied("retention_days")? {
-            Some(v) => Some(
-                audit_retention::validate_retention_days(&v).map_err(|msg| bv_error_response_status!(400, msg))?,
-            ),
+            Some(v) => {
+                Some(audit_retention::validate_retention_days(&v).map_err(|msg| bv_error_response_status!(400, msg))?)
+            }
             None => None,
         };
         let enabled = match supplied("enabled")? {
@@ -2641,7 +2568,10 @@ impl SystemBackend {
     /// The independent per-subsystem reads run concurrently (each is its
     /// own storage round-trip), so the wall-clock cost is the slowest
     /// single source rather than their sum.
-    async fn collect_audit_events_since(&self, since: chrono::DateTime<chrono::Utc>) -> (Vec<AuditEventBuilder>, Vec<&'static str>) {
+    async fn collect_audit_events_since(
+        &self,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> (Vec<AuditEventBuilder>, Vec<&'static str>) {
         let collected = self.collect_audit_event_groups_since(since).await;
         (collected.groups.into_iter().flatten().collect(), collected.failed)
     }
@@ -2799,13 +2729,10 @@ impl SystemBackend {
             return Ok(events);
         };
         for (kind, label) in [(GroupKind::User, "identity-group-user"), (GroupKind::App, "identity-group-app")] {
-            let names =
-                gs.list_groups(kind).await.map_err(|e| format!("the {label} list could not be read: {e}"))?;
+            let names = gs.list_groups(kind).await.map_err(|e| format!("the {label} list could not be read: {e}"))?;
             let live: HashMap<String, String> = names.into_iter().map(|n| (n.to_lowercase(), n)).collect();
-            let entries = gs
-                .list_history_all(kind)
-                .await
-                .map_err(|e| format!("the {label} history could not be read: {e}"))?;
+            let entries =
+                gs.list_history_all(kind).await.map_err(|e| format!("the {label} history could not be read: {e}"))?;
             for (key_name, e) in entries {
                 let Some(target) = live.get(&key_name) else { continue };
                 if e.ts.as_str() >= cutoff {
@@ -2833,8 +2760,7 @@ impl SystemBackend {
         use std::collections::HashMap;
 
         let mut events = Vec::new();
-        let Some(store) = self.get_module::<ResourceGroupModule>("resource-group").ok().and_then(|m| m.store())
-        else {
+        let Some(store) = self.get_module::<ResourceGroupModule>("resource-group").ok().and_then(|m| m.store()) else {
             return Ok(events);
         };
         let names = store.list_groups().await.map_err(|e| format!("the asset-group list could not be read: {e}"))?;
@@ -2916,12 +2842,10 @@ impl SystemBackend {
         let mut events = Vec::new();
         // No identity module or no store: the subsystem is absent, which is
         // not a read failure.
-        let Some(store) = self.get_module::<IdentityModule>("identity").ok().and_then(|m| m.user_audit_store())
-        else {
+        let Some(store) = self.get_module::<IdentityModule>("identity").ok().and_then(|m| m.user_audit_store()) else {
             return Ok(events);
         };
-        let entries =
-            store.list_since(since_key).await.map_err(|e| format!("the store could not be read: {e}"))?;
+        let entries = store.list_since(since_key).await.map_err(|e| format!("the store could not be read: {e}"))?;
         for e in entries {
             let mut fields = Vec::new();
             fields.push(format!("mount={}", e.mount));
@@ -2948,8 +2872,7 @@ impl SystemBackend {
     async fn collect_file_events(&self, since_key: &str) -> AuditSourceResult {
         let store = crate::modules::files::files_audit_store::FileAuditStore::from_core(&self.core)
             .map_err(|e| format!("the store could not be opened: {e}"))?;
-        let entries =
-            store.list_since(since_key).await.map_err(|e| format!("the store could not be read: {e}"))?;
+        let entries = store.list_since(since_key).await.map_err(|e| format!("the store could not be read: {e}"))?;
         let mut events = Vec::new();
         for e in entries {
             let mut fields = Vec::new();
@@ -2981,8 +2904,7 @@ impl SystemBackend {
     async fn collect_login_events(&self, since_key: &str) -> AuditSourceResult {
         let store = crate::modules::credential::login_audit_store::LoginAuditStore::from_core(&self.core)
             .map_err(|e| format!("the store could not be opened: {e}"))?;
-        let entries =
-            store.list_since(since_key).await.map_err(|e| format!("the store could not be read: {e}"))?;
+        let entries = store.list_since(since_key).await.map_err(|e| format!("the store could not be read: {e}"))?;
         let mut events = Vec::new();
         for e in entries {
             let mut fields = Vec::new();
@@ -3023,8 +2945,7 @@ impl SystemBackend {
     async fn collect_denial_events(&self, since_key: &str) -> AuditSourceResult {
         let store = crate::modules::system::denial_audit_store::DenialAuditStore::from_core(&self.core)
             .map_err(|e| format!("the store could not be opened: {e}"))?;
-        let entries =
-            store.list_since(since_key).await.map_err(|e| format!("the store could not be read: {e}"))?;
+        let entries = store.list_since(since_key).await.map_err(|e| format!("the store could not be read: {e}"))?;
         let mut events = Vec::new();
         for e in entries {
             let mut fields = Vec::new();
@@ -3079,8 +3000,7 @@ impl SystemBackend {
     async fn collect_access_events(&self, since_key: &str) -> AuditSourceResult {
         let store = crate::modules::system::access_audit_store::AccessAuditStore::from_core(&self.core)
             .map_err(|e| format!("the store could not be opened: {e}"))?;
-        let entries =
-            store.list_since(since_key).await.map_err(|e| format!("the store could not be read: {e}"))?;
+        let entries = store.list_since(since_key).await.map_err(|e| format!("the store could not be read: {e}"))?;
         let mut events = Vec::new();
         for e in entries {
             let mut fields = Vec::new();
@@ -3097,11 +3017,7 @@ impl SystemBackend {
                 ts: e.ts,
                 user: e.user,
                 machine: e.machine,
-                op: if e.operation.is_empty() {
-                    "read".into()
-                } else {
-                    e.operation
-                },
+                op: if e.operation.is_empty() { "read".into() } else { e.operation },
                 category: "access".into(),
                 target: e.path,
                 changed_fields: fields,
@@ -3124,19 +3040,14 @@ impl SystemBackend {
     async fn collect_ssh_ca_events(&self, since_key: &str) -> AuditSourceResult {
         let store = crate::modules::ssh::ssh_ca_audit_store::SshCaAuditStore::from_core(&self.core)
             .map_err(|e| format!("the store could not be opened: {e}"))?;
-        let entries =
-            store.list_since(since_key).await.map_err(|e| format!("the store could not be read: {e}"))?;
+        let entries = store.list_since(since_key).await.map_err(|e| format!("the store could not be read: {e}"))?;
         let mut events = Vec::new();
         for e in entries {
             let mut fields = Vec::new();
             if !e.algorithm.is_empty() {
                 fields.push(format!("algorithm={}", e.algorithm));
             }
-            let target = if e.mount.is_empty() {
-                "config/ca".to_string()
-            } else {
-                format!("{}config/ca", e.mount)
-            };
+            let target = if e.mount.is_empty() { "config/ca".to_string() } else { format!("{}config/ca", e.mount) };
             events.push(AuditEventBuilder {
                 ts: e.ts,
                 user: e.actor_entity_id,
@@ -3156,8 +3067,7 @@ impl SystemBackend {
     async fn collect_ssh_sign_events(&self, since_key: &str) -> AuditSourceResult {
         let store = crate::modules::ssh::ssh_sign_audit_store::SshSignAuditStore::from_core(&self.core)
             .map_err(|e| format!("the store could not be opened: {e}"))?;
-        let entries =
-            store.list_since(since_key).await.map_err(|e| format!("the store could not be read: {e}"))?;
+        let entries = store.list_since(since_key).await.map_err(|e| format!("the store could not be read: {e}"))?;
         let mut events = Vec::new();
         for e in entries {
             let mut fields = Vec::new();
@@ -3174,11 +3084,7 @@ impl SystemBackend {
                 fields.push(format!("algorithm={}", e.algorithm));
             }
             let role = if e.role.is_empty() { "?".to_string() } else { e.role.clone() };
-            let target = if e.mount.is_empty() {
-                format!("sign/{role}")
-            } else {
-                format!("{}sign/{role}", e.mount)
-            };
+            let target = if e.mount.is_empty() { format!("sign/{role}") } else { format!("{}sign/{role}", e.mount) };
             events.push(AuditEventBuilder {
                 ts: e.ts,
                 user: e.actor_entity_id,
@@ -3203,16 +3109,9 @@ impl SystemBackend {
         };
 
         let path = req.get_data("path")?.as_str().unwrap_or("").to_string();
-        let device_type = req
-            .get_data("type")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_default();
-        let description = req
-            .get_data("description")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_default();
+        let device_type = req.get_data("type").ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
+        let description =
+            req.get_data("description").ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
 
         // `options` is declared as FieldType::Map on the route — it
         // resolves to a `serde_json::Map` of string values. Other
@@ -3245,22 +3144,10 @@ impl SystemBackend {
         // Multi-tenancy: the device is scoped to the namespace named by the
         // request header (root when absent). `mirror` is a root-only superuser
         // flag that shadows every namespace's stream onto this device.
-        let namespace =
-            crate::modules::namespace::policy_scope::writer_namespace_path(req.headers.as_ref());
-        let mirror = req
-            .get_data("mirror")
-            .ok()
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let namespace = crate::modules::namespace::policy_scope::writer_namespace_path(req.headers.as_ref());
+        let mirror = req.get_data("mirror").ok().and_then(|v| v.as_bool()).unwrap_or(false);
 
-        let cfg = crate::audit::AuditDeviceConfig {
-            path,
-            device_type,
-            description,
-            options,
-            namespace,
-            mirror,
-        };
+        let cfg = crate::audit::AuditDeviceConfig { path, device_type, description, options, namespace, mirror };
         broker.enable_device(cfg).await?;
         Ok(None)
     }
@@ -3287,16 +3174,10 @@ impl SystemBackend {
         _backend: &dyn Backend,
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        let entity_id = req
-            .get_data("entity_id")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_default();
+        let entity_id =
+            req.get_data("entity_id").ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
         if entity_id.trim().is_empty() {
-            return Err(bv_error_response_status!(
-                400,
-                "entity_id is required and must be non-empty"
-            ));
+            return Err(bv_error_response_status!(400, "entity_id is required and must be non-empty"));
         }
 
         let resources: Vec<String> = req
@@ -3326,11 +3207,7 @@ impl SystemBackend {
             .filter_map(|v| v.as_str().map(|s| s.to_string()))
             .filter(|s| !s.trim().is_empty())
             .collect();
-        let dry_run = req
-            .get_data("dry_run")
-            .ok()
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let dry_run = req.get_data("dry_run").ok().and_then(|v| v.as_bool()).unwrap_or(false);
 
         if resources.is_empty() && kv_paths.is_empty() && file_ids.is_empty() {
             return Err(bv_error_response_status!(
@@ -3340,9 +3217,8 @@ impl SystemBackend {
         }
 
         let identity = self.get_module::<IdentityModule>("identity")?;
-        let store = identity.owner_store().ok_or_else(|| {
-            bv_error_response_status!(500, "owner store not initialized")
-        })?;
+        let store =
+            identity.owner_store().ok_or_else(|| bv_error_response_status!(500, "owner store not initialized"))?;
 
         let mut res_stamped = 0usize;
         let mut res_already = 0usize;
@@ -3365,9 +3241,7 @@ impl SystemBackend {
                 Some(_) => res_already += 1,
                 None => {
                     if !dry_run {
-                        store
-                            .record_resource_owner_if_absent(&key, &entity_id)
-                            .await?;
+                        store.record_resource_owner_if_absent(&key, &entity_id).await?;
                     }
                     res_stamped += 1;
                 }
@@ -3384,12 +3258,10 @@ impl SystemBackend {
             // `canonicalize_kv_path_scoped` returns None for malformed input
             // (empty segments, `..`, etc.); we surface those separately so the
             // operator sees exactly which paths were skipped.
-            let Some(key) =
-                crate::modules::identity::owner_store::OwnerStore::canonicalize_kv_path_scoped(
-                    path,
-                    req.namespace_path.as_deref(),
-                )
-            else {
+            let Some(key) = crate::modules::identity::owner_store::OwnerStore::canonicalize_kv_path_scoped(
+                path,
+                req.namespace_path.as_deref(),
+            ) else {
                 kv_invalid.push(path.clone());
                 continue;
             };
@@ -3397,9 +3269,7 @@ impl SystemBackend {
                 Some(_) => kv_already += 1,
                 None => {
                     if !dry_run {
-                        store
-                            .record_kv_owner_if_absent(&key, &entity_id)
-                            .await?;
+                        store.record_kv_owner_if_absent(&key, &entity_id).await?;
                     }
                     kv_stamped += 1;
                 }
@@ -3409,27 +3279,20 @@ impl SystemBackend {
         let mut resources_summary = Map::new();
         resources_summary.insert("stamped".into(), Value::from(res_stamped));
         resources_summary.insert("already_owned".into(), Value::from(res_already));
-        resources_summary.insert(
-            "invalid".into(),
-            Value::Array(res_invalid.into_iter().map(Value::String).collect()),
-        );
+        resources_summary.insert("invalid".into(), Value::Array(res_invalid.into_iter().map(Value::String).collect()));
 
         let mut kv_summary = Map::new();
         kv_summary.insert("stamped".into(), Value::from(kv_stamped));
         kv_summary.insert("already_owned".into(), Value::from(kv_already));
-        kv_summary.insert(
-            "invalid".into(),
-            Value::Array(kv_invalid.into_iter().map(Value::String).collect()),
-        );
+        kv_summary.insert("invalid".into(), Value::Array(kv_invalid.into_iter().map(Value::String).collect()));
 
         let mut file_stamped = 0usize;
         let mut file_already = 0usize;
         let mut file_invalid: Vec<String> = Vec::new();
         for id in &file_ids {
-            let Some(key) = crate::modules::identity::owner_store::OwnerStore::scope_target_name(
-                id,
-                req.namespace_path.as_deref(),
-            ) else {
+            let Some(key) =
+                crate::modules::identity::owner_store::OwnerStore::scope_target_name(id, req.namespace_path.as_deref())
+            else {
                 file_invalid.push(id.clone());
                 continue;
             };
@@ -3447,10 +3310,7 @@ impl SystemBackend {
         let mut files_summary = Map::new();
         files_summary.insert("stamped".into(), Value::from(file_stamped));
         files_summary.insert("already_owned".into(), Value::from(file_already));
-        files_summary.insert(
-            "invalid".into(),
-            Value::Array(file_invalid.into_iter().map(Value::String).collect()),
-        );
+        files_summary.insert("invalid".into(), Value::Array(file_invalid.into_iter().map(Value::String).collect()));
 
         let mut data = Map::new();
         data.insert("entity_id".into(), Value::String(entity_id));
@@ -3486,8 +3346,7 @@ impl SystemBackend {
         if path.trim().is_empty() {
             return Err(bv_error_response_status!(400, "path is required"));
         }
-        let namespace =
-            crate::modules::namespace::policy_scope::writer_namespace_path(req.headers.as_ref());
+        let namespace = crate::modules::namespace::policy_scope::writer_namespace_path(req.headers.as_ref());
         broker.disable_device(&namespace, &path).await?;
         Ok(None)
     }
@@ -3575,15 +3434,10 @@ impl SystemBackend {
                 Value::Number(n) => n.as_i64().map(|i| i != 0),
                 _ => None,
             })
-            .ok_or_else(|| {
-                RvError::ErrString("sso/settings: `enabled` must be a boolean".into())
-            })?;
+            .ok_or_else(|| RvError::ErrString("sso/settings: `enabled` must be a boolean".into()))?;
 
         let payload = json!({ "enabled": enabled });
-        let entry = StorageEntry {
-            key: Self::SSO_SETTINGS_KEY.to_string(),
-            value: serde_json::to_vec(&payload)?,
-        };
+        let entry = StorageEntry { key: Self::SSO_SETTINGS_KEY.to_string(), value: serde_json::to_vec(&payload)? };
         self.core.barrier().put(&entry).await?;
         Ok(None)
     }
@@ -3617,11 +3471,7 @@ impl SystemBackend {
                 // (set via `sys/auth/<mount>` description field). Fall
                 // back to the mount path so a blank description still
                 // renders something clickable.
-                let name = if entry.description.trim().is_empty() {
-                    mount.clone()
-                } else {
-                    entry.description.clone()
-                };
+                let name = if entry.description.trim().is_empty() { mount.clone() } else { entry.description.clone() };
                 let mut row = Map::new();
                 row.insert("mount".into(), Value::String(mount));
                 row.insert("name".into(), Value::String(name));
@@ -3652,10 +3502,7 @@ impl SystemBackend {
             return Ok(false);
         };
         let parsed: Value = serde_json::from_slice(&entry.value).unwrap_or(Value::Null);
-        Ok(parsed
-            .get("enabled")
-            .and_then(Value::as_bool)
-            .unwrap_or(false))
+        Ok(parsed.get("enabled").and_then(Value::as_bool).unwrap_or(false))
     }
 
     pub async fn handle_raw_delete(
@@ -3728,9 +3575,7 @@ impl SystemBackend {
         } else {
             let policy_module = self.get_module::<PolicyModule>("policy")?;
             let policy_store = policy_module.policy_store.load();
-            let acl: ACL = policy_store
-                .new_acl_for_request(&auth.policies, None, &auth, active_ns.as_deref())
-                .await?;
+            let acl: ACL = policy_store.new_acl_for_request(&auth.policies, None, &auth, active_ns.as_deref()).await?;
             let ns_prefix = match active_ns.as_deref() {
                 Some(p) if !p.is_empty() => format!("{}/", p.trim_end_matches('/')),
                 _ => String::new(),
@@ -3743,8 +3588,7 @@ impl SystemBackend {
                     // policy rules are `<ns>/`-prefixed.
                     let probe = qualify_capability_path(&ns_prefix, mount);
                     let caps = acl.capabilities(probe);
-                    caps.iter().any(|c| c == "root" || c == "read" || c == "list")
-                        && !caps.iter().any(|c| c == "deny")
+                    caps.iter().any(|c| c == "root" || c == "read" || c == "list") && !caps.iter().any(|c| c == "deny")
                 })
                 .collect()
         };
@@ -3775,10 +3619,7 @@ impl SystemBackend {
         let policy_module = self.get_module::<PolicyModule>("policy")?;
 
         let paths: Vec<String> = match req.get_data("paths") {
-            Ok(Value::Array(arr)) => arr
-                .iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect(),
+            Ok(Value::Array(arr)) => arr.iter().filter_map(|v| v.as_str().map(String::from)).collect(),
             Ok(Value::String(s)) => vec![s],
             _ => Vec::new(),
         };
@@ -3789,10 +3630,7 @@ impl SystemBackend {
         // The capabilities are those of the authenticated caller. An
         // unauthenticated request cannot reach a `Write` route, so `auth`
         // is present; treat its absence as deny.
-        let auth = req
-            .auth
-            .clone()
-            .ok_or(RvError::ErrPermissionDenied)?;
+        let auth = req.auth.clone().ok_or(RvError::ErrPermissionDenied)?;
 
         // Multi-tenancy honesty: `sys/capabilities-self` is a `sys/` path, so it
         // is exempt from `enforce_request_token_binding` and would otherwise
@@ -3803,27 +3641,20 @@ impl SystemBackend {
         // names a namespace this token cannot operate in, advertise no
         // capabilities and surface the mismatch so the UI can explain it rather
         // than let the caller walk into an opaque denial.
-        let active_ns = self
-            .resolve_request_namespace(req)
-            .await?
-            .map(|(_, path)| path);
+        let active_ns = self.resolve_request_namespace(req).await?.map(|(_, path)| path);
         // `checked`, not `resolved`: this verdict is *reported* to the client,
         // and the GUI turns `false` into "you have no allowed-namespace entry".
         // A storage error (e.g. a hiqlite read timing out on an unhealthy
         // cluster) must surface as an error, not as that claim.
         let operable = match active_ns.as_deref() {
             Some(ns_path) => {
-                crate::modules::namespace::token_binding::token_operable_checked(
-                    &self.core, &auth, ns_path,
-                )
-                .await?
+                crate::modules::namespace::token_binding::token_operable_checked(&self.core, &auth, ns_path).await?
             }
             None => true,
         };
 
         if !operable {
-            let (token_ns, _) =
-                crate::modules::namespace::token_binding::binding_from_metadata(&auth.metadata);
+            let (token_ns, _) = crate::modules::namespace::token_binding::binding_from_metadata(&auth.metadata);
             let mut capabilities = Map::new();
             for path in &paths {
                 capabilities.insert(path.clone(), Value::Array(vec![]));
@@ -3832,17 +3663,12 @@ impl SystemBackend {
             data.insert("capabilities".into(), Value::Object(capabilities));
             data.insert("namespace_operable".into(), Value::Bool(false));
             data.insert("token_namespace".into(), Value::String(token_ns));
-            data.insert(
-                "active_namespace".into(),
-                Value::String(active_ns.unwrap_or_default()),
-            );
+            data.insert("active_namespace".into(), Value::String(active_ns.unwrap_or_default()));
             return Ok(Some(Response::data_response(Some(data))));
         }
 
         let policy_store = policy_module.policy_store.load();
-        let acl: ACL = policy_store
-            .new_acl_for_request(&auth.policies, None, &auth, active_ns.as_deref())
-            .await?;
+        let acl: ACL = policy_store.new_acl_for_request(&auth.policies, None, &auth, active_ns.as_deref()).await?;
 
         // Probe the path the *router* would authorize, not the one the client
         // typed. See `qualify_capability_path`: without this every mount-backed
@@ -3879,9 +3705,7 @@ impl SystemBackend {
                     ("delete", Operation::Delete),
                 ] {
                     if caps.iter().any(|c| c == cap_name)
-                        && !policy_store
-                            .can_operate(&auth, &probe, op, active_ns.as_deref())
-                            .await
+                        && !policy_store.can_operate(&auth, &probe, op, active_ns.as_deref()).await
                     {
                         caps.retain(|c| c != cap_name);
                     }
@@ -3897,18 +3721,14 @@ impl SystemBackend {
                     let mut probe_req = Request::new(&probe);
                     probe_req.operation = Operation::Read;
                     probe_req.auth = Some(auth.clone());
-                    probe_req.namespace_path =
-                        active_ns.as_deref().filter(|p| !p.is_empty()).map(String::from);
+                    probe_req.namespace_path = active_ns.as_deref().filter(|p| !p.is_empty()).map(String::from);
                     if !policy_store.may_connect_target(&probe_req, &probe).await {
                         caps.retain(|c| c != "connect");
                     }
                 }
             }
 
-            capabilities.insert(
-                path.clone(),
-                Value::Array(caps.into_iter().map(Value::String).collect()),
-            );
+            capabilities.insert(path.clone(), Value::Array(caps.into_iter().map(Value::String).collect()));
         }
 
         // Vault returns both a `capabilities` map and per-path top-level
@@ -3926,13 +3746,9 @@ impl SystemBackend {
         // tenant session as sitting at root. Both fields carry the same meaning in
         // both branches: `""` means the root namespace, and now says so because
         // that is the answer, not because the key was missing.
-        let (token_ns, _) =
-            crate::modules::namespace::token_binding::binding_from_metadata(&auth.metadata);
+        let (token_ns, _) = crate::modules::namespace::token_binding::binding_from_metadata(&auth.metadata);
         data.insert("token_namespace".into(), Value::String(token_ns));
-        data.insert(
-            "active_namespace".into(),
-            Value::String(active_ns.unwrap_or_default()),
-        );
+        data.insert("active_namespace".into(), Value::String(active_ns.unwrap_or_default()));
 
         Ok(Some(Response::data_response(Some(data))))
     }
@@ -3970,12 +3786,7 @@ impl SystemBackend {
                 policy_module
                     .policy_store
                     .load()
-                    .new_acl_for_request(
-                        &auth.policies,
-                        None,
-                        &auth,
-                        req.namespace_path.as_deref(),
-                    )
+                    .new_acl_for_request(&auth.policies, None, &auth, req.namespace_path.as_deref())
                     .await?,
             ),
             _ => None,
@@ -4031,9 +3842,7 @@ impl SystemBackend {
         let policies = if ns_path.is_empty() {
             policy_store.list_policy(crate::modules::policy::PolicyType::Acl).await
         } else {
-            policy_store
-                .list_policy_ns(crate::modules::policy::PolicyType::Acl, &ns_path)
-                .await
+            policy_store.list_policy_ns(crate::modules::policy::PolicyType::Acl, &ns_path).await
         }
         .map(|v| v.len())
         .unwrap_or(0);
@@ -4041,13 +3850,9 @@ impl SystemBackend {
         // --- Entity count ---------------------------------------------
         let entities = if let Ok(identity_module) = self.get_module::<IdentityModule>("identity") {
             if let Some(es) = identity_module.entity_store() {
-                if ns_path.is_empty() {
-                    es.list_entities().await
-                } else {
-                    es.list_entities_ns(&ns_path).await
-                }
-                .map(|v| v.len())
-                .unwrap_or(0)
+                if ns_path.is_empty() { es.list_entities().await } else { es.list_entities_ns(&ns_path).await }
+                    .map(|v| v.len())
+                    .unwrap_or(0)
             } else {
                 0
             }
@@ -4071,8 +3876,7 @@ impl SystemBackend {
         // sudo-gated via `root_paths` ("audit/*"), so an audit-capable operator
         // presents `sudo`. Accept all three or the admin Dashboard loses the
         // tiles it has always shown.
-        let audit_caps: Vec<String> =
-            acl.as_ref().map(|a| a.capabilities("sys/audit/events")).unwrap_or_default();
+        let audit_caps: Vec<String> = acl.as_ref().map(|a| a.capabilities("sys/audit/events")).unwrap_or_default();
         let has_cap = |cap: &str| audit_caps.iter().any(|c| c == cap);
         // The aggregate counters keep the gate they have always had.
         let audit_visible = has_cap("root") || has_cap("sudo") || has_cap("read");
@@ -4140,10 +3944,7 @@ impl SystemBackend {
                         "write_failures": stats.audit_write_failures_24h(now_secs),
                     }),
                 );
-                data.insert(
-                    "attention".to_string(),
-                    json!({ "failed_logins_1h": record.failed_logins_1h }),
-                );
+                data.insert("attention".to_string(), json!({ "failed_logins_1h": record.failed_logins_1h }));
             }
             data.insert("audit_stats".to_string(), view.to_json(audit_detail_visible));
         }
@@ -4201,14 +4002,22 @@ impl SystemBackend {
     }
 
     /// `GET v2/sys/hsm/members` — the seal record's pool members (sudo).
-    pub async fn handle_hsm_members(&self, _backend: &dyn Backend, _req: &mut Request) -> Result<Option<Response>, RvError> {
+    pub async fn handle_hsm_members(
+        &self,
+        _backend: &dyn Backend,
+        _req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
         let provider = self.hsm_pool_provider()?;
         let hsm = provider.as_hsm().ok_or(RvError::ErrHsmUnavailable)?;
         Self::hsm_json(hsm.hsm_members().await.map_err(Self::hsm_refusal)?)
     }
 
     /// `POST v2/sys/hsm/members/:name` — attest and add a member (sudo).
-    pub async fn handle_hsm_member_add(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+    pub async fn handle_hsm_member_add(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
         let name = req.get_data_as_str("name")?;
         let raw_bundle = req.get_data_as_str("bundle")?;
         let gateway = req.get_data("gateway").ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
@@ -4236,7 +4045,11 @@ impl SystemBackend {
     }
 
     /// `GET v2/sys/hsm/nodes` — enrolled and pending nodes (sudo).
-    pub async fn handle_hsm_nodes(&self, _backend: &dyn Backend, _req: &mut Request) -> Result<Option<Response>, RvError> {
+    pub async fn handle_hsm_nodes(
+        &self,
+        _backend: &dyn Backend,
+        _req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
         let provider = self.hsm_pool_provider()?;
         let hsm = provider.as_hsm().ok_or(RvError::ErrHsmUnavailable)?;
         Self::hsm_json(hsm.hsm_nodes().await.map_err(Self::hsm_refusal)?)
@@ -4284,7 +4097,11 @@ impl SystemBackend {
 
     /// `POST v2/sys/hsm/repair` — run the repair job now (sudo). With admin
     /// credentials it also applies pending revocations and promotes members.
-    pub async fn handle_hsm_repair(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+    pub async fn handle_hsm_repair(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
         let admin = Self::hsm_admin_credentials(req)?;
         let provider = self.hsm_pool_provider()?;
         let hsm = provider.as_hsm().ok_or(RvError::ErrHsmUnavailable)?;
@@ -4326,27 +4143,23 @@ impl SystemBackend {
         let mut is_authed = false;
 
         let client_ip = req.connection.as_ref().map(|c| c.client_ip()).unwrap_or_default();
-        let acl: Option<ACL> = if let Some(auth) = token_store.check_token(&req.path, &req.client_token, &client_ip, false).await? {
-            if auth.policies.is_empty() {
-                None
+        let acl: Option<ACL> =
+            if let Some(auth) = token_store.check_token(&req.path, &req.client_token, &client_ip, false).await? {
+                if auth.policies.is_empty() {
+                    None
+                } else {
+                    is_authed = true;
+                    Some(
+                        policy_module
+                            .policy_store
+                            .load()
+                            .new_acl_for_request(&auth.policies, None, &auth, req.namespace_path.as_deref())
+                            .await?,
+                    )
+                }
             } else {
-                is_authed = true;
-                Some(
-                    policy_module
-                        .policy_store
-                        .load()
-                        .new_acl_for_request(
-                            &auth.policies,
-                            None,
-                            &auth,
-                            req.namespace_path.as_deref(),
-                        )
-                        .await?,
-                )
-            }
-        } else {
-            None
-        };
+                None
+            };
 
         let has_access = |me: &MountEntry| -> bool {
             if !is_authed {
@@ -4395,10 +4208,8 @@ impl SystemBackend {
                         // to nothing. Root never saw it: `ACL::has_mount_access`
                         // short-circuits on the root policy.
                         if acl.has_mount_access(&format!("{path}/{mount_path}")) {
-                            secret_mounts.insert(
-                                mount_path,
-                                json!({ "type": logical_type, "description": description }),
-                            );
+                            secret_mounts
+                                .insert(mount_path, json!({ "type": logical_type, "description": description }));
                         }
                     }
                 }
@@ -4410,8 +4221,7 @@ impl SystemBackend {
                     let me = entry.read()?;
                     if has_access(&me) {
                         if is_authed {
-                            secret_mounts
-                                .insert(path.clone(), Value::Object(self.mount_info(&me)));
+                            secret_mounts.insert(path.clone(), Value::Object(self.mount_info(&me)));
                         } else {
                             secret_mounts.insert(
                                 path.clone(),
@@ -4542,9 +4352,7 @@ impl SystemBackend {
             .ok_or_else(|| bv_error_string!("namespace store unavailable"))
     }
 
-    fn namespace_registry(
-        &self,
-    ) -> Result<Arc<crate::modules::namespace::NamespaceMountRegistry>, RvError> {
+    fn namespace_registry(&self) -> Result<Arc<crate::modules::namespace::NamespaceMountRegistry>, RvError> {
         self.core
             .module_manager()
             .get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
@@ -4556,10 +4364,7 @@ impl SystemBackend {
     /// `X-BastionVault-Namespace` header. Returns `None` for the root
     /// namespace (operate on `Core`'s mount table) or `Some((uuid, path))` for
     /// a child namespace (operate on the per-namespace registry).
-    async fn resolve_request_namespace(
-        &self,
-        req: &Request,
-    ) -> Result<Option<(String, String)>, RvError> {
+    async fn resolve_request_namespace(&self, req: &Request) -> Result<Option<(String, String)>, RvError> {
         let Some(raw) = namespace_header_from_map(req.headers.as_ref()) else {
             return Ok(None);
         };
@@ -4684,17 +4489,14 @@ impl SystemBackend {
         // A `Read` route is only reachable authenticated; treat a missing auth as
         // deny rather than as "root namespace only".
         let auth = req.auth.clone().ok_or(RvError::ErrPermissionDenied)?;
-        let (token_ns, _) =
-            crate::modules::namespace::token_binding::binding_from_metadata(&auth.metadata);
+        let (token_ns, _) = crate::modules::namespace::token_binding::binding_from_metadata(&auth.metadata);
         let is_root = auth.policies.iter().any(|p| p == "root");
 
         // Non-namespace builds (module absent) have exactly one namespace: root.
         // Degrade to that rather than erroring — the caller only wants to know
         // what it can switch between.
         let Ok(store) = self.resolve_namespace_store() else {
-            let data = json!({ "namespaces": [""], "token_namespace": "", "root": is_root })
-                .as_object()
-                .cloned();
+            let data = json!({ "namespaces": [""], "token_namespace": "", "root": is_root }).as_object().cloned();
             return Ok(Some(Response::data_response(data)));
         };
 
@@ -4702,11 +4504,7 @@ impl SystemBackend {
         for ns in store.list_all().await? {
             // `checked`: a storage error must fail the listing, not silently
             // drop the namespaces whose assignment could not be read.
-            if crate::modules::namespace::token_binding::token_operable_checked(
-                &self.core, &auth, &ns.path,
-            )
-            .await?
-            {
+            if crate::modules::namespace::token_binding::token_operable_checked(&self.core, &auth, &ns.path).await? {
                 namespaces.push(ns.path);
             }
         }
@@ -4762,13 +4560,9 @@ impl SystemBackend {
             request_rate: req.get_data_or_default("request_rate")?.as_u64().unwrap_or(0),
             max_mounts: req.get_data_or_default("max_mounts")?.as_u64().unwrap_or(0),
             max_entities: req.get_data_or_default("max_entities")?.as_u64().unwrap_or(0),
-            max_child_namespaces: req
-                .get_data_or_default("max_child_namespaces")?
-                .as_u64()
-                .unwrap_or(0),
+            max_child_namespaces: req.get_data_or_default("max_child_namespaces")?.as_u64().unwrap_or(0),
         };
-        let child_visible_default =
-            req.get_data_or_default("child_visible_default")?.as_bool().unwrap_or(false);
+        let child_visible_default = req.get_data_or_default("child_visible_default")?.as_bool().unwrap_or(false);
 
         let ns = store.update(&path, Some(quotas), Some(child_visible_default)).await?;
         Ok(Some(Self::namespace_to_response(&ns)))
@@ -4801,13 +4595,9 @@ impl SystemBackend {
             request_rate: req.get_data_or_default("request_rate")?.as_u64().unwrap_or(0),
             max_mounts: req.get_data_or_default("max_mounts")?.as_u64().unwrap_or(0),
             max_entities: req.get_data_or_default("max_entities")?.as_u64().unwrap_or(0),
-            max_child_namespaces: req
-                .get_data_or_default("max_child_namespaces")?
-                .as_u64()
-                .unwrap_or(0),
+            max_child_namespaces: req.get_data_or_default("max_child_namespaces")?.as_u64().unwrap_or(0),
         };
-        let child_visible_default =
-            req.get_data_or_default("child_visible_default")?.as_bool().unwrap_or(false);
+        let child_visible_default = req.get_data_or_default("child_visible_default")?.as_bool().unwrap_or(false);
 
         // Create-or-update (upsert): the logical operation model has no PATCH,
         // so a Write to an existing namespace updates its quotas and
@@ -4843,9 +4633,7 @@ impl SystemBackend {
     /// namespace creation, so the namespace still exists and the operator can
     /// mount the remainder manually.
     async fn seed_default_namespace_mounts(&self, ns_uuid: &str, ns_path: &str) {
-        let Some(module) =
-            self.core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
-        else {
+        let Some(module) = self.core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME) else {
             log::warn!(target: "namespace", "cannot seed default mounts: namespace module unavailable");
             return;
         };
@@ -4884,18 +4672,11 @@ impl SystemBackend {
         // engine's barrier view, so this destroys any secrets/resources the
         // namespace held — deleting a tenant removes the tenant's data.
         if let Some(ns) = store.get_by_path(&path).await? {
-            if let Some(module) =
-                self.core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
-            {
-                let mounts = module
-                    .registry
-                    .list_mounts(self.core.clone(), &ns.uuid, &ns.path)
-                    .await
-                    .unwrap_or_default();
+            if let Some(module) = self.core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME) {
+                let mounts =
+                    module.registry.list_mounts(self.core.clone(), &ns.uuid, &ns.path).await.unwrap_or_default();
                 for (mount_path, _type, _desc) in mounts {
-                    if let Err(e) =
-                        module.registry.unmount(self.core.clone(), &ns.uuid, &ns.path, &mount_path).await
-                    {
+                    if let Err(e) = module.registry.unmount(self.core.clone(), &ns.uuid, &ns.path, &mount_path).await {
                         log::warn!(
                             target: "namespace",
                             "cascade-unmount {mount_path} in namespace {:?} failed: {e}",
@@ -4913,9 +4694,7 @@ impl SystemBackend {
         Ok(None)
     }
 
-    fn resolve_namespace_link_store(
-        &self,
-    ) -> Result<Arc<crate::modules::namespace::IdentityLinkStore>, RvError> {
+    fn resolve_namespace_link_store(&self) -> Result<Arc<crate::modules::namespace::IdentityLinkStore>, RvError> {
         self.core
             .module_manager()
             .get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
@@ -4924,11 +4703,8 @@ impl SystemBackend {
     }
 
     fn link_to_response(link: &crate::modules::namespace::IdentityLink) -> Response {
-        let members: Vec<Value> = link
-            .members
-            .iter()
-            .map(|m| json!({ "namespace": m.namespace, "entity_id": m.entity_id }))
-            .collect();
+        let members: Vec<Value> =
+            link.members.iter().map(|m| json!({ "namespace": m.namespace, "entity_id": m.entity_id })).collect();
         let data = json!({
             "id": link.id,
             "parent_namespace": link.parent_namespace,
@@ -4961,16 +4737,10 @@ impl SystemBackend {
         let links = self.resolve_namespace_link_store()?;
         let ns_store = self.resolve_namespace_store()?;
         let parent = namespace_header_from_map(req.headers.as_ref()).unwrap_or_default();
-        let label = req
-            .get_data("label")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_default();
+        let label = req.get_data("label").ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
 
         let members_val = req.get_data("members")?;
-        let arr = members_val
-            .as_array()
-            .ok_or_else(|| bv_error_response_status!(400, "members must be an array"))?;
+        let arr = members_val.as_array().ok_or_else(|| bv_error_response_status!(400, "members must be an array"))?;
         let mut members = Vec::with_capacity(arr.len());
         for m in arr {
             let namespace = m
@@ -5016,9 +4786,7 @@ impl SystemBackend {
         Ok(None)
     }
 
-    fn resolve_ns_assignment_store(
-        &self,
-    ) -> Result<crate::modules::namespace::NsAssignmentStore, RvError> {
+    fn resolve_ns_assignment_store(&self) -> Result<crate::modules::namespace::NsAssignmentStore, RvError> {
         crate::modules::namespace::NsAssignmentStore::new(&self.core)
     }
 
@@ -5051,11 +4819,11 @@ impl SystemBackend {
         records.sort_by(|a, b| (a.mount.as_str(), a.name.as_str()).cmp(&(b.mount.as_str(), b.name.as_str())));
         let assignments: Vec<Value> = records
             .iter()
-            .map(|a| json!({ "mount": a.mount, "name": a.name, "namespaces": a.namespaces, "updated_at": a.updated_at }))
+            .map(
+                |a| json!({ "mount": a.mount, "name": a.name, "namespaces": a.namespaces, "updated_at": a.updated_at }),
+            )
             .collect();
-        Ok(Some(Response::data_response(
-            json!({ "assignments": assignments }).as_object().cloned(),
-        )))
+        Ok(Some(Response::data_response(json!({ "assignments": assignments }).as_object().cloned())))
     }
 
     pub async fn handle_ns_assignment_read(
@@ -5182,26 +4950,20 @@ impl SystemBackend {
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let ip_str = req.get_data_as_str("ip")?;
-        let ip: std::net::IpAddr = ip_str
-            .parse()
-            .map_err(|_| bv_error_response_status!(400, &format!("invalid IP address: {ip_str}")))?;
+        let ip: std::net::IpAddr =
+            ip_str.parse().map_err(|_| bv_error_response_status!(400, &format!("invalid IP address: {ip_str}")))?;
         // Default the TTL to the configured ban duration, or 300s if auto-ban
         // is disabled (ban_secs == 0) so a manual ban still has an effect.
         let cfg_ban = self.core.dos_guard.config().ban_secs;
-        let ttl = req
-            .get_data("ttl_secs")
-            .ok()
-            .and_then(|v| v.as_u64())
-            .filter(|&t| t > 0)
-            .unwrap_or(if cfg_ban > 0 { cfg_ban } else { 300 });
-        let reason = req
-            .get_data_as_str("reason")
-            .unwrap_or_else(|_| "manually banned by operator".to_string());
+        let ttl = req.get_data("ttl_secs").ok().and_then(|v| v.as_u64()).filter(|&t| t > 0).unwrap_or(if cfg_ban > 0 {
+            cfg_ban
+        } else {
+            300
+        });
+        let reason = req.get_data_as_str("reason").unwrap_or_else(|_| "manually banned by operator".to_string());
         self.core.dos_manual_ban(ip, ttl, &reason).await?;
         Ok(Some(Response::data_response(
-            json!({ "ip": ip_str, "banned": true, "ttl_secs": ttl, "reason": reason })
-                .as_object()
-                .cloned(),
+            json!({ "ip": ip_str, "banned": true, "ttl_secs": ttl, "reason": reason }).as_object().cloned(),
         )))
     }
 
@@ -5211,18 +4973,13 @@ impl SystemBackend {
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let ip_str = req.get_data_as_str("ip")?;
-        let ip: std::net::IpAddr = ip_str
-            .parse()
-            .map_err(|_| bv_error_response_status!(400, &format!("invalid IP address: {ip_str}")))?;
+        let ip: std::net::IpAddr =
+            ip_str.parse().map_err(|_| bv_error_response_status!(400, &format!("invalid IP address: {ip_str}")))?;
         let existed = self.core.dos_unban(ip).await?;
-        Ok(Some(Response::data_response(
-            json!({ "ip": ip_str, "unbanned": existed }).as_object().cloned(),
-        )))
+        Ok(Some(Response::data_response(json!({ "ip": ip_str, "unbanned": existed }).as_object().cloned())))
     }
 
-    fn resolve_default_account_store(
-        &self,
-    ) -> Result<crate::modules::identity::DefaultResourceAccountStore, RvError> {
+    fn resolve_default_account_store(&self) -> Result<crate::modules::identity::DefaultResourceAccountStore, RvError> {
         crate::modules::identity::DefaultResourceAccountStore::new(&self.core)
     }
 
@@ -5244,16 +5001,10 @@ impl SystemBackend {
                 data.insert("linux".into(), Value::String(a.linux.clone()));
                 data.insert("macos".into(), Value::String(a.macos.clone()));
                 data.insert("windows".into(), Value::String(a.windows.clone()));
-                data.insert(
-                    "has_windows_password".into(),
-                    Value::Bool(a.has_windows_password()),
-                );
+                data.insert("has_windows_password".into(), Value::Bool(a.has_windows_password()));
                 data.insert("updated_at".into(), Value::String(a.updated_at.clone()));
                 if reveal_password {
-                    data.insert(
-                        "windows_password".into(),
-                        Value::String(a.windows_password.clone()),
-                    );
+                    data.insert("windows_password".into(), Value::String(a.windows_password.clone()));
                 }
             }
             None => {
@@ -5281,9 +5032,7 @@ impl SystemBackend {
     ) -> Result<Option<Response>, RvError> {
         let store = self.resolve_default_account_store()?;
         let mut records = store.list().await?;
-        records.sort_by(|a, b| {
-            (a.mount.as_str(), a.name.as_str()).cmp(&(b.mount.as_str(), b.name.as_str()))
-        });
+        records.sort_by(|a, b| (a.mount.as_str(), a.name.as_str()).cmp(&(b.mount.as_str(), b.name.as_str())));
         let accounts: Vec<Value> = records
             .iter()
             .map(|a| {
@@ -5299,9 +5048,7 @@ impl SystemBackend {
                 })
             })
             .collect();
-        Ok(Some(Response::data_response(
-            json!({ "accounts": accounts }).as_object().cloned(),
-        )))
+        Ok(Some(Response::data_response(json!({ "accounts": accounts }).as_object().cloned())))
     }
 
     pub async fn handle_default_account_read(
@@ -5314,12 +5061,7 @@ impl SystemBackend {
         let name = req.get_data_as_str("name")?;
         let rec = store.get(&mount, &name).await?;
         // Admin read: password masked (has_windows_password only).
-        Ok(Some(Self::default_account_to_response(
-            rec.as_ref(),
-            &mount,
-            &name,
-            false,
-        )))
+        Ok(Some(Self::default_account_to_response(rec.as_ref(), &mount, &name, false)))
     }
 
     pub async fn handle_default_account_write(
@@ -5339,23 +5081,12 @@ impl SystemBackend {
         // record without re-typing the password does not wipe it.
         let windows_password = match req.get_data("windows_password") {
             Ok(v) => v.as_str().unwrap_or("").to_string(),
-            Err(_) => store
-                .get(&mount, &name)
-                .await?
-                .map(|a| a.windows_password)
-                .unwrap_or_default(),
+            Err(_) => store.get(&mount, &name).await?.map(|a| a.windows_password).unwrap_or_default(),
         };
-        let rec = store
-            .set(&mount, &name, &linux, &macos, &windows, &windows_password)
-            .await?;
+        let rec = store.set(&mount, &name, &linux, &macos, &windows, &windows_password).await?;
         match rec {
             // Echo back masked (never the plaintext that was just written).
-            Some(a) => Ok(Some(Self::default_account_to_response(
-                Some(&a),
-                &mount,
-                &name,
-                false,
-            ))),
+            Some(a) => Ok(Some(Self::default_account_to_response(Some(&a), &mount, &name, false))),
             None => Ok(None), // all-empty cleared the record
         }
     }
@@ -5390,12 +5121,7 @@ impl SystemBackend {
     ) -> Result<Option<Response>, RvError> {
         let (candidates, existing) = self.self_default_account(req).await?;
         if let Some(a) = existing {
-            return Ok(Some(Self::default_account_to_response(
-                Some(&a),
-                &a.mount,
-                &a.name,
-                true,
-            )));
+            return Ok(Some(Self::default_account_to_response(Some(&a), &a.mount, &a.name, true)));
         }
 
         // Nothing on file — echo the best-known principal for context.
@@ -5435,10 +5161,7 @@ impl SystemBackend {
         };
 
         // 1) Fast path: backends that stamp mount_path + username.
-        if let (Some(mp), Some(un)) = (
-            auth.metadata.get("mount_path"),
-            auth.metadata.get("username"),
-        ) {
+        if let (Some(mp), Some(un)) = (auth.metadata.get("mount_path"), auth.metadata.get("username")) {
             push(&mut candidates, mp, un);
         }
 
@@ -5464,13 +5187,7 @@ impl SystemBackend {
     pub(crate) async fn self_default_account(
         &self,
         req: &Request,
-    ) -> Result<
-        (
-            Vec<(String, String)>,
-            Option<crate::modules::identity::DefaultResourceAccount>,
-        ),
-        RvError,
-    > {
+    ) -> Result<(Vec<(String, String)>, Option<crate::modules::identity::DefaultResourceAccount>), RvError> {
         let candidates = self.self_default_account_candidates(req).await?;
         let store = self.resolve_default_account_store()?;
         for (mount, name) in &candidates {
@@ -5529,23 +5246,14 @@ impl SystemBackend {
         let windows_password = field("windows_password", &stored.windows_password)?;
 
         let store = self.resolve_default_account_store()?;
-        let rec = store
-            .set(&mount, &name, &linux, &macos, &windows, &windows_password)
-            .await?;
+        let rec = store.set(&mount, &name, &linux, &macos, &windows, &windows_password).await?;
 
-        Ok(Some(Self::default_account_to_response(
-            rec.as_ref(),
-            &mount,
-            &name,
-            false,
-        )))
+        Ok(Some(Self::default_account_to_response(rec.as_ref(), &mount, &name, false)))
     }
 
     // ── SSH security keys (features/connect-mfa-and-fido2-ssh.md) ────
 
-    fn resolve_ssh_security_key_store(
-        &self,
-    ) -> Result<crate::modules::identity::SshSecurityKeyStore, RvError> {
+    fn resolve_ssh_security_key_store(&self) -> Result<crate::modules::identity::SshSecurityKeyStore, RvError> {
         crate::modules::identity::SshSecurityKeyStore::new(&self.core)
     }
 
@@ -5595,9 +5303,7 @@ impl SystemBackend {
     ) -> Result<Option<Response>, RvError> {
         let store = self.resolve_ssh_security_key_store()?;
         let mut records = store.list().await?;
-        records.sort_by(|a, b| {
-            (a.mount.as_str(), a.name.as_str()).cmp(&(b.mount.as_str(), b.name.as_str()))
-        });
+        records.sort_by(|a, b| (a.mount.as_str(), a.name.as_str()).cmp(&(b.mount.as_str(), b.name.as_str())));
         let keys: Vec<Value> = records
             .iter()
             .map(|k| {
@@ -5739,11 +5445,8 @@ impl SystemBackend {
         name: &str,
     ) -> Result<Option<Response>, RvError> {
         let required = |req: &mut Request, key: &str| -> Result<String, RvError> {
-            let v = req
-                .get_data(key)
-                .ok()
-                .and_then(|v| v.as_str().map(|s| s.trim().to_string()))
-                .filter(|s| !s.is_empty());
+            let v =
+                req.get_data(key).ok().and_then(|v| v.as_str().map(|s| s.trim().to_string())).filter(|s| !s.is_empty());
             v.ok_or_else(|| bv_error_response_status!(400, &format!("`{key}` is required")))
         };
 
@@ -5752,8 +5455,7 @@ impl SystemBackend {
         let credential_id = required(req, "credential_id")?;
         let application =
             req.get_data("application").ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
-        let comment =
-            req.get_data("comment").ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+        let comment = req.get_data("comment").ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
 
         let rec = store
             .set(mount, name, &algorithm, &public_key, &credential_id, &application, &comment)
@@ -5766,7 +5468,11 @@ impl SystemBackend {
 
 impl SystemModule {
     pub fn new(core: Arc<Core>) -> Self {
-        Self { name: "system".to_string(), backend: SystemBackend::new(core), housekeeping_started: AtomicBool::new(false) }
+        Self {
+            name: "system".to_string(),
+            backend: SystemBackend::new(core),
+            housekeeping_started: AtomicBool::new(false),
+        }
     }
 }
 
@@ -5941,11 +5647,7 @@ mod mod_system_tests {
 
         // Two userpass users, one per policy.
         server
-            .write(
-                "v1/sys/auth/pass",
-                serde_json::json!({ "type": "userpass" }).as_object().cloned(),
-                Some(&root),
-            )
+            .write("v1/sys/auth/pass", serde_json::json!({ "type": "userpass" }).as_object().cloned(), Some(&root))
             .unwrap();
         for (user, policy) in [("conn", "connect-only"), ("both", "read-connect")] {
             server
@@ -5984,9 +5686,7 @@ mod mod_system_tests {
                 .request(
                     "POST",
                     "v2/sys/capabilities-self",
-                    serde_json::json!({ "paths": ["resources/secrets/db-prod/"] })
-                        .as_object()
-                        .cloned(),
+                    serde_json::json!({ "paths": ["resources/secrets/db-prod/"] }).as_object().cloned(),
                     Some(token),
                     None,
                 )
@@ -6054,11 +5754,7 @@ mod mod_system_tests {
             )
             .unwrap();
         server
-            .write(
-                "v1/sys/auth/pass",
-                serde_json::json!({ "type": "userpass" }).as_object().cloned(),
-                Some(&root),
-            )
+            .write("v1/sys/auth/pass", serde_json::json!({ "type": "userpass" }).as_object().cloned(), Some(&root))
             .unwrap();
         server
             .write(
@@ -6072,8 +5768,7 @@ mod mod_system_tests {
 
         // Login carrying an optional namespace header; returns the token.
         let login_ns = |server: &TestHttpServer, ns: Option<&str>| -> String {
-            let headers: Vec<(&str, &str)> =
-                ns.map(|n| vec![("X-BastionVault-Namespace", n)]).unwrap_or_default();
+            let headers: Vec<(&str, &str)> = ns.map(|n| vec![("X-BastionVault-Namespace", n)]).unwrap_or_default();
             server
                 .request_with_headers(
                     "POST",
@@ -6094,8 +5789,7 @@ mod mod_system_tests {
 
         // capabilities-self against `secret/data/x` with an optional active-ns header.
         let caps_ns = |server: &TestHttpServer, token: &str, ns: Option<&str>| -> Value {
-            let headers: Vec<(&str, &str)> =
-                ns.map(|n| vec![("X-BastionVault-Namespace", n)]).unwrap_or_default();
+            let headers: Vec<(&str, &str)> = ns.map(|n| vec![("X-BastionVault-Namespace", n)]).unwrap_or_default();
             let (s, r) = server
                 .request_with_headers(
                     "POST",
@@ -6147,10 +5841,7 @@ mod mod_system_tests {
         // root. `""` must mean root because that is the answer, not because the
         // key was missing, so assert presence explicitly and not just the value.
         for k in ["token_namespace", "active_namespace"] {
-            assert!(
-                at_root.get(k).is_some(),
-                "{k} must be present on a successful capabilities-self: {at_root:?}"
-            );
+            assert!(at_root.get(k).is_some(), "{k} must be present on a successful capabilities-self: {at_root:?}");
             assert_eq!(at_root[k], serde_json::json!(""), "{k} at root is the empty string");
         }
 
@@ -6230,9 +5921,8 @@ mod mod_system_tests {
         // A child namespace and a userpass user whose only policy exists at
         // root (so it is absent from the child keyspace — the "empty
         // namespace" condition).
-        let (s, r) = server
-            .write("v1/sys/namespaces/nsx", serde_json::json!({}).as_object().cloned(), Some(&root))
-            .unwrap();
+        let (s, r) =
+            server.write("v1/sys/namespaces/nsx", serde_json::json!({}).as_object().cloned(), Some(&root)).unwrap();
         assert!((200..300).contains(&s), "ns create: {s} {r:?}");
         server
             .write(
@@ -6313,21 +6003,13 @@ mod mod_system_tests {
 
         for path in ["dti", "dti/esi"] {
             let (s, r) = server
-                .write(
-                    &format!("v1/sys/namespaces/{path}"),
-                    serde_json::json!({}).as_object().cloned(),
-                    Some(&root),
-                )
+                .write(&format!("v1/sys/namespaces/{path}"), serde_json::json!({}).as_object().cloned(), Some(&root))
                 .unwrap();
             assert!((200..300).contains(&s), "ns create {path}: {s} {r:?}");
         }
 
         server
-            .write(
-                "v1/sys/auth/userpass",
-                serde_json::json!({ "type": "userpass" }).as_object().cloned(),
-                Some(&root),
-            )
+            .write("v1/sys/auth/userpass", serde_json::json!({ "type": "userpass" }).as_object().cloned(), Some(&root))
             .unwrap();
         let (s, r) = server
             .write(
@@ -6444,9 +6126,8 @@ mod mod_system_tests {
         );
 
         // And the switcher's own source of truth must offer the namespaces.
-        let (s, selfns) = server
-            .request_with_headers("GET", "v2/sys/namespaces-self", None, Some(&token), None, &[])
-            .unwrap();
+        let (s, selfns) =
+            server.request_with_headers("GET", "v2/sys/namespaces-self", None, Some(&token), None, &[]).unwrap();
         assert_eq!(s, 200, "namespaces-self: {selfns:?}");
         assert_eq!(
             selfns["namespaces"],
@@ -6455,7 +6136,6 @@ mod mod_system_tests {
         );
     }
 
-
     #[test]
     fn test_qualify_capability_path() {
         // Root-scoped callers: the pre-namespace hot path, untouched.
@@ -6463,21 +6143,14 @@ mod mod_system_tests {
 
         // The regression: a mount-backed probe from a namespace-bound caller
         // has to become the string the router will authorize.
-        assert_eq!(
-            qualify_capability_path("dti/esi/", "resources/secrets/db/"),
-            "dti/esi/resources/secrets/db/"
-        );
+        assert_eq!(qualify_capability_path("dti/esi/", "resources/secrets/db/"), "dti/esi/resources/secrets/db/");
         assert_eq!(qualify_capability_path("dti/esi/", "ssh/sign/admins"), "dti/esi/ssh/sign/admins");
 
         // Header-scoped mounts live only in the root mount table, so the router
         // never rewrites them and neither may we. This is why `rustion/*` and
         // `sys/*` reported correctly while `resources/*` did not.
-        for p in [
-            "sys/capabilities-self",
-            "auth/token/lookup-self",
-            "identity/entity/self",
-            "rustion/policy/effective",
-        ] {
+        for p in ["sys/capabilities-self", "auth/token/lookup-self", "identity/entity/self", "rustion/policy/effective"]
+        {
             assert_eq!(qualify_capability_path("dti/esi/", p), p, "{p} is header-scoped");
         }
 
@@ -6491,10 +6164,7 @@ mod mod_system_tests {
         // A sibling namespace's path is left alone: it is not this caller's
         // prefix, and prefixing would silently rewrite one tenant's probe into
         // another's path space.
-        assert_eq!(
-            qualify_capability_path("dti/esi/", "dti/other/resources/x"),
-            "dti/esi/dti/other/resources/x"
-        );
+        assert_eq!(qualify_capability_path("dti/esi/", "dti/other/resources/x"), "dti/esi/dti/other/resources/x");
     }
 
     /// capabilities-self must answer for the path the *router* authorizes.
@@ -6517,9 +6187,8 @@ mod mod_system_tests {
 
         let ns_hdr: Vec<(&str, &str)> = vec![("X-BastionVault-Namespace", "tns")];
 
-        let (s, r) = server
-            .write("v1/sys/namespaces/tns", serde_json::json!({}).as_object().cloned(), Some(&root))
-            .unwrap();
+        let (s, r) =
+            server.write("v1/sys/namespaces/tns", serde_json::json!({}).as_object().cloned(), Some(&root)).unwrap();
         assert!((200..300).contains(&s), "ns create: {s} {r:?}");
 
         // Authored *in* the namespace, so every rule must be `tns/`-prefixed —
@@ -6620,9 +6289,8 @@ mod mod_system_tests {
         );
 
         // Agreement with the pipeline, in both directions.
-        let (read_status, _) = server
-            .request_with_headers("GET", "v1/secret/data/x", None, Some(&token), None, &ns_hdr)
-            .unwrap();
+        let (read_status, _) =
+            server.request_with_headers("GET", "v1/secret/data/x", None, Some(&token), None, &ns_hdr).unwrap();
         assert_ne!(read_status, 403, "advertised `read` must not be refused by the router");
 
         let ungranted = caps(serde_json::json!(["secret/data/other"]));
@@ -6631,9 +6299,8 @@ mod mod_system_tests {
             !none.contains(&serde_json::json!("read")),
             "qualification must not turn into a blanket grant: {ungranted:?}"
         );
-        let (denied_status, _) = server
-            .request_with_headers("GET", "v1/secret/data/other", None, Some(&token), None, &ns_hdr)
-            .unwrap();
+        let (denied_status, _) =
+            server.request_with_headers("GET", "v1/secret/data/other", None, Some(&token), None, &ns_hdr).unwrap();
         assert_eq!(denied_status, 403, "an unadvertised path must really be refused");
 
         // Passing the already-qualified form keeps working — the guard against
@@ -6664,9 +6331,8 @@ mod mod_system_tests {
 
         let ns_hdr: Vec<(&str, &str)> = vec![("X-BastionVault-Namespace", "sns")];
 
-        let (s, r) = server
-            .write("v1/sys/namespaces/sns", serde_json::json!({}).as_object().cloned(), Some(&root))
-            .unwrap();
+        let (s, r) =
+            server.write("v1/sys/namespaces/sns", serde_json::json!({}).as_object().cloned(), Some(&root)).unwrap();
         assert!((200..300).contains(&s), "ns create: {s} {r:?}");
 
         let (s, r) = server
@@ -6753,13 +6419,12 @@ mod mod_system_tests {
             "a scope-gated rule with no share must grant nothing: {before:?}"
         );
 
-        let entity_id = server
-            .request_with_headers("GET", "v1/identity/entity/self", None, Some(&token), None, &ns_hdr)
-            .unwrap()
-            .1["data"]["entity_id"]
-            .as_str()
-            .unwrap()
-            .to_string();
+        let entity_id =
+            server.request_with_headers("GET", "v1/identity/entity/self", None, Some(&token), None, &ns_hdr).unwrap().1
+                ["data"]["entity_id"]
+                .as_str()
+                .unwrap()
+                .to_string();
         let target_b64 = {
             use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
             URL_SAFE_NO_PAD.encode("r1")
@@ -6789,9 +6454,8 @@ mod mod_system_tests {
         }
 
         // …and the router agrees.
-        let (read_status, _) = server
-            .request_with_headers("GET", "v1/resources/resources/r1", None, Some(&token), None, &ns_hdr)
-            .unwrap();
+        let (read_status, _) =
+            server.request_with_headers("GET", "v1/resources/resources/r1", None, Some(&token), None, &ns_hdr).unwrap();
         assert_eq!(read_status, 200, "advertised `read` must actually work");
     }
 
@@ -6829,17 +6493,10 @@ mod mod_system_tests {
                 Some(&root),
             )
             .unwrap();
-        assert!(
-            (200..300).contains(&pol_status),
-            "policy write must succeed: {pol_status} {pol_resp:?}"
-        );
+        assert!((200..300).contains(&pol_status), "policy write must succeed: {pol_status} {pol_resp:?}");
 
         server
-            .write(
-                "v1/sys/auth/pass",
-                serde_json::json!({ "type": "userpass" }).as_object().cloned(),
-                Some(&root),
-            )
+            .write("v1/sys/auth/pass", serde_json::json!({ "type": "userpass" }).as_object().cloned(), Some(&root))
             .unwrap();
         server
             .write(
@@ -6894,10 +6551,7 @@ mod mod_system_tests {
             !shared.contains(&"update".to_string()),
             "scope-gated `update` must not leak to a non-grantee: {shared:?}"
         );
-        assert!(
-            !shared.contains(&"read".to_string()),
-            "scope-gated `read` must not leak to a non-grantee: {shared:?}"
-        );
+        assert!(!shared.contains(&"read".to_string()), "scope-gated `read` must not leak to a non-grantee: {shared:?}");
 
         // Ungated rule: full capabilities still reported (no over-pruning).
         let plain = caps_for("resources/resources/plain-thing");
@@ -6972,9 +6626,7 @@ mod mod_system_tests {
             .request(
                 "POST",
                 "v2/sys/policies/acl/test",
-                serde_json::json!({ "policy": "path \"x\" { capabilities = [", "cases": [] })
-                    .as_object()
-                    .cloned(),
+                serde_json::json!({ "policy": "path \"x\" { capabilities = [", "cases": [] }).as_object().cloned(),
                 Some(&root),
                 None,
             )
@@ -7132,12 +6784,8 @@ mod mod_system_tests {
         );
         let r = &resp["results"][0];
         assert_eq!(r["allowed"], Value::Bool(true), "restated path unions: {r:?}");
-        let granting: Vec<String> = r["granting_policies"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|v| v.as_str().map(String::from))
-            .collect();
+        let granting: Vec<String> =
+            r["granting_policies"].as_array().unwrap().iter().filter_map(|v| v.as_str().map(String::from)).collect();
         assert!(granting.contains(&"administrator".to_string()), "{granting:?}");
         assert!(granting.contains(&"default".to_string()), "{granting:?}");
 
@@ -7241,10 +6889,8 @@ mod mod_system_tests {
                 None,
             )
             .unwrap();
-        let token = resp["auth"]["client_token"]
-            .as_str()
-            .unwrap_or_else(|| panic!("login: {status} {resp:?}"))
-            .to_string();
+        let token =
+            resp["auth"]["client_token"].as_str().unwrap_or_else(|| panic!("login: {status} {resp:?}")).to_string();
 
         let draft = r#"path "a/b" { capabilities = ["read"] }"#;
 
@@ -7396,24 +7042,17 @@ mod mod_system_tests {
     /// Admin → Audit page.
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_audit_events_includes_user_lifecycle() {
-        let mut server =
-            TestHttpServer::new("test_audit_events_includes_user_lifecycle", true).await;
+        let mut server = TestHttpServer::new("test_audit_events_includes_user_lifecycle", true).await;
         server.token = server.root_token.clone();
 
         let _ = server
-            .write(
-                "sys/auth/pass",
-                serde_json::json!({ "type": "userpass" }).as_object().cloned(),
-                None,
-            )
+            .write("sys/auth/pass", serde_json::json!({ "type": "userpass" }).as_object().cloned(), None)
             .unwrap();
 
         let _ = server
             .write(
                 "auth/pass/users/alice",
-                serde_json::json!({ "password": "hunter22XX!", "token_policies": "default" })
-                    .as_object()
-                    .cloned(),
+                serde_json::json!({ "password": "hunter22XX!", "token_policies": "default" }).as_object().cloned(),
                 None,
             )
             .unwrap();
@@ -7421,48 +7060,29 @@ mod mod_system_tests {
         let _ = server
             .write(
                 "auth/pass/users/alice/password",
-                serde_json::json!({ "password": "hunter22XX_new!" })
-                    .as_object()
-                    .cloned(),
+                serde_json::json!({ "password": "hunter22XX_new!" }).as_object().cloned(),
                 None,
             )
             .unwrap();
 
-        let _ = server
-            .delete("auth/pass/users/alice", None, None)
-            .unwrap();
+        let _ = server.delete("auth/pass/users/alice", None, None).unwrap();
 
         let ret = server.read("sys/audit/events", None).unwrap().1;
-        let events = ret
-            .get("events")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
+        let events = ret.get("events").and_then(|v| v.as_array()).cloned().unwrap_or_default();
 
         let matching: Vec<_> = events
             .iter()
             .filter(|e| {
                 e.get("category").and_then(|v| v.as_str()) == Some("user")
-                    && e.get("target").and_then(|v| v.as_str())
-                        == Some("userpass/alice")
+                    && e.get("target").and_then(|v| v.as_str()) == Some("userpass/alice")
             })
             .collect();
 
-        let ops: Vec<String> = matching
-            .iter()
-            .map(|e| {
-                e.get("op")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string()
-            })
-            .collect();
+        let ops: Vec<String> =
+            matching.iter().map(|e| e.get("op").and_then(|v| v.as_str()).unwrap_or("").to_string()).collect();
 
         assert!(ops.contains(&"create".to_string()), "missing create in {ops:?}");
-        assert!(
-            ops.contains(&"password-change".to_string()),
-            "missing password-change in {ops:?}",
-        );
+        assert!(ops.contains(&"password-change".to_string()), "missing password-change in {ops:?}",);
         assert!(ops.contains(&"delete".to_string()), "missing delete in {ops:?}");
 
         // Regression: root-token operations used to store an empty
@@ -7470,19 +7090,9 @@ mod mod_system_tests {
         // the Admin → Audit page. `caller_audit_actor` now falls
         // back to `auth.display_name` so root writes surface as
         // `"root"`.
-        let users: Vec<String> = matching
-            .iter()
-            .map(|e| {
-                e.get("user")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string()
-            })
-            .collect();
-        assert!(
-            users.iter().all(|u| u == "root"),
-            "root-token audit rows should surface as 'root', got {users:?}",
-        );
+        let users: Vec<String> =
+            matching.iter().map(|e| e.get("user").and_then(|v| v.as_str()).unwrap_or("").to_string()).collect();
+        assert!(users.iter().all(|u| u == "root"), "root-token audit rows should surface as 'root', got {users:?}",);
     }
 
     /// A password login records a `login` op and a self-revoke records a
@@ -7493,30 +7103,21 @@ mod mod_system_tests {
     /// the token server-side nor produced an audit row.
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_audit_events_includes_login_and_logout() {
-        let mut server =
-            TestHttpServer::new("test_audit_events_includes_login_and_logout", true).await;
+        let mut server = TestHttpServer::new("test_audit_events_includes_login_and_logout", true).await;
         server.token = server.root_token.clone();
 
-        server
-            .write("sys/auth/pass", serde_json::json!({ "type": "userpass" }).as_object().cloned(), None)
-            .unwrap();
+        server.write("sys/auth/pass", serde_json::json!({ "type": "userpass" }).as_object().cloned(), None).unwrap();
         server
             .write(
                 "auth/pass/users/bob",
-                serde_json::json!({ "password": "hunter22XX!", "token_policies": "default" })
-                    .as_object()
-                    .cloned(),
+                serde_json::json!({ "password": "hunter22XX!", "token_policies": "default" }).as_object().cloned(),
                 None,
             )
             .unwrap();
 
         // Password login -> records a `login` event and mints bob's token.
         let login = server
-            .write(
-                "auth/pass/login/bob",
-                serde_json::json!({ "password": "hunter22XX!" }).as_object().cloned(),
-                None,
-            )
+            .write("auth/pass/login/bob", serde_json::json!({ "password": "hunter22XX!" }).as_object().cloned(), None)
             .unwrap()
             .1;
         let bob_token = login
@@ -7529,9 +7130,7 @@ mod mod_system_tests {
         // Self-revoke with bob's own token -> records a `logout` event.
         // `default` policy is granted `update` on this path, so this also
         // exercises the ACL grant that was previously unserved.
-        server
-            .write("auth/token/revoke-self", None, Some(&bob_token))
-            .unwrap();
+        server.write("auth/token/revoke-self", None, Some(&bob_token)).unwrap();
 
         let ret = server.read("sys/audit/events", None).unwrap().1;
         let ops: Vec<String> = ret
@@ -7556,17 +7155,14 @@ mod mod_system_tests {
     /// presenting a token is not a credential-backend login event.
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_audit_events_includes_token_login() {
-        let mut server =
-            TestHttpServer::new("test_audit_events_includes_token_login", true).await;
+        let mut server = TestHttpServer::new("test_audit_events_includes_token_login", true).await;
         server.token = server.root_token.clone();
 
         // The endpoint any authenticated token may call (granted by the
         // `default` policy) — this is the exact call the GUI makes after
         // a pasted token validates against `lookup-self`.
         let tok = server.root_token.clone();
-        server
-            .write("auth/token/audit-login", None, Some(&tok))
-            .unwrap();
+        server.write("auth/token/audit-login", None, Some(&tok)).unwrap();
 
         let ret = server.read("sys/audit/events", None).unwrap().1;
         let rows: Vec<(String, String)> = ret
@@ -7585,8 +7181,7 @@ mod mod_system_tests {
             .collect();
 
         assert!(
-            rows.iter()
-                .any(|(op, target)| op == "login" && target.starts_with("token/")),
+            rows.iter().any(|(op, target)| op == "login" && target.starts_with("token/")),
             "missing token login row in {rows:?}"
         );
     }
@@ -7600,17 +7195,12 @@ mod mod_system_tests {
     /// issued, which the wrapper still records.
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_audit_events_includes_sso_callback_failure() {
-        let mut server =
-            TestHttpServer::new("test_audit_events_includes_sso_callback_failure", true).await;
+        let mut server = TestHttpServer::new("test_audit_events_includes_sso_callback_failure", true).await;
         server.token = server.root_token.clone();
 
         // Mount OIDC + SAML; both `callback` endpoints are unauth paths.
-        server
-            .write("sys/auth/oidc", serde_json::json!({ "type": "oidc" }).as_object().cloned(), None)
-            .unwrap();
-        server
-            .write("sys/auth/saml", serde_json::json!({ "type": "saml" }).as_object().cloned(), None)
-            .unwrap();
+        server.write("sys/auth/oidc", serde_json::json!({ "type": "oidc" }).as_object().cloned(), None).unwrap();
+        server.write("sys/auth/saml", serde_json::json!({ "type": "saml" }).as_object().cloned(), None).unwrap();
 
         // Unknown state (OIDC) / unconfigured mount (SAML) → both reject
         // before minting a token, exercising the failure-recording path.
@@ -7621,9 +7211,7 @@ mod mod_system_tests {
         );
         let _ = server.write(
             "auth/saml/callback",
-            serde_json::json!({ "saml_response": "bm9wZQ==", "relay_state": "nope" })
-                .as_object()
-                .cloned(),
+            serde_json::json!({ "saml_response": "bm9wZQ==", "relay_state": "nope" }).as_object().cloned(),
             Some(""),
         );
 
@@ -7644,13 +7232,11 @@ mod mod_system_tests {
             .collect();
 
         assert!(
-            rows.iter()
-                .any(|(op, target)| op == "login-failed" && target.starts_with("oidc/")),
+            rows.iter().any(|(op, target)| op == "login-failed" && target.starts_with("oidc/")),
             "missing oidc login-failed row in {rows:?}"
         );
         assert!(
-            rows.iter()
-                .any(|(op, target)| op == "login-failed" && target.starts_with("saml/")),
+            rows.iter().any(|(op, target)| op == "login-failed" && target.starts_with("saml/")),
             "missing saml login-failed row in {rows:?}"
         );
     }
@@ -7661,11 +7247,7 @@ mod mod_system_tests {
     /// activity was invisible on the Admin → Audit page.
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_audit_events_includes_share_grants_and_revokes() {
-        let mut server = TestHttpServer::new(
-            "test_audit_events_includes_share_grants_and_revokes",
-            true,
-        )
-        .await;
+        let mut server = TestHttpServer::new("test_audit_events_includes_share_grants_and_revokes", true).await;
         server.token = server.root_token.clone();
 
         // Grant a share — generates a `share`/`grant` row.
@@ -7688,20 +7270,11 @@ mod mod_system_tests {
             .unwrap();
 
         // Revoke it — generates a `share`/`revoke` row.
-        let _ = server
-            .delete(
-                &format!("identity/sharing/by-target/kv-secret/{target_b64}/{grantee}"),
-                None,
-                None,
-            )
-            .unwrap();
+        let _ =
+            server.delete(&format!("identity/sharing/by-target/kv-secret/{target_b64}/{grantee}"), None, None).unwrap();
 
         let ret = server.read("sys/audit/events", None).unwrap().1;
-        let events = ret
-            .get("events")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
+        let events = ret.get("events").and_then(|v| v.as_array()).cloned().unwrap_or_default();
 
         let has_grant = events.iter().any(|e| {
             e.get("category").and_then(|v| v.as_str()) == Some("share")
@@ -7730,9 +7303,7 @@ mod mod_system_tests {
         let _ = server
             .write(
                 "sys/policies/acl/audit-test-pol",
-                serde_json::json!({ "policy": r#"path "secret/*" { capabilities = ["read"] }"# })
-                    .as_object()
-                    .cloned(),
+                serde_json::json!({ "policy": r#"path "secret/*" { capabilities = ["read"] }"# }).as_object().cloned(),
                 None,
             )
             .unwrap();
@@ -7747,11 +7318,7 @@ mod mod_system_tests {
             .unwrap();
 
         let ret = server.read("sys/audit/events", None).unwrap().1;
-        let events = ret
-            .get("events")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
+        let events = ret.get("events").and_then(|v| v.as_array()).cloned().unwrap_or_default();
         assert!(!events.is_empty(), "audit trail should not be empty");
 
         let has_policy = events.iter().any(|e| {
@@ -7776,9 +7343,7 @@ mod mod_system_tests {
     /// name; and history of an object that no longer exists stays out.
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_audit_events_bulk_history_scan_covers_every_name() {
-        let mut server =
-            TestHttpServer::new("test_audit_events_bulk_history_scan_covers_every_name", true)
-                .await;
+        let mut server = TestHttpServer::new("test_audit_events_bulk_history_scan_covers_every_name", true).await;
         server.token = server.root_token.clone();
 
         let policy_body = |caps: &str| {
@@ -7792,15 +7357,12 @@ mod mod_system_tests {
         // Two live policies, one written twice so it carries two history
         // rows under the same name prefix.
         let _ = server.write("sys/policies/acl/bulk-pol-a", policy_body(r#""read""#), None).unwrap();
-        let _ = server
-            .write("sys/policies/acl/bulk-pol-a", policy_body(r#""read", "list""#), None)
-            .unwrap();
+        let _ = server.write("sys/policies/acl/bulk-pol-a", policy_body(r#""read", "list""#), None).unwrap();
         let _ = server.write("sys/policies/acl/bulk-pol-b", policy_body(r#""read""#), None).unwrap();
 
         // A third policy, then deleted: its history rows remain in storage
         // but must not surface.
-        let _ =
-            server.write("sys/policies/acl/bulk-pol-gone", policy_body(r#""read""#), None).unwrap();
+        let _ = server.write("sys/policies/acl/bulk-pol-gone", policy_body(r#""read""#), None).unwrap();
         let _ = server.delete("sys/policies/acl/bulk-pol-gone", None, None).unwrap();
 
         for name in ["bulk-grp-a", "bulk-grp-b"] {
@@ -7839,11 +7401,7 @@ mod mod_system_tests {
             "both history rows of the twice-written policy must survive: {events:?}"
         );
         assert_eq!(count("policy", "bulk-pol-b"), 1, "the second policy's row: {events:?}");
-        assert_eq!(
-            count("policy", "bulk-pol-gone"),
-            0,
-            "history of a deleted policy must stay out: {events:?}"
-        );
+        assert_eq!(count("policy", "bulk-pol-gone"), 0, "history of a deleted policy must stay out: {events:?}");
         for name in ["bulk-grp-a", "bulk-grp-b"] {
             assert_eq!(
                 count("identity-group-user", name),
@@ -7851,11 +7409,7 @@ mod mod_system_tests {
                 "group {name} must be attributed to its own name: {events:?}"
             );
         }
-        assert_eq!(
-            count("asset-group", "bulk-asset-a"),
-            1,
-            "the asset group's create row: {events:?}"
-        );
+        assert_eq!(count("asset-group", "bulk-asset-a"), 1, "the asset group's create row: {events:?}");
     }
 
     /// Regression: the `bv-client` remote backend sends a GET whose
@@ -7866,8 +7420,7 @@ mod mod_system_tests {
     /// show stale events while the 24h KPI correctly read zero.
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_audit_events_filters_from_json_body() {
-        let mut server =
-            TestHttpServer::new("test_audit_events_filters_from_json_body", true).await;
+        let mut server = TestHttpServer::new("test_audit_events_filters_from_json_body", true).await;
         server.token = server.root_token.clone();
 
         for n in ["p-alpha", "p-beta", "p-gamma"] {
@@ -7882,8 +7435,7 @@ mod mod_system_tests {
                 .unwrap();
         }
 
-        let count =
-            |v: &Value| v.get("events").and_then(|e| e.as_array()).map(|a| a.len()).unwrap_or(0);
+        let count = |v: &Value| v.get("events").and_then(|e| e.as_array()).map(|a| a.len()).unwrap_or(0);
 
         // Baseline: no params → every event present.
         let all = server.read("sys/audit/events", None).unwrap().1;
@@ -7928,8 +7480,7 @@ mod mod_system_tests {
     /// hand every tenant token the deployment's denial and failed-login rates.
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_dashboard_summary_for_a_default_only_principal() {
-        let mut server =
-            TestHttpServer::new("test_dashboard_summary_default_only", true).await;
+        let mut server = TestHttpServer::new("test_dashboard_summary_default_only", true).await;
         server.token = server.root_token.clone();
         let root = server.root_token.clone();
 
@@ -7999,7 +7550,8 @@ mod mod_system_tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
             let ret = server.read("sys/dashboard/summary", Some(token)).unwrap().1;
-            let state = ret.get("audit_stats").and_then(|s| s.get("state")).and_then(|v| v.as_str()).map(str::to_string);
+            let state =
+                ret.get("audit_stats").and_then(|s| s.get("state")).and_then(|v| v.as_str()).map(str::to_string);
             if state.as_deref() == Some("ready") {
                 return ret;
             }
@@ -8036,17 +7588,11 @@ mod mod_system_tests {
 
         // A nested tenant, mirroring the reported `dti/esi`.
         for path in ["v1/sys/namespaces/dti", "v1/sys/namespaces/dti/esi"] {
-            let (s, r) = server
-                .write(path, serde_json::json!({}).as_object().cloned(), Some(&root))
-                .unwrap();
+            let (s, r) = server.write(path, serde_json::json!({}).as_object().cloned(), Some(&root)).unwrap();
             assert!((200..300).contains(&s), "ns create {path}: {s} {r:?}");
         }
         server
-            .write(
-                "v1/sys/auth/userpass",
-                serde_json::json!({ "type": "userpass" }).as_object().cloned(),
-                Some(&root),
-            )
+            .write("v1/sys/auth/userpass", serde_json::json!({ "type": "userpass" }).as_object().cloned(), Some(&root))
             .unwrap();
         server
             .write(
@@ -8095,10 +7641,7 @@ mod mod_system_tests {
                 &[("X-BastionVault-Namespace", "dti/esi")],
             )
             .unwrap();
-        assert_eq!(
-            status, 200,
-            "a namespace-bound principal must be able to read the dashboard summary: {ret:?}"
-        );
+        assert_eq!(status, 200, "a namespace-bound principal must be able to read the dashboard summary: {ret:?}");
         assert_eq!(
             ret.get("namespace").and_then(|v| v.as_str()),
             Some("dti/esi"),
@@ -8121,19 +7664,9 @@ mod mod_system_tests {
         // the dashboard-summary grant landed: `UserDashboard` fetches
         // `identity/sharing/for-me`, and `identity/entity/self` failed the same
         // way, which is why the header never rendered "Signed in as".
-        for (op, path) in [
-            ("LIST", "v1/identity/sharing/for-me"),
-            ("GET", "v1/identity/entity/self"),
-        ] {
+        for (op, path) in [("LIST", "v1/identity/sharing/for-me"), ("GET", "v1/identity/entity/self")] {
             let (s, r) = server
-                .request_with_headers(
-                    op,
-                    path,
-                    None,
-                    Some(&token),
-                    None,
-                    &[("X-BastionVault-Namespace", "dti/esi")],
-                )
+                .request_with_headers(op, path, None, Some(&token), None, &[("X-BastionVault-Namespace", "dti/esi")])
                 .unwrap();
             assert_eq!(
                 s, 200,
@@ -8151,8 +7684,7 @@ mod mod_system_tests {
     /// token (`reason=invalid-token`, user = `(unauthenticated)`).
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_audit_events_include_denied_requests() {
-        let mut server =
-            TestHttpServer::new("test_audit_events_include_denied_requests", true).await;
+        let mut server = TestHttpServer::new("test_audit_events_include_denied_requests", true).await;
         server.token = server.root_token.clone();
 
         // Provision a low-privilege user (default policy only) and log in.
@@ -8186,9 +7718,7 @@ mod mod_system_tests {
         let denied = server
             .write(
                 "sys/policies/acl/denied-into-audit",
-                serde_json::json!({ "policy": r#"path "x" { capabilities = ["read"] }"# })
-                    .as_object()
-                    .cloned(),
+                serde_json::json!({ "policy": r#"path "x" { capabilities = ["read"] }"# }).as_object().cloned(),
                 Some(&token),
             )
             .unwrap();
@@ -8201,17 +7731,12 @@ mod mod_system_tests {
         // Both denials must now be visible in the unified audit trail.
         let ret = server.read("sys/audit/events", Some(&server.root_token)).unwrap().1;
         let events = ret.get("events").and_then(|v| v.as_array()).expect("events array");
-        let denied_events: Vec<_> = events
-            .iter()
-            .filter(|e| e.get("op").and_then(|v| v.as_str()) == Some("denied"))
-            .collect();
+        let denied_events: Vec<_> =
+            events.iter().filter(|e| e.get("op").and_then(|v| v.as_str()) == Some("denied")).collect();
 
         let acl_denial = denied_events
             .iter()
-            .find(|e| {
-                e.get("target").and_then(|v| v.as_str())
-                    == Some("sys/policies/acl/denied-into-audit")
-            })
+            .find(|e| e.get("target").and_then(|v| v.as_str()) == Some("sys/policies/acl/denied-into-audit"))
             .unwrap_or_else(|| panic!("ACL denial missing from audit trail: {events:?}"));
         assert_eq!(
             acl_denial.get("category").and_then(|v| v.as_str()),
@@ -8225,16 +7750,11 @@ mod mod_system_tests {
             .and_then(|v| v.as_array())
             .map(|a| a.iter().filter_map(|f| f.as_str()).collect::<Vec<_>>())
             .unwrap_or_default();
-        assert!(
-            fields.contains(&"reason=policy"),
-            "a valid-token denial is a policy rejection: {fields:?}"
-        );
+        assert!(fields.contains(&"reason=policy"), "a valid-token denial is a policy rejection: {fields:?}");
 
         let token_denial = denied_events
             .iter()
-            .find(|e| {
-                e.get("user").and_then(|v| v.as_str()) == Some("(unauthenticated)")
-            })
+            .find(|e| e.get("user").and_then(|v| v.as_str()) == Some("(unauthenticated)"))
             .unwrap_or_else(|| panic!("invalid-token denial missing from audit trail: {events:?}"));
         let fields = token_denial
             .get("changed_fields")
@@ -8259,8 +7779,7 @@ mod mod_system_tests {
     /// exemption: mislabelling aside, break-glass must keep working.
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_machine_identity_denial_is_labelled_distinctly() {
-        let mut server =
-            TestHttpServer::new("test_machine_identity_denial_is_labelled_distinctly", true).await;
+        let mut server = TestHttpServer::new("test_machine_identity_denial_is_labelled_distinctly", true).await;
         server.token = server.root_token.clone();
 
         // A low-privilege user whose `default` policy DOES permit
@@ -8319,9 +7838,7 @@ mod mod_system_tests {
         let gate_denial = events
             .iter()
             .filter(|e| e.get("op").and_then(|v| v.as_str()) == Some("denied"))
-            .find(|e| {
-                e.get("target").and_then(|v| v.as_str()) == Some("auth/token/lookup-self")
-            })
+            .find(|e| e.get("target").and_then(|v| v.as_str()) == Some("auth/token/lookup-self"))
             .unwrap_or_else(|| panic!("machine-identity denial missing from audit trail: {events:?}"));
         let fields = gate_denial
             .get("changed_fields")
@@ -8341,17 +7858,12 @@ mod mod_system_tests {
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_system_internal_ui_mounts_default_policy_shareable_mounts() {
         let mut test_http_server =
-            TestHttpServer::new("test_system_internal_ui_mounts_default_policy_shareable_mounts", true)
-                .await;
+            TestHttpServer::new("test_system_internal_ui_mounts_default_policy_shareable_mounts", true).await;
 
         // Mount userpass and provision a user with only `default`.
         test_http_server.token = test_http_server.root_token.clone();
         let _ = test_http_server
-            .write(
-                "sys/auth/pass",
-                serde_json::json!({ "type": "userpass" }).as_object().cloned(),
-                None,
-            )
+            .write("sys/auth/pass", serde_json::json!({ "type": "userpass" }).as_object().cloned(), None)
             .unwrap();
         let _ = test_http_server
             .write(
@@ -8371,19 +7883,13 @@ mod mod_system_tests {
         let login = test_http_server
             .write(
                 "auth/pass/login/felipe",
-                serde_json::json!({ "password": "hunter22XX!" })
-                    .as_object()
-                    .cloned(),
+                serde_json::json!({ "password": "hunter22XX!" }).as_object().cloned(),
                 None,
             )
             .unwrap()
             .1;
-        let felipe_token = login
-            .get("auth")
-            .and_then(|a| a.get("client_token"))
-            .and_then(|v| v.as_str())
-            .unwrap()
-            .to_string();
+        let felipe_token =
+            login.get("auth").and_then(|a| a.get("client_token")).and_then(|v| v.as_str()).unwrap().to_string();
 
         // IMPORTANT: pass felipe's token explicitly. The helper falls
         // back to `self.root_token` when the per-call token is `None`;
@@ -8392,16 +7898,8 @@ mod mod_system_tests {
         let ret = test_http_server.read("sys/internal/ui/mounts", Some(&felipe_token));
         assert!(ret.is_ok(), "felipe should still be able to hit the endpoint");
         let body = ret.unwrap().1;
-        let secret = body
-            .get("secret")
-            .and_then(|v| v.as_object())
-            .cloned()
-            .unwrap_or_default();
-        let auth = body
-            .get("auth")
-            .and_then(|v| v.as_object())
-            .cloned()
-            .unwrap_or_default();
+        let secret = body.get("secret").and_then(|v| v.as_object()).cloned().unwrap_or_default();
+        let auth = body.get("auth").and_then(|v| v.as_object()).cloned().unwrap_or_default();
 
         // Mounts felipe MAY now see: the `default` policy carries
         // share-scoped grants (`scopes = ["shared"]`) on secret/,
@@ -8447,27 +7945,14 @@ mod mod_system_tests {
         server.url_prefix = server.url_prefix.trim_end_matches("/v1").to_string();
 
         // Creating a namespace seeds it with the default engines.
-        let (s, r) = server
-            .write(
-                "v1/sys/namespaces/nschild",
-                serde_json::json!({}).as_object().cloned(),
-                Some(&root),
-            )
-            .unwrap();
+        let (s, r) =
+            server.write("v1/sys/namespaces/nschild", serde_json::json!({}).as_object().cloned(), Some(&root)).unwrap();
         assert!((200..300).contains(&s), "ns create: {s} {r:?}");
 
         let ui_mounts = |ns: Option<&str>| -> serde_json::Map<String, Value> {
-            let headers: Vec<(&str, &str)> =
-                ns.map(|n| vec![("X-BastionVault-Namespace", n)]).unwrap_or_default();
+            let headers: Vec<(&str, &str)> = ns.map(|n| vec![("X-BastionVault-Namespace", n)]).unwrap_or_default();
             let (s, r) = server
-                .request_with_headers(
-                    "GET",
-                    "v1/sys/internal/ui/mounts",
-                    None,
-                    Some(&root),
-                    None,
-                    &headers,
-                )
+                .request_with_headers("GET", "v1/sys/internal/ui/mounts", None, Some(&root), None, &headers)
                 .unwrap();
             assert_eq!(s, 200, "ui/mounts must 200: {r:?}");
             r.get("secret").and_then(|v| v.as_object()).cloned().unwrap_or_default()
@@ -8530,9 +8015,8 @@ mod mod_system_tests {
         // whose only named policy lives at root — so the namespace keyspace is
         // empty and the token carries nothing but the implicit policies. This
         // is the shape every tenant login has today.
-        let (s, r) = server
-            .write("v1/sys/namespaces/nsui", serde_json::json!({}).as_object().cloned(), Some(&root))
-            .unwrap();
+        let (s, r) =
+            server.write("v1/sys/namespaces/nsui", serde_json::json!({}).as_object().cloned(), Some(&root)).unwrap();
         assert!((200..300).contains(&s), "ns create: {s} {r:?}");
         server
             .write(
@@ -8608,10 +8092,7 @@ mod mod_system_tests {
                 &[("X-BastionVault-Namespace", "nsui")],
             )
             .unwrap();
-        assert_eq!(
-            s, 403,
-            "share-scoped grant must not read an unshared resource: {s} {r:?}"
-        );
+        assert_eq!(s, 403, "share-scoped grant must not read an unshared resource: {s} {r:?}");
     }
 
     /// End-to-end: a resource shared with a tenant inside a namespace must be
@@ -8641,9 +8122,7 @@ mod mod_system_tests {
 
         // `dti` must exist before `dti/esi` (segment-wise creation).
         for path in ["v1/sys/namespaces/dti", "v1/sys/namespaces/dti/esi"] {
-            let (s, r) = server
-                .write(path, serde_json::json!({}).as_object().cloned(), Some(&root))
-                .unwrap();
+            let (s, r) = server.write(path, serde_json::json!({}).as_object().cloned(), Some(&root)).unwrap();
             assert!((200..300).contains(&s), "ns create {path}: {s} {r:?}");
         }
 
@@ -8716,19 +8195,11 @@ mod mod_system_tests {
         // into a resource read and render it in the UI, so leaking the key
         // makes every shared resource unopenable and prints the key on screen.
         let (s, r) = server
-            .request_with_headers(
-                "LIST",
-                "v2/identity/sharing/for-me",
-                None,
-                Some(&tenant),
-                None,
-                &ns_header,
-            )
+            .request_with_headers("LIST", "v2/identity/sharing/for-me", None, Some(&tenant), None, &ns_header)
             .unwrap();
         assert_eq!(s, 200, "for-me feed: {s} {r:?}");
         let entries = r["data"]["entries"].as_array().cloned().unwrap_or_default();
-        let targets: Vec<&str> =
-            entries.iter().filter_map(|e| e["target_path"].as_str()).collect();
+        let targets: Vec<&str> = entries.iter().filter_map(|e| e["target_path"].as_str()).collect();
         assert_eq!(
             targets,
             vec!["shared-db"],
@@ -8737,25 +8208,13 @@ mod mod_system_tests {
 
         // The tenant can now read the namespace's resource…
         let (s, r) = server
-            .request_with_headers(
-                "GET",
-                "v1/resources/resources/shared-db",
-                None,
-                Some(&tenant),
-                None,
-                &ns_header,
-            )
+            .request_with_headers("GET", "v1/resources/resources/shared-db", None, Some(&tenant), None, &ns_header)
             .unwrap();
         assert_eq!(s, 200, "tenant must read the resource shared with them: {s} {r:?}");
 
         // …and the share must NOT reach root's same-named resource.
-        let (s, r) = server
-            .read("v1/resources/resources/shared-db", Some(&tenant))
-            .unwrap();
-        assert_eq!(
-            s, 403,
-            "a share granted in a namespace must not open root's same-named resource: {s} {r:?}"
-        );
+        let (s, r) = server.read("v1/resources/resources/shared-db", Some(&tenant)).unwrap();
+        assert_eq!(s, 403, "a share granted in a namespace must not open root's same-named resource: {s} {r:?}");
     }
 
     /// A namespace-bound principal whose `group_shared_resources` policy and
@@ -8890,9 +8349,8 @@ mod mod_system_tests {
         let root = server.root_token.clone();
         server.url_prefix = server.url_prefix.trim_end_matches("/v1").to_string();
 
-        let (s, r) = server
-            .write("v1/sys/namespaces/tns", serde_json::json!({}).as_object().cloned(), Some(&root))
-            .unwrap();
+        let (s, r) =
+            server.write("v1/sys/namespaces/tns", serde_json::json!({}).as_object().cloned(), Some(&root)).unwrap();
         assert!((200..300).contains(&s), "ns create: {s} {r:?}");
 
         // `pki` is not in the namespace seed set, so it's a clean probe: mount
@@ -8945,9 +8403,8 @@ mod mod_system_tests {
         let root = server.root_token.clone();
         server.url_prefix = server.url_prefix.trim_end_matches("/v1").to_string();
 
-        let (s, r) = server
-            .write("v1/sys/namespaces/pns", serde_json::json!({}).as_object().cloned(), Some(&root))
-            .unwrap();
+        let (s, r) =
+            server.write("v1/sys/namespaces/pns", serde_json::json!({}).as_object().cloned(), Some(&root)).unwrap();
         assert!((200..300).contains(&s), "ns create: {s} {r:?}");
 
         // A policy written at root (no header).
@@ -8955,9 +8412,7 @@ mod mod_system_tests {
             .request_with_headers(
                 "POST",
                 "v1/sys/policies/acl/root-only-pol",
-                serde_json::json!({ "policy": "path \"secret/*\" { capabilities = [\"read\"] }" })
-                    .as_object()
-                    .cloned(),
+                serde_json::json!({ "policy": "path \"secret/*\" { capabilities = [\"read\"] }" }).as_object().cloned(),
                 Some(&root),
                 None,
                 &[],
@@ -8966,8 +8421,7 @@ mod mod_system_tests {
         assert!((200..300).contains(&s), "root policy write: {s} {r:?}");
 
         // Listing at root includes it...
-        let (s, r) =
-            server.request_with_headers("GET", "v1/sys/policies/acl", None, Some(&root), None, &[]).unwrap();
+        let (s, r) = server.request_with_headers("GET", "v1/sys/policies/acl", None, Some(&root), None, &[]).unwrap();
         assert_eq!(s, 200, "root policy list: {r:?}");
         assert!(
             serde_json::to_string(&r).unwrap().contains("root-only-pol"),

@@ -24,10 +24,9 @@ mod tests;
 pub use challenge::Challenge;
 pub use errors::RpError;
 pub use proto::{
-    AllowCredential, AuthenticationChallengeResponse, AuthenticatorAssertionResponse,
-    AuthenticatorAttestationResponse, AuthenticatorSelection, ExcludeCredential,
-    PubKeyCredParams, PublicKeyCredentialAssertion, PublicKeyCredentialAttestation,
-    PublicKeyCredentialCreationOptions, PublicKeyCredentialRequestOptions,
+    AllowCredential, AuthenticationChallengeResponse, AuthenticatorAssertionResponse, AuthenticatorAttestationResponse,
+    AuthenticatorSelection, ExcludeCredential, PubKeyCredParams, PublicKeyCredentialAssertion,
+    PublicKeyCredentialAttestation, PublicKeyCredentialCreationOptions, PublicKeyCredentialRequestOptions,
     RegistrationChallengeResponse, RpEntity, UserEntity,
 };
 
@@ -72,14 +71,12 @@ fn default_version() -> u32 {
 impl Passkey {
     /// Decode `cred_id` to raw bytes.
     pub fn cred_id_bytes(&self) -> Result<Vec<u8>, RpError> {
-        base64url::decode(&self.cred_id)
-            .map_err(|e| RpError::Decode(format!("stored cred_id base64: {e}")))
+        base64url::decode(&self.cred_id).map_err(|e| RpError::Decode(format!("stored cred_id base64: {e}")))
     }
 
     /// Decode the stored COSE public key bytes.
     pub fn cose_pub_key_bytes(&self) -> Result<Vec<u8>, RpError> {
-        base64url::decode(&self.cose_pub_key)
-            .map_err(|e| RpError::Decode(format!("stored cose_pub_key base64: {e}")))
+        base64url::decode(&self.cose_pub_key).map_err(|e| RpError::Decode(format!("stored cose_pub_key base64: {e}")))
     }
 
     /// Construct an `AllowCredential` referencing this passkey for an
@@ -88,11 +85,7 @@ impl Passkey {
         AllowCredential {
             ty: "public-key".to_string(),
             id: self.cred_id.clone(),
-            transports: if self.transports.is_empty() {
-                None
-            } else {
-                Some(self.transports.clone())
-            },
+            transports: if self.transports.is_empty() { None } else { Some(self.transports.clone()) },
         }
     }
 }
@@ -139,11 +132,9 @@ impl<'a> RelyingParty<'a> {
     /// Validate that `rp_origin` is a parseable URL and (loosely) that
     /// `rp_id` is a registrable suffix of its host.
     pub fn validate(&self) -> Result<(), RpError> {
-        let url = url::Url::parse(self.rp_origin)
-            .map_err(|e| RpError::InvalidConfig(format!("invalid rp_origin: {e}")))?;
-        let host = url
-            .host_str()
-            .ok_or_else(|| RpError::InvalidConfig("rp_origin has no host".into()))?;
+        let url =
+            url::Url::parse(self.rp_origin).map_err(|e| RpError::InvalidConfig(format!("invalid rp_origin: {e}")))?;
+        let host = url.host_str().ok_or_else(|| RpError::InvalidConfig("rp_origin has no host".into()))?;
         if host != self.rp_id && !host.ends_with(&format!(".{}", self.rp_id)) {
             return Err(RpError::InvalidConfig(format!(
                 "rp_id `{}` is not a registrable suffix of origin host `{}`",
@@ -169,20 +160,14 @@ impl<'a> RelyingParty<'a> {
             Some(
                 exclude
                     .iter()
-                    .map(|id| ExcludeCredential {
-                        ty: "public-key".to_string(),
-                        id: base64url::encode(id),
-                    })
+                    .map(|id| ExcludeCredential { ty: "public-key".to_string(), id: base64url::encode(id) })
                     .collect(),
             )
         };
 
         let resp = RegistrationChallengeResponse {
             public_key: PublicKeyCredentialCreationOptions {
-                rp: RpEntity {
-                    id: self.rp_id.to_string(),
-                    name: self.rp_name.to_string(),
-                },
+                rp: RpEntity { id: self.rp_id.to_string(), name: self.rp_name.to_string() },
                 user: UserEntity {
                     id: base64url::encode(&user_handle),
                     name: username.to_string(),
@@ -226,12 +211,7 @@ impl<'a> RelyingParty<'a> {
         // 1. clientDataJSON.
         let client_data_bytes = base64url::decode(&attestation.response.client_data_json)
             .map_err(|e| RpError::Decode(format!("clientDataJSON base64: {e}")))?;
-        client_data::verify(
-            &client_data_bytes,
-            "webauthn.create",
-            self.rp_origin,
-            &state.challenge,
-        )?;
+        client_data::verify(&client_data_bytes, "webauthn.create", self.rp_origin, &state.challenge)?;
 
         // 2. attestationObject.
         //
@@ -259,18 +239,13 @@ impl<'a> RelyingParty<'a> {
         if !auth_data.flags.attested_credential_data() {
             return Err(RpError::MissingAttestedCredentialData);
         }
-        let cred = auth_data
-            .attested_credential
-            .as_ref()
-            .ok_or(RpError::MissingAttestedCredentialData)?;
+        let cred = auth_data.attested_credential.as_ref().ok_or(RpError::MissingAttestedCredentialData)?;
 
         // 4. Sanity-check the COSE key parses now so we don't store garbage.
         cose::parse_public_key(&cred.cose_public_key)?;
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+        let now =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
 
         Ok(Passkey {
             v: 1,
@@ -278,11 +253,7 @@ impl<'a> RelyingParty<'a> {
             cose_pub_key: base64url::encode(&cred.cose_public_key),
             sign_count: auth_data.sign_count,
             user_handle: state.user_handle.clone(),
-            transports: attestation
-                .response
-                .transports
-                .clone()
-                .unwrap_or_default(),
+            transports: attestation.response.transports.clone().unwrap_or_default(),
             created_at: now,
         })
     }
@@ -297,10 +268,8 @@ impl<'a> RelyingParty<'a> {
             return Err(RpError::NoCredentials);
         }
         let challenge = Challenge::random();
-        let allow_credentials: Vec<AllowCredential> =
-            passkeys.iter().map(Passkey::to_allow_credential).collect();
-        let allow_cred_ids: Vec<String> =
-            passkeys.iter().map(|p| p.cred_id.clone()).collect();
+        let allow_credentials: Vec<AllowCredential> = passkeys.iter().map(Passkey::to_allow_credential).collect();
+        let allow_cred_ids: Vec<String> = passkeys.iter().map(|p| p.cred_id.clone()).collect();
 
         let resp = AuthenticationChallengeResponse {
             public_key: PublicKeyCredentialRequestOptions {
@@ -312,13 +281,7 @@ impl<'a> RelyingParty<'a> {
             },
         };
 
-        Ok((
-            resp,
-            AuthenticationState {
-                challenge,
-                allow_cred_ids,
-            },
-        ))
+        Ok((resp, AuthenticationState { challenge, allow_cred_ids }))
     }
 
     /// Verify an authentication assertion. On success returns the
@@ -337,26 +300,16 @@ impl<'a> RelyingParty<'a> {
         if !state.allow_cred_ids.iter().any(|id| id == &assertion.raw_id) {
             return Err(RpError::UnknownCredential);
         }
-        let raw_id = base64url::decode(&assertion.raw_id)
-            .map_err(|e| RpError::Decode(format!("rawId base64: {e}")))?;
+        let raw_id = base64url::decode(&assertion.raw_id).map_err(|e| RpError::Decode(format!("rawId base64: {e}")))?;
         let pk = passkeys
             .iter()
-            .find(|p| {
-                p.cred_id_bytes()
-                    .map(|b| b == raw_id)
-                    .unwrap_or(false)
-            })
+            .find(|p| p.cred_id_bytes().map(|b| b == raw_id).unwrap_or(false))
             .ok_or(RpError::UnknownCredential)?;
 
         // 2. clientDataJSON.
         let client_data_bytes = base64url::decode(&assertion.response.client_data_json)
             .map_err(|e| RpError::Decode(format!("clientDataJSON base64: {e}")))?;
-        client_data::verify(
-            &client_data_bytes,
-            "webauthn.get",
-            self.rp_origin,
-            &state.challenge,
-        )?;
+        client_data::verify(&client_data_bytes, "webauthn.get", self.rp_origin, &state.challenge)?;
 
         // 3. authenticatorData.
         let auth_data_bytes = base64url::decode(&assertion.response.authenticator_data)
@@ -370,13 +323,8 @@ impl<'a> RelyingParty<'a> {
         // require strict monotonic progress. Authenticators that always
         // emit 0 are explicitly allowed by spec; we treat them as opt-out
         // of clone detection.
-        if (pk.sign_count != 0 || ad.sign_count != 0)
-            && ad.sign_count <= pk.sign_count
-        {
-            return Err(RpError::CounterRegression {
-                stored: pk.sign_count,
-                presented: ad.sign_count,
-            });
+        if (pk.sign_count != 0 || ad.sign_count != 0) && ad.sign_count <= pk.sign_count {
+            return Err(RpError::CounterRegression { stored: pk.sign_count, presented: ad.sign_count });
         }
 
         // 4. Verify signature over (authenticatorData ‖ SHA-256(clientDataJSON)).
@@ -386,9 +334,6 @@ impl<'a> RelyingParty<'a> {
         let key = cose::parse_public_key(&cose_bytes)?;
         verify::verify_assertion(&key, &auth_data_bytes, &client_data_bytes, &signature)?;
 
-        Ok(AuthResult {
-            cred_id: raw_id,
-            new_sign_count: ad.sign_count,
-        })
+        Ok(AuthResult { cred_id: raw_id, new_sign_count: ad.sign_count })
     }
 }

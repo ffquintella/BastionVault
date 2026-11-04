@@ -148,9 +148,7 @@ pub async fn token_operable_checked(
     };
     let store = super::ns_assignment::NsAssignmentStore::new(core)?;
     match store.get(&mount, &name).await? {
-        Some(assignment) => {
-            Ok(super::ns_assignment::namespace_allowed(&assignment.namespaces, request_ns_path))
-        }
+        Some(assignment) => Ok(super::ns_assignment::namespace_allowed(&assignment.namespaces, request_ns_path)),
         // No record (unrestricted for *login*): no explicit cross-namespace
         // grant, so keep the strict binding verdict.
         None => Ok(false),
@@ -174,7 +172,8 @@ pub fn binding_from_metadata(meta: &HashMap<String, String>) -> (String, bool) {
 /// is refused, never read as another namespace.
 pub fn acl_namespace(auth: &crate::logical::Auth) -> Result<(String, String), RvError> {
     if let Some(recorded) = auth.mcp_binding.as_ref().and_then(|b| b.policy_namespace.as_ref()) {
-        if crate::kernel_api::namespace::normalize_path(&recorded.path).ok().as_deref() != Some(recorded.path.as_str()) {
+        if crate::kernel_api::namespace::normalize_path(&recorded.path).ok().as_deref() != Some(recorded.path.as_str())
+        {
             return Err(crate::bv_error_response_status!(
                 403,
                 "mcp_namespace_unavailable: the MCP token's policy namespace is malformed; no ACL is built for it"
@@ -188,12 +187,7 @@ pub fn acl_namespace(auth: &crate::logical::Auth) -> Result<(String, String), Rv
 }
 
 /// Stamp a namespace binding into a token metadata map at create time.
-pub fn stamp_binding(
-    meta: &mut HashMap<String, String>,
-    ns_path: &str,
-    ns_uuid: &str,
-    child_visible: bool,
-) {
+pub fn stamp_binding(meta: &mut HashMap<String, String>, ns_path: &str, ns_uuid: &str, child_visible: bool) {
     meta.insert(NS_PATH_META.to_string(), ns_path.to_string());
     meta.insert(NS_ID_META.to_string(), ns_uuid.to_string());
     meta.insert(CHILD_VISIBLE_META.to_string(), child_visible.to_string());
@@ -215,9 +209,7 @@ pub async fn resolve_login_namespace(
 ) -> Result<(String, String), crate::errors::RvError> {
     use super::router::namespace_header_from_map;
 
-    let raw = namespace_header_from_map(req.headers.as_ref())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
+    let raw = namespace_header_from_map(req.headers.as_ref()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     let Some(raw) = raw else {
         return Ok((String::new(), String::new()));
     };
@@ -238,12 +230,8 @@ async fn resolve_namespace_by_path(
     let module = core
         .module_manager()
         .get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
-        .ok_or_else(|| {
-            crate::bv_error_string!("namespace header set but the namespace module is unavailable")
-        })?;
-    let store = module
-        .store()
-        .ok_or_else(|| crate::bv_error_string!("namespace store not initialized"))?;
+        .ok_or_else(|| crate::bv_error_string!("namespace header set but the namespace module is unavailable"))?;
+    let store = module.store().ok_or_else(|| crate::bv_error_string!("namespace store not initialized"))?;
     let ns = store.get_by_path(raw).await?.ok_or_else(|| {
         let p = super::store::normalize_path(raw).unwrap_or_else(|_| raw.to_string());
         crate::bv_error_response_status!(404, &format!("no such namespace: {p:?}"))
@@ -277,9 +265,8 @@ pub async fn resolve_login_namespace_for_principal(
 ) -> Result<(String, String), crate::errors::RvError> {
     use super::router::namespace_header_from_map;
 
-    let explicit = namespace_header_from_map(req.headers.as_ref())
-        .map(|s| s.trim().to_string())
-        .is_some_and(|s| !s.is_empty());
+    let explicit =
+        namespace_header_from_map(req.headers.as_ref()).map(|s| s.trim().to_string()).is_some_and(|s| !s.is_empty());
     if explicit {
         return resolve_login_namespace(core, req).await;
     }
@@ -330,8 +317,7 @@ pub async fn enforce_request_token_binding(
         return Ok(());
     }
 
-    let Some(module) = core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
-    else {
+    let Some(module) = core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME) else {
         return Ok(());
     };
     let Some(store) = module.store() else {
@@ -359,20 +345,11 @@ pub async fn enforce_request_token_binding(
 pub async fn login_child_visible(core: &crate::core::Core, ns_path: &str) -> bool {
     use super::{NamespaceModule, NAMESPACE_MODULE_NAME};
 
-    let Some(module) = core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
-    else {
+    let Some(module) = core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME) else {
         return false;
     };
     let Some(store) = module.store() else {
         return false;
     };
-    store
-        .get_by_path(ns_path)
-        .await
-        .ok()
-        .flatten()
-        .map(|ns| ns.child_visible_default)
-        .unwrap_or(false)
+    store.get_by_path(ns_path).await.ok().flatten().map(|ns| ns.child_visible_default).unwrap_or(false)
 }
-
-

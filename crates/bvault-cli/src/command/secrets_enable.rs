@@ -4,8 +4,8 @@ use derive_more::Deref;
 use crate::{
     api::sys::{MountConfigInput, MountInput},
     command::{self, CommandExecutor},
-        util::ensure_trailing_slash,
     errors::RvError,
+    util::ensure_trailing_slash,
     utils::{
         kv_builder::KvPairParse,
         token_util::{DEFAULT_LEASE_TTL, MAX_LEASE_TTL},

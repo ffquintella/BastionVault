@@ -57,18 +57,9 @@ impl FileAuditDevice {
             .get("file_path")
             .cloned()
             .ok_or_else(|| bv_error_string!("file audit device requires `file_path`"))?;
-        let log_raw = options
-            .get("log_raw")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false);
-        let rotate_size_bytes = options
-            .get("rotate_size_bytes")
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(0);
-        let rotate_keep = options
-            .get("rotate_keep")
-            .and_then(|v| v.parse::<u32>().ok())
-            .unwrap_or(5);
+        let log_raw = options.get("log_raw").map(|v| v == "true" || v == "1").unwrap_or(false);
+        let rotate_size_bytes = options.get("rotate_size_bytes").and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+        let rotate_keep = options.get("rotate_keep").and_then(|v| v.parse::<u32>().ok()).unwrap_or(5);
 
         let path = PathBuf::from(&path_str);
         if let Some(parent) = path.parent() {
@@ -80,11 +71,7 @@ impl FileAuditDevice {
         }
 
         let file = open_append(&path).await?;
-        let size = file
-            .metadata()
-            .await
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let size = file.metadata().await.map(|m| m.len()).unwrap_or(0);
 
         Ok(Arc::new(Self {
             path,
@@ -111,9 +98,9 @@ impl FileAuditDevice {
                 let src = numbered_path(&self.path, i);
                 if tokio::fs::try_exists(&src).await.unwrap_or(false) {
                     let dst = numbered_path(&self.path, i + 1);
-                    tokio::fs::rename(&src, &dst).await.map_err(|e| {
-                        bv_error_string!(format!("audit: rotate rename failed: {e}"))
-                    })?;
+                    tokio::fs::rename(&src, &dst)
+                        .await
+                        .map_err(|e| bv_error_string!(format!("audit: rotate rename failed: {e}")))?;
                 }
             }
             tokio::fs::rename(&self.path, numbered_path(&self.path, 1))
@@ -155,18 +142,12 @@ impl AuditDevice for FileAuditDevice {
         let needed = line.len() as u64 + 1;
         let mut state = self.state.lock().await;
 
-        if self.rotate_size_bytes > 0
-            && state.size > 0
-            && state.size + needed > self.rotate_size_bytes
-        {
+        if self.rotate_size_bytes > 0 && state.size > 0 && state.size + needed > self.rotate_size_bytes {
             if let Err(e) = self.rotate(&mut state).await {
                 // Don't drop the entry — log to stderr (we *are* the
                 // audit log; we can't recurse through the log macros
                 // to ourselves) and keep writing in place.
-                eprintln!(
-                    "audit: rotate of {} failed: {e}. Continuing in place.",
-                    self.path.display()
-                );
+                eprintln!("audit: rotate of {} failed: {e}. Continuing in place.", self.path.display());
             }
         }
 
@@ -175,27 +156,15 @@ impl AuditDevice for FileAuditDevice {
             .write_all(line.as_bytes())
             .await
             .map_err(|e| bv_error_string!(format!("audit: write failed: {e}")))?;
-        state
-            .file
-            .write_all(b"\n")
-            .await
-            .map_err(|e| bv_error_string!(format!("audit: write failed: {e}")))?;
-        state
-            .file
-            .flush()
-            .await
-            .map_err(|e| bv_error_string!(format!("audit: flush failed: {e}")))?;
+        state.file.write_all(b"\n").await.map_err(|e| bv_error_string!(format!("audit: write failed: {e}")))?;
+        state.file.flush().await.map_err(|e| bv_error_string!(format!("audit: flush failed: {e}")))?;
         state.size += needed;
         Ok(())
     }
 
     async fn flush(&self) -> Result<(), RvError> {
         let mut state = self.state.lock().await;
-        state
-            .file
-            .flush()
-            .await
-            .map_err(|e| bv_error_string!(format!("audit: flush failed: {e}")))
+        state.file.flush().await.map_err(|e| bv_error_string!(format!("audit: flush failed: {e}")))
     }
 
     /// Re-open the file handle (after external logrotate). Swaps

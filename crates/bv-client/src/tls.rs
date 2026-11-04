@@ -41,11 +41,7 @@ impl TLSConfigBuilder {
         self
     }
 
-    pub fn with_client_cert_path(
-        mut self,
-        cert_path: &PathBuf,
-        key_path: &PathBuf,
-    ) -> Result<Self, ClientError> {
+    pub fn with_client_cert_path(mut self, cert_path: &PathBuf, key_path: &PathBuf) -> Result<Self, ClientError> {
         self.client_cert_pem = Some(fs::read(cert_path)?);
         self.client_key_pem = Some(fs::read(key_path)?);
         Ok(self)
@@ -85,10 +81,8 @@ impl TLSConfigBuilder {
                     _ => None,
                 })
                 .collect();
-            let client_key = PrivateKey::from_pem(key_pem)
-                .map_err(|e| ClientError::tls(e.to_string()))?;
-            tls_builder = tls_builder
-                .client_cert(Some(ClientCert::new_with_certs(&client_certs, client_key)));
+            let client_key = PrivateKey::from_pem(key_pem).map_err(|e| ClientError::tls(e.to_string()))?;
+            tls_builder = tls_builder.client_cert(Some(ClientCert::new_with_certs(&client_certs, client_key)));
         }
 
         Ok(ClientTlsConfig { tls_config: tls_builder.build() })

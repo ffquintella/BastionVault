@@ -87,11 +87,7 @@ pub struct NsAssignment {
 /// can escape the key segment. The `.` separator is outside the base64url
 /// alphabet, so the split is unambiguous.
 fn assignment_key(mount: &str, name: &str) -> String {
-    format!(
-        "{}.{}",
-        URL_SAFE_NO_PAD.encode(mount.as_bytes()),
-        URL_SAFE_NO_PAD.encode(name.as_bytes())
-    )
+    format!("{}.{}", URL_SAFE_NO_PAD.encode(mount.as_bytes()), URL_SAFE_NO_PAD.encode(name.as_bytes()))
 }
 
 /// The pure assignment decision, isolated for testing. `allowed` is the
@@ -105,9 +101,7 @@ pub fn namespace_allowed(allowed: &[String], request_ns: &str) -> bool {
     if allowed.is_empty() {
         return true;
     }
-    allowed
-        .iter()
-        .any(|a| a == request_ns || is_descendant(request_ns, a))
+    allowed.iter().any(|a| a == request_ns || is_descendant(request_ns, a))
 }
 
 /// The namespace a login should *default* to for a principal carrying `allowed`,
@@ -161,9 +155,7 @@ impl NsAssignmentStore {
         namespaces: Vec<String>,
     ) -> Result<Option<NsAssignment>, RvError> {
         if mount.trim().is_empty() || name.trim().is_empty() {
-            return Err(crate::bv_error_string!(
-                "namespace assignment requires a non-empty mount and principal name"
-            ));
+            return Err(crate::bv_error_string!("namespace assignment requires a non-empty mount and principal name"));
         }
 
         // Normalize + validate, dropping duplicates. An empty result clears.
@@ -171,10 +163,7 @@ impl NsAssignmentStore {
         for ns in namespaces {
             let p = normalize_path(&ns)?;
             if !p.is_empty() && ns_store.get_by_path(&p).await?.is_none() {
-                return Err(crate::bv_error_response_status!(
-                    404,
-                    &format!("no such namespace: {p:?}")
-                ));
+                return Err(crate::bv_error_response_status!(404, &format!("no such namespace: {p:?}")));
             }
             if !normalized.contains(&p) {
                 normalized.push(p);
@@ -193,9 +182,7 @@ impl NsAssignmentStore {
             updated_at: Utc::now().to_rfc3339(),
         };
         let value = serde_json::to_vec(&record)?;
-        self.view
-            .put(&StorageEntry { key: assignment_key(mount, name), value })
-            .await?;
+        self.view.put(&StorageEntry { key: assignment_key(mount, name), value }).await?;
         Ok(Some(record))
     }
 
@@ -260,5 +247,3 @@ pub async fn default_login_namespace_for(
     };
     Ok(default_login_namespace(&assignment.namespaces).map(String::from))
 }
-
-

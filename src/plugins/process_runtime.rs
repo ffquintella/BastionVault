@@ -983,7 +983,10 @@ mod tests {
         let out = invoke_proc(m, b"", Some(core.clone())).await.unwrap();
         assert_eq!(out.response, b"no_session");
         let storage = core.barrier();
-        assert!(crate::plugins::quarantine::lookup(storage.as_storage(), "test-dynamic_forbidden").await.unwrap().is_none());
+        assert!(crate::plugins::quarantine::lookup(storage.as_storage(), "test-dynamic_forbidden")
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]

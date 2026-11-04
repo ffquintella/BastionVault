@@ -48,27 +48,20 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use actix_web::{
-    dev::Payload,
-    error::InternalError,
-    web,
-    FromRequest,
-    HttpRequest,
-    HttpResponse,
-    http::{StatusCode},
-};
+use actix_web::{dev::Payload, error::InternalError, http::StatusCode, web, FromRequest, HttpRequest, HttpResponse};
 use ipnetwork::IpNetwork;
 use prometheus_client::encoding::text::encode;
 
 use crate::routes::{resource, route, ResourceSpec};
 use crate::{
+    client_ip::{ClientIp, TrustedProxies},
     core::Core,
     errors::RvError,
-    client_ip::{ClientIp, TrustedProxies},
-        get_token_from_req, response_error, Connection,
+    get_token_from_req,
     logical::{Operation, Request},
     metrics::manager::MetricsManager,
     modules::{auth::AuthModule, policy::PolicyModule},
+    response_error, Connection,
 };
 
 /// Logical path the scrape endpoint authorizes against. It is not a
@@ -230,11 +223,7 @@ fn allowlisted_source(req: &HttpRequest, core: &Arc<Core>) -> bool {
 
     // Prefer the socket peer captured by the on-connect hook; fall back to
     // actix's `peer_addr` when that hook did not run (test harness).
-    let Some(socket_peer) = req
-        .conn_data::<Connection>()
-        .map(|c| c.peer)
-        .or_else(|| req.peer_addr())
-    else {
+    let Some(socket_peer) = req.conn_data::<Connection>().map(|c| c.peer).or_else(|| req.peer_addr()) else {
         return false;
     };
 
@@ -243,10 +232,7 @@ fn allowlisted_source(req: &HttpRequest, core: &Arc<Core>) -> bool {
     // something no client can set in a header. Same rule, same predicate
     // as the `sys/cluster-status` disclosure gate.
     if access.allow_cluster_local()
-        && crate::sys::ip_is_cluster_local(
-            socket_peer.ip(),
-            &crate::sys::cluster_peer_ips(core),
-        )
+        && crate::sys::ip_is_cluster_local(socket_peer.ip(), &crate::sys::cluster_peer_ips(core))
     {
         return true;
     }
@@ -277,11 +263,7 @@ fn allowlisted_source(req: &HttpRequest, core: &Arc<Core>) -> bool {
 /// empty string when the peer cannot be determined, which `check_token`
 /// treats as a refusal for any token that carries a binding.
 fn scrape_client_ip(req: &HttpRequest) -> String {
-    let Some(socket_peer) = req
-        .conn_data::<Connection>()
-        .map(|c| c.peer)
-        .or_else(|| req.peer_addr())
-    else {
+    let Some(socket_peer) = req.conn_data::<Connection>().map(|c| c.peer).or_else(|| req.peer_addr()) else {
         return String::new();
     };
 
@@ -303,29 +285,19 @@ fn scrape_client_ip(req: &HttpRequest) -> String {
 /// not a routed logical path, so the two steps are performed here rather
 /// than by going through `Core::handle_request`.
 async fn token_grants_scrape(core: &Arc<Core>, token: &str, client_ip: &str) -> Result<bool, RvError> {
-    let auth_module = core
-        .module_manager()
-        .get_module::<AuthModule>("auth")
-        .ok_or(RvError::ErrPermissionDenied)?;
-    let token_store = auth_module
-        .token_store
-        .load_full()
-        .ok_or(RvError::ErrPermissionDenied)?;
+    let auth_module = core.module_manager().get_module::<AuthModule>("auth").ok_or(RvError::ErrPermissionDenied)?;
+    let token_store = auth_module.token_store.load_full().ok_or(RvError::ErrPermissionDenied)?;
     let Some(auth) = token_store.check_token(METRICS_ACL_PATH, token, client_ip, false).await? else {
         return Ok(false);
     };
 
-    let policy_module = core
-        .module_manager()
-        .get_module::<PolicyModule>("policy")
-        .ok_or(RvError::ErrPermissionDenied)?;
+    let policy_module =
+        core.module_manager().get_module::<PolicyModule>("policy").ok_or(RvError::ErrPermissionDenied)?;
     let policy_store = policy_module.policy_store.load();
     // `None` for the request namespace: `/metrics` is not a routed logical
     // path and is never namespace-scoped, so no `{{request.namespace}}` rule
     // should contribute to the scrape verdict.
-    let acl = policy_store
-        .new_acl_for_request(&auth.policies, None, &auth, None)
-        .await?;
+    let acl = policy_store.new_acl_for_request(&auth.policies, None, &auth, None).await?;
 
     let mut probe = Request::new(METRICS_ACL_PATH);
     probe.operation = Operation::Read;
@@ -359,21 +331,12 @@ mod test {
     /// `TestHttpServer::request_prometheus`, `token: None` sends **no**
     /// token header at all — that is the case the gate exists for.
     fn scrape(server: &TestHttpServer, token: Option<&str>) -> u16 {
-        let agent = ureq::Agent::config_builder()
-            .http_status_as_error(false)
-            .build()
-            .new_agent();
-        let mut builder = ::http::Request::builder()
-            .method("GET")
-            .uri(format!("{}/metrics", server.url_prefix));
+        let agent = ureq::Agent::config_builder().http_status_as_error(false).build().new_agent();
+        let mut builder = ::http::Request::builder().method("GET").uri(format!("{}/metrics", server.url_prefix));
         if let Some(token) = token {
             builder = builder.header("X-BastionVault-Token", token);
         }
-        agent
-            .run(builder.body(()).unwrap())
-            .unwrap()
-            .status()
-            .as_u16()
+        agent.run(builder.body(()).unwrap()).unwrap().status().as_u16()
     }
 
     /// `/metrics` is authorization-gated: an anonymous or unprivileged
@@ -415,9 +378,7 @@ mod test {
             .request_prometheus(
                 "POST",
                 "v1/sys/policy/metrics-scraper",
-                json!({ "policy": "path \"sys/metrics\" { capabilities = [\"read\"] }" })
-                    .as_object()
-                    .cloned(),
+                json!({ "policy": "path \"sys/metrics\" { capabilities = [\"read\"] }" }).as_object().cloned(),
                 Some(&root_token),
                 None,
             )
@@ -459,8 +420,7 @@ mod test {
         assert!(cfg.allow_cluster_local);
         assert!(cfg.allow_unauthenticated_cidrs.is_empty());
 
-        let (access, bad) =
-            MetricsAccess::parse(cfg.allow_cluster_local, &cfg.allow_unauthenticated_cidrs);
+        let (access, bad) = MetricsAccess::parse(cfg.allow_cluster_local, &cfg.allow_unauthenticated_cidrs);
         assert!(bad.is_empty());
         assert!(!access.is_token_only());
         assert!(access.allow_cluster_local());
@@ -471,12 +431,7 @@ mod test {
     fn test_metrics_access_matches_only_listed_cidrs() {
         let (access, bad) = MetricsAccess::parse(
             false,
-            &[
-                "127.0.0.1/32".to_string(),
-                " 10.20.0.0/16 ".to_string(),
-                "".to_string(),
-                "::1/128".to_string(),
-            ],
+            &["127.0.0.1/32".to_string(), " 10.20.0.0/16 ".to_string(), "".to_string(), "::1/128".to_string()],
         );
         assert!(bad.is_empty());
         assert!(!access.is_token_only());
@@ -501,10 +456,7 @@ mod test {
     fn test_allowlisted_source_paths() {
         use actix_web::test::TestRequest;
 
-        let core = crate::test_utils::new_test_bastion_vault("test_metrics_allowlist_source")
-            .core
-            .load()
-            .clone();
+        let core = crate::test_utils::new_test_bastion_vault("test_metrics_allowlist_source").core.load().clone();
 
         let strict = web::Data::new(MetricsAccess::default());
         let (cluster_local, _) = MetricsAccess::parse(true, &[]);
@@ -520,9 +472,7 @@ mod test {
         assert!(!allowlisted_source(&req, &core));
 
         // No app data at all is the same as token-only.
-        let req = TestRequest::default()
-            .peer_addr("127.0.0.1:5000".parse().unwrap())
-            .to_http_request();
+        let req = TestRequest::default().peer_addr("127.0.0.1:5000".parse().unwrap()).to_http_request();
         assert!(!allowlisted_source(&req, &core));
 
         // Cluster-local enabled: loopback is waived, a remote peer is not.
@@ -567,8 +517,7 @@ mod test {
     /// authoritative.
     #[test]
     fn test_metrics_access_reports_bad_entries_and_fails_closed() {
-        let (access, bad) =
-            MetricsAccess::parse(false, &["not-a-cidr".to_string(), "192.0.2.0/24".to_string()]);
+        let (access, bad) = MetricsAccess::parse(false, &["not-a-cidr".to_string(), "192.0.2.0/24".to_string()]);
         assert_eq!(bad, vec!["not-a-cidr".to_string()]);
         assert!(access.cidrs_allow("192.0.2.10".parse().unwrap()));
         assert!(!access.cidrs_allow("198.51.100.10".parse().unwrap()));

@@ -69,7 +69,7 @@ impl CommandExecutor for Read {
 #[cfg(test)]
 mod test {
     use crate::{
-        errors::RvError, modules::policy::policy_store::DEFAULT_POLICY, bv_error_string, test_utils::TestHttpServer,
+        bv_error_string, errors::RvError, modules::policy::policy_store::DEFAULT_POLICY, test_utils::TestHttpServer,
     };
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]

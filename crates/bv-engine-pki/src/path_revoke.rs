@@ -16,8 +16,7 @@ use super::{
     issuers::{self, IssuerHandle},
     storage::{self, CertRecord, CrlConfig, CrlState, RevokedSerial, KEY_CONFIG_CRL},
     x509::{self, RevokedEntry},
-    x509_pqc,
-    PkiBackend, PkiBackendInner,
+    x509_pqc, PkiBackend, PkiBackendInner,
 };
 use crate::{
     context::Context,
@@ -43,22 +42,14 @@ impl PkiBackend {
 #[maybe_async::maybe_async]
 impl PkiBackendInner {
     pub async fn revoke_cert(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
-        let serial_raw = req.get_data("serial_number")?.as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
-        let serial_hex: String = serial_raw
-            .chars()
-            .filter(|c| c.is_ascii_hexdigit())
-            .collect::<String>()
-            .to_ascii_lowercase();
+        let serial_raw = req.get_data("serial_number")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
+        let serial_hex: String =
+            serial_raw.chars().filter(|c| c.is_ascii_hexdigit()).collect::<String>().to_ascii_lowercase();
 
         let cert_key = storage::cert_storage_key(&serial_hex);
-        let mut record: CertRecord = storage::get_json(req, &cert_key).await?
-            .ok_or(RvError::ErrPkiCertNotFound)?;
+        let mut record: CertRecord = storage::get_json(req, &cert_key).await?.ok_or(RvError::ErrPkiCertNotFound)?;
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
 
         // Idempotent: re-revoking returns the existing revocation time.
         if record.revoked_at_unix.is_none() {
@@ -71,9 +62,7 @@ impl PkiBackendInner {
             // the revocation itself; the cert is already revoked from
             // the verifier's perspective.
             if !record.key_id.is_empty() {
-                if let Err(e) =
-                    super::keys::remove_cert_ref(req, &record.key_id, &serial_hex).await
-                {
+                if let Err(e) = super::keys::remove_cert_ref(req, &record.key_id, &serial_hex).await {
                     log::warn!(
                         "pki/revoke: failed to clear key_ref binding for serial {serial_hex} \
                          on key {}: {e:?}",
@@ -142,13 +131,9 @@ pub async fn rebuild_crl_for_issuer(req: &Request, issuer: &IssuerHandle) -> Res
             x509_pqc::build_crl(crl_number, cfg.expiry_seconds.max(60), &revoked, ml, &issuer.cert_pem)?
         }
         #[cfg(feature = "pki_pqc_composite")]
-        Signer::Composite(c) => super::x509_composite::build_crl(
-            crl_number,
-            cfg.expiry_seconds.max(60),
-            &revoked,
-            c,
-            &issuer.cert_pem,
-        )?,
+        Signer::Composite(c) => {
+            super::x509_composite::build_crl(crl_number, cfg.expiry_seconds.max(60), &revoked, c, &issuer.cert_pem)?
+        }
     };
     storage::put_string(req, &crl_cached_key, &pem).await?;
     Ok(pem)

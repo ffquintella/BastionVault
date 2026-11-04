@@ -26,9 +26,7 @@ use serde_json::{Map, Value};
 use sysexits::ExitCode;
 
 use crate::{
-    command, command::CommandExecutor,
-    errors::RvError,
-    modules::credential::ferrogate::machine_id,
+    command, command::CommandExecutor, errors::RvError, modules::credential::ferrogate::machine_id,
     EXIT_CODE_INSUFFICIENT_PARAMS,
 };
 

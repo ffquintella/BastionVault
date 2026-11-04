@@ -48,10 +48,10 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::kernel_api::VaultCtx;
-use crate::errors::RvError;
-use crate::storage::{barrier_view::BarrierView, Storage, StorageEntry};
 use crate::bv_error_string;
+use crate::errors::RvError;
+use crate::kernel_api::VaultCtx;
+use crate::storage::{barrier_view::BarrierView, Storage, StorageEntry};
 
 const BASTION_GROUPS_SUB_PATH: &str = "rustion/bastion-groups/";
 const GLOBAL_POLICY_KEY: &str = "rustion/policy/global";
@@ -426,11 +426,7 @@ pub fn resolve(
     // broken by id (alphabetic) — stable so the audit chain stays
     // deterministic.
     let mut ag: Vec<&AssetGroupPolicy> = asset_groups.iter().collect();
-    ag.sort_by(|a, b| {
-        a.priority
-            .cmp(&b.priority)
-            .then_with(|| a.asset_group_id.cmp(&b.asset_group_id))
-    });
+    ag.sort_by(|a, b| a.priority.cmp(&b.priority).then_with(|| a.asset_group_id.cmp(&b.asset_group_id)));
 
     // Walk in increasing specificity so the resolver can both:
     //   - track the *most-restrictive transport* (so a lower tier
@@ -480,15 +476,15 @@ pub fn resolve(
         if let Some(t) = tier.transport {
             if let Some((locked_t, locking_src)) = locked_transport {
                 if t.rank() < locked_t.rank() {
-                lock_violation.get_or_insert(LockViolation {
-                    locking_tier: locking_src,
-                    field: "transport",
-                    detail: format!(
-                        "tier `{name}` set transport={} but tier `{locking_src}` locked it at {}",
-                        t.as_str(),
-                        locked_t.as_str()
-                    ),
-                });
+                    lock_violation.get_or_insert(LockViolation {
+                        locking_tier: locking_src,
+                        field: "transport",
+                        detail: format!(
+                            "tier `{name}` set transport={} but tier `{locking_src}` locked it at {}",
+                            t.as_str(),
+                            locked_t.as_str()
+                        ),
+                    });
                 }
             }
             transport_opt = match transport_opt {
@@ -513,15 +509,15 @@ pub fn resolve(
         if let Some(r) = tier.recording {
             if let Some((locked_r, locking_src)) = locked_recording {
                 if r.rank() < locked_r.rank() {
-                lock_violation.get_or_insert(LockViolation {
-                    locking_tier: locking_src,
-                    field: "recording",
-                    detail: format!(
-                        "tier `{name}` set recording={} but tier `{locking_src}` locked it at {}",
-                        r.as_str(),
-                        locked_r.as_str()
-                    ),
-                });
+                    lock_violation.get_or_insert(LockViolation {
+                        locking_tier: locking_src,
+                        field: "recording",
+                        detail: format!(
+                            "tier `{name}` set recording={} but tier `{locking_src}` locked it at {}",
+                            r.as_str(),
+                            locked_r.as_str()
+                        ),
+                    });
                 }
             }
             recording_opt = match recording_opt {
@@ -553,10 +549,8 @@ pub fn resolve(
         }
     }
 
-    let (transport, transport_source) = transport_opt
-        .unwrap_or((Transport::Direct, "default"));
-    let (recording, recording_source) = recording_opt
-        .unwrap_or((Recording::Always, "default"));
+    let (transport, transport_source) = transport_opt.unwrap_or((Transport::Direct, "default"));
+    let (recording, recording_source) = recording_opt.unwrap_or((Recording::Always, "default"));
 
     EffectivePolicy {
         transport,
@@ -597,13 +591,7 @@ impl PolicyStore {
         let type_view = Arc::new(system_view.new_sub_view(TYPE_POLICY_SUB_PATH));
         let asset_group_view = Arc::new(system_view.new_sub_view(ASSET_GROUP_POLICY_SUB_PATH));
         let resource_view = Arc::new(system_view.new_sub_view(RESOURCE_POLICY_SUB_PATH));
-        Ok(Arc::new(Self {
-            bastion_groups_view,
-            type_view,
-            asset_group_view,
-            resource_view,
-            system_view,
-        }))
+        Ok(Arc::new(Self { bastion_groups_view, type_view, asset_group_view, resource_view, system_view }))
     }
 
     // ─── Bastion groups ─────────────────────────────────────────
@@ -626,8 +614,7 @@ impl PolicyStore {
 
     pub async fn put_group(&self, group: &BastionGroup) -> Result<(), RvError> {
         let name = sanitize(&group.name)?;
-        let value = serde_json::to_vec(group)
-            .map_err(|e| bv_error_string!(&format!("encode bastion group: {e}")))?;
+        let value = serde_json::to_vec(group).map_err(|e| bv_error_string!(&format!("encode bastion group: {e}")))?;
         self.bastion_groups_view.put(&StorageEntry { key: name, value }).await
     }
 
@@ -642,19 +629,12 @@ impl PolicyStore {
         let Some(entry) = self.system_view.get(GLOBAL_POLICY_KEY).await? else {
             return Ok(GlobalPolicy::default());
         };
-        serde_json::from_slice(&entry.value)
-            .map_err(|e| bv_error_string!(&format!("decode global policy: {e}")))
+        serde_json::from_slice(&entry.value).map_err(|e| bv_error_string!(&format!("decode global policy: {e}")))
     }
 
     pub async fn put_global(&self, p: &GlobalPolicy) -> Result<(), RvError> {
-        let value = serde_json::to_vec(p)
-            .map_err(|e| bv_error_string!(&format!("encode global policy: {e}")))?;
-        self.system_view
-            .put(&StorageEntry {
-                key: GLOBAL_POLICY_KEY.to_string(),
-                value,
-            })
-            .await
+        let value = serde_json::to_vec(p).map_err(|e| bv_error_string!(&format!("encode global policy: {e}")))?;
+        self.system_view.put(&StorageEntry { key: GLOBAL_POLICY_KEY.to_string(), value }).await
     }
 
     // ─── Type policy ────────────────────────────────────────────
@@ -671,8 +651,7 @@ impl PolicyStore {
 
     pub async fn put_type(&self, p: &TypePolicy) -> Result<(), RvError> {
         let name = sanitize(&p.type_name)?;
-        let value = serde_json::to_vec(p)
-            .map_err(|e| bv_error_string!(&format!("encode type policy: {e}")))?;
+        let value = serde_json::to_vec(p).map_err(|e| bv_error_string!(&format!("encode type policy: {e}")))?;
         self.type_view.put(&StorageEntry { key: name, value }).await
     }
 
@@ -683,10 +662,7 @@ impl PolicyStore {
 
     // ─── Asset-group policy ─────────────────────────────────────
 
-    pub async fn get_asset_group(
-        &self,
-        asset_group_id: &str,
-    ) -> Result<Option<AssetGroupPolicy>, RvError> {
+    pub async fn get_asset_group(&self, asset_group_id: &str) -> Result<Option<AssetGroupPolicy>, RvError> {
         let id = sanitize(asset_group_id)?;
         let Some(entry) = self.asset_group_view.get(&id).await? else {
             return Ok(None);
@@ -704,17 +680,13 @@ impl PolicyStore {
 
     pub async fn put_asset_group(&self, p: &AssetGroupPolicy) -> Result<(), RvError> {
         let id = sanitize(&p.asset_group_id)?;
-        let value = serde_json::to_vec(p)
-            .map_err(|e| bv_error_string!(&format!("encode asset-group policy: {e}")))?;
+        let value = serde_json::to_vec(p).map_err(|e| bv_error_string!(&format!("encode asset-group policy: {e}")))?;
         self.asset_group_view.put(&StorageEntry { key: id, value }).await
     }
 
     // ─── Resource policy ────────────────────────────────────────
 
-    pub async fn get_resource(
-        &self,
-        resource_id: &str,
-    ) -> Result<Option<ResourcePolicy>, RvError> {
+    pub async fn get_resource(&self, resource_id: &str) -> Result<Option<ResourcePolicy>, RvError> {
         let id = sanitize(resource_id)?;
         let Some(entry) = self.resource_view.get(&id).await? else {
             return Ok(None);
@@ -726,8 +698,7 @@ impl PolicyStore {
 
     pub async fn put_resource(&self, p: &ResourcePolicy) -> Result<(), RvError> {
         let id = sanitize(&p.resource_id)?;
-        let value = serde_json::to_vec(p)
-            .map_err(|e| bv_error_string!(&format!("encode resource policy: {e}")))?;
+        let value = serde_json::to_vec(p).map_err(|e| bv_error_string!(&format!("encode resource policy: {e}")))?;
         self.resource_view.put(&StorageEntry { key: id, value }).await
     }
 
@@ -755,10 +726,7 @@ impl PolicyStore {
     /// by contrast, encodes a hard constraint — deleting the group out
     /// from under it would silently turn `rustion-required` into
     /// random-pool, defeating the lock. So those block the delete.
-    pub async fn locked_group_references(
-        &self,
-        group_name: &str,
-    ) -> Result<Vec<String>, RvError> {
+    pub async fn locked_group_references(&self, group_name: &str) -> Result<Vec<String>, RvError> {
         let mut refs = Vec::new();
         let pins = |t: &PolicyTier| t.lock && t.bastion_group.as_deref() == Some(group_name);
 
@@ -809,32 +777,21 @@ mod tests {
     use super::*;
 
     fn ag(id: &str, priority: i32, tier: PolicyTier) -> AssetGroupPolicy {
-        AssetGroupPolicy {
-            asset_group_id: id.into(),
-            priority,
-            tier,
-            updated_at: Utc::now(),
-        }
+        AssetGroupPolicy { asset_group_id: id.into(), priority, tier, updated_at: Utc::now() }
     }
 
     #[test]
     fn transport_most_restrictive_wins() {
         let p = resolve(
             &GlobalPolicy {
-                tier: PolicyTier {
-                    transport: Some(Transport::RustionPreferred),
-                    ..Default::default()
-                },
+                tier: PolicyTier { transport: Some(Transport::RustionPreferred), ..Default::default() },
                 updated_at: None,
             },
             None,
             &[],
             Some(&ResourcePolicy {
                 resource_id: "r".into(),
-                tier: PolicyTier {
-                    transport: Some(Transport::Direct),
-                    ..Default::default()
-                },
+                tier: PolicyTier { transport: Some(Transport::Direct), ..Default::default() },
                 updated_at: Utc::now(),
             }),
         );
@@ -847,20 +804,14 @@ mod tests {
     fn resource_can_raise_transport() {
         let p = resolve(
             &GlobalPolicy {
-                tier: PolicyTier {
-                    transport: Some(Transport::Direct),
-                    ..Default::default()
-                },
+                tier: PolicyTier { transport: Some(Transport::Direct), ..Default::default() },
                 updated_at: None,
             },
             None,
             &[],
             Some(&ResourcePolicy {
                 resource_id: "r".into(),
-                tier: PolicyTier {
-                    transport: Some(Transport::RustionRequired),
-                    ..Default::default()
-                },
+                tier: PolicyTier { transport: Some(Transport::RustionRequired), ..Default::default() },
                 updated_at: Utc::now(),
             }),
         );
@@ -872,21 +823,14 @@ mod tests {
     fn lock_prevents_weakening_transport() {
         let p = resolve(
             &GlobalPolicy {
-                tier: PolicyTier {
-                    transport: Some(Transport::RustionRequired),
-                    lock: true,
-                    ..Default::default()
-                },
+                tier: PolicyTier { transport: Some(Transport::RustionRequired), lock: true, ..Default::default() },
                 updated_at: None,
             },
             None,
             &[],
             Some(&ResourcePolicy {
                 resource_id: "r".into(),
-                tier: PolicyTier {
-                    transport: Some(Transport::Direct),
-                    ..Default::default()
-                },
+                tier: PolicyTier { transport: Some(Transport::Direct), ..Default::default() },
                 updated_at: Utc::now(),
             }),
         );
@@ -900,20 +844,14 @@ mod tests {
     fn recording_strictest_wins() {
         let p = resolve(
             &GlobalPolicy {
-                tier: PolicyTier {
-                    recording: Some(Recording::Off),
-                    ..Default::default()
-                },
+                tier: PolicyTier { recording: Some(Recording::Off), ..Default::default() },
                 updated_at: None,
             },
             None,
             &[],
             Some(&ResourcePolicy {
                 resource_id: "r".into(),
-                tier: PolicyTier {
-                    recording: Some(Recording::Always),
-                    ..Default::default()
-                },
+                tier: PolicyTier { recording: Some(Recording::Always), ..Default::default() },
                 updated_at: Utc::now(),
             }),
         );
@@ -925,20 +863,14 @@ mod tests {
     fn bastions_nearest_tier_wins() {
         let p = resolve(
             &GlobalPolicy {
-                tier: PolicyTier {
-                    bastions: vec!["g1".into(), "g2".into()],
-                    ..Default::default()
-                },
+                tier: PolicyTier { bastions: vec!["g1".into(), "g2".into()], ..Default::default() },
                 updated_at: None,
             },
             None,
             &[],
             Some(&ResourcePolicy {
                 resource_id: "r".into(),
-                tier: PolicyTier {
-                    bastions: vec!["r1".into()],
-                    ..Default::default()
-                },
+                tier: PolicyTier { bastions: vec!["r1".into()], ..Default::default() },
                 updated_at: Utc::now(),
             }),
         );
@@ -948,22 +880,8 @@ mod tests {
 
     #[test]
     fn asset_group_priority_breaks_ties() {
-        let high = ag(
-            "high",
-            10,
-            PolicyTier {
-                bastions: vec!["high-b".into()],
-                ..Default::default()
-            },
-        );
-        let low = ag(
-            "low",
-            5,
-            PolicyTier {
-                bastions: vec!["low-b".into()],
-                ..Default::default()
-            },
-        );
+        let high = ag("high", 10, PolicyTier { bastions: vec!["high-b".into()], ..Default::default() });
+        let low = ag("low", 5, PolicyTier { bastions: vec!["low-b".into()], ..Default::default() });
         let p = resolve(&GlobalPolicy::default(), None, &[low, high], None);
         // After sorting by priority desc, high is processed first, then
         // low overrides since nearest-defined-tier wins on the same tier
@@ -994,30 +912,20 @@ mod tests {
     fn locked_recording_prevents_off_override() {
         let p = resolve(
             &GlobalPolicy {
-                tier: PolicyTier {
-                    recording: Some(Recording::Always),
-                    lock: true,
-                    ..Default::default()
-                },
+                tier: PolicyTier { recording: Some(Recording::Always), lock: true, ..Default::default() },
                 updated_at: None,
             },
             None,
             &[],
             Some(&ResourcePolicy {
                 resource_id: "r".into(),
-                tier: PolicyTier {
-                    recording: Some(Recording::Off),
-                    ..Default::default()
-                },
+                tier: PolicyTier { recording: Some(Recording::Off), ..Default::default() },
                 updated_at: Utc::now(),
             }),
         );
         assert_eq!(p.recording, Recording::Always);
         assert!(p.lock_violation.is_some());
-        assert_eq!(
-            p.lock_violation.as_ref().unwrap().locking_tier,
-            "global"
-        );
+        assert_eq!(p.lock_violation.as_ref().unwrap().locking_tier, "global");
         assert_eq!(p.lock_violation.as_ref().unwrap().field, "recording");
     }
 

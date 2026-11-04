@@ -14,13 +14,13 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64, Engine as _};
 use serde_json::{json, Map, Value};
 
 use super::storage::{EabKey, EAB_PREFIX};
-use bv_storage::StorageEntry;
 use crate::{
     context::Context,
     errors::RvError,
     logical::{Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
     new_fields, new_fields_internal, new_path, new_path_internal,
 };
+use bv_storage::StorageEntry;
 
 use super::super::{PkiBackend, PkiBackendInner};
 
@@ -67,16 +67,8 @@ impl PkiBackend {
 
 #[maybe_async::maybe_async]
 impl PkiBackendInner {
-    pub async fn handle_acme_eab_read(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
-        let key_id = req
-            .get_data("key_id")
-            .ok()
-            .and_then(|v| v.as_str().map(String::from))
-            .unwrap_or_default();
+    pub async fn handle_acme_eab_read(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let key_id = req.get_data("key_id").ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
         let key = self
             .load_eab(req, &key_id)
             .await?
@@ -85,10 +77,7 @@ impl PkiBackendInner {
         data.insert("key_id".into(), Value::String(key.key_id));
         data.insert("key_b64".into(), Value::String(key.key_b64));
         data.insert("comment".into(), Value::String(key.comment));
-        data.insert(
-            "created_at_unix".into(),
-            Value::Number(key.created_at_unix.into()),
-        );
+        data.insert("created_at_unix".into(), Value::Number(key.created_at_unix.into()));
         data.insert("consumed".into(), Value::Bool(key.consumed));
         Ok(Some(Response::data_response(Some(data))))
     }
@@ -98,20 +87,11 @@ impl PkiBackendInner {
         _b: &dyn Backend,
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        let key_id = req
-            .get_data("key_id")
-            .ok()
-            .and_then(|v| v.as_str().map(String::from))
-            .unwrap_or_default();
-        let key_b64 = match req
-            .get_data("key_b64")
-            .ok()
-            .and_then(|v| v.as_str().map(String::from))
-        {
+        let key_id = req.get_data("key_id").ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
+        let key_b64 = match req.get_data("key_b64").ok().and_then(|v| v.as_str().map(String::from)) {
             Some(s) if !s.is_empty() => {
-                B64.decode(s.as_bytes()).map_err(|_| {
-                    RvError::ErrString("acme: eab key_b64 not URL-safe base64 (no pad)".into())
-                })?;
+                B64.decode(s.as_bytes())
+                    .map_err(|_| RvError::ErrString("acme: eab key_b64 not URL-safe base64 (no pad)".into()))?;
                 s
             }
             _ => {
@@ -121,19 +101,12 @@ impl PkiBackendInner {
                 B64.encode(bytes)
             }
         };
-        let comment = req
-            .get_data("comment")
-            .ok()
-            .and_then(|v| v.as_str().map(String::from))
-            .unwrap_or_default();
+        let comment = req.get_data("comment").ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
         let key = EabKey {
             key_id: key_id.clone(),
             key_b64: key_b64.clone(),
             comment,
-            created_at_unix: SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
+            created_at_unix: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
             consumed: false,
         };
         self.save_eab(req, &key_id, &key).await?;
@@ -148,37 +121,20 @@ impl PkiBackendInner {
         _b: &dyn Backend,
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        let key_id = req
-            .get_data("key_id")
-            .ok()
-            .and_then(|v| v.as_str().map(String::from))
-            .unwrap_or_default();
+        let key_id = req.get_data("key_id").ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
         req.storage_delete(&format!("{EAB_PREFIX}{key_id}")).await?;
         Ok(None)
     }
 
-    pub async fn load_eab(
-        &self,
-        req: &Request,
-        key_id: &str,
-    ) -> Result<Option<EabKey>, RvError> {
+    pub async fn load_eab(&self, req: &Request, key_id: &str) -> Result<Option<EabKey>, RvError> {
         match req.storage_get(&format!("{EAB_PREFIX}{key_id}")).await? {
             Some(e) => Ok(Some(serde_json::from_slice(&e.value)?)),
             None => Ok(None),
         }
     }
-    pub async fn save_eab(
-        &self,
-        req: &mut Request,
-        key_id: &str,
-        key: &EabKey,
-    ) -> Result<(), RvError> {
+    pub async fn save_eab(&self, req: &mut Request, key_id: &str, key: &EabKey) -> Result<(), RvError> {
         let bytes = serde_json::to_vec(key)?;
-        req.storage_put(&StorageEntry {
-            key: format!("{EAB_PREFIX}{key_id}"),
-            value: bytes,
-        })
-        .await
+        req.storage_put(&StorageEntry { key: format!("{EAB_PREFIX}{key_id}"), value: bytes }).await
     }
 }
 
@@ -200,44 +156,26 @@ pub fn verify_eab(
     expected_url_tail: &str,
     lookup: impl FnOnce(&str) -> Option<EabKey>,
 ) -> Result<EabKey, String> {
-    use hmac::{Hmac, Mac};
     use hmac::digest::KeyInit;
+    use hmac::{Hmac, Mac};
     use sha2::Sha256;
     type HmacSha256 = Hmac<Sha256>;
 
-    let protected = eab_value
-        .get("protected")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "eab: missing protected".to_string())?;
-    let payload = eab_value
-        .get("payload")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "eab: missing payload".to_string())?;
-    let signature = eab_value
-        .get("signature")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "eab: missing signature".to_string())?;
+    let protected =
+        eab_value.get("protected").and_then(|v| v.as_str()).ok_or_else(|| "eab: missing protected".to_string())?;
+    let payload =
+        eab_value.get("payload").and_then(|v| v.as_str()).ok_or_else(|| "eab: missing payload".to_string())?;
+    let signature =
+        eab_value.get("signature").and_then(|v| v.as_str()).ok_or_else(|| "eab: missing signature".to_string())?;
 
-    let header_bytes = B64
-        .decode(protected.as_bytes())
-        .map_err(|_| "eab: protected not base64url".to_string())?;
-    let header: Value = serde_json::from_slice(&header_bytes)
-        .map_err(|_| "eab: protected not JSON".to_string())?;
-    let alg = header
-        .get("alg")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "eab: missing protected.alg".to_string())?;
+    let header_bytes = B64.decode(protected.as_bytes()).map_err(|_| "eab: protected not base64url".to_string())?;
+    let header: Value = serde_json::from_slice(&header_bytes).map_err(|_| "eab: protected not JSON".to_string())?;
+    let alg = header.get("alg").and_then(|v| v.as_str()).ok_or_else(|| "eab: missing protected.alg".to_string())?;
     if alg != "HS256" {
         return Err(format!("eab: alg `{alg}` not HS256"));
     }
-    let kid = header
-        .get("kid")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "eab: missing protected.kid".to_string())?;
-    let url = header
-        .get("url")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "eab: missing protected.url".to_string())?;
+    let kid = header.get("kid").and_then(|v| v.as_str()).ok_or_else(|| "eab: missing protected.kid".to_string())?;
+    let url = header.get("url").and_then(|v| v.as_str()).ok_or_else(|| "eab: missing protected.url".to_string())?;
     let want = format!("/acme/{expected_url_tail}");
     if !url.ends_with(&want) {
         return Err(format!("eab: protected.url `{url}` not new-account"));
@@ -247,28 +185,20 @@ pub fn verify_eab(
     if key.consumed {
         return Err(format!("eab: key `{kid}` already consumed"));
     }
-    let key_bytes = B64
-        .decode(key.key_b64.as_bytes())
-        .map_err(|_| "eab: stored key_b64 invalid".to_string())?;
+    let key_bytes = B64.decode(key.key_b64.as_bytes()).map_err(|_| "eab: stored key_b64 invalid".to_string())?;
 
-    let payload_bytes = B64
-        .decode(payload.as_bytes())
-        .map_err(|_| "eab: payload not base64url".to_string())?;
-    let inner_jwk: Value = serde_json::from_slice(&payload_bytes)
-        .map_err(|_| "eab: payload not JSON".to_string())?;
+    let payload_bytes = B64.decode(payload.as_bytes()).map_err(|_| "eab: payload not base64url".to_string())?;
+    let inner_jwk: Value = serde_json::from_slice(&payload_bytes).map_err(|_| "eab: payload not JSON".to_string())?;
     if !jwks_equal(&inner_jwk, expected_account_jwk) {
         return Err("eab: payload JWK does not match account JWK".to_string());
     }
 
     let signing_input = format!("{protected}.{payload}");
-    let sig = B64
-        .decode(signature.as_bytes())
-        .map_err(|_| "eab: signature not base64url".to_string())?;
-    let mut mac = <HmacSha256 as KeyInit>::new_from_slice(&key_bytes)
-        .map_err(|_| "eab: hmac key length".to_string())?;
+    let sig = B64.decode(signature.as_bytes()).map_err(|_| "eab: signature not base64url".to_string())?;
+    let mut mac =
+        <HmacSha256 as KeyInit>::new_from_slice(&key_bytes).map_err(|_| "eab: hmac key length".to_string())?;
     mac.update(signing_input.as_bytes());
-    mac.verify_slice(&sig)
-        .map_err(|_| "eab: signature verify failed".to_string())?;
+    mac.verify_slice(&sig).map_err(|_| "eab: signature verify failed".to_string())?;
     Ok(key)
 }
 
@@ -277,10 +207,7 @@ pub fn verify_eab(
 /// need — same fields, lex order, no whitespace. We get it for free
 /// by recomputing the thumbprint of each side and comparing those.
 fn jwks_equal(a: &Value, b: &Value) -> bool {
-    match (
-        super::jws::jwk_thumbprint(a),
-        super::jws::jwk_thumbprint(b),
-    ) {
+    match (super::jws::jwk_thumbprint(a), super::jws::jwk_thumbprint(b)) {
         (Ok(x), Ok(y)) => x == y,
         _ => false,
     }
@@ -334,13 +261,8 @@ mod tests {
             "signature": sig,
         });
 
-        let stored = EabKey {
-            key_id: kid.to_string(),
-            key_b64,
-            comment: String::new(),
-            created_at_unix: 0,
-            consumed: false,
-        };
+        let stored =
+            EabKey { key_id: kid.to_string(), key_b64, comment: String::new(), created_at_unix: 0, consumed: false };
         let r = verify_eab(&envelope, &account_jwk, "new-account", |k| {
             assert_eq!(k, kid);
             Some(stored.clone())
@@ -364,9 +286,7 @@ mod tests {
             "payload": B64.encode(b"{}"),
             "signature": B64.encode([0u8; 32]),
         });
-        let r = verify_eab(&envelope, &json!({}), "new-account", |_| {
-            Some(stored.clone())
-        });
+        let r = verify_eab(&envelope, &json!({}), "new-account", |_| Some(stored.clone()));
         assert!(r.is_err());
         assert!(r.err().unwrap().to_string().contains("consumed"));
     }

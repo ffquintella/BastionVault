@@ -266,9 +266,10 @@ pub fn plan(mode: Mode, until: Option<Step>, allow_writes: bool) -> Result<Vec<S
     let steps = match until {
         None => all.to_vec(),
         Some(last) => {
-            let at = all.iter().position(|s| *s == last).ok_or_else(|| {
-                harness_error(format!("{ENV_UNTIL}={} is not a step of {mode:?}", last.name()))
-            })?;
+            let at = all
+                .iter()
+                .position(|s| *s == last)
+                .ok_or_else(|| harness_error(format!("{ENV_UNTIL}={} is not a step of {mode:?}", last.name())))?;
             all[..=at].to_vec()
         }
     };
@@ -1201,7 +1202,8 @@ mod tests {
         // Enabled but incomplete or ambiguous: refused, never defaulted.
         assert!(HarnessEnv::from_lookup(env(&[(ENV_ENABLE, "1"), (ENV_OUT_DIR, "/tmp")])).is_err(), "no serials");
         assert!(HarnessEnv::from_lookup(env(&[(ENV_ENABLE, "1"), (ENV_SERIALS, "36470559,36470560")])).is_err());
-        let gate = [(ENV_ENABLE, "1"), (ENV_SERIALS, "36470559,36470560"), (ENV_OUT_DIR, "/t"), (ENV_ALLOW_WRITES, "yes")];
+        let gate =
+            [(ENV_ENABLE, "1"), (ENV_SERIALS, "36470559,36470560"), (ENV_OUT_DIR, "/t"), (ENV_ALLOW_WRITES, "yes")];
         assert!(HarnessEnv::from_lookup(env(&gate)).unwrap_err().to_string().contains(ENV_ALLOW_WRITES));
     }
 

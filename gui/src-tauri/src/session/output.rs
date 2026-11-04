@@ -512,10 +512,7 @@ mod tests {
                     InvokeResponseBody::Raw(bytes) => String::from_utf8(bytes).unwrap(),
                 };
                 let decoded: ChunkIn = serde_json::from_str(&json).unwrap();
-                bucket.lock().unwrap().push(ChunkPayload {
-                    bytes_b64: decoded.bytes_b64,
-                    notice: decoded.notice,
-                });
+                bucket.lock().unwrap().push(ChunkPayload { bytes_b64: decoded.bytes_b64, notice: decoded.notice });
                 Ok(())
             })
         }
@@ -591,10 +588,8 @@ mod tests {
 
         let replay = out.handshake(1).unwrap();
         assert!(!replay.is_empty());
-        let delivered = sink.send_if_epoch(
-            ChunkPayload { bytes_b64: encode_b64(&replay.bytes), notice: replay.notice.clone() },
-            1,
-        );
+        let delivered =
+            sink.send_if_epoch(ChunkPayload { bytes_b64: encode_b64(&replay.bytes), notice: replay.notice.clone() }, 1);
         assert!(delivered);
         out.handshake_done(1);
 

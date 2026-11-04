@@ -462,8 +462,9 @@ fn recover_step(client: &crate::api::Client, body: Map<String, Value>) -> Result
 fn name_values(flag: &str, specs: &[String]) -> Result<Map<String, Value>, RvError> {
     let mut out = Map::new();
     for spec in specs {
-        let (name, value) =
-            spec.split_once('=').ok_or_else(|| RvError::ErrString(format!("--{flag} {spec:?}: expected NAME=VALUE")))?;
+        let (name, value) = spec
+            .split_once('=')
+            .ok_or_else(|| RvError::ErrString(format!("--{flag} {spec:?}: expected NAME=VALUE")))?;
         out.insert(name.to_string(), Value::String(value.to_string()));
     }
     Ok(out)

@@ -147,10 +147,7 @@ impl AccessAuditStore {
     /// prefix) and decode, skipping values that fail to parse.
     fn decode(mut entries: Vec<StorageEntry>) -> Vec<AccessAuditEntry> {
         entries.sort_by(|a, b| b.key.cmp(&a.key));
-        entries
-            .into_iter()
-            .filter_map(|e| serde_json::from_slice::<AccessAuditEntry>(&e.value).ok())
-            .collect()
+        entries.into_iter().filter_map(|e| serde_json::from_slice::<AccessAuditEntry>(&e.value).ok()).collect()
     }
 }
 

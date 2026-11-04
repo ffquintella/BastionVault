@@ -11,8 +11,10 @@ use x509_cert::der::Decode;
 
 use super::{
     crypto::Signer,
-    storage::{self, CaKind, CrlConfig, UrlsConfig, KEY_CA_CERT, KEY_CA_KEY,
-              KEY_CA_META, KEY_CONFIG_CRL, KEY_CONFIG_URLS, KEY_CRL_STATE},
+    storage::{
+        self, CaKind, CrlConfig, UrlsConfig, KEY_CA_CERT, KEY_CA_KEY, KEY_CA_META, KEY_CONFIG_CRL, KEY_CONFIG_URLS,
+        KEY_CRL_STATE,
+    },
     PkiBackend, PkiBackendInner,
 };
 use crate::{
@@ -83,12 +85,15 @@ impl PkiBackendInner {
 
     pub async fn write_config_urls(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let cfg = UrlsConfig {
-            issuing_certificates: req.get_data_or_default("issuing_certificates")?
-                .as_comma_string_slice().unwrap_or_default(),
-            crl_distribution_points: req.get_data_or_default("crl_distribution_points")?
-                .as_comma_string_slice().unwrap_or_default(),
-            ocsp_servers: req.get_data_or_default("ocsp_servers")?
-                .as_comma_string_slice().unwrap_or_default(),
+            issuing_certificates: req
+                .get_data_or_default("issuing_certificates")?
+                .as_comma_string_slice()
+                .unwrap_or_default(),
+            crl_distribution_points: req
+                .get_data_or_default("crl_distribution_points")?
+                .as_comma_string_slice()
+                .unwrap_or_default(),
+            ocsp_servers: req.get_data_or_default("ocsp_servers")?.as_comma_string_slice().unwrap_or_default(),
         };
         storage::put_json(req, KEY_CONFIG_URLS, &cfg).await?;
         Ok(None)
@@ -135,8 +140,7 @@ impl PkiBackendInner {
     /// Re-importing a cert already present at the mount (by serial) is a
     /// no-op skip, so a shared root pasted across imports doesn't collide.
     pub async fn import_config_ca(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
-        let bundle = req.get_data("pem_bundle")?.as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
+        let bundle = req.get_data("pem_bundle")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
         let requested_name = req.get_data_or_default("issuer_name")?.as_str().unwrap_or("").to_string();
 
         let (cert_pems, key_pem) = split_ca_bundle(&bundle)?;
@@ -228,9 +232,7 @@ impl PkiBackendInner {
             let is_signing = Some(c.index) == signing_idx;
 
             // Idempotent skip: cert already at this mount (by serial).
-            if let Some((id, name)) =
-                super::issuers::find_issuer_by_serial(req, &c.serial_hex).await?
-            {
+            if let Some((id, name)) = super::issuers::find_issuer_by_serial(req, &c.serial_hex).await? {
                 used_names.insert(name.clone());
                 chain_out.push(c.chain_entry(&id, &name, is_signing, true));
                 if is_signing {
@@ -239,9 +241,7 @@ impl PkiBackendInner {
                 continue;
             }
 
-            let name = self
-                .choose_issuer_name(req, &requested_name, is_signing, c, &used_names)
-                .await?;
+            let name = self.choose_issuer_name(req, &requested_name, is_signing, c, &used_names).await?;
             used_names.insert(name.clone());
 
             let id = if is_signing {
@@ -294,10 +294,7 @@ impl PkiBackendInner {
                 .find(|e| e.get("self_signed").and_then(Value::as_bool).unwrap_or(false))
                 .or_else(|| chain_out.first())
                 .and_then(|e| {
-                    Some((
-                        e.get("issuer_id")?.as_str()?.to_string(),
-                        e.get("issuer_name")?.as_str()?.to_string(),
-                    ))
+                    Some((e.get("issuer_id")?.as_str()?.to_string(), e.get("issuer_name")?.as_str()?.to_string()))
                 })
         });
 
@@ -341,7 +338,11 @@ impl PkiBackendInner {
             super::issuers::next_default_name(&index)
         } else {
             let slug = slugify_cn(&cert.common_name);
-            if slug.is_empty() { "ca".to_string() } else { slug }
+            if slug.is_empty() {
+                "ca".to_string()
+            } else {
+                slug
+            }
         };
         if !taken(&base) {
             return Ok(base);
@@ -383,14 +384,8 @@ struct ParsedCaCert {
 impl ParsedCaCert {
     fn parse(pem_block: &str, index: usize) -> Result<Self, RvError> {
         let cert_der = super::csr::decode_pem_or_der(pem_block)?;
-        let cert = x509_cert::Certificate::from_der(&cert_der)
-            .map_err(|_| RvError::ErrPkiPemBundleInvalid)?;
-        let spki_raw = cert
-            .tbs_certificate
-            .subject_public_key_info
-            .subject_public_key
-            .raw_bytes()
-            .to_vec();
+        let cert = x509_cert::Certificate::from_der(&cert_der).map_err(|_| RvError::ErrPkiPemBundleInvalid)?;
+        let spki_raw = cert.tbs_certificate.subject_public_key_info.subject_public_key.raw_bytes().to_vec();
         let subject_dn = cert.tbs_certificate.subject.to_string();
         let issuer_dn = cert.tbs_certificate.issuer.to_string();
         let common_name = subject_dn
@@ -398,8 +393,7 @@ impl ParsedCaCert {
             .find_map(|piece| piece.trim().strip_prefix("CN=").map(|v| v.to_string()))
             .unwrap_or_default();
         let serial_hex = storage::serial_to_hex(cert.tbs_certificate.serial_number.as_bytes());
-        let not_after_unix =
-            cert.tbs_certificate.validity.not_after.to_unix_duration().as_secs() as i64;
+        let not_after_unix = cert.tbs_certificate.validity.not_after.to_unix_duration().as_secs() as i64;
         Ok(ParsedCaCert {
             index,
             // Re-emit canonical PEM so downstream reads round-trip cleanly.

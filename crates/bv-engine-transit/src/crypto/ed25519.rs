@@ -24,23 +24,22 @@ pub fn generate_keypair() -> (Vec<u8>, Vec<u8>) {
 }
 
 pub fn sign(seed: &[u8], message: &[u8]) -> Result<Vec<u8>, RvError> {
-    let seed: &[u8; ED25519_SEED_LEN] = seed
-        .try_into()
-        .map_err(|_| RvError::ErrString(format!("ed25519 seed must be {ED25519_SEED_LEN} bytes")))?;
+    let seed: &[u8; ED25519_SEED_LEN] =
+        seed.try_into().map_err(|_| RvError::ErrString(format!("ed25519 seed must be {ED25519_SEED_LEN} bytes")))?;
     let sk = SigningKey::from_bytes(seed);
     let sig: Signature = sk.sign(message);
     Ok(sig.to_bytes().to_vec())
 }
 
 pub fn verify(public_key: &[u8], message: &[u8], signature: &[u8]) -> Result<bool, RvError> {
-    let pk: &[u8; ED25519_PUBLIC_KEY_LEN] = public_key.try_into().map_err(|_| {
-        RvError::ErrString(format!("ed25519 public key must be {ED25519_PUBLIC_KEY_LEN} bytes"))
-    })?;
-    let vk = VerifyingKey::from_bytes(pk)
-        .map_err(|e| RvError::ErrString(format!("invalid ed25519 public key: {e}")))?;
-    let sig: &[u8; ED25519_SIGNATURE_LEN] = signature.try_into().map_err(|_| {
-        RvError::ErrString(format!("ed25519 signature must be {ED25519_SIGNATURE_LEN} bytes"))
-    })?;
+    let pk: &[u8; ED25519_PUBLIC_KEY_LEN] = public_key
+        .try_into()
+        .map_err(|_| RvError::ErrString(format!("ed25519 public key must be {ED25519_PUBLIC_KEY_LEN} bytes")))?;
+    let vk =
+        VerifyingKey::from_bytes(pk).map_err(|e| RvError::ErrString(format!("invalid ed25519 public key: {e}")))?;
+    let sig: &[u8; ED25519_SIGNATURE_LEN] = signature
+        .try_into()
+        .map_err(|_| RvError::ErrString(format!("ed25519 signature must be {ED25519_SIGNATURE_LEN} bytes")))?;
     let sig = Signature::from_bytes(sig);
     Ok(vk.verify(message, &sig).is_ok())
 }

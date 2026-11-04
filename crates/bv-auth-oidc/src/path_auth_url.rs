@@ -18,15 +18,12 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use openidconnect::{
     core::{CoreAuthenticationFlow, CoreClient, CoreProviderMetadata},
-    reqwest, ClientId, ClientSecret, CsrfToken, IssuerUrl, Nonce, PkceCodeChallenge,
-    RedirectUrl, Scope,
+    reqwest, ClientId, ClientSecret, CsrfToken, IssuerUrl, Nonce, PkceCodeChallenge, RedirectUrl, Scope,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use super::{
-    path_config::OidcConfig, path_roles::OidcRoleEntry, OidcBackend, OidcBackendInner,
-};
+use super::{path_config::OidcConfig, path_roles::OidcRoleEntry, OidcBackend, OidcBackendInner};
 use crate::{
     context::Context,
     errors::RvError,
@@ -85,55 +82,35 @@ impl OidcBackend {
 
 #[maybe_async::maybe_async]
 impl OidcBackendInner {
-    pub async fn auth_url(
-        &self,
-        _backend: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
-        let cfg = OidcConfig::load(req).await?.ok_or_else(|| {
-            RvError::ErrString(
-                "oidc: provider config missing — POST to `config` first".into(),
-            )
-        })?;
+    pub async fn auth_url(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let cfg = OidcConfig::load(req)
+            .await?
+            .ok_or_else(|| RvError::ErrString("oidc: provider config missing — POST to `config` first".into()))?;
 
         // Role selection: explicit > default > error.
-        let role_name = req
-            .get_data_as_str("role")
-            .unwrap_or_default()
-            .trim()
-            .to_string();
+        let role_name = req.get_data_as_str("role").unwrap_or_default().trim().to_string();
         let role_name = if role_name.is_empty() {
             if cfg.default_role.is_empty() {
-                return Err(RvError::ErrString(
-                    "oidc: `role` is required (no `default_role` configured)".into(),
-                ));
+                return Err(RvError::ErrString("oidc: `role` is required (no `default_role` configured)".into()));
             }
             cfg.default_role.clone()
         } else {
             role_name
         };
-        let role = OidcRoleEntry::load(req, &role_name).await?.ok_or_else(|| {
-            RvError::ErrString(format!("oidc: role `{role_name}` not configured"))
-        })?;
+        let role = OidcRoleEntry::load(req, &role_name)
+            .await?
+            .ok_or_else(|| RvError::ErrString(format!("oidc: role `{role_name}` not configured")))?;
 
         // Redirect-URI validation. The per-role whitelist narrows
         // the provider-level whitelist; if either is empty that
         // tier accepts anything. At least one tier must be non-
         // empty to avoid turning the mount into an open-redirect
         // oracle.
-        let redirect_uri = req
-            .get_data_as_str("redirect_uri")
-            .unwrap_or_default()
-            .trim()
-            .to_string();
+        let redirect_uri = req.get_data_as_str("redirect_uri").unwrap_or_default().trim().to_string();
         if redirect_uri.is_empty() {
-            return Err(RvError::ErrString(
-                "oidc: `redirect_uri` is required".into(),
-            ));
+            return Err(RvError::ErrString("oidc: `redirect_uri` is required".into()));
         }
-        if !role.allowed_redirect_uris.is_empty()
-            && !role.allowed_redirect_uris.contains(&redirect_uri)
-        {
+        if !role.allowed_redirect_uris.is_empty() && !role.allowed_redirect_uris.contains(&redirect_uri) {
             return Err(RvError::ErrString(format!(
                 "oidc: redirect_uri `{redirect_uri}` not in role `{role_name}` whitelist"
             )));
@@ -173,11 +150,8 @@ impl OidcBackendInner {
         );
 
         let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
-        let mut builder = client.authorize_url(
-            CoreAuthenticationFlow::AuthorizationCode,
-            CsrfToken::new_random,
-            Nonce::new_random,
-        );
+        let mut builder =
+            client.authorize_url(CoreAuthenticationFlow::AuthorizationCode, CsrfToken::new_random, Nonce::new_random);
         // Union of provider-level + role-level scopes; de-duplicate
         // so the provider doesn't reject `scope=openid openid`.
         let mut scopes: Vec<String> = cfg.oidc_scopes.clone();
@@ -229,10 +203,7 @@ pub(crate) fn reqwest_http_client() -> Result<reqwest::Client, RvError> {
 
 pub(crate) fn unix_now() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
 #[cfg(test)]

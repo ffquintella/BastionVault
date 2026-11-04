@@ -24,19 +24,15 @@ use super::{
     jws::JwsEnvelope,
     storage::{ORDER_CERT_SUFFIX, ORDER_PREFIX},
 };
-use bv_storage::StorageEntry;
 use crate::{
     context::Context,
     errors::RvError,
     logical::{Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
     new_fields, new_fields_internal, new_path, new_path_internal,
 };
+use bv_storage::StorageEntry;
 
-use super::super::{
-    issuers, path_revoke,
-    storage as pki_storage,
-    PkiBackend, PkiBackendInner,
-};
+use super::super::{issuers, path_revoke, storage as pki_storage, PkiBackend, PkiBackendInner};
 
 const HELP: &str = "RFC 8555 §7.6 — revoke a previously-issued certificate.";
 
@@ -58,19 +54,13 @@ impl PkiBackend {
 
 #[maybe_async::maybe_async]
 impl PkiBackendInner {
-    pub async fn handle_acme_revoke(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_acme_revoke(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let cfg = self.load_acme_config(req).await?.unwrap_or_default();
         if !cfg.enabled {
             return Err(RvError::ErrString("acme: not enabled on this mount".into()));
         }
         let envelope = parse_envelope(req)?;
-        let (account_id, payload) = self
-            .verify_kid_jws(req, &envelope, "revoke-cert")
-            .await?;
+        let (account_id, payload) = self.verify_kid_jws(req, &envelope, "revoke-cert").await?;
 
         let payload_json: Value = serde_json::from_slice(&payload)
             .map_err(|e| RvError::ErrString(format!("acme: revoke payload not JSON: {e}")))?;
@@ -96,28 +86,20 @@ impl PkiBackendInner {
         // account's orders by linear scan — order count per account
         // is small in any sane deployment, and the alternative is a
         // reverse index we'd have to maintain on every finalize.
-        let owned = self
-            .account_owns_serial(req, &account_id, &serial_hex)
-            .await?;
+        let owned = self.account_owns_serial(req, &account_id, &serial_hex).await?;
         if !owned {
-            return Err(RvError::ErrString(
-                "acme: unauthorized — account did not issue this certificate".into(),
-            ));
+            return Err(RvError::ErrString("acme: unauthorized — account did not issue this certificate".into()));
         }
 
         // Drop into the same plumbing `pki/revoke` uses: flip the
         // cert record, append to CRL state, rebuild the issuer's CRL.
         let cert_key = pki_storage::cert_storage_key(&serial_hex);
-        let mut record: pki_storage::CertRecord =
-            pki_storage::get_json(req, &cert_key).await?.ok_or_else(|| {
-                RvError::ErrString(format!(
-                    "acme: cert serial `{serial_hex}` not in engine index (was it issued by this mount?)"
-                ))
-            })?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let mut record: pki_storage::CertRecord = pki_storage::get_json(req, &cert_key).await?.ok_or_else(|| {
+            RvError::ErrString(format!(
+                "acme: cert serial `{serial_hex}` not in engine index (was it issued by this mount?)"
+            ))
+        })?;
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         if record.revoked_at_unix.is_none() {
             record.revoked_at_unix = Some(now);
             pki_storage::put_json(req, &cert_key, &record).await?;
@@ -128,14 +110,10 @@ impl PkiBackendInner {
                 issuers::load_issuer(req, &record.issuer_id).await?
             };
             let crl_state_key = pki_storage::issuer_crl_state_key(&issuer.id);
-            let mut state: pki_storage::CrlState = pki_storage::get_json(req, &crl_state_key)
-                .await?
-                .unwrap_or_default();
+            let mut state: pki_storage::CrlState =
+                pki_storage::get_json(req, &crl_state_key).await?.unwrap_or_default();
             if !state.revoked.iter().any(|e| e.serial_hex == serial_hex) {
-                state.revoked.push(pki_storage::RevokedSerial {
-                    serial_hex: serial_hex.clone(),
-                    revoked_at_unix: now,
-                });
+                state.revoked.push(pki_storage::RevokedSerial { serial_hex: serial_hex.clone(), revoked_at_unix: now });
             }
             state.crl_number = state.crl_number.saturating_add(1);
             pki_storage::put_json(req, &crl_state_key, &state).await?;
@@ -151,11 +129,7 @@ impl PkiBackendInner {
         let mut data = Map::new();
         data.insert("revocation_time".into(), json!(record.revoked_at_unix.unwrap_or(now)));
         data.insert("serial_number".into(), json!(serial_hex));
-        Ok(Some(Response {
-            data: Some(data),
-            headers: Some(headers),
-            ..Default::default()
-        }))
+        Ok(Some(Response { data: Some(data), headers: Some(headers), ..Default::default() }))
     }
 
     /// Walk the account's stored orders and return true if any
@@ -183,9 +157,7 @@ impl PkiBackendInner {
                 continue;
             }
             let order_id = k.clone();
-            let entry = req
-                .storage_get(&format!("{ORDER_PREFIX}{order_id}"))
-                .await?;
+            let entry = req.storage_get(&format!("{ORDER_PREFIX}{order_id}")).await?;
             let order: super::storage::AcmeOrder = match entry {
                 Some(e) => match serde_json::from_slice(&e.value) {
                     Ok(o) => o,
@@ -200,12 +172,7 @@ impl PkiBackendInner {
                 continue;
             }
             // Pull the stashed PEM bundle and check the leaf serial.
-            let chain = req
-                .storage_get(&format!(
-                    "{ORDER_PREFIX}{}{ORDER_CERT_SUFFIX}",
-                    order.cert_id
-                ))
-                .await?;
+            let chain = req.storage_get(&format!("{ORDER_PREFIX}{}{ORDER_CERT_SUFFIX}", order.cert_id)).await?;
             let pem = match chain {
                 Some(e) => match String::from_utf8(e.value) {
                     Ok(s) => s,
@@ -224,31 +191,13 @@ impl PkiBackendInner {
 }
 
 fn parse_envelope(req: &Request) -> Result<JwsEnvelope, RvError> {
-    let protected = req
-        .get_data("protected")
-        .ok()
-        .and_then(|v| v.as_str().map(String::from))
-        .unwrap_or_default();
-    let payload = req
-        .get_data("payload")
-        .ok()
-        .and_then(|v| v.as_str().map(String::from))
-        .unwrap_or_default();
-    let signature = req
-        .get_data("signature")
-        .ok()
-        .and_then(|v| v.as_str().map(String::from))
-        .unwrap_or_default();
+    let protected = req.get_data("protected").ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
+    let payload = req.get_data("payload").ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
+    let signature = req.get_data("signature").ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
     if protected.is_empty() || signature.is_empty() {
-        return Err(RvError::ErrString(
-            "acme: malformed JWS envelope (missing protected or signature)".into(),
-        ));
+        return Err(RvError::ErrString("acme: malformed JWS envelope (missing protected or signature)".into()));
     }
-    Ok(JwsEnvelope {
-        protected,
-        payload,
-        signature,
-    })
+    Ok(JwsEnvelope { protected, payload, signature })
 }
 
 fn first_pem_cert_serial(pem: &str) -> Option<String> {
@@ -275,9 +224,6 @@ fn first_pem_cert_serial(pem: &str) -> Option<String> {
 
 #[allow(dead_code)]
 fn _silence() {
-    let _ = StorageEntry {
-        key: String::new(),
-        value: Vec::new(),
-    };
+    let _ = StorageEntry { key: String::new(), value: Vec::new() };
     let _ = Arc::new(());
 }

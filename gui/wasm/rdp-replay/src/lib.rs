@@ -553,30 +553,17 @@ pub fn decode(bytes: &[u8]) -> DecodeOutput {
                 } else {
                     let frame = decode_graphics(ts, payload, desk_w, desk_h);
                     bump(&mut counts, &bitmap_count_key(&frame));
-                    timeline.push(TimelineEvent::Bitmap {
-                        timestamp_ms: ts,
-                        index: frames.len(),
-                    });
+                    timeline.push(TimelineEvent::Bitmap { timestamp_ms: ts, index: frames.len() });
                     frames.push(frame);
                 }
             }
             EVENT_SURFACE => {
                 graphics_events += 1;
-                let u = index_surface_update(
-                    ts,
-                    payload,
-                    payload_offset,
-                    fields.version,
-                    desk_w,
-                    desk_h,
-                );
+                let u = index_surface_update(ts, payload, payload_offset, fields.version, desk_w, desk_h);
                 if let Some(key) = u.count_key.clone() {
                     bump(&mut counts, &key);
                 }
-                timeline.push(TimelineEvent::Surface {
-                    timestamp_ms: ts,
-                    index: surface_updates.len(),
-                });
+                timeline.push(TimelineEvent::Surface { timestamp_ms: ts, index: surface_updates.len() });
                 surface_updates.push(u);
             }
             EVENT_DESKTOP_SIZE => {
@@ -590,16 +577,9 @@ pub fn decode(bytes: &[u8]) -> DecodeOutput {
                     let h = u16::from_le_bytes([payload[2], payload[3]]);
                     desk_w = u32::from(w);
                     desk_h = u32::from(h);
-                    let d = DesktopSizeEvent {
-                        timestamp_ms: ts,
-                        width: w,
-                        height: h,
-                    };
+                    let d = DesktopSizeEvent { timestamp_ms: ts, width: w, height: h };
                     desktop_sizes.push(d);
-                    timeline.push(TimelineEvent::Desktop {
-                        timestamp_ms: ts,
-                        desktop: d,
-                    });
+                    timeline.push(TimelineEvent::Desktop { timestamp_ms: ts, desktop: d });
                 }
             }
             EVENT_KEYBOARD => keyboard += 1,
@@ -641,8 +621,7 @@ pub fn decode(bytes: &[u8]) -> DecodeOutput {
         graphics_encodings: fields.graphics_encodings,
         graphics_undecodable: fields.version < FIRST_DECODABLE_BITMAP_VERSION,
         newer_format: fields.version > MAX_SUPPORTED_VERSION,
-        graphics_not_recordable: fields.version >= FIRST_SURFACE_VERSION
-            && graphics_events == 0,
+        graphics_not_recordable: fields.version >= FIRST_SURFACE_VERSION && graphics_events == 0,
         frames,
         surface_updates,
         desktop_sizes,
@@ -749,10 +728,7 @@ fn index_surface_update(
         return u;
     }
     if u.format != SURFACE_FORMAT_RGBA8888 {
-        u.error = Some(format!(
-            "unknown surface format {} (known: {SURFACE_FORMAT_RGBA8888} = RGBA8888)",
-            u.format
-        ));
+        u.error = Some(format!("unknown surface format {} (known: {SURFACE_FORMAT_RGBA8888} = RGBA8888)", u.format));
         u.count_key = Some(COUNT_SURFACE_BAD_FORMAT.to_string());
         return u;
     }
@@ -809,11 +785,7 @@ pub fn decode_surface_update(bytes: &[u8], u: &SurfaceUpdate) -> SurfaceRender {
 
     if u.encoding == SURFACE_ENCODING_RAW {
         // Length was validated at index time.
-        return SurfaceRender {
-            rgba: data.to_vec(),
-            error: None,
-            count_key: COUNT_SURFACE.to_string(),
-        };
+        return SurfaceRender { rgba: data.to_vec(), error: None, count_key: COUNT_SURFACE.to_string() };
     }
 
     // encoding == 1: an RFC 1950 zlib stream. The limit is the hard
@@ -835,11 +807,7 @@ pub fn decode_surface_update(bytes: &[u8], u: &SurfaceUpdate) -> SurfaceRender {
                     count_key: COUNT_SURFACE_BAD_LENGTH.to_string(),
                 };
             }
-            SurfaceRender {
-                rgba: out,
-                error: None,
-                count_key: COUNT_SURFACE.to_string(),
-            }
+            SurfaceRender { rgba: out, error: None, count_key: COUNT_SURFACE.to_string() }
         }
         // The stream inflates past the allocation bound: the region
         // claims less than it carries.
@@ -908,13 +876,7 @@ fn json_u32(header: &str, name: &str) -> u32 {
     let Some(colon) = rest.find(':') else {
         return 0;
     };
-    rest[colon + 1..]
-        .trim_start()
-        .chars()
-        .take_while(|c| c.is_ascii_digit())
-        .collect::<String>()
-        .parse()
-        .unwrap_or(0)
+    rest[colon + 1..].trim_start().chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse().unwrap_or(0)
 }
 
 /// A flat array-of-strings field. Empty when absent or malformed.
@@ -964,9 +926,7 @@ fn check_geometry(x: u16, y: u16, w: u16, h: u16, screen_w: u32, screen_h: u32) 
         return None;
     }
     if u64::from(w) * u64::from(h) > MAX_RECT_PIXELS {
-        return Some(format!(
-            "invalid geometry: rect {w}×{h} exceeds the {MAX_RECT_PIXELS}-pixel cap"
-        ));
+        return Some(format!("invalid geometry: rect {w}×{h} exceeds the {MAX_RECT_PIXELS}-pixel cap"));
     }
     None
 }
@@ -1105,14 +1065,7 @@ fn decode_graphics(timestamp_ms: u64, payload: &[u8], screen_w: u32, screen_h: u
 
     let payload = &payload[REC_RECT_HEADER_LEN..];
     if payload.len() < 18 {
-        return frame_err(
-            timestamp_ms,
-            x,
-            y,
-            width,
-            height,
-            "TS_BITMAP_DATA header truncated",
-        );
+        return frame_err(timestamp_ms, x, y, width, height, "TS_BITMAP_DATA header truncated");
     }
     let bpp = u16::from_le_bytes([payload[12], payload[13]]);
     let flags = u16::from_le_bytes([payload[14], payload[15]]);
@@ -1123,10 +1076,7 @@ fn decode_graphics(timestamp_ms: u64, payload: &[u8], screen_w: u32, screen_h: u
     if compressed && (flags & NO_BITMAP_COMPRESSION_HDR) == 0 {
         // Compressed bitmap header (8 bytes) precedes the body.
         if cursor + 8 > payload.len() {
-            return frame_err(
-                timestamp_ms, x, y, width, height,
-                "compressed bitmap header truncated",
-            );
+            return frame_err(timestamp_ms, x, y, width, height, "compressed bitmap header truncated");
         }
         // We don't need the cbCompFirstRowSize / cbCompMainBodySize
         // fields — the spec recommends using `bitmapLength` as the
@@ -1136,10 +1086,7 @@ fn decode_graphics(timestamp_ms: u64, payload: &[u8], screen_w: u32, screen_h: u
         cursor += 8;
     }
     if cursor + bitmap_len > payload.len() {
-        return frame_err(
-            timestamp_ms, x, y, width, height,
-            "bitmap body truncated",
-        );
+        return frame_err(timestamp_ms, x, y, width, height, "bitmap body truncated");
     }
     let body = &payload[cursor..cursor + bitmap_len];
 
@@ -1225,15 +1172,7 @@ fn frame_err(ts: u64, x: u16, y: u16, w: u16, h: u16, msg: &str) -> Frame {
     }
 }
 
-fn frame_err_decoder(
-    ts: u64,
-    x: u16,
-    y: u16,
-    w: u16,
-    h: u16,
-    decoder: &str,
-    msg: &str,
-) -> Frame {
+fn frame_err_decoder(ts: u64, x: u16, y: u16, w: u16, h: u16, decoder: &str, msg: &str) -> Frame {
     Frame {
         timestamp_ms: ts,
         x,
@@ -1250,12 +1189,7 @@ fn frame_err_decoder(
 
 // ─── Uncompressed decoder ───────────────────────────────────────────
 
-fn decode_uncompressed(
-    bpp: u16,
-    width: u16,
-    height: u16,
-    body: &[u8],
-) -> Result<Vec<u8>, String> {
+fn decode_uncompressed(bpp: u16, width: u16, height: u16, body: &[u8]) -> Result<Vec<u8>, String> {
     let w = width as usize;
     let h = height as usize;
     let mut rgba = vec![0u8; w * h * 4];
@@ -1264,10 +1198,7 @@ fn decode_uncompressed(
             // RGB565 (rrrrr gggggg bbbbb). Bottom-up.
             let expected = w * h * 2;
             if body.len() < expected {
-                return Err(format!(
-                    "16bpp body short: have {} want {expected}",
-                    body.len()
-                ));
+                return Err(format!("16bpp body short: have {} want {expected}", body.len()));
             }
             for row in 0..h {
                 let src_row = h - 1 - row; // bottom-up → top-down
@@ -1291,10 +1222,7 @@ fn decode_uncompressed(
             // BGR, bottom-up.
             let expected = w * h * 3;
             if body.len() < expected {
-                return Err(format!(
-                    "24bpp body short: have {} want {expected}",
-                    body.len()
-                ));
+                return Err(format!("24bpp body short: have {} want {expected}", body.len()));
             }
             for row in 0..h {
                 let src_row = h - 1 - row;
@@ -1312,10 +1240,7 @@ fn decode_uncompressed(
             // BGRA (or BGRX). Bottom-up.
             let expected = w * h * 4;
             if body.len() < expected {
-                return Err(format!(
-                    "32bpp body short: have {} want {expected}",
-                    body.len()
-                ));
+                return Err(format!("32bpp body short: have {} want {expected}", body.len()));
             }
             for row in 0..h {
                 let src_row = h - 1 - row;
@@ -1688,9 +1613,7 @@ mod tests {
     fn build_record(events: &[(u64, u8, Vec<u8>)]) -> Vec<u8> {
         build_record_with_header(
             events,
-            &format!(
-                "{{\"version\":2,\"screen_width\":{SCREEN_W},\"screen_height\":{SCREEN_H}}}\n"
-            ),
+            &format!("{{\"version\":2,\"screen_width\":{SCREEN_W},\"screen_height\":{SCREEN_H}}}\n"),
         )
     }
 
@@ -1707,13 +1630,7 @@ mod tests {
         out
     }
 
-    fn build_graphics_uncompressed_24(
-        x: u16,
-        y: u16,
-        w: u16,
-        h: u16,
-        pixels: &[(u8, u8, u8)],
-    ) -> Vec<u8> {
+    fn build_graphics_uncompressed_24(x: u16, y: u16, w: u16, h: u16, pixels: &[(u8, u8, u8)]) -> Vec<u8> {
         // Recorder rect header, then the TS_BITMAP_DATA the recorder
         // copies out of the wire PDU starting at destLeft.
         let mut p = rec_rect_header(x, y, w, h);
@@ -1747,10 +1664,7 @@ mod tests {
 
     #[test]
     fn uncompressed_24bpp_round_trip() {
-        let pixels = vec![
-            (0xff, 0, 0), (0, 0xff, 0),
-            (0, 0, 0xff), (0xff, 0xff, 0xff),
-        ];
+        let pixels = vec![(0xff, 0, 0), (0, 0xff, 0), (0, 0, 0xff), (0xff, 0xff, 0xff)];
         let g = build_graphics_uncompressed_24(10, 20, 2, 2, &pixels);
         let rec = build_record(&[(100, EVENT_GRAPHICS, g)]);
         let out = decode(&rec);
@@ -1782,7 +1696,7 @@ mod tests {
         p.extend_from_slice(&24u16.to_le_bytes()); // bpp
         p.extend_from_slice(&0u16.to_le_bytes()); // flags
         p.extend_from_slice(&300u16.to_le_bytes()); // claim 300 bytes
-        // no body
+                                                    // no body
         let rec = build_record(&[(0, EVENT_GRAPHICS, p)]);
         let out = decode(&rec);
         assert!(out.ok);
@@ -1818,9 +1732,7 @@ mod tests {
         p.extend_from_slice(&1u16.to_le_bytes()); // width
         p.extend_from_slice(&1u16.to_le_bytes()); // height
         p.extend_from_slice(&8u16.to_le_bytes()); // bpp=8
-        p.extend_from_slice(
-            &(BITMAP_COMPRESSION | NO_BITMAP_COMPRESSION_HDR).to_le_bytes(),
-        );
+        p.extend_from_slice(&(BITMAP_COMPRESSION | NO_BITMAP_COMPRESSION_HDR).to_le_bytes());
         p.extend_from_slice(&1u16.to_le_bytes()); // bitmapLength
         p.push(0x00); // 1 byte body
         let rec = build_record(&[(5, EVENT_GRAPHICS, p)]);
@@ -1842,9 +1754,7 @@ mod tests {
         p.extend_from_slice(&4u16.to_le_bytes()); // width
         p.extend_from_slice(&1u16.to_le_bytes()); // height
         p.extend_from_slice(&24u16.to_le_bytes()); // bpp
-        p.extend_from_slice(
-            &(BITMAP_COMPRESSION | NO_BITMAP_COMPRESSION_HDR).to_le_bytes(),
-        );
+        p.extend_from_slice(&(BITMAP_COMPRESSION | NO_BITMAP_COMPRESSION_HDR).to_le_bytes());
         p.extend_from_slice(&1u16.to_le_bytes()); // bitmapLength = 1 (just the opcode)
         p.push(0x04); // BgRun(4)
         let rec = build_record(&[(7, EVENT_GRAPHICS, p)]);
@@ -1871,15 +1781,10 @@ mod tests {
         g_bad.extend_from_slice(&1u16.to_le_bytes());
         g_bad.extend_from_slice(&1u16.to_le_bytes());
         g_bad.extend_from_slice(&8u16.to_le_bytes());
-        g_bad.extend_from_slice(
-            &(BITMAP_COMPRESSION | NO_BITMAP_COMPRESSION_HDR).to_le_bytes(),
-        );
+        g_bad.extend_from_slice(&(BITMAP_COMPRESSION | NO_BITMAP_COMPRESSION_HDR).to_le_bytes());
         g_bad.extend_from_slice(&1u16.to_le_bytes());
         g_bad.push(0);
-        let rec = build_record(&[
-            (1, EVENT_GRAPHICS, g_ok),
-            (2, EVENT_GRAPHICS, g_bad),
-        ]);
+        let rec = build_record(&[(1, EVENT_GRAPHICS, g_ok), (2, EVENT_GRAPHICS, g_bad)]);
         let out = decode(&rec);
         assert_eq!(*out.decoder_counts.get("uncompressed").unwrap_or(&0), 1);
         assert_eq!(*out.decoder_counts.get("unsupported").unwrap_or(&0), 1);
@@ -1913,10 +1818,7 @@ mod tests {
     fn caps_rect_size_without_screen_size_in_header() {
         let mut p = rec_rect_header(0, 0, u16::MAX, u16::MAX);
         p.extend_from_slice(&[0u8; 64]);
-        let rec = build_record_with_header(
-            &[(0, EVENT_GRAPHICS, p)],
-            "{\"version\":2}\n",
-        );
+        let rec = build_record_with_header(&[(0, EVENT_GRAPHICS, p)], "{\"version\":2}\n");
         let out = decode(&rec);
         let err = out.frames[0].error.as_ref().unwrap();
         assert!(err.contains("cap"), "got: {err}");
@@ -1935,12 +1837,10 @@ mod tests {
         // Read as a recorder rect header it claims 63230×255 at
         // (513,3), which cannot fit a 1920×1080 desktop.
         let ev1: Vec<u8> = vec![
-            0x01, 0x02, 0x03, 0x00, 0xfe, 0xf6, 0xff, 0x00, 0x01, 0x02, 0x03, 0x00,
-            0xff, 0xf8, 0x02, 0x01, 0x02, 0x04, 0x3e, 0x00, 0x05, 0x00, 0x14, 0x7c,
-            0x00, 0x01, 0x2a, 0x14, 0x76, 0x0a, 0x01, 0x01, 0x00, 0x01, 0xc0, 0x00,
-            0x4d, 0x63, 0x44, 0x6e, 0x28, 0x01, 0x0c, 0x10, 0x00, 0x11, 0x00, 0x08,
-            0x00, 0x01, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x00, 0x00, 0x03, 0x0c, 0x0c,
-            0x00, 0xeb, 0x03, 0x01, 0x00, 0xec, 0x03, 0x00, 0x00, 0x02, 0x0c, 0x0c,
+            0x01, 0x02, 0x03, 0x00, 0xfe, 0xf6, 0xff, 0x00, 0x01, 0x02, 0x03, 0x00, 0xff, 0xf8, 0x02, 0x01, 0x02, 0x04,
+            0x3e, 0x00, 0x05, 0x00, 0x14, 0x7c, 0x00, 0x01, 0x2a, 0x14, 0x76, 0x0a, 0x01, 0x01, 0x00, 0x01, 0xc0, 0x00,
+            0x4d, 0x63, 0x44, 0x6e, 0x28, 0x01, 0x0c, 0x10, 0x00, 0x11, 0x00, 0x08, 0x00, 0x01, 0x00, 0x00, 0x00, 0x0c,
+            0x00, 0x00, 0x00, 0x03, 0x0c, 0x0c, 0x00, 0xeb, 0x03, 0x01, 0x00, 0xec, 0x03, 0x00, 0x00, 0x02, 0x0c, 0x0c,
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         ];
         let out = decode(&build_record(&[(7, EVENT_GRAPHICS, ev1)]));
@@ -1959,7 +1859,10 @@ mod tests {
         // destLeft/destTop/destRight/destBottom and pushes every later
         // field 8 bytes out of place, so bpp comes from the wrong bytes.
         let g = build_graphics_uncompressed_24(
-            10, 20, 2, 2,
+            10,
+            20,
+            2,
+            2,
             &[(0xff, 0, 0), (0, 0xff, 0), (0, 0, 0xff), (0xff, 0xff, 0xff)],
         );
         assert_eq!(&g[..REC_RECT_HEADER_LEN], &rec_rect_header(10, 20, 2, 2)[..]);
@@ -1989,9 +1892,8 @@ mod tests {
         assert_eq!((f.screen_w, f.screen_h), (0, 0));
 
         // Unknown fields are ignored — the producer may add more.
-        let f = parse_header_fields(
-            "{\"version\":4,\"a_field_we_have_never_seen\":{\"nested\":true},\"screen_width\":8}",
-        );
+        let f =
+            parse_header_fields("{\"version\":4,\"a_field_we_have_never_seen\":{\"nested\":true},\"screen_width\":8}");
         assert_eq!(f.version, 4);
         assert_eq!(f.screen_w, 8);
     }
@@ -2011,14 +1913,8 @@ mod tests {
             &[(0xff, 0, 0), (0, 0xff, 0), (0, 0, 0xff), (0xff, 0xff, 0xff)],
         );
         let rec = build_record_with_header(
-            &[
-                (1, EVENT_GRAPHICS, g.clone()),
-                (2, EVENT_GRAPHICS, g),
-                (3, EVENT_KEYBOARD, vec![0x1e, 0x00, 1]),
-            ],
-            &format!(
-                "{{\"version\":1,\"screen_width\":{SCREEN_W},\"screen_height\":{SCREEN_H}}}\n"
-            ),
+            &[(1, EVENT_GRAPHICS, g.clone()), (2, EVENT_GRAPHICS, g), (3, EVENT_KEYBOARD, vec![0x1e, 0x00, 1])],
+            &format!("{{\"version\":1,\"screen_width\":{SCREEN_W},\"screen_height\":{SCREEN_H}}}\n"),
         );
         let out = decode(&rec);
         assert!(out.ok);
@@ -2044,11 +1940,7 @@ mod tests {
         let out = decode(&rec);
         assert_eq!(out.version, 0);
         assert!(out.graphics_undecodable);
-        assert!(out.surface_updates[0]
-            .error
-            .as_deref()
-            .unwrap()
-            .contains("version-0 recording"));
+        assert!(out.surface_updates[0].error.as_deref().unwrap().contains("version-0 recording"));
         assert_eq!(out.decoder_counts.get(COUNT_SURFACE_BAD_VERSION), Some(&1));
     }
 
@@ -2092,15 +1984,7 @@ mod tests {
     }
 
     /// `x:u16 y:u16 w:u16 h:u16 format:u8 encoding:u8` + data.
-    fn surface_payload(
-        x: u16,
-        y: u16,
-        w: u16,
-        h: u16,
-        data: &[u8],
-        format: u8,
-        encoding: u8,
-    ) -> Vec<u8> {
+    fn surface_payload(x: u16, y: u16, w: u16, h: u16, data: &[u8], format: u8, encoding: u8) -> Vec<u8> {
         let mut p = Vec::with_capacity(SURFACE_PREFIX_LEN + data.len());
         p.extend_from_slice(&x.to_le_bytes());
         p.extend_from_slice(&y.to_le_bytes());
@@ -2114,32 +1998,13 @@ mod tests {
 
     /// RGBA8888, row-major, top-down, no row padding.
     fn solid_rgba(w: u16, h: u16, px: [u8; 4]) -> Vec<u8> {
-        px.iter()
-            .copied()
-            .cycle()
-            .take(usize::from(w) * usize::from(h) * 4)
-            .collect()
+        px.iter().copied().cycle().take(usize::from(w) * usize::from(h) * 4).collect()
     }
 
-    fn surface_event(
-        ts: u64,
-        x: u16,
-        y: u16,
-        w: u16,
-        h: u16,
-        rgba: &[u8],
-        compress: bool,
-    ) -> (u64, u8, Vec<u8>) {
-        let (data, encoding) = if compress {
-            (zlib_stored(rgba), SURFACE_ENCODING_ZLIB)
-        } else {
-            (rgba.to_vec(), SURFACE_ENCODING_RAW)
-        };
-        (
-            ts,
-            EVENT_SURFACE,
-            surface_payload(x, y, w, h, &data, SURFACE_FORMAT_RGBA8888, encoding),
-        )
+    fn surface_event(ts: u64, x: u16, y: u16, w: u16, h: u16, rgba: &[u8], compress: bool) -> (u64, u8, Vec<u8>) {
+        let (data, encoding) =
+            if compress { (zlib_stored(rgba), SURFACE_ENCODING_ZLIB) } else { (rgba.to_vec(), SURFACE_ENCODING_RAW) };
+        (ts, EVENT_SURFACE, surface_payload(x, y, w, h, &data, SURFACE_FORMAT_RGBA8888, encoding))
     }
 
     fn v3_header(w: u16, h: u16) -> String {
@@ -2231,7 +2096,7 @@ mod tests {
         // pass.
         let red = solid_rgba(8, 8, [255, 0, 0, 255]); // zlib
         let blue = solid_rgba(4, 4, [0, 0, 255, 255]); // raw, under 512 bytes
-        // Top row green, the rest black — catches bottom-up row order.
+                                                       // Top row green, the rest black — catches bottom-up row order.
         let mut striped = solid_rgba(4, 4, [0, 0, 0, 255]);
         for i in 0..4 {
             striped[i * 4..i * 4 + 4].copy_from_slice(&[0, 255, 0, 255]);
@@ -2251,10 +2116,7 @@ mod tests {
         assert_eq!(out.surface_updates.len(), 3);
         assert!(out.surface_updates.iter().all(|u| u.error.is_none()));
         // Both encodings really are both encodings.
-        assert_eq!(
-            out.surface_updates.iter().map(|u| u.encoding).collect::<Vec<_>>(),
-            vec![1, 0, 1]
-        );
+        assert_eq!(out.surface_updates.iter().map(|u| u.encoding).collect::<Vec<_>>(), vec![1, 0, 1]);
 
         let (canvas, painted, live) = replay(&rec, &out);
         assert_eq!(painted, 3);
@@ -2298,16 +2160,10 @@ mod tests {
         // i.e. a dynamic-Huffman block from a third implementation. The
         // stored-block fixtures above exercise the framing; this
         // exercises the inflate proper.
-        const PY_ZLIB_4X4: &[u8] = &[
-            0x78, 0xda, 0x63, 0x64, 0x62, 0xfe, 0xcf, 0x48, 0x01, 0x06, 0x00, 0xfa, 0x9f, 0x10,
-            0x51,
-        ];
+        const PY_ZLIB_4X4: &[u8] =
+            &[0x78, 0xda, 0x63, 0x64, 0x62, 0xfe, 0xcf, 0x48, 0x01, 0x06, 0x00, 0xfa, 0x9f, 0x10, 0x51];
         let rec = build_record_with_header(
-            &[(
-                100,
-                EVENT_SURFACE,
-                surface_payload(0, 0, 4, 4, PY_ZLIB_4X4, 1, 1),
-            )],
+            &[(100, EVENT_SURFACE, surface_payload(0, 0, 4, 4, PY_ZLIB_4X4, 1, 1))],
             &v3_header(16, 16),
         );
         let out = decode(&rec);
@@ -2354,20 +2210,13 @@ mod tests {
         let rec = build_record_with_header(
             &[
                 surface_event(100, 0, 0, 4, 4, &solid_rgba(4, 4, [255, 0, 0, 255]), false),
-                (
-                    200,
-                    EVENT_DESKTOP_SIZE,
-                    [1600u16.to_le_bytes(), 1200u16.to_le_bytes()].concat(),
-                ),
+                (200, EVENT_DESKTOP_SIZE, [1600u16.to_le_bytes(), 1200u16.to_le_bytes()].concat()),
                 surface_event(300, 1000, 700, 8, 8, &solid_rgba(8, 8, [0, 255, 0, 255]), true),
             ],
             &v3_header(640, 480),
         );
         let out = decode(&rec);
-        assert_eq!(
-            out.desktop_sizes,
-            vec![DesktopSizeEvent { timestamp_ms: 200, width: 1600, height: 1200 }]
-        );
+        assert_eq!(out.desktop_sizes, vec![DesktopSizeEvent { timestamp_ms: 200, width: 1600, height: 1200 }]);
         assert!(out.surface_updates[0].error.is_none());
         assert!(out.surface_updates[1].error.is_none());
         let (canvas, painted, _) = replay(&rec, &out);
@@ -2393,11 +2242,7 @@ mod tests {
         let first = out.surface_updates[0].error.as_deref().unwrap();
         assert!(first.starts_with("invalid geometry"), "{first}");
         assert!(first.contains("640×480"), "{first}");
-        assert!(out.surface_updates[1]
-            .error
-            .as_deref()
-            .unwrap()
-            .contains("zero-size"));
+        assert!(out.surface_updates[1].error.as_deref().unwrap().contains("zero-size"));
         assert_eq!(out.decoder_counts.get(COUNT_INVALID_GEOMETRY), Some(&2));
         let (_, painted, _) = replay(&rec, &out);
         assert_eq!(painted, 0);
@@ -2429,11 +2274,7 @@ mod tests {
             &v3_header(64, 64),
         );
         let out = decode(&rec);
-        assert!(out.surface_updates[2]
-            .error
-            .as_deref()
-            .unwrap()
-            .contains("raw surface data is 63 bytes"));
+        assert!(out.surface_updates[2].error.as_deref().unwrap().contains("raw surface data is 63 bytes"));
         assert_eq!(out.decoder_counts.get(COUNT_SURFACE_BAD_LENGTH), Some(&1));
         // The two zlib ones can only be caught by inflating.
         assert!(out.surface_updates[0].error.is_none());
@@ -2463,21 +2304,9 @@ mod tests {
             &v3_header(64, 64),
         );
         let out = decode(&rec);
-        assert!(out.surface_updates[0]
-            .error
-            .as_deref()
-            .unwrap()
-            .contains("unknown surface format 2"));
-        assert!(out.surface_updates[1]
-            .error
-            .as_deref()
-            .unwrap()
-            .contains("unknown surface encoding 9"));
-        assert!(out.surface_updates[2]
-            .error
-            .as_deref()
-            .unwrap()
-            .contains("payload truncated"));
+        assert!(out.surface_updates[0].error.as_deref().unwrap().contains("unknown surface format 2"));
+        assert!(out.surface_updates[1].error.as_deref().unwrap().contains("unknown surface encoding 9"));
+        assert!(out.surface_updates[2].error.as_deref().unwrap().contains("payload truncated"));
         assert_eq!(out.decoder_counts.get(COUNT_SURFACE_BAD_FORMAT), Some(&1));
         assert_eq!(out.decoder_counts.get(COUNT_SURFACE_BAD_ENCODING), Some(&1));
         assert_eq!(out.decoder_counts.get(COUNT_SURFACE_TRUNCATED), Some(&1));
@@ -2562,11 +2391,7 @@ mod tests {
             &[
                 (100, EVENT_KEYBOARD, vec![0x1e, 0x00, 1]),
                 (200, EVENT_MOUSE, vec![10, 0, 20, 0, 0]),
-                (
-                    300,
-                    EVENT_DESKTOP_SIZE,
-                    [1920u16.to_le_bytes(), 1080u16.to_le_bytes()].concat(),
-                ),
+                (300, EVENT_DESKTOP_SIZE, [1920u16.to_le_bytes(), 1080u16.to_le_bytes()].concat()),
             ],
             &v3_header(SCREEN_W, SCREEN_H),
         );
@@ -2592,18 +2417,10 @@ mod tests {
 
     #[test]
     fn a_version_3_file_may_carry_both_event_types() {
-        let g = build_graphics_uncompressed_24(
-            0,
-            0,
-            2,
-            2,
-            &[(0xff, 0, 0), (0, 0xff, 0), (0, 0, 0xff), (0xff, 0xff, 0xff)],
-        );
+        let g =
+            build_graphics_uncompressed_24(0, 0, 2, 2, &[(0xff, 0, 0), (0, 0xff, 0), (0, 0, 0xff), (0xff, 0xff, 0xff)]);
         let rec = build_record_with_header(
-            &[
-                (100, EVENT_GRAPHICS, g),
-                surface_event(200, 8, 8, 4, 4, &solid_rgba(4, 4, [7, 7, 7, 255]), true),
-            ],
+            &[(100, EVENT_GRAPHICS, g), surface_event(200, 8, 8, 4, 4, &solid_rgba(4, 4, [7, 7, 7, 255]), true)],
             &v3_header(64, 64),
         );
         let out = decode(&rec);
@@ -2618,22 +2435,10 @@ mod tests {
 
     #[test]
     fn a_surface_update_in_a_version_2_file_is_skipped() {
-        let rec = build_record(&[surface_event(
-            100,
-            0,
-            0,
-            4,
-            4,
-            &solid_rgba(4, 4, [1, 2, 3, 255]),
-            false,
-        )]);
+        let rec = build_record(&[surface_event(100, 0, 0, 4, 4, &solid_rgba(4, 4, [1, 2, 3, 255]), false)]);
         let out = decode(&rec);
         assert_eq!(out.version, 2);
-        assert!(out.surface_updates[0]
-            .error
-            .as_deref()
-            .unwrap()
-            .contains("version-2 recording"));
+        assert!(out.surface_updates[0].error.as_deref().unwrap().contains("version-2 recording"));
         assert_eq!(out.decoder_counts.get(COUNT_SURFACE_BAD_VERSION), Some(&1));
         assert_eq!(replay(&rec, &out).1, 0);
     }
@@ -2692,11 +2497,7 @@ mod tests {
                 surface_event(100, 0, 0, 4, 4, &solid_rgba(4, 4, [1, 2, 3, 255]), false),
                 (200, EVENT_KEYBOARD, vec![0x1e, 0x00, 1]),
                 (300, EVENT_MOUSE, vec![0, 0, 0, 0, 0]),
-                (
-                    400,
-                    EVENT_DESKTOP_SIZE,
-                    [64u16.to_le_bytes(), 64u16.to_le_bytes()].concat(),
-                ),
+                (400, EVENT_DESKTOP_SIZE, [64u16.to_le_bytes(), 64u16.to_le_bytes()].concat()),
                 (500, 0x5a, vec![0xab; 3]),
             ],
             &v3_header(64, 64),
@@ -2760,11 +2561,7 @@ mod tests {
         let graphics = || {
             vec![
                 surface_event(100, 0, 0, 8, 8, &solid_rgba(8, 8, [255, 0, 0, 255]), true),
-                (
-                    200,
-                    EVENT_DESKTOP_SIZE,
-                    [64u16.to_le_bytes(), 64u16.to_le_bytes()].concat(),
-                ),
+                (200, EVENT_DESKTOP_SIZE, [64u16.to_le_bytes(), 64u16.to_le_bytes()].concat()),
                 surface_event(300, 8, 0, 8, 8, &solid_rgba(8, 8, [0, 255, 0, 255]), false),
                 surface_event(400, 0, 8, 8, 8, &solid_rgba(8, 8, [0, 0, 255, 255]), true),
             ]
@@ -2781,11 +2578,7 @@ mod tests {
                 g[2].clone(),
                 (350, EVENT_TEXT_INPUT, text_input_payload(0x09, 2, "")),
                 g[3].clone(),
-                (
-                    500,
-                    EVENT_KEYSTROKE_TRAILER,
-                    trailer_payload(TRAILER_JSON),
-                ),
+                (500, EVENT_KEYSTROKE_TRAILER, trailer_payload(TRAILER_JSON)),
             ],
             &v4_header(64, 64, true),
         );
@@ -2799,10 +2592,7 @@ mod tests {
         assert_eq!(out4.surface_updates.len(), out3.surface_updates.len());
         assert_eq!(out4.desktop_sizes, out3.desktop_sizes);
         assert_eq!(out4.timeline.len(), out3.timeline.len());
-        assert_eq!(
-            out4.decoder_counts.get(COUNT_SURFACE),
-            out3.decoder_counts.get(COUNT_SURFACE)
-        );
+        assert_eq!(out4.decoder_counts.get(COUNT_SURFACE), out3.decoder_counts.get(COUNT_SURFACE));
     }
 
     #[test]
@@ -2873,9 +2663,6 @@ mod tests {
         let out = decode(&rec);
         assert_eq!(out.text_input_events, 0);
         assert!(!out.keystroke_trailer);
-        assert_eq!(
-            out.decoder_counts.get(COUNT_KEYSTROKE_BAD_VERSION),
-            Some(&2)
-        );
+        assert_eq!(out.decoder_counts.get(COUNT_KEYSTROKE_BAD_VERSION), Some(&2));
     }
 }

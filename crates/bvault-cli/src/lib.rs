@@ -24,17 +24,16 @@ use sysexits::ExitCode;
 // resolves the `crate::<name>::` paths the moved files still use. Same alias
 // preamble the Phase 3 engine crates carry, two tiers up.
 use bastion_vault::{
-    api, backup, config, errors, exchange, kernel_api, logging, logical, metrics, modules, plugins,
-    seal, server_info, storage, utils,
+    api, backup, config, errors, exchange, kernel_api, logging, logical, metrics, modules, plugins, seal, server_info,
+    storage, utils,
 };
 
 // Re-exported rather than aliased: the call sites spell these `crate::VERSION`
 // and `crate::EXIT_CODE_*`, at this crate's root, because that is where they
 // were when this was `bastion_vault::cli`.
 pub use bastion_vault::{
-    bv_error_response, bv_error_string, BastionVault, EXIT_CODE_INSUFFICIENT_PARAMS,
-    EXIT_CODE_LOAD_CONFIG_FAILURE, EXIT_CODE_OK, EXIT_CODE_SERVER_ABORTED,
-    EXIT_CODE_SERVER_EXIT_UNEXPECTEDLY, VERSION,
+    bv_error_response, bv_error_string, BastionVault, EXIT_CODE_INSUFFICIENT_PARAMS, EXIT_CODE_LOAD_CONFIG_FAILURE,
+    EXIT_CODE_OK, EXIT_CODE_SERVER_ABORTED, EXIT_CODE_SERVER_EXIT_UNEXPECTEDLY, VERSION,
 };
 
 use crate::command::CommandExecutor;
@@ -62,18 +61,47 @@ mod test_utils {
     /// (`policy_store::load_default_acl_policy` + `module_policies`).
     pub fn seeded_policy_names<'a>(extra: &[&'a str]) -> Vec<&'a str> {
         let mut names: Vec<&str> = vec![
-            "administrator", "default", "ldap-admin", "ldap-user", "pki-admin", "pki-user",
-            "secret-author", "self-accounts-user", "shared-access", "standard-user", "standard-user-readonly",
-            "totp-admin", "totp-user", "transit-admin", "transit-user",
+            "administrator",
+            "default",
+            "ldap-admin",
+            "ldap-user",
+            "pki-admin",
+            "pki-user",
+            "secret-author",
+            "self-accounts-user",
+            "shared-access",
+            "standard-user",
+            "standard-user-readonly",
+            "totp-admin",
+            "totp-user",
+            "transit-admin",
+            "transit-user",
             // Per-module baselines (features/module-policies.md).
-            "secrets-full", "secrets-read", "secrets-shared",
-            "resource-full", "resource-read", "resource-connect", "resource-shared",
-            "files-full", "files-read", "files-shared",
-            "ssh-full", "ssh-read", "ssh-connect",
-            "pki-full", "pki-read", "pki-connect",
-            "ad-full", "ad-read", "ad-connect",
-            "totp-full", "totp-read", "totp-connect",
-            "transit-full", "transit-read", "transit-connect",
+            "secrets-full",
+            "secrets-read",
+            "secrets-shared",
+            "resource-full",
+            "resource-read",
+            "resource-connect",
+            "resource-shared",
+            "files-full",
+            "files-read",
+            "files-shared",
+            "ssh-full",
+            "ssh-read",
+            "ssh-connect",
+            "pki-full",
+            "pki-read",
+            "pki-connect",
+            "ad-full",
+            "ad-read",
+            "ad-connect",
+            "totp-full",
+            "totp-read",
+            "totp-connect",
+            "transit-full",
+            "transit-read",
+            "transit-connect",
         ];
         names.extend_from_slice(extra);
         names.sort_unstable();

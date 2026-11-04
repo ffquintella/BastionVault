@@ -98,12 +98,8 @@ impl S3Target {
             .ok_or_else(|| RvError::ErrString("s3 target: `region` is required".into()))?;
 
         let endpoint_url: Url = match conf.get("endpoint_url").and_then(|v| v.as_str()) {
-            Some(u) => u
-                .parse()
-                .map_err(|e| RvError::ErrString(format!("s3 target: bad `endpoint_url`: {e}")))?,
-            None => format!("https://s3.{region}.amazonaws.com")
-                .parse()
-                .expect("AWS URL is valid"),
+            Some(u) => u.parse().map_err(|e| RvError::ErrString(format!("s3 target: bad `endpoint_url`: {e}")))?,
+            None => format!("https://s3.{region}.amazonaws.com").parse().expect("AWS URL is valid"),
         };
         let url_style = match conf.get("url_style").and_then(|v| v.as_str()).unwrap_or("virtual") {
             "path" => UrlStyle::Path,
@@ -132,19 +128,10 @@ impl S3Target {
         // `http_status_as_error` so our code can route 404 cleanly to
         // `Ok(None)` in `read()` / no-op in `delete()` rather than
         // matching on an error variant.
-        let agent: Agent = UreqConfig::builder()
-            .timeout_global(Some(http_timeout))
-            .http_status_as_error(false)
-            .build()
-            .into();
+        let agent: Agent =
+            UreqConfig::builder().timeout_global(Some(http_timeout)).http_status_as_error(false).build().into();
 
-        Ok(Self {
-            bucket,
-            credentials,
-            prefix,
-            http_timeout,
-            agent,
-        })
+        Ok(Self { bucket, credentials, prefix, http_timeout, agent })
     }
 
     /// Compose the full S3 object key for a vault key, applying the
@@ -219,14 +206,10 @@ impl FileTarget for S3Target {
                 return Ok(None);
             }
             if !(200..300).contains(&status) {
-                return Err(RvError::ErrString(format!(
-                    "s3 target: GET {key_owned}: http status {status}"
-                )));
+                return Err(RvError::ErrString(format!("s3 target: GET {key_owned}: http status {status}")));
             }
-            let body = resp
-                .into_body()
-                .read_to_vec()
-                .map_err(|e| RvError::ErrString(format!("s3 target: read body: {e}")))?;
+            let body =
+                resp.into_body().read_to_vec().map_err(|e| RvError::ErrString(format!("s3 target: read body: {e}")))?;
             Ok(Some(body))
         })
         .await
@@ -250,9 +233,7 @@ impl FileTarget for S3Target {
                 .map_err(|e| RvError::ErrString(format!("s3 target: PUT {key_owned}: {e}")))?;
             let status = resp.status().as_u16();
             if !(200..300).contains(&status) {
-                return Err(RvError::ErrString(format!(
-                    "s3 target: PUT {key_owned}: http status {status}"
-                )));
+                return Err(RvError::ErrString(format!("s3 target: PUT {key_owned}: http status {status}")));
             }
             Ok(())
         })
@@ -278,9 +259,7 @@ impl FileTarget for S3Target {
             if status == 404 || (200..300).contains(&status) {
                 Ok(())
             } else {
-                Err(RvError::ErrString(format!(
-                    "s3 target: DELETE {key_owned}: http status {status}"
-                )))
+                Err(RvError::ErrString(format!("s3 target: DELETE {key_owned}: http status {status}")))
             }
         })
         .await
@@ -312,15 +291,11 @@ impl FileTarget for S3Target {
             let agent = self.agent.clone();
             let url_str = url.to_string();
             let body = blocking(move || {
-                let resp = agent
-                    .get(&url_str)
-                    .call()
-                    .map_err(|e| RvError::ErrString(format!("s3 target: LIST: {e}")))?;
+                let resp =
+                    agent.get(&url_str).call().map_err(|e| RvError::ErrString(format!("s3 target: LIST: {e}")))?;
                 let status = resp.status().as_u16();
                 if !(200..300).contains(&status) {
-                    return Err(RvError::ErrString(format!(
-                        "s3 target: LIST: http status {status}"
-                    )));
+                    return Err(RvError::ErrString(format!("s3 target: LIST: http status {status}")));
                 }
                 let buf = resp
                     .into_body()
@@ -420,9 +395,7 @@ where
 {
     match tokio::task::spawn_blocking(f).await {
         Ok(r) => r,
-        Err(join_err) => Err(RvError::ErrString(format!(
-            "s3 target: worker panic/cancel: {join_err}"
-        ))),
+        Err(join_err) => Err(RvError::ErrString(format!("s3 target: worker panic/cancel: {join_err}"))),
     }
 }
 
@@ -459,10 +432,8 @@ mod tests {
     #[test]
     fn from_config_rejects_unknown_url_style() {
         let creds = r#"{"access_key_id":"a","secret_access_key":"b"}"#;
-        let ref_inline = format!("inline:{}", base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD,
-            creds.as_bytes(),
-        ));
+        let ref_inline =
+            format!("inline:{}", base64::Engine::encode(&base64::engine::general_purpose::STANDARD, creds.as_bytes(),));
         let err = S3Target::from_config(&cfg(json!({
             "bucket":"b",
             "region":"us-east-1",
@@ -476,10 +447,8 @@ mod tests {
     #[test]
     fn from_config_accepts_inline_credentials_ref() {
         let creds = r#"{"access_key_id":"AKIA","secret_access_key":"sekret"}"#;
-        let ref_inline = format!(
-            "inline:{}",
-            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, creds.as_bytes()),
-        );
+        let ref_inline =
+            format!("inline:{}", base64::Engine::encode(&base64::engine::general_purpose::STANDARD, creds.as_bytes()),);
         let target = S3Target::from_config(&cfg(json!({
             "bucket":"b",
             "region":"us-east-1",
@@ -515,10 +484,8 @@ mod tests {
     #[test]
     fn object_key_prepends_prefix() {
         let creds = r#"{"access_key_id":"a","secret_access_key":"b"}"#;
-        let ref_inline = format!(
-            "inline:{}",
-            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, creds.as_bytes()),
-        );
+        let ref_inline =
+            format!("inline:{}", base64::Engine::encode(&base64::engine::general_purpose::STANDARD, creds.as_bytes()),);
         let t = S3Target::from_config(&cfg(json!({
             "bucket":"b","region":"us-east-1","prefix":"p","credentials_ref": ref_inline,
         })))
@@ -549,11 +516,9 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn s3_target_live_roundtrip() {
-        let endpoint =
-            std::env::var("BVAULT_TEST_S3_ENDPOINT").expect("BVAULT_TEST_S3_ENDPOINT");
+        let endpoint = std::env::var("BVAULT_TEST_S3_ENDPOINT").expect("BVAULT_TEST_S3_ENDPOINT");
         let bucket = std::env::var("BVAULT_TEST_S3_BUCKET").expect("BVAULT_TEST_S3_BUCKET");
-        let region =
-            std::env::var("BVAULT_TEST_S3_REGION").unwrap_or_else(|_| "us-east-1".to_string());
+        let region = std::env::var("BVAULT_TEST_S3_REGION").unwrap_or_else(|_| "us-east-1".to_string());
 
         let target = S3Target::from_config(&cfg(json!({
             "bucket": bucket,

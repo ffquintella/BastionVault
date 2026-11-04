@@ -64,10 +64,7 @@ impl AuthenticatorData {
     /// Parse the binary authenticatorData blob.
     pub fn parse(raw: &[u8]) -> Result<Self, RpError> {
         if raw.len() < 37 {
-            return Err(RpError::BadAuthData(format!(
-                "expected at least 37 bytes, got {}",
-                raw.len()
-            )));
+            return Err(RpError::BadAuthData(format!("expected at least 37 bytes, got {}", raw.len())));
         }
         let mut rp_id_hash = [0u8; 32];
         rp_id_hash.copy_from_slice(&raw[0..32]);
@@ -77,9 +74,7 @@ impl AuthenticatorData {
         let mut idx = 37;
         let attested_credential = if flags.attested_credential_data() {
             if raw.len() < idx + 18 {
-                return Err(RpError::BadAuthData(
-                    "truncated attestedCredentialData header".into(),
-                ));
+                return Err(RpError::BadAuthData("truncated attestedCredentialData header".into()));
             }
             let mut aaguid = [0u8; 16];
             aaguid.copy_from_slice(&raw[idx..idx + 16]);
@@ -87,9 +82,7 @@ impl AuthenticatorData {
             let cred_id_len = u16::from_be_bytes([raw[idx], raw[idx + 1]]) as usize;
             idx += 2;
             if raw.len() < idx + cred_id_len {
-                return Err(RpError::BadAuthData(
-                    "truncated credentialId".into(),
-                ));
+                return Err(RpError::BadAuthData("truncated credentialId".into()));
             }
             let credential_id = raw[idx..idx + cred_id_len].to_vec();
             idx += cred_id_len;
@@ -97,13 +90,10 @@ impl AuthenticatorData {
             // The remaining bytes start with a CBOR-encoded COSE_Key. We need
             // to know exactly how many bytes that key consumed so we can
             // distinguish it from the optional extensions map that follows.
-            let cose_len = cbor_item_len(&raw[idx..]).map_err(|e| {
-                RpError::BadAuthData(format!("could not measure COSE_Key length: {e}"))
-            })?;
+            let cose_len = cbor_item_len(&raw[idx..])
+                .map_err(|e| RpError::BadAuthData(format!("could not measure COSE_Key length: {e}")))?;
             if raw.len() < idx + cose_len {
-                return Err(RpError::BadAuthData(
-                    "truncated credentialPublicKey".into(),
-                ));
+                return Err(RpError::BadAuthData("truncated credentialPublicKey".into()));
             }
             let cose_public_key = raw[idx..idx + cose_len].to_vec();
             // We don't validate trailing extensions; their presence is fine.
@@ -137,8 +127,7 @@ impl AuthenticatorData {
 /// straightforward and avoids a hand-rolled CBOR scanner.
 fn cbor_item_len(bytes: &[u8]) -> Result<usize, String> {
     let mut cursor = std::io::Cursor::new(bytes);
-    let val: CborValue = ciborium::de::from_reader(&mut cursor)
-        .map_err(|e| format!("decode: {e}"))?;
+    let val: CborValue = ciborium::de::from_reader(&mut cursor).map_err(|e| format!("decode: {e}"))?;
     let mut buf = Vec::new();
     ciborium::ser::into_writer(&val, &mut buf).map_err(|e| format!("re-encode: {e}"))?;
     if buf.len() > bytes.len() {
@@ -167,8 +156,8 @@ pub struct AttestationObject {
 
 impl AttestationObject {
     pub fn parse(raw: &[u8]) -> Result<Self, RpError> {
-        let val: CborValue = ciborium::de::from_reader(raw)
-            .map_err(|e| RpError::Cbor(format!("attestationObject: {e}")))?;
+        let val: CborValue =
+            ciborium::de::from_reader(raw).map_err(|e| RpError::Cbor(format!("attestationObject: {e}")))?;
         let map = match val {
             CborValue::Map(m) => m,
             _ => return Err(RpError::Cbor("attestationObject is not a CBOR map".into())),

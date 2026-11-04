@@ -81,17 +81,11 @@ impl ClientError {
     }
 
     pub fn node_unavailable<H: Into<String>, R: Into<String>>(host: H, reason: R) -> Self {
-        ClientError::NodeUnavailable {
-            host: host.into(),
-            reason: reason.into(),
-        }
+        ClientError::NodeUnavailable { host: host.into(), reason: reason.into() }
     }
 
     pub fn no_healthy_node<C: Into<String>, R: Into<String>>(cluster: C, reason: R) -> Self {
-        ClientError::NoHealthyNode {
-            cluster: cluster.into(),
-            reason: reason.into(),
-        }
+        ClientError::NoHealthyNode { cluster: cluster.into(), reason: reason.into() }
     }
 
     /// True when the error is an oversized response body rather than
@@ -137,22 +131,15 @@ pub fn classify_node_failure(host: &str, raw: ClientError) -> ClientError {
         // `Ureq(BodyExceedsLimit)` reaching here must never become
         // `NodeUnavailable` — that would trigger a failover retry that
         // re-downloads the same too-large body from another node.
-        ClientError::Ureq(ureq::Error::BodyExceedsLimit(limit)) => {
-            ClientError::ResponseTooLarge { limit: *limit }
-        }
+        ClientError::Ureq(ureq::Error::BodyExceedsLimit(limit)) => ClientError::ResponseTooLarge { limit: *limit },
         // ureq transport failures are the textbook "node went away":
         // connection refused, TLS handshake fail, DNS hiccup, etc.
-        ClientError::Ureq(_) | ClientError::Io(_) => {
-            ClientError::node_unavailable(host, raw.to_string())
-        }
+        ClientError::Ureq(_) | ClientError::Io(_) => ClientError::node_unavailable(host, raw.to_string()),
         // A 5xx Server error with a sealed-shaped body counts too —
         // the node is technically up but is no longer serving.
         ClientError::Server { status, message } if *status >= 500 => {
             let msg_lc = message.to_ascii_lowercase();
-            if msg_lc.contains("sealed")
-                || msg_lc.contains("uninitialized")
-                || msg_lc.contains("standby")
-            {
+            if msg_lc.contains("sealed") || msg_lc.contains("uninitialized") || msg_lc.contains("standby") {
                 ClientError::node_unavailable(host, message)
             } else {
                 raw

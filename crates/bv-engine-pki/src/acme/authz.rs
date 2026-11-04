@@ -17,13 +17,13 @@ use super::{
     jws::{key_authorization, JwsEnvelope},
     storage::{AcmeAuthz, AcmeChall, AUTHZ_PREFIX, CHALL_PREFIX},
 };
-use bv_storage::StorageEntry;
 use crate::{
     context::Context,
     errors::RvError,
     logical::{Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
     new_fields, new_fields_internal, new_path, new_path_internal,
 };
+use bv_storage::StorageEntry;
 
 use super::super::{PkiBackend, PkiBackendInner};
 
@@ -64,25 +64,15 @@ impl PkiBackend {
 
 #[maybe_async::maybe_async]
 impl PkiBackendInner {
-    pub async fn handle_acme_authz(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_acme_authz(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let cfg = self.load_acme_config(req).await?.unwrap_or_default();
         if !cfg.enabled {
             return Err(RvError::ErrString("acme: not enabled on this mount".into()));
         }
-        let id = req
-            .get_data("id")
-            .ok()
-            .and_then(|v| v.as_str().map(String::from))
-            .unwrap_or_default();
+        let id = req.get_data("id").ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
 
         let envelope = parse_envelope(req)?;
-        let (account_id, _payload) = self
-            .verify_kid_jws(req, &envelope, &format!("authz/{id}"))
-            .await?;
+        let (account_id, _payload) = self.verify_kid_jws(req, &envelope, &format!("authz/{id}")).await?;
 
         let authz = self
             .load_authz(req, &id)
@@ -94,25 +84,15 @@ impl PkiBackendInner {
         self.respond_authz(req, &id, &authz).await
     }
 
-    pub async fn handle_acme_chall(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_acme_chall(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let cfg = self.load_acme_config(req).await?.unwrap_or_default();
         if !cfg.enabled {
             return Err(RvError::ErrString("acme: not enabled on this mount".into()));
         }
-        let id = req
-            .get_data("id")
-            .ok()
-            .and_then(|v| v.as_str().map(String::from))
-            .unwrap_or_default();
+        let id = req.get_data("id").ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
 
         let envelope = parse_envelope(req)?;
-        let (account_id, _payload) = self
-            .verify_kid_jws(req, &envelope, &format!("chall/{id}"))
-            .await?;
+        let (account_id, _payload) = self.verify_kid_jws(req, &envelope, &format!("chall/{id}")).await?;
 
         let mut chall = self
             .load_chall(req, &id)
@@ -121,9 +101,7 @@ impl PkiBackendInner {
         let mut authz = self
             .load_authz(req, &chall.authz_id)
             .await?
-            .ok_or_else(|| {
-                RvError::ErrString("acme: chall references unknown authz (corruption)".into())
-            })?;
+            .ok_or_else(|| RvError::ErrString("acme: chall references unknown authz (corruption)".into()))?;
         if authz.account_id != account_id {
             return Err(RvError::ErrString("acme: chall belongs to another account".into()));
         }
@@ -146,11 +124,7 @@ impl PkiBackendInner {
         // is out of scope for v1.
         let result = match chall.typ.as_str() {
             "http-01" => http01_validate(&chall.identifier.value, &chall.token, &expected),
-            "dns-01" => super::dns01::dns01_validate(
-                &chall.identifier.value,
-                &expected,
-                &cfg.dns_resolvers,
-            ),
+            "dns-01" => super::dns01::dns01_validate(&chall.identifier.value, &expected, &cfg.dns_resolvers),
             other => Err(format!("unsupported challenge type `{other}`")),
         };
 
@@ -189,35 +163,21 @@ impl PkiBackendInner {
         self.respond_chall(req, &id, &chall, &authz).await
     }
 
-    async fn respond_authz(
-        &self,
-        req: &mut Request,
-        id: &str,
-        authz: &AcmeAuthz,
-    ) -> Result<Option<Response>, RvError> {
+    async fn respond_authz(&self, req: &mut Request, id: &str, authz: &AcmeAuthz) -> Result<Option<Response>, RvError> {
         let cfg = self.load_acme_config(req).await?.unwrap_or_default();
         let base = directory_base(&cfg, req);
         let location = format!("{base}/acme/authz/{id}");
 
         let mut data = Map::new();
         data.insert("status".into(), Value::String(authz.status.clone()));
-        data.insert(
-            "expires".into(),
-            Value::String(rfc3339_from_unix(authz.expires_at_unix)),
-        );
-        data.insert(
-            "identifier".into(),
-            json!({"type": authz.identifier.typ, "value": authz.identifier.value}),
-        );
+        data.insert("expires".into(), Value::String(rfc3339_from_unix(authz.expires_at_unix)));
+        data.insert("identifier".into(), json!({"type": authz.identifier.typ, "value": authz.identifier.value}));
         let mut chall_arr = Vec::with_capacity(authz.challenges.len());
         for ch_id in &authz.challenges {
             if let Some(ch) = self.load_chall(req, ch_id).await? {
                 let mut o = Map::new();
                 o.insert("type".into(), Value::String(ch.typ.clone()));
-                o.insert(
-                    "url".into(),
-                    Value::String(format!("{base}/acme/chall/{ch_id}")),
-                );
+                o.insert("url".into(), Value::String(format!("{base}/acme/chall/{ch_id}")));
                 o.insert("status".into(), Value::String(ch.status.clone()));
                 o.insert("token".into(), Value::String(ch.token.clone()));
                 if !ch.validated.is_empty() {
@@ -236,15 +196,8 @@ impl PkiBackendInner {
         headers.insert("Replay-Nonce".to_string(), nonce);
         headers.insert("Cache-Control".to_string(), "no-store".to_string());
         headers.insert("Location".to_string(), location);
-        headers.insert(
-            "Link".to_string(),
-            format!(r#"<{base}/acme/directory>;rel="index""#),
-        );
-        Ok(Some(Response {
-            data: Some(data),
-            headers: Some(headers),
-            ..Default::default()
-        }))
+        headers.insert("Link".to_string(), format!(r#"<{base}/acme/directory>;rel="index""#));
+        Ok(Some(Response { data: Some(data), headers: Some(headers), ..Default::default() }))
     }
 
     async fn respond_chall(
@@ -258,10 +211,7 @@ impl PkiBackendInner {
         let base = directory_base(&cfg, req);
         let mut data = Map::new();
         data.insert("type".into(), Value::String(chall.typ.clone()));
-        data.insert(
-            "url".into(),
-            Value::String(format!("{base}/acme/chall/{id}")),
-        );
+        data.insert("url".into(), Value::String(format!("{base}/acme/chall/{id}")));
         data.insert("status".into(), Value::String(chall.status.clone()));
         data.insert("token".into(), Value::String(chall.token.clone()));
         if !chall.validated.is_empty() {
@@ -276,17 +226,10 @@ impl PkiBackendInner {
         headers.insert("Cache-Control".to_string(), "no-store".to_string());
         headers.insert(
             "Link".to_string(),
-            format!(
-                r#"<{base}/acme/authz/{}>;rel="up", <{base}/acme/directory>;rel="index""#,
-                chall.authz_id
-            ),
+            format!(r#"<{base}/acme/authz/{}>;rel="up", <{base}/acme/directory>;rel="index""#, chall.authz_id),
         );
         let _ = authz;
-        Ok(Some(Response {
-            data: Some(data),
-            headers: Some(headers),
-            ..Default::default()
-        }))
+        Ok(Some(Response { data: Some(data), headers: Some(headers), ..Default::default() }))
     }
 }
 
@@ -325,11 +268,7 @@ fn http01_validate(domain: &str, token: &str, expected: &str) -> Result<(), Stri
     };
     let trimmed = body.trim();
     if trimmed != expected {
-        return Err(format!(
-            "keyAuthorization mismatch (got {} bytes, wanted {})",
-            trimmed.len(),
-            expected.len()
-        ));
+        return Err(format!("keyAuthorization mismatch (got {} bytes, wanted {})", trimmed.len(), expected.len()));
     }
     Ok(())
 }
@@ -337,31 +276,13 @@ fn http01_validate(domain: &str, token: &str, expected: &str) -> Result<(), Stri
 // ── shared helpers (mirror order.rs) ─────────────────────────────
 
 fn parse_envelope(req: &Request) -> Result<JwsEnvelope, RvError> {
-    let protected = req
-        .get_data("protected")
-        .ok()
-        .and_then(|v| v.as_str().map(String::from))
-        .unwrap_or_default();
-    let payload = req
-        .get_data("payload")
-        .ok()
-        .and_then(|v| v.as_str().map(String::from))
-        .unwrap_or_default();
-    let signature = req
-        .get_data("signature")
-        .ok()
-        .and_then(|v| v.as_str().map(String::from))
-        .unwrap_or_default();
+    let protected = req.get_data("protected").ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
+    let payload = req.get_data("payload").ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
+    let signature = req.get_data("signature").ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
     if protected.is_empty() || signature.is_empty() {
-        return Err(RvError::ErrString(
-            "acme: malformed JWS envelope (missing protected or signature)".into(),
-        ));
+        return Err(RvError::ErrString("acme: malformed JWS envelope (missing protected or signature)".into()));
     }
-    Ok(JwsEnvelope {
-        protected,
-        payload,
-        signature,
-    })
+    Ok(JwsEnvelope { protected, payload, signature })
 }
 
 fn directory_base(cfg: &super::storage::AcmeConfig, req: &Request) -> String {
@@ -385,9 +306,7 @@ fn directory_base(cfg: &super::storage::AcmeConfig, req: &Request) -> String {
 
 fn rfc3339_now() -> String {
     use time::{format_description::well_known::Rfc3339, OffsetDateTime};
-    OffsetDateTime::now_utc()
-        .format(&Rfc3339)
-        .unwrap_or_default()
+    OffsetDateTime::now_utc().format(&Rfc3339).unwrap_or_default()
 }
 
 fn rfc3339_from_unix(t: u64) -> String {
@@ -402,10 +321,7 @@ fn rfc3339_from_unix(t: u64) -> String {
 fn _silence() {
     let _ = AUTHZ_PREFIX;
     let _ = CHALL_PREFIX;
-    let _ = StorageEntry {
-        key: String::new(),
-        value: Vec::new(),
-    };
+    let _ = StorageEntry { key: String::new(), value: Vec::new() };
     let _ = Arc::new(());
     let _ = std::marker::PhantomData::<&()>;
 }

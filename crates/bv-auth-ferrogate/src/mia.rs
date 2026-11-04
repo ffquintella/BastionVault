@@ -258,11 +258,8 @@ fn read_cmis(path: &Path) -> Option<CmisDiscovery> {
     let endpoint = cmis.get("endpoint").and_then(toml::Value::as_str).map(str::trim).filter(|s| !s.is_empty());
     if let Some(raw) = endpoint {
         let tls_enable = !raw.starts_with("http://");
-        let endpoint = raw
-            .trim_start_matches("https://")
-            .trim_start_matches("http://")
-            .trim_end_matches('/')
-            .to_string();
+        let endpoint =
+            raw.trim_start_matches("https://").trim_start_matches("http://").trim_end_matches('/').to_string();
         return Some(CmisDiscovery { endpoint, srv: None, spki_pin, tls_enable });
     }
     let srv = cmis.get("srv").and_then(toml::Value::as_str).map(str::trim).filter(|s| !s.is_empty());
@@ -321,10 +318,7 @@ fn cbor_to_bytes(v: &ciborium::value::Value) -> Option<Vec<u8>> {
     if let Some(b) = v.as_bytes() {
         return Some(b.clone());
     }
-    v.as_array()?
-        .iter()
-        .map(|e| e.as_integer().and_then(|i| u8::try_from(i).ok()))
-        .collect()
+    v.as_array()?.iter().map(|e| e.as_integer().and_then(|i| u8::try_from(i).ok())).collect()
 }
 
 /// A completed BastionVault `ferrogate` mount configuration derived from the
@@ -380,9 +374,7 @@ pub async fn build_autoconfig(
         )
     })?;
     if disc.tls_enable && disc.spki_pin.is_empty() {
-        return Err(format!(
-            "{cfg_name} configures CMIS over TLS but has no [cmis].spki_pin; cannot verify CMIS"
-        ));
+        return Err(format!("{cfg_name} configures CMIS over TLS but has no [cmis].spki_pin; cannot verify CMIS"));
     }
 
     let mut warnings = Vec::new();
@@ -631,11 +623,7 @@ mod tests {
     #[test]
     fn helper_frames_roundtrip_cbor() {
         // Lock the wire format against mia::helper::proto.
-        let req = HelperReq {
-            audience: "https://vault.example.com".into(),
-            dpop_jkt: "abc".into(),
-            ttl_secs: 300,
-        };
+        let req = HelperReq { audience: "https://vault.example.com".into(), dpop_jkt: "abc".into(), ttl_secs: 300 };
         let mut buf = Vec::new();
         ciborium::into_writer(&req, &mut buf).unwrap();
         let back: HelperReq = ciborium::from_reader(&buf[..]).unwrap();
@@ -664,15 +652,10 @@ mod tests {
             let msg = code.describe();
             assert!(!msg.is_empty(), "{code:?} has no description");
             // The raw variant name must not leak into the operator message.
-            assert!(
-                !msg.contains(&format!("{code:?}")),
-                "describe() for {code:?} leaks the raw variant name: {msg}"
-            );
+            assert!(!msg.contains(&format!("{code:?}")), "describe() for {code:?} leaks the raw variant name: {msg}");
         }
         // Spot-check the CrlStale wording the GUI toast renders.
-        assert!(ErrorCode::CrlStale
-            .describe()
-            .contains("revocation list (CRL) from CMIS is stale"));
+        assert!(ErrorCode::CrlStale.describe().contains("revocation list (CRL) from CMIS is stale"));
     }
 
     #[test]
@@ -681,11 +664,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
 
         let https = dir.join("https.toml");
-        std::fs::write(
-            &https,
-            "[cmis]\nendpoint = 'https://cmis.example.com:8443/'\nspki_pin = 'abc123'\n",
-        )
-        .unwrap();
+        std::fs::write(&https, "[cmis]\nendpoint = 'https://cmis.example.com:8443/'\nspki_pin = 'abc123'\n").unwrap();
         let d = read_cmis(&https).expect("parses");
         assert_eq!(d.endpoint, "cmis.example.com:8443", "scheme + trailing slash stripped");
         assert_eq!(d.spki_pin, "abc123");
@@ -702,11 +681,7 @@ mod tests {
         // owner name + pin. Endpoint is left empty for later DNS resolution;
         // SRV always implies TLS.
         let srv = dir.join("srv.toml");
-        std::fs::write(
-            &srv,
-            "[cmis]\nsrv = '_ferrogate-hml._tcp.esi.fgv.br'\nspki_pin = 'deadbeef'\n",
-        )
-        .unwrap();
+        std::fs::write(&srv, "[cmis]\nsrv = '_ferrogate-hml._tcp.esi.fgv.br'\nspki_pin = 'deadbeef'\n").unwrap();
         let d = read_cmis(&srv).expect("parses");
         assert!(d.endpoint.is_empty(), "srv source leaves endpoint unresolved");
         assert_eq!(d.srv.as_deref(), Some("_ferrogate-hml._tcp.esi.fgv.br"));
@@ -768,10 +743,7 @@ mod tests {
             "log = 'info'\n\n[helper]\nsocket = '/Library/Application Support/FerroGate/run/mia.sock'\nsocket_mode = '660'\n",
         )
         .unwrap();
-        assert_eq!(
-            read_helper_socket(&path).as_deref(),
-            Some("/Library/Application Support/FerroGate/run/mia.sock")
-        );
+        assert_eq!(read_helper_socket(&path).as_deref(), Some("/Library/Application Support/FerroGate/run/mia.sock"));
 
         // No [helper].socket ⇒ no path (helper API disabled).
         let none_path = dir.join("nohelper.toml");

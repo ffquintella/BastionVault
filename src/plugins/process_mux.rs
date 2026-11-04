@@ -134,8 +134,15 @@ pub enum MuxError {
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum HostMsg<'a> {
-    Init { plugin_name: &'a str, protocol: &'static str, max_concurrent: u32 },
-    Invoke { id: u64, input: String },
+    Init {
+        plugin_name: &'a str,
+        protocol: &'static str,
+        max_concurrent: u32,
+    },
+    Invoke {
+        id: u64,
+        input: String,
+    },
     HostReply {
         id: u64,
         invocation: u64,
@@ -144,9 +151,16 @@ enum HostMsg<'a> {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<&'a str>,
     },
-    Cancel { id: u64 },
-    Ping { nonce: u64 },
-    Lifecycle { event: LifecycleEvent, deadline_ms: u64 },
+    Cancel {
+        id: u64,
+    },
+    Ping {
+        nonce: u64,
+    },
+    Lifecycle {
+        event: LifecycleEvent,
+        deadline_ms: u64,
+    },
 }
 
 /// Plugin → host. Anything else is a protocol violation.
@@ -677,7 +691,9 @@ async fn route_oversized(worker: &Arc<MuxWorker>, ends: &[u8]) -> Result<(), Dea
             }
         }
         Some((kind, id, invocation)) if kind == "host_call" => reply_error(worker, id, invocation, "too_large").await,
-        _ => log::warn!(target: "plugin", "[{}] dropped an unattributable message over {MAX_LINE_BYTES} bytes", worker.plugin),
+        _ => {
+            log::warn!(target: "plugin", "[{}] dropped an unattributable message over {MAX_LINE_BYTES} bytes", worker.plugin)
+        }
     }
     Ok(())
 }
@@ -799,7 +815,8 @@ pub fn run_test_long_lived_plugin() -> ! {
                     let sleep_ms = input["sleep_ms"].as_u64().unwrap_or(0);
                     let start = Instant::now();
                     while start.elapsed() < Duration::from_millis(sleep_ms) {
-                        if input["ignore_cancel"] != true && cancelled.lock().map(|c| c.contains(&id)).unwrap_or(false) {
+                        if input["ignore_cancel"] != true && cancelled.lock().map(|c| c.contains(&id)).unwrap_or(false)
+                        {
                             was_cancelled = true;
                             break;
                         }

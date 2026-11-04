@@ -23,8 +23,7 @@ use super::channel;
 use super::contacts;
 use super::store::NotificationStore;
 use super::types::{
-    ChannelInfo, InboxEntry, Notification, NotificationConfig, Recipient, SendOutcome,
-    IN_APP_CHANNEL_ID,
+    ChannelInfo, InboxEntry, Notification, NotificationConfig, Recipient, SendOutcome, IN_APP_CHANNEL_ID,
 };
 
 /// Per-plugin rolling send-rate window.
@@ -45,11 +44,7 @@ fn now_iso() -> String {
 
 impl NotificationService {
     pub fn new(core: Arc<dyn VaultCtx>, store: Arc<NotificationStore>) -> Arc<Self> {
-        Arc::new(Self {
-            core,
-            store,
-            plugin_rate: Mutex::new(HashMap::new()),
-        })
+        Arc::new(Self { core, store, plugin_rate: Mutex::new(HashMap::new()) })
     }
 
     // ---- sending ------------------------------------------------------------
@@ -59,11 +54,7 @@ impl NotificationService {
     /// `"plugin:<name>"`). Assigns id/created_at/namespace, resolves the
     /// target, writes the canonical message + per-user inboxes (in-app),
     /// then fans out to any requested external channels.
-    pub async fn send(
-        &self,
-        mut notif: Notification,
-        ns_path: &str,
-    ) -> Result<SendOutcome, RvError> {
+    pub async fn send(&self, mut notif: Notification, ns_path: &str) -> Result<SendOutcome, RvError> {
         if notif.title.trim().is_empty() {
             return Err(bv_error_string!("notification title is required"));
         }
@@ -86,10 +77,7 @@ impl NotificationService {
                 read_at: String::new(),
             };
             if self.store.put_inbox(ns_path, eid, &entry).await.is_ok() {
-                let _ = self
-                    .store
-                    .prune_inbox(ns_path, eid, cfg.inbox_cap as usize)
-                    .await;
+                let _ = self.store.prune_inbox(ns_path, eid, cfg.inbox_cap as usize).await;
             }
         }
 
@@ -103,28 +91,17 @@ impl NotificationService {
             .collect();
         if !external.is_empty() {
             let recipients: Vec<Recipient> =
-                contacts::resolve_recipients(&self.core, &entity_ids, ns_path)
-                    .await
-                    .unwrap_or_default();
+                contacts::resolve_recipients(&self.core, &entity_ids, ns_path).await.unwrap_or_default();
             for ch in external {
                 let res = channel::deliver_to_channel(self.core.clone(), &ch, &notif, &recipients).await;
                 if let Some(err) = &res.error {
-                    log::warn!(
-                        "notification {} channel `{}` delivery error: {}",
-                        notif.id,
-                        res.channel,
-                        err
-                    );
+                    log::warn!("notification {} channel `{}` delivery error: {}", notif.id, res.channel, err);
                 }
                 channel_results.push(res);
             }
         }
 
-        Ok(SendOutcome {
-            id: notif.id,
-            recipient_count: notif.recipient_count,
-            channel_results,
-        })
+        Ok(SendOutcome { id: notif.id, recipient_count: notif.recipient_count, channel_results })
     }
 
     /// Plugin-originated send. Enforces the per-plugin rate limit and
@@ -136,12 +113,7 @@ impl NotificationService {
         mut notif: Notification,
         ns_path: &str,
     ) -> Result<SendOutcome, RvError> {
-        let limit = self
-            .store
-            .get_config(ns_path)
-            .await
-            .unwrap_or_default()
-            .plugin_rate_per_min;
+        let limit = self.store.get_config(ns_path).await.unwrap_or_default().plugin_rate_per_min;
         self.check_plugin_rate(plugin_name, limit)?;
         notif.source = format!("plugin:{plugin_name}");
         self.send(notif, ns_path).await
@@ -151,15 +123,9 @@ impl NotificationService {
         if limit == 0 {
             return Ok(());
         }
-        let mut map = self
-            .plugin_rate
-            .lock()
-            .map_err(|_| bv_error_string!("notification rate limiter poisoned"))?;
+        let mut map = self.plugin_rate.lock().map_err(|_| bv_error_string!("notification rate limiter poisoned"))?;
         let now = Instant::now();
-        let window = map.entry(plugin_name.to_string()).or_insert(RateWindow {
-            started: now,
-            count: 0,
-        });
+        let window = map.entry(plugin_name.to_string()).or_insert(RateWindow { started: now, count: 0 });
         if now.duration_since(window.started) >= Duration::from_secs(60) {
             window.started = now;
             window.count = 0;
@@ -178,12 +144,7 @@ impl NotificationService {
     /// The caller's inbox as GUI-ready JSON: each notification merged
     /// with the caller's read state. `recipient_count` is stripped (it is
     /// an admin-only field).
-    pub async fn inbox(
-        &self,
-        ns_path: &str,
-        entity_id: &str,
-        include_read: bool,
-    ) -> Result<Vec<Value>, RvError> {
+    pub async fn inbox(&self, ns_path: &str, entity_id: &str, include_read: bool) -> Result<Vec<Value>, RvError> {
         let entries = self.store.list_inbox_entries(ns_path, entity_id).await?;
         let mut out = Vec::with_capacity(entries.len());
         for e in entries {
@@ -215,12 +176,7 @@ impl NotificationService {
         Ok(entries.iter().filter(|e| !e.is_read()).count() as u64)
     }
 
-    pub async fn mark_read(
-        &self,
-        ns_path: &str,
-        entity_id: &str,
-        id: &str,
-    ) -> Result<(), RvError> {
+    pub async fn mark_read(&self, ns_path: &str, entity_id: &str, id: &str) -> Result<(), RvError> {
         if let Some(mut e) = self.store.get_inbox_entry(ns_path, entity_id, id).await? {
             if e.read_at.is_empty() {
                 e.read_at = now_iso();
@@ -274,11 +230,7 @@ impl NotificationService {
         self.store.get_config(ns_path).await
     }
 
-    pub async fn put_config(
-        &self,
-        ns_path: &str,
-        cfg: &NotificationConfig,
-    ) -> Result<(), RvError> {
+    pub async fn put_config(&self, ns_path: &str, cfg: &NotificationConfig) -> Result<(), RvError> {
         self.store.put_config(ns_path, cfg).await
     }
 
@@ -293,13 +245,7 @@ impl NotificationService {
         ns_path: &str,
     ) -> Result<Vec<Notification>, RvError> {
         let src = format!("plugin:{plugin_name}");
-        Ok(self
-            .store
-            .list_messages(ns_path)
-            .await?
-            .into_iter()
-            .filter(|n| n.source == src)
-            .collect())
+        Ok(self.store.list_messages(ns_path).await?.into_iter().filter(|n| n.source == src).collect())
     }
 
     pub async fn get_authored_by_plugin(
@@ -309,10 +255,6 @@ impl NotificationService {
         id: &str,
     ) -> Result<Option<Notification>, RvError> {
         let src = format!("plugin:{plugin_name}");
-        Ok(self
-            .store
-            .get_message(ns_path, id)
-            .await?
-            .filter(|n| n.source == src))
+        Ok(self.store.get_message(ns_path, id).await?.filter(|n| n.source == src))
     }
 }

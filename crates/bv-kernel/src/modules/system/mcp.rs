@@ -277,7 +277,9 @@ fn valid_pairing_id(id: &str) -> bool {
 }
 
 fn valid_tool_name(name: &str) -> bool {
-    !name.is_empty() && name.len() <= 64 && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+    !name.is_empty()
+        && name.len() <= 64
+        && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
 const MAX_PAIRING_LIST_LEN: usize = 64;
@@ -287,9 +289,8 @@ fn pairing_str_list(p: &Map<String, Value>, key: &str) -> Result<Vec<String>, Rv
     let Some(value) = p.get(key) else {
         return Ok(Vec::new());
     };
-    let arr = value
-        .as_array()
-        .ok_or_else(|| crate::bv_error_response!("pairing.{} must be an array of strings", key))?;
+    let arr =
+        value.as_array().ok_or_else(|| crate::bv_error_response!("pairing.{} must be an array of strings", key))?;
     if arr.len() > MAX_PAIRING_LIST_LEN {
         return Err(crate::bv_error_response!("pairing.{} has too many entries", key));
     }
@@ -499,11 +500,10 @@ async fn narrowing_target(
 #[maybe_async::maybe_async]
 async fn issuer_operable_namespaces(core: &crate::core::Core, auth: &Auth) -> Result<Vec<String>, RvError> {
     use crate::modules::namespace::{token_binding, NamespaceModule, NAMESPACE_MODULE_NAME};
-    let store = core
-        .module_manager()
-        .get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
-        .and_then(|m| m.store())
-        .ok_or_else(|| namespace_unavailable("the namespace store is not available to list the issuer's namespaces"))?;
+    let store =
+        core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME).and_then(|m| m.store()).ok_or_else(
+            || namespace_unavailable("the namespace store is not available to list the issuer's namespaces"),
+        )?;
     let mut operable = Vec::new();
     for ns in store.list_all().await? {
         if token_binding::token_operable_checked(core, auth, &ns.path).await? {
@@ -1069,9 +1069,8 @@ impl SystemBackend {
         // before entity resolution was wired through login carry only the
         // latter. AppRole (`role_name`) and machine (`spiffe_id`) tokens are
         // excluded either way.
-        let has_human_identity = [ENTITY_ID_META, USERNAME_META]
-            .iter()
-            .any(|k| auth.metadata.get(*k).is_some_and(|s| !s.is_empty()));
+        let has_human_identity =
+            [ENTITY_ID_META, USERNAME_META].iter().any(|k| auth.metadata.get(*k).is_some_and(|s| !s.is_empty()));
         let is_operator_session = has_human_identity
             && !auth.metadata.contains_key("role_name")
             && auth.metadata.get(SPIFFE_ID_META).is_none_or(|s| s.is_empty());

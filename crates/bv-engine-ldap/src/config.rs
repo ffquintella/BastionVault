@@ -28,9 +28,7 @@ impl DirectoryType {
         match s.to_ascii_lowercase().as_str() {
             "" | "openldap" | "open_ldap" => Ok(Self::OpenLdap),
             "active_directory" | "ad" | "activedirectory" => Ok(Self::ActiveDirectory),
-            other => Err(format!(
-                "directory_type must be `openldap` or `active_directory`, got `{other}`"
-            )),
+            other => Err(format!("directory_type must be `openldap` or `active_directory`, got `{other}`")),
         }
     }
 }
@@ -48,9 +46,7 @@ impl TlsMinVersion {
         match s.to_ascii_lowercase().as_str() {
             "" | "tls12" | "1.2" | "tls1.2" => Ok(Self::Tls12),
             "tls13" | "1.3" | "tls1.3" => Ok(Self::Tls13),
-            other => Err(format!(
-                "tls_min_version must be `tls12` or `tls13`, got `{other}`"
-            )),
+            other => Err(format!("tls_min_version must be `tls12` or `tls13`, got `{other}`")),
         }
     }
 }
@@ -133,27 +129,20 @@ impl LdapConfig {
         let is_ldaps = url_lc.starts_with("ldaps://");
         let is_ldap = url_lc.starts_with("ldap://");
         if !is_ldaps && !is_ldap {
-            return Err(format!(
-                "url must start with `ldap://` or `ldaps://`, got `{}`",
-                self.url
-            ));
+            return Err(format!("url must start with `ldap://` or `ldaps://`, got `{}`", self.url));
         }
         // TLS-only by default. Plain `ldap://` without `starttls`
         // requires the two-flag opt-in.
         if is_ldap && !self.starttls && !self.insecure_tls {
-            return Err(
-                "plain `ldap://` requires either `starttls = true` or both \
+            return Err("plain `ldap://` requires either `starttls = true` or both \
                  `insecure_tls = true` + `acknowledge_insecure_tls = true`"
-                    .into(),
-            );
+                .into());
         }
         if self.insecure_tls && !acknowledge_insecure {
-            return Err(
-                "`insecure_tls = true` requires also setting \
+            return Err("`insecure_tls = true` requires also setting \
                  `acknowledge_insecure_tls = true` to confirm the operator \
                  understood the implications"
-                    .into(),
-            );
+                .into());
         }
         if self.request_timeout > MAX_REQUEST_TIMEOUT {
             return Err(format!(
@@ -245,14 +234,8 @@ mod tests {
 
     #[test]
     fn directory_type_parse() {
-        assert_eq!(
-            DirectoryType::parse("openldap").unwrap(),
-            DirectoryType::OpenLdap
-        );
-        assert_eq!(
-            DirectoryType::parse("active_directory").unwrap(),
-            DirectoryType::ActiveDirectory
-        );
+        assert_eq!(DirectoryType::parse("openldap").unwrap(), DirectoryType::OpenLdap);
+        assert_eq!(DirectoryType::parse("active_directory").unwrap(), DirectoryType::ActiveDirectory);
         assert_eq!(DirectoryType::parse("AD").unwrap(), DirectoryType::ActiveDirectory);
         assert!(DirectoryType::parse("kerberos").is_err());
     }

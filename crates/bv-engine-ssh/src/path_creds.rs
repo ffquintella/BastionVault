@@ -75,26 +75,12 @@ impl SshBackend {
 
 #[maybe_async::maybe_async]
 impl SshBackendInner {
-    pub async fn handle_creds(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
-        let role_name = req
-            .get_data("role")?
-            .as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?
-            .to_string();
-        let ip_str = req
-            .get_data("ip")?
-            .as_str()
-            .ok_or_else(|| RvError::ErrString("ip is required".into()))?
-            .to_string();
-        let username_in = req
-            .get_data("username")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_default();
+    pub async fn handle_creds(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let role_name = req.get_data("role")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
+        let ip_str =
+            req.get_data("ip")?.as_str().ok_or_else(|| RvError::ErrString("ip is required".into()))?.to_string();
+        let username_in =
+            req.get_data("username").ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
 
         let role = self
             .get_role(req, &role_name)
@@ -108,13 +94,10 @@ impl SshBackendInner {
             )));
         }
 
-        let ip: std::net::IpAddr = ip_str.parse().map_err(|e| {
-            RvError::ErrString(format!("ip `{ip_str}` is not a valid IP address: {e}"))
-        })?;
+        let ip: std::net::IpAddr =
+            ip_str.parse().map_err(|e| RvError::ErrString(format!("ip `{ip_str}` is not a valid IP address: {e}")))?;
         if !role.ip_allowed(ip) {
-            return Err(RvError::ErrString(format!(
-                "ip `{ip_str}` is not in role's cidr_list (or is excluded)"
-            )));
+            return Err(RvError::ErrString(format!("ip `{ip_str}` is not in role's cidr_list (or is excluded)")));
         }
 
         // username: caller pick, then role.default_user, else error.
@@ -123,21 +106,19 @@ impl SshBackendInner {
         } else if !role.default_user.is_empty() {
             role.default_user.clone()
         } else {
-            return Err(RvError::ErrString(
-                "no username supplied and role has no default_user".into(),
-            ));
+            return Err(RvError::ErrString("no username supplied and role has no default_user".into()));
         };
 
         // TTL: caller-supplied (humantime) → role.ttl → engine
         // default. Capped at role.max_ttl so an operator who set both
         // can rely on the cap actually doing something.
-        let req_ttl_str = req
-            .get_data("ttl")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_default();
+        let req_ttl_str = req.get_data("ttl").ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
         let mut ttl = if req_ttl_str.trim().is_empty() {
-            if role.ttl.is_zero() { DEFAULT_OTP_TTL } else { role.ttl }
+            if role.ttl.is_zero() {
+                DEFAULT_OTP_TTL
+            } else {
+                role.ttl
+            }
         } else {
             humantime::parse_duration(&req_ttl_str).map_err(|e| {
                 RvError::ErrString(format!(
@@ -164,11 +145,7 @@ impl SshBackendInner {
             expires_at,
         };
         let bytes = serde_json::to_vec(&entry)?;
-        req.storage_put(&StorageEntry {
-            key: format!("{OTP_PREFIX}{hash_hex}"),
-            value: bytes,
-        })
-        .await?;
+        req.storage_put(&StorageEntry { key: format!("{OTP_PREFIX}{hash_hex}"), value: bytes }).await?;
 
         let mut data = Map::new();
         data.insert("key".into(), Value::String(plaintext));
@@ -180,16 +157,9 @@ impl SshBackendInner {
         Ok(Some(Response::data_response(Some(data))))
     }
 
-    pub async fn handle_verify(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
-        let otp = req
-            .get_data("otp")?
-            .as_str()
-            .ok_or_else(|| RvError::ErrString("otp is required".into()))?
-            .to_string();
+    pub async fn handle_verify(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let otp =
+            req.get_data("otp")?.as_str().ok_or_else(|| RvError::ErrString("otp is required".into()))?.to_string();
         if otp.is_empty() {
             return Err(RvError::ErrString("otp is required".into()));
         }
@@ -230,4 +200,3 @@ impl SshBackendInner {
         Ok(Some(Response::data_response(Some(data))))
     }
 }
-

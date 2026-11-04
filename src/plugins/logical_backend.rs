@@ -225,8 +225,11 @@ impl Backend for PluginLogicalBackend {
 
         // ABI 1.4: the host-side half of the caller, for caller-bound host
         // calls and actor-stamped audit. Never sent to the plugin.
-        let invocation_caller =
-            if manifest.capabilities.caller_identity { super::invocation::InvocationCaller::from_request(req) } else { None };
+        let invocation_caller = if manifest.capabilities.caller_identity {
+            super::invocation::InvocationCaller::from_request(req)
+        } else {
+            None
+        };
 
         let envelope = build_envelope(req, caller.as_ref())?;
         let envelope_bytes = serde_json::to_vec(&envelope)
@@ -593,7 +596,9 @@ mod tests {
 
     #[test]
     fn no_http_operation_can_produce_a_dynamic_op() {
-        for op in [Operation::Read, Operation::Write, Operation::Delete, Operation::List, Operation::Renew, Operation::Revoke] {
+        for op in
+            [Operation::Read, Operation::Write, Operation::Delete, Operation::List, Operation::Renew, Operation::Revoke]
+        {
             let mut req = Request::new("creds/readonly");
             req.operation = op;
             let env = build_envelope(&req, None).unwrap();

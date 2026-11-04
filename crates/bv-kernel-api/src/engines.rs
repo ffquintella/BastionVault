@@ -113,11 +113,7 @@ pub trait ConnectMfaGate: Send + Sync {
     /// A transport uses this to refuse an unattributed open — a caller that
     /// omits `profile_id` on a resource carrying a gated profile must not be
     /// routed around the gate.
-    async fn resource_has_gated_profile(
-        &self,
-        ns_prefix: &str,
-        resource: &str,
-    ) -> Result<bool, RvError>;
+    async fn resource_has_gated_profile(&self, ns_prefix: &str, resource: &str) -> Result<bool, RvError>;
 }
 
 // ── credential → totp ──────────────────────────────────────────────────
@@ -135,13 +131,7 @@ pub trait TotpMfa: Send + Sync {
     /// `Ok(true)` = the code is valid right now. `Ok(false)` = it is not.
     /// `Err(_)` = the check could not run (no mount, no key, storage failure)
     /// — never treat that as a pass.
-    async fn verify_code(
-        &self,
-        mount: &str,
-        key_name: &str,
-        code: &str,
-        now_secs: u64,
-    ) -> Result<bool, RvError>;
+    async fn verify_code(&self, mount: &str, key_name: &str, code: &str, now_secs: u64) -> Result<bool, RvError>;
 }
 
 // ── plugins → notifications ────────────────────────────────────────────
@@ -158,27 +148,13 @@ pub trait NotificationSink: Send + Sync {
     /// overwrites `source` so an author can never forge a system origin.
     ///
     /// Returns `{"id": ..., "recipient_count": ...}`.
-    async fn send_from_plugin(
-        &self,
-        author: &str,
-        notification: Value,
-        ns_path: &str,
-    ) -> Result<Value, RvError>;
+    async fn send_from_plugin(&self, author: &str, notification: Value, ns_path: &str) -> Result<Value, RvError>;
 
     /// Notifications authored by `author`, newest first.
-    async fn list_authored_by_plugin(
-        &self,
-        author: &str,
-        ns_path: &str,
-    ) -> Result<Vec<Value>, RvError>;
+    async fn list_authored_by_plugin(&self, author: &str, ns_path: &str) -> Result<Vec<Value>, RvError>;
 
     /// One notification authored by `author`, or `None`.
-    async fn get_authored_by_plugin(
-        &self,
-        author: &str,
-        ns_path: &str,
-        id: &str,
-    ) -> Result<Option<Value>, RvError>;
+    async fn get_authored_by_plugin(&self, author: &str, ns_path: &str, id: &str) -> Result<Option<Value>, RvError>;
 }
 
 // ── notifications → plugins ────────────────────────────────────────────

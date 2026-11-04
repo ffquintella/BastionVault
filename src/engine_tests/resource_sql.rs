@@ -529,7 +529,8 @@ mod resource_sql_tests {
         let f = fixture("sql_step_up_action").await;
         let m = granted_plugin(&f).await;
         let (ana_token, ana) = f.user("ana", READER).await;
-        let begin = |profile: &str, action: Value| json!({ "resource": RESOURCE, "profile_id": profile, "action": action });
+        let begin =
+            |profile: &str, action: Value| json!({ "resource": RESOURCE, "profile_id": profile, "action": action });
         let path = "resources/v2/connect/mfa/begin";
 
         // Before any factor: an action the profile does not gate, a

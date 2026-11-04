@@ -38,11 +38,7 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(validated: ValidatedManifest, index: RenderedIndex) -> Self {
-        let assets = validated
-            .assets
-            .into_iter()
-            .map(|a| (a.url.clone(), a))
-            .collect();
+        let assets = validated.assets.into_iter().map(|a| (a.url.clone(), a)).collect();
         Self {
             index_html: index.html,
             csp: HeaderValue::from_str(&index.csp).expect("CSP is ASCII by construction"),
@@ -75,27 +71,14 @@ pub fn router(state: Arc<AppState>) -> Router {
 /// that and, for instance, render an operator-supplied `.pem` as HTML.
 fn harden(mut response: Response) -> Response {
     let headers = response.headers_mut();
-    headers.insert(
-        header::X_CONTENT_TYPE_OPTIONS,
-        HeaderValue::from_static("nosniff"),
-    );
-    headers.insert(
-        header::REFERRER_POLICY,
-        HeaderValue::from_static("no-referrer"),
-    );
+    headers.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    headers.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
     response
 }
 
 async fn index(State(state): State<Arc<AppState>>) -> Response {
-    let mut response = (
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, mime::HTML)],
-        state.index_html.clone(),
-    )
-        .into_response();
-    response
-        .headers_mut()
-        .insert(header::CONTENT_SECURITY_POLICY, state.csp.clone());
+    let mut response = (StatusCode::OK, [(header::CONTENT_TYPE, mime::HTML)], state.index_html.clone()).into_response();
+    response.headers_mut().insert(header::CONTENT_SECURITY_POLICY, state.csp.clone());
     harden(response)
 }
 
@@ -106,14 +89,7 @@ async fn healthz() -> Response {
 /// The manifest, echoed byte-for-byte. A consumer verifying a detached
 /// signature over it must see the operator's bytes, not our re-serialisation.
 async fn manifest_json(State(state): State<Arc<AppState>>) -> Response {
-    harden(
-        (
-            StatusCode::OK,
-            [(header::CONTENT_TYPE, mime::JSON)],
-            state.manifest_json.clone(),
-        )
-            .into_response(),
-    )
+    harden((StatusCode::OK, [(header::CONTENT_TYPE, mime::JSON)], state.manifest_json.clone()).into_response())
 }
 
 /// Artefacts, signatures and certificates — and nothing else.
@@ -151,10 +127,7 @@ async fn file(State(state): State<Arc<AppState>>, method: Method, uri: Uri) -> R
     harden(
         (
             StatusCode::OK,
-            [
-                (header::CONTENT_TYPE, asset.mime.to_string()),
-                (header::CONTENT_LENGTH, asset.len.to_string()),
-            ],
+            [(header::CONTENT_TYPE, asset.mime.to_string()), (header::CONTENT_LENGTH, asset.len.to_string())],
             body,
         )
             .into_response(),
@@ -165,14 +138,7 @@ async fn file(State(state): State<Arc<AppState>>, method: Method, uri: Uri) -> R
 /// that disappeared all look identical from outside. There is no directory
 /// listing and no "did you mean".
 fn not_found() -> Response {
-    harden(
-        (
-            StatusCode::NOT_FOUND,
-            [(header::CONTENT_TYPE, mime::TEXT)],
-            "not found\n",
-        )
-            .into_response(),
-    )
+    harden((StatusCode::NOT_FOUND, [(header::CONTENT_TYPE, mime::TEXT)], "not found\n").into_response())
 }
 
 #[cfg(test)]
@@ -230,26 +196,17 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or_default().to_string()))
             .collect();
-        let body = to_bytes(response.into_body(), 1024 * 1024)
-            .await
-            .expect("body")
-            .to_vec();
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.expect("body").to_vec();
         (status, headers, body)
     }
 
     async fn get_path(app: &Router, path: &str) -> (StatusCode, Vec<(String, String)>, Vec<u8>) {
-        let request = Request::builder()
-            .uri(path)
-            .body(Body::empty())
-            .expect("request");
+        let request = Request::builder().uri(path).body(Body::empty()).expect("request");
         send(app, request).await
     }
 
     fn header_of(headers: &[(String, String)], name: &str) -> Option<String> {
-        headers
-            .iter()
-            .find(|(k, _)| k == name)
-            .map(|(_, v)| v.clone())
+        headers.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone())
     }
 
     #[tokio::test]
@@ -259,10 +216,7 @@ mod tests {
         let (status, headers, body) = get_path(&app, "/healthz").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, b"ok");
-        assert_eq!(
-            header_of(&headers, "x-content-type-options").as_deref(),
-            Some("nosniff")
-        );
+        assert_eq!(header_of(&headers, "x-content-type-options").as_deref(), Some("nosniff"));
     }
 
     #[tokio::test]
@@ -271,10 +225,7 @@ mod tests {
         let (app, _) = app(dir.path());
         let (status, headers, body) = get_path(&app, "/").await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(
-            header_of(&headers, "content-type").as_deref(),
-            Some(mime::HTML)
-        );
+        assert_eq!(header_of(&headers, "content-type").as_deref(), Some(mime::HTML));
         let csp = header_of(&headers, "content-security-policy").expect("csp");
         assert!(csp.contains("default-src 'none'"), "{csp}");
         assert!(!csp.contains("unsafe-inline"), "{csp}");
@@ -290,10 +241,7 @@ mod tests {
         let (app, _) = app(dir.path());
         let (status, headers, body) = get_path(&app, "/manifest.json").await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(
-            header_of(&headers, "content-type").as_deref(),
-            Some(mime::JSON)
-        );
+        assert_eq!(header_of(&headers, "content-type").as_deref(), Some(mime::JSON));
         assert_eq!(body, on_disk);
     }
 
@@ -310,11 +258,7 @@ mod tests {
         ] {
             let (status, headers, body) = get_path(&app, path).await;
             assert_eq!(status, StatusCode::OK, "{path}");
-            assert_eq!(
-                header_of(&headers, "content-type").as_deref(),
-                Some(expected_mime),
-                "{path}"
-            );
+            assert_eq!(header_of(&headers, "content-type").as_deref(), Some(expected_mime), "{path}");
             assert_eq!(
                 header_of(&headers, "content-length").as_deref(),
                 Some(expected_body.len().to_string().as_str()),

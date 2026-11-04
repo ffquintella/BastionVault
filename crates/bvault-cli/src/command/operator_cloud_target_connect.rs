@@ -122,20 +122,13 @@ impl CommandExecutor for CloudTargetConnect {
 impl CloudTargetConnect {
     fn run(&self) -> Result<(), RvError> {
         let provider = oauth::well_known_provider(&self.target)?;
-        let creds_obj = oauth::OAuthCredentials {
-            client_id: self.client_id.clone(),
-            client_secret: self.client_secret.clone(),
-        };
+        let creds_obj =
+            oauth::OAuthCredentials { client_id: self.client_id.clone(), client_secret: self.client_secret.clone() };
 
         // Fixed loopback port so the redirect URI is stable and
         // matches whatever the user registered at the provider's
         // dev console. See `oauth::DEFAULT_LOOPBACK_PORT`.
-        let session = oauth::begin_consent(
-            &provider,
-            &creds_obj,
-            &self.bind_host,
-            Some(oauth::DEFAULT_LOOPBACK_PORT),
-        )?;
+        let session = oauth::begin_consent(&provider, &creds_obj, &self.bind_host, Some(oauth::DEFAULT_LOOPBACK_PORT))?;
         let listener_addr = session
             .listener_addr()
             .map_err(|e| RvError::ErrString(format!("cloud-target connect: local_addr: {e}")))?;
@@ -145,10 +138,7 @@ impl CloudTargetConnect {
 
         println!("Opening consent URL for target `{}`:", self.target);
         println!("  {}", consent_url);
-        println!(
-            "Waiting for the browser callback on {}...",
-            listener_addr
-        );
+        println!("Waiting for the browser callback on {}...", listener_addr);
 
         if !self.no_browser {
             if let Err(e) = open_browser(consent_url.as_str()) {
@@ -166,23 +156,22 @@ impl CloudTargetConnect {
         let callback = session.wait_for_callback(Duration::from_secs(self.timeout_secs))?;
         println!("Callback received — exchanging authorization code for tokens...");
 
-        let token_response =
-            oauth::exchange_code(&provider, &creds_obj, &callback.code, &verifier, &redirect_uri)?;
+        let token_response = oauth::exchange_code(&provider, &creds_obj, &callback.code, &verifier, &redirect_uri)?;
 
         let refresh_token = token_response.refresh_token.as_deref().ok_or_else(|| {
-            RvError::ErrString("cloud-target connect: provider returned no refresh_token \
+            RvError::ErrString(
+                "cloud-target connect: provider returned no refresh_token \
                  (check that the `offline_access` scope is granted and \
                  that your OAuth application is configured for a refresh \
                  token; for Google you may need --target=gdrive which \
-                 automatically sets access_type=offline)".to_string())
+                 automatically sets access_type=offline)"
+                    .to_string(),
+            )
         })?;
 
         creds::persist(&self.credentials_ref, refresh_token.as_bytes())?;
 
-        println!(
-            "Success — refresh token persisted to `{}`.",
-            self.credentials_ref
-        );
+        println!("Success — refresh token persisted to `{}`.", self.credentials_ref);
         if let Some(secs) = token_response.expires_in {
             println!("Access token valid for ~{secs} seconds; vault will refresh on demand.");
         }
@@ -216,7 +205,5 @@ fn open_browser(url: &str) -> Result<(), RvError> {
         c
     };
     let mut cmd = cmd;
-    cmd.spawn()
-        .map(|_| ())
-        .map_err(|e| RvError::ErrString(format!("browser launcher: {e}")))
+    cmd.spawn().map(|_| ()).map_err(|e| RvError::ErrString(format!("browser launcher: {e}")))
 }

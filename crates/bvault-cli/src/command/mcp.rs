@@ -373,10 +373,7 @@ impl CommandExecutor for PairingsList {
             println!("No paired clients.");
             return Ok(());
         }
-        println!(
-            "{:<34} {:<24} {:<14} {:<6} {:<7} {:<7} STATE",
-            "ID", "CLIENT", "TRANSPORT", "UID", "REVEAL", "WRITE"
-        );
+        println!("{:<34} {:<24} {:<14} {:<6} {:<7} {:<7} STATE", "ID", "CLIENT", "TRANSPORT", "UID", "REVEAL", "WRITE");
         for r in &records {
             let uid = r.peer_uid.map(|u| u.to_string()).unwrap_or_else(|| "-".into());
             let state = match r.expires_at {

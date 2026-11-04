@@ -8,13 +8,13 @@ use std::{collections::HashMap, sync::Arc};
 use serde_json::{Map, Value};
 
 use super::storage::{AcmeConfig, CONFIG_KEY};
-use bv_storage::StorageEntry;
 use crate::{
     context::Context,
     errors::RvError,
     logical::{Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
     new_fields, new_fields_internal, new_path, new_path_internal,
 };
+use bv_storage::StorageEntry;
 
 use super::super::{PkiBackend, PkiBackendInner};
 
@@ -68,27 +68,16 @@ impl PkiBackend {
 
 #[maybe_async::maybe_async]
 impl PkiBackendInner {
-    pub async fn load_acme_config(
-        &self,
-        req: &Request,
-    ) -> Result<Option<AcmeConfig>, RvError> {
+    pub async fn load_acme_config(&self, req: &Request) -> Result<Option<AcmeConfig>, RvError> {
         match req.storage_get(CONFIG_KEY).await? {
             Some(e) => Ok(Some(serde_json::from_slice(&e.value)?)),
             None => Ok(None),
         }
     }
 
-    pub async fn save_acme_config(
-        &self,
-        req: &mut Request,
-        cfg: &AcmeConfig,
-    ) -> Result<(), RvError> {
+    pub async fn save_acme_config(&self, req: &mut Request, cfg: &AcmeConfig) -> Result<(), RvError> {
         let bytes = serde_json::to_vec(cfg)?;
-        req.storage_put(&StorageEntry {
-            key: CONFIG_KEY.to_string(),
-            value: bytes,
-        })
-        .await
+        req.storage_put(&StorageEntry { key: CONFIG_KEY.to_string(), value: bytes }).await
     }
 
     pub async fn handle_acme_config_read(
@@ -100,36 +89,16 @@ impl PkiBackendInner {
         let mut data = Map::new();
         data.insert("enabled".into(), Value::Bool(cfg.enabled));
         data.insert("default_role".into(), Value::String(cfg.default_role));
-        data.insert(
-            "default_issuer_ref".into(),
-            Value::String(cfg.default_issuer_ref),
-        );
-        data.insert(
-            "external_hostname".into(),
-            Value::String(cfg.external_hostname),
-        );
-        data.insert(
-            "nonce_ttl_secs".into(),
-            Value::Number(cfg.nonce_ttl_secs.into()),
-        );
+        data.insert("default_issuer_ref".into(), Value::String(cfg.default_issuer_ref));
+        data.insert("external_hostname".into(), Value::String(cfg.external_hostname));
+        data.insert("nonce_ttl_secs".into(), Value::Number(cfg.nonce_ttl_secs.into()));
         data.insert(
             "dns_resolvers".into(),
-            Value::Array(
-                cfg.dns_resolvers
-                    .iter()
-                    .map(|s| Value::String(s.clone()))
-                    .collect(),
-            ),
+            Value::Array(cfg.dns_resolvers.iter().map(|s| Value::String(s.clone())).collect()),
         );
         data.insert("eab_required".into(), Value::Bool(cfg.eab_required));
-        data.insert(
-            "rate_window_secs".into(),
-            Value::Number(cfg.rate_window_secs.into()),
-        );
-        data.insert(
-            "rate_orders_per_window".into(),
-            Value::Number(cfg.rate_orders_per_window.into()),
-        );
+        data.insert("rate_window_secs".into(), Value::Number(cfg.rate_window_secs.into()));
+        data.insert("rate_orders_per_window".into(), Value::Number(cfg.rate_orders_per_window.into()));
         Ok(Some(Response::data_response(Some(data))))
     }
 
@@ -140,11 +109,7 @@ impl PkiBackendInner {
     ) -> Result<Option<Response>, RvError> {
         let existing = self.load_acme_config(req).await?.unwrap_or_default();
 
-        let enabled = req
-            .get_data("enabled")
-            .ok()
-            .and_then(|v| v.as_bool())
-            .unwrap_or(existing.enabled);
+        let enabled = req.get_data("enabled").ok().and_then(|v| v.as_bool()).unwrap_or(existing.enabled);
         let default_role = req
             .get_data("default_role")
             .ok()
@@ -161,30 +126,16 @@ impl PkiBackendInner {
             .ok()
             .and_then(|v| v.as_str().map(|s| s.to_string()))
             .unwrap_or(existing.external_hostname);
-        let nonce_ttl_secs = req
-            .get_data("nonce_ttl_secs")
-            .ok()
-            .and_then(|v| v.as_u64())
-            .unwrap_or(existing.nonce_ttl_secs);
+        let nonce_ttl_secs =
+            req.get_data("nonce_ttl_secs").ok().and_then(|v| v.as_u64()).unwrap_or(existing.nonce_ttl_secs);
         let dns_resolvers = match req.get_data("dns_resolvers").ok().and_then(|v| v.as_str().map(|s| s.to_string())) {
-            Some(s) if !s.is_empty() => s
-                .split(',')
-                .map(|t| t.trim().to_string())
-                .filter(|t| !t.is_empty())
-                .collect(),
+            Some(s) if !s.is_empty() => s.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect(),
             Some(_) => existing.dns_resolvers,
             None => existing.dns_resolvers,
         };
-        let eab_required = req
-            .get_data("eab_required")
-            .ok()
-            .and_then(|v| v.as_bool())
-            .unwrap_or(existing.eab_required);
-        let rate_window_secs = req
-            .get_data("rate_window_secs")
-            .ok()
-            .and_then(|v| v.as_u64())
-            .unwrap_or(existing.rate_window_secs);
+        let eab_required = req.get_data("eab_required").ok().and_then(|v| v.as_bool()).unwrap_or(existing.eab_required);
+        let rate_window_secs =
+            req.get_data("rate_window_secs").ok().and_then(|v| v.as_u64()).unwrap_or(existing.rate_window_secs);
         let rate_orders_per_window = req
             .get_data("rate_orders_per_window")
             .ok()
@@ -192,9 +143,7 @@ impl PkiBackendInner {
             .unwrap_or(existing.rate_orders_per_window);
 
         if enabled && default_role.trim().is_empty() {
-            return Err(RvError::ErrString(
-                "acme: enabled = true requires default_role".into(),
-            ));
+            return Err(RvError::ErrString("acme: enabled = true requires default_role".into()));
         }
 
         let cfg = AcmeConfig {

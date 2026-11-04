@@ -22,8 +22,8 @@ use crate::{
     context::Context,
     errors::RvError,
     logical::{
-        is_reserved_token_meta_key, Backend, Field, FieldType, Operation, Path, PathOperation, Request,
-        Response, USERNAME_META,
+        is_reserved_token_meta_key, Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response,
+        USERNAME_META,
     },
     new_fields, new_fields_internal, new_path, new_path_internal,
     storage::StorageEntry,
@@ -93,16 +93,10 @@ impl SamlRoleEntry {
         name_id_format: &str,
         attributes: &Map<String, Value>,
     ) -> Result<(), RvError> {
-        if !self.bound_subjects.is_empty()
-            && !self.bound_subjects.iter().any(|s| s == name_id)
-        {
-            return Err(RvError::ErrString(format!(
-                "saml: NameID `{name_id}` not in role `bound_subjects`"
-            )));
+        if !self.bound_subjects.is_empty() && !self.bound_subjects.iter().any(|s| s == name_id) {
+            return Err(RvError::ErrString(format!("saml: NameID `{name_id}` not in role `bound_subjects`")));
         }
-        if !self.bound_subjects_type.is_empty()
-            && !name_id_format.ends_with(&self.bound_subjects_type)
-        {
+        if !self.bound_subjects_type.is_empty() && !name_id_format.ends_with(&self.bound_subjects_type) {
             return Err(RvError::ErrString(format!(
                 "saml: NameID format `{name_id_format}` does not match \
                  role `bound_subjects_type` `{}`",
@@ -116,9 +110,7 @@ impl SamlRoleEntry {
                 )));
             };
             if !attribute_matches_any(value, allowed) {
-                return Err(RvError::ErrString(format!(
-                    "saml: bound_attribute `{attr}` did not match allowed values"
-                )));
+                return Err(RvError::ErrString(format!("saml: bound_attribute `{attr}` did not match allowed values")));
             }
         }
         Ok(())
@@ -131,64 +123,27 @@ impl SamlRoleEntry {
             Value::Object(
                 self.bound_attributes
                     .iter()
-                    .map(|(k, vs)| {
-                        (
-                            k.clone(),
-                            Value::Array(vs.iter().cloned().map(Value::String).collect()),
-                        )
-                    })
+                    .map(|(k, vs)| (k.clone(), Value::Array(vs.iter().cloned().map(Value::String).collect())))
                     .collect(),
             ),
         );
         m.insert(
             "bound_subjects".into(),
-            Value::Array(
-                self.bound_subjects
-                    .iter()
-                    .cloned()
-                    .map(Value::String)
-                    .collect(),
-            ),
+            Value::Array(self.bound_subjects.iter().cloned().map(Value::String).collect()),
         );
-        m.insert(
-            "bound_subjects_type".into(),
-            Value::String(self.bound_subjects_type.clone()),
-        );
+        m.insert("bound_subjects_type".into(), Value::String(self.bound_subjects_type.clone()));
         m.insert(
             "attribute_mappings".into(),
-            Value::Object(
-                self.attribute_mappings
-                    .iter()
-                    .map(|(k, v)| (k.clone(), Value::String(v.clone())))
-                    .collect(),
-            ),
+            Value::Object(self.attribute_mappings.iter().map(|(k, v)| (k.clone(), Value::String(v.clone()))).collect()),
         );
-        m.insert(
-            "groups_attribute".into(),
-            Value::String(self.groups_attribute.clone()),
-        );
+        m.insert("groups_attribute".into(), Value::String(self.groups_attribute.clone()));
         m.insert(
             "allowed_redirect_uris".into(),
-            Value::Array(
-                self.allowed_redirect_uris
-                    .iter()
-                    .cloned()
-                    .map(Value::String)
-                    .collect(),
-            ),
+            Value::Array(self.allowed_redirect_uris.iter().cloned().map(Value::String).collect()),
         );
-        m.insert(
-            "policies".into(),
-            Value::Array(self.policies.iter().cloned().map(Value::String).collect()),
-        );
-        m.insert(
-            "token_ttl_secs".into(),
-            Value::Number(self.token_ttl_secs.into()),
-        );
-        m.insert(
-            "token_max_ttl_secs".into(),
-            Value::Number(self.token_max_ttl_secs.into()),
-        );
+        m.insert("policies".into(), Value::Array(self.policies.iter().cloned().map(Value::String).collect()));
+        m.insert("token_ttl_secs".into(), Value::Number(self.token_ttl_secs.into()));
+        m.insert("token_max_ttl_secs".into(), Value::Number(self.token_max_ttl_secs.into()));
         m
     }
 }
@@ -253,11 +208,7 @@ impl SamlBackend {
 
 #[maybe_async::maybe_async]
 impl SamlBackendInner {
-    pub async fn read_role(
-        &self,
-        _backend: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn read_role(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let name = req.get_data_as_str("name").unwrap_or_default();
         let Some(role) = SamlRoleEntry::load(req, &name).await? else {
             return Ok(None);
@@ -265,11 +216,7 @@ impl SamlBackendInner {
         Ok(Some(Response::data_response(Some(role.to_map()))))
     }
 
-    pub async fn write_role(
-        &self,
-        _backend: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn write_role(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let name = req.get_data_as_str("name").unwrap_or_default();
         if name.trim().is_empty() {
             return Err(RvError::ErrString("saml: role name is required".into()));
@@ -286,10 +233,7 @@ impl SamlBackendInner {
                     role.bound_attributes = parse_claim_map(raw)?;
                 }
             } else if let Value::Object(obj) = &v {
-                role.bound_attributes = obj
-                    .iter()
-                    .map(|(k, vs)| (k.clone(), vals_to_strings(vs)))
-                    .collect();
+                role.bound_attributes = obj.iter().map(|(k, vs)| (k.clone(), vals_to_strings(vs))).collect();
             }
         }
         if let Ok(v) = req.get_data("bound_subjects") {
@@ -304,10 +248,8 @@ impl SamlBackendInner {
                     role.attribute_mappings = parse_str_map(raw)?;
                 }
             } else if let Value::Object(obj) = &v {
-                role.attribute_mappings = obj
-                    .iter()
-                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                    .collect();
+                role.attribute_mappings =
+                    obj.iter().filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string()))).collect();
             }
         }
         if let Ok(Value::String(v)) = req.get_data("groups_attribute") {
@@ -334,29 +276,17 @@ impl SamlBackendInner {
         reject_reserved_mapping_targets(&role.attribute_mappings)?;
 
         let bytes = serde_json::to_vec(&role)?;
-        req.storage_put(&StorageEntry {
-            key: format!("{ROLE_PREFIX}{name}"),
-            value: bytes,
-        })
-        .await?;
+        req.storage_put(&StorageEntry { key: format!("{ROLE_PREFIX}{name}"), value: bytes }).await?;
         Ok(None)
     }
 
-    pub async fn delete_role(
-        &self,
-        _backend: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn delete_role(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let name = req.get_data_as_str("name").unwrap_or_default();
         req.storage_delete(&format!("{ROLE_PREFIX}{name}")).await?;
         Ok(None)
     }
 
-    pub async fn list_roles(
-        &self,
-        _backend: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn list_roles(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let names = req.storage_list(ROLE_PREFIX).await?;
         Ok(Some(Response::list_response(&names)))
     }
@@ -417,11 +347,8 @@ fn reject_reserved_mapping_targets(mappings: &HashMap<String, String>) -> Result
     }
     offenders.sort_unstable();
 
-    let listed = offenders
-        .iter()
-        .map(|(attr, vault_key)| format!("`{attr}` -> `{vault_key}`"))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let listed =
+        offenders.iter().map(|(attr, vault_key)| format!("`{attr}` -> `{vault_key}`")).collect::<Vec<_>>().join(", ");
     Err(RvError::ErrString(format!(
         "saml: attribute_mappings may not target reserved token metadata key(s): {listed}. Those \
          keys are set by the auth backend that authenticated the principal and are read back as \
@@ -433,54 +360,37 @@ fn reject_reserved_mapping_targets(mappings: &HashMap<String, String>) -> Result
 
 fn parse_string_list(v: &Value) -> Vec<String> {
     match v {
-        Value::Array(a) => a
-            .iter()
-            .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
-            .filter(|s| !s.is_empty())
-            .collect(),
-        Value::String(s) => s
-            .split(',')
-            .map(|p| p.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect(),
+        Value::Array(a) => {
+            a.iter().filter_map(|x| x.as_str().map(|s| s.trim().to_string())).filter(|s| !s.is_empty()).collect()
+        }
+        Value::String(s) => s.split(',').map(|p| p.trim().to_string()).filter(|s| !s.is_empty()).collect(),
         _ => Vec::new(),
     }
 }
 
 fn parse_claim_map(raw: &str) -> Result<HashMap<String, Vec<String>>, RvError> {
-    let parsed: Value = serde_json::from_str(raw)
-        .map_err(|e| RvError::ErrString(format!("bound_attributes: invalid JSON: {e}")))?;
+    let parsed: Value =
+        serde_json::from_str(raw).map_err(|e| RvError::ErrString(format!("bound_attributes: invalid JSON: {e}")))?;
     match parsed {
-        Value::Object(obj) => Ok(obj
-            .into_iter()
-            .map(|(k, v)| (k, vals_to_strings(&v)))
-            .collect()),
-        _ => Err(RvError::ErrString(
-            "bound_attributes: expected JSON object of attr → allowed-values".into(),
-        )),
+        Value::Object(obj) => Ok(obj.into_iter().map(|(k, v)| (k, vals_to_strings(&v))).collect()),
+        _ => Err(RvError::ErrString("bound_attributes: expected JSON object of attr → allowed-values".into())),
     }
 }
 
 fn parse_str_map(raw: &str) -> Result<HashMap<String, String>, RvError> {
-    let parsed: Value = serde_json::from_str(raw)
-        .map_err(|e| RvError::ErrString(format!("attribute_mappings: invalid JSON: {e}")))?;
+    let parsed: Value =
+        serde_json::from_str(raw).map_err(|e| RvError::ErrString(format!("attribute_mappings: invalid JSON: {e}")))?;
     match parsed {
-        Value::Object(obj) => Ok(obj
-            .into_iter()
-            .filter_map(|(k, v)| v.as_str().map(|s| (k, s.to_string())))
-            .collect()),
-        _ => Err(RvError::ErrString(
-            "attribute_mappings: expected JSON object of attribute-name → metadata-key".into(),
-        )),
+        Value::Object(obj) => Ok(obj.into_iter().filter_map(|(k, v)| v.as_str().map(|s| (k, s.to_string()))).collect()),
+        _ => {
+            Err(RvError::ErrString("attribute_mappings: expected JSON object of attribute-name → metadata-key".into()))
+        }
     }
 }
 
 fn vals_to_strings(v: &Value) -> Vec<String> {
     match v {
-        Value::Array(a) => a
-            .iter()
-            .filter_map(|x| x.as_str().map(|s| s.to_string()))
-            .collect(),
+        Value::Array(a) => a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect(),
         Value::String(s) => vec![s.clone()],
         _ => Vec::new(),
     }
@@ -492,32 +402,20 @@ mod tests {
 
     #[test]
     fn validate_assertion_bound_subject_happy() {
-        let role = SamlRoleEntry {
-            bound_subjects: vec!["alice@example.com".into()],
-            ..Default::default()
-        };
-        role.validate_assertion("alice@example.com", "emailAddress", &Map::new())
-            .unwrap();
+        let role = SamlRoleEntry { bound_subjects: vec!["alice@example.com".into()], ..Default::default() };
+        role.validate_assertion("alice@example.com", "emailAddress", &Map::new()).unwrap();
     }
 
     #[test]
     fn validate_assertion_bound_subject_rejects_other() {
-        let role = SamlRoleEntry {
-            bound_subjects: vec!["alice@example.com".into()],
-            ..Default::default()
-        };
-        let err = role
-            .validate_assertion("mallory@example.com", "emailAddress", &Map::new())
-            .unwrap_err();
+        let role = SamlRoleEntry { bound_subjects: vec!["alice@example.com".into()], ..Default::default() };
+        let err = role.validate_assertion("mallory@example.com", "emailAddress", &Map::new()).unwrap_err();
         assert!(format!("{err}").contains("not in role"));
     }
 
     #[test]
     fn validate_assertion_bound_subject_type_rejects_format() {
-        let role = SamlRoleEntry {
-            bound_subjects_type: "emailAddress".into(),
-            ..Default::default()
-        };
+        let role = SamlRoleEntry { bound_subjects_type: "emailAddress".into(), ..Default::default() };
         let err = role
             .validate_assertion("xyz", "urn:oasis:names:tc:SAML:2.0:nameid-format:transient", &Map::new())
             .unwrap_err();
@@ -527,23 +425,17 @@ mod tests {
     #[test]
     fn validate_assertion_bound_attribute_missing_rejects() {
         let role = SamlRoleEntry {
-            bound_attributes: [("department".to_string(), vec!["eng".to_string()])]
-                .into_iter()
-                .collect(),
+            bound_attributes: [("department".to_string(), vec!["eng".to_string()])].into_iter().collect(),
             ..Default::default()
         };
-        let err = role
-            .validate_assertion("anyone", "", &Map::new())
-            .unwrap_err();
+        let err = role.validate_assertion("anyone", "", &Map::new()).unwrap_err();
         assert!(format!("{err}").contains("missing from assertion"));
     }
 
     #[test]
     fn validate_assertion_bound_attribute_mismatch_rejects() {
         let role = SamlRoleEntry {
-            bound_attributes: [("department".to_string(), vec!["eng".to_string()])]
-                .into_iter()
-                .collect(),
+            bound_attributes: [("department".to_string(), vec!["eng".to_string()])].into_iter().collect(),
             ..Default::default()
         };
         let mut attrs = Map::new();
@@ -555,18 +447,13 @@ mod tests {
     #[test]
     fn validate_assertion_bound_attribute_array_matches_any() {
         let role = SamlRoleEntry {
-            bound_attributes: [("groups".to_string(), vec!["admins".to_string()])]
-                .into_iter()
-                .collect(),
+            bound_attributes: [("groups".to_string(), vec!["admins".to_string()])].into_iter().collect(),
             ..Default::default()
         };
         let mut attrs = Map::new();
         attrs.insert(
             "groups".into(),
-            Value::Array(vec![
-                Value::String("engineering".into()),
-                Value::String("admins".into()),
-            ]),
+            Value::Array(vec![Value::String("engineering".into()), Value::String("admins".into())]),
         );
         role.validate_assertion("anyone", "", &attrs).unwrap();
     }
@@ -593,14 +480,8 @@ mod tests {
 
     #[test]
     fn attribute_matches_any_number_and_bool() {
-        assert!(attribute_matches_any(
-            &Value::Number(42.into()),
-            &["42".to_string()]
-        ));
-        assert!(attribute_matches_any(
-            &Value::Bool(true),
-            &["true".to_string()]
-        ));
+        assert!(attribute_matches_any(&Value::Number(42.into()), &["42".to_string()]));
+        assert!(attribute_matches_any(&Value::Bool(true), &["true".to_string()]));
     }
 }
 

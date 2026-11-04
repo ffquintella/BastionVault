@@ -103,10 +103,7 @@ async fn read_marker(core: &crate::core::Core) -> Result<u32, RvError> {
 }
 
 async fn write_marker(core: &crate::core::Core, version: u32) -> Result<(), RvError> {
-    core.barrier()
-        .as_storage()
-        .put(&StorageEntry { key: marker_key(), value: serde_json::to_vec(&version)? })
-        .await
+    core.barrier().as_storage().put(&StorageEntry { key: marker_key(), value: serde_json::to_vec(&version)? }).await
 }
 
 /// Map every resource name to the namespace paths that actually hold a resource
@@ -166,11 +163,7 @@ async fn resource_locations(
 
 /// Decide the destination for one legacy bare key, or `None` to leave it alone.
 /// `report` is updated with the reason whenever the answer is "leave it".
-fn destination_for(
-    name: &str,
-    locations: &HashMap<String, Vec<String>>,
-    report: &mut NsScopeReport,
-) -> Option<String> {
+fn destination_for(name: &str, locations: &HashMap<String, Vec<String>>, report: &mut NsScopeReport) -> Option<String> {
     let Some(holders) = locations.get(name) else {
         report.orphaned += 1;
         return None;
@@ -221,19 +214,13 @@ pub async fn run_if_needed(core: &crate::core::Core) -> Result<NsScopeReport, Rv
     }
 
     let Some(identity) = core.module_manager().get_module::<IdentityModule>("identity") else {
-        return Err(crate::bv_error_string!(
-            "owner/share ns-scope datafix: identity module unavailable"
-        ));
+        return Err(crate::bv_error_string!("owner/share ns-scope datafix: identity module unavailable"));
     };
     let Some(owner_store) = identity.owner_store() else {
-        return Err(crate::bv_error_string!(
-            "owner/share ns-scope datafix: owner store unavailable"
-        ));
+        return Err(crate::bv_error_string!("owner/share ns-scope datafix: owner store unavailable"));
     };
     let Some(share_store) = identity.share_store() else {
-        return Err(crate::bv_error_string!(
-            "owner/share ns-scope datafix: share store unavailable"
-        ));
+        return Err(crate::bv_error_string!("owner/share ns-scope datafix: share store unavailable"));
     };
 
     let ns_store = NamespaceStore::new(core)?;
@@ -275,9 +262,7 @@ pub async fn run_if_needed(core: &crate::core::Core) -> Result<NsScopeReport, Rv
             report.ambiguous += per_share.ambiguous.min(1);
             continue;
         };
-        let moved = share_store
-            .rename_target(ShareTargetKind::Resource, &canonical, &dest, "ns-scope-datafix")
-            .await?;
+        let moved = share_store.rename_target(ShareTargetKind::Resource, &canonical, &dest, "ns-scope-datafix").await?;
         if moved > 0 {
             report.moved_shares += moved;
             log::info!(
@@ -308,12 +293,7 @@ mod tests {
     use super::*;
 
     fn locations(pairs: &[(&str, &[&str])]) -> HashMap<String, Vec<String>> {
-        pairs
-            .iter()
-            .map(|(n, nss)| {
-                (n.to_string(), nss.iter().map(|s| s.to_string()).collect::<Vec<_>>())
-            })
-            .collect()
+        pairs.iter().map(|(n, nss)| (n.to_string(), nss.iter().map(|s| s.to_string()).collect::<Vec<_>>())).collect()
     }
 
     #[test]

@@ -462,7 +462,9 @@ async fn invoke_mux(
                 sup.last_attempt_at = Some(Instant::now());
                 let spawned = match spawn_child(manifest, binary) {
                     Ok((child, stdin, stdout, bootstrap)) => {
-                        MuxWorker::start(manifest, child, stdin, stdout, &bootstrap).await.map_err(SupervisorError::from)
+                        MuxWorker::start(manifest, child, stdin, stdout, &bootstrap)
+                            .await
+                            .map_err(SupervisorError::from)
                     }
                     Err(e) => Err(e),
                 };
@@ -868,9 +870,10 @@ mod tests {
         let m = mux_manifest("test-mux-binding", None);
         let bin = test_binary();
         let target = json!({"method": "resource_sql_target", "params": {"resource": "db"}});
-        let stray = call(&m, &bin, json!({"host_call": target, "invocation_override": 999_999}), Some(a_caller()), LONG)
-            .await
-            .unwrap();
+        let stray =
+            call(&m, &bin, json!({"host_call": target, "invocation_override": 999_999}), Some(a_caller()), LONG)
+                .await
+                .unwrap();
         assert_eq!(stray["reply"]["error"], "no_invocation");
         let uncalled = call(&m, &bin, json!({"host_call": target}), None, LONG).await.unwrap();
         assert_eq!(uncalled["reply"]["error"], "no_invocation");

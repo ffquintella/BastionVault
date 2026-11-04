@@ -322,8 +322,7 @@ mod test {
         use crate::modules::totp::{crypto, policy::Algorithm};
         use std::collections::HashMap;
 
-        let (_bvault, core, root_token) =
-            new_unseal_test_bastion_vault("test_totp_mfa_login_namespace").await;
+        let (_bvault, core, root_token) = new_unseal_test_bastion_vault("test_totp_mfa_login_namespace").await;
         test_mount_auth_api(&core, &root_token, "userpass", "pass").await;
         test_mount_api(&core, &root_token, "totp", "totp").await;
         test_write_user(&core, &root_token, "pass", "bob", "pw-bob-123", 0).await;

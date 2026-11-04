@@ -27,11 +27,11 @@ use bv_utils as utils;
 // which places them at *that* crate's root; the call sites import them as
 // `crate::new_path` and friends. The `_internal` halves are the recursive arms
 // the public macros expand into, so they must travel with them.
-pub use bv_logical::{
-    new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path,
-    new_path_internal, new_secret, new_secret_internal,
-};
 pub use bv_errors::{bv_error_response, bv_error_response_status, bv_error_string};
+pub use bv_logical::{
+    new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path, new_path_internal,
+    new_secret, new_secret_internal,
+};
 
 use std::{any::Any, collections::HashMap, sync::Arc};
 
@@ -40,13 +40,13 @@ use derive_more::Deref;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
-use bv_kernel_api::{Module, VaultCtx};
 use crate::{
     context::Context,
     errors::RvError,
-    logical::{Backend, Field, FieldType, LogicalBackend, Operation, Path, PathOperation, Request, Response},
     kernel_api::identity::caller_audit_actor,
+    logical::{Backend, Field, FieldType, LogicalBackend, Operation, Path, PathOperation, Request, Response},
 };
+use bv_kernel_api::{Module, VaultCtx};
 
 pub mod channel;
 pub mod contacts;
@@ -57,10 +57,7 @@ pub mod types;
 
 pub use service::NotificationService;
 pub use store::NotificationStore;
-pub use types::{
-    ChannelInfo, InboxEntry, Notification, NotificationConfig, NotificationTarget, Recipient,
-    Severity,
-};
+pub use types::{ChannelInfo, InboxEntry, Notification, NotificationConfig, NotificationTarget, Recipient, Severity};
 
 static NOTIFICATIONS_BACKEND_HELP: &str = r#"
 The notifications backend delivers in-app notifications to users, user
@@ -245,11 +242,7 @@ fn ns_from_req(req: &Request) -> String {
 #[maybe_async::maybe_async]
 impl NotificationsBackendInner {
     fn resolve_service(&self) -> Result<Arc<NotificationService>, RvError> {
-        self.service
-            .load()
-            .as_ref()
-            .clone()
-            .ok_or_else(|| bv_error_string!("notification service unavailable"))
+        self.service.load().as_ref().clone().ok_or_else(|| bv_error_string!("notification service unavailable"))
     }
 
     /// The caller's stable inbox key. Empty for tokens with no entity
@@ -258,11 +251,7 @@ impl NotificationsBackendInner {
         caller_audit_actor(req)
     }
 
-    pub async fn handle_send(
-        &self,
-        _backend: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_send(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let service = self.resolve_service()?;
         let ns = ns_from_req(req);
 
@@ -271,21 +260,13 @@ impl NotificationsBackendInner {
             .map_err(|e| bv_error_string!(format!("invalid notification payload: {e}")))?;
 
         let caller = Self::caller_entity(req);
-        let source = if caller.is_empty() {
-            "system".to_string()
-        } else {
-            format!("user:{caller}")
-        };
+        let source = if caller.is_empty() { "system".to_string() } else { format!("user:{caller}") };
 
         let notif = Notification {
             id: String::new(),
             title: payload.title,
             body: payload.body,
-            severity: payload
-                .severity
-                .as_deref()
-                .map(Severity::parse)
-                .unwrap_or_default(),
+            severity: payload.severity.as_deref().map(Severity::parse).unwrap_or_default(),
             source,
             target: payload.target,
             channels: payload.channels,
@@ -297,10 +278,7 @@ impl NotificationsBackendInner {
         };
 
         let outcome = service.send(notif, &ns).await?;
-        let data = serde_json::to_value(&outcome)
-            .ok()
-            .and_then(|v| v.as_object().cloned())
-            .unwrap_or_default();
+        let data = serde_json::to_value(&outcome).ok().and_then(|v| v.as_object().cloned()).unwrap_or_default();
         Ok(Some(Response::data_response(Some(data))))
     }
 
@@ -359,11 +337,7 @@ impl NotificationsBackendInner {
         Ok(Some(Response::data_response(Some(data))))
     }
 
-    pub async fn handle_dismiss(
-        &self,
-        _backend: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_dismiss(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let service = self.resolve_service()?;
         let ns = ns_from_req(req);
         let entity = Self::caller_entity(req);
@@ -393,10 +367,7 @@ impl NotificationsBackendInner {
         let channel = req.get_data("channel")?.as_str().unwrap_or("").to_string();
         let to = req.get_data("to")?.as_str().unwrap_or("").to_string();
         let result = service.test_channel(&channel, &to).await?;
-        let data = serde_json::to_value(&result)
-            .ok()
-            .and_then(|v| v.as_object().cloned())
-            .unwrap_or_default();
+        let data = serde_json::to_value(&result).ok().and_then(|v| v.as_object().cloned()).unwrap_or_default();
         Ok(Some(Response::data_response(Some(data))))
     }
 
@@ -421,10 +392,7 @@ impl NotificationsBackendInner {
         let service = self.resolve_service()?;
         let ns = ns_from_req(req);
         let cfg = service.get_config(&ns).await?;
-        let data = serde_json::to_value(&cfg)
-            .ok()
-            .and_then(|v| v.as_object().cloned())
-            .unwrap_or_default();
+        let data = serde_json::to_value(&cfg).ok().and_then(|v| v.as_object().cloned()).unwrap_or_default();
         Ok(Some(Response::data_response(Some(data))))
     }
 
@@ -453,11 +421,7 @@ impl NotificationsBackendInner {
 
 impl NotificationsModule {
     pub fn new(core: Arc<dyn VaultCtx>) -> Self {
-        Self {
-            name: "notifications".to_string(),
-            core,
-            service: Arc::new(ArcSwap::new(Arc::new(None))),
-        }
+        Self { name: "notifications".to_string(), core, service: Arc::new(ArcSwap::new(Arc::new(None))) }
     }
 
     pub fn service(&self) -> Option<Arc<NotificationService>> {
@@ -485,8 +449,7 @@ impl Module for NotificationsModule {
         // the moment `init` installs it — and never has to look the module up.
         let service = self.service.clone();
         let backend_new_func = move |_c: Arc<dyn VaultCtx>| -> Result<Arc<dyn Backend>, RvError> {
-            let mut b =
-                NotificationsBackend::new(core_for_backend.clone(), service.clone()).new_backend();
+            let mut b = NotificationsBackend::new(core_for_backend.clone(), service.clone()).new_backend();
             b.init()?;
             Ok(Arc::new(b))
         };

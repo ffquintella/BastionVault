@@ -94,18 +94,10 @@ impl LdapBackendInner {
 
     pub async fn save_config(&self, req: &mut Request, cfg: &LdapConfig) -> Result<(), RvError> {
         let bytes = serde_json::to_vec(cfg)?;
-        req.storage_put(&StorageEntry {
-            key: CONFIG_KEY.to_string(),
-            value: bytes,
-        })
-        .await
+        req.storage_put(&StorageEntry { key: CONFIG_KEY.to_string(), value: bytes }).await
     }
 
-    pub async fn handle_config_read(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_config_read(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         match self.load_config(req).await? {
             None => Ok(None),
             Some(cfg) => {
@@ -122,10 +114,7 @@ impl LdapBackendInner {
                     }),
                 );
                 data.insert("password_policy".into(), Value::String(r.password_policy));
-                data.insert(
-                    "request_timeout".into(),
-                    Value::Number(r.request_timeout.as_secs().into()),
-                );
+                data.insert("request_timeout".into(), Value::Number(r.request_timeout.as_secs().into()));
                 data.insert("starttls".into(), Value::Bool(r.starttls));
                 data.insert(
                     "tls_min_version".into(),
@@ -142,19 +131,12 @@ impl LdapBackendInner {
         }
     }
 
-    pub async fn handle_config_write(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_config_write(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let existing = self.load_config(req).await?;
 
         let bindpass_in = take_str(req, "bindpass");
         let bindpass = if bindpass_in.is_empty() {
-            existing
-                .as_ref()
-                .map(|c| c.bindpass.clone())
-                .unwrap_or_default()
+            existing.as_ref().map(|c| c.bindpass.clone()).unwrap_or_default()
         } else {
             bindpass_in
         };
@@ -164,8 +146,7 @@ impl LdapBackendInner {
             binddn: take_or(req, "binddn", existing.as_ref().map(|c| c.binddn.as_str()).unwrap_or("")),
             bindpass,
             userdn: take_or(req, "userdn", existing.as_ref().map(|c| c.userdn.as_str()).unwrap_or("")),
-            directory_type: DirectoryType::parse(&take_str(req, "directory_type"))
-                .map_err(RvError::ErrString)?,
+            directory_type: DirectoryType::parse(&take_str(req, "directory_type")).map_err(RvError::ErrString)?,
             password_policy: take_str(req, "password_policy"),
             request_timeout: std::time::Duration::from_secs(
                 req.get_data("request_timeout")
@@ -175,8 +156,7 @@ impl LdapBackendInner {
             ),
             client_tls_cert: take_str(req, "client_tls_cert"),
             client_tls_key: take_str(req, "client_tls_key"),
-            tls_min_version: TlsMinVersion::parse(&take_str(req, "tls_min_version"))
-                .map_err(RvError::ErrString)?,
+            tls_min_version: TlsMinVersion::parse(&take_str(req, "tls_min_version")).map_err(RvError::ErrString)?,
             insecure_tls: take_bool(req, "insecure_tls", false),
             userattr: take_or(req, "userattr", "cn"),
             starttls: take_bool(req, "starttls", false),
@@ -188,24 +168,14 @@ impl LdapBackendInner {
         Ok(None)
     }
 
-    pub async fn handle_config_delete(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_config_delete(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         req.storage_delete(CONFIG_KEY).await?;
         Ok(None)
     }
 
-    pub async fn handle_rotate_root(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
-        let mut cfg = self
-            .load_config(req)
-            .await?
-            .ok_or_else(|| RvError::ErrString("ldap engine not configured".into()))?;
+    pub async fn handle_rotate_root(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let mut cfg =
+            self.load_config(req).await?.ok_or_else(|| RvError::ErrString("ldap engine not configured".into()))?;
 
         let new_password = super::password::generate(super::password::DEFAULT_LENGTH);
 
@@ -213,9 +183,7 @@ impl LdapBackendInner {
         // to the bind DN. Directory-write-first is essential: if we
         // wrote storage first and the LDAP write failed, the engine
         // would be unable to bind on the next call.
-        let mut ldap = client::bind(&cfg)
-            .await
-            .map_err(|e| RvError::ErrString(format!("rotate-root: bind: {e}")))?;
+        let mut ldap = client::bind(&cfg).await.map_err(|e| RvError::ErrString(format!("rotate-root: bind: {e}")))?;
         client::set_password(&mut ldap, &cfg, &cfg.binddn, &new_password)
             .await
             .map_err(|e| RvError::ErrString(format!("rotate-root: write: {e}")))?;
@@ -237,10 +205,7 @@ impl LdapBackendInner {
                 let mut data = Map::new();
                 data.insert("ok".into(), Value::Bool(false));
                 data.insert("stage".into(), Value::String("config".into()));
-                data.insert(
-                    "error".into(),
-                    Value::String("ldap engine not configured".into()),
-                );
+                data.insert("error".into(), Value::String("ldap engine not configured".into()));
                 return Ok(Some(Response::data_response(Some(data))));
             }
         };
@@ -282,60 +247,31 @@ impl LdapBackendInner {
             Err(_) => {
                 data.insert("ok".into(), Value::Bool(false));
                 data.insert("stage".into(), Value::String("dns".into()));
-                data.insert(
-                    "dns_ms".into(),
-                    Value::Number((dns_start.elapsed().as_millis() as u64).into()),
-                );
-                data.insert(
-                    "error".into(),
-                    Value::String(format!("DNS resolution for `{host}` timed out after 5s")),
-                );
+                data.insert("dns_ms".into(), Value::Number((dns_start.elapsed().as_millis() as u64).into()));
+                data.insert("error".into(), Value::String(format!("DNS resolution for `{host}` timed out after 5s")));
                 return Ok(Some(Response::data_response(Some(data))));
             }
             Ok(Err(join_err)) => {
                 data.insert("ok".into(), Value::Bool(false));
                 data.insert("stage".into(), Value::String("dns".into()));
-                data.insert(
-                    "error".into(),
-                    Value::String(format!("DNS task failed: {join_err}")),
-                );
+                data.insert("error".into(), Value::String(format!("DNS task failed: {join_err}")));
                 return Ok(Some(Response::data_response(Some(data))));
             }
             Ok(Ok(Err(e))) => {
                 data.insert("ok".into(), Value::Bool(false));
                 data.insert("stage".into(), Value::String("dns".into()));
-                data.insert(
-                    "dns_ms".into(),
-                    Value::Number((dns_start.elapsed().as_millis() as u64).into()),
-                );
-                data.insert(
-                    "error".into(),
-                    Value::String(format!("DNS resolution failed for `{host}`: {e}")),
-                );
+                data.insert("dns_ms".into(), Value::Number((dns_start.elapsed().as_millis() as u64).into()));
+                data.insert("error".into(), Value::String(format!("DNS resolution failed for `{host}`: {e}")));
                 return Ok(Some(Response::data_response(Some(data))));
             }
             Ok(Ok(Ok(addrs))) => addrs,
         };
-        data.insert(
-            "dns_ms".into(),
-            Value::Number((dns_start.elapsed().as_millis() as u64).into()),
-        );
-        data.insert(
-            "resolved".into(),
-            Value::Array(
-                resolved
-                    .iter()
-                    .map(|sa| Value::String(sa.to_string()))
-                    .collect(),
-            ),
-        );
+        data.insert("dns_ms".into(), Value::Number((dns_start.elapsed().as_millis() as u64).into()));
+        data.insert("resolved".into(), Value::Array(resolved.iter().map(|sa| Value::String(sa.to_string())).collect()));
         if resolved.is_empty() {
             data.insert("ok".into(), Value::Bool(false));
             data.insert("stage".into(), Value::String("dns".into()));
-            data.insert(
-                "error".into(),
-                Value::String(format!("DNS returned no addresses for `{host}`")),
-            );
+            data.insert("error".into(), Value::String(format!("DNS returned no addresses for `{host}`")));
             return Ok(Some(Response::data_response(Some(data))));
         }
 
@@ -350,47 +286,26 @@ impl LdapBackendInner {
         let mut tcp_ok: Option<std::net::SocketAddr> = None;
         for target in &resolved {
             let attempt_start = std::time::Instant::now();
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                tokio::net::TcpStream::connect(*target),
-            )
-            .await
+            match tokio::time::timeout(std::time::Duration::from_secs(5), tokio::net::TcpStream::connect(*target)).await
             {
                 Ok(Ok(stream)) => {
                     drop(stream);
-                    tcp_attempts.push(format!(
-                        "{target} ok ({}ms)",
-                        attempt_start.elapsed().as_millis()
-                    ));
+                    tcp_attempts.push(format!("{target} ok ({}ms)", attempt_start.elapsed().as_millis()));
                     tcp_ok = Some(*target);
                     break;
                 }
                 Err(_) => {
-                    tcp_attempts.push(format!(
-                        "{target} timeout ({}ms)",
-                        attempt_start.elapsed().as_millis()
-                    ));
+                    tcp_attempts.push(format!("{target} timeout ({}ms)", attempt_start.elapsed().as_millis()));
                 }
                 Ok(Err(e)) => {
-                    tcp_attempts.push(format!(
-                        "{target} {e} ({}ms)",
-                        attempt_start.elapsed().as_millis()
-                    ));
+                    tcp_attempts.push(format!("{target} {e} ({}ms)", attempt_start.elapsed().as_millis()));
                 }
             }
         }
-        data.insert(
-            "tcp_ms".into(),
-            Value::Number((tcp_start.elapsed().as_millis() as u64).into()),
-        );
+        data.insert("tcp_ms".into(), Value::Number((tcp_start.elapsed().as_millis() as u64).into()));
         data.insert(
             "tcp_attempts".into(),
-            Value::Array(
-                tcp_attempts
-                    .iter()
-                    .map(|s| Value::String(s.clone()))
-                    .collect(),
-            ),
+            Value::Array(tcp_attempts.iter().map(|s| Value::String(s.clone())).collect()),
         );
         if tcp_ok.is_none() {
             data.insert("ok".into(), Value::Bool(false));
@@ -416,10 +331,7 @@ impl LdapBackendInner {
                 let _ = ldap.unbind().await;
                 data.insert("ok".into(), Value::Bool(true));
                 data.insert("stage".into(), Value::String("bind".into()));
-                data.insert(
-                    "bind_ms".into(),
-                    Value::Number((bind_start.elapsed().as_millis() as u64).into()),
-                );
+                data.insert("bind_ms".into(), Value::Number((bind_start.elapsed().as_millis() as u64).into()));
                 let total = dns_start.elapsed().as_millis() as u64;
                 data.insert("latency_ms".into(), Value::Number(total.into()));
             }
@@ -440,10 +352,7 @@ impl LdapBackendInner {
                     "ldap-bind" => " (server reachable — check `binddn` and `bindpass`)",
                     _ => "",
                 };
-                data.insert(
-                    "error".into(),
-                    Value::String(format!("{e}{hint}")),
-                );
+                data.insert("error".into(), Value::String(format!("{e}{hint}")));
             }
         }
         Ok(Some(Response::data_response(Some(data))))
@@ -466,14 +375,11 @@ fn parse_ldap_url(url: &str) -> Result<(String, u16, &'static str), String> {
     let host_port = rest.split('/').next().unwrap_or(rest);
     // IPv6 literal in brackets: `[::1]:636`.
     if let Some(stripped) = host_port.strip_prefix('[') {
-        let end = stripped
-            .find(']')
-            .ok_or_else(|| format!("url `{url}` has unclosed `[` for IPv6 literal"))?;
+        let end = stripped.find(']').ok_or_else(|| format!("url `{url}` has unclosed `[` for IPv6 literal"))?;
         let host = &stripped[..end];
         let after = &stripped[end + 1..];
         let port = if let Some(p) = after.strip_prefix(':') {
-            p.parse::<u16>()
-                .map_err(|_| format!("url `{url}` has invalid port `{p}`"))?
+            p.parse::<u16>().map_err(|_| format!("url `{url}` has invalid port `{p}`"))?
         } else {
             default_port
         };
@@ -483,9 +389,7 @@ fn parse_ldap_url(url: &str) -> Result<(String, u16, &'static str), String> {
     if let Some((h, p)) = host_port.rsplit_once(':') {
         // Avoid mis-treating an empty host like `:636`.
         if !h.is_empty() {
-            let port = p
-                .parse::<u16>()
-                .map_err(|_| format!("url `{url}` has invalid port `{p}`"))?;
+            let port = p.parse::<u16>().map_err(|_| format!("url `{url}` has invalid port `{p}`"))?;
             return Ok((h.to_string(), port, scheme));
         }
     }
@@ -496,10 +400,7 @@ fn parse_ldap_url(url: &str) -> Result<(String, u16, &'static str), String> {
 }
 
 fn take_str(req: &Request, key: &str) -> String {
-    req.get_data(key)
-        .ok()
-        .and_then(|v| v.as_str().map(|s| s.to_string()))
-        .unwrap_or_default()
+    req.get_data(key).ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default()
 }
 
 fn take_or(req: &Request, key: &str, default: &str) -> String {
@@ -512,10 +413,7 @@ fn take_or(req: &Request, key: &str, default: &str) -> String {
 }
 
 fn take_bool(req: &Request, key: &str, default: bool) -> bool {
-    req.get_data(key)
-        .ok()
-        .and_then(|v| v.as_bool())
-        .unwrap_or(default)
+    req.get_data(key).ok().and_then(|v| v.as_bool()).unwrap_or(default)
 }
 
 #[cfg(test)]
@@ -529,21 +427,12 @@ mod url_tests {
     }
     #[test]
     fn explicit_port() {
-        assert_eq!(
-            parse_ldap_url("ldap://h:1389").unwrap(),
-            ("h".into(), 1389, "ldap")
-        );
+        assert_eq!(parse_ldap_url("ldap://h:1389").unwrap(), ("h".into(), 1389, "ldap"));
     }
     #[test]
     fn ipv6_literal() {
-        assert_eq!(
-            parse_ldap_url("ldaps://[::1]").unwrap(),
-            ("::1".into(), 636, "ldaps")
-        );
-        assert_eq!(
-            parse_ldap_url("ldaps://[::1]:1636").unwrap(),
-            ("::1".into(), 1636, "ldaps")
-        );
+        assert_eq!(parse_ldap_url("ldaps://[::1]").unwrap(), ("::1".into(), 636, "ldaps"));
+        assert_eq!(parse_ldap_url("ldaps://[::1]:1636").unwrap(), ("::1".into(), 1636, "ldaps"));
     }
     #[test]
     fn rejects_missing_scheme() {

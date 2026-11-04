@@ -120,13 +120,10 @@ fn read_password_for_export(format: &str) -> Result<Option<String>, RvError> {
     }
     use std::io::IsTerminal;
     let pw = if std::io::stdin().is_terminal() {
-        rpassword::prompt_password("Export password (will not echo): ")
-            .map_err(|_| RvError::ErrRequestInvalid)?
+        rpassword::prompt_password("Export password (will not echo): ").map_err(|_| RvError::ErrRequestInvalid)?
     } else {
         let mut buf = String::new();
-        std::io::stdin()
-            .read_line(&mut buf)
-            .map_err(|_| RvError::ErrRequestInvalid)?;
+        std::io::stdin().read_line(&mut buf).map_err(|_| RvError::ErrRequestInvalid)?;
         buf.trim_end_matches(['\r', '\n']).to_string()
     };
     Ok(Some(pw))
@@ -155,10 +152,7 @@ impl CommandExecutor for ExchangeExport {
 
         let mut body = serde_json::Map::new();
         body.insert("format".to_string(), json!(self.format));
-        body.insert(
-            "scope".to_string(),
-            json!({ "kind": kind, "include": include }),
-        );
+        body.insert("scope".to_string(), json!({ "kind": kind, "include": include }));
         body.insert("allow_plaintext".to_string(), json!(self.allow_plaintext));
         if let Some(ref c) = self.comment {
             body.insert("comment".to_string(), json!(c));
@@ -185,20 +179,11 @@ impl CommandExecutor for ExchangeExport {
         }
 
         let data = ret.response_data.unwrap_or(serde_json::Value::Null);
-        let b64 = data
-            .get("file_b64")
-            .and_then(|v| v.as_str())
-            .ok_or(RvError::ErrRequestInvalid)?;
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(b64.as_bytes())
-            .map_err(|_| RvError::ErrRequestInvalid)?;
+        let b64 = data.get("file_b64").and_then(|v| v.as_str()).ok_or(RvError::ErrRequestInvalid)?;
+        let bytes =
+            base64::engine::general_purpose::STANDARD.decode(b64.as_bytes()).map_err(|_| RvError::ErrRequestInvalid)?;
         std::fs::write(&self.output, &bytes)?;
-        println!(
-            "Wrote {} bytes to {} (format={})",
-            bytes.len(),
-            self.output,
-            self.format
-        );
+        println!("Wrote {} bytes to {} (format={})", bytes.len(), self.output, self.format);
         Ok(())
     }
 }

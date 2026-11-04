@@ -317,7 +317,9 @@ impl BastionVault {
         // The SQL browser's host calls read database resources through the
         // resource engine's `sql` protocol (features/sql-browser.md §9.5).
         // Stateless and process-wide: every vault in the process shares it.
-        crate::plugins::sql_host::set_sql_resource_source(Arc::new(crate::plugins::sql_resource::ResourceEngineSqlSource));
+        crate::plugins::sql_host::set_sql_resource_source(Arc::new(
+            crate::plugins::sql_resource::ResourceEngineSqlSource,
+        ));
 
         // MCP brokered sessions (features/mcp-brokered-sessions.md §11-12):
         // the resource engine's session handler reads the server config's

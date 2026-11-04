@@ -117,11 +117,8 @@ pub fn unpack(bundle: &[u8]) -> Result<BundleParts<'_>, String> {
                 .checked_add(4)
                 .filter(|end| *end <= bundle.len())
                 .ok_or("bundle is missing the v2 binary length")?;
-            let binary_len = u32::from_le_bytes(
-                bundle[manifest_end..binary_len_end]
-                    .try_into()
-                    .expect("4 bytes"),
-            ) as usize;
+            let binary_len =
+                u32::from_le_bytes(bundle[manifest_end..binary_len_end].try_into().expect("4 bytes")) as usize;
             let binary_end = binary_len_end
                 .checked_add(binary_len)
                 .filter(|end| *end <= bundle.len())
@@ -130,11 +127,8 @@ pub fn unpack(bundle: &[u8]) -> Result<BundleParts<'_>, String> {
                 .checked_add(4)
                 .filter(|end| *end <= bundle.len())
                 .ok_or("bundle is missing the v2 surface length")?;
-            let surface_len = u32::from_le_bytes(
-                bundle[binary_end..surface_len_end]
-                    .try_into()
-                    .expect("4 bytes"),
-            ) as usize;
+            let surface_len =
+                u32::from_le_bytes(bundle[binary_end..surface_len_end].try_into().expect("4 bytes")) as usize;
             let surface_end = surface_len_end
                 .checked_add(surface_len)
                 .filter(|end| *end <= bundle.len())
@@ -564,11 +558,8 @@ size = 0
         let mut bundle = pack_surface("surface-tamper", None);
         let manifest_len = u32::from_le_bytes(bundle[8..12].try_into().unwrap()) as usize;
         let binary_len_start = LEGACY_HEADER_LEN + manifest_len;
-        let binary_len = u32::from_le_bytes(
-            bundle[binary_len_start..binary_len_start + 4]
-                .try_into()
-                .unwrap(),
-        ) as usize;
+        let binary_len =
+            u32::from_le_bytes(bundle[binary_len_start..binary_len_start + 4].try_into().unwrap()) as usize;
         let surface_start = binary_len_start + 4 + binary_len + 4;
         bundle[surface_start] ^= 0x01;
 

@@ -84,8 +84,7 @@ pub fn build_root_ca(
     let dn = x509_pqc::build_dn_cn_o(common_name, organization)?;
     let validity = x509_pqc::build_validity(Duration::from_secs(30), ttl)?;
     let serial_bytes = super::x509::random_serial_bytes();
-    let serial =
-        SerialNumber::<x509_cert::certificate::Rfc5280>::new(&serial_bytes).map_err(x509_pqc::der_err)?;
+    let serial = SerialNumber::<x509_cert::certificate::Rfc5280>::new(&serial_bytes).map_err(x509_pqc::der_err)?;
 
     // Identify the SKI off the *composite* public key bytes so leaves
     // chained against this root carry a matching AKI.
@@ -139,8 +138,7 @@ pub fn build_leaf(
     let subject_dn = x509_pqc::build_leaf_dn(role, &subject.common_name)?;
     let validity = x509_pqc::build_validity(role.not_before_duration, ttl)?;
     let serial_bytes = super::x509::random_serial_bytes();
-    let serial =
-        SerialNumber::<x509_cert::certificate::Rfc5280>::new(&serial_bytes).map_err(x509_pqc::der_err)?;
+    let serial = SerialNumber::<x509_cert::certificate::Rfc5280>::new(&serial_bytes).map_err(x509_pqc::der_err)?;
 
     let leaf_pk_bytes = leaf_signer.composite_public_key_der()?;
     let mut extensions = vec![
@@ -219,9 +217,7 @@ pub fn build_crl(
         extn_id: CRL_NUMBER_OID,
         critical: false,
         extn_value: OctetString::new(
-            SerialNumber::<x509_cert::certificate::Rfc5280>::from(crl_number)
-                .to_der()
-                .map_err(x509_pqc::der_err)?,
+            SerialNumber::<x509_cert::certificate::Rfc5280>::from(crl_number).to_der().map_err(x509_pqc::der_err)?,
         )
         .map_err(x509_pqc::der_err)?,
     };

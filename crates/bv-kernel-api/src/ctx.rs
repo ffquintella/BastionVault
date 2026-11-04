@@ -87,9 +87,7 @@ use bv_logical::{
     handler::{AuthHandler, Handler},
     Backend, Request, Response,
 };
-use bv_storage::{
-    barrier::SecurityBarrier, barrier_view::BarrierView, cache::CacheConfig, Backend as PhysicalBackend,
-};
+use bv_storage::{barrier::SecurityBarrier, barrier_view::BarrierView, cache::CacheConfig, Backend as PhysicalBackend};
 
 use crate::{
     auth::{AuthMountRegistry, TokenService},
@@ -415,4 +413,3 @@ impl<T: VaultCtx + ?Sized> VaultCtx for Arc<T> {
         (**self).set_require_machine_identity(required).await
     }
 }
-

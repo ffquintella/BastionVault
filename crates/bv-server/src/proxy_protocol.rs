@@ -51,9 +51,7 @@ impl std::str::FromStr for ProxyProtocolMode {
             "" | "off" | "0" | "false" | "no" => Ok(Self::Off),
             "v1" | "1" => Ok(Self::V1),
             "v2" | "2" => Ok(Self::V2),
-            other => Err(format!(
-                "invalid BASTIONVAULT_PROXY_PROTOCOL `{other}`; expected off|v1|v2"
-            )),
+            other => Err(format!("invalid BASTIONVAULT_PROXY_PROTOCOL `{other}`; expected off|v1|v2")),
         }
     }
 }
@@ -79,9 +77,7 @@ pub enum ProxyParseError {
 }
 
 const V1_PREFIX: &[u8] = b"PROXY ";
-const V2_SIG: [u8; 12] = [
-    0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A,
-];
+const V2_SIG: [u8; 12] = [0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A];
 
 /// Try to parse a v1 ASCII header. Returns `Ok(Some((header, len)))` on
 /// success (caller advances `len` bytes past the CRLF), `Ok(None)` if
@@ -93,12 +89,8 @@ pub fn parse_v1(buf: &[u8]) -> Result<Option<(ProxyHeader, usize)>, ProxyParseEr
     }
     // v1 ends in CRLF; the spec caps total length at 107 bytes.
     let max = buf.len().min(108);
-    let crlf = buf[..max]
-        .windows(2)
-        .position(|w| w == b"\r\n")
-        .ok_or(ProxyParseError::Truncated)?;
-    let line = std::str::from_utf8(&buf[V1_PREFIX.len()..crlf])
-        .map_err(|_| ProxyParseError::Malformed("non-utf8"))?;
+    let crlf = buf[..max].windows(2).position(|w| w == b"\r\n").ok_or(ProxyParseError::Truncated)?;
+    let line = std::str::from_utf8(&buf[V1_PREFIX.len()..crlf]).map_err(|_| ProxyParseError::Malformed("non-utf8"))?;
     let total = crlf + 2;
 
     // Forms: "TCP4 src dst sport dport", "TCP6 ...", "UNKNOWN ...".
@@ -125,18 +117,12 @@ pub fn parse_v1(buf: &[u8]) -> Result<Option<(ProxyHeader, usize)>, ProxyParseEr
         "TCP4" => {
             let s: Ipv4Addr = src.parse().map_err(|_| ProxyParseError::Malformed("bad v4 src"))?;
             let d: Ipv4Addr = dst.parse().map_err(|_| ProxyParseError::Malformed("bad v4 dst"))?;
-            (
-                SocketAddr::V4(SocketAddrV4::new(s, sport)),
-                SocketAddr::V4(SocketAddrV4::new(d, dport)),
-            )
+            (SocketAddr::V4(SocketAddrV4::new(s, sport)), SocketAddr::V4(SocketAddrV4::new(d, dport)))
         }
         "TCP6" => {
             let s: Ipv6Addr = src.parse().map_err(|_| ProxyParseError::Malformed("bad v6 src"))?;
             let d: Ipv6Addr = dst.parse().map_err(|_| ProxyParseError::Malformed("bad v6 dst"))?;
-            (
-                SocketAddr::V6(SocketAddrV6::new(s, sport, 0, 0)),
-                SocketAddr::V6(SocketAddrV6::new(d, dport, 0, 0)),
-            )
+            (SocketAddr::V6(SocketAddrV6::new(s, sport, 0, 0)), SocketAddr::V6(SocketAddrV6::new(d, dport, 0, 0)))
         }
         _ => return Err(ProxyParseError::Malformed("unknown proto")),
     };

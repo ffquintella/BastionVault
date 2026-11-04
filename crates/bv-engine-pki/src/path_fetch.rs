@@ -16,8 +16,8 @@ use crate::{
     context::Context,
     errors::RvError,
     logical::{
-        optional_param, page_response, paginate, Backend, Field, FieldType, Operation,
-        PageLimits, Path, PathOperation, Request, Response,
+        optional_param, page_response, paginate, Backend, Field, FieldType, Operation, PageLimits, Path, PathOperation,
+        Request, Response,
     },
     new_fields, new_fields_internal, new_path, new_path_internal,
 };
@@ -145,8 +145,7 @@ impl PkiBackend {
 #[maybe_async::maybe_async]
 impl PkiBackendInner {
     pub async fn read_cert(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
-        let serial_raw = req.get_data("serial")?.as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
+        let serial_raw = req.get_data("serial")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
         let serial_hex = normalize_serial_hex(&serial_raw);
         let key = storage::cert_storage_key(&serial_hex);
         let record: Option<CertRecord> = storage::get_json(req, &key).await?;
@@ -198,23 +197,19 @@ impl PkiBackendInner {
     /// it to any cert, so the two arrive unlinked. Binding the correct key
     /// lets the export-with-private-key and key-reuse-on-renewal paths work.
     pub async fn set_cert_key(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
-        let serial_raw = req.get_data("serial")?.as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
+        let serial_raw = req.get_data("serial")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
         let serial_hex = normalize_serial_hex(&serial_raw);
-        let key_ref = req.get_data("key_ref")?.as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?.trim().to_string();
+        let key_ref = req.get_data("key_ref")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.trim().to_string();
         if key_ref.is_empty() {
             return Err(RvError::ErrRequestFieldInvalid);
         }
 
         let cert_key = storage::cert_storage_key(&serial_hex);
-        let mut record: CertRecord = storage::get_json(req, &cert_key).await?
-            .ok_or(RvError::ErrPkiCertNotFound)?;
+        let mut record: CertRecord = storage::get_json(req, &cert_key).await?.ok_or(RvError::ErrPkiCertNotFound)?;
 
-        let entry = super::keys::load_key(req, &key_ref).await?
-            .ok_or_else(|| RvError::ErrString(format!(
-                "set_cert_key: managed key `{key_ref}` not found on this mount"
-            )))?;
+        let entry = super::keys::load_key(req, &key_ref).await?.ok_or_else(|| {
+            RvError::ErrString(format!("set_cert_key: managed key `{key_ref}` not found on this mount"))
+        })?;
 
         // Compare the certificate's SubjectPublicKeyInfo DER against the
         // managed key's public SPKI DER — the same byte-equality contract
@@ -269,13 +264,11 @@ impl PkiBackendInner {
     /// once nothing else references it. Idempotent: clearing an already
     /// unbound cert succeeds.
     pub async fn clear_cert_key(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
-        let serial_raw = req.get_data("serial")?.as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
+        let serial_raw = req.get_data("serial")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
         let serial_hex = normalize_serial_hex(&serial_raw);
 
         let cert_key = storage::cert_storage_key(&serial_hex);
-        let mut record: CertRecord = storage::get_json(req, &cert_key).await?
-            .ok_or(RvError::ErrPkiCertNotFound)?;
+        let mut record: CertRecord = storage::get_json(req, &cert_key).await?.ok_or(RvError::ErrPkiCertNotFound)?;
 
         if !record.key_id.is_empty() {
             let old = record.key_id.clone();
@@ -306,23 +299,15 @@ impl PkiBackendInner {
     /// best-effort basis so a downstream `DELETE pki/key/<id>` can
     /// succeed once the last referring cert is gone.
     pub async fn delete_cert(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
-        let serial_raw = req.get_data("serial")?.as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
+        let serial_raw = req.get_data("serial")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
         let serial_hex = normalize_serial_hex(&serial_raw);
-        let force = req
-            .get_data_or_default("force")
-            .ok()
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let force = req.get_data_or_default("force").ok().and_then(|v| v.as_bool()).unwrap_or(false);
 
         let cert_key = storage::cert_storage_key(&serial_hex);
-        let record: CertRecord = storage::get_json(req, &cert_key).await?
-            .ok_or(RvError::ErrPkiCertNotFound)?;
+        let record: CertRecord = storage::get_json(req, &cert_key).await?.ok_or(RvError::ErrPkiCertNotFound)?;
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+        let now =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
         let expired = record.not_after_unix > 0 && record.not_after_unix <= now;
         let is_active = record.revoked_at_unix.is_none() && !expired;
         if is_active && !force {
@@ -350,10 +335,7 @@ impl PkiBackendInner {
                     state.crl_number = state.crl_number.saturating_add(1);
                     storage::put_json(req, &crl_state_key, &state).await?;
                     if let Err(e) = rebuild_crl_for_issuer(req, &issuer).await {
-                        log::warn!(
-                            "pki/cert delete: CRL rebuild for issuer {} failed: {e:?}",
-                            issuer.id
-                        );
+                        log::warn!("pki/cert delete: CRL rebuild for issuer {} failed: {e:?}", issuer.id);
                     }
                 }
             }
@@ -379,19 +361,11 @@ impl PkiBackendInner {
     }
 
     pub async fn import_cert(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
-        let pem_in = req.get_data("certificate")?
-            .as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?
-            .trim()
-            .to_string();
+        let pem_in = req.get_data("certificate")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.trim().to_string();
         if pem_in.is_empty() {
             return Err(RvError::ErrRequestFieldInvalid);
         }
-        let source = req.get_data_or_default("source")?
-            .as_str()
-            .unwrap_or("")
-            .trim()
-            .to_string();
+        let source = req.get_data_or_default("source")?.as_str().unwrap_or("").trim().to_string();
 
         // Parse the PEM → DER → x509 to pull serial + NotAfter. We only
         // accept a single CERTIFICATE block; chains belong on the issuer
@@ -418,10 +392,7 @@ impl PkiBackendInner {
             )));
         }
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         let record = CertRecord {
             serial_hex: serial_hex.clone(),
             // Re-emit canonical PEM (single-block, normalized line endings)
@@ -473,10 +444,7 @@ impl PkiBackendInner {
         // paging loop that resets is far harder to diagnose than a 400.
         let after = optional_param(req, "after").as_str().unwrap_or("").trim().to_string();
         if !after.is_empty() && after.chars().any(|c| !c.is_ascii_hexdigit()) {
-            return Err(bv_error_response_status!(
-                400,
-                "`after` must be a certificate serial in lowercase hex"
-            ));
+            return Err(bv_error_response_status!(400, "`after` must be a certificate serial in lowercase hex"));
         }
 
         let keys = req.storage_list("certs/").await?;
@@ -555,8 +523,7 @@ fn parse_subject_and_issuer(pem: &str) -> (String, String) {
     let Ok(cert) = x509_cert::Certificate::from_der(&der) else {
         return (String::new(), String::new());
     };
-    let cn_oid: x509_cert::der::asn1::ObjectIdentifier =
-        "2.5.4.3".parse().expect("CN OID literal is valid");
+    let cn_oid: x509_cert::der::asn1::ObjectIdentifier = "2.5.4.3".parse().expect("CN OID literal is valid");
     let mut common_name = String::new();
     'outer: for rdn in cert.tbs_certificate.subject.0.iter() {
         for atv in rdn.0.iter() {

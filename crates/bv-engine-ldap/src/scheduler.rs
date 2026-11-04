@@ -63,12 +63,8 @@ const TICK_INTERVAL: Duration = Duration::from_secs(60);
 /// process exits. The loop self-skips when sealed.
 pub fn start_ldap_rotation_scheduler(core: Arc<dyn VaultCtx>) -> tokio::task::JoinHandle<()> {
     tokio::task::spawn(async move {
-        let last_fired: Arc<Mutex<HashMap<String, Instant>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-        log::info!(
-            "openldap/auto-rotate: scheduler started (tick every {}s)",
-            TICK_INTERVAL.as_secs()
-        );
+        let last_fired: Arc<Mutex<HashMap<String, Instant>>> = Arc::new(Mutex::new(HashMap::new()));
+        log::info!("openldap/auto-rotate: scheduler started (tick every {}s)", TICK_INTERVAL.as_secs());
 
         let mut interval = tokio::time::interval(TICK_INTERVAL);
         loop {
@@ -98,10 +94,7 @@ pub async fn run_rotation_pass(
 }
 
 #[maybe_async::maybe_async]
-async fn tick(
-    core: &dyn VaultCtx,
-    _last_fired: Arc<Mutex<HashMap<String, Instant>>>,
-) -> Result<(), RvError> {
+async fn tick(core: &dyn VaultCtx, _last_fired: Arc<Mutex<HashMap<String, Instant>>>) -> Result<(), RvError> {
     // Snapshot the mount table; release the read lock before any awaits.
     let ldap_mounts: Vec<(String, String)> = {
         let mounts_router = core.mounts_router();
@@ -125,20 +118,14 @@ async fn tick(
 
     for (uuid, path) in ldap_mounts {
         if let Err(e) = run_one(core, &uuid, &path).await {
-            log::warn!(
-                "openldap/auto-rotate: mount {path} (uuid {uuid}): tick error: {e}"
-            );
+            log::warn!("openldap/auto-rotate: mount {path} (uuid {uuid}): tick error: {e}");
         }
     }
     Ok(())
 }
 
 #[maybe_async::maybe_async]
-async fn run_one(
-    core: &dyn VaultCtx,
-    _mount_uuid: &str,
-    mount_path: &str,
-) -> Result<(), RvError> {
+async fn run_one(core: &dyn VaultCtx, _mount_uuid: &str, mount_path: &str) -> Result<(), RvError> {
     let view = match core.router().matching_view(mount_path)? {
         Some(v) => v,
         None => return Ok(()),
@@ -154,9 +141,7 @@ async fn run_one(
         Some(e) => match serde_json::from_slice(&e.value) {
             Ok(c) => c,
             Err(_) => {
-                log::warn!(
-                    "openldap/auto-rotate: mount {mount_path}: config corrupt; skipping tick"
-                );
+                log::warn!("openldap/auto-rotate: mount {mount_path}: config corrupt; skipping tick");
                 return Ok(());
             }
         },
@@ -194,19 +179,14 @@ async fn run_one(
         return Ok(());
     }
 
-    log::info!(
-        "openldap/auto-rotate: mount {mount_path}: {} role(s) due for rotation",
-        due.len()
-    );
+    log::info!("openldap/auto-rotate: mount {mount_path}: {} role(s) due for rotation", due.len());
 
     // One bind per mount per tick. If the bind fails, log and bail —
     // we'll retry next tick. Don't burn cycles binding per role.
     let mut ldap = match client::bind(&cfg).await {
         Ok(l) => l,
         Err(e) => {
-            log::warn!(
-                "openldap/auto-rotate: mount {mount_path}: bind failed: {e}; skipping tick"
-            );
+            log::warn!("openldap/auto-rotate: mount {mount_path}: bind failed: {e}; skipping tick");
             return Ok(());
         }
     };
@@ -218,19 +198,14 @@ async fn run_one(
     for (name, role) in due {
         let new_password = password::generate(password::DEFAULT_LENGTH);
         // Directory-first; storage-second.
-        if let Err(e) =
-            client::set_password(&mut ldap, &cfg, &role.dn, &new_password).await
-        {
+        if let Err(e) = client::set_password(&mut ldap, &cfg, &role.dn, &new_password).await {
             log::warn!(
                 "openldap/auto-rotate: mount {mount_path}: rotate `{name}` (dn={}): directory write failed: {e}",
                 role.dn
             );
             continue;
         }
-        let cred = StaticCred {
-            password: new_password,
-            last_vault_rotation_unix: unix_now(),
-        };
+        let cred = StaticCred { password: new_password, last_vault_rotation_unix: unix_now() };
         let bytes = match serde_json::to_vec(&cred) {
             Ok(b) => b,
             Err(e) => {
@@ -241,12 +216,8 @@ async fn run_one(
                 continue;
             }
         };
-        if let Err(e) = req_mut
-            .storage_put(&StorageEntry {
-                key: format!("{STATIC_CRED_PREFIX}{name}"),
-                value: bytes,
-            })
-            .await
+        if let Err(e) =
+            req_mut.storage_put(&StorageEntry { key: format!("{STATIC_CRED_PREFIX}{name}"), value: bytes }).await
         {
             log::error!(
                 "openldap/auto-rotate: mount {mount_path}: rotate `{name}`: storage write failed AFTER directory write: {e}; \
@@ -254,10 +225,7 @@ async fn run_one(
             );
             continue;
         }
-        log::info!(
-            "openldap/auto-rotate: mount {mount_path}: rotated `{name}` (dn={})",
-            role.dn
-        );
+        log::info!("openldap/auto-rotate: mount {mount_path}: rotated `{name}` (dn={})", role.dn);
     }
 
     let _ = ldap.unbind().await;
@@ -278,15 +246,12 @@ async fn read_last_rotation(req: &Request, name: &str) -> Result<u64, RvError> {
 }
 
 fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
 #[cfg(test)]
 mod tests {
-    
+
     use crate::policy::StaticRole;
     use std::time::Duration;
 

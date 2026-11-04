@@ -76,8 +76,7 @@ impl DosStore {
     }
 
     async fn put(&self, state: &PersistedDosState) -> Result<(), RvError> {
-        let value = serde_json::to_vec(state)
-            .map_err(|e| bv_error_string!(&format!("encode dos state: {e}")))?;
+        let value = serde_json::to_vec(state).map_err(|e| bv_error_string!(&format!("encode dos state: {e}")))?;
         self.view.put(&StorageEntry { key: DOS_STATE_KEY.to_string(), value }).await
     }
 

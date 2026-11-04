@@ -48,16 +48,10 @@ use chrono::Utc;
 use rand::TryRng;
 use serde::Deserialize;
 
-use crate::kernel_api::VaultCtx;
 use crate::errors::RvError;
+use crate::kernel_api::VaultCtx;
 
-use super::{
-    audit, apply_probe,
-    config::RustionTarget,
-    health::ProbeOutcome,
-    master::MasterStore,
-    RustionStore,
-};
+use super::{apply_probe, audit, config::RustionTarget, health::ProbeOutcome, master::MasterStore, RustionStore};
 
 /// Default tick. Surfaced as a constant so a test can drive the
 /// state machine without waiting 30s for real wallclock progress.
@@ -92,10 +86,7 @@ pub const PROBE_AUTHORITY: &str = crate::master::DEFAULT_AUTHORITY_NAME;
 /// can hold it; dropping the handle does not stop the task (tokio
 /// detaches when the parent crate-level futures terminate). Mirrors
 /// `pki::scheduler::start_pki_tidy_scheduler`.
-pub fn start_pinger(
-    core: Arc<dyn VaultCtx>,
-    stores: Arc<super::RustionStores>,
-) -> tokio::task::JoinHandle<()> {
+pub fn start_pinger(core: Arc<dyn VaultCtx>, stores: Arc<super::RustionStores>) -> tokio::task::JoinHandle<()> {
     tokio::task::spawn(async move {
         log::info!(
             "rustion/pinger: started (tick every {}s, probe timeout {}s)",
@@ -238,11 +229,7 @@ async fn tick(stores: &super::RustionStores) -> Result<(), RvError> {
         let client = match build_client_for(&target) {
             Ok(c) => c,
             Err(e) => {
-                log::warn!(
-                    "rustion/pinger: build http client for {} ({}): {e}",
-                    target.id,
-                    target.name
-                );
+                log::warn!("rustion/pinger: build http client for {} ({}): {e}", target.id, target.name);
                 continue;
             }
         };
@@ -258,12 +245,7 @@ async fn probe_one(
     signer: Option<&BvrgMasterSigningKey>,
     target: &RustionTarget,
 ) {
-    let prev = store
-        .get_health(&target.id)
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or_default();
+    let prev = store.get_health(&target.id).await.ok().flatten().unwrap_or_default();
     let outcome = run_single_probe(client, authority, signer, target).await;
     let now = Utc::now();
     let (next, changed) = apply_probe(&prev, outcome, now);
@@ -281,10 +263,7 @@ async fn probe_one(
     }
 
     if let Err(e) = store.put_health(&target.id, &next).await {
-        log::warn!(
-            "rustion/pinger: persist health for {} failed: {e}",
-            target.id
-        );
+        log::warn!("rustion/pinger: persist health for {} failed: {e}", target.id);
     }
 }
 
@@ -317,18 +296,14 @@ async fn run_single_probe(
                 detail.push_str(&format!("{s}"));
                 src = std::error::Error::source(s);
             }
-            return ProbeOutcome::Failure {
-                error: format!("transport: {detail}"),
-            };
+            return ProbeOutcome::Failure { error: format!("transport: {detail}") };
         }
     };
 
     let status = resp.status();
     if !status.is_success() {
         let code = read_error_code(resp).await;
-        if let Some(c @ ("nonce_replay" | "health_auth_malformed" | "missing_authority_header")) =
-            code.as_deref()
-        {
+        if let Some(c @ ("nonce_replay" | "health_auth_malformed" | "missing_authority_header")) = code.as_deref() {
             // Every probe carries a fresh nonce and a well-formed header
             // set, so these refusals mean BastionVault built a bad probe.
             log::warn!(
@@ -338,17 +313,13 @@ async fn run_single_probe(
                 target.name
             );
         }
-        return ProbeOutcome::Failure {
-            error: describe_refusal(status, code.as_deref(), authority),
-        };
+        return ProbeOutcome::Failure { error: describe_refusal(status, code.as_deref(), authority) };
     }
 
     let body: HealthBody = match resp.json().await {
         Ok(b) => b,
         Err(e) => {
-            return ProbeOutcome::Failure {
-                error: format!("decode body: {e}"),
-            };
+            return ProbeOutcome::Failure { error: format!("decode body: {e}") };
         }
     };
 
@@ -399,10 +370,7 @@ fn probe_auth(authority: &str, signer: Option<&BvrgMasterSigningKey>) -> Result<
     let nonce = mint_nonce()?;
     let sig = bvrg::sign_detached_hybrid(master, &probe_signed_message(&nonce, authority))
         .map_err(|e| format!("sign health probe: {e}"))?;
-    Ok(ProbeAuth::Signed {
-        nonce_b64: STANDARD.encode(nonce),
-        sig_b64: STANDARD.encode(sig),
-    })
+    Ok(ProbeAuth::Signed { nonce_b64: STANDARD.encode(nonce), sig_b64: STANDARD.encode(sig) })
 }
 
 /// The bytes a signed probe signs: the raw nonce followed by the
@@ -425,10 +393,7 @@ fn build_probe_request(
     signer: Option<&BvrgMasterSigningKey>,
 ) -> Result<reqwest::Request, String> {
     let url = format!("https://{}/v1/health", target.endpoint.trim_end_matches('/'));
-    let mut builder = client
-        .get(&url)
-        .header(HEADER_AUTHORITY, authority)
-        .timeout(PROBE_TIMEOUT);
+    let mut builder = client.get(&url).header(HEADER_AUTHORITY, authority).timeout(PROBE_TIMEOUT);
     match probe_auth(authority, signer)? {
         ProbeAuth::Signed { nonce_b64, sig_b64 } => {
             builder = builder.header(HEADER_NONCE, nonce_b64).header(HEADER_SIG, sig_b64);
@@ -472,9 +437,7 @@ fn parse_error_code(body: &[u8]) -> Option<String> {
         error: String,
     }
     let code = serde_json::from_slice::<ErrorBody>(body).ok()?.error;
-    let plain = !code.is_empty()
-        && code.len() <= 64
-        && code.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+    let plain = !code.is_empty() && code.len() <= 64 && code.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
     plain.then_some(code)
 }
 
@@ -546,19 +509,14 @@ mod tests {
     fn header(req: &reqwest::Request, name: &str) -> Option<String> {
         let values: Vec<_> = req.headers().get_all(name).iter().collect();
         assert!(values.len() <= 1, "{name} sent {} times", values.len());
-        values
-            .first()
-            .map(|v| v.to_str().expect("header is visible ASCII").to_string())
+        values.first().map(|v| v.to_str().expect("header is visible ASCII").to_string())
     }
 
     /// `(nonce, sig_blob)` decoded from a signed request.
     fn signed_parts(req: &reqwest::Request) -> ([u8; PROBE_NONCE_LEN], Vec<u8>) {
-        let nonce = STANDARD
-            .decode(header(req, HEADER_NONCE).expect("nonce header"))
-            .expect("nonce is standard base64");
-        let sig = STANDARD
-            .decode(header(req, HEADER_SIG).expect("sig header"))
-            .expect("sig is standard base64");
+        let nonce =
+            STANDARD.decode(header(req, HEADER_NONCE).expect("nonce header")).expect("nonce is standard base64");
+        let sig = STANDARD.decode(header(req, HEADER_SIG).expect("sig header")).expect("sig is standard base64");
         (nonce.try_into().expect("nonce is 16 bytes"), sig)
     }
 
@@ -656,8 +614,7 @@ mod tests {
         verify_detached_hybrid(&probe_signed_message(&nonce, authority), &sig, &pubkey)
             .expect("signed over the exact header value");
         assert!(
-            verify_detached_hybrid(&probe_signed_message(&nonce, "bv-prod.eu_1"), &sig, &pubkey)
-                .is_err(),
+            verify_detached_hybrid(&probe_signed_message(&nonce, "bv-prod.eu_1"), &sig, &pubkey).is_err(),
             "authority must not be re-cased"
         );
     }
@@ -719,11 +676,7 @@ mod tests {
 
     #[test]
     fn refusal_messages_carry_the_code_and_point_at_the_pinned_key() {
-        let msg = describe_refusal(
-            reqwest::StatusCode::UNAUTHORIZED,
-            Some("signature_invalid"),
-            AUTHORITY,
-        );
+        let msg = describe_refusal(reqwest::StatusCode::UNAUTHORIZED, Some("signature_invalid"), AUTHORITY);
         assert!(msg.starts_with("http 401 signature_invalid: "), "{msg}");
         assert!(msg.contains("GET /v1/authorities/self"), "{msg}");
         assert!(msg.contains("`bastion-vault`"), "{msg}");
@@ -742,10 +695,7 @@ mod tests {
 
         assert!(load_probe_signer(Some(&master)).await.is_none());
         assert!(load_probe_signer(None).await.is_none());
-        assert!(
-            master.read_signing_record().await.unwrap().is_none(),
-            "loading the probe signer minted a master key"
-        );
+        assert!(master.read_signing_record().await.unwrap().is_none(), "loading the probe signer minted a master key");
 
         // Once a key exists, the probe signs with it.
         master.get_or_init_signing_key().await.unwrap();
@@ -773,10 +723,7 @@ mod tests {
 
         run_probe_pass(&stores).await.expect("probe pass");
 
-        assert!(
-            master.read_signing_record().await.unwrap().is_none(),
-            "a health tick minted a master key"
-        );
+        assert!(master.read_signing_record().await.unwrap().is_none(), "a health tick minted a master key");
         let health = store.get_health(&target.id).await.unwrap().expect("health persisted");
         assert_ne!(health.status, HealthStatus::Up);
         assert_eq!(health.consecutive_failures, 1);

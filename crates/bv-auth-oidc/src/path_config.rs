@@ -71,36 +71,15 @@ impl OidcConfig {
     /// surfaces a boolean hint so operators know whether one is set.
     fn to_public_map(&self) -> Map<String, Value> {
         let mut m = Map::new();
-        m.insert(
-            "oidc_discovery_url".into(),
-            Value::String(self.oidc_discovery_url.clone()),
-        );
-        m.insert(
-            "oidc_client_id".into(),
-            Value::String(self.oidc_client_id.clone()),
-        );
-        m.insert(
-            "oidc_client_secret_set".into(),
-            Value::Bool(!self.oidc_client_secret.is_empty()),
-        );
-        m.insert(
-            "default_role".into(),
-            Value::String(self.default_role.clone()),
-        );
+        m.insert("oidc_discovery_url".into(), Value::String(self.oidc_discovery_url.clone()));
+        m.insert("oidc_client_id".into(), Value::String(self.oidc_client_id.clone()));
+        m.insert("oidc_client_secret_set".into(), Value::Bool(!self.oidc_client_secret.is_empty()));
+        m.insert("default_role".into(), Value::String(self.default_role.clone()));
         m.insert(
             "allowed_redirect_uris".into(),
-            Value::Array(
-                self.allowed_redirect_uris
-                    .iter()
-                    .cloned()
-                    .map(Value::String)
-                    .collect(),
-            ),
+            Value::Array(self.allowed_redirect_uris.iter().cloned().map(Value::String).collect()),
         );
-        m.insert(
-            "oidc_scopes".into(),
-            Value::Array(self.oidc_scopes.iter().cloned().map(Value::String).collect()),
-        );
+        m.insert("oidc_scopes".into(), Value::Array(self.oidc_scopes.iter().cloned().map(Value::String).collect()));
         m
     }
 }
@@ -149,22 +128,14 @@ impl OidcBackend {
 
 #[maybe_async::maybe_async]
 impl OidcBackendInner {
-    pub async fn read_config(
-        &self,
-        _backend: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn read_config(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let Some(cfg) = OidcConfig::load(req).await? else {
             return Ok(None);
         };
         Ok(Some(Response::data_response(Some(cfg.to_public_map()))))
     }
 
-    pub async fn write_config(
-        &self,
-        _backend: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn write_config(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         // Load existing (if any) so a partial write doesn't clear
         // fields the caller didn't provide. This lets an operator
         // rotate only the client secret without re-entering the
@@ -196,14 +167,10 @@ impl OidcBackendInner {
         // Minimum-viable validation: discovery URL and client id
         // are both required for the backend to function at all.
         if cfg.oidc_discovery_url.trim().is_empty() {
-            return Err(RvError::ErrString(
-                "oidc: `oidc_discovery_url` is required".into(),
-            ));
+            return Err(RvError::ErrString("oidc: `oidc_discovery_url` is required".into()));
         }
         if cfg.oidc_client_id.trim().is_empty() {
-            return Err(RvError::ErrString(
-                "oidc: `oidc_client_id` is required".into(),
-            ));
+            return Err(RvError::ErrString("oidc: `oidc_client_id` is required".into()));
         }
 
         // Default scopes — the RFC-standard minimum for an OIDC
@@ -211,19 +178,11 @@ impl OidcBackendInner {
         // defaults that surface `preferred_username` and the email
         // claim, both commonly used in role bound_claims.
         if cfg.oidc_scopes.is_empty() {
-            cfg.oidc_scopes = vec![
-                "openid".into(),
-                "profile".into(),
-                "email".into(),
-            ];
+            cfg.oidc_scopes = vec!["openid".into(), "profile".into(), "email".into()];
         }
 
         let bytes = serde_json::to_vec(&cfg)?;
-        req.storage_put(&StorageEntry {
-            key: CONFIG_KEY.to_string(),
-            value: bytes,
-        })
-        .await?;
+        req.storage_put(&StorageEntry { key: CONFIG_KEY.to_string(), value: bytes }).await?;
         Ok(None)
     }
 }
@@ -234,16 +193,10 @@ impl OidcBackendInner {
 /// sometimes the other depending on the request shape.
 fn parse_string_list(v: &Value) -> Vec<String> {
     match v {
-        Value::Array(a) => a
-            .iter()
-            .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
-            .filter(|s| !s.is_empty())
-            .collect(),
-        Value::String(s) => s
-            .split(',')
-            .map(|p| p.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect(),
+        Value::Array(a) => {
+            a.iter().filter_map(|x| x.as_str().map(|s| s.trim().to_string())).filter(|s| !s.is_empty()).collect()
+        }
+        Value::String(s) => s.split(',').map(|p| p.trim().to_string()).filter(|s| !s.is_empty()).collect(),
         _ => Vec::new(),
     }
 }
@@ -264,34 +217,22 @@ mod tests {
         };
         let m = cfg.to_public_map();
         // The secret must never appear in the serialized output.
-        assert_eq!(
-            m.get("oidc_client_secret_set").and_then(Value::as_bool),
-            Some(true)
-        );
+        assert_eq!(m.get("oidc_client_secret_set").and_then(Value::as_bool), Some(true));
         let rendered = serde_json::to_string(&m).unwrap();
-        assert!(
-            !rendered.contains("highly-sensitive"),
-            "client secret leaked into serialized output"
-        );
+        assert!(!rendered.contains("highly-sensitive"), "client secret leaked into serialized output");
     }
 
     #[test]
     fn to_public_map_surfaces_secret_absence() {
         let cfg = OidcConfig::default();
         let m = cfg.to_public_map();
-        assert_eq!(
-            m.get("oidc_client_secret_set").and_then(Value::as_bool),
-            Some(false)
-        );
+        assert_eq!(m.get("oidc_client_secret_set").and_then(Value::as_bool), Some(false));
     }
 
     #[test]
     fn parse_string_list_accepts_array_and_comma_string() {
         assert_eq!(
-            parse_string_list(&Value::Array(vec![
-                Value::String("a".into()),
-                Value::String("b".into())
-            ])),
+            parse_string_list(&Value::Array(vec![Value::String("a".into()), Value::String("b".into())])),
             vec!["a".to_string(), "b".to_string()]
         );
         assert_eq!(

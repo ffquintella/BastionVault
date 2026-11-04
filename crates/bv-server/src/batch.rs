@@ -29,12 +29,7 @@
 
 use std::sync::Arc;
 
-use actix_web::{
-    web,
-    HttpRequest,
-    HttpResponse,
-    http::{StatusCode},
-};
+use actix_web::{http::StatusCode, web, HttpRequest, HttpResponse};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -42,8 +37,8 @@ use crate::{
     config::Config,
     core::Core,
     errors::RvError,
-    request_auth, response_error, HttpError,
     logical::{Operation, Request},
+    request_auth, response_error, HttpError,
 };
 
 /// One entry in a batch request body. `data` is optional and ignored by
@@ -113,13 +108,7 @@ pub const DEFAULT_BATCH_MAX_OPERATIONS: usize = 128;
 /// extension, falling back to the default when unset.
 fn max_operations(core_config: Option<&Arc<Config>>) -> usize {
     core_config
-        .and_then(|c| {
-            if c.batch_max_operations == 0 {
-                None
-            } else {
-                Some(c.batch_max_operations)
-            }
-        })
+        .and_then(|c| if c.batch_max_operations == 0 { None } else { Some(c.batch_max_operations) })
         .unwrap_or(DEFAULT_BATCH_MAX_OPERATIONS)
 }
 
@@ -138,19 +127,12 @@ async fn sys_batch_request_handler(
 
     let body = batch.into_inner();
     if body.operations.is_empty() {
-        return Ok(response_error(
-            StatusCode::BAD_REQUEST,
-            "batch must contain at least one operation",
-        ));
+        return Ok(response_error(StatusCode::BAD_REQUEST, "batch must contain at least one operation"));
     }
     if body.operations.len() > max_ops {
         return Ok(response_error(
             StatusCode::BAD_REQUEST,
-            &format!(
-                "batch has {} operations, exceeds max {}",
-                body.operations.len(),
-                max_ops
-            ),
+            &format!("batch has {} operations, exceeds max {}", body.operations.len(), max_ops),
         ));
     }
 
@@ -174,12 +156,7 @@ pub async fn sys_batch_v2_request_handler(
     sys_batch_request_handler(req, batch, core, 2).await
 }
 
-async fn run_one(
-    core: Arc<Core>,
-    base_auth: &Request,
-    default_api_version: u8,
-    op: BatchOperation,
-) -> BatchResult {
+async fn run_one(core: Arc<Core>, base_auth: &Request, default_api_version: u8, op: BatchOperation) -> BatchResult {
     // Reject empty paths up front rather than letting them reach the
     // router — the router would produce a less-informative error, and
     // an empty path on a batch entry is almost certainly a client bug.
@@ -214,19 +191,9 @@ async fn run_one(
         Ok(Some(resp)) => {
             let data = resp.data;
             if data.is_some() {
-                BatchResult {
-                    status: StatusCode::OK.as_u16(),
-                    path: op.path,
-                    data,
-                    errors: Vec::new(),
-                }
+                BatchResult { status: StatusCode::OK.as_u16(), path: op.path, data, errors: Vec::new() }
             } else {
-                BatchResult {
-                    status: StatusCode::NO_CONTENT.as_u16(),
-                    path: op.path,
-                    data: None,
-                    errors: Vec::new(),
-                }
+                BatchResult { status: StatusCode::NO_CONTENT.as_u16(), path: op.path, data: None, errors: Vec::new() }
             }
         }
         Ok(None) => {
@@ -234,12 +201,7 @@ async fn run_one(
                 BatchOpKind::Read | BatchOpKind::List => StatusCode::NOT_FOUND,
                 _ => StatusCode::NO_CONTENT,
             };
-            BatchResult {
-                status: status.as_u16(),
-                path: op.path,
-                data: None,
-                errors: Vec::new(),
-            }
+            BatchResult { status: status.as_u16(), path: op.path, data: None, errors: Vec::new() }
         }
         Err(e) => {
             // Map common error shapes to their HTTP equivalents. Fall
@@ -248,33 +210,18 @@ async fn run_one(
             // the per-op `errors` field, mirroring individual-call
             // behavior.
             let (status, msg) = match &e {
-                RvError::ErrPermissionDenied => {
-                    (StatusCode::FORBIDDEN, "permission denied".to_string())
-                }
-                RvError::ErrRequestClientTokenMissing => {
-                    (StatusCode::UNAUTHORIZED, "missing client token".to_string())
-                }
-                RvError::ErrRouterMountNotFound => {
-                    (StatusCode::NOT_FOUND, "mount not found".to_string())
-                }
+                RvError::ErrPermissionDenied => (StatusCode::FORBIDDEN, "permission denied".to_string()),
+                RvError::ErrRequestClientTokenMissing => (StatusCode::UNAUTHORIZED, "missing client token".to_string()),
+                RvError::ErrRouterMountNotFound => (StatusCode::NOT_FOUND, "mount not found".to_string()),
                 // A resolved mount with no matching route inside it is a
                 // not-found, exactly as on the individual-call surface
                 // (`RvError::response_status`). Kept in step here so a
                 // batched op and the same op on its own do not disagree.
-                RvError::ErrLogicalPathUnsupported => {
-                    (StatusCode::NOT_FOUND, e.to_string())
-                }
-                RvError::ErrBarrierSealed => {
-                    (StatusCode::SERVICE_UNAVAILABLE, "vault is sealed".to_string())
-                }
+                RvError::ErrLogicalPathUnsupported => (StatusCode::NOT_FOUND, e.to_string()),
+                RvError::ErrBarrierSealed => (StatusCode::SERVICE_UNAVAILABLE, "vault is sealed".to_string()),
                 other => (StatusCode::INTERNAL_SERVER_ERROR, other.to_string()),
             };
-            BatchResult {
-                status: status.as_u16(),
-                path: op.path,
-                data: None,
-                errors: vec![msg],
-            }
+            BatchResult { status: status.as_u16(), path: op.path, data: None, errors: vec![msg] }
         }
     }
 }
@@ -358,47 +305,29 @@ mod http_tests {
             ]
         });
         let (status, resp) = server
-            .request(
-                "POST",
-                "v2/sys/batch",
-                body.as_object().cloned(),
-                Some(&server.root_token.clone()),
-                None,
-            )
+            .request("POST", "v2/sys/batch", body.as_object().cloned(), Some(&server.root_token.clone()), None)
             .unwrap();
         assert_eq!(status, 200, "batch must succeed: {resp:?}");
 
-        let results = resp
-            .get("results")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
+        let results = resp.get("results").and_then(Value::as_array).cloned().unwrap_or_default();
         assert_eq!(results.len(), 4);
 
         // Writes return 204 when handle_request returns None after the
         // write commits. Reads return 200 with the data envelope.
         for (idx, r) in results.iter().take(2).enumerate() {
             let s = r.get("status").and_then(Value::as_u64).unwrap_or(0);
-            assert!(
-                s == 200 || s == 204,
-                "op {idx} (write) status {s} unexpected: {r:?}"
-            );
+            assert!(s == 200 || s == 204, "op {idx} (write) status {s} unexpected: {r:?}");
         }
         // Last two are reads and must echo the just-written data.
         let alpha = &results[2];
         assert_eq!(alpha.get("status").and_then(Value::as_u64), Some(200));
         assert_eq!(
-            alpha
-                .pointer("/data/data/k")
-                .and_then(Value::as_str),
+            alpha.pointer("/data/data/k").and_then(Value::as_str),
             Some("alpha"),
             "batch read must see same-batch write: {alpha:?}"
         );
         let beta = &results[3];
-        assert_eq!(
-            beta.pointer("/data/data/k").and_then(Value::as_str),
-            Some("beta")
-        );
+        assert_eq!(beta.pointer("/data/data/k").and_then(Value::as_str), Some("beta"));
     }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
@@ -408,18 +337,11 @@ mod http_tests {
         server.url_prefix = server.url_prefix.trim_end_matches("/v1").to_string();
 
         // 129 > DEFAULT_BATCH_MAX_OPERATIONS (128)
-        let ops: Vec<Value> = (0..129)
-            .map(|i| json!({ "operation": "read", "path": format!("secret/data/x{i}") }))
-            .collect();
+        let ops: Vec<Value> =
+            (0..129).map(|i| json!({ "operation": "read", "path": format!("secret/data/x{i}") })).collect();
         let body = json!({ "operations": ops });
         let (status, _resp) = server
-            .request(
-                "POST",
-                "v2/sys/batch",
-                body.as_object().cloned(),
-                Some(&server.root_token.clone()),
-                None,
-            )
+            .request("POST", "v2/sys/batch", body.as_object().cloned(), Some(&server.root_token.clone()), None)
             .unwrap();
         assert_eq!(status, 400, "oversized batch must be rejected with 400");
     }
@@ -432,13 +354,7 @@ mod http_tests {
 
         let body = json!({ "operations": [] });
         let (status, _) = server
-            .request(
-                "POST",
-                "v2/sys/batch",
-                body.as_object().cloned(),
-                Some(&server.root_token.clone()),
-                None,
-            )
+            .request("POST", "v2/sys/batch", body.as_object().cloned(), Some(&server.root_token.clone()), None)
             .unwrap();
         assert_eq!(status, 400, "empty batch must be rejected");
     }
@@ -461,13 +377,7 @@ mod http_tests {
             ]
         });
         let (status, resp) = server
-            .request(
-                "POST",
-                "v2/sys/batch",
-                body.as_object().cloned(),
-                Some(&server.root_token.clone()),
-                None,
-            )
+            .request("POST", "v2/sys/batch", body.as_object().cloned(), Some(&server.root_token.clone()), None)
             .unwrap();
         assert_eq!(status, 200);
         let results = resp.get("results").and_then(Value::as_array).unwrap().clone();
@@ -476,10 +386,7 @@ mod http_tests {
         // Middle op (missing read) must fail without breaking the batch.
         let missing = &results[1];
         let missing_status = missing.get("status").and_then(Value::as_u64).unwrap();
-        assert!(
-            missing_status == 404 || missing_status == 200,
-            "missing-key read status unexpected: {missing:?}"
-        );
+        assert!(missing_status == 404 || missing_status == 200, "missing-key read status unexpected: {missing:?}");
         // Surrounding ops succeed regardless.
         let present_read = &results[2];
         assert_eq!(

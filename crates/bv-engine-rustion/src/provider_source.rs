@@ -234,13 +234,10 @@ impl super::RustionBackendInner {
         let path = format!("{ns_prefix}resources/resources/{resource_name}");
         let mut sub = Request::new(&path);
         sub.operation = Operation::Read;
-        let meta = self
-            .core
-            .router()
-            .handle_request(&mut sub)
-            .await?
-            .and_then(|r| r.data)
-            .ok_or_else(|| refusal(404, reason::INVALID_REQUEST, format!("resource `{resource_name}` not found")))?;
+        let meta =
+            self.core.router().handle_request(&mut sub).await?.and_then(|r| r.data).ok_or_else(|| {
+                refusal(404, reason::INVALID_REQUEST, format!("resource `{resource_name}` not found"))
+            })?;
         let profile = meta
             .get("connection_profiles")
             .and_then(Value::as_array)
@@ -322,11 +319,19 @@ impl super::RustionBackendInner {
             ));
         }
         let not_approved = || {
-            refusal(403, reason::NOT_GRANTED, format!("credential provider `{requested}` is not approved on this server"))
+            refusal(
+                403,
+                reason::NOT_GRANTED,
+                format!("credential provider `{requested}` is not approved on this server"),
+            )
         };
         let plugin_host = self.core.plugin_host().ok_or_else(not_approved)?;
-        let decl =
-            plugin_host.credential_providers().await.into_iter().find(|d| d.plugin == requested).ok_or_else(not_approved)?;
+        let decl = plugin_host
+            .credential_providers()
+            .await
+            .into_iter()
+            .find(|d| d.plugin == requested)
+            .ok_or_else(not_approved)?;
         if !decl.protocols.iter().any(|p| p == protocol) {
             return Err(refusal(
                 400,

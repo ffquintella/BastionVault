@@ -29,21 +29,21 @@ use bv_storage as storage;
 // which places them at *that* crate's root; the call sites import them as
 // `crate::new_path` and friends. The `_internal` halves are the recursive arms
 // the public macros expand into, so they must travel with them.
-pub use bv_logical::{
-    new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path,
-    new_path_internal, new_secret, new_secret_internal,
-};
 pub use bv_errors::{bv_error_response, bv_error_response_status, bv_error_string};
+pub use bv_logical::{
+    new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path, new_path_internal,
+    new_secret, new_secret_internal,
+};
 
 use std::{any::Any, sync::Arc};
 
 use derive_more::Deref;
 
-use bv_kernel_api::{Module, VaultCtx};
 use crate::{
     errors::RvError,
     logical::{Backend, LogicalBackend, Path},
 };
+use bv_kernel_api::{Module, VaultCtx};
 
 pub mod backend;
 pub mod barcode;
@@ -82,17 +82,11 @@ pub struct TotpBackend {
 
 impl TotpBackend {
     pub fn new(core: Arc<dyn VaultCtx>) -> Self {
-        Self {
-            inner: Arc::new(TotpBackendInner { core }),
-        }
+        Self { inner: Arc::new(TotpBackendInner { core }) }
     }
 
     pub fn new_backend(&self) -> LogicalBackend {
-        let paths: Vec<Path> = vec![
-            self.keys_path(),
-            self.keys_list_path(),
-            self.code_path(),
-        ];
+        let paths: Vec<Path> = vec![self.keys_path(), self.keys_list_path(), self.code_path()];
         let mut backend = LogicalBackend::new();
         for p in paths {
             backend.paths.push(Arc::new(p));
@@ -109,10 +103,7 @@ pub struct TotpModule {
 
 impl TotpModule {
     pub fn new(core: Arc<dyn VaultCtx>) -> Self {
-        Self {
-            name: "totp".to_string(),
-            backend: Arc::new(TotpBackend::new(core)),
-        }
+        Self { name: "totp".to_string(), backend: Arc::new(TotpBackend::new(core)) }
     }
 }
 

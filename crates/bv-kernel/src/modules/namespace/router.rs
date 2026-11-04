@@ -184,14 +184,9 @@ pub fn qualify_path_in_namespace(ns_path: &str, path: &str) -> String {
     qualify_path_for_namespace(&format!("{}/", ns_path.trim_end_matches('/')), path)
 }
 
-pub fn namespace_header_from_map(
-    headers: Option<&std::collections::HashMap<String, String>>,
-) -> Option<String> {
+pub fn namespace_header_from_map(headers: Option<&std::collections::HashMap<String, String>>) -> Option<String> {
     let headers = headers?;
-    headers
-        .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case(NAMESPACE_HEADER))
-        .map(|(_, v)| v.clone())
+    headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(NAMESPACE_HEADER)).map(|(_, v)| v.clone())
 }
 
 /// Compute the barrier-storage prefix for a namespace's logical mounts:
@@ -234,10 +229,7 @@ pub fn arc_namespace(ns: Namespace) -> Arc<Namespace> {
 /// `sys/` and `auth/` paths stay root-scoped (per-namespace sys/auth is
 /// Phase 2), so they are left unrewritten.
 #[maybe_async::maybe_async]
-pub async fn rewrite_request_for_namespace(
-    core: &crate::core::Core,
-    req: &mut Request,
-) -> Result<(), RvError> {
+pub async fn rewrite_request_for_namespace(core: &crate::core::Core, req: &mut Request) -> Result<(), RvError> {
     let Some(raw) = namespace_header_from_map(req.headers.as_ref()) else {
         return Ok(());
     };
@@ -286,9 +278,10 @@ pub async fn rewrite_request_for_namespace(
         return Ok(());
     }
 
-    let ns = store.get_by_path(&ns_path).await?.ok_or_else(|| {
-        crate::bv_error_response_status!(404, &format!("no such namespace: {ns_path:?}"))
-    })?;
+    let ns = store
+        .get_by_path(&ns_path)
+        .await?
+        .ok_or_else(|| crate::bv_error_response_status!(404, &format!("no such namespace: {ns_path:?}")))?;
     if ns.is_root() {
         return Ok(());
     }
@@ -395,11 +388,7 @@ mod qualify_path_tests {
         ];
 
         for (ns, path, want) in cases {
-            assert_eq!(
-                qualify_path_in_namespace(ns, path),
-                *want,
-                "namespace {ns:?}, path {path:?}"
-            );
+            assert_eq!(qualify_path_in_namespace(ns, path), *want, "namespace {ns:?}, path {path:?}");
         }
     }
 

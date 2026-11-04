@@ -2,8 +2,8 @@ use serde_json::{Map, Value};
 
 use crate::{
     api::{Client, HttpResponse},
-    errors::RvError,
     bv_error_string,
+    errors::RvError,
 };
 
 pub fn kv_read_request(client: &Client, path: &str, data: Option<Map<String, Value>>) -> Result<HttpResponse, RvError> {

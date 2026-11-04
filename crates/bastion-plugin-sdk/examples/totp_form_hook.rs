@@ -43,14 +43,8 @@ fn validate_create(input: Value) -> Value {
     }
     // Allow ASCII space + dash so users pasting QR-derived secrets
     // with their built-in formatting don't have to clean them up.
-    let normalised: String = secret
-        .chars()
-        .filter(|c| !matches!(c, ' ' | '-'))
-        .collect();
-    let valid_b32 = !normalised.is_empty()
-        && normalised
-            .chars()
-            .all(|c| matches!(c, 'A'..='Z' | '2'..='7' | '='));
+    let normalised: String = secret.chars().filter(|c| !matches!(c, ' ' | '-')).collect();
+    let valid_b32 = !normalised.is_empty() && normalised.chars().all(|c| matches!(c, 'A'..='Z' | '2'..='7' | '='));
     if !valid_b32 {
         return json!({
             "ok": false,

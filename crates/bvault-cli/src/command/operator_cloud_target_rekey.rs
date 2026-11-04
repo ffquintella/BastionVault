@@ -129,9 +129,7 @@ pub struct CloudTargetRekey {
 fn parse_config_pairs(pairs: &[String]) -> Result<HashMap<String, Value>, RvError> {
     let mut conf = HashMap::new();
     for pair in pairs {
-        let (key, val) = pair
-            .split_once('=')
-            .ok_or(RvError::ErrConfigLoadFailed)?;
+        let (key, val) = pair.split_once('=').ok_or(RvError::ErrConfigLoadFailed)?;
         let value = if let Ok(n) = val.parse::<u64>() {
             Value::Number(n.into())
         } else if val == "true" {
@@ -166,9 +164,7 @@ impl CommandExecutor for CloudTargetRekey {
         conf.insert("obfuscate_keys".into(), Value::Bool(false));
         conf.insert("target".into(), Value::String(self.target_type.clone()));
 
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?;
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
 
         rt.block_on(async {
             let underlying = build_underlying_target(&conf).await?;
@@ -181,9 +177,7 @@ impl CommandExecutor for CloudTargetRekey {
 /// Goes through `FileBackend::new` and then unwraps the `target`
 /// field — the simplest way to reuse all the per-provider config
 /// parsing the engine already does.
-async fn build_underlying_target(
-    conf: &HashMap<String, Value>,
-) -> Result<Arc<dyn FileTarget>, RvError> {
+async fn build_underlying_target(conf: &HashMap<String, Value>) -> Result<Arc<dyn FileTarget>, RvError> {
     use crate::storage::physical::file::FileBackend;
     let mut conf = conf.clone();
     // Disable the cache decorator too — we want straight reads /
@@ -193,21 +187,14 @@ async fn build_underlying_target(
     Ok(backend.target_arc())
 }
 
-async fn run_rekey(
-    underlying: Arc<dyn FileTarget>,
-    dry_run: bool,
-) -> Result<(), RvError> {
+async fn run_rekey(underlying: Arc<dyn FileTarget>, dry_run: bool) -> Result<(), RvError> {
     use rand::RngExt;
 
     // Step 1: load current salt + manifest.
     let old_salt_bytes = underlying
         .read(SALT_KEY)
         .await?
-        .ok_or_else(|| {
-            RvError::ErrString(format!(
-                "rekey: target has no `{SALT_KEY}` — was it ever obfuscated?"
-            ))
-        })?;
+        .ok_or_else(|| RvError::ErrString(format!("rekey: target has no `{SALT_KEY}` — was it ever obfuscated?")))?;
     if old_salt_bytes.len() != SALT_BYTES {
         return Err(RvError::ErrString(format!(
             "rekey: stored salt is {} bytes, expected {SALT_BYTES}",
@@ -219,10 +206,7 @@ async fn run_rekey(
     let old_target = ObfuscatingTarget::with_salt(underlying.clone(), old_salt);
 
     let manifest = old_target.read_manifest().await?;
-    println!(
-        "rekey: target carries {} key(s) under the current salt",
-        manifest.len()
-    );
+    println!("rekey: target carries {} key(s) under the current salt", manifest.len());
     if dry_run {
         println!("rekey: --dry-run — no data will be touched");
         return Ok(());
@@ -258,9 +242,7 @@ async fn run_rekey(
                 // storage has no blob — log and continue rather
                 // than fail the whole rekey. The manifest will be
                 // refreshed on the next vault write of this key.
-                eprintln!(
-                    "rekey: warning — manifest entry `{key}` has no underlying blob; skipping"
-                );
+                eprintln!("rekey: warning — manifest entry `{key}` has no underlying blob; skipping");
                 continue;
             }
         };
@@ -274,12 +256,8 @@ async fn run_rekey(
     // manifest under the new layout. Both writes go through
     // `underlying.write` (not the obfuscating wrapper) so the
     // hashing rules don't re-apply to the marker keys.
-    underlying
-        .write(SALT_KEY, &new_salt)
-        .await
-        .map_err(|e| RvError::ErrString(format!("rekey: swap salt: {e}")))?;
-    let new_manifest_bytes =
-        crate::storage::physical::file::obfuscate::encode_manifest(&manifest);
+    underlying.write(SALT_KEY, &new_salt).await.map_err(|e| RvError::ErrString(format!("rekey: swap salt: {e}")))?;
+    let new_manifest_bytes = crate::storage::physical::file::obfuscate::encode_manifest(&manifest);
     underlying
         .write(MANIFEST_KEY, &new_manifest_bytes)
         .await
@@ -298,9 +276,7 @@ async fn run_rekey(
         }
     }
     if orphans > 0 {
-        println!(
-            "rekey: {orphans} orphan blob(s) left under the old salt (re-run the rekey to retry cleanup)"
-        );
+        println!("rekey: {orphans} orphan blob(s) left under the old salt (re-run the rekey to retry cleanup)");
     } else {
         println!("rekey: all old-salt positions cleaned up");
     }
@@ -317,10 +293,7 @@ mod tests {
         std::env::temp_dir().join(format!(
             "bvault-rekey-test-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
         ))
     }
 
@@ -332,12 +305,10 @@ mod tests {
     async fn rekey_round_trip_against_local_fs() {
         let dir = temp_dir();
         std::fs::create_dir_all(&dir).unwrap();
-        let underlying: Arc<dyn FileTarget> =
-            Arc::new(LocalFsTarget::new(dir.clone()).unwrap());
+        let underlying: Arc<dyn FileTarget> = Arc::new(LocalFsTarget::new(dir.clone()).unwrap());
 
         // 1. Bootstrap the obfuscating target — mints a fresh salt.
-        let old =
-            ObfuscatingTarget::bootstrap(underlying.clone()).await.unwrap();
+        let old = ObfuscatingTarget::bootstrap(underlying.clone()).await.unwrap();
         let old_salt = *old.salt_bytes();
         old.write("kv/a", b"value-a").await.unwrap();
         old.write("kv/b", b"value-b").await.unwrap();
@@ -353,21 +324,11 @@ mod tests {
 
         // 3. Reads through a fresh bootstrap (which now picks up
         //    the rotated salt) must return the same bytes.
-        let after =
-            ObfuscatingTarget::bootstrap(underlying.clone()).await.unwrap();
+        let after = ObfuscatingTarget::bootstrap(underlying.clone()).await.unwrap();
         assert_ne!(*after.salt_bytes(), old_salt, "salt must have rotated");
-        assert_eq!(
-            after.read("kv/a").await.unwrap().as_deref(),
-            Some(b"value-a".as_slice())
-        );
-        assert_eq!(
-            after.read("kv/b").await.unwrap().as_deref(),
-            Some(b"value-b".as_slice())
-        );
-        assert_eq!(
-            after.read("sys/policy/admin").await.unwrap().as_deref(),
-            Some(b"value-admin".as_slice())
-        );
+        assert_eq!(after.read("kv/a").await.unwrap().as_deref(), Some(b"value-a".as_slice()));
+        assert_eq!(after.read("kv/b").await.unwrap().as_deref(), Some(b"value-b".as_slice()));
+        assert_eq!(after.read("sys/policy/admin").await.unwrap().as_deref(), Some(b"value-admin".as_slice()));
 
         // 4. Old hash positions must have been cleaned up.
         assert!(underlying.read(&old_hash_a).await.unwrap().is_none());
@@ -377,10 +338,7 @@ mod tests {
         // 5. Manifest under the new salt must list every key.
         let mut manifest = after.read_manifest().await.unwrap();
         manifest.sort();
-        assert_eq!(
-            manifest,
-            vec!["kv/a", "kv/b", "sys/policy/admin"]
-        );
+        assert_eq!(manifest, vec!["kv/a", "kv/b", "sys/policy/admin"]);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -391,19 +349,16 @@ mod tests {
     async fn rekey_dry_run_is_a_noop() {
         let dir = temp_dir();
         std::fs::create_dir_all(&dir).unwrap();
-        let underlying: Arc<dyn FileTarget> =
-            Arc::new(LocalFsTarget::new(dir.clone()).unwrap());
+        let underlying: Arc<dyn FileTarget> = Arc::new(LocalFsTarget::new(dir.clone()).unwrap());
 
-        let old =
-            ObfuscatingTarget::bootstrap(underlying.clone()).await.unwrap();
+        let old = ObfuscatingTarget::bootstrap(underlying.clone()).await.unwrap();
         let salt_before = *old.salt_bytes();
         old.write("kv/x", b"v").await.unwrap();
         let listing_before = underlying.list("").await.unwrap();
 
         run_rekey(underlying.clone(), true).await.unwrap();
 
-        let after =
-            ObfuscatingTarget::bootstrap(underlying.clone()).await.unwrap();
+        let after = ObfuscatingTarget::bootstrap(underlying.clone()).await.unwrap();
         assert_eq!(*after.salt_bytes(), salt_before, "dry-run must leave the salt alone");
         let listing_after = underlying.list("").await.unwrap();
         assert_eq!(listing_before.len(), listing_after.len());
@@ -415,8 +370,7 @@ mod tests {
     async fn rekey_refuses_on_target_without_salt() {
         let dir = temp_dir();
         std::fs::create_dir_all(&dir).unwrap();
-        let underlying: Arc<dyn FileTarget> =
-            Arc::new(LocalFsTarget::new(dir.clone()).unwrap());
+        let underlying: Arc<dyn FileTarget> = Arc::new(LocalFsTarget::new(dir.clone()).unwrap());
 
         // No salt persisted yet — rekey should refuse rather than
         // mint a fresh one (that would leave the operator thinking

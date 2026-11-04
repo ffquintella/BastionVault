@@ -20,8 +20,8 @@ pub mod agent_ssh;
 pub mod agent_web;
 pub mod connect_clipboard;
 pub mod connect_mfa;
-pub mod connect_session;
 pub mod connect_provider;
+pub mod connect_session;
 pub mod connect_web;
 pub mod kernel_service;
 pub mod sql_profile;
@@ -43,11 +43,11 @@ use bv_storage as storage;
 // which places them at *that* crate's root; the call sites import them as
 // `crate::new_path` and friends. The `_internal` halves are the recursive arms
 // the public macros expand into, so they must travel with them.
-pub use bv_logical::{
-    new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path,
-    new_path_internal, new_secret, new_secret_internal,
-};
 pub use bv_errors::{bv_error_response, bv_error_response_status, bv_error_string};
+pub use bv_logical::{
+    new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path, new_path_internal,
+    new_secret, new_secret_internal,
+};
 
 use std::{any::Any, collections::HashMap, sync::Arc, time::Duration};
 
@@ -56,7 +56,6 @@ use derive_more::Deref;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use bv_kernel_api::Module;
 use crate::kernel_api::{
     engines::LoginClassVerdict,
     identity::{caller_audit_actor, ObjectKind},
@@ -66,11 +65,11 @@ use crate::{
     context::Context,
     errors::RvError,
     logical::{
-        secret::Secret, Backend, Field, FieldType, LogicalBackend, Operation, Path, PathOperation,
-        Request, Response,
+        secret::Secret, Backend, Field, FieldType, LogicalBackend, Operation, Path, PathOperation, Request, Response,
     },
     storage::StorageEntry,
 };
+use bv_kernel_api::Module;
 
 static RESOURCE_BACKEND_HELP: &str = r#"
 The resource backend provides dedicated storage for infrastructure resources
@@ -90,12 +89,7 @@ available for audit.
 /// attach time. A bare `passphrase` (a modifier, not a credential) does
 /// not count on its own.
 fn static_ssh_credential_shape(body: &Map<String, Value>) -> bool {
-    let nonempty = |k: &str| {
-        body.get(k)
-            .and_then(|v| v.as_str())
-            .map(|s| !s.trim().is_empty())
-            .unwrap_or(false)
-    };
+    let nonempty = |k: &str| body.get(k).and_then(|v| v.as_str()).map(|s| !s.trim().is_empty()).unwrap_or(false);
     nonempty("private_key") || nonempty("password")
 }
 
@@ -168,10 +162,7 @@ pub struct ConnectProfileCredentialHint {
 impl ResourceCardEntry {
     fn from_metadata(name: &str, data: &Map<String, Value>) -> Self {
         let str_field = |k: &str| -> Option<String> {
-            data.get(k)
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-                .filter(|s| !s.is_empty())
+            data.get(k).and_then(|v| v.as_str()).map(str::to_string).filter(|s| !s.is_empty())
         };
         Self {
             name: name.to_string(),
@@ -192,10 +183,7 @@ impl ResourceCardEntry {
             return Vec::new();
         };
         let opt_str = |o: &Map<String, Value>, k: &str| -> Option<String> {
-            o.get(k)
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-                .filter(|s| !s.is_empty())
+            o.get(k).and_then(|v| v.as_str()).map(str::to_string).filter(|s| !s.is_empty())
         };
         profiles
             .iter()
@@ -1007,9 +995,7 @@ fn now_rfc3339() -> String {
 /// as the suffix of history log keys so `storage_list()` returns entries
 /// in chronological order.
 fn hist_seq() -> String {
-    let n = Utc::now()
-        .timestamp_nanos_opt()
-        .unwrap_or_else(|| Utc::now().timestamp_millis() * 1_000_000);
+    let n = Utc::now().timestamp_nanos_opt().unwrap_or_else(|| Utc::now().timestamp_millis() * 1_000_000);
     format!("{:020}", n.max(0) as u128)
 }
 
@@ -1079,10 +1065,7 @@ fn diff_field_names(old: Option<&Map<String, Value>>, new: &Map<String, Value>) 
 /// at the canonical key — i.e., new resources are always lowercase, and
 /// any existing CI-equal record is updated in place rather than
 /// duplicated.
-pub(crate) async fn resolve_resource_name(
-    req: &mut Request,
-    raw: &str,
-) -> Result<String, RvError> {
+pub(crate) async fn resolve_resource_name(req: &mut Request, raw: &str) -> Result<String, RvError> {
     let storage = req.storage.clone().ok_or(RvError::ErrRequestNotReady)?;
     resolve_resource_name_in(storage.as_ref(), raw).await
 }
@@ -1163,10 +1146,7 @@ impl ResourceBackendInner {
         // and read as `deny` later.
         agent_access::validate_type_config(body).map_err(agent_refusal_error)?;
         let data = serde_json::to_string(body)?;
-        let entry = StorageEntry {
-            key: "config/types".to_string(),
-            value: data.into_bytes(),
-        };
+        let entry = StorageEntry { key: "config/types".to_string(), value: data.into_bytes() };
         req.storage_put(&entry).await?;
         Ok(None)
     }
@@ -1216,25 +1196,10 @@ impl ResourceBackendInner {
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let body = req.body.clone().unwrap_or_default();
-        let q = body
-            .get("q")
-            .and_then(|v| v.as_str())
-            .map(|s| s.trim().to_ascii_lowercase())
-            .filter(|s| !s.is_empty());
-        let type_filter = body
-            .get("type")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .filter(|s| !s.is_empty());
-        let offset = body
-            .get("offset")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize;
-        let limit = body
-            .get("limit")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(30)
-            .clamp(1, 200) as usize;
+        let q = body.get("q").and_then(|v| v.as_str()).map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty());
+        let type_filter = body.get("type").and_then(|v| v.as_str()).map(|s| s.to_string()).filter(|s| !s.is_empty());
+        let offset = body.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        let limit = body.get("limit").and_then(|v| v.as_u64()).unwrap_or(30).clamp(1, 200) as usize;
 
         let keys = req.storage_list(META_PREFIX).await?;
 
@@ -1267,21 +1232,12 @@ impl ResourceBackendInner {
             }
             if let Some(needle) = &q {
                 let name_lc = key.to_ascii_lowercase();
-                let host_lc = data
-                    .get("hostname")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_ascii_lowercase())
-                    .unwrap_or_default();
-                let ip_lc = data
-                    .get("ip_address")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_ascii_lowercase())
-                    .unwrap_or_default();
-                let tags_lc = data
-                    .get("tags")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_ascii_lowercase())
-                    .unwrap_or_default();
+                let host_lc =
+                    data.get("hostname").and_then(|v| v.as_str()).map(|s| s.to_ascii_lowercase()).unwrap_or_default();
+                let ip_lc =
+                    data.get("ip_address").and_then(|v| v.as_str()).map(|s| s.to_ascii_lowercase()).unwrap_or_default();
+                let tags_lc =
+                    data.get("tags").and_then(|v| v.as_str()).map(|s| s.to_ascii_lowercase()).unwrap_or_default();
                 if !name_lc.contains(needle)
                     && !host_lc.contains(needle)
                     && !ip_lc.contains(needle)
@@ -1340,12 +1296,8 @@ impl ResourceBackendInner {
                 _ => String::new(),
             };
             let base = format!("{ns_prefix}{RESOURCE_METADATA_PATH_PREFIX}");
-            let targets: Vec<String> =
-                matches.iter().map(|(name, _)| format!("{base}{name}")).collect();
-            let policy = self
-                .core
-                .policy()
-                .ok_or_else(|| bv_error_string!("policy module not registered"))?;
+            let targets: Vec<String> = matches.iter().map(|(name, _)| format!("{base}{name}")).collect();
+            let policy = self.core.policy().ok_or_else(|| bv_error_string!("policy module not registered"))?;
             let visible = policy.readable_targets(req, &targets).await;
             let mut kept = Vec::with_capacity(matches.len());
             for (entry, ok) in matches.into_iter().zip(visible) {
@@ -1440,9 +1392,7 @@ impl ResourceBackendInner {
         // event with no field pill, and surface it on the security log
         // so an operator tailing security.log sees connection activity
         // without having to cross-reference operations.log.
-        let is_connect = op == "update"
-            && changed_fields.len() == 1
-            && changed_fields[0] == "recent_sessions";
+        let is_connect = op == "update" && changed_fields.len() == 1 && changed_fields[0] == "recent_sessions";
         if is_connect {
             op = "connect";
             changed_fields.clear();
@@ -1461,10 +1411,7 @@ impl ResourceBackendInner {
 
         // Write the new metadata.
         let data = serde_json::to_string(&body)?;
-        let entry = StorageEntry {
-            key,
-            value: data.into_bytes(),
-        };
+        let entry = StorageEntry { key, value: data.into_bytes() };
         req.storage_put(&entry).await?;
 
         if record_history {
@@ -1475,10 +1422,7 @@ impl ResourceBackendInner {
                 changed_fields,
             };
             let hist_key = format!("{HIST_PREFIX}{name}/{}", hist_seq());
-            let hist_entry = StorageEntry {
-                key: hist_key,
-                value: serde_json::to_string(&hist)?.into_bytes(),
-            };
+            let hist_entry = StorageEntry { key: hist_key, value: serde_json::to_string(&hist)?.into_bytes() };
             req.storage_put(&hist_entry).await?;
         }
 
@@ -1503,10 +1447,7 @@ impl ResourceBackendInner {
             changed_fields: Vec::new(),
         };
         let hist_key = format!("{HIST_PREFIX}{name}/{}", hist_seq());
-        let hist_entry = StorageEntry {
-            key: hist_key,
-            value: serde_json::to_string(&hist)?.into_bytes(),
-        };
+        let hist_entry = StorageEntry { key: hist_key, value: serde_json::to_string(&hist)?.into_bytes() };
         req.storage_put(&hist_entry).await?;
 
         // Delete the resource metadata.
@@ -1591,25 +1532,16 @@ impl ResourceBackendInner {
         // Validate the target name. Names are the storage key *and* the
         // ACL path segment, so reject anything that could escape the key
         // space or collide with a sub-path.
-        let raw_new = req
-            .get_data("new_name")?
-            .as_str()
-            .unwrap_or("")
-            .trim()
-            .to_string();
+        let raw_new = req.get_data("new_name")?.as_str().unwrap_or("").trim().to_string();
         if raw_new.is_empty() {
             return Err(bv_error_string!("new_name is required"));
         }
         let new = raw_new.to_ascii_lowercase();
         if new.contains('/') || new.contains("..") {
-            return Err(bv_error_string!(
-                "new_name must not contain '/' or '..'"
-            ));
+            return Err(bv_error_string!("new_name must not contain '/' or '..'"));
         }
         if new == old {
-            return Err(bv_error_string!(
-                "new_name is the same as the current name"
-            ));
+            return Err(bv_error_string!("new_name is the same as the current name"));
         }
 
         // Source must exist.
@@ -1623,31 +1555,19 @@ impl ResourceBackendInner {
         // rename can never silently clobber a differently-cased record.
         let new_meta_key = format!("{META_PREFIX}{new}");
         if req.storage_get(&new_meta_key).await?.is_some() {
-            return Err(bv_error_string!(format!(
-                "a resource named '{new}' already exists"
-            )));
+            return Err(bv_error_string!(format!("a resource named '{new}' already exists")));
         }
         for k in req.storage_list(META_PREFIX).await? {
             if k.eq_ignore_ascii_case(&new) {
-                return Err(bv_error_string!(format!(
-                    "a resource named '{new}' already exists"
-                )));
+                return Err(bv_error_string!(format!("a resource named '{new}' already exists")));
             }
         }
 
         // ── 1. Metadata: write the new record (name + updated_at) ──────
-        let mut meta: Map<String, Value> =
-            serde_json::from_slice(&old_entry.value).unwrap_or_default();
+        let mut meta: Map<String, Value> = serde_json::from_slice(&old_entry.value).unwrap_or_default();
         meta.insert("name".to_string(), Value::String(new.clone()));
-        meta.insert(
-            "updated_at".to_string(),
-            Value::String(now_rfc3339()),
-        );
-        req.storage_put(&StorageEntry {
-            key: new_meta_key,
-            value: serde_json::to_vec(&meta)?,
-        })
-        .await?;
+        meta.insert("updated_at".to_string(), Value::String(now_rfc3339()));
+        req.storage_put(&StorageEntry { key: new_meta_key, value: serde_json::to_vec(&meta)? }).await?;
 
         // ── 2. Secrets: current values, version index, version payloads ─
         // Copy every key from the old prefix to the new, then delete the
@@ -1656,11 +1576,7 @@ impl ResourceBackendInner {
         let new_secret_prefix = format!("{SECRET_PREFIX}{new}/");
         for k in req.storage_list(&old_secret_prefix).await? {
             if let Some(e) = req.storage_get(&format!("{old_secret_prefix}{k}")).await? {
-                req.storage_put(&StorageEntry {
-                    key: format!("{new_secret_prefix}{k}"),
-                    value: e.value,
-                })
-                .await?;
+                req.storage_put(&StorageEntry { key: format!("{new_secret_prefix}{k}"), value: e.value }).await?;
             }
         }
 
@@ -1668,11 +1584,7 @@ impl ResourceBackendInner {
         let new_smeta_prefix = format!("{SMETA_PREFIX}{new}/");
         for k in req.storage_list(&old_smeta_prefix).await? {
             if let Some(e) = req.storage_get(&format!("{old_smeta_prefix}{k}")).await? {
-                req.storage_put(&StorageEntry {
-                    key: format!("{new_smeta_prefix}{k}"),
-                    value: e.value,
-                })
-                .await?;
+                req.storage_put(&StorageEntry { key: format!("{new_smeta_prefix}{k}"), value: e.value }).await?;
             }
         }
 
@@ -1685,11 +1597,7 @@ impl ResourceBackendInner {
             let new_sub = format!("{new_sver_prefix}{key_seg}/");
             for v in req.storage_list(&old_sub).await? {
                 if let Some(e) = req.storage_get(&format!("{old_sub}{v}")).await? {
-                    req.storage_put(&StorageEntry {
-                        key: format!("{new_sub}{v}"),
-                        value: e.value,
-                    })
-                    .await?;
+                    req.storage_put(&StorageEntry { key: format!("{new_sub}{v}"), value: e.value }).await?;
                 }
             }
         }
@@ -1699,11 +1607,7 @@ impl ResourceBackendInner {
         let new_hist_prefix = format!("{HIST_PREFIX}{new}/");
         for k in req.storage_list(&old_hist_prefix).await? {
             if let Some(e) = req.storage_get(&format!("{old_hist_prefix}{k}")).await? {
-                req.storage_put(&StorageEntry {
-                    key: format!("{new_hist_prefix}{k}"),
-                    value: e.value,
-                })
-                .await?;
+                req.storage_put(&StorageEntry { key: format!("{new_hist_prefix}{k}"), value: e.value }).await?;
             }
         }
         let hist = ResourceHistoryEntry {
@@ -1862,11 +1766,7 @@ impl ResourceBackendInner {
     /// unaffected. The resource's classification hints (type + asset-group
     /// memberships) come from the resource record and the resource-group
     /// reverse index.
-    async fn resolve_login_class(
-        &self,
-        req: &Request,
-        resource: &str,
-    ) -> Result<LoginClassVerdict, RvError> {
+    async fn resolve_login_class(&self, req: &Request, resource: &str) -> Result<LoginClassVerdict, RvError> {
         let Some(policy) = self.core.login_class() else {
             return Ok(LoginClassVerdict::default());
         };
@@ -1949,35 +1849,20 @@ impl ResourceBackendInner {
             operation: op.to_string(),
         };
         let ver_key = format!("{SVER_PREFIX}{resource}/{key_name}/{new_version}");
-        req.storage_put(&StorageEntry {
-            key: ver_key,
-            value: serde_json::to_string(&ver_payload)?.into_bytes(),
-        })
-        .await?;
+        req.storage_put(&StorageEntry { key: ver_key, value: serde_json::to_string(&ver_payload)?.into_bytes() })
+            .await?;
 
         // Keep the current-value entry for O(1) reads.
         let data = serde_json::to_string(&body)?;
-        req.storage_put(&StorageEntry {
-            key: curr_key,
-            value: data.into_bytes(),
-        })
-        .await?;
+        req.storage_put(&StorageEntry { key: curr_key, value: data.into_bytes() }).await?;
 
         // Update and persist the version index.
         meta.current_version = new_version;
         meta.versions.insert(
             new_version.to_string(),
-            ResourceSecretVersionMeta {
-                created_time: now,
-                username: user,
-                operation: op.to_string(),
-            },
+            ResourceSecretVersionMeta { created_time: now, username: user, operation: op.to_string() },
         );
-        req.storage_put(&StorageEntry {
-            key: smeta_key,
-            value: serde_json::to_string(&meta)?.into_bytes(),
-        })
-        .await?;
+        req.storage_put(&StorageEntry { key: smeta_key, value: serde_json::to_string(&meta)?.into_bytes() }).await?;
 
         Ok(None)
     }
@@ -2032,11 +1917,8 @@ impl ResourceBackendInner {
 
         // Convert the HashMap<String, VersionMeta> into a sorted array for
         // the frontend. Descending version order puts the newest first.
-        let mut versions: Vec<(u64, &ResourceSecretVersionMeta)> = meta
-            .versions
-            .iter()
-            .filter_map(|(k, v)| k.parse::<u64>().ok().map(|n| (n, v)))
-            .collect();
+        let mut versions: Vec<(u64, &ResourceSecretVersionMeta)> =
+            meta.versions.iter().filter_map(|(k, v)| k.parse::<u64>().ok().map(|n| (n, v))).collect();
         versions.sort_by_key(|v| std::cmp::Reverse(v.0));
 
         let mut entries = Vec::with_capacity(versions.len());
@@ -2050,10 +1932,7 @@ impl ResourceBackendInner {
         }
 
         let mut data = Map::new();
-        data.insert(
-            "current_version".to_string(),
-            Value::from(meta.current_version),
-        );
+        data.insert("current_version".to_string(), Value::from(meta.current_version));
         data.insert("versions".to_string(), Value::Array(entries));
         Ok(Some(Response::data_response(Some(data))))
     }
@@ -2067,17 +1946,14 @@ impl ResourceBackendInner {
         let resource = resolve_resource_name(req, &raw).await?;
         let key_name = req.get_data("key")?.as_str().unwrap().to_string();
         let version_str = req.get_data("version")?.as_str().unwrap().to_string();
-        let version: u64 = version_str
-            .parse()
-            .map_err(|_| RvError::ErrRequestInvalid)?;
+        let version: u64 = version_str.parse().map_err(|_| RvError::ErrRequestInvalid)?;
 
         let ver_key = format!("{SVER_PREFIX}{resource}/{key_name}/{version}");
         let entry = match req.storage_get(&ver_key).await? {
             Some(e) => e,
             None => return Ok(None),
         };
-        let v: ResourceSecretVersion =
-            serde_json::from_slice(&entry.value).map_err(|_| RvError::ErrRequestInvalid)?;
+        let v: ResourceSecretVersion = serde_json::from_slice(&entry.value).map_err(|_| RvError::ErrRequestInvalid)?;
 
         let mut data = Map::new();
         data.insert("version".to_string(), Value::from(v.version));
@@ -2099,11 +1975,7 @@ impl ResourceBackendInner {
         Ok(Some(Response::data_response(Some(data))))
     }
 
-    pub async fn handle_noop(
-        &self,
-        _backend: &dyn Backend,
-        _req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_noop(&self, _backend: &dyn Backend, _req: &mut Request) -> Result<Option<Response>, RvError> {
         Ok(None)
     }
 }
@@ -2112,10 +1984,7 @@ impl ResourceBackendInner {
 
 impl ResourceModule {
     pub fn new(core: Arc<dyn VaultCtx>) -> Self {
-        Self {
-            name: "resource".to_string(),
-            backend: Arc::new(ResourceBackend::new(core)),
-        }
+        Self { name: "resource".to_string(), backend: Arc::new(ResourceBackend::new(core)) }
     }
 }
 
@@ -2185,10 +2054,7 @@ mod tests {
         let new = obj(json!({ "hostname": "new", "port": 22, "tags": "web" }));
         // Changed: hostname; added: tags; removed: owner.
         let changed = diff_field_names(Some(&old), &new);
-        assert_eq!(
-            changed,
-            vec!["hostname".to_string(), "owner".to_string(), "tags".to_string()]
-        );
+        assert_eq!(changed, vec!["hostname".to_string(), "owner".to_string(), "tags".to_string()]);
     }
 
     #[test]
@@ -2220,4 +2086,3 @@ mod tests {
         assert!(!static_ssh_credential_shape(&obj(json!({ "token": "t" }))));
     }
 }
-

@@ -126,7 +126,11 @@ impl TestHostBuilder {
     /// accepts once, for exactly that action.
     pub fn connect_action_ticket(mut self, resource: &str, profile: &str, action: &str, ticket: &str) -> Self {
         let action = canonical_action(action).expect("a well-formed step-up action");
-        self.sql.action_tickets.entry((canonical(resource), profile.to_string(), action)).or_default().insert(ticket.into());
+        self.sql
+            .action_tickets
+            .entry((canonical(resource), profile.to_string(), action))
+            .or_default()
+            .insert(ticket.into());
         self
     }
 
@@ -266,13 +270,16 @@ impl TestHost {
             Some(Value::String(a)) if method == "connect_ticket_redeem" => {
                 Some(canonical_action(a).map_err(|m| err("bad_request", m))?)
             }
-            Some(_) if method == "connect_ticket_redeem" => return Err(err("bad_request", "`action` must be a string")),
+            Some(_) if method == "connect_ticket_redeem" => {
+                return Err(err("bad_request", "`action` must be a string"))
+            }
             _ => None,
         };
         let held: Vec<String> = sql.privileges.get(&resource).map(|s| s.iter().cloned().collect()).unwrap_or_default();
         match method {
             "resource_sql_authorize" => {
-                let checks = params.get("checks").and_then(Value::as_array).ok_or_else(|| err("bad_request", "checks"))?;
+                let checks =
+                    params.get("checks").and_then(Value::as_array).ok_or_else(|| err("bad_request", "checks"))?;
                 let mut verdicts = Vec::new();
                 for c in checks {
                     let cap = c.get("capability").and_then(Value::as_str).unwrap_or("");
@@ -294,7 +301,9 @@ impl TestHost {
                 Err(e)
             }
             "resource_sql_target" => match sql.targets.get(&resource) {
-                Some(t) => Ok(json!({"namespace": caller.namespace, "resource": resource, "privileges": held, "target": t})),
+                Some(t) => {
+                    Ok(json!({"namespace": caller.namespace, "resource": resource, "privileges": held, "target": t}))
+                }
                 None => Err(err("not_found", "resource_not_found: no SQL target for this resource")),
             },
             "connect_ticket_redeem" if action.is_some() => {
@@ -306,7 +315,10 @@ impl TestHost {
                 if sql.action_tickets.get_mut(&key).is_some_and(|t| t.remove(&ticket)) {
                     Ok(json!({"redeemed": true, "method": "totp", "action": action}))
                 } else {
-                    Err(err("refused", "mfa_required: the step-up ticket is unknown, used, expired or bound to another action"))
+                    Err(err(
+                        "refused",
+                        "mfa_required: the step-up ticket is unknown, used, expired or bound to another action",
+                    ))
                 }
             }
             "connect_ticket_redeem" => {
@@ -404,7 +416,9 @@ mod tests {
 
     fn params(method: &str) -> Value {
         match method {
-            "resource_sql_authorize" => json!({"resource": "db", "checks": [{"capability": "sql_select", "target": "server"}]}),
+            "resource_sql_authorize" => {
+                json!({"resource": "db", "checks": [{"capability": "sql_select", "target": "server"}]})
+            }
             "resource_sql_credential" => json!({"resource": "db", "profile": "ro", "session_ref": "s-1"}),
             "connect_ticket_redeem" => json!({"resource": "db", "profile": "ro", "ticket": "t-1"}),
             _ => json!({"resource": "db"}),
@@ -432,7 +446,11 @@ mod tests {
             .resource_credentials(true)
             .sql_privileges("DB", &["sql_select"])
             .sql_release("db", "ro", MockRelease::bound("db1:5432", "svc", "pw"))
-            .sql_release("db", "moved", MockRelease { endpoint: "evil:5432".into(), ..MockRelease::bound("db1:5432", "svc", "pw") })
+            .sql_release(
+                "db",
+                "moved",
+                MockRelease { endpoint: "evil:5432".into(), ..MockRelease::bound("db1:5432", "svc", "pw") },
+            )
             .build();
         let ok = host.process_host_call(Some(&ana()), "resource_sql_credential", &params("resource_sql_credential"));
         assert_eq!(ok.unwrap()["password"], "pw");
@@ -482,7 +500,10 @@ mod tests {
         assert_eq!(host.process_host_call(Some(&ana()), "connect_ticket_redeem", &redeem).unwrap()["redeemed"], true);
         let other = TestCaller::new("ent-bob");
         assert!(host.process_host_call(Some(&other), "resource_sql_credential", &release).is_err());
-        assert_eq!(host.process_host_call(Some(&ana()), "resource_sql_credential", &release).unwrap()["password"], "pw");
+        assert_eq!(
+            host.process_host_call(Some(&ana()), "resource_sql_credential", &release).unwrap()["password"],
+            "pw"
+        );
         assert!(host.process_host_call(Some(&ana()), "resource_sql_credential", &release).is_err(), "spent");
         let reasons: Vec<Value> = host.audit_events().iter().map(|e| e["data"]["reason"].clone()).collect();
         assert_eq!(reasons[0], "mfa_required");
@@ -505,22 +526,43 @@ mod tests {
             a
         };
         // A connect ticket is never accepted for an action.
-        assert_eq!(code(host.process_host_call(Some(&ana()), "connect_ticket_redeem", &with("t-1", json!("sql_drop"))) ), "refused");
+        assert_eq!(
+            code(host.process_host_call(Some(&ana()), "connect_ticket_redeem", &with("t-1", json!("sql_drop")))),
+            "refused"
+        );
         assert_eq!(host.process_host_call(Some(&ana()), "connect_ticket_redeem", &p).unwrap()["redeemed"], true);
         assert_eq!(code(host.process_host_call(Some(&ana()), "connect_ticket_redeem", &p)), "refused");
         for bad in [json!(""), json!("drop"), json!("sql_drop,sql_drop"), json!(["sql_drop"])] {
-            assert_eq!(code(host.process_host_call(Some(&ana()), "connect_ticket_redeem", &with("a-1", bad))), "bad_request");
+            assert_eq!(
+                code(host.process_host_call(Some(&ana()), "connect_ticket_redeem", &with("a-1", bad))),
+                "bad_request"
+            );
         }
         // Another action, then the action in any order (once).
-        assert_eq!(code(host.process_host_call(Some(&ana()), "connect_ticket_redeem", &with("a-1", json!("sql_drop")))), "refused");
-        let ok = host.process_host_call(Some(&ana()), "connect_ticket_redeem", &with("a-1", json!("sql_drop,sql_script"))).unwrap();
+        assert_eq!(
+            code(host.process_host_call(Some(&ana()), "connect_ticket_redeem", &with("a-1", json!("sql_drop")))),
+            "refused"
+        );
+        let ok = host
+            .process_host_call(Some(&ana()), "connect_ticket_redeem", &with("a-1", json!("sql_drop,sql_script")))
+            .unwrap();
         assert_eq!((ok["redeemed"].clone(), ok["action"].clone()), (json!(true), json!("sql_drop,sql_script")));
-        assert_eq!(code(host.process_host_call(Some(&ana()), "connect_ticket_redeem", &with("a-1", json!("sql_drop,sql_script")))), "refused");
+        assert_eq!(
+            code(host.process_host_call(
+                Some(&ana()),
+                "connect_ticket_redeem",
+                &with("a-1", json!("sql_drop,sql_script"))
+            )),
+            "refused"
+        );
         // The connect redemption above was spent by nothing yet; the action
         // redemption added none: one release, then mfa_required.
         let release = params("resource_sql_credential");
         assert!(host.process_host_call(Some(&ana()), "resource_sql_credential", &release).is_ok());
-        assert_eq!(host.process_host_call(Some(&ana()), "resource_sql_credential", &release).unwrap_err(), "refused: mfa_required");
+        assert_eq!(
+            host.process_host_call(Some(&ana()), "resource_sql_credential", &release).unwrap_err(),
+            "refused: mfa_required"
+        );
     }
 
     #[test]

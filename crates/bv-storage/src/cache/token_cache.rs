@@ -238,10 +238,7 @@ mod tests {
         let entry = sample_entry();
         let cached = CachedToken::from_value(&entry).unwrap();
         let rendered = format!("{cached:?}");
-        assert!(
-            !rendered.contains("marker-display-name"),
-            "Debug must not leak payload contents: {rendered}"
-        );
+        assert!(!rendered.contains("marker-display-name"), "Debug must not leak payload contents: {rendered}");
         assert!(!rendered.contains("the-bearer-secret"));
         assert_eq!(rendered, "<cached:token:redacted>");
     }
@@ -272,14 +269,8 @@ mod tests {
         use zeroize::Zeroize;
         let entry = sample_entry();
         let mut cached = CachedToken::from_value(&entry).unwrap();
-        assert!(
-            cached.bytes.iter().any(|b| *b != 0),
-            "payload must start non-zero for the test to be meaningful"
-        );
+        assert!(cached.bytes.iter().any(|b| *b != 0), "payload must start non-zero for the test to be meaningful");
         cached.bytes.zeroize();
-        assert!(
-            cached.bytes.iter().all(|b| *b == 0),
-            "Zeroize impl must wipe every byte"
-        );
+        assert!(cached.bytes.iter().all(|b| *b == 0), "Zeroize impl must wipe every byte");
     }
 }

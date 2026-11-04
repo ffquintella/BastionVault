@@ -30,7 +30,8 @@ const KEYS_LIST_HELP: &str = "List configured transit key names.";
 
 const ROTATE_HELP: &str = "Append a new version to the named key. Encrypt / sign use the latest; decrypt / verify try every version >= min_decryption_version.";
 const CONFIG_HELP: &str = "Update min_decryption_version, min_available_version, deletion_allowed.";
-const TRIM_HELP: &str = "Drop versions below min_available_version. Refused if any retained version is below min_decryption_version.";
+const TRIM_HELP: &str =
+    "Drop versions below min_available_version. Refused if any retained version is below min_decryption_version.";
 
 impl TransitBackend {
     pub fn keys_path(&self) -> Path {
@@ -103,20 +104,12 @@ impl TransitBackend {
 
 #[maybe_async::maybe_async]
 impl TransitBackendInner {
-    pub async fn handle_keys_list(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_keys_list(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let keys = self.list_policies(req).await?;
         Ok(Some(Response::list_response(&keys)))
     }
 
-    pub async fn handle_key_read(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_key_read(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let name = take_str(req, "name");
         match self.get_policy(req, &name).await? {
             Some(p) => Ok(Some(Response::data_response(Some(render_metadata(&p))))),
@@ -124,11 +117,7 @@ impl TransitBackendInner {
         }
     }
 
-    pub async fn handle_key_create(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_key_create(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let name = take_str(req, "name");
         if name.is_empty() {
             return Err(RvError::ErrString("name is required".into()));
@@ -184,35 +173,21 @@ impl TransitBackendInner {
         Ok(Some(Response::data_response(Some(render_metadata(&p)))))
     }
 
-    pub async fn handle_key_delete(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_key_delete(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let name = take_str(req, "name");
-        let p = self
-            .get_policy(req, &name)
-            .await?
-            .ok_or_else(|| RvError::ErrString(format!("unknown key `{name}`")))?;
+        let p =
+            self.get_policy(req, &name).await?.ok_or_else(|| RvError::ErrString(format!("unknown key `{name}`")))?;
         if !p.deletion_allowed {
-            return Err(RvError::ErrString(
-                "deletion_allowed is false; flip it via /keys/<name>/config first".into(),
-            ));
+            return Err(RvError::ErrString("deletion_allowed is false; flip it via /keys/<name>/config first".into()));
         }
         self.delete_policy(req, &name).await?;
         Ok(None)
     }
 
-    pub async fn handle_key_rotate(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_key_rotate(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let name = take_str(req, "name");
-        let mut p = self
-            .get_policy(req, &name)
-            .await?
-            .ok_or_else(|| RvError::ErrString(format!("unknown key `{name}`")))?;
+        let mut p =
+            self.get_policy(req, &name).await?.ok_or_else(|| RvError::ErrString(format!("unknown key `{name}`")))?;
         let next = p.latest_version + 1;
         let v = mint_version(p.key_type, next)?;
         p.versions.insert(next, v);
@@ -221,16 +196,10 @@ impl TransitBackendInner {
         Ok(Some(Response::data_response(Some(render_metadata(&p)))))
     }
 
-    pub async fn handle_key_config(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_key_config(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let name = take_str(req, "name");
-        let mut p = self
-            .get_policy(req, &name)
-            .await?
-            .ok_or_else(|| RvError::ErrString(format!("unknown key `{name}`")))?;
+        let mut p =
+            self.get_policy(req, &name).await?.ok_or_else(|| RvError::ErrString(format!("unknown key `{name}`")))?;
 
         let mdv = take_int(req, "min_decryption_version", 0) as u32;
         if mdv > 0 {
@@ -262,16 +231,10 @@ impl TransitBackendInner {
         Ok(Some(Response::data_response(Some(render_metadata(&p)))))
     }
 
-    pub async fn handle_key_trim(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_key_trim(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let name = take_str(req, "name");
-        let mut p = self
-            .get_policy(req, &name)
-            .await?
-            .ok_or_else(|| RvError::ErrString(format!("unknown key `{name}`")))?;
+        let mut p =
+            self.get_policy(req, &name).await?.ok_or_else(|| RvError::ErrString(format!("unknown key `{name}`")))?;
         let mav = p.min_available_version;
         let before = p.versions.len();
         p.versions.retain(|v, _| *v >= mav);
@@ -290,10 +253,7 @@ impl TransitBackendInner {
 
 /// Construct one fresh key version of the given algorithm.
 pub fn mint_version(kt: KeyType, version: u32) -> Result<KeyVersion, RvError> {
-    let now = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let (material, pk) = match kt {
         KeyType::Chacha20Poly1305 => (sym::generate_aead_key(kt)?, Vec::new()),
         KeyType::Hmac => (sym::generate_hmac_key(), Vec::new()),
@@ -310,13 +270,9 @@ pub fn mint_version(kt: KeyType, version: u32) -> Result<KeyVersion, RvError> {
             (seed, pk)
         }
         #[cfg(feature = "transit_pqc_hybrid")]
-        KeyType::HybridEd25519MlDsa65 => {
-            super::crypto::hybrid::generate_signing_keypair()?
-        }
+        KeyType::HybridEd25519MlDsa65 => super::crypto::hybrid::generate_signing_keypair()?,
         #[cfg(feature = "transit_pqc_hybrid")]
-        KeyType::HybridX25519MlKem768 => {
-            super::crypto::hybrid::generate_kem_keypair()?
-        }
+        KeyType::HybridX25519MlKem768 => super::crypto::hybrid::generate_kem_keypair()?,
     };
     Ok(KeyVersion { version, created_at: now, material, pk })
 }
@@ -327,21 +283,12 @@ pub fn render_metadata(p: &KeyPolicy) -> Map<String, Value> {
     data.insert("name".into(), Value::String(p.name.clone()));
     data.insert("type".into(), Value::String(p.key_type.as_str().into()));
     data.insert("latest_version".into(), Value::Number(p.latest_version.into()));
-    data.insert(
-        "min_decryption_version".into(),
-        Value::Number(p.min_decryption_version.into()),
-    );
-    data.insert(
-        "min_available_version".into(),
-        Value::Number(p.min_available_version.into()),
-    );
+    data.insert("min_decryption_version".into(), Value::Number(p.min_decryption_version.into()));
+    data.insert("min_available_version".into(), Value::Number(p.min_available_version.into()));
     data.insert("deletion_allowed".into(), Value::Bool(p.deletion_allowed));
     data.insert("exportable".into(), Value::Bool(p.exportable));
     data.insert("derived".into(), Value::Bool(p.derived));
-    data.insert(
-        "convergent_encryption".into(),
-        Value::Bool(p.convergent_encryption),
-    );
+    data.insert("convergent_encryption".into(), Value::Bool(p.convergent_encryption));
 
     // Asymmetric types: surface per-version public keys (base64-encoded
     // raw bytes — the wire format depends on the algorithm: 32-byte
@@ -369,15 +316,16 @@ pub fn render_metadata(p: &KeyPolicy) -> Map<String, Value> {
 }
 
 fn take_str(req: &Request, key: &str) -> String {
-    req.get_data(key)
-        .ok()
-        .and_then(|v| v.as_str().map(|s| s.to_string()))
-        .unwrap_or_default()
+    req.get_data(key).ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default()
 }
 
 fn take_or(req: &Request, key: &str, default: &str) -> String {
     let s = take_str(req, key);
-    if s.is_empty() { default.to_string() } else { s }
+    if s.is_empty() {
+        default.to_string()
+    } else {
+        s
+    }
 }
 
 fn take_int(req: &Request, key: &str, default: i64) -> i64 {

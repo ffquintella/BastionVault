@@ -20,9 +20,11 @@ use crate::{
     new_fields, new_fields_internal, new_path, new_path_internal,
 };
 
-const ENCRYPT_HELP: &str = "Encrypt base64 plaintext under the latest version of the named symmetric AEAD key. Returns `bvault:vN:<base64>`.";
+const ENCRYPT_HELP: &str =
+    "Encrypt base64 plaintext under the latest version of the named symmetric AEAD key. Returns `bvault:vN:<base64>`.";
 const DECRYPT_HELP: &str = "Decrypt a `bvault:vN:<base64>` ciphertext. Tries the embedded version against this key.";
-const REWRAP_HELP: &str = "Decrypt and re-encrypt a ciphertext under the latest key version. The plaintext never leaves the engine.";
+const REWRAP_HELP: &str =
+    "Decrypt and re-encrypt a ciphertext under the latest key version. The plaintext never leaves the engine.";
 
 impl TransitBackend {
     pub fn encrypt_path(&self) -> Path {
@@ -70,11 +72,7 @@ impl TransitBackend {
 
 #[maybe_async::maybe_async]
 impl TransitBackendInner {
-    pub async fn handle_encrypt(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_encrypt(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let name = take_str(req, "name");
         let plaintext_b64 = take_str(req, "plaintext");
         let aad_b64 = take_str(req, "context");
@@ -85,14 +83,11 @@ impl TransitBackendInner {
         let aad = if aad_b64.is_empty() {
             Vec::new()
         } else {
-            B64.decode(aad_b64.as_bytes())
-                .map_err(|e| RvError::ErrString(format!("context: not base64 ({e})")))?
+            B64.decode(aad_b64.as_bytes()).map_err(|e| RvError::ErrString(format!("context: not base64 ({e})")))?
         };
 
-        let p = self
-            .get_policy(req, &name)
-            .await?
-            .ok_or_else(|| RvError::ErrString(format!("unknown key `{name}`")))?;
+        let p =
+            self.get_policy(req, &name).await?.ok_or_else(|| RvError::ErrString(format!("unknown key `{name}`")))?;
         if !p.key_type.supports_encrypt() {
             return Err(RvError::ErrString(format!(
                 "{} keys do not support /encrypt; use /sign or /datakey as appropriate",
@@ -116,11 +111,7 @@ impl TransitBackendInner {
         Ok(Some(Response::data_response(Some(data))))
     }
 
-    pub async fn handle_decrypt(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_decrypt(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let name = take_str(req, "name");
         let ct_str = take_str(req, "ciphertext");
         let aad_b64 = take_str(req, "context");
@@ -134,17 +125,12 @@ impl TransitBackendInner {
         let aad = if aad_b64.is_empty() {
             Vec::new()
         } else {
-            B64.decode(aad_b64.as_bytes())
-                .map_err(|e| RvError::ErrString(format!("context: not base64 ({e})")))?
+            B64.decode(aad_b64.as_bytes()).map_err(|e| RvError::ErrString(format!("context: not base64 ({e})")))?
         };
 
-        let p = self
-            .get_policy(req, &name)
-            .await?
-            .ok_or_else(|| RvError::ErrString(format!("unknown key `{name}`")))?;
-        let v = p
-            .version_for_decrypt(framed.version)
-            .map_err(RvError::ErrString)?;
+        let p =
+            self.get_policy(req, &name).await?.ok_or_else(|| RvError::ErrString(format!("unknown key `{name}`")))?;
+        let v = p.version_for_decrypt(framed.version).map_err(RvError::ErrString)?;
         let pt = decrypt_with_modes(&p, &v.material, &framed.bytes, &aad)?;
 
         let mut data = Map::new();
@@ -152,11 +138,7 @@ impl TransitBackendInner {
         Ok(Some(Response::data_response(Some(data))))
     }
 
-    pub async fn handle_rewrap(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_rewrap(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let name = take_str(req, "name");
         let ct_str = take_str(req, "ciphertext");
         let aad_b64 = take_str(req, "context");
@@ -170,21 +152,14 @@ impl TransitBackendInner {
         let aad = if aad_b64.is_empty() {
             Vec::new()
         } else {
-            B64.decode(aad_b64.as_bytes())
-                .map_err(|e| RvError::ErrString(format!("context: not base64 ({e})")))?
+            B64.decode(aad_b64.as_bytes()).map_err(|e| RvError::ErrString(format!("context: not base64 ({e})")))?
         };
 
-        let p = self
-            .get_policy(req, &name)
-            .await?
-            .ok_or_else(|| RvError::ErrString(format!("unknown key `{name}`")))?;
-        let v_old = p
-            .version_for_decrypt(framed.version)
-            .map_err(RvError::ErrString)?;
+        let p =
+            self.get_policy(req, &name).await?.ok_or_else(|| RvError::ErrString(format!("unknown key `{name}`")))?;
+        let v_old = p.version_for_decrypt(framed.version).map_err(RvError::ErrString)?;
         let pt = decrypt_with_modes(&p, &v_old.material, &framed.bytes, &aad)?;
-        let v_new = p
-            .latest()
-            .ok_or_else(|| RvError::ErrString("key has no versions".into()))?;
+        let v_new = p.latest().ok_or_else(|| RvError::ErrString("key has no versions".into()))?;
         let blob = encrypt_with_modes(&p, &v_new.material, &pt, &aad)?;
         let wire = ciphertext::build(v_new.version, None, &blob);
 
@@ -238,8 +213,5 @@ fn decrypt_with_modes(
 }
 
 fn take_str(req: &Request, key: &str) -> String {
-    req.get_data(key)
-        .ok()
-        .and_then(|v| v.as_str().map(|s| s.to_string()))
-        .unwrap_or_default()
+    req.get_data(key).ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default()
 }

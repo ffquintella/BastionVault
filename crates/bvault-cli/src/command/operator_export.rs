@@ -56,9 +56,7 @@ impl CommandExecutor for Export {
                     let body = ret.response_data.unwrap_or(serde_json::Value::Null);
                     let json = serde_json::to_string_pretty(&body)?;
                     std::fs::write(&self.output, json.as_bytes())?;
-                    eprintln!(
-                        "WARNING: Export file contains PLAINTEXT SECRETS. Encrypt it before storing."
-                    );
+                    eprintln!("WARNING: Export file contains PLAINTEXT SECRETS. Encrypt it before storing.");
                     println!("Export written to {}", self.output);
                 } else {
                     ret.print_debug_info();

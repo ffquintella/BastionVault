@@ -211,10 +211,7 @@ impl std::fmt::Debug for CachingTarget {
             .field("config", &self.state.config)
             .field("read_entries", &self.state.reads.len())
             .field("list_entries", &self.state.lists.len())
-            .field(
-                "total_bytes",
-                &self.state.total_bytes.load(Ordering::Relaxed),
-            )
+            .field("total_bytes", &self.state.total_bytes.load(Ordering::Relaxed))
             .finish()
     }
 }
@@ -253,9 +250,7 @@ impl CachingTarget {
             if !prefetch_keys.is_empty() {
                 let prefetch_state = state.clone();
                 tokio::spawn(async move {
-                    prefetch_state
-                        .run_prefetch(prefetch_keys, prefetch_concurrency)
-                        .await;
+                    prefetch_state.run_prefetch(prefetch_keys, prefetch_concurrency).await;
                 });
             }
         }
@@ -324,8 +319,7 @@ impl CachingState {
         }
         if let Some(k) = oldest_key {
             if let Some((_, prev)) = self.reads.remove(&k) {
-                self.total_bytes
-                    .fetch_sub(prev.bytes, Ordering::Relaxed);
+                self.total_bytes.fetch_sub(prev.bytes, Ordering::Relaxed);
                 cache_metrics().record_eviction(CacheLayer::CloudTarget);
             }
         }
@@ -341,11 +335,7 @@ impl CachingState {
         // uncacheable, which fails open on performance in a confusing
         // way.
         while self.reads.len() >= self.config.max_entries
-            || self
-                .total_bytes
-                .load(Ordering::Relaxed)
-                .saturating_add(bytes)
-                > self.config.max_bytes
+            || self.total_bytes.load(Ordering::Relaxed).saturating_add(bytes) > self.config.max_bytes
         {
             if self.reads.is_empty() {
                 break;
@@ -353,14 +343,9 @@ impl CachingState {
             self.evict_oldest_read();
         }
 
-        let new_entry = ReadEntry {
-            value,
-            inserted_at: Instant::now(),
-            bytes,
-        };
+        let new_entry = ReadEntry { value, inserted_at: Instant::now(), bytes };
         if let Some(prev) = self.reads.insert(key.to_string(), new_entry) {
-            self.total_bytes
-                .fetch_sub(prev.bytes, Ordering::Relaxed);
+            self.total_bytes.fetch_sub(prev.bytes, Ordering::Relaxed);
         }
         self.total_bytes.fetch_add(bytes, Ordering::Relaxed);
         cache_metrics().set_size(CacheLayer::CloudTarget, self.reads.len() as i64);
@@ -371,8 +356,7 @@ impl CachingState {
     /// prefix would have returned this key.
     fn invalidate(&self, key: &str) {
         if let Some((_, prev)) = self.reads.remove(key) {
-            self.total_bytes
-                .fetch_sub(prev.bytes, Ordering::Relaxed);
+            self.total_bytes.fetch_sub(prev.bytes, Ordering::Relaxed);
         }
         // The provider's `list(prefix)` returns every key starting
         // with `prefix`. A write to `key` affects every such prefix
@@ -387,15 +371,9 @@ impl CachingState {
     /// concurrent readers of the same uncached key share a single
     /// provider round-trip.
     #[cfg(not(feature = "sync_handler"))]
-    async fn singleflight_fetch(
-        self: &Arc<Self>,
-        key: &str,
-    ) -> Result<Option<Vec<u8>>, RvError> {
-        let gate = self
-            .inflight
-            .entry(key.to_string())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone();
+    async fn singleflight_fetch(self: &Arc<Self>, key: &str) -> Result<Option<Vec<u8>>, RvError> {
+        let gate =
+            self.inflight.entry(key.to_string()).or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone();
         let _guard = gate.lock().await;
 
         // Re-check after acquiring the gate: a prior holder may have
@@ -430,10 +408,7 @@ impl CachingState {
     /// Sync fallback for the `sync_handler` feature — no singleflight,
     /// no spawned refresh, just a direct pass-through.
     #[cfg(feature = "sync_handler")]
-    async fn singleflight_fetch(
-        self: &Arc<Self>,
-        key: &str,
-    ) -> Result<Option<Vec<u8>>, RvError> {
+    async fn singleflight_fetch(self: &Arc<Self>, key: &str) -> Result<Option<Vec<u8>>, RvError> {
         let fresh = self.target.read(key).await?;
         self.insert_read(key, fresh.clone());
         Ok(fresh)
@@ -557,13 +532,7 @@ impl FileTarget for CachingTarget {
         cache_metrics().record_miss(CacheLayer::CloudTarget);
 
         let fresh = self.state.target.list(prefix).await?;
-        self.state.lists.insert(
-            prefix.to_string(),
-            ListEntry {
-                values: fresh.clone(),
-                inserted_at: Instant::now(),
-            },
-        );
+        self.state.lists.insert(prefix.to_string(), ListEntry { values: fresh.clone(), inserted_at: Instant::now() });
         Ok(fresh)
     }
 
@@ -623,10 +592,7 @@ mod tests {
         }
         async fn write(&self, key: &str, value: &[u8]) -> Result<(), RvError> {
             self.writes.fetch_add(1, AtomicOrdering::Relaxed);
-            self.data
-                .lock()
-                .unwrap()
-                .insert(key.to_string(), value.to_vec());
+            self.data.lock().unwrap().insert(key.to_string(), value.to_vec());
             Ok(())
         }
         async fn delete(&self, key: &str) -> Result<(), RvError> {
@@ -636,14 +602,7 @@ mod tests {
         }
         async fn list(&self, prefix: &str) -> Result<Vec<String>, RvError> {
             self.lists.fetch_add(1, AtomicOrdering::Relaxed);
-            Ok(self
-                .data
-                .lock()
-                .unwrap()
-                .keys()
-                .filter(|k| k.starts_with(prefix))
-                .cloned()
-                .collect())
+            Ok(self.data.lock().unwrap().keys().filter(|k| k.starts_with(prefix)).cloned().collect())
         }
         async fn lock(&self, _: &str) -> Result<Box<dyn Any + Send>, RvError> {
             Ok(Box::new(()))
@@ -665,11 +624,7 @@ mod tests {
         let b = cache.read("k").await.unwrap();
         assert_eq!(a.as_deref(), Some(b"v".as_ref()));
         assert_eq!(b.as_deref(), Some(b"v".as_ref()));
-        assert_eq!(
-            inner.read_calls(),
-            1,
-            "second read should have served from cache"
-        );
+        assert_eq!(inner.read_calls(), 1, "second read should have served from cache");
     }
 
     #[tokio::test]
@@ -677,25 +632,14 @@ mod tests {
         let (cache, inner) = make_cache(CacheConfig::default());
         assert!(cache.read("missing").await.unwrap().is_none());
         assert!(cache.read("missing").await.unwrap().is_none());
-        assert_eq!(
-            inner.read_calls(),
-            1,
-            "negative result should be cached to keep barrier probes off the wire"
-        );
+        assert_eq!(inner.read_calls(), 1, "negative result should be cached to keep barrier probes off the wire");
     }
 
     #[tokio::test]
     async fn write_invalidates_cached_read() {
         let (cache, inner) = make_cache(CacheConfig::default());
-        inner
-            .data
-            .lock()
-            .unwrap()
-            .insert("k".into(), b"old".to_vec());
-        assert_eq!(
-            cache.read("k").await.unwrap().as_deref(),
-            Some(b"old".as_ref())
-        );
+        inner.data.lock().unwrap().insert("k".into(), b"old".to_vec());
+        assert_eq!(cache.read("k").await.unwrap().as_deref(), Some(b"old".as_ref()));
 
         cache.write("k", b"new").await.unwrap();
         assert_eq!(
@@ -709,45 +653,23 @@ mod tests {
     #[tokio::test]
     async fn delete_invalidates_cached_read() {
         let (cache, inner) = make_cache(CacheConfig::default());
-        inner
-            .data
-            .lock()
-            .unwrap()
-            .insert("k".into(), b"v".to_vec());
-        assert_eq!(
-            cache.read("k").await.unwrap().as_deref(),
-            Some(b"v".as_ref())
-        );
+        inner.data.lock().unwrap().insert("k".into(), b"v".to_vec());
+        assert_eq!(cache.read("k").await.unwrap().as_deref(), Some(b"v".as_ref()));
 
         cache.delete("k").await.unwrap();
-        assert!(
-            cache.read("k").await.unwrap().is_none(),
-            "delete must invalidate the cached hit"
-        );
+        assert!(cache.read("k").await.unwrap().is_none(), "delete must invalidate the cached hit");
     }
 
     #[tokio::test]
     async fn list_is_cached_then_invalidated_on_write_under_prefix() {
         let (cache, inner) = make_cache(CacheConfig::default());
-        inner
-            .data
-            .lock()
-            .unwrap()
-            .insert("a/1".into(), b"x".to_vec());
-        inner
-            .data
-            .lock()
-            .unwrap()
-            .insert("a/2".into(), b"y".to_vec());
+        inner.data.lock().unwrap().insert("a/1".into(), b"x".to_vec());
+        inner.data.lock().unwrap().insert("a/2".into(), b"y".to_vec());
 
         let first = cache.list("a/").await.unwrap();
         assert_eq!(first.len(), 2);
         let _second = cache.list("a/").await.unwrap();
-        assert_eq!(
-            inner.list_calls(),
-            1,
-            "second list should have served from cache"
-        );
+        assert_eq!(inner.list_calls(), 1, "second list should have served from cache");
 
         cache.write("a/3", b"z").await.unwrap();
         let third = cache.list("a/").await.unwrap();
@@ -767,45 +689,25 @@ mod tests {
             ..CacheConfig::default()
         };
         let (cache, inner) = make_cache(config);
-        inner
-            .data
-            .lock()
-            .unwrap()
-            .insert("k".into(), b"v".to_vec());
+        inner.data.lock().unwrap().insert("k".into(), b"v".to_vec());
 
         let _ = cache.read("k").await.unwrap();
         tokio::time::sleep(Duration::from_millis(40)).await;
         let _ = cache.read("k").await.unwrap();
-        assert_eq!(
-            inner.read_calls(),
-            2,
-            "expired entry must force a provider re-fetch"
-        );
+        assert_eq!(inner.read_calls(), 2, "expired entry must force a provider re-fetch");
     }
 
     #[tokio::test]
     async fn byte_cap_evicts_old_entries() {
-        let config = CacheConfig {
-            max_bytes: 16,
-            max_entries: 1024,
-            ..CacheConfig::default()
-        };
+        let config = CacheConfig { max_bytes: 16, max_entries: 1024, ..CacheConfig::default() };
         let (cache, inner) = make_cache(config);
         for i in 0..8u8 {
-            inner
-                .data
-                .lock()
-                .unwrap()
-                .insert(format!("k{i}"), vec![b'x'; 4]);
+            inner.data.lock().unwrap().insert(format!("k{i}"), vec![b'x'; 4]);
         }
         for i in 0..8u8 {
             let _ = cache.read(&format!("k{i}")).await.unwrap();
         }
-        assert!(
-            cache.cached_bytes() <= 16,
-            "cache held {} bytes, exceeds 16-byte cap",
-            cache.cached_bytes()
-        );
+        assert!(cache.cached_bytes() <= 16, "cache held {} bytes, exceeds 16-byte cap", cache.cached_bytes());
         assert!(
             cache.cached_entries() <= 4,
             "cache held {} entries, expected ≤ 4 for a 16-byte / 4-bytes-each cap",
@@ -815,18 +717,10 @@ mod tests {
 
     #[tokio::test]
     async fn entry_cap_evicts_old_entries() {
-        let config = CacheConfig {
-            max_entries: 3,
-            max_bytes: u64::MAX,
-            ..CacheConfig::default()
-        };
+        let config = CacheConfig { max_entries: 3, max_bytes: u64::MAX, ..CacheConfig::default() };
         let (cache, inner) = make_cache(config);
         for i in 0..6u8 {
-            inner
-                .data
-                .lock()
-                .unwrap()
-                .insert(format!("k{i}"), b"v".to_vec());
+            inner.data.lock().unwrap().insert(format!("k{i}"), b"v".to_vec());
         }
         for i in 0..6u8 {
             let _ = cache.read(&format!("k{i}")).await.unwrap();
@@ -839,11 +733,7 @@ mod tests {
     #[tokio::test]
     async fn singleflight_coalesces_concurrent_misses() {
         let (cache, inner) = make_cache(CacheConfig::default());
-        inner
-            .data
-            .lock()
-            .unwrap()
-            .insert("hot".into(), b"v".to_vec());
+        inner.data.lock().unwrap().insert("hot".into(), b"v".to_vec());
         // 10ms per read is plenty for 8 tasks to all be in flight by
         // the time the first one reaches the provider.
         inner.set_read_delay(Duration::from_millis(10));
@@ -852,9 +742,7 @@ mod tests {
         let mut handles = Vec::new();
         for _ in 0..8 {
             let c = cache.clone();
-            handles.push(tokio::spawn(async move {
-                c.read("hot").await.unwrap()
-            }));
+            handles.push(tokio::spawn(async move { c.read("hot").await.unwrap() }));
         }
         for h in handles {
             let got = h.await.unwrap();
@@ -879,11 +767,7 @@ mod tests {
             ..CacheConfig::default()
         };
         let (cache, inner) = make_cache(config);
-        inner
-            .data
-            .lock()
-            .unwrap()
-            .insert("k".into(), b"v1".to_vec());
+        inner.data.lock().unwrap().insert("k".into(), b"v1".to_vec());
         let _ = cache.read("k").await.unwrap(); // populate
         assert_eq!(inner.read_calls(), 1);
 
@@ -892,11 +776,7 @@ mod tests {
         // Mutate the provider so the background refresh picks up
         // the new value, and issue a read. The read should serve
         // the OLD cached value (SWR) while a spawn goes out.
-        inner
-            .data
-            .lock()
-            .unwrap()
-            .insert("k".into(), b"v2".to_vec());
+        inner.data.lock().unwrap().insert("k".into(), b"v2".to_vec());
 
         let got = cache.read("k").await.unwrap();
         assert_eq!(
@@ -907,46 +787,23 @@ mod tests {
 
         // Give the spawned refresh a moment to complete.
         tokio::time::sleep(Duration::from_millis(40)).await;
-        assert_eq!(
-            inner.read_calls(),
-            2,
-            "background refresh should have produced a second provider call"
-        );
+        assert_eq!(inner.read_calls(), 2, "background refresh should have produced a second provider call");
 
         // Next read (still within new TTL of the refreshed entry)
         // sees the updated value without another provider call.
         let got2 = cache.read("k").await.unwrap();
         assert_eq!(got2.as_deref(), Some(b"v2".as_ref()));
-        assert_eq!(
-            inner.read_calls(),
-            2,
-            "fresh hit after SWR refresh should NOT have called the provider again"
-        );
+        assert_eq!(inner.read_calls(), 2, "fresh hit after SWR refresh should NOT have called the provider again");
     }
 
     #[tokio::test]
     async fn prefetch_loads_configured_keys_on_startup() {
         let inner = Arc::new(CountingTarget::default());
-        inner
-            .data
-            .lock()
-            .unwrap()
-            .insert("warm/a".into(), b"1".to_vec());
-        inner
-            .data
-            .lock()
-            .unwrap()
-            .insert("warm/b".into(), b"2".to_vec());
-        inner
-            .data
-            .lock()
-            .unwrap()
-            .insert("cold".into(), b"3".to_vec());
+        inner.data.lock().unwrap().insert("warm/a".into(), b"1".to_vec());
+        inner.data.lock().unwrap().insert("warm/b".into(), b"2".to_vec());
+        inner.data.lock().unwrap().insert("cold".into(), b"3".to_vec());
 
-        let config = CacheConfig {
-            prefetch_keys: vec!["warm/a".into(), "warm/b".into()],
-            ..CacheConfig::default()
-        };
+        let config = CacheConfig { prefetch_keys: vec!["warm/a".into(), "warm/b".into()], ..CacheConfig::default() };
         let cache = CachingTarget::new(inner.clone(), config);
 
         // Give the background prefetch spawn a chance to run. In
@@ -969,11 +826,7 @@ mod tests {
         let b = cache.read("warm/b").await.unwrap();
         assert_eq!(a.as_deref(), Some(b"1".as_ref()));
         assert_eq!(b.as_deref(), Some(b"2".as_ref()));
-        assert_eq!(
-            inner.read_calls(),
-            pre_reads,
-            "cache hits after prefetch should not touch the provider"
-        );
+        assert_eq!(inner.read_calls(), pre_reads, "cache hits after prefetch should not touch the provider");
 
         // An unprefetched key still misses first, as expected.
         let c = cache.read("cold").await.unwrap();
@@ -986,16 +839,9 @@ mod tests {
         // NaN, negative, and >1 all collapse to valid clamped
         // configurations rather than producing panics or nonsense.
         for bad in [f32::NAN, -1.0, 2.0, f32::INFINITY] {
-            let cfg = CacheConfig {
-                stale_ratio: bad,
-                ..CacheConfig::default()
-            };
+            let cfg = CacheConfig { stale_ratio: bad, ..CacheConfig::default() };
             let (cache, inner) = make_cache(cfg);
-            inner
-                .data
-                .lock()
-                .unwrap()
-                .insert("k".into(), b"v".to_vec());
+            inner.data.lock().unwrap().insert("k".into(), b"v".to_vec());
             // Must not panic.
             let _ = cache.read("k").await.unwrap();
         }

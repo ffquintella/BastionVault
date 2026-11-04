@@ -152,7 +152,8 @@ lazy_static! {
             uuid: generate_uuid(),
             path: "ssh-broker/".to_string(),
             logical_type: "ssh-broker".to_string(),
-            description: "SSH login-class (broker) policy — shared-credential vs brokered, four-tier lockable".to_string(),
+            description: "SSH login-class (broker) policy — shared-credential vs brokered, four-tier lockable"
+                .to_string(),
             ..Default::default()
         }
     ];

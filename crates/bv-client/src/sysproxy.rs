@@ -47,14 +47,7 @@ pub fn system_proxy_uri() -> Option<String> {
 
 /// Proxy environment variables ureq reads, in `Proxy::try_from_env`'s
 /// precedence order (and matching its case handling).
-const ENV_VARS: &[&str] = &[
-    "ALL_PROXY",
-    "all_proxy",
-    "HTTPS_PROXY",
-    "https_proxy",
-    "HTTP_PROXY",
-    "http_proxy",
-];
+const ENV_VARS: &[&str] = &["ALL_PROXY", "all_proxy", "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"];
 
 /// The first proxy environment variable that is set to a non-empty value,
 /// as `(var_name, value)`.
@@ -88,10 +81,7 @@ pub fn describe_system_proxy() -> (String, Option<String>) {
     }
     match platform_proxy_uri() {
         Some(uri) => ("system network settings".to_string(), Some(uri)),
-        None => (
-            "no proxy configured (direct connection)".to_string(),
-            None,
-        ),
+        None => ("no proxy configured (direct connection)".to_string(), None),
     }
 }
 
@@ -100,10 +90,7 @@ fn platform_proxy_uri() -> Option<String> {
     // `scutil --proxy` dumps the active System Settings network proxy
     // dictionary as plain text. Parsing its output avoids a dependency
     // on the SystemConfiguration framework bindings.
-    let output = std::process::Command::new("scutil")
-        .arg("--proxy")
-        .output()
-        .ok()?;
+    let output = std::process::Command::new("scutil").arg("--proxy").output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -200,10 +187,7 @@ fn platform_proxy_uri() -> Option<String> {
 /// emits (`'host'` → `host`, `uint32 8080` → `8080`).
 #[cfg(target_os = "linux")]
 fn gsettings_get(schema: &str, key: &str) -> Option<String> {
-    let output = std::process::Command::new("gsettings")
-        .args(["get", schema, key])
-        .output()
-        .ok()?;
+    let output = std::process::Command::new("gsettings").args(["get", schema, key]).output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -232,26 +216,16 @@ mod tests {
             HTTPEnable : 1\n  HTTPProxy : 10.0.0.1\n  HTTPPort : 3128\n  \
             HTTPSEnable : 1\n  HTTPSProxy : 10.0.0.2\n  HTTPSPort : 3129\n  \
             SOCKSEnable : 0\n}";
-        assert_eq!(
-            parse_scutil_proxy(text),
-            Some("http://10.0.0.2:3129".to_string())
-        );
+        assert_eq!(parse_scutil_proxy(text), Some("http://10.0.0.2:3129".to_string()));
     }
 
     #[test]
     fn scutil_falls_back_to_http_then_socks() {
         let http_only = "HTTPEnable : 1\nHTTPProxy : 10.0.0.1\nHTTPPort : 3128\nHTTPSEnable : 0\nSOCKSEnable : 0\n";
-        assert_eq!(
-            parse_scutil_proxy(http_only),
-            Some("http://10.0.0.1:3128".to_string())
-        );
+        assert_eq!(parse_scutil_proxy(http_only), Some("http://10.0.0.1:3128".to_string()));
 
-        let socks_only =
-            "HTTPEnable : 0\nHTTPSEnable : 0\nSOCKSEnable : 1\nSOCKSProxy : 10.0.0.9\nSOCKSPort : 1080\n";
-        assert_eq!(
-            parse_scutil_proxy(socks_only),
-            Some("socks5://10.0.0.9:1080".to_string())
-        );
+        let socks_only = "HTTPEnable : 0\nHTTPSEnable : 0\nSOCKSEnable : 1\nSOCKSProxy : 10.0.0.9\nSOCKSPort : 1080\n";
+        assert_eq!(parse_scutil_proxy(socks_only), Some("socks5://10.0.0.9:1080".to_string()));
     }
 
     #[test]
@@ -268,9 +242,6 @@ mod tests {
     #[test]
     fn scutil_omits_port_when_absent() {
         let no_port = "HTTPSEnable : 1\nHTTPSProxy : proxy.local\n";
-        assert_eq!(
-            parse_scutil_proxy(no_port),
-            Some("http://proxy.local".to_string())
-        );
+        assert_eq!(parse_scutil_proxy(no_port), Some("http://proxy.local".to_string()));
     }
 }

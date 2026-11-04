@@ -27,10 +27,7 @@ use http::Request;
 use serde::Deserialize;
 use ureq::Agent;
 
-use crate::{
-    discovery::SrvCandidate,
-    tls::ClientTlsConfig,
-};
+use crate::{discovery::SrvCandidate, tls::ClientTlsConfig};
 
 /// Classified state of a single node. `ActiveLeader` and `Follower`
 /// are the only states the selector will route to; the rest are
@@ -145,11 +142,7 @@ pub struct HealthConfig {
 
 impl Default for HealthConfig {
     fn default() -> Self {
-        Self {
-            probe_timeout: Duration::from_millis(1500),
-            parallelism: 4,
-            use_system_proxy: false,
-        }
+        Self { probe_timeout: Duration::from_millis(1500), parallelism: 4, use_system_proxy: false }
     }
 }
 
@@ -175,9 +168,7 @@ pub async fn probe_all(
     for _ in 0..parallelism {
         if let Some((idx, cand)) = iter.next() {
             let agent = agent.clone();
-            handles.push(tokio::spawn(async move {
-                (idx, probe_one(&agent, &cand).await)
-            }));
+            handles.push(tokio::spawn(async move { (idx, probe_one(&agent, &cand).await) }));
         }
     }
 
@@ -194,9 +185,7 @@ pub async fn probe_all(
         results.push(v);
         if let Some((idx, cand)) = iter.next() {
             let agent = agent.clone();
-            handles.push(tokio::spawn(async move {
-                (idx, probe_one(&agent, &cand).await)
-            }));
+            handles.push(tokio::spawn(async move { (idx, probe_one(&agent, &cand).await) }));
         }
     }
 
@@ -204,11 +193,7 @@ pub async fn probe_all(
     results.into_iter().map(|(_, r)| r).collect()
 }
 
-fn build_probe_agent(
-    timeout: Duration,
-    tls: Option<&ClientTlsConfig>,
-    use_system_proxy: bool,
-) -> Agent {
+fn build_probe_agent(timeout: Duration, tls: Option<&ClientTlsConfig>, use_system_proxy: bool) -> Agent {
     let mut cfg = ureq::Agent::config_builder()
         .timeout_connect(Some(timeout))
         .timeout_global(Some(timeout))
@@ -248,12 +233,7 @@ async fn probe_one(agent: &Agent, cand: &SrvCandidate) -> ProbeResult {
 
     let join = tokio::task::spawn_blocking(move || {
         let start = Instant::now();
-        let req = match Request::builder()
-            .method("GET")
-            .uri(&url)
-            .header("Accept", "application/json")
-            .body(())
-        {
+        let req = match Request::builder().method("GET").uri(&url).header("Accept", "application/json").body(()) {
             Ok(r) => r,
             Err(e) => {
                 return ProbeResult {
@@ -302,9 +282,7 @@ async fn probe_one(agent: &Agent, cand: &SrvCandidate) -> ProbeResult {
             Err(e) => {
                 return ProbeResult {
                     candidate: cand_for_thread,
-                    state: NodeState::Unreachable(format!(
-                        "parse health body (HTTP {status}): {e}"
-                    )),
+                    state: NodeState::Unreachable(format!("parse health body (HTTP {status}): {e}")),
                     rtt_ms: rtt_ms_from(start),
                     cluster_id: None,
                     version: None,
@@ -358,12 +336,7 @@ fn dominant_cluster_id(probes: &[&ProbeResult]) -> Option<String> {
     }
     tally
         .into_iter()
-        .max_by(|a, b| {
-            a.1.0
-                .cmp(&b.1.0)
-                .then_with(|| b.1.1.cmp(&a.1.1))
-                .then_with(|| b.1.2.cmp(&a.1.2))
-        })
+        .max_by(|a, b| a.1 .0.cmp(&b.1 .0).then_with(|| b.1 .1.cmp(&a.1 .1)).then_with(|| b.1 .2.cmp(&a.1 .2)))
         .map(|(id, _)| id.to_string())
 }
 
@@ -378,10 +351,7 @@ pub fn pick(probes: &[ProbeResult]) -> Option<Selected> {
 
     // Hard SRV-priority floor.
     let min_priority = healthy.iter().map(|p| p.candidate.priority).min().unwrap();
-    let bucket: Vec<&ProbeResult> = healthy
-        .into_iter()
-        .filter(|p| p.candidate.priority == min_priority)
-        .collect();
+    let bucket: Vec<&ProbeResult> = healthy.into_iter().filter(|p| p.candidate.priority == min_priority).collect();
 
     // Cluster_id sanity check.
     let dominant = dominant_cluster_id(&bucket);
@@ -426,13 +396,7 @@ mod tests {
     use super::*;
 
     fn cand(target: &str, priority: u16, weight: u16) -> SrvCandidate {
-        SrvCandidate {
-            target: target.to_string(),
-            port: 8200,
-            scheme: "https".to_string(),
-            priority,
-            weight,
-        }
+        SrvCandidate { target: target.to_string(), port: 8200, scheme: "https".to_string(), priority, weight }
     }
 
     fn probe(
@@ -454,19 +418,37 @@ mod tests {
 
     #[test]
     fn classify_active_leader() {
-        let r = HealthResponse { initialized: true, sealed: false, standby: false, performance_standby: false, ..Default::default() };
+        let r = HealthResponse {
+            initialized: true,
+            sealed: false,
+            standby: false,
+            performance_standby: false,
+            ..Default::default()
+        };
         assert_eq!(classify(&r), NodeState::ActiveLeader);
     }
 
     #[test]
     fn classify_follower_standby() {
-        let r = HealthResponse { initialized: true, sealed: false, standby: true, performance_standby: false, ..Default::default() };
+        let r = HealthResponse {
+            initialized: true,
+            sealed: false,
+            standby: true,
+            performance_standby: false,
+            ..Default::default()
+        };
         assert_eq!(classify(&r), NodeState::Follower);
     }
 
     #[test]
     fn classify_follower_perf_standby() {
-        let r = HealthResponse { initialized: true, sealed: false, standby: false, performance_standby: true, ..Default::default() };
+        let r = HealthResponse {
+            initialized: true,
+            sealed: false,
+            standby: false,
+            performance_standby: true,
+            ..Default::default()
+        };
         assert_eq!(classify(&r), NodeState::Follower);
     }
 

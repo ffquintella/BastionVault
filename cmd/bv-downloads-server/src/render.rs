@@ -102,10 +102,7 @@ impl fmt::Display for RenderError {
 impl std::error::Error for RenderError {}
 
 /// Render the page. `static_dir` overrides the compiled-in brand assets.
-pub fn render(
-    validated: &ValidatedManifest,
-    static_dir: Option<&Path>,
-) -> Result<RenderedIndex, RenderError> {
+pub fn render(validated: &ValidatedManifest, static_dir: Option<&Path>) -> Result<RenderedIndex, RenderError> {
     let (style, logo) = match static_dir {
         Some(dir) => (read_asset(dir, "style.css")?, read_asset(dir, "logo.svg")?),
         None => (DEFAULT_STYLE.to_string(), DEFAULT_LOGO.to_string()),
@@ -145,10 +142,7 @@ fn read_asset(dir: &Path, name: &str) -> Result<String, RenderError> {
 /// `sha256-<base64>`, the CSP source expression body for an inline block.
 fn csp_hash(body: &str) -> String {
     let digest = Sha256::digest(body.as_bytes());
-    format!(
-        "sha256-{}",
-        base64::engine::general_purpose::STANDARD.encode(digest)
-    )
+    format!("sha256-{}", base64::engine::general_purpose::STANDARD.encode(digest))
 }
 
 /// Group the manifest's files into the page's three sections, preserving the
@@ -161,12 +155,7 @@ pub fn sections(validated: &ValidatedManifest) -> Vec<Section> {
         .map(|&platform| Section {
             slug: platform.slug(),
             label: platform.label(),
-            rows: m
-                .files
-                .iter()
-                .filter(|f| f.platform == platform)
-                .map(|f| row(&version_dir, f))
-                .collect(),
+            rows: m.files.iter().filter(|f| f.platform == platform).map(|f| row(&version_dir, f)).collect(),
         })
         .filter(|s| !s.rows.is_empty())
         .collect()
@@ -267,11 +256,7 @@ mod tests {
             let name = artefact_name(k, a);
             let body = name.as_bytes().to_vec();
             fs::write(dir.path().join("v0.4.0").join(&name), &body).expect("write");
-            fs::write(
-                dir.path().join("v0.4.0").join(format!("{name}.sig")),
-                b"signature",
-            )
-            .expect("write sig");
+            fs::write(dir.path().join("v0.4.0").join(format!("{name}.sig")), b"signature").expect("write sig");
             entries.push(format!(
                 r#"{{"platform":"{}","arch":"{}","kind":"{}","name":"{name}","size":{},
                     "sha256":"{}","cosign_signature":"v0.4.0/{name}.sig"}}"#,
@@ -304,20 +289,11 @@ mod tests {
         for (p, k, a) in every_kind() {
             let name = artefact_name(k, a);
             assert!(page.html.contains(&name), "missing {name}");
-            assert!(
-                page.html.contains(&format!("href=\"/v0.4.0/{name}\"")),
-                "missing download link for {name}"
-            );
-            assert!(
-                page.html.contains(&format!("href=\"/v0.4.0/{name}.sig\"")),
-                "missing signature link for {name}"
-            );
+            assert!(page.html.contains(&format!("href=\"/v0.4.0/{name}\"")), "missing download link for {name}");
+            assert!(page.html.contains(&format!("href=\"/v0.4.0/{name}.sig\"")), "missing signature link for {name}");
             assert!(page.html.contains(k.label()), "missing label for {k:?}");
             assert!(page.html.contains(a.label()), "missing arch for {a:?}");
-            assert!(
-                page.html.contains(&format!("id=\"{}\"", p.slug())),
-                "missing section for {p:?}"
-            );
+            assert!(page.html.contains(&format!("id=\"{}\"", p.slug())), "missing section for {p:?}");
         }
     }
 
@@ -327,11 +303,7 @@ mod tests {
         let validated = load_and_validate(dir.path(), false).expect("valid");
         let page = render(&validated, None).expect("render");
         for f in &validated.manifest.files {
-            assert!(
-                page.html.contains(&f.sha256),
-                "sha256 for {} not on the page",
-                f.name
-            );
+            assert!(page.html.contains(&f.sha256), "sha256 for {} not on the page", f.name);
         }
     }
 

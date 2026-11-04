@@ -71,10 +71,7 @@ pub fn default_audit_log_path() -> Option<PathBuf> {
 /// operations/security streams.
 pub fn default_audit_options() -> Option<(PathBuf, u64, u32)> {
     let path = DEFAULT_AUDIT_PATH.get()?.clone();
-    let (size, keep) = ROTATE_POLICY.get().copied().unwrap_or((
-        DEFAULT_ROTATE_SIZE_BYTES,
-        DEFAULT_ROTATE_KEEP,
-    ));
+    let (size, keep) = ROTATE_POLICY.get().copied().unwrap_or((DEFAULT_ROTATE_SIZE_BYTES, DEFAULT_ROTATE_KEEP));
     Some((path, size, keep))
 }
 
@@ -106,16 +103,8 @@ pub struct LogConfig<'a> {
 /// call is a no-op — useful for tests that spin up multiple servers).
 pub fn init(cfg: LogConfig<'_>) -> Result<(), SetLoggerError> {
     let filter = LevelFilters::parse(cfg.level);
-    let rotate_size = if cfg.rotate_size_bytes == 0 {
-        DEFAULT_ROTATE_SIZE_BYTES
-    } else {
-        cfg.rotate_size_bytes
-    };
-    let rotate_keep = if cfg.rotate_keep == 0 {
-        DEFAULT_ROTATE_KEEP
-    } else {
-        cfg.rotate_keep
-    };
+    let rotate_size = if cfg.rotate_size_bytes == 0 { DEFAULT_ROTATE_SIZE_BYTES } else { cfg.rotate_size_bytes };
+    let rotate_keep = if cfg.rotate_keep == 0 { DEFAULT_ROTATE_KEEP } else { cfg.rotate_keep };
 
     let file_sink = if cfg.log_dir.is_empty() {
         None
@@ -123,10 +112,7 @@ pub fn init(cfg: LogConfig<'_>) -> Result<(), SetLoggerError> {
         match open_sinks(Path::new(cfg.log_dir), rotate_size, rotate_keep) {
             Ok(s) => Some(s),
             Err(e) => {
-                eprintln!(
-                    "logging: failed to open log files under `{}`: {e}. Falling back to stderr.",
-                    cfg.log_dir
-                );
+                eprintln!("logging: failed to open log files under `{}`: {e}. Falling back to stderr.", cfg.log_dir);
                 None
             }
         }
@@ -147,11 +133,7 @@ pub fn init(cfg: LogConfig<'_>) -> Result<(), SetLoggerError> {
     // per-target override like `hiqlite=debug` under a `warn` global
     // would be filtered out before `FanoutLogger::log` runs.
     let max_level = filter.max_verbosity();
-    let logger = FanoutLogger {
-        filter,
-        files: file_sink.map(Mutex::new),
-        stderr,
-    };
+    let logger = FanoutLogger { filter, files: file_sink.map(Mutex::new), stderr };
 
     log::set_max_level(max_level);
     match log::set_boxed_logger(Box::new(logger)) {
@@ -219,10 +201,7 @@ impl LevelFilters {
     /// The most verbose level any directive can enable. Used to set
     /// the `log` crate's global `max_level` ceiling.
     fn max_verbosity(&self) -> LevelFilter {
-        self.targets
-            .iter()
-            .map(|(_, l)| *l)
-            .fold(self.global, |acc, l| acc.max(l))
+        self.targets.iter().map(|(_, l)| *l).fold(self.global, |acc, l| acc.max(l))
     }
 }
 
@@ -253,13 +232,7 @@ impl RotatingFile {
     fn open(path: PathBuf, max_size: u64, keep: u32) -> io::Result<Self> {
         let file = open_append(&path)?;
         let size = file.metadata().map(|m| m.len()).unwrap_or(0);
-        Ok(Self {
-            path,
-            file,
-            size,
-            max_size,
-            keep,
-        })
+        Ok(Self { path, file, size, max_size, keep })
     }
 
     /// Append a line + newline. Rotates first if the write would
@@ -273,10 +246,7 @@ impl RotatingFile {
             if let Err(e) = self.rotate() {
                 // Log to stderr because the file sink is what's
                 // failing — using log::warn! here would recurse.
-                eprintln!(
-                    "logging: rotate of {} failed: {e}. Continuing in place.",
-                    self.path.display()
-                );
+                eprintln!("logging: rotate of {} failed: {e}. Continuing in place.", self.path.display());
             }
         }
         writeln!(self.file, "{line}")?;
@@ -336,11 +306,7 @@ fn open_sinks(dir: &Path, max_size: u64, keep: u32) -> io::Result<FileSink> {
     let ops = RotatingFile::open(dir.join("operations.log"), max_size, keep)?;
     let security = RotatingFile::open(dir.join("security.log"), max_size, keep)?;
     let audit_path = dir.join("audit.log");
-    Ok(FileSink {
-        ops,
-        security,
-        audit_path,
-    })
+    Ok(FileSink { ops, security, audit_path })
 }
 
 fn open_append(path: &Path) -> io::Result<std::fs::File> {
@@ -371,12 +337,7 @@ impl Log for FanoutLogger {
         }
 
         let line = format_line(record);
-        let is_security = record
-            .target()
-            .split("::")
-            .next()
-            .map(|t| t == SECURITY_TARGET_PREFIX)
-            .unwrap_or(false);
+        let is_security = record.target().split("::").next().map(|t| t == SECURITY_TARGET_PREFIX).unwrap_or(false);
 
         if self.stderr {
             // Best-effort; ignore stderr write failures (closed pipe,
@@ -490,10 +451,7 @@ mod tests {
         // chatty hiqlite raft WebSocket logs.
         let f = LevelFilters::parse("info,hiqlite=warn");
         assert_eq!(f.global, LevelFilter::Info);
-        assert_eq!(
-            f.level_for("hiqlite::network::raft_server"),
-            LevelFilter::Warn
-        );
+        assert_eq!(f.level_for("hiqlite::network::raft_server"), LevelFilter::Warn);
         // A WARN from hiqlite still passes; INFO does not.
         assert!(LevelFilter::Warn >= LevelFilter::Warn);
         assert!(f.level_for("hiqlite::network::raft_server") < LevelFilter::Info);

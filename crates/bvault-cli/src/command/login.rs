@@ -5,8 +5,8 @@ use serde_json::Value;
 use crate::{
     api::secret::Secret,
     command::{self, auth::LoginHandlers, CommandExecutor},
-        util,
     errors::RvError,
+    util,
     utils::kv_builder::KvPairParse,
 };
 

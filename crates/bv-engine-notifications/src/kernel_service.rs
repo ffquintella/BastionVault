@@ -24,15 +24,8 @@ use super::{
 
 #[maybe_async::maybe_async]
 impl NotificationSink for NotificationsModule {
-    async fn send_from_plugin(
-        &self,
-        author: &str,
-        notification: Value,
-        ns_path: &str,
-    ) -> Result<Value, RvError> {
-        let service = self
-            .service()
-            .ok_or_else(|| crate::bv_error_string!("notification service unavailable"))?;
+    async fn send_from_plugin(&self, author: &str, notification: Value, ns_path: &str) -> Result<Value, RvError> {
+        let service = self.service().ok_or_else(|| crate::bv_error_string!("notification service unavailable"))?;
         // A malformed `severity` must not fail the send — the pre-trait code
         // ran it through `Severity::parse`, which defaults unknown input to
         // `info`. Normalise before decoding so that stays true.
@@ -46,27 +39,14 @@ impl NotificationSink for NotificationsModule {
         Ok(json!({ "id": outcome.id, "recipient_count": outcome.recipient_count }))
     }
 
-    async fn list_authored_by_plugin(
-        &self,
-        author: &str,
-        ns_path: &str,
-    ) -> Result<Vec<Value>, RvError> {
-        let service = self
-            .service()
-            .ok_or_else(|| crate::bv_error_string!("notification service unavailable"))?;
+    async fn list_authored_by_plugin(&self, author: &str, ns_path: &str) -> Result<Vec<Value>, RvError> {
+        let service = self.service().ok_or_else(|| crate::bv_error_string!("notification service unavailable"))?;
         let list = service.list_authored_by_plugin(author, ns_path).await?;
         list.into_iter().map(|n| serde_json::to_value(n).map_err(RvError::from)).collect()
     }
 
-    async fn get_authored_by_plugin(
-        &self,
-        author: &str,
-        ns_path: &str,
-        id: &str,
-    ) -> Result<Option<Value>, RvError> {
-        let service = self
-            .service()
-            .ok_or_else(|| crate::bv_error_string!("notification service unavailable"))?;
+    async fn get_authored_by_plugin(&self, author: &str, ns_path: &str, id: &str) -> Result<Option<Value>, RvError> {
+        let service = self.service().ok_or_else(|| crate::bv_error_string!("notification service unavailable"))?;
         match service.get_authored_by_plugin(author, ns_path, id).await? {
             Some(n) => Ok(Some(serde_json::to_value(n)?)),
             None => Ok(None),

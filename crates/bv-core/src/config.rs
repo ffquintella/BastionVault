@@ -512,7 +512,9 @@ where
             match value {
                 "tls12" => Ok(TlsVersion::Tls12),
                 "tls13" => Ok(TlsVersion::Tls13),
-                "tls10" | "tls11" => Err(E::custom(format!("TLS version {value} is not supported; use tls12 or tls13"))),
+                "tls10" | "tls11" => {
+                    Err(E::custom(format!("TLS version {value} is not supported; use tls12 or tls13")))
+                }
                 _ => Err(E::custom(format!("unexpected TLS version: {value}"))),
             }
         }
@@ -572,9 +574,7 @@ impl Config {
             return Ok(None);
         }
         if self.hsm.len() > 1 {
-            return Err(RvError::ErrHsmConfigInvalid(
-                "at most one `hsm` seal block may be configured".into(),
-            ));
+            return Err(RvError::ErrHsmConfigInvalid("at most one `hsm` seal block may be configured".into()));
         }
         let (label, block) = self.hsm.iter().next().expect("len checked above");
         let resolved = crate::hsm::resolve_config(label, block)?;
@@ -1146,10 +1146,7 @@ mod test {
         assert!(write_file(path, &with_block).is_ok());
         let config = load_config(path).unwrap();
         assert!(!config.metrics.allow_cluster_local);
-        assert_eq!(
-            config.metrics.allow_unauthenticated_cidrs,
-            vec!["10.20.0.0/16".to_string(), "::1/128".to_string()]
-        );
+        assert_eq!(config.metrics.allow_unauthenticated_cidrs, vec!["10.20.0.0/16".to_string(), "::1/128".to_string()]);
     }
 
     const BROKERED_BASE: &str = r#"
@@ -1361,13 +1358,17 @@ mod test {
         let narrow = format!("{BROKERED_BASE}{NARROW_MCP}");
         let other = format!("{BROKERED_BASE}\nmcp {{\n  enabled = false\n}}\n");
         let empty = format!("{BROKERED_BASE}\nmcp {{}}\n");
-        let json_mcp = r#"{"storage":{"file":{"path":"./d"}},"listener":{"tcp":{"address":"127.0.0.1:8200"}},"mcp":{}}"#;
+        let json_mcp =
+            r#"{"storage":{"file":{"path":"./d"}},"listener":{"tcp":{"address":"127.0.0.1:8200"}},"mcp":{}}"#;
         for (dir_name, files) in [
             ("merge_mcp_twice", vec![("a.hcl", narrow.as_str()), ("b.hcl", other.as_str())]),
             ("merge_mcp_twice_same", vec![("a.hcl", narrow.as_str()), ("b.hcl", narrow.as_str())]),
             ("merge_mcp_twice_empty", vec![("a.hcl", narrow.as_str()), ("b.hcl", empty.as_str())]),
             ("merge_mcp_twice_json", vec![("a.hcl", narrow.as_str()), ("b.json", json_mcp)]),
-            ("merge_mcp_twice_mid", vec![("a.hcl", narrow.as_str()), ("b.hcl", BROKERED_BASE), ("c.hcl", other.as_str())]),
+            (
+                "merge_mcp_twice_mid",
+                vec![("a.hcl", narrow.as_str()), ("b.hcl", BROKERED_BASE), ("c.hcl", other.as_str())],
+            ),
         ] {
             let (config, dir) = load_dir(dir_name, &files);
             let err = config.expect_err(dir_name).to_string();

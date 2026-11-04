@@ -13,7 +13,6 @@
 //! address are still returned — the in-app channel needs only the entity
 //! id, and address-based channels skip them and report them as failed.
 
-
 use serde_json::Value;
 
 use crate::kernel_api::{identity::GroupKind, VaultCtx};
@@ -65,9 +64,8 @@ pub async fn resolve_target_entities(
             let gkind = GroupKind::parse(group_kind)?;
             let mut seen = std::collections::BTreeSet::new();
             for member in identity.group_members(gkind, name, ns_path).await? {
-                if let Some(id) = identity
-                    .entity_id_for_alias(USERPASS_ALIAS_MOUNT, &member.to_lowercase(), ns_path)
-                    .await?
+                if let Some(id) =
+                    identity.entity_id_for_alias(USERPASS_ALIAS_MOUNT, &member.to_lowercase(), ns_path).await?
                 {
                     seen.insert(id);
                 }

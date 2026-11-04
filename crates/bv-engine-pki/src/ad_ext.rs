@@ -94,9 +94,8 @@ pub fn parse_oid(dotted: &str) -> Result<ObjectIdentifier, RvError> {
             "oid `{trimmed}` has an empty component (check for a doubled or trailing `.`)"
         )));
     }
-    ObjectIdentifier::new(trimmed).map_err(|e| {
-        RvError::ErrString(format!("oid `{trimmed}` is not a valid object identifier ({e})"))
-    })
+    ObjectIdentifier::new(trimmed)
+        .map_err(|e| RvError::ErrString(format!("oid `{trimmed}` is not a valid object identifier ({e})")))
 }
 
 /// Parse a dotted-decimal OID into the `&[u64]` arc form `rcgen` wants.
@@ -142,9 +141,7 @@ pub fn sid_extension_der(sid: &str) -> Result<Vec<u8>, RvError> {
         .map_err(|e| RvError::ErrString(format!("ad_sid: cannot wrap `{sid}` in Any ({e})")))?;
 
     let names: GeneralNames = vec![GeneralName::OtherName(OtherName { type_id, value })];
-    names
-        .to_der()
-        .map_err(|e| RvError::ErrString(format!("ad_sid: GeneralNames DER encode failed ({e})")))
+    names.to_der().map_err(|e| RvError::ErrString(format!("ad_sid: GeneralNames DER encode failed ({e})")))
 }
 
 /// The SID extension as an `x509-cert` `Extension`, for the hand-rolled
@@ -180,9 +177,7 @@ pub fn validate_upn(role: &RoleEntry, upn: &str) -> Result<(), RvError> {
         return Err(RvError::ErrString("upn_sans: empty UPN".into()));
     }
     if upn.chars().any(|c| c.is_whitespace() || c.is_control()) {
-        return Err(RvError::ErrString(format!(
-            "upn_sans: `{upn}` contains whitespace or control characters"
-        )));
+        return Err(RvError::ErrString(format!("upn_sans: `{upn}` contains whitespace or control characters")));
     }
     let mut parts = upn.split('@');
     let local = parts.next().unwrap_or("");
@@ -197,17 +192,12 @@ pub fn validate_upn(role: &RoleEntry, upn: &str) -> Result<(), RvError> {
         return Ok(());
     }
     let candidate = domain.to_ascii_lowercase();
-    let permitted = role
-        .allowed_upn_domains
-        .iter()
-        .map(|d| d.trim().to_ascii_lowercase())
-        .any(|d| !d.is_empty() && d == candidate);
+    let permitted =
+        role.allowed_upn_domains.iter().map(|d| d.trim().to_ascii_lowercase()).any(|d| !d.is_empty() && d == candidate);
     if permitted {
         Ok(())
     } else {
-        Err(RvError::ErrString(format!(
-            "upn_sans: realm `{domain}` is not in the role's allowed_upn_domains"
-        )))
+        Err(RvError::ErrString(format!("upn_sans: realm `{domain}` is not in the role's allowed_upn_domains")))
     }
 }
 
@@ -241,30 +231,20 @@ pub fn validate_ad_sid(role: &RoleEntry, sid: &str) -> Result<(), RvError> {
     }
     match parts.next() {
         Some("1") => {}
-        _ => {
-            return Err(RvError::ErrString(format!(
-                "ad_sid: `{sid}` must use SID revision 1"
-            )))
-        }
+        _ => return Err(RvError::ErrString(format!("ad_sid: `{sid}` must use SID revision 1"))),
     }
     let mut authority_count = 0usize;
     for part in parts {
         if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
-            return Err(RvError::ErrString(format!(
-                "ad_sid: `{sid}` has a non-numeric or empty component"
-            )));
+            return Err(RvError::ErrString(format!("ad_sid: `{sid}` has a non-numeric or empty component")));
         }
         if part.parse::<u64>().is_err() {
-            return Err(RvError::ErrString(format!(
-                "ad_sid: `{sid}` has a component that overflows a 64-bit integer"
-            )));
+            return Err(RvError::ErrString(format!("ad_sid: `{sid}` has a component that overflows a 64-bit integer")));
         }
         authority_count += 1;
     }
     if authority_count == 0 {
-        return Err(RvError::ErrString(format!(
-            "ad_sid: `{sid}` is missing an identifier authority"
-        )));
+        return Err(RvError::ErrString(format!("ad_sid: `{sid}` is missing an identifier authority")));
     }
     Ok(())
 }
@@ -393,10 +373,7 @@ mod tests {
         assert!(validate_ad_sid(&r, "S-1").is_err(), "needs an authority");
         assert!(validate_ad_sid(&r, "S-1-5-").is_err(), "trailing dash leaves an empty component");
         assert!(validate_ad_sid(&r, "S-1-5-abc").is_err(), "components must be numeric");
-        assert!(
-            validate_ad_sid(&r, "S-1-5-99999999999999999999999").is_err(),
-            "components must fit a u64"
-        );
+        assert!(validate_ad_sid(&r, "S-1-5-99999999999999999999999").is_err(), "components must fit a u64");
         let too_long = format!("S-1-5{}", "-1".repeat(MAX_SID_LEN));
         assert!(validate_ad_sid(&r, &too_long).is_err(), "over-long SIDs are refused");
     }

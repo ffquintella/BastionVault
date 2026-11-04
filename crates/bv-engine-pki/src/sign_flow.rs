@@ -161,24 +161,14 @@ pub struct SignOutcome {
 #[maybe_async::maybe_async]
 impl PkiBackendInner {
     /// Decide a signing request without touching a signing key.
-    pub async fn plan_sign(
-        &self,
-        req: &Request,
-        mode: &SignMode,
-        args: &SignArgs,
-    ) -> Result<SignPlan, RvError> {
+    pub async fn plan_sign(&self, req: &Request, mode: &SignMode, args: &SignArgs) -> Result<SignPlan, RvError> {
         match mode {
             SignMode::Role(role_name) => self.plan_sign_role(req, role_name, args).await,
             SignMode::Verbatim => self.plan_sign_verbatim(req, args).await,
         }
     }
 
-    async fn plan_sign_role(
-        &self,
-        req: &Request,
-        role_name: &str,
-        args: &SignArgs,
-    ) -> Result<SignPlan, RvError> {
+    async fn plan_sign_role(&self, req: &Request, role_name: &str, args: &SignArgs) -> Result<SignPlan, RvError> {
         let role = self.get_role(req, role_name).await?.ok_or(RvError::ErrPkiRoleNotFound)?;
         if args.csr.trim().is_empty() {
             return Err(RvError::ErrRequestFieldNotFound);
@@ -199,8 +189,7 @@ impl PkiBackendInner {
             let entry_spki = keys::entry_spki_der(&entry)?;
             if entry_spki != parsed.spki_der {
                 return Err(RvError::ErrString(
-                    "sign_csr: CSR SubjectPublicKeyInfo does not match the pinned managed key"
-                        .into(),
+                    "sign_csr: CSR SubjectPublicKeyInfo does not match the pinned managed key".into(),
                 ));
             }
             Some(entry)
@@ -225,15 +214,10 @@ impl PkiBackendInner {
         x509::validate_common_name(&role, &common_name)?;
 
         let (mut dns_sans, ip_sans, csr_email_sans) = if role.use_csr_sans {
-            (
-                parsed.requested_dns_sans.clone(),
-                parsed.requested_ip_sans.clone(),
-                parsed.requested_email_sans.clone(),
-            )
+            (parsed.requested_dns_sans.clone(), parsed.requested_ip_sans.clone(), parsed.requested_email_sans.clone())
         } else {
-            let requested = parsed.requested_dns_sans.len()
-                + parsed.requested_ip_sans.len()
-                + parsed.requested_email_sans.len();
+            let requested =
+                parsed.requested_dns_sans.len() + parsed.requested_ip_sans.len() + parsed.requested_email_sans.len();
             if requested > 0 {
                 warnings.push(format!(
                     "role `{role_name}` sets use_csr_sans=false: {requested} SAN(s) requested by the CSR are dropped"
@@ -276,16 +260,10 @@ impl PkiBackendInner {
         let ttl = role.effective_ttl(requested_ttl);
 
         // Issuer priority: request body > role-level pin > mount default.
-        let issuer = self
-            .resolve_issuer(req, &args.issuer_ref, &role.issuer_ref)
-            .await?;
+        let issuer = self.resolve_issuer(req, &args.issuer_ref, &role.issuer_ref).await?;
         let (ttl, ttl_clamped) = issuers::clamp_ttl_to_issuer(&issuer, ttl)?;
         if ttl_clamped {
-            warnings.push(format!(
-                "TTL clamped to issuer `{}`'s remaining lifetime ({}s)",
-                issuer.name,
-                ttl.as_secs()
-            ));
+            warnings.push(format!("TTL clamped to issuer `{}`'s remaining lifetime ({}s)", issuer.name, ttl.as_secs()));
         }
 
         let (upn_sans, ad_sid) = resolve_ad_smartcard(&role, &args.upn_sans, &args.ad_sid)?;
@@ -323,11 +301,7 @@ impl PkiBackendInner {
         })
     }
 
-    async fn plan_sign_verbatim(
-        &self,
-        req: &Request,
-        args: &SignArgs,
-    ) -> Result<SignPlan, RvError> {
+    async fn plan_sign_verbatim(&self, req: &Request, args: &SignArgs) -> Result<SignPlan, RvError> {
         if args.csr.trim().is_empty() {
             return Err(RvError::ErrRequestFieldNotFound);
         }
@@ -349,7 +323,8 @@ impl PkiBackendInner {
         if !args.upn_sans.trim().is_empty() || !args.ad_sid.trim().is_empty() {
             return Err(RvError::ErrResponseStatus(
                 400,
-                "sign: `upn_sans` / `ad_sid` need a role to authorise them; they are not accepted in verbatim mode".into(),
+                "sign: `upn_sans` / `ad_sid` need a role to authorise them; they are not accepted in verbatim mode"
+                    .into(),
             ));
         }
         if !args.email_sans.trim().is_empty() {
@@ -372,11 +347,7 @@ impl PkiBackendInner {
             "verbatim mode bypasses role policy: the subject and SANs are taken from the CSR with no allowed_domains / allow_ip_sans check".to_string(),
         ];
         if ttl_clamped {
-            warnings.push(format!(
-                "TTL clamped to issuer `{}`'s remaining lifetime ({}s)",
-                issuer.name,
-                ttl.as_secs()
-            ));
+            warnings.push(format!("TTL clamped to issuer `{}`'s remaining lifetime ({}s)", issuer.name, ttl.as_secs()));
         }
 
         // A permissive synthetic role: server+client EKUs, no name
@@ -483,12 +454,7 @@ impl PkiBackendInner {
         })
     }
 
-    async fn resolve_issuer(
-        &self,
-        req: &Request,
-        request_ref: &str,
-        role_ref: &str,
-    ) -> Result<IssuerHandle, RvError> {
+    async fn resolve_issuer(&self, req: &Request, request_ref: &str, role_ref: &str) -> Result<IssuerHandle, RvError> {
         let issuer = if !request_ref.trim().is_empty() {
             issuers::load_issuer(req, request_ref.trim()).await?
         } else if !role_ref.trim().is_empty() {
@@ -505,11 +471,7 @@ impl PkiBackendInner {
 
     /// Mint the certificate a [`SignPlan`] describes. Performs no policy
     /// checks — producing the plan was the decision.
-    pub async fn execute_sign(
-        &self,
-        req: &Request,
-        plan: SignPlan,
-    ) -> Result<SignOutcome, RvError> {
+    pub async fn execute_sign(&self, req: &Request, plan: SignPlan) -> Result<SignOutcome, RvError> {
         let ca_cert_pem = plan.issuer.cert_pem.clone();
         let ca_chain = issuers::build_issuer_chain(req, &plan.issuer).await?;
         let issuer_id = plan.issuer.id.clone();
@@ -618,8 +580,5 @@ fn parse_ttl(raw: &str) -> Result<Option<Duration>, RvError> {
 }
 
 fn now_unix() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }

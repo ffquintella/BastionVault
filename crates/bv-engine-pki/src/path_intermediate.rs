@@ -26,12 +26,10 @@ use x509_cert::der::Decode;
 use super::{
     crypto::{KeyAlgorithm, Signer},
     storage::{
-        self, CaKind, CrlConfig, PendingIntermediate, KEY_CA_CERT, KEY_CA_KEY,
-        KEY_CA_META, KEY_CA_PENDING_CSR, KEY_CA_PENDING_KEY, KEY_CA_PENDING_META, KEY_CONFIG_CRL,
-        KEY_CRL_STATE,
+        self, CaKind, CrlConfig, PendingIntermediate, KEY_CA_CERT, KEY_CA_KEY, KEY_CA_META, KEY_CA_PENDING_CSR,
+        KEY_CA_PENDING_KEY, KEY_CA_PENDING_META, KEY_CONFIG_CRL, KEY_CRL_STATE,
     },
-    x509,
-    PkiBackend, PkiBackendInner,
+    x509, PkiBackend, PkiBackendInner,
 };
 use crate::{
     context::Context,
@@ -51,11 +49,9 @@ pub(super) fn issuer_path_len(cert_pem: &str) -> Result<Option<u8>, RvError> {
     use x509_parser::extensions::ParsedExtension;
     use x509_parser::prelude::FromDer;
 
-    let der = pem::parse(cert_pem.as_bytes())
-        .map_err(|_| RvError::ErrPkiPemBundleInvalid)?
-        .into_contents();
-    let (_, parsed) = x509_parser::certificate::X509Certificate::from_der(&der)
-        .map_err(|_| RvError::ErrPkiPemBundleInvalid)?;
+    let der = pem::parse(cert_pem.as_bytes()).map_err(|_| RvError::ErrPkiPemBundleInvalid)?.into_contents();
+    let (_, parsed) =
+        x509_parser::certificate::X509Certificate::from_der(&der).map_err(|_| RvError::ErrPkiPemBundleInvalid)?;
     for ext in parsed.tbs_certificate.extensions() {
         if let ParsedExtension::BasicConstraints(bc) = ext.parsed_extension() {
             if !bc.ca {
@@ -118,7 +114,11 @@ impl PkiBackend {
 
 #[maybe_async::maybe_async]
 impl PkiBackendInner {
-    pub async fn generate_intermediate(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+    pub async fn generate_intermediate(
+        &self,
+        _b: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
         // Phase 5.2: this route is additive — having other issuers on the
         // mount does not block generating a new pending intermediate. The
         // only constraint is that there can be only ONE pending generation
@@ -138,8 +138,7 @@ impl PkiBackendInner {
         }
 
         let exported = req.get_data("exported")?.as_str().unwrap_or("").to_string();
-        let common_name = req.get_data("common_name")?.as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
+        let common_name = req.get_data("common_name")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
         let organization = req.get_data_or_default("organization")?.as_str().unwrap_or("").to_string();
         let key_type = req.get_data_or_default("key_type")?.as_str().unwrap_or("ec").to_string();
         let key_bits = req.get_data_or_default("key_bits")?.as_u64().unwrap_or(0) as u32;
@@ -150,12 +149,7 @@ impl PkiBackendInner {
         // from the stored material; the key_id is stashed in
         // `PendingIntermediate` so `set-signed` can record the binding
         // once the signed cert installs the issuer.
-        let request_key_ref = req
-            .get_data_or_default("key_ref")?
-            .as_str()
-            .unwrap_or("")
-            .trim()
-            .to_string();
+        let request_key_ref = req.get_data_or_default("key_ref")?.as_str().unwrap_or("").trim().to_string();
         let pinned_key = if request_key_ref.is_empty() {
             None
         } else {
@@ -186,10 +180,7 @@ impl PkiBackendInner {
         let storage_key_pem = signer.to_storage_pem();
         storage::put_string(req, KEY_CA_PENDING_KEY, &storage_key_pem).await?;
         storage::put_string(req, KEY_CA_PENDING_CSR, &csr_pem).await?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         storage::put_json(
             req,
             KEY_CA_PENDING_META,
@@ -225,15 +216,11 @@ impl PkiBackendInner {
         _b: &dyn Backend,
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        let pending_key = storage::get_string(req, KEY_CA_PENDING_KEY)
-            .await?
-            .ok_or(RvError::ErrPkiCaKeyNotFound)?;
-        let pending_meta: PendingIntermediate = storage::get_json(req, KEY_CA_PENDING_META)
-            .await?
-            .ok_or(RvError::ErrPkiCaKeyNotFound)?;
+        let pending_key = storage::get_string(req, KEY_CA_PENDING_KEY).await?.ok_or(RvError::ErrPkiCaKeyNotFound)?;
+        let pending_meta: PendingIntermediate =
+            storage::get_json(req, KEY_CA_PENDING_META).await?.ok_or(RvError::ErrPkiCaKeyNotFound)?;
 
-        let signed_pem = req.get_data("certificate")?.as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
+        let signed_pem = req.get_data("certificate")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
 
         // Validate: the cert's SubjectPublicKeyInfo must match the pending
         // keypair's public key. This is the defence against an operator
@@ -243,13 +230,8 @@ impl PkiBackendInner {
             return Err(RvError::ErrPkiKeyTypeInvalid);
         };
         let cert_der = super::csr::decode_pem_or_der(&signed_pem)?;
-        let cert = x509_cert::Certificate::from_der(&cert_der)
-            .map_err(|_| RvError::ErrPkiCertChainIncorrect)?;
-        let cert_pk_bits = cert
-            .tbs_certificate
-            .subject_public_key_info
-            .subject_public_key
-            .raw_bytes();
+        let cert = x509_cert::Certificate::from_der(&cert_der).map_err(|_| RvError::ErrPkiCertChainIncorrect)?;
+        let cert_pk_bits = cert.tbs_certificate.subject_public_key_info.subject_public_key.raw_bytes();
         // Compare raw public key bytes via rcgen's PublicKeyData trait.
         use rcgen::PublicKeyData;
         if cert_pk_bits != classical.key_pair().der_bytes() {
@@ -260,12 +242,7 @@ impl PkiBackendInner {
         // issuers, rather than clobbering a singleton ca/cert. Pick the
         // operator-supplied `issuer_name` if any, else next-available
         // (`default`, `issuer-2`, ...).
-        let not_after_unix = cert
-            .tbs_certificate
-            .validity
-            .not_after
-            .to_unix_duration()
-            .as_secs() as i64;
+        let not_after_unix = cert.tbs_certificate.validity.not_after.to_unix_duration().as_secs() as i64;
         let serial_hex = storage::serial_to_hex(cert.tbs_certificate.serial_number.as_bytes());
 
         let requested_name = req.get_data_or_default("issuer_name")?.as_str().unwrap_or("").to_string();
@@ -281,11 +258,7 @@ impl PkiBackendInner {
         // the pending keypair. Issuer→key binding is recorded inside
         // `add_issuer`, so the legacy `add_issuer_ref` follow-up call
         // here is no longer needed.
-        let key_id_hint = if pending_meta.key_id.is_empty() {
-            None
-        } else {
-            Some(pending_meta.key_id.clone())
-        };
+        let key_id_hint = if pending_meta.key_id.is_empty() { None } else { Some(pending_meta.key_id.clone()) };
         let issuer_id = super::issuers::add_issuer(
             req,
             &issuer_name,
@@ -318,8 +291,7 @@ impl PkiBackendInner {
     }
 
     pub async fn sign_intermediate(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
-        let csr_input = req.get_data("csr")?.as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
+        let csr_input = req.get_data("csr")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
         let parsed = super::csr::parse_and_verify(&csr_input)?;
 
         let common_name = {

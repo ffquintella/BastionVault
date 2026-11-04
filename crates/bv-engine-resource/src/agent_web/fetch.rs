@@ -463,7 +463,9 @@ async fn fetch(spec: &FetchSpec, trace: &mut FetchTrace) -> Result<Fetched, Fetc
             }
             // Borrowed straight from the headers: no plain copy of a cookie
             // value outlives this call (the jar keeps its own, zeroized).
-            trace.jar.absorb(&origin, response.headers().get_all(header::SET_COOKIE).iter().filter_map(|v| v.to_str().ok()));
+            trace
+                .jar
+                .absorb(&origin, response.headers().get_all(header::SET_COOKIE).iter().filter_map(|v| v.to_str().ok()));
             if response.status() == StatusCode::UNAUTHORIZED && authorization.is_none() {
                 if let (Some(credential), Some(realm)) = (&spec.credential, basic_realm(response.headers())) {
                     if answered.insert((origin.clone(), realm)) {
@@ -581,7 +583,11 @@ mod tests {
         let url = Url::parse("https://app/app;jsessionid=ABC123/home;x=1?token=s3cr3t").unwrap();
         assert_eq!(final_path(&url), "/app/home");
         assert_eq!(hop_path(&url, false), "/app;jsessionid=ABC123/home;x=1?token=s3cr3t");
-        assert_eq!(hop_path(&url, true), "/app/home?…", "a redirect target's query and session parameters never reach the transcript");
+        assert_eq!(
+            hop_path(&url, true),
+            "/app/home?…",
+            "a redirect target's query and session parameters never reach the transcript"
+        );
         assert_eq!(hop_path(&Url::parse("https://app/a;jsessionid=S").unwrap(), true), "/a");
         let credential =
             BasicCredential { username: Zeroizing::new("ops".into()), password: Zeroizing::new("pw".into()) };
@@ -911,7 +917,10 @@ mod server_tests {
         assert!(seen[0].header("authorization").is_none(), "never pre-emptive");
         // Built from the fixture rather than spelled out: a literal `Basic <base64>`
         // trips the repository's secret scanner although it is a test password.
-        let expected = format!("Basic {}", base64::Engine::encode(&base64::engine::general_purpose::STANDARD,format!("ops:{PASSWORD}")));
+        let expected = format!(
+            "Basic {}",
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, format!("ops:{PASSWORD}"))
+        );
         assert_eq!(seen[1].header("authorization"), Some(expected.as_str()));
 
         let (trace, outcome) = call("/rejecting").run(&s).await;

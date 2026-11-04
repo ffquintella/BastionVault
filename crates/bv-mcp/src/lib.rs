@@ -570,13 +570,17 @@ mod dispatch_tests {
     async fn policy_read_searches_the_recorded_namespaces() {
         let b = policy_binding(&["sys/policies/acl/*", "dti/esi/sys/policies/acl/*"], &["", "dti/esi"]);
         let path = "sys/policies/acl/esi-ssh-connect";
-        let backend = FakeBackend::default()
-            .with_in("dti/esi", path, Ok(json!({ "name": "esi-ssh-connect", "policy": "path \"a/*\" {}" })));
+        let backend = FakeBackend::default().with_in(
+            "dti/esi",
+            path,
+            Ok(json!({ "name": "esi-ssh-connect", "policy": "path \"a/*\" {}" })),
+        );
         let p = root_principal();
         let guard = SingleUseGuard::new();
-        let result = dispatcher::call("bv_policy_read", policy_args("esi-ssh-connect"), None, &ctx(&b, &backend, &p, &guard))
-            .await
-            .unwrap();
+        let result =
+            dispatcher::call("bv_policy_read", policy_args("esi-ssh-connect"), None, &ctx(&b, &backend, &p, &guard))
+                .await
+                .unwrap();
         let data = result.structured_content.unwrap();
         assert_eq!(data["matches"], json!([{ "namespace": "dti/esi", "policy": "path \"a/*\" {}" }]));
         assert_eq!((data["searched"].clone(), data["denied"].clone()), (json!(2), json!([])));
@@ -590,9 +594,11 @@ mod dispatch_tests {
     async fn policy_read_reports_a_namespace_the_acl_refuses() {
         let b = policy_binding(&["*"], &["dti", "dti/esi"]);
         let path = "sys/policies/acl/x";
-        let backend = FakeBackend::default()
-            .with_in("dti", path, Err(403))
-            .with_in("dti/esi", path, Ok(json!({ "name": "x", "policy": "" })));
+        let backend = FakeBackend::default().with_in("dti", path, Err(403)).with_in(
+            "dti/esi",
+            path,
+            Ok(json!({ "name": "x", "policy": "" })),
+        );
         let p = root_principal();
         let guard = SingleUseGuard::new();
         let result =
@@ -611,9 +617,11 @@ mod dispatch_tests {
         let p = root_principal();
         let guard = SingleUseGuard::new();
         let path = "sys/policies/acl/x";
-        let backend = FakeBackend::default()
-            .with(path, json!({ "policy": "root" }))
-            .with_in("dti/esi", path, Ok(json!({ "policy": "tenant" })));
+        let backend = FakeBackend::default().with(path, json!({ "policy": "root" })).with_in(
+            "dti/esi",
+            path,
+            Ok(json!({ "policy": "tenant" })),
+        );
 
         let b = policy_binding(&["dti/esi/sys/policies/acl/*"], &["", "dti/esi"]);
         let result =
@@ -635,13 +643,18 @@ mod dispatch_tests {
         let result =
             dispatcher::call("bv_policy_read", policy_args("x"), None, &ctx(&b, &backend, &p, &guard)).await.unwrap();
         let data = result.structured_content.unwrap();
-        assert_eq!(data["matches"], json!([{ "namespace": "", "policy": "root" }]), "an empty list is the own namespace");
+        assert_eq!(
+            data["matches"],
+            json!([{ "namespace": "", "policy": "root" }]),
+            "an empty list is the own namespace"
+        );
         assert_eq!(data["searched"], json!(1));
 
         let b = binding(&["bv_whoami"], &["*"]);
         let calls_before = backend.calls.lock().unwrap().len();
-        let err =
-            dispatcher::call("bv_policy_read", policy_args("x"), None, &ctx(&b, &backend, &p, &guard)).await.unwrap_err();
+        let err = dispatcher::call("bv_policy_read", policy_args("x"), None, &ctx(&b, &backend, &p, &guard))
+            .await
+            .unwrap_err();
         assert_eq!(err.code(), "mcp_tool_not_allowed");
         assert_eq!(backend.calls.lock().unwrap().len(), calls_before, "a refused tool reaches nothing");
     }
@@ -689,9 +702,10 @@ mod dispatch_tests {
             json!({ "events": [{ "ts": "2026-10-27T10:00:00+00:00", "user": "a\u{202e}b", "op": "read" }], "failed_sources": [] }),
         );
         let args = json!({ "from": "2026-10-27T00:00:00Z", "to": "2026-10-27T12:00:00Z", "limit": 5 });
-        let result = dispatcher::call("bv_audit_read", args.as_object().unwrap().clone(), None, &ctx(&b, &backend, &p, &guard))
-            .await
-            .unwrap();
+        let result =
+            dispatcher::call("bv_audit_read", args.as_object().unwrap().clone(), None, &ctx(&b, &backend, &p, &guard))
+                .await
+                .unwrap();
         let (op, routed, body) = backend.only_call();
         assert_eq!((op, routed.as_str()), (Operation::Read, "sys/audit/events"));
         assert_eq!(
@@ -725,18 +739,25 @@ mod dispatch_tests {
             json!({ "namespace": "other" }),
             json!({ "path": "sys/raw" }),
         ] {
-            let err = dispatcher::call("bv_audit_read", args.as_object().unwrap().clone(), None, &ctx(&b, &backend, &p, &guard))
-                .await
-                .unwrap_err();
+            let err = dispatcher::call(
+                "bv_audit_read",
+                args.as_object().unwrap().clone(),
+                None,
+                &ctx(&b, &backend, &p, &guard),
+            )
+            .await
+            .unwrap_err();
             assert_eq!(err.code(), "mcp_invalid_argument", "{args}");
         }
         for scope in [&["secret/*"][..], &["sys/policies/acl/*"][..]] {
             let b = binding(&["bv_audit_read"], scope);
-            let err = dispatcher::call("bv_audit_read", Map::new(), None, &ctx(&b, &backend, &p, &guard)).await.unwrap_err();
+            let err =
+                dispatcher::call("bv_audit_read", Map::new(), None, &ctx(&b, &backend, &p, &guard)).await.unwrap_err();
             assert_eq!(err.code(), "mcp_path_out_of_scope", "scope {scope:?}");
         }
         let b = binding(&["bv_whoami"], &["*"]);
-        let err = dispatcher::call("bv_audit_read", Map::new(), None, &ctx(&b, &backend, &p, &guard)).await.unwrap_err();
+        let err =
+            dispatcher::call("bv_audit_read", Map::new(), None, &ctx(&b, &backend, &p, &guard)).await.unwrap_err();
         assert_eq!(err.code(), "mcp_tool_not_allowed");
         assert!(backend.calls.lock().unwrap().is_empty());
     }

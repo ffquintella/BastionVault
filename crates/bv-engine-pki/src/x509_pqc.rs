@@ -31,8 +31,8 @@ use x509_cert::{
         pkix::{
             crl::dp::DistributionPoint,
             name::{DistributionPointName, GeneralName, GeneralNames},
-            AuthorityKeyIdentifier, BasicConstraints, CrlDistributionPoints, ExtendedKeyUsage,
-            KeyUsage, KeyUsages, SubjectAltName, SubjectKeyIdentifier,
+            AuthorityKeyIdentifier, BasicConstraints, CrlDistributionPoints, ExtendedKeyUsage, KeyUsage, KeyUsages,
+            SubjectAltName, SubjectKeyIdentifier,
         },
         Extension,
     },
@@ -235,9 +235,7 @@ pub fn build_crl(
     ca_cert_pem: &str,
 ) -> Result<String, RvError> {
     let alg_id = AlgorithmIdentifierOwned { oid: ca_signer.level().oid(), parameters: None };
-    build_crl_with_alg(crl_number, next_update_secs, revoked, ca_cert_pem, alg_id, |tbs_der| {
-        ca_signer.sign(tbs_der)
-    })
+    build_crl_with_alg(crl_number, next_update_secs, revoked, ca_cert_pem, alg_id, |tbs_der| ca_signer.sign(tbs_der))
 }
 
 /// Generic CRL assembly. Phase 5.4: the classical / PQC / composite paths
@@ -459,7 +457,10 @@ pub(super) fn encode_aki(ca_ski: &OctetString) -> Result<Extension, RvError> {
     encode_ext(false, &aki)
 }
 
-pub(super) fn encode_ext<E: Encode + const_oid::AssociatedOid>(critical: bool, value: &E) -> Result<Extension, RvError> {
+pub(super) fn encode_ext<E: Encode + const_oid::AssociatedOid>(
+    critical: bool,
+    value: &E,
+) -> Result<Extension, RvError> {
     Ok(Extension {
         extn_id: E::OID,
         critical,
@@ -467,7 +468,11 @@ pub(super) fn encode_ext<E: Encode + const_oid::AssociatedOid>(critical: bool, v
     })
 }
 
-pub(super) fn encode_ext_octets(oid: ObjectIdentifier, critical: bool, value: OctetString) -> Result<Extension, RvError> {
+pub(super) fn encode_ext_octets(
+    oid: ObjectIdentifier,
+    critical: bool,
+    value: OctetString,
+) -> Result<Extension, RvError> {
     let der = value.to_der().map_err(der_err)?;
     Ok(Extension { extn_id: oid, critical, extn_value: OctetString::new(der).map_err(der_err)? })
 }
@@ -585,9 +590,7 @@ pub(super) fn build_ad_sid_extension(subject: &SubjectInput) -> Result<Option<Ex
 /// `DistributionPoint` holding every configured URI. Shared with the
 /// classical path (byte-identical to rcgen's encoding), so a chain that
 /// mixes issuer classes presents the same CDP shape to verifiers.
-pub(super) fn build_crl_distribution_points(
-    urls: &super::x509::IssuanceUrls,
-) -> Result<Option<Extension>, RvError> {
+pub(super) fn build_crl_distribution_points(urls: &super::x509::IssuanceUrls) -> Result<Option<Extension>, RvError> {
     if urls.crl_distribution_points.is_empty() {
         return Ok(None);
     }

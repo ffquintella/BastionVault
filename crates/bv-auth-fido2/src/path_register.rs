@@ -4,9 +4,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use uuid::Uuid;
 
-use super::rp::{
-    PublicKeyCredentialAttestation, RegistrationState, RelyingParty,
-};
+use super::rp::{PublicKeyCredentialAttestation, RegistrationState, RelyingParty};
 use super::{Fido2Backend, Fido2BackendInner};
 use crate::{
     context::Context,
@@ -69,21 +67,12 @@ impl Fido2Backend {
 
 #[maybe_async::maybe_async]
 impl Fido2BackendInner {
-    pub async fn register_begin(
-        &self,
-        _backend: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
-        let config = self.get_config(req).await?
-            .ok_or(RvError::ErrFido2NotConfigured)?;
+    pub async fn register_begin(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let config = self.get_config(req).await?.ok_or(RvError::ErrFido2NotConfigured)?;
 
         let username = req.get_data("username")?.as_str().unwrap().to_lowercase();
 
-        let rp = RelyingParty {
-            rp_id: &config.rp_id,
-            rp_origin: &config.rp_origin,
-            rp_name: &config.rp_name,
-        };
+        let rp = RelyingParty { rp_id: &config.rp_id, rp_origin: &config.rp_origin, rp_name: &config.rp_name };
 
         // Load existing credentials to exclude them from registration.
         let exclude_credentials: Vec<Vec<u8>> = self
@@ -101,17 +90,14 @@ impl Fido2BackendInner {
             .map_err(|e| RvError::ErrFido2RegistrationFailed(e.to_string()))?;
 
         // Persist registration state for the complete step.
-        let state_json = serde_json::to_string(&reg_state)
-            .map_err(|e| RvError::ErrFido2RegistrationFailed(e.to_string()))?;
-        let state_entry = StorageEntry::new(
-            &format!("challenge/reg/{username}"),
-            &state_json,
-        )?;
+        let state_json =
+            serde_json::to_string(&reg_state).map_err(|e| RvError::ErrFido2RegistrationFailed(e.to_string()))?;
+        let state_entry = StorageEntry::new(&format!("challenge/reg/{username}"), &state_json)?;
         req.storage_put(&state_entry).await?;
 
         // Emit the creation-options JSON exactly as the browser expects.
-        let challenge_json = serde_json::to_value(&challenge)
-            .map_err(|e| RvError::ErrFido2RegistrationFailed(e.to_string()))?;
+        let challenge_json =
+            serde_json::to_value(&challenge).map_err(|e| RvError::ErrFido2RegistrationFailed(e.to_string()))?;
         Ok(Some(Response::data_response(challenge_json.as_object().cloned())))
     }
 
@@ -120,15 +106,14 @@ impl Fido2BackendInner {
         _backend: &dyn Backend,
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        let config = self.get_config(req).await?
-            .ok_or(RvError::ErrFido2NotConfigured)?;
+        let config = self.get_config(req).await?.ok_or(RvError::ErrFido2NotConfigured)?;
 
         let username = req.get_data("username")?.as_str().unwrap().to_lowercase();
         let credential_json = req.get_data("credential")?.as_str().unwrap().to_string();
 
         // Load registration state.
-        let state_entry = req.storage_get(&format!("challenge/reg/{username}")).await?
-            .ok_or(RvError::ErrFido2ChallengeExpired)?;
+        let state_entry =
+            req.storage_get(&format!("challenge/reg/{username}")).await?.ok_or(RvError::ErrFido2ChallengeExpired)?;
         let state_str: String = serde_json::from_slice(&state_entry.value)?;
         let reg_state: RegistrationState = serde_json::from_str(&state_str)
             .map_err(|e| RvError::ErrFido2RegistrationFailed(format!("invalid state: {e}")))?;
@@ -136,32 +121,24 @@ impl Fido2BackendInner {
         // Single-use: drop the challenge state regardless of outcome below.
         req.storage_delete(&format!("challenge/reg/{username}")).await?;
 
-        let rp = RelyingParty {
-            rp_id: &config.rp_id,
-            rp_origin: &config.rp_origin,
-            rp_name: &config.rp_name,
-        };
+        let rp = RelyingParty { rp_id: &config.rp_id, rp_origin: &config.rp_origin, rp_name: &config.rp_name };
 
-        let attestation: PublicKeyCredentialAttestation =
-            serde_json::from_str(&credential_json).map_err(|e| {
-                RvError::ErrFido2RegistrationFailed(format!("invalid credential: {e}"))
-            })?;
+        let attestation: PublicKeyCredentialAttestation = serde_json::from_str(&credential_json)
+            .map_err(|e| RvError::ErrFido2RegistrationFailed(format!("invalid credential: {e}")))?;
 
         let passkey = rp
             .finish_registration(&attestation, &reg_state)
             .map_err(|e| RvError::ErrFido2RegistrationFailed(e.to_string()))?;
 
         // Store the credential alongside existing ones.
-        let mut user_entry = self.get_user_credentials(req, &username).await?
-            .unwrap_or_else(|| UserCredentialEntry {
-                username: username.clone(),
-                ..Default::default()
-            });
+        let mut user_entry = self
+            .get_user_credentials(req, &username)
+            .await?
+            .unwrap_or_else(|| UserCredentialEntry { username: username.clone(), ..Default::default() });
 
         let mut passkeys = user_entry.get_passkeys().unwrap_or_default();
         passkeys.push(passkey);
-        user_entry.set_passkeys(&passkeys)
-            .map_err(|e| RvError::ErrFido2RegistrationFailed(e.to_string()))?;
+        user_entry.set_passkeys(&passkeys).map_err(|e| RvError::ErrFido2RegistrationFailed(e.to_string()))?;
 
         self.set_user_credentials(req, &username, &user_entry).await?;
 

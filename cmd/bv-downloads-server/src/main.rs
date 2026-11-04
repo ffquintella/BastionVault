@@ -79,16 +79,13 @@ fn run(cli: Cli) -> Result<(), String> {
     let tls_cert = std::env::var_os("BV_DOWNLOADS_TLS_CERT");
     let tls_key = std::env::var_os("BV_DOWNLOADS_TLS_KEY");
     if tls_cert.is_some() || tls_key.is_some() {
-        return Err(
-            "BV_DOWNLOADS_TLS_CERT / BV_DOWNLOADS_TLS_KEY are set, but built-in TLS is not \
+        return Err("BV_DOWNLOADS_TLS_CERT / BV_DOWNLOADS_TLS_KEY are set, but built-in TLS is not \
              implemented yet (Phase 3). Refusing to start rather than serving plaintext on a \
              port you believe is HTTPS — terminate TLS at your reverse proxy for now."
-                .to_string(),
-        );
+            .to_string());
     }
 
-    let validated = manifest::load_and_validate(&cli.root, cli.verify_hashes)
-        .map_err(|e| format!("{e}"))?;
+    let validated = manifest::load_and_validate(&cli.root, cli.verify_hashes).map_err(|e| format!("{e}"))?;
     for warning in &validated.warnings {
         eprintln!("bv-downloads-server: warning: {warning}");
     }
@@ -110,12 +107,9 @@ fn run(cli: Cli) -> Result<(), String> {
         .map_err(|e| format!("cannot start the async runtime: {e}"))?;
 
     runtime.block_on(async move {
-        let listener = tokio::net::TcpListener::bind(cli.addr)
-            .await
-            .map_err(|e| format!("cannot bind {}: {e}", cli.addr))?;
-        let bound = listener
-            .local_addr()
-            .map_err(|e| format!("cannot read the bound address: {e}"))?;
+        let listener =
+            tokio::net::TcpListener::bind(cli.addr).await.map_err(|e| format!("cannot bind {}: {e}", cli.addr))?;
+        let bound = listener.local_addr().map_err(|e| format!("cannot read the bound address: {e}"))?;
 
         println!(
             "bv-downloads-server: serving BastionVault {version} \

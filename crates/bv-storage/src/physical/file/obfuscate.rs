@@ -141,8 +141,7 @@ impl ObfuscatingTarget {
     /// hex-encoded so the output is safe to use as a filesystem
     /// path or an S3 object name.
     pub fn obfuscate(&self, raw: &str) -> String {
-        let mut mac = HmacSha256::new_from_slice(&self.salt)
-            .expect("HMAC accepts any key length");
+        let mut mac = HmacSha256::new_from_slice(&self.salt).expect("HMAC accepts any key length");
         mac.update(raw.as_bytes());
         let tag = mac.finalize().into_bytes();
         hex_encode(&tag)
@@ -211,11 +210,7 @@ pub fn encode_manifest(keys: &[String]) -> Vec<u8> {
 }
 
 pub(crate) fn decode_manifest(bytes: &[u8]) -> Vec<String> {
-    String::from_utf8_lossy(bytes)
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(|l| l.to_string())
-        .collect()
+    String::from_utf8_lossy(bytes).lines().filter(|l| !l.is_empty()).map(|l| l.to_string()).collect()
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -377,17 +372,10 @@ mod tests {
         // Two entries: the hashed data + the manifest marker. The
         // hashed data is 64-char hex; the manifest is at MANIFEST_KEY.
         assert_eq!(stored.len(), 2);
-        let data_keys: Vec<&String> = stored
-            .iter()
-            .filter(|k| *k != MANIFEST_KEY && *k != SALT_KEY)
-            .collect();
+        let data_keys: Vec<&String> = stored.iter().filter(|k| *k != MANIFEST_KEY && *k != SALT_KEY).collect();
         assert_eq!(data_keys.len(), 1);
         assert_ne!(data_keys[0], "sys/policy/admin");
-        assert_eq!(
-            data_keys[0].len(),
-            64,
-            "hex-encoded SHA-256 is 64 chars"
-        );
+        assert_eq!(data_keys[0].len(), 64, "hex-encoded SHA-256 is 64 chars");
     }
 
     #[tokio::test]

@@ -23,10 +23,8 @@ fuzz_target!(|data: &[u8]| {
         vec!["public".into(), "pg_catalog".into()]
     };
     let current_schema = (flags & 8 == 0).then(|| "public".to_string());
-    let ctx = NameContext {
-        database_read_only: flags & 2 != 0,
-        ..NameContext::postgres("db", current_schema, search_path)
-    };
+    let ctx =
+        NameContext { database_read_only: flags & 2 != 0, ..NameContext::postgres("db", current_schema, search_path) };
     let name_match = |bits: u8| match bits & 3 {
         0 => NameMatch::AsciiCaseInsensitive,
         1 => NameMatch::AsciiCaseSensitive,

@@ -28,9 +28,6 @@
 use std::{collections::HashMap, sync::Arc};
 
 use super::{UserPassBackend, UserPassBackendInner};
-use bv_auth_fido2::rp::{
-    AuthenticationState, PublicKeyCredentialAssertion, RelyingParty,
-};
 use crate::{
     context::Context,
     errors::RvError,
@@ -38,6 +35,7 @@ use crate::{
     new_fields, new_fields_internal, new_path, new_path_internal,
     storage::StorageEntry,
 };
+use bv_auth_fido2::rp::{AuthenticationState, PublicKeyCredentialAssertion, RelyingParty};
 
 /// Storage prefix for in-flight step-up challenges. Deliberately distinct
 /// from `challenge/auth/` (the login ceremony) so a challenge minted for a
@@ -128,10 +126,8 @@ impl AvailableFactors {
 /// root token) has no second factor on file here and is rejected outright
 /// rather than being silently treated as factor-less-but-fine.
 pub fn caller_username(req: &Request) -> Result<String, RvError> {
-    let auth = req
-        .auth
-        .as_ref()
-        .ok_or_else(|| RvError::ErrResponse("step-up requires an authenticated caller".into()))?;
+    let auth =
+        req.auth.as_ref().ok_or_else(|| RvError::ErrResponse("step-up requires an authenticated caller".into()))?;
 
     let mount = auth.metadata.get("mount_path").map(|s| s.as_str()).unwrap_or_default();
     let username = auth.metadata.get("username").map(|s| s.as_str()).unwrap_or_default();
@@ -155,10 +151,8 @@ impl UserPassBackendInner {
     /// failing at verify time.
     pub async fn step_up_factors(&self, req: &mut Request) -> Result<AvailableFactors, RvError> {
         let username = caller_username(req)?;
-        let user = self
-            .get_user(req, &username)
-            .await?
-            .ok_or_else(|| RvError::ErrResponse("no such principal".into()))?;
+        let user =
+            self.get_user(req, &username).await?.ok_or_else(|| RvError::ErrResponse("no such principal".into()))?;
 
         if user.disabled {
             return Err(RvError::ErrResponse("this principal is disabled".into()));
@@ -179,11 +173,7 @@ impl UserPassBackendInner {
     /// enrolled, mints a FIDO2 assertion challenge stored under
     /// `challenge/stepup/<username>`. A second `begin` overwrites the first,
     /// so an abandoned prompt cannot be redeemed later.
-    pub async fn step_up_begin(
-        &self,
-        _backend: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn step_up_begin(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let username = caller_username(req)?;
         let factors = self.step_up_factors(req).await?;
 
@@ -191,37 +181,23 @@ impl UserPassBackendInner {
         data.insert("username".into(), serde_json::Value::String(username.clone()));
         data.insert(
             "methods".into(),
-            serde_json::Value::Array(
-                factors.names().into_iter().map(serde_json::Value::String).collect(),
-            ),
+            serde_json::Value::Array(factors.names().into_iter().map(serde_json::Value::String).collect()),
         );
 
         if factors.fido2 {
             let config = self.get_fido2_config(req).await?.ok_or(RvError::ErrFido2NotConfigured)?;
-            let user = self
-                .get_user(req, &username)
-                .await?
-                .ok_or_else(|| RvError::ErrResponse("no such principal".into()))?;
-            let passkeys = user
-                .get_passkeys()
-                .map_err(|e: serde_json::Error| RvError::ErrFido2AuthFailed(e.to_string()))?;
+            let user =
+                self.get_user(req, &username).await?.ok_or_else(|| RvError::ErrResponse("no such principal".into()))?;
+            let passkeys =
+                user.get_passkeys().map_err(|e: serde_json::Error| RvError::ErrFido2AuthFailed(e.to_string()))?;
 
-            let rp = RelyingParty {
-                rp_id: &config.rp_id,
-                rp_origin: &config.rp_origin,
-                rp_name: &config.rp_name,
-            };
-            let (challenge, auth_state) = rp
-                .begin_authentication(&passkeys)
-                .map_err(|e| RvError::ErrFido2AuthFailed(e.to_string()))?;
+            let rp = RelyingParty { rp_id: &config.rp_id, rp_origin: &config.rp_origin, rp_name: &config.rp_name };
+            let (challenge, auth_state) =
+                rp.begin_authentication(&passkeys).map_err(|e| RvError::ErrFido2AuthFailed(e.to_string()))?;
 
             let state_json = serde_json::to_string(&auth_state)
                 .map_err(|e: serde_json::Error| RvError::ErrFido2AuthFailed(e.to_string()))?;
-            req.storage_put(&StorageEntry::new(
-                &format!("{STEP_UP_CHALLENGE_PREFIX}{username}"),
-                &state_json,
-            )?)
-            .await?;
+            req.storage_put(&StorageEntry::new(&format!("{STEP_UP_CHALLENGE_PREFIX}{username}"), &state_json)?).await?;
 
             let challenge_json = serde_json::to_value(&challenge)
                 .map_err(|e: serde_json::Error| RvError::ErrFido2AuthFailed(e.to_string()))?;
@@ -237,11 +213,7 @@ impl UserPassBackendInner {
     /// `{verified: true, method}` or an error — never a `{verified: false}`
     /// body, so a caller cannot mistake a failed factor for a successful
     /// call with a falsy field.
-    pub async fn step_up_verify(
-        &self,
-        _backend: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn step_up_verify(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let username = caller_username(req)?;
         let method = req.get_data("method")?.as_str().unwrap_or_default().trim().to_lowercase();
 
@@ -278,10 +250,8 @@ impl UserPassBackendInner {
             return Err(RvError::ErrResponse("totp_code is required for method `totp`".into()));
         }
 
-        let user = self
-            .get_user(req, username)
-            .await?
-            .ok_or_else(|| RvError::ErrResponse("no such principal".into()))?;
+        let user =
+            self.get_user(req, username).await?.ok_or_else(|| RvError::ErrResponse("no such principal".into()))?;
         if user.disabled {
             return Err(RvError::ErrResponse("this principal is disabled".into()));
         }
@@ -293,9 +263,7 @@ impl UserPassBackendInner {
             ));
         }
 
-        let totp = self.core.totp_mfa().ok_or_else(|| {
-            RvError::ErrResponse("the TOTP engine is not loaded".into())
-        })?;
+        let totp = self.core.totp_mfa().ok_or_else(|| RvError::ErrResponse("the TOTP engine is not loaded".into()))?;
         let mount = match totp.normalize_mount(&user.totp_mount) {
             m if m.is_empty() => {
                 let cfg = self.get_mfa_config(req).await?;
@@ -320,11 +288,8 @@ impl UserPassBackendInner {
     /// the authenticator's new signature counter back to the user record so
     /// clone detection keeps working across login and step-up alike.
     async fn step_up_verify_fido2(&self, req: &mut Request, username: &str) -> Result<(), RvError> {
-        let credential_json = req
-            .get_data("credential")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_default();
+        let credential_json =
+            req.get_data("credential").ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
         if credential_json.trim().is_empty() {
             return Err(RvError::ErrResponse("credential is required for method `fido2`".into()));
         }
@@ -340,31 +305,22 @@ impl UserPassBackendInner {
         let auth_state: AuthenticationState = serde_json::from_str(&state_str)
             .map_err(|e: serde_json::Error| RvError::ErrFido2AuthFailed(format!("invalid state: {e}")))?;
 
-        let mut user = self
-            .get_user(req, username)
-            .await?
-            .ok_or_else(|| RvError::ErrResponse("no such principal".into()))?;
+        let mut user =
+            self.get_user(req, username).await?.ok_or_else(|| RvError::ErrResponse("no such principal".into()))?;
         if user.disabled {
             return Err(RvError::ErrResponse("this principal is disabled".into()));
         }
 
-        let mut passkeys = user
-            .get_passkeys()
-            .map_err(|e: serde_json::Error| RvError::ErrFido2AuthFailed(e.to_string()))?;
+        let mut passkeys =
+            user.get_passkeys().map_err(|e: serde_json::Error| RvError::ErrFido2AuthFailed(e.to_string()))?;
         if passkeys.is_empty() {
             return Err(RvError::ErrFido2CredentialNotFound);
         }
 
         let assertion: PublicKeyCredentialAssertion = serde_json::from_str(&credential_json)
-            .map_err(|e: serde_json::Error| {
-                RvError::ErrFido2AuthFailed(format!("invalid credential: {e}"))
-            })?;
+            .map_err(|e: serde_json::Error| RvError::ErrFido2AuthFailed(format!("invalid credential: {e}")))?;
 
-        let rp = RelyingParty {
-            rp_id: &config.rp_id,
-            rp_origin: &config.rp_origin,
-            rp_name: &config.rp_name,
-        };
+        let rp = RelyingParty { rp_id: &config.rp_id, rp_origin: &config.rp_origin, rp_name: &config.rp_name };
         let auth_result = rp
             .finish_authentication(&assertion, &auth_state, &passkeys)
             .map_err(|e| RvError::ErrFido2AuthFailed(e.to_string()))?;
@@ -376,8 +332,7 @@ impl UserPassBackendInner {
                 }
             }
         }
-        user.set_passkeys(&passkeys)
-            .map_err(|e: serde_json::Error| RvError::ErrFido2AuthFailed(e.to_string()))?;
+        user.set_passkeys(&passkeys).map_err(|e: serde_json::Error| RvError::ErrFido2AuthFailed(e.to_string()))?;
         self.set_user(req, username, &user).await?;
 
         Ok(())

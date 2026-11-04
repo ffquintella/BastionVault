@@ -28,8 +28,7 @@ use serde_json::{json, Map, Value};
 use super::{
     path_revoke::rebuild_crl,
     storage::{
-        self, AutoTidyConfig, CertRecord, CrlState, TidyStatus, KEY_CONFIG_AUTO_TIDY, KEY_CRL_STATE,
-        KEY_TIDY_STATUS,
+        self, AutoTidyConfig, CertRecord, CrlState, TidyStatus, KEY_CONFIG_AUTO_TIDY, KEY_CRL_STATE, KEY_TIDY_STATUS,
     },
     PkiBackend, PkiBackendInner,
 };
@@ -99,8 +98,7 @@ impl PkiBackendInner {
         let tidy_certs = req.get_data_or_default("tidy_cert_store")?.as_bool().unwrap_or(true);
         let tidy_revoked = req.get_data_or_default("tidy_revoked_certs")?.as_bool().unwrap_or(true);
         let buffer_str = req.get_data_or_default("safety_buffer")?.as_str().unwrap_or("72h").to_string();
-        let safety_buffer =
-            parse_duration(&buffer_str).map_err(|_| RvError::ErrRequestFieldInvalid)?.as_secs();
+        let safety_buffer = parse_duration(&buffer_str).map_err(|_| RvError::ErrRequestFieldInvalid)?.as_secs();
 
         let summary = run_tidy_inner(req, tidy_certs, tidy_revoked, safety_buffer, "manual").await?;
 
@@ -159,10 +157,7 @@ pub async fn run_tidy_inner(
     source: &str,
 ) -> Result<TidyStatus, RvError> {
     let started = Instant::now();
-    let now_unix = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let now_unix = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let cutoff = now_unix.saturating_sub(safety_buffer_seconds) as i64;
 
     let mut certs_deleted: u64 = 0;
@@ -299,8 +294,7 @@ pub async fn run_tidy_inner(
 #[maybe_async::maybe_async]
 async fn sweep_acme(req: &Request, cutoff: i64) -> Result<(u64, u64, u64), RvError> {
     use super::acme::storage::{
-        AcmeAuthz, AcmeChall, AcmeOrder, AUTHZ_PREFIX, CHALL_PREFIX, ORDER_CERT_SUFFIX,
-        ORDER_PREFIX,
+        AcmeAuthz, AcmeChall, AcmeOrder, AUTHZ_PREFIX, CHALL_PREFIX, ORDER_CERT_SUFFIX, ORDER_PREFIX,
     };
     let cutoff_u = if cutoff <= 0 { 0 } else { cutoff as u64 };
 
@@ -312,9 +306,7 @@ async fn sweep_acme(req: &Request, cutoff: i64) -> Result<(u64, u64, u64), RvErr
     // their parent record when it's swept.
     if let Ok(keys) = req.storage_list(ORDER_PREFIX).await {
         for k in keys {
-            if k.ends_with(ORDER_CERT_SUFFIX.trim_start_matches('/'))
-                || k.contains(ORDER_CERT_SUFFIX)
-            {
+            if k.ends_with(ORDER_CERT_SUFFIX.trim_start_matches('/')) || k.contains(ORDER_CERT_SUFFIX) {
                 continue;
             }
             let full = format!("{ORDER_PREFIX}{k}");
@@ -328,9 +320,7 @@ async fn sweep_acme(req: &Request, cutoff: i64) -> Result<(u64, u64, u64), RvErr
             };
             if ord.expires_at_unix > 0 && ord.expires_at_unix < cutoff_u {
                 let _ = req.storage_delete(&full).await;
-                let _ = req
-                    .storage_delete(&format!("{ORDER_PREFIX}{k}{ORDER_CERT_SUFFIX}"))
-                    .await;
+                let _ = req.storage_delete(&format!("{ORDER_PREFIX}{k}{ORDER_CERT_SUFFIX}")).await;
                 orders_swept += 1;
             }
         }
@@ -370,11 +360,7 @@ async fn sweep_acme(req: &Request, cutoff: i64) -> Result<(u64, u64, u64), RvErr
                 Ok(c) => c,
                 Err(_) => continue,
             };
-            let parent = req
-                .storage_get(&format!("{AUTHZ_PREFIX}{}", ch.authz_id))
-                .await
-                .ok()
-                .flatten();
+            let parent = req.storage_get(&format!("{AUTHZ_PREFIX}{}", ch.authz_id)).await.ok().flatten();
             if parent.is_none() {
                 let _ = req.storage_delete(&full).await;
                 chall_swept += 1;

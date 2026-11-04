@@ -1,11 +1,11 @@
 use std::fmt;
 
 use rustls::{
+    client::danger::HandshakeSignatureValid,
     crypto::{self, WebPkiSupportedAlgorithms},
     pki_types::{CertificateDer, UnixTime},
     server::danger::{ClientCertVerified, ClientCertVerifier},
-    client::danger::HandshakeSignatureValid,
-    DistinguishedName, DigitallySignedStruct, Error, SignatureScheme,
+    DigitallySignedStruct, DistinguishedName, Error, SignatureScheme,
 };
 
 /// Requests a client certificate at the TLS layer but defers trust decisions to application code.
@@ -19,9 +19,7 @@ pub struct OptionalClientAuthVerifier {
 
 impl OptionalClientAuthVerifier {
     pub fn new() -> Self {
-        Self {
-            supported_algs: rustls::crypto::aws_lc_rs::default_provider().signature_verification_algorithms,
-        }
+        Self { supported_algs: rustls::crypto::aws_lc_rs::default_provider().signature_verification_algorithms }
     }
 }
 

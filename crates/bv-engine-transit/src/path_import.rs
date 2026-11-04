@@ -119,11 +119,7 @@ impl TransitBackendInner {
     /// path so a `transit-user` token (which has no `update` on
     /// `wrapping_key`) can still pull the public key — the lazy-init
     /// then runs under whichever operator first hit the endpoint.
-    pub async fn handle_wrapping_key(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_wrapping_key(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let wk = self.load_or_create_wrapping_key(req).await?;
         let mut data = Map::new();
         data.insert("public_key".into(), Value::String(B64.encode(&wk.public)));
@@ -131,11 +127,7 @@ impl TransitBackendInner {
         Ok(Some(Response::data_response(Some(data))))
     }
 
-    pub async fn handle_import(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_import(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let name = take_str(req, "name");
         let kt = KeyType::parse(&take_or(req, "key_type", "chacha20-poly1305"))?;
         if !kt.is_symmetric_aead() && kt != KeyType::Hmac {
@@ -161,22 +153,12 @@ impl TransitBackendInner {
             )));
         }
         if convergent_encryption && !derived {
-            return Err(RvError::ErrString(
-                "convergent_encryption=true requires derived=true".into(),
-            ));
+            return Err(RvError::ErrString("convergent_encryption=true requires derived=true".into()));
         }
 
         let material = self.unwrap_imported_key(req, kt).await?;
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let v1 = KeyVersion {
-            version: 1,
-            created_at: now,
-            material,
-            pk: Vec::new(),
-        };
+        let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let v1 = KeyVersion { version: 1, created_at: now, material, pk: Vec::new() };
         let mut p = KeyPolicy::new(name, kt, v1);
         p.exportable = exportable;
         p.deletion_allowed = deletion_allowed;
@@ -192,55 +174,31 @@ impl TransitBackendInner {
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let name = take_str(req, "name");
-        let mut p = self
-            .get_policy(req, &name)
-            .await?
-            .ok_or_else(|| RvError::ErrString(format!("unknown key `{name}`")))?;
+        let mut p =
+            self.get_policy(req, &name).await?.ok_or_else(|| RvError::ErrString(format!("unknown key `{name}`")))?;
         let material = self.unwrap_imported_key(req, p.key_type).await?;
         let next = p.latest_version + 1;
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        p.versions.insert(
-            next,
-            KeyVersion {
-                version: next,
-                created_at: now,
-                material,
-                pk: Vec::new(),
-            },
-        );
+        let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        p.versions.insert(next, KeyVersion { version: next, created_at: now, material, pk: Vec::new() });
         p.latest_version = next;
         self.put_policy(req, &p).await?;
         Ok(Some(Response::data_response(Some(super::path_keys::render_metadata(&p)))))
     }
 
-    async fn load_or_create_wrapping_key(
-        &self,
-        req: &mut Request,
-    ) -> Result<WrappingKey, RvError> {
+    async fn load_or_create_wrapping_key(&self, req: &mut Request) -> Result<WrappingKey, RvError> {
         if let Some(e) = req.storage_get(WRAPPING_KEY_PATH).await? {
             return Ok(serde_json::from_slice(&e.value)?);
         }
         let (sk, pk) = ml_kem::generate_keypair()?;
         let wk = WrappingKey { secret: sk, public: pk };
-        req.storage_put(&StorageEntry {
-            key: WRAPPING_KEY_PATH.to_string(),
-            value: serde_json::to_vec(&wk)?,
-        })
-        .await?;
+        req.storage_put(&StorageEntry { key: WRAPPING_KEY_PATH.to_string(), value: serde_json::to_vec(&wk)? }).await?;
         Ok(wk)
     }
 
     /// Decapsulate the caller-supplied wrapped blob with this mount's
     /// private wrapping key, validate the recovered key length
     /// matches the declared key_type, and return the raw key bytes.
-    async fn unwrap_imported_key(
-        &self,
-        req: &mut Request,
-        kt: KeyType,
-    ) -> Result<Vec<u8>, RvError> {
+    async fn unwrap_imported_key(&self, req: &mut Request, kt: KeyType) -> Result<Vec<u8>, RvError> {
         let ct_str = take_str(req, "ciphertext");
         let framed = ciphertext::parse(&ct_str)?;
         if framed.pqc_algo.as_deref() != Some("ml-kem-768") {
@@ -259,10 +217,7 @@ impl TransitBackendInner {
             KeyType::Chacha20Poly1305 => sym::CHACHA_KEY_LEN,
             KeyType::Hmac => 32,
             other => {
-                return Err(RvError::ErrString(format!(
-                    "BYOK import does not currently support {}",
-                    other.as_str()
-                )))
+                return Err(RvError::ErrString(format!("BYOK import does not currently support {}", other.as_str())))
             }
         };
         if dk.len() != expected_len {
@@ -278,15 +233,16 @@ impl TransitBackendInner {
 }
 
 fn take_str(req: &Request, key: &str) -> String {
-    req.get_data(key)
-        .ok()
-        .and_then(|v| v.as_str().map(|s| s.to_string()))
-        .unwrap_or_default()
+    req.get_data(key).ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default()
 }
 
 fn take_or(req: &Request, key: &str, default: &str) -> String {
     let s = take_str(req, key);
-    if s.is_empty() { default.to_string() } else { s }
+    if s.is_empty() {
+        default.to_string()
+    } else {
+        s
+    }
 }
 
 fn take_bool(req: &Request, key: &str, default: bool) -> bool {

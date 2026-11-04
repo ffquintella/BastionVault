@@ -15,8 +15,7 @@ use crate::{
     kernel_api::auth::MAX_LEASE_DURATION_SECS,
     storage::{Storage, StorageEntry},
     utils::{
-        self, deserialize_duration, deserialize_system_time, hmac_sha256_hex, serialize_duration,
-        serialize_system_time,
+        self, deserialize_duration, deserialize_system_time, hmac_sha256_hex, serialize_duration, serialize_system_time,
     },
 };
 
@@ -461,10 +460,16 @@ mod reserved_meta_tests {
     use super::*;
 
     fn forged() -> HashMap<String, String> {
-        [("entity_id", "victim"), ("username", "alice"), ("spiffe_id", "spiffe://x"), ("approle_env_scoped", "x"), ("team", "ops")]
-            .into_iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect()
+        [
+            ("entity_id", "victim"),
+            ("username", "alice"),
+            ("spiffe_id", "spiffe://x"),
+            ("approle_env_scoped", "x"),
+            ("team", "ops"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
     }
 
     #[test]

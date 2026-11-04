@@ -92,10 +92,7 @@ impl EntityStore {
             return self.alias_view.clone();
         }
         let b64 = URL_SAFE_NO_PAD.encode(ns_path.as_bytes());
-        Arc::new(
-            self.system_view
-                .new_sub_view(&format!("{IDENTITY_NS_SUB_PATH}{b64}/alias/")),
-        )
+        Arc::new(self.system_view.new_sub_view(&format!("{IDENTITY_NS_SUB_PATH}{b64}/alias/")))
     }
 
     /// Storage key under the alias view for a `(mount, name)` pair.
@@ -115,21 +112,12 @@ impl EntityStore {
 
     /// Look up an entity by (mount, principal name). Returns `None`
     /// when no alias exists — typical on a user's first login.
-    pub async fn get_by_alias(
-        &self,
-        mount: &str,
-        name: &str,
-    ) -> Result<Option<Entity>, RvError> {
+    pub async fn get_by_alias(&self, mount: &str, name: &str) -> Result<Option<Entity>, RvError> {
         self.get_by_alias_ns(mount, name, "").await
     }
 
     /// Namespace-scoped alias lookup. Root delegates to the legacy keyspace.
-    pub async fn get_by_alias_ns(
-        &self,
-        mount: &str,
-        name: &str,
-        ns_path: &str,
-    ) -> Result<Option<Entity>, RvError> {
+    pub async fn get_by_alias_ns(&self, mount: &str, name: &str, ns_path: &str) -> Result<Option<Entity>, RvError> {
         let key = Self::alias_key(mount, name);
         let Some(raw) = self.alias_view_for(ns_path).get(&key).await? else {
             return Ok(None);
@@ -153,11 +141,7 @@ impl EntityStore {
     /// call. Idempotent: a concurrent second call for the same alias
     /// will return the already-created entity rather than issuing a
     /// new UUID.
-    pub async fn get_or_create_entity(
-        &self,
-        mount: &str,
-        name: &str,
-    ) -> Result<Entity, RvError> {
+    pub async fn get_or_create_entity(&self, mount: &str, name: &str) -> Result<Entity, RvError> {
         self.get_or_create_entity_ns(mount, name, "").await
     }
 
@@ -165,12 +149,7 @@ impl EntityStore {
     /// keyspace and the new entity record is tagged with `ns_path`, so the same
     /// external principal resolves to a distinct entity per namespace. Root
     /// (`ns_path == ""`) is byte-for-byte the legacy behaviour.
-    pub async fn get_or_create_entity_ns(
-        &self,
-        mount: &str,
-        name: &str,
-        ns_path: &str,
-    ) -> Result<Entity, RvError> {
+    pub async fn get_or_create_entity_ns(&self, mount: &str, name: &str, ns_path: &str) -> Result<Entity, RvError> {
         if let Some(existing) = self.get_by_alias_ns(mount, name, ns_path).await? {
             return Ok(existing);
         }
@@ -185,15 +164,11 @@ impl EntityStore {
             namespace: ns_path.to_string(),
         };
         let value = serde_json::to_vec(&entity)?;
-        self.entity_view
-            .put(&StorageEntry { key: id.clone(), value })
-            .await?;
+        self.entity_view.put(&StorageEntry { key: id.clone(), value }).await?;
 
         let alias_key = Self::alias_key(mount, name);
         let alias_value = serde_json::to_vec(&id)?;
-        self.alias_view_for(ns_path)
-            .put(&StorageEntry { key: alias_key, value: alias_value })
-            .await?;
+        self.alias_view_for(ns_path).put(&StorageEntry { key: alias_key, value: alias_value }).await?;
 
         Ok(entity)
     }
@@ -276,11 +251,7 @@ impl EntityStore {
                 namespace: ns_path.to_string(),
             });
         }
-        out.sort_by(|a, b| {
-            a.mount
-                .cmp(&b.mount)
-                .then_with(|| a.name.cmp(&b.name))
-        });
+        out.sort_by(|a, b| a.mount.cmp(&b.mount).then_with(|| a.name.cmp(&b.name)));
         Ok(out)
     }
 }

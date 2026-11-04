@@ -128,10 +128,9 @@ fn params_for_subject(
     if !subject.upn_sans.is_empty() {
         let upn_arcs = super::ad_ext::upn_san_arcs();
         for upn in &subject.upn_sans {
-            params.subject_alt_names.push(SanType::OtherName((
-                upn_arcs.clone(),
-                OtherNameValue::Utf8String(upn.clone()),
-            )));
+            params
+                .subject_alt_names
+                .push(SanType::OtherName((upn_arcs.clone(), OtherNameValue::Utf8String(upn.clone()))));
         }
     }
 
@@ -146,9 +145,8 @@ fn params_for_subject(
     }
 
     if !urls.crl_distribution_points.is_empty() {
-        params.crl_distribution_points = vec![rcgen::CrlDistributionPoint {
-            uris: urls.crl_distribution_points.clone(),
-        }];
+        params.crl_distribution_points =
+            vec![rcgen::CrlDistributionPoint { uris: urls.crl_distribution_points.clone() }];
     }
 
     let mut dn = DistinguishedName::new();
@@ -237,8 +235,8 @@ fn resolve_ext_key_usage(value: &str) -> Result<Option<ExtendedKeyUsagePurpose>,
     }
     // Dotted-decimal shape → treat as an OID.
     if trimmed.bytes().all(|b| b.is_ascii_digit() || b == b'.') {
-        let arcs = super::ad_ext::parse_oid_arcs(trimmed)
-            .map_err(|e| RvError::ErrString(format!("ext_key_usage: {e}")))?;
+        let arcs =
+            super::ad_ext::parse_oid_arcs(trimmed).map_err(|e| RvError::ErrString(format!("ext_key_usage: {e}")))?;
         return Ok(Some(ExtendedKeyUsagePurpose::Other(arcs)));
     }
     let named = match trimmed.to_ascii_lowercase().as_str() {
@@ -249,21 +247,18 @@ fn resolve_ext_key_usage(value: &str) -> Result<Option<ExtendedKeyUsagePurpose>,
         "timestamping" => Some(ExtendedKeyUsagePurpose::TimeStamping),
         "ocspsigning" => Some(ExtendedKeyUsagePurpose::OcspSigning),
         "any" | "anyextendedkeyusage" => Some(ExtendedKeyUsagePurpose::Any),
-        "smartcardlogon" => Some(ExtendedKeyUsagePurpose::Other(
-            super::ad_ext::parse_oid_arcs(super::ad_ext::SMARTCARD_LOGON_EKU_OID)?,
-        )),
-        "kdcauthentication" => Some(ExtendedKeyUsagePurpose::Other(
-            super::ad_ext::parse_oid_arcs(super::ad_ext::KDC_AUTH_EKU_OID)?,
-        )),
+        "smartcardlogon" => {
+            Some(ExtendedKeyUsagePurpose::Other(super::ad_ext::parse_oid_arcs(super::ad_ext::SMARTCARD_LOGON_EKU_OID)?))
+        }
+        "kdcauthentication" => {
+            Some(ExtendedKeyUsagePurpose::Other(super::ad_ext::parse_oid_arcs(super::ad_ext::KDC_AUTH_EKU_OID)?))
+        }
         _ => None,
     };
     Ok(named)
 }
 
-fn parse_ext_key_usages(
-    role: &RoleEntry,
-    values: &[String],
-) -> Result<Vec<ExtendedKeyUsagePurpose>, RvError> {
+fn parse_ext_key_usages(role: &RoleEntry, values: &[String]) -> Result<Vec<ExtendedKeyUsagePurpose>, RvError> {
     let mut out: Vec<ExtendedKeyUsagePurpose> = Vec::new();
     for v in values {
         if let Some(purpose) = resolve_ext_key_usage(v)? {
@@ -277,8 +272,8 @@ fn parse_ext_key_usages(
     // here means the role predates validation or storage was edited
     // out-of-band).
     for oid in &role.ext_key_usage_oids {
-        let arcs = super::ad_ext::parse_oid_arcs(oid)
-            .map_err(|e| RvError::ErrString(format!("ext_key_usage_oids: {e}")))?;
+        let arcs =
+            super::ad_ext::parse_oid_arcs(oid).map_err(|e| RvError::ErrString(format!("ext_key_usage_oids: {e}")))?;
         let purpose = ExtendedKeyUsagePurpose::Other(arcs);
         if !out.contains(&purpose) {
             out.push(purpose);
@@ -309,8 +304,7 @@ pub fn build_root_ca(
     }
     params.distinguished_name = dn;
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    params.key_usages =
-        vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign, KeyUsagePurpose::DigitalSignature];
+    params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign, KeyUsagePurpose::DigitalSignature];
 
     let now = OffsetDateTime::now_utc();
     params.not_before = now - time::Duration::seconds(30);
@@ -449,8 +443,7 @@ pub fn build_leaf_csr(
     let serial_throwaway = random_serial_bytes();
     // No CDP in a generated CSR: rcgen refuses CRL-DP in a CSR, and the
     // upstream CA sets its own distribution points anyway.
-    let mut params =
-        params_for_subject(role, subject, role.ttl, &serial_throwaway, &IssuanceUrls::default())?;
+    let mut params = params_for_subject(role, subject, role.ttl, &serial_throwaway, &IssuanceUrls::default())?;
     params.serial_number = None;
     params.serialize_request(signer.key_pair()).map_err(rcgen_err)
 }
@@ -840,14 +833,9 @@ pub fn build_crl(
 ) -> Result<String, RvError> {
     use rcgen::SigningKey;
     let alg_id = classical_signature_alg_id(ca_signer.algorithm())?;
-    super::x509_pqc::build_crl_with_alg(
-        crl_number,
-        next_update_secs,
-        revoked,
-        ca_cert_pem,
-        alg_id,
-        |tbs_der| ca_signer.key_pair().sign(tbs_der).map_err(rcgen_err),
-    )
+    super::x509_pqc::build_crl_with_alg(crl_number, next_update_secs, revoked, ca_cert_pem, alg_id, |tbs_der| {
+        ca_signer.key_pair().sign(tbs_der).map_err(rcgen_err)
+    })
 }
 
 /// Map a classical signing algorithm to the `AlgorithmIdentifier` that
@@ -872,35 +860,21 @@ fn classical_signature_alg_id(
 
     let (oid, parameters): (const_oid::ObjectIdentifier, Option<x509_cert::der::Any>) = match alg {
         // sha256WithRSAEncryption
-        KeyAlgorithm::Rsa2048 => (
-            const_oid::ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.11"),
-            null_params.clone(),
-        ),
+        KeyAlgorithm::Rsa2048 => {
+            (const_oid::ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.11"), null_params.clone())
+        }
         // sha384WithRSAEncryption
-        KeyAlgorithm::Rsa3072 => (
-            const_oid::ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.12"),
-            null_params.clone(),
-        ),
+        KeyAlgorithm::Rsa3072 => {
+            (const_oid::ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.12"), null_params.clone())
+        }
         // sha512WithRSAEncryption
-        KeyAlgorithm::Rsa4096 => (
-            const_oid::ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.13"),
-            null_params,
-        ),
+        KeyAlgorithm::Rsa4096 => (const_oid::ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.13"), null_params),
         // ecdsa-with-SHA256
-        KeyAlgorithm::EcdsaP256 => (
-            const_oid::ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.2"),
-            None,
-        ),
+        KeyAlgorithm::EcdsaP256 => (const_oid::ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.2"), None),
         // ecdsa-with-SHA384
-        KeyAlgorithm::EcdsaP384 => (
-            const_oid::ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.3"),
-            None,
-        ),
+        KeyAlgorithm::EcdsaP384 => (const_oid::ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.3"), None),
         // id-Ed25519 (RFC 8410)
-        KeyAlgorithm::Ed25519 => (
-            const_oid::ObjectIdentifier::new_unwrap("1.3.101.112"),
-            None,
-        ),
+        KeyAlgorithm::Ed25519 => (const_oid::ObjectIdentifier::new_unwrap("1.3.101.112"), None),
         // PQC + composite are handled by their own builders, not this one.
         KeyAlgorithm::MlDsa44 | KeyAlgorithm::MlDsa65 | KeyAlgorithm::MlDsa87 => {
             return Err(RvError::ErrPkiKeyTypeInvalid);
@@ -976,9 +950,7 @@ pub fn validate_dns_name(role: &RoleEntry, name: &str) -> Result<(), RvError> {
             return Ok(());
         }
     }
-    Err(RvError::ErrString(format!(
-        "name `{name}` is not permitted by the role's emission policy"
-    )))
+    Err(RvError::ErrString(format!("name `{name}` is not permitted by the role's emission policy")))
 }
 
 /// `child` is a strict subdomain of `parent` when it ends with

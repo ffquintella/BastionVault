@@ -27,10 +27,7 @@ pub struct ValidationInput<'a> {
     pub clock_skew_secs: u64,
 }
 
-pub fn validate(
-    parsed: &ParsedResponse,
-    input: &ValidationInput<'_>,
-) -> Result<(), RvError> {
+pub fn validate(parsed: &ParsedResponse, input: &ValidationInput<'_>) -> Result<(), RvError> {
     // Status must be Success — everything else is a hard failure and
     // the IdP's `StatusMessage` (when present) is surfaced so the
     // operator can diagnose (account locked, MFA required, etc.).
@@ -74,10 +71,8 @@ pub fn validate(
         )));
     }
 
-    let assertion = parsed
-        .assertion
-        .as_ref()
-        .ok_or_else(|| RvError::ErrString("saml: Response carries no Assertion".into()))?;
+    let assertion =
+        parsed.assertion.as_ref().ok_or_else(|| RvError::ErrString("saml: Response carries no Assertion".into()))?;
 
     if assertion.issuer != input.expected_issuer {
         return Err(RvError::ErrString(format!(
@@ -87,10 +82,7 @@ pub fn validate(
     }
 
     if !assertion.audience_restrictions.is_empty()
-        && !assertion
-            .audience_restrictions
-            .iter()
-            .any(|a| a == input.expected_audience)
+        && !assertion.audience_restrictions.iter().any(|a| a == input.expected_audience)
     {
         return Err(RvError::ErrString(format!(
             "saml: Assertion Audience `{:?}` does not include configured SP entity id `{}`",
@@ -122,9 +114,7 @@ pub fn validate(
     }
 
     if assertion.name_id.is_empty() {
-        return Err(RvError::ErrString(
-            "saml: Assertion has no NameID".into(),
-        ));
+        return Err(RvError::ErrString("saml: Assertion has no NameID".into()));
     }
 
     Ok(())
@@ -132,10 +122,7 @@ pub fn validate(
 
 /// Seconds-since-epoch for "now".
 pub fn now_unix() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
 /// Parse an ISO-8601 UTC timestamp of the form `YYYY-MM-DDTHH:MM:SSZ`
@@ -149,9 +136,8 @@ pub fn parse_iso8601_utc(s: &str) -> Result<u64, RvError> {
     let trimmed = s.trim();
     let without_frac = match trimmed.find('.') {
         Some(dot) => {
-            let end_z = trimmed
-                .find('Z')
-                .ok_or_else(|| RvError::ErrString(format!("saml: timestamp `{s}` missing Z")))?;
+            let end_z =
+                trimmed.find('Z').ok_or_else(|| RvError::ErrString(format!("saml: timestamp `{s}` missing Z")))?;
             let mut out = String::with_capacity(trimmed.len() - (end_z - dot));
             out.push_str(&trimmed[..dot]);
             out.push('Z');
@@ -167,54 +153,33 @@ pub fn parse_iso8601_utc(s: &str) -> Result<u64, RvError> {
     }
 
     let bytes = without_frac.as_bytes();
-    let year: u32 = std::str::from_utf8(&bytes[0..4])
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .ok_or_else(|| bad(s))?;
+    let year: u32 = std::str::from_utf8(&bytes[0..4]).ok().and_then(|v| v.parse().ok()).ok_or_else(|| bad(s))?;
     if bytes[4] != b'-' {
         return Err(bad(s));
     }
-    let month: u32 = std::str::from_utf8(&bytes[5..7])
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .ok_or_else(|| bad(s))?;
+    let month: u32 = std::str::from_utf8(&bytes[5..7]).ok().and_then(|v| v.parse().ok()).ok_or_else(|| bad(s))?;
     if bytes[7] != b'-' {
         return Err(bad(s));
     }
-    let day: u32 = std::str::from_utf8(&bytes[8..10])
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .ok_or_else(|| bad(s))?;
+    let day: u32 = std::str::from_utf8(&bytes[8..10]).ok().and_then(|v| v.parse().ok()).ok_or_else(|| bad(s))?;
     if bytes[10] != b'T' {
         return Err(bad(s));
     }
-    let hour: u32 = std::str::from_utf8(&bytes[11..13])
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .ok_or_else(|| bad(s))?;
+    let hour: u32 = std::str::from_utf8(&bytes[11..13]).ok().and_then(|v| v.parse().ok()).ok_or_else(|| bad(s))?;
     if bytes[13] != b':' {
         return Err(bad(s));
     }
-    let min: u32 = std::str::from_utf8(&bytes[14..16])
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .ok_or_else(|| bad(s))?;
+    let min: u32 = std::str::from_utf8(&bytes[14..16]).ok().and_then(|v| v.parse().ok()).ok_or_else(|| bad(s))?;
     if bytes[16] != b':' {
         return Err(bad(s));
     }
-    let sec: u32 = std::str::from_utf8(&bytes[17..19])
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .ok_or_else(|| bad(s))?;
+    let sec: u32 = std::str::from_utf8(&bytes[17..19]).ok().and_then(|v| v.parse().ok()).ok_or_else(|| bad(s))?;
 
     if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || min > 59 || sec > 60 {
         return Err(bad(s));
     }
 
-    Ok(days_from_civil(year as i64, month, day) * 86_400
-        + (hour as u64) * 3600
-        + (min as u64) * 60
-        + (sec as u64))
+    Ok(days_from_civil(year as i64, month, day) * 86_400 + (hour as u64) * 3600 + (min as u64) * 60 + (sec as u64))
 }
 
 /// Howard-Hinnant civil_from_days, adapted for UTC epoch. Returns
@@ -232,9 +197,7 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> u64 {
 }
 
 fn bad(s: &str) -> RvError {
-    RvError::ErrString(format!(
-        "saml: timestamp `{s}` is not a parseable ISO-8601 UTC datetime"
-    ))
+    RvError::ErrString(format!("saml: timestamp `{s}` is not a parseable ISO-8601 UTC datetime"))
 }
 
 #[cfg(test)]
@@ -325,8 +288,7 @@ mod tests {
     #[test]
     fn audience_mismatch_rejected() {
         let mut r = good_response();
-        r.assertion.as_mut().unwrap().audience_restrictions =
-            vec!["https://someone-else.example.com".into()];
+        r.assertion.as_mut().unwrap().audience_restrictions = vec!["https://someone-else.example.com".into()];
         let err = validate(&r, &good_input()).unwrap_err();
         assert!(format!("{err}").contains("Audience"));
     }

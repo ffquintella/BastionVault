@@ -204,9 +204,7 @@ impl FerroGateBackendInner {
         if let Ok(v) = req.get_data("jwks_source") {
             let src = v.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
             if src != super::jwks_source::STATIC && src != super::jwks_source::CMIS_GRPC {
-                return Ok(Some(Response::error_response(
-                    "jwks_source must be 'static_jwks' or 'cmis_grpc'",
-                )));
+                return Ok(Some(Response::error_response("jwks_source must be 'static_jwks' or 'cmis_grpc'")));
             }
             config.jwks_source = src;
         }
@@ -261,9 +259,7 @@ impl FerroGateBackendInner {
             // Same charset rule as the MIA's own environment validation: the
             // value is advertised to clients which turn it into a
             // `mia-<env>.toml` file name, so it must never carry path syntax.
-            if !env.is_empty()
-                && !env.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
-            {
+            if !env.is_empty() && !env.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')) {
                 return Ok(Some(Response::error_response(
                     "mia_environment is invalid: use only letters, digits, '.', '-', '_'",
                 )));
@@ -290,16 +286,18 @@ impl FerroGateBackendInner {
 
         // Mirror the enforcement flag to the system view + in-memory fast path
         // so the token layer can gate every request without a storage read.
-        self.core
-            .set_require_machine_identity(config.require_machine_identity)
-            .await?;
+        self.core.set_require_machine_identity(config.require_machine_identity).await?;
 
         Ok(None)
     }
 
     /// Unauthenticated handler: report whether this server requires FerroGate
     /// machine identity, plus the audience/trust-domain a client should target.
-    pub async fn read_requirement(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+    pub async fn read_requirement(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
         let config = self.get_config(req).await?;
         let mut data = serde_json::Map::new();
         data.insert("require_machine_identity".to_string(), serde_json::Value::Bool(config.require_machine_identity));

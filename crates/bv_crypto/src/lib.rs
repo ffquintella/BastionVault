@@ -9,8 +9,8 @@ pub mod signature;
 #[cfg(all(feature = "ml-kem-768", feature = "ml-dsa-65"))]
 pub use bvrg::{
     build as bvrg_build, fresh_nonce as bvrg_fresh_nonce, unix_now as bvrg_unix_now, verify as bvrg_verify,
-    BvrgCredential, BvrgError, BvrgMasterPublicKey, BvrgMasterSigningKey, BvrgOperator, BvrgPayload,
-    BvrgSession, BvrgTarget, VerifiedEnvelope, BVRG_MAGIC, MAX_ENVELOPE_BYTES,
+    BvrgCredential, BvrgError, BvrgMasterPublicKey, BvrgMasterSigningKey, BvrgOperator, BvrgPayload, BvrgSession,
+    BvrgTarget, VerifiedEnvelope, BVRG_MAGIC, MAX_ENVELOPE_BYTES,
 };
 
 pub use aead::{AeadCipher, Chacha20Poly1305Cipher, Nonce, SymmetricKey};

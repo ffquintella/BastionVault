@@ -112,8 +112,6 @@ impl FileAuditStore {
 /// `UserAuditStore::hist_seq` and the file-module's per-file
 /// history so append-only logs sort chronologically.
 fn hist_seq() -> String {
-    let n = Utc::now()
-        .timestamp_nanos_opt()
-        .unwrap_or_else(|| Utc::now().timestamp_millis() * 1_000_000);
+    let n = Utc::now().timestamp_nanos_opt().unwrap_or_else(|| Utc::now().timestamp_millis() * 1_000_000);
     format!("{:020}", n.max(0) as u128)
 }

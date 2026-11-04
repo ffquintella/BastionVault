@@ -35,11 +35,7 @@ pub const FAILURE_THRESHOLD: u32 = 3;
 #[derive(Debug, Clone)]
 pub enum ProbeOutcome {
     /// Probe succeeded; carries the body Rustion returned.
-    Success {
-        latency_ms: u32,
-        version: String,
-        active_sessions: u64,
-    },
+    Success { latency_ms: u32, version: String, active_sessions: u64 },
     /// Probe failed (network error, non-2xx, body parse failure, …).
     Failure { error: String },
 }
@@ -58,11 +54,7 @@ pub fn apply_probe(
 
     let prev_status = prev.status;
     match outcome {
-        ProbeOutcome::Success {
-            latency_ms,
-            version,
-            active_sessions,
-        } => {
+        ProbeOutcome::Success { latency_ms, version, active_sessions } => {
             next.status = HealthStatus::Up;
             next.last_ok_at = Some(now);
             next.last_error.clear();
@@ -82,11 +74,7 @@ pub fn apply_probe(
             let strikes = prev.consecutive_failures.saturating_add(1);
             next.consecutive_failures = strikes;
             next.last_error = error;
-            next.status = if strikes >= FAILURE_THRESHOLD {
-                HealthStatus::Down
-            } else {
-                HealthStatus::Degraded
-            };
+            next.status = if strikes >= FAILURE_THRESHOLD { HealthStatus::Down } else { HealthStatus::Degraded };
             // Leave latency_ms_p50 untouched on failure — the metric
             // tracks successful round trips only.
         }
@@ -109,11 +97,7 @@ mod tests {
         let prev = RustionTargetHealth::default();
         let (next, changed) = apply_probe(
             &prev,
-            ProbeOutcome::Success {
-                latency_ms: 12,
-                version: "rustion 0.4.2".into(),
-                active_sessions: 0,
-            },
+            ProbeOutcome::Success { latency_ms: 12, version: "rustion 0.4.2".into(), active_sessions: 0 },
             at(1_000),
         );
         assert!(changed);
@@ -126,17 +110,9 @@ mod tests {
 
     #[test]
     fn first_failure_lands_on_degraded_not_down() {
-        let prev = RustionTargetHealth {
-            status: HealthStatus::Up,
-            ..Default::default()
-        };
-        let (next, changed) = apply_probe(
-            &prev,
-            ProbeOutcome::Failure {
-                error: "tcp connect timeout".into(),
-            },
-            at(2_000),
-        );
+        let prev = RustionTargetHealth { status: HealthStatus::Up, ..Default::default() };
+        let (next, changed) =
+            apply_probe(&prev, ProbeOutcome::Failure { error: "tcp connect timeout".into() }, at(2_000));
         assert!(changed);
         assert_eq!(next.status, HealthStatus::Degraded);
         assert_eq!(next.consecutive_failures, 1);
@@ -145,18 +121,10 @@ mod tests {
 
     #[test]
     fn third_failure_flips_to_down() {
-        let mut h = RustionTargetHealth {
-            status: HealthStatus::Up,
-            ..Default::default()
-        };
+        let mut h = RustionTargetHealth { status: HealthStatus::Up, ..Default::default() };
         for i in 1..=FAILURE_THRESHOLD {
-            let (next, _) = apply_probe(
-                &h,
-                ProbeOutcome::Failure {
-                    error: format!("strike {i}"),
-                },
-                at(3_000 + i as i64),
-            );
+            let (next, _) =
+                apply_probe(&h, ProbeOutcome::Failure { error: format!("strike {i}") }, at(3_000 + i as i64));
             h = next;
         }
         assert_eq!(h.status, HealthStatus::Down);
@@ -173,11 +141,7 @@ mod tests {
         };
         let (next, changed) = apply_probe(
             &prev,
-            ProbeOutcome::Success {
-                latency_ms: 30,
-                version: "rustion 0.4.2".into(),
-                active_sessions: 2,
-            },
+            ProbeOutcome::Success { latency_ms: 30, version: "rustion 0.4.2".into(), active_sessions: 2 },
             at(4_000),
         );
         assert!(changed);
@@ -189,18 +153,10 @@ mod tests {
 
     #[test]
     fn stable_status_reports_no_change() {
-        let prev = RustionTargetHealth {
-            status: HealthStatus::Up,
-            latency_ms_p50: 20,
-            ..Default::default()
-        };
+        let prev = RustionTargetHealth { status: HealthStatus::Up, latency_ms_p50: 20, ..Default::default() };
         let (next, changed) = apply_probe(
             &prev,
-            ProbeOutcome::Success {
-                latency_ms: 24,
-                version: "rustion 0.4.2".into(),
-                active_sessions: 1,
-            },
+            ProbeOutcome::Success { latency_ms: 24, version: "rustion 0.4.2".into(), active_sessions: 1 },
             at(5_000),
         );
         assert!(!changed);

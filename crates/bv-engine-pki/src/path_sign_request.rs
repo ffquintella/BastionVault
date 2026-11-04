@@ -50,8 +50,8 @@ use crate::{
     context::Context,
     errors::RvError,
     logical::{
-        page_response, paginate, Backend, Field, FieldType, Operation, PageLimits, Path,
-        PathOperation, Request, Response,
+        page_response, paginate, Backend, Field, FieldType, Operation, PageLimits, Path, PathOperation, Request,
+        Response,
     },
     new_fields, new_fields_internal, new_path, new_path_internal,
 };
@@ -212,17 +212,8 @@ impl PkiBackend {
 
 #[maybe_async::maybe_async]
 impl PkiBackendInner {
-    pub async fn sign_request_import(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
-        let csr_input = req
-            .get_data("csr")?
-            .as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?
-            .trim()
-            .to_string();
+    pub async fn sign_request_import(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let csr_input = req.get_data("csr")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.trim().to_string();
         if csr_input.is_empty() {
             return Err(RvError::ErrRequestFieldInvalid);
         }
@@ -239,10 +230,7 @@ impl PkiBackendInner {
         let common_name = parsed.common_name.clone().unwrap_or_default();
         let spki_sha256 = csr::spki_fingerprint(&parsed.spki_der);
 
-        let allow_duplicate = req
-            .get_data_or_default("allow_duplicate")?
-            .as_bool()
-            .unwrap_or(false);
+        let allow_duplicate = req.get_data_or_default("allow_duplicate")?.as_bool().unwrap_or(false);
         let pending = self.scan_pending(req, &spki_sha256).await?;
         if pending.count >= MAX_PENDING_REQUESTS {
             return Err(RvError::ErrResponseStatus(
@@ -263,20 +251,10 @@ impl PkiBackendInner {
             }
         }
 
-        let requester = truncate(
-            req.get_data_or_default("requester")?.as_str().unwrap_or("").trim(),
-            MAX_REQUESTER_CHARS,
-        );
-        let notes = truncate(
-            req.get_data_or_default("notes")?.as_str().unwrap_or("").trim(),
-            MAX_NOTES_CHARS,
-        );
-        let suggested_role = req
-            .get_data_or_default("suggested_role")?
-            .as_str()
-            .unwrap_or("")
-            .trim()
-            .to_string();
+        let requester =
+            truncate(req.get_data_or_default("requester")?.as_str().unwrap_or("").trim(), MAX_REQUESTER_CHARS);
+        let notes = truncate(req.get_data_or_default("notes")?.as_str().unwrap_or("").trim(), MAX_NOTES_CHARS);
+        let suggested_role = req.get_data_or_default("suggested_role")?.as_str().unwrap_or("").trim().to_string();
 
         let record = SignRequestRecord {
             version: SIGN_REQUEST_FORMAT_VERSION,
@@ -309,11 +287,7 @@ impl PkiBackendInner {
         Ok(Some(Response::data_response(Some(record_summary(&record)))))
     }
 
-    pub async fn sign_request_list(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn sign_request_list(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let ids = req.storage_list(storage::KEY_PREFIX_SIGN_REQUEST).await?;
         Ok(Some(Response::list_response(&ids)))
     }
@@ -345,11 +319,7 @@ impl PkiBackendInner {
         Ok(Some(page_response(&page, records)))
     }
 
-    pub async fn sign_request_read(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn sign_request_read(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let id = request_id(req)?;
         let Some(record) = self.load_sign_request(req, &id).await? else {
             return Ok(None);
@@ -362,11 +332,7 @@ impl PkiBackendInner {
         Ok(Some(Response::data_response(Some(data))))
     }
 
-    pub async fn sign_request_delete(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn sign_request_delete(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let id = request_id(req)?;
         let key = storage::sign_request_storage_key(&id);
         if req.storage_get(&key).await?.is_none() {
@@ -385,10 +351,7 @@ impl PkiBackendInner {
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let id = request_id(req)?;
-        let record = self
-            .load_sign_request(req, &id)
-            .await?
-            .ok_or_else(|| not_found(&id))?;
+        let record = self.load_sign_request(req, &id).await?.ok_or_else(|| not_found(&id))?;
         let args = args_from_request(req, &record.csr_pem)?;
         let mode_raw = req.get_data_or_default("mode")?.as_str().unwrap_or("").trim().to_string();
         let role_raw = req.get_data_or_default("role")?.as_str().unwrap_or("").trim().to_string();
@@ -426,11 +389,7 @@ impl PkiBackendInner {
         Ok(Some(Response::data_response(Some(data))))
     }
 
-    pub async fn sign_request_approve(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn sign_request_approve(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let role = field(req, "role")?;
         if role.is_empty() {
             return Err(RvError::ErrResponseStatus(
@@ -458,10 +417,7 @@ impl PkiBackendInner {
         action: &str,
     ) -> Result<Option<Response>, RvError> {
         let id = request_id(req)?;
-        let mut record = self
-            .load_sign_request(req, &id)
-            .await?
-            .ok_or_else(|| not_found(&id))?;
+        let mut record = self.load_sign_request(req, &id).await?.ok_or_else(|| not_found(&id))?;
         require_pending(&record, action)?;
 
         let args = args_from_request(req, &record.csr_pem)?;
@@ -508,29 +464,14 @@ impl PkiBackendInner {
         Ok(Some(Response::data_response(Some(data))))
     }
 
-    pub async fn sign_request_reject(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn sign_request_reject(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let id = request_id(req)?;
-        let mut record = self
-            .load_sign_request(req, &id)
-            .await?
-            .ok_or_else(|| not_found(&id))?;
+        let mut record = self.load_sign_request(req, &id).await?.ok_or_else(|| not_found(&id))?;
         require_pending(&record, "reject")?;
 
-        let reason = req
-            .get_data("reason")?
-            .as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?
-            .trim()
-            .to_string();
+        let reason = req.get_data("reason")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.trim().to_string();
         if reason.is_empty() {
-            return Err(RvError::ErrResponseStatus(
-                400,
-                "sign-request/reject: `reason` is required".into(),
-            ));
+            return Err(RvError::ErrResponseStatus(400, "sign-request/reject: `reason` is required".into()));
         }
 
         record.status = sign_request_status::REJECTED.to_string();
@@ -538,32 +479,20 @@ impl PkiBackendInner {
         record.decided_by = caller_identity(req);
         record.reject_reason = truncate(&reason, MAX_REASON_CHARS);
         storage::put_json(req, &storage::sign_request_storage_key(&id), &record).await?;
-        log::info!(
-            "pki/sign-request: rejected {id} by {} — {}",
-            record.decided_by,
-            record.reject_reason
-        );
+        log::info!("pki/sign-request: rejected {id} by {} — {}", record.decided_by, record.reject_reason);
 
         Ok(Some(Response::data_response(Some(record_summary(&record)))))
     }
 
     // ── helpers ──────────────────────────────────────────────────────
 
-    async fn load_sign_request(
-        &self,
-        req: &Request,
-        id: &str,
-    ) -> Result<Option<SignRequestRecord>, RvError> {
+    async fn load_sign_request(&self, req: &Request, id: &str) -> Result<Option<SignRequestRecord>, RvError> {
         storage::get_json(req, &storage::sign_request_storage_key(id)).await
     }
 
     /// One pass over the queue: how many requests are undecided, and
     /// whether one of them already carries this SPKI fingerprint.
-    async fn scan_pending(
-        &self,
-        req: &Request,
-        fingerprint: &str,
-    ) -> Result<PendingScan, RvError> {
+    async fn scan_pending(&self, req: &Request, fingerprint: &str) -> Result<PendingScan, RvError> {
         let mut scan = PendingScan::default();
         for id in req.storage_list(storage::KEY_PREFIX_SIGN_REQUEST).await? {
             let Some(record) = self.load_sign_request(req, &id).await? else {
@@ -581,13 +510,8 @@ impl PkiBackendInner {
     }
 
     async fn all_role_modes(&self, req: &Request) -> Result<Vec<SignMode>, RvError> {
-        let mut modes: Vec<SignMode> = req
-            .storage_list("role/")
-            .await?
-            .into_iter()
-            .filter(|name| !name.is_empty())
-            .map(SignMode::Role)
-            .collect();
+        let mut modes: Vec<SignMode> =
+            req.storage_list("role/").await?.into_iter().filter(|name| !name.is_empty()).map(SignMode::Role).collect();
         modes.sort_by(|a, b| a.role_name().cmp(b.role_name()));
         Ok(modes)
     }
@@ -641,7 +565,8 @@ impl PkiBackendInner {
             hints.push(if role.use_csr_common_name {
                 "the CSR carries no CN and the role reads the CN from the CSR (use_csr_common_name=true)".to_string()
             } else {
-                "the role ignores the CSR's CN (use_csr_common_name=false) and no `common_name` was supplied".to_string()
+                "the role ignores the CSR's CN (use_csr_common_name=false) and no `common_name` was supplied"
+                    .to_string()
             });
         } else if x509::validate_common_name(&role, &common_name).is_err() {
             hints.push(format!(
@@ -660,9 +585,7 @@ impl PkiBackendInner {
         };
         for dns in &dns_sans {
             if x509::validate_dns_name(&role, dns).is_err() {
-                hints.push(format!(
-                    "DNS SAN `{dns}` is not permitted by role `{role_name}`"
-                ));
+                hints.push(format!("DNS SAN `{dns}` is not permitted by role `{role_name}`"));
             }
         }
         if !role.allow_ip_sans && !ip_sans.is_empty() {
@@ -672,14 +595,10 @@ impl PkiBackendInner {
             ));
         }
         if !args.key_ref.trim().is_empty() && !role.allow_key_reuse {
-            hints.push(format!(
-                "role `{role_name}` sets allow_key_reuse=false, so `key_ref` is refused"
-            ));
+            hints.push(format!("role `{role_name}` sets allow_key_reuse=false, so `key_ref` is refused"));
         }
         if !args.upn_sans.trim().is_empty() && !role.allow_upn_sans {
-            hints.push(format!(
-                "role `{role_name}` sets allow_upn_sans=false, so `upn_sans` is refused"
-            ));
+            hints.push(format!("role `{role_name}` sets allow_upn_sans=false, so `upn_sans` is refused"));
         }
         // rfc822Name SANs: from the CSR when the role honours CSR SANs,
         // from the body otherwise. Both are refused by a role that does
@@ -688,11 +607,7 @@ impl PkiBackendInner {
         let requested_emails = if role.use_csr_sans {
             parsed.requested_email_sans.clone()
         } else {
-            args.email_sans
-                .split(',')
-                .map(|a| a.trim().to_string())
-                .filter(|a| !a.is_empty())
-                .collect()
+            args.email_sans.split(',').map(|a| a.trim().to_string()).filter(|a| !a.is_empty()).collect()
         };
         if !requested_emails.is_empty() && !role.allow_email_sans {
             hints.push(format!(
@@ -702,9 +617,7 @@ impl PkiBackendInner {
         }
         for addr in &requested_emails {
             if role.allow_email_sans && super::email_san::validate_email(&role, addr).is_err() {
-                hints.push(format!(
-                    "rfc822Name SAN `{addr}` is not permitted by role `{role_name}`"
-                ));
+                hints.push(format!("rfc822Name SAN `{addr}` is not permitted by role `{role_name}`"));
             }
         }
         if role.use_csr_sans && !args.email_sans.trim().is_empty() {
@@ -728,10 +641,7 @@ struct PendingScan {
 fn merge_plan(out: &mut Map<String, Value>, plan: &SignPlan) {
     out.insert("common_name".into(), json!(plan.common_name));
     out.insert("dns_sans".into(), json!(plan.dns_sans));
-    out.insert(
-        "ip_sans".into(),
-        json!(plan.ip_sans.iter().map(|ip| ip.to_string()).collect::<Vec<_>>()),
-    );
+    out.insert("ip_sans".into(), json!(plan.ip_sans.iter().map(|ip| ip.to_string()).collect::<Vec<_>>()));
     out.insert("upn_sans".into(), json!(plan.upn_sans));
     out.insert("email_sans".into(), json!(plan.email_sans));
     out.insert("ad_sid".into(), json!(plan.ad_sid.clone().unwrap_or_default()));
@@ -804,11 +714,7 @@ fn field(req: &Request, key: &str) -> Result<String, RvError> {
 }
 
 fn request_id(req: &Request) -> Result<String, RvError> {
-    Ok(req
-        .get_data("request_id")?
-        .as_str()
-        .ok_or(RvError::ErrRequestFieldInvalid)?
-        .to_string())
+    Ok(req.get_data("request_id")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string())
 }
 
 fn require_pending(record: &SignRequestRecord, action: &str) -> Result<(), RvError> {
@@ -850,8 +756,5 @@ fn truncate(s: &str, max_chars: usize) -> String {
 }
 
 fn now_unix() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }

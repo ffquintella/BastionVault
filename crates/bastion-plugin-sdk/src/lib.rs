@@ -221,12 +221,10 @@ pub mod surface {
     //! See [`features/plugin-extensibility.md`](https://github.com/ffquintella/BastionVault/blob/main/features/plugin-extensibility.md)
     //! for the schema reference.
     pub use bv_plugin_surface::{
-        ActiveSurfaceBundle, ActiveSurfaceEntry, CURRENT_SCHEMA_VERSION,
-        MODAL_FORMS_SCHEMA_VERSION, SurfaceBinding, SurfaceColumn,
-        SurfaceComponent, SurfaceDetail, SurfaceDetailField, SurfaceError,
-        SurfaceForm, SurfaceManifest, SurfaceMenu, SurfaceOp, SurfaceOpenForm,
-        SurfacePage, SurfacePresentation, SurfaceRowAction, SurfaceSection,
-        SurfaceSubmit, SurfaceTable, SurfaceTableAction,
+        ActiveSurfaceBundle, ActiveSurfaceEntry, SurfaceBinding, SurfaceColumn, SurfaceComponent, SurfaceDetail,
+        SurfaceDetailField, SurfaceError, SurfaceForm, SurfaceManifest, SurfaceMenu, SurfaceOp, SurfaceOpenForm,
+        SurfacePage, SurfacePresentation, SurfaceRowAction, SurfaceSection, SurfaceSubmit, SurfaceTable,
+        SurfaceTableAction, CURRENT_SCHEMA_VERSION, MODAL_FORMS_SCHEMA_VERSION,
     };
 
     /// Build a minimal-shaped [`SurfaceManifest`] with sensible
@@ -347,8 +345,7 @@ macro_rules! form_hook {
             // SAFETY: host's contract — see `read_input`'s docs.
             let input_bytes = unsafe { $crate::form_hook_abi::read_input(ptr, len) };
             let parsed: ::serde_json::Value =
-                ::serde_json::from_slice(input_bytes)
-                    .unwrap_or_else(|_| ::serde_json::Value::Null);
+                ::serde_json::from_slice(input_bytes).unwrap_or_else(|_| ::serde_json::Value::Null);
             let out: ::serde_json::Value = $export(parsed);
             let bytes = ::serde_json::to_vec(&out).unwrap_or_default();
             $crate::form_hook_abi::pack_response(bytes)
@@ -531,15 +528,9 @@ mod tests {
 
         // No mock set → returns the real wall-clock, sandwiched by the
         // host's own `SystemTime::now` calls.
-        let before = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64;
+        let before = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
         let now = host.now_unix_ms();
-        let after = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64;
+        let after = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
         assert!(now >= before && now <= after);
 
         // With a mock set, the wrapper returns it verbatim — the

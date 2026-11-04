@@ -14,16 +14,15 @@ use std::sync::Arc;
 use actix_web::{
     body::{EitherBody, MessageBody},
     dev::{ServiceRequest, ServiceResponse},
+    http::header,
     middleware::Next,
     web::Data,
-    Error,
-    HttpResponse,
-    http::header,
+    Error, HttpResponse,
 };
 
-use crate::kernel_api::VaultCtx;
-use crate::core::Core;
 use crate::client_ip::{ClientIp, TrustedProxies};
+use crate::core::Core;
+use crate::kernel_api::VaultCtx;
 use crate::Connection;
 
 use bastion_vault::dos::guard::{is_exempt_path, BanInfo};
@@ -49,10 +48,7 @@ pub async fn dos_middleware(
     // fall back to actix's `peer_addr` if the connect hook did not run (e.g.
     // under the test harness). If neither is available we cannot key the guard,
     // so we fail open.
-    let socket_peer = req
-        .conn_data::<Connection>()
-        .map(|c| c.peer)
-        .or_else(|| req.peer_addr());
+    let socket_peer = req.conn_data::<Connection>().map(|c| c.peer).or_else(|| req.peer_addr());
     let Some(socket_peer) = socket_peer else {
         return Ok(next.call(req).await?.map_into_left_body());
     };
@@ -81,13 +77,13 @@ pub async fn dos_middleware(
 }
 
 fn ban_response(info: &BanInfo) -> HttpResponse {
-    HttpResponse::TooManyRequests()
-        .insert_header((header::RETRY_AFTER, info.retry_after_secs))
-        .json(serde_json::json!({
+    HttpResponse::TooManyRequests().insert_header((header::RETRY_AFTER, info.retry_after_secs)).json(
+        serde_json::json!({
             "errors": [format!(
                 "request temporarily blocked by DoS protection: {}", info.reason
             )],
-        }))
+        }),
+    )
 }
 
 async fn emit_ban_audit(core: &dyn VaultCtx, ip: std::net::IpAddr, path: &str, info: &BanInfo) {
@@ -115,8 +111,8 @@ async fn emit_ban_audit(core: &dyn VaultCtx, ip: std::net::IpAddr, path: &str, i
 mod tests {
     use super::*;
     use crate::core::Core;
-    use bastion_vault::dos::DosConfig;
     use actix_web::{middleware::from_fn, test, web, App, HttpResponse};
+    use bastion_vault::dos::DosConfig;
 
     fn test_core(cfg: DosConfig) -> Arc<Core> {
         let core = Core::default().wrap();

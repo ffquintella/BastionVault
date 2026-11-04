@@ -370,7 +370,9 @@ fn yubihsm_extensions<'a>(cert: &'a X509Certificate<'a>) -> Result<BTreeMap<u32,
 }
 
 fn ext<'a>(exts: &BTreeMap<u32, &'a [u8]>, n: u32) -> Result<&'a [u8], RvError> {
-    exts.get(&n).copied().ok_or_else(|| invalid(format!("the key certificate lacks YubiHSM extension {YUBIHSM_ARC}{n}")))
+    exts.get(&n)
+        .copied()
+        .ok_or_else(|| invalid(format!("the key certificate lacks YubiHSM extension {YUBIHSM_ARC}{n}")))
 }
 
 /// One universal, primitive DER value filling `bytes`.
@@ -685,7 +687,8 @@ mod tests {
     impl Pki {
         fn new() -> Self {
             let root = root("Yubico Test Attestation Root");
-            let intermediate = signed(ca_params("Yubico Test Attestation Intermediate"), &PKCS_ECDSA_P256_SHA256, &root);
+            let intermediate =
+                signed(ca_params("Yubico Test Attestation Intermediate"), &PKCS_ECDSA_P256_SHA256, &root);
             let device = signed(device_params(SERIAL), &PKCS_ECDSA_P256_SHA256, &intermediate);
             Self { root, intermediate, device }
         }
@@ -908,10 +911,7 @@ mod tests {
         // Domain 9 (0x0100) and bit 32 of the capabilities, trailing zero bytes dropped.
         assert_eq!(read(&[0, 0x01], Some(&[0, 0, 0, 0, 0x01])), (0x0100, 0x0000_0001_0000_0000));
         // The full-width encodings of the same values.
-        assert_eq!(
-            read(&[0, 0x01, 0x00], Some(&[0, 0, 0, 0, 0x01, 0, 0, 0, 0])),
-            (0x0100, 0x0000_0001_0000_0000)
-        );
+        assert_eq!(read(&[0, 0x01, 0x00], Some(&[0, 0, 0, 0, 0x01, 0, 0, 0, 0])), (0x0100, 0x0000_0001_0000_0000));
     }
 
     #[test]

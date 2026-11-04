@@ -25,26 +25,23 @@ use bv_storage as storage;
 // which places them at *that* crate's root; the call sites import them as
 // `crate::new_path` and friends. The `_internal` halves are the recursive arms
 // the public macros expand into, so they must travel with them.
-pub use bv_logical::{
-    new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path,
-    new_path_internal, new_secret, new_secret_internal,
-};
 pub use bv_errors::{bv_error_response, bv_error_response_status, bv_error_string};
+pub use bv_logical::{
+    new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path, new_path_internal,
+    new_secret, new_secret_internal,
+};
 
 use std::{any::Any, collections::HashMap, sync::Arc};
 
 use derive_more::Deref;
 use serde_json::{Map, Value};
 
-use bv_kernel_api::{Module, VaultCtx};
 use crate::{
     context::Context,
     errors::RvError,
-    logical::{
-        Backend, Field, FieldType, LogicalBackend, Operation, Path, PathOperation, Request,
-        Response,
-    },
+    logical::{Backend, Field, FieldType, LogicalBackend, Operation, Path, PathOperation, Request, Response},
 };
+use bv_kernel_api::{Module, VaultCtx};
 
 pub mod audit;
 pub mod kernel_service;
@@ -67,11 +64,7 @@ fn read_tier_fields(req: &Request) -> policy::LoginClassTier {
         .and_then(|v| v.as_str().map(|s| s.to_string()))
         .filter(|s| !s.is_empty())
         .and_then(|s| policy::LoginClass::parse(&s));
-    let lock = req
-        .get_data("lock")
-        .ok()
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let lock = req.get_data("lock").ok().and_then(|v| v.as_bool()).unwrap_or(false);
     policy::LoginClassTier { login_class, lock }
 }
 
@@ -85,11 +78,7 @@ fn read_global_tier_fields(req: &Request) -> policy::LoginClassTier {
         .and_then(|v| v.as_str().map(|s| s.to_string()))
         .filter(|s| !s.is_empty())
         .and_then(|s| policy::LoginClass::parse(&s));
-    let lock = req
-        .get_data("login_class_lock")
-        .ok()
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let lock = req.get_data("login_class_lock").ok().and_then(|v| v.as_bool()).unwrap_or(false);
     policy::LoginClassTier { login_class, lock }
 }
 
@@ -118,30 +107,13 @@ fn tier_doc_to_map(
 
 fn effective_to_map(e: &policy::EffectiveLoginClass) -> Map<String, Value> {
     let mut m = Map::new();
-    m.insert(
-        "login_class".into(),
-        Value::String(e.login_class.as_str().into()),
-    );
-    m.insert(
-        "login_class_source".into(),
-        Value::String(e.login_class_source.into()),
-    );
-    m.insert(
-        "locked_by".into(),
-        Value::Array(
-            e.locked_by
-                .iter()
-                .map(|s| Value::String((*s).to_string()))
-                .collect(),
-        ),
-    );
+    m.insert("login_class".into(), Value::String(e.login_class.as_str().into()));
+    m.insert("login_class_source".into(), Value::String(e.login_class_source.into()));
+    m.insert("locked_by".into(), Value::Array(e.locked_by.iter().map(|s| Value::String((*s).to_string())).collect()));
     if let Some(t) = e.locked_at_tier {
         m.insert("locked_at_tier".into(), Value::String(t.to_string()));
     }
-    m.insert(
-        "login_class_chain".into(),
-        Value::Array(e.chain.iter().cloned().map(Value::String).collect()),
-    );
+    m.insert("login_class_chain".into(), Value::Array(e.chain.iter().cloned().map(Value::String).collect()));
     m
 }
 
@@ -173,9 +145,7 @@ pub struct SshBrokerBackend {
 
 impl SshBrokerBackend {
     pub fn new(core: Arc<dyn VaultCtx>, policy_store: Arc<PolicyStoreSlot>) -> Self {
-        Self {
-            inner: Arc::new(SshBrokerBackendInner { core, policy_store }),
-        }
+        Self { inner: Arc::new(SshBrokerBackendInner { core, policy_store }) }
     }
 
     pub fn new_backend(&self) -> LogicalBackend {
@@ -286,19 +256,12 @@ impl SshBrokerBackendInner {
 
     // ─── Global ─────────────────────────────────────────────────
 
-    pub async fn handle_global_read(
-        &self,
-        _b: &dyn Backend,
-        _req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_global_read(&self, _b: &dyn Backend, _req: &mut Request) -> Result<Option<Response>, RvError> {
         let pol = self.resolve_policy_store()?;
         let g = pol.get_global().await?;
         let mut m = Map::new();
         if let Some(c) = g.tier.login_class {
-            m.insert(
-                "login_class_default".into(),
-                Value::String(c.as_str().into()),
-            );
+            m.insert("login_class_default".into(), Value::String(c.as_str().into()));
         }
         m.insert("login_class_lock".into(), Value::Bool(g.tier.lock));
         if let Some(t) = g.updated_at {
@@ -307,25 +270,15 @@ impl SshBrokerBackendInner {
         Ok(Some(Response::data_response(Some(m))))
     }
 
-    pub async fn handle_global_write(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_global_write(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let pol = self.resolve_policy_store()?;
         let tier = read_global_tier_fields(req);
-        let g = policy::GlobalPolicy {
-            tier,
-            updated_at: Some(chrono::Utc::now()),
-        };
+        let g = policy::GlobalPolicy { tier, updated_at: Some(chrono::Utc::now()) };
         pol.put_global(&g).await?;
         log::info!(
             "{}: login_class_default={} lock={}",
             audit::POLICY_GLOBAL_UPDATE,
-            g.tier
-                .login_class
-                .map(|c| c.as_str())
-                .unwrap_or("(unset)"),
+            g.tier.login_class.map(|c| c.as_str()).unwrap_or("(unset)"),
             g.tier.lock
         );
         self.handle_global_read(_b, req).await
@@ -333,11 +286,7 @@ impl SshBrokerBackendInner {
 
     // ─── Per-type ───────────────────────────────────────────────
 
-    pub async fn handle_type_read(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_type_read(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let pol = self.resolve_policy_store()?;
         let name = req.path.strip_prefix("policy/type/").unwrap_or("").to_string();
         match pol.get_type(&name).await? {
@@ -347,41 +296,21 @@ impl SshBrokerBackendInner {
                 None,
                 Some(p.updated_at),
             ))))),
-            None => Err(bv_error_response_status!(
-                404,
-                &format!("type login-class policy `{name}` not set")
-            )),
+            None => Err(bv_error_response_status!(404, &format!("type login-class policy `{name}` not set"))),
         }
     }
 
-    pub async fn handle_type_write(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_type_write(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let pol = self.resolve_policy_store()?;
         let name = req.path.strip_prefix("policy/type/").unwrap_or("").to_string();
         let tier = read_tier_fields(req);
-        let p = policy::TypePolicy {
-            type_name: name.clone(),
-            tier,
-            updated_at: chrono::Utc::now(),
-        };
+        let p = policy::TypePolicy { type_name: name.clone(), tier, updated_at: chrono::Utc::now() };
         pol.put_type(&p).await?;
         log::info!("{}: type={}", audit::POLICY_TYPE_UPDATE, name);
-        Ok(Some(Response::data_response(Some(tier_doc_to_map(
-            &p.tier,
-            Some(&p.type_name),
-            None,
-            Some(p.updated_at),
-        )))))
+        Ok(Some(Response::data_response(Some(tier_doc_to_map(&p.tier, Some(&p.type_name), None, Some(p.updated_at))))))
     }
 
-    pub async fn handle_type_delete(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_type_delete(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let pol = self.resolve_policy_store()?;
         let name = req.path.strip_prefix("policy/type/").unwrap_or("").to_string();
         pol.delete_type(&name).await?;
@@ -391,17 +320,9 @@ impl SshBrokerBackendInner {
 
     // ─── Per-asset-group ────────────────────────────────────────
 
-    pub async fn handle_ag_read(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_ag_read(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let pol = self.resolve_policy_store()?;
-        let id = req
-            .path
-            .strip_prefix("policy/asset-group/")
-            .unwrap_or("")
-            .to_string();
+        let id = req.path.strip_prefix("policy/asset-group/").unwrap_or("").to_string();
         match pol.get_asset_group(&id).await? {
             Some(p) => Ok(Some(Response::data_response(Some(tier_doc_to_map(
                 &p.tier,
@@ -409,85 +330,34 @@ impl SshBrokerBackendInner {
                 Some(p.priority),
                 Some(p.updated_at),
             ))))),
-            None => Err(bv_error_response_status!(
-                404,
-                &format!("asset-group login-class policy `{id}` not set")
-            )),
+            None => Err(bv_error_response_status!(404, &format!("asset-group login-class policy `{id}` not set"))),
         }
     }
 
-    pub async fn handle_ag_write(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_ag_write(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let pol = self.resolve_policy_store()?;
-        let id = req
-            .path
-            .strip_prefix("policy/asset-group/")
-            .unwrap_or("")
-            .to_string();
+        let id = req.path.strip_prefix("policy/asset-group/").unwrap_or("").to_string();
         let tier = read_tier_fields(req);
-        let priority = req
-            .get_data("priority")
-            .ok()
-            .and_then(|v| v.as_i64())
-            .map(|n| n as i32)
-            .unwrap_or(0);
-        let p = policy::AssetGroupPolicy {
-            asset_group_id: id.clone(),
-            priority,
-            tier,
-            updated_at: chrono::Utc::now(),
-        };
+        let priority = req.get_data("priority").ok().and_then(|v| v.as_i64()).map(|n| n as i32).unwrap_or(0);
+        let p = policy::AssetGroupPolicy { asset_group_id: id.clone(), priority, tier, updated_at: chrono::Utc::now() };
         pol.put_asset_group(&p).await?;
-        log::info!(
-            "{}: asset_group={} priority={}",
-            audit::POLICY_ASSET_GROUP_UPDATE,
-            id,
-            priority
-        );
-        Ok(Some(Response::data_response(Some(tier_doc_to_map(
-            &p.tier,
-            None,
-            Some(p.priority),
-            Some(p.updated_at),
-        )))))
+        log::info!("{}: asset_group={} priority={}", audit::POLICY_ASSET_GROUP_UPDATE, id, priority);
+        Ok(Some(Response::data_response(Some(tier_doc_to_map(&p.tier, None, Some(p.priority), Some(p.updated_at))))))
     }
 
-    pub async fn handle_ag_delete(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_ag_delete(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let pol = self.resolve_policy_store()?;
-        let id = req
-            .path
-            .strip_prefix("policy/asset-group/")
-            .unwrap_or("")
-            .to_string();
+        let id = req.path.strip_prefix("policy/asset-group/").unwrap_or("").to_string();
         pol.delete_asset_group(&id).await?;
-        log::info!(
-            "{}: asset_group={} (deleted)",
-            audit::POLICY_ASSET_GROUP_UPDATE,
-            id
-        );
+        log::info!("{}: asset_group={} (deleted)", audit::POLICY_ASSET_GROUP_UPDATE, id);
         Ok(Some(Response::data_response(Some(Map::new()))))
     }
 
     // ─── Per-resource ───────────────────────────────────────────
 
-    pub async fn handle_res_read(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_res_read(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let pol = self.resolve_policy_store()?;
-        let id = req
-            .path
-            .strip_prefix("policy/resource/")
-            .unwrap_or("")
-            .to_string();
+        let id = req.path.strip_prefix("policy/resource/").unwrap_or("").to_string();
         match pol.get_resource(&id).await? {
             Some(p) => Ok(Some(Response::data_response(Some(tier_doc_to_map(
                 &p.tier,
@@ -495,24 +365,13 @@ impl SshBrokerBackendInner {
                 None,
                 Some(p.updated_at),
             ))))),
-            None => Err(bv_error_response_status!(
-                404,
-                &format!("resource login-class policy `{id}` not set")
-            )),
+            None => Err(bv_error_response_status!(404, &format!("resource login-class policy `{id}` not set"))),
         }
     }
 
-    pub async fn handle_res_write(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_res_write(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let pol = self.resolve_policy_store()?;
-        let id = req
-            .path
-            .strip_prefix("policy/resource/")
-            .unwrap_or("")
-            .to_string();
+        let id = req.path.strip_prefix("policy/resource/").unwrap_or("").to_string();
         let tier = read_tier_fields(req);
         // Refuse a per-resource write that would weaken a locked upstream
         // tier. The resolver reports `lock_violation` when the proposed
@@ -529,10 +388,7 @@ impl SshBrokerBackendInner {
                 &[],
                 Some(&policy::ResourcePolicy {
                     resource_id: id.clone(),
-                    tier: policy::LoginClassTier {
-                        login_class: Some(class),
-                        lock: false,
-                    },
+                    tier: policy::LoginClassTier { login_class: Some(class), lock: false },
                     updated_at: chrono::Utc::now(),
                 }),
             );
@@ -546,11 +402,7 @@ impl SshBrokerBackendInner {
                 ));
             }
         }
-        let p = policy::ResourcePolicy {
-            resource_id: id.clone(),
-            tier,
-            updated_at: chrono::Utc::now(),
-        };
+        let p = policy::ResourcePolicy { resource_id: id.clone(), tier, updated_at: chrono::Utc::now() };
         pol.put_resource(&p).await?;
         log::info!("{}: resource={}", audit::POLICY_RESOURCE_UPDATE, id);
         Ok(Some(Response::data_response(Some(tier_doc_to_map(
@@ -561,17 +413,9 @@ impl SshBrokerBackendInner {
         )))))
     }
 
-    pub async fn handle_res_delete(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_res_delete(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let pol = self.resolve_policy_store()?;
-        let id = req
-            .path
-            .strip_prefix("policy/resource/")
-            .unwrap_or("")
-            .to_string();
+        let id = req.path.strip_prefix("policy/resource/").unwrap_or("").to_string();
         pol.delete_resource(&id).await?;
         log::info!("{}: resource={} (deleted)", audit::POLICY_RESOURCE_UPDATE, id);
         Ok(Some(Response::data_response(Some(Map::new()))))
@@ -579,35 +423,19 @@ impl SshBrokerBackendInner {
 
     // ─── Effective ──────────────────────────────────────────────
 
-    pub async fn handle_effective(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_effective(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let pol = self.resolve_policy_store()?;
         let pick = |k: &str| -> String {
-            req.get_data(k)
-                .ok()
-                .and_then(|v| v.as_str().map(|s| s.to_string()))
-                .unwrap_or_default()
+            req.get_data(k).ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default()
         };
         let resource_type = pick("resource_type");
         let resource_id = pick("resource_id");
         let asset_group_ids: Vec<String> = match req.get_data("asset_group_ids") {
-            Ok(Value::Array(arr)) => arr
-                .iter()
-                .filter_map(|x| x.as_str().map(String::from))
-                .collect(),
-            Ok(Value::String(s)) => s
-                .split(',')
-                .map(|x| x.trim().to_string())
-                .filter(|x| !x.is_empty())
-                .collect(),
+            Ok(Value::Array(arr)) => arr.iter().filter_map(|x| x.as_str().map(String::from)).collect(),
+            Ok(Value::String(s)) => s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect(),
             _ => Vec::new(),
         };
-        let eff = pol
-            .resolve_for(&resource_type, &asset_group_ids, &resource_id)
-            .await?;
+        let eff = pol.resolve_for(&resource_type, &asset_group_ids, &resource_id).await?;
         Ok(Some(Response::data_response(Some(effective_to_map(&eff)))))
     }
 }
@@ -616,11 +444,7 @@ impl SshBrokerBackendInner {
 
 impl SshBrokerModule {
     pub fn new(core: Arc<dyn VaultCtx>) -> Self {
-        Self {
-            name: "ssh-broker".to_string(),
-            core,
-            policy_store: Arc::new(arc_swap::ArcSwap::new(Arc::new(None))),
-        }
+        Self { name: "ssh-broker".to_string(), core, policy_store: Arc::new(arc_swap::ArcSwap::new(Arc::new(None))) }
     }
 
     pub fn policy_store(&self) -> Option<Arc<policy::PolicyStore>> {
@@ -646,8 +470,7 @@ impl Module for SshBrokerModule {
         let core_for_backend = self.core.clone();
         let policy_store = self.policy_store.clone();
         let backend_new_func = move |_c: Arc<dyn VaultCtx>| -> Result<Arc<dyn Backend>, RvError> {
-            let mut b = SshBrokerBackend::new(core_for_backend.clone(), policy_store.clone())
-                .new_backend();
+            let mut b = SshBrokerBackend::new(core_for_backend.clone(), policy_store.clone()).new_backend();
             b.init()?;
             Ok(Arc::new(b))
         };

@@ -6,10 +6,8 @@ use std::{
 };
 
 use actix_web::{
-    web,
-    HttpRequest,
-    HttpResponse,
     http::{header, StatusCode},
+    web, HttpRequest, HttpResponse,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -20,14 +18,14 @@ use crate::{
     authz::{sys_route, Authorized, SysAuditCtx},
     core::{Core, SealConfig},
     errors::RvError,
-    HttpError,
-        //Connection,
-        handle_request,
-        request_auth,
-        response_error,
-        response_json_ok,
-        response_ok,
+    //Connection,
+    handle_request,
     logical::{Operation, Request},
+    request_auth,
+    response_error,
+    response_json_ok,
+    response_ok,
+    HttpError,
 };
 
 /// The route table for this module's handlers (Phase 1.3 of
@@ -118,7 +116,10 @@ async fn response_seal_status(core: web::Data<Arc<Core>>) -> Result<HttpResponse
     Ok(response_json_ok(None, resp))
 }
 
-async fn sys_init_get_request_handler(_req: HttpRequest, core: web::Data<Arc<Core>>) -> Result<HttpResponse, HttpError> {
+async fn sys_init_get_request_handler(
+    _req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, HttpError> {
     #[cfg(not(feature = "sync_handler"))]
     let inited = core.inited().await?;
     #[cfg(feature = "sync_handler")]
@@ -375,7 +376,10 @@ async fn sys_hsm_bootstrap_request_handler(
 ) -> Result<HttpResponse, HttpError> {
     let peer = req.conn_data::<crate::Connection>().map(|c| c.peer).or_else(|| req.peer_addr());
     if !peer.is_some_and(|p| p.ip().is_loopback()) {
-        return Ok(response_error(StatusCode::FORBIDDEN, "HSM pool bootstrap is accepted only from loopback on the init node"));
+        return Ok(response_error(
+            StatusCode::FORBIDDEN,
+            "HSM pool bootstrap is accepted only from loopback on the init node",
+        ));
     }
     #[cfg(not(feature = "sync_handler"))]
     let initialized = core.inited().await?;
@@ -395,7 +399,8 @@ async fn sys_hsm_bootstrap_request_handler(
         let mut bundles = std::collections::BTreeMap::new();
         if let Some(serde_json::Value::Object(map)) = payload.get("bundles") {
             for (name, raw) in map {
-                let raw = raw.as_str().ok_or_else(|| RvError::ErrHsm(format!("bundle for {name:?} must be a string")))?;
+                let raw =
+                    raw.as_str().ok_or_else(|| RvError::ErrHsm(format!("bundle for {name:?} must be a string")))?;
                 bundles.insert(name.clone(), bastion_vault::hsm::ceremony::AttestationBundle::decode(raw.as_bytes())?);
             }
         }
@@ -424,7 +429,10 @@ async fn sys_hsm_migrate_request_handler(
 ) -> Result<HttpResponse, HttpError> {
     let peer = req.conn_data::<crate::Connection>().map(|c| c.peer).or_else(|| req.peer_addr());
     if !peer.is_some_and(|p| p.ip().is_loopback()) {
-        return Ok(response_error(StatusCode::FORBIDDEN, "HSM migrate-to-pool is accepted only from loopback on the node"));
+        return Ok(response_error(
+            StatusCode::FORBIDDEN,
+            "HSM migrate-to-pool is accepted only from loopback on the node",
+        ));
     }
     let provider = core.seal_provider();
     let Some(hsm) = provider.as_hsm() else {
@@ -469,7 +477,10 @@ async fn sys_hsm_recover_request_handler(
         return Ok(response_error(StatusCode::BAD_REQUEST, "the vault is not initialized"));
     }
     if !core.sealed() {
-        return Ok(response_error(StatusCode::BAD_REQUEST, "this node is unsealed; HSM recovery runs only on a sealed node"));
+        return Ok(response_error(
+            StatusCode::BAD_REQUEST,
+            "this node is unsealed; HSM recovery runs only on a sealed node",
+        ));
     }
     let provider = core.seal_provider();
     let Some(hsm) = provider.as_hsm() else {
@@ -509,7 +520,9 @@ async fn sys_hsm_recover_request_handler(
 
 /// The `v2/sys/hsm/recover` body. The share is decoded into a zeroizing
 /// buffer; a malformed one is refused without being echoed.
-fn parse_recovery_submission(payload: &serde_json::Value) -> Result<bastion_vault::seal::hsm::RecoverySubmission, RvError> {
+fn parse_recovery_submission(
+    payload: &serde_json::Value,
+) -> Result<bastion_vault::seal::hsm::RecoverySubmission, RvError> {
     use bastion_vault::seal::hsm::{RecoveryMember, RecoverySubmission};
     let mut submission = RecoverySubmission {
         reset: payload.get("reset").and_then(|v| v.as_bool()).unwrap_or(false),
@@ -557,11 +570,8 @@ async fn sys_audit_enable_request_handler(
     if device_path.is_empty() {
         return Ok(response_error(StatusCode::NOT_FOUND, ""));
     }
-    let payload: serde_json::Map<String, serde_json::Value> = if body.is_empty() {
-        serde_json::Map::new()
-    } else {
-        serde_json::from_slice(&body)?
-    };
+    let payload: serde_json::Map<String, serde_json::Value> =
+        if body.is_empty() { serde_json::Map::new() } else { serde_json::from_slice(&body)? };
     body.clear();
 
     let mut r = request_auth(&req);
@@ -592,11 +602,8 @@ async fn sys_owner_backfill_request_handler(
     mut body: web::Bytes,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    let payload: serde_json::Map<String, serde_json::Value> = if body.is_empty() {
-        serde_json::Map::new()
-    } else {
-        serde_json::from_slice(&body)?
-    };
+    let payload: serde_json::Map<String, serde_json::Value> =
+        if body.is_empty() { serde_json::Map::new() } else { serde_json::from_slice(&body)? };
     body.clear();
 
     let mut r = request_auth(&req);
@@ -613,14 +620,8 @@ async fn sys_owner_backfill_request_handler(
 /// `logical.rs`; otherwise child-namespace scoping silently always resolves
 /// to root. The authorization witness uses it for the same reason.
 pub(crate) fn copy_namespace_header(req: &HttpRequest, r: &mut Request) {
-    if let Some(ns) = req
-        .headers()
-        .get("x-bastionvault-namespace")
-        .and_then(|v| v.to_str().ok())
-    {
-        r.headers
-            .get_or_insert_with(Default::default)
-            .insert("x-bastionvault-namespace".to_string(), ns.to_string());
+    if let Some(ns) = req.headers().get("x-bastionvault-namespace").and_then(|v| v.to_str().ok()) {
+        r.headers.get_or_insert_with(Default::default).insert("x-bastionvault-namespace".to_string(), ns.to_string());
     }
 }
 
@@ -737,11 +738,7 @@ async fn sys_namespace_link_path_request_handler(
     let mut r = request_auth(&req);
     r.path = format!("sys/namespace-links/{}", path.into_inner());
     copy_namespace_header(&req, &mut r);
-    r.operation = if *req.method() == actix_web::http::Method::DELETE {
-        Operation::Delete
-    } else {
-        Operation::Read
-    };
+    r.operation = if *req.method() == actix_web::http::Method::DELETE { Operation::Delete } else { Operation::Read };
     handle_request(core, &mut r).await
 }
 
@@ -1063,11 +1060,8 @@ async fn sys_kv_owner_transfer_request_handler(
     mut body: web::Bytes,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    let payload: serde_json::Map<String, serde_json::Value> = if body.is_empty() {
-        serde_json::Map::new()
-    } else {
-        serde_json::from_slice(&body)?
-    };
+    let payload: serde_json::Map<String, serde_json::Value> =
+        if body.is_empty() { serde_json::Map::new() } else { serde_json::from_slice(&body)? };
     body.clear();
 
     let mut r = request_auth(&req);
@@ -1091,11 +1085,8 @@ async fn sys_kv_owner_claim_request_handler(
     mut body: web::Bytes,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    let payload: serde_json::Map<String, serde_json::Value> = if body.is_empty() {
-        serde_json::Map::new()
-    } else {
-        serde_json::from_slice(&body)?
-    };
+    let payload: serde_json::Map<String, serde_json::Value> =
+        if body.is_empty() { serde_json::Map::new() } else { serde_json::from_slice(&body)? };
     body.clear();
 
     let mut r = request_auth(&req);
@@ -1118,11 +1109,8 @@ async fn sys_resource_owner_transfer_request_handler(
     mut body: web::Bytes,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    let payload: serde_json::Map<String, serde_json::Value> = if body.is_empty() {
-        serde_json::Map::new()
-    } else {
-        serde_json::from_slice(&body)?
-    };
+    let payload: serde_json::Map<String, serde_json::Value> =
+        if body.is_empty() { serde_json::Map::new() } else { serde_json::from_slice(&body)? };
     body.clear();
 
     let mut r = request_auth(&req);
@@ -1139,11 +1127,8 @@ async fn sys_asset_group_owner_transfer_request_handler(
     mut body: web::Bytes,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    let payload: serde_json::Map<String, serde_json::Value> = if body.is_empty() {
-        serde_json::Map::new()
-    } else {
-        serde_json::from_slice(&body)?
-    };
+    let payload: serde_json::Map<String, serde_json::Value> =
+        if body.is_empty() { serde_json::Map::new() } else { serde_json::from_slice(&body)? };
     body.clear();
 
     let mut r = request_auth(&req);
@@ -1160,11 +1145,8 @@ async fn sys_file_owner_transfer_request_handler(
     mut body: web::Bytes,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    let payload: serde_json::Map<String, serde_json::Value> = if body.is_empty() {
-        serde_json::Map::new()
-    } else {
-        serde_json::from_slice(&body)?
-    };
+    let payload: serde_json::Map<String, serde_json::Value> =
+        if body.is_empty() { serde_json::Map::new() } else { serde_json::from_slice(&body)? };
     body.clear();
 
     let mut r = request_auth(&req);
@@ -1288,8 +1270,7 @@ async fn sys_audit_events_request_handler(
     // JSON request body, when the caller managed to send one. Body values
     // take precedence over the query string when both are present.
     if !payload.is_empty() {
-        if let Ok(serde_json::Value::Object(m)) = serde_json::from_slice::<serde_json::Value>(&payload)
-        {
+        if let Ok(serde_json::Value::Object(m)) = serde_json::from_slice::<serde_json::Value>(&payload) {
             for (k, v) in m {
                 body.insert(k, v);
             }
@@ -1584,11 +1565,8 @@ async fn sys_capabilities_self_request_handler(
     mut body: web::Bytes,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    let payload: serde_json::Map<String, serde_json::Value> = if body.is_empty() {
-        serde_json::Map::new()
-    } else {
-        serde_json::from_slice(&body)?
-    };
+    let payload: serde_json::Map<String, serde_json::Value> =
+        if body.is_empty() { serde_json::Map::new() } else { serde_json::from_slice(&body)? };
     body.clear();
 
     let mut r = request_auth(&req);
@@ -1635,11 +1613,8 @@ async fn sys_policy_tests_write_request_handler(
     mut body: web::Bytes,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
-    let payload: serde_json::Map<String, serde_json::Value> = if body.is_empty() {
-        serde_json::Map::new()
-    } else {
-        serde_json::from_slice(&body)?
-    };
+    let payload: serde_json::Map<String, serde_json::Value> =
+        if body.is_empty() { serde_json::Map::new() } else { serde_json::from_slice(&body)? };
     body.clear();
 
     let policy_name = name.into_inner();
@@ -1669,10 +1644,7 @@ async fn sys_get_internal_ui_mount_request_handler(
     handle_request(core, &mut r).await
 }
 
-async fn sys_health_request_handler(
-    _req: HttpRequest,
-    core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, HttpError> {
+async fn sys_health_request_handler(_req: HttpRequest, core: web::Data<Arc<Core>>) -> Result<HttpResponse, HttpError> {
     #[cfg(not(feature = "sync_handler"))]
     let initialized = core.inited().await.unwrap_or(false);
     #[cfg(feature = "sync_handler")]
@@ -1823,10 +1795,7 @@ pub(crate) fn cluster_peer_ips(core: &dyn VaultCtx) -> Arc<HashSet<IpAddr>> {
 /// Either it holds a live token, or it is one of the cluster's own machines
 /// (see [`ip_is_cluster_local`]).
 async fn caller_may_see_cluster_topology(core: &dyn VaultCtx, req: &HttpRequest) -> bool {
-    let socket_peer = req
-        .conn_data::<crate::Connection>()
-        .map(|c| c.peer)
-        .or_else(|| req.peer_addr());
+    let socket_peer = req.conn_data::<crate::Connection>().map(|c| c.peer).or_else(|| req.peer_addr());
 
     if let Some(peer) = socket_peer {
         if ip_is_cluster_local(peer.ip(), &cluster_peer_ips(core)) {
@@ -1837,10 +1806,7 @@ async fn caller_may_see_cluster_topology(core: &dyn VaultCtx, req: &HttpRequest)
     caller_has_live_token(core, req).await
 }
 
-async fn sys_info_request_handler(
-    req: HttpRequest,
-    core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, HttpError> {
+async fn sys_info_request_handler(req: HttpRequest, core: web::Data<Arc<Core>>) -> Result<HttpResponse, HttpError> {
     #[cfg(not(feature = "sync_handler"))]
     let initialized = core.inited().await.unwrap_or(false);
     #[cfg(feature = "sync_handler")]
@@ -1959,8 +1925,7 @@ async fn sys_cluster_remove_node_request_handler(
     body.clear();
 
     if let Some(result) =
-        crate::storage::cluster::remove_node(_core.physical().as_ref(), payload.node_id, payload.stay_as_learner)
-            .await
+        crate::storage::cluster::remove_node(_core.physical().as_ref(), payload.node_id, payload.stay_as_learner).await
     {
         result?;
         return Ok(response_ok(None, None));
@@ -2000,13 +1965,7 @@ async fn sys_backup_request_handler(
     let hmac_key = core.barrier().derive_hmac_key()?;
     let mut buf = Vec::new();
 
-    crate::backup::create::create_backup(
-        core.physical().as_ref(),
-        &hmac_key,
-        &mut buf,
-        false,
-    )
-    .await?;
+    crate::backup::create::create_backup(core.physical().as_ref(), &hmac_key, &mut buf, false).await?;
 
     Ok(HttpResponse::Ok()
         .content_type("application/octet-stream")
@@ -2043,12 +2002,7 @@ async fn sys_export_request_handler(
         (format!("{path}/"), String::new())
     };
 
-    let export_data = crate::backup::export::export_secrets(
-        core.barrier().as_storage(),
-        &mount,
-        &prefix,
-    )
-    .await?;
+    let export_data = crate::backup::export::export_secrets(core.barrier().as_storage(), &mount, &prefix).await?;
 
     Ok(response_json_ok(None, export_data))
 }
@@ -2105,84 +2059,70 @@ async fn sys_exchange_export_request_handler(
         let mut payload: ExchangeExportRequest = match serde_json::from_slice(&body) {
             Ok(p) => p,
             Err(e) => {
-                return Ok(response_error(
-                    StatusCode::BAD_REQUEST,
-                    &format!("invalid export request body: {e}"),
-                ));
+                return Ok(response_error(StatusCode::BAD_REQUEST, &format!("invalid export request body: {e}")));
             }
         };
 
-    // Build the bvx.v1 document by walking barrier-decrypted storage. An
-    // `all_namespaces` scope fans out over every tenant's barrier prefix (see
-    // `crate::exchange::namespaces`); anything else stays root-scoped.
-    let exporter = crate::exchange::ExporterInfo::default();
-    let core_arc = core.get_ref().clone();
-    let document = if payload.scope.kind == crate::exchange::ScopeKind::AllNamespaces {
-        crate::exchange::export_all_namespaces(&core_arc, exporter, payload.scope.clone()).await?
-    } else {
-        let mounts = crate::exchange::scope::MountIndex::from_core(&core_arc)?;
-        crate::exchange::scope::export_to_document(
-            core.barrier().as_storage(),
-            &mounts,
-            exporter,
-            payload.scope.clone(),
-        )
-        .await?
-    };
+        // Build the bvx.v1 document by walking barrier-decrypted storage. An
+        // `all_namespaces` scope fans out over every tenant's barrier prefix (see
+        // `crate::exchange::namespaces`); anything else stays root-scoped.
+        let exporter = crate::exchange::ExporterInfo::default();
+        let core_arc = core.get_ref().clone();
+        let document = if payload.scope.kind == crate::exchange::ScopeKind::AllNamespaces {
+            crate::exchange::export_all_namespaces(&core_arc, exporter, payload.scope.clone()).await?
+        } else {
+            let mounts = crate::exchange::scope::MountIndex::from_core(&core_arc)?;
+            crate::exchange::scope::export_to_document(
+                core.barrier().as_storage(),
+                &mounts,
+                exporter,
+                payload.scope.clone(),
+            )
+            .await?
+        };
 
-    // Canonical JSON — sorted keys, no whitespace, deterministic across runs.
-    let inner_bytes = crate::exchange::canonical::to_canonical_vec(&document)?;
+        // Canonical JSON — sorted keys, no whitespace, deterministic across runs.
+        let inner_bytes = crate::exchange::canonical::to_canonical_vec(&document)?;
 
-    let (body_bytes, format_label) = match payload.format.as_str() {
-        "json" => {
-            if !payload.allow_plaintext {
-                // Loud refusal: the default is encrypted. Operators who want
-                // plaintext must opt in explicitly so the choice is auditable.
-                return Ok(response_error(
-                    StatusCode::BAD_REQUEST,
-                    "plaintext export refused (set allow_plaintext: true to override)",
-                ));
+        let (body_bytes, format_label) = match payload.format.as_str() {
+            "json" => {
+                if !payload.allow_plaintext {
+                    // Loud refusal: the default is encrypted. Operators who want
+                    // plaintext must opt in explicitly so the choice is auditable.
+                    return Ok(response_error(
+                        StatusCode::BAD_REQUEST,
+                        "plaintext export refused (set allow_plaintext: true to override)",
+                    ));
+                }
+                (inner_bytes, "json")
             }
-            (inner_bytes, "json")
-        }
-        "bvx" => {
-            let Some(password) = payload.password.as_deref() else {
-                return Ok(response_error(
-                    StatusCode::BAD_REQUEST,
-                    "password required for format \"bvx\"",
-                ));
-            };
-            let bytes = crate::exchange::encrypt_bvx(
-                &inner_bytes,
-                password,
-                "",
-                payload.comment.clone(),
-            )?;
-            // Zeroise the password buffer in our local copy.
-            if let Some(ref mut p) = payload.password {
-                p.zeroize();
+            "bvx" => {
+                let Some(password) = payload.password.as_deref() else {
+                    return Ok(response_error(StatusCode::BAD_REQUEST, "password required for format \"bvx\""));
+                };
+                let bytes = crate::exchange::encrypt_bvx(&inner_bytes, password, "", payload.comment.clone())?;
+                // Zeroise the password buffer in our local copy.
+                if let Some(ref mut p) = payload.password {
+                    p.zeroize();
+                }
+                (bytes, "bvx")
             }
-            (bytes, "bvx")
-        }
-        _ => {
-            return Ok(response_error(
-                StatusCode::BAD_REQUEST,
-                "format must be \"bvx\" or \"json\"",
-            ));
-        }
-    };
+            _ => {
+                return Ok(response_error(StatusCode::BAD_REQUEST, "format must be \"bvx\" or \"json\""));
+            }
+        };
 
-    use base64::Engine;
-    let body_b64 = base64::engine::general_purpose::STANDARD.encode(&body_bytes);
+        use base64::Engine;
+        let body_b64 = base64::engine::general_purpose::STANDARD.encode(&body_bytes);
 
-    Ok(response_json_ok(
-        None,
-        json!({
-            "format": format_label,
-            "size_bytes": body_bytes.len(),
-            "file_b64": body_b64,
-        }),
-    ))
+        Ok(response_json_ok(
+            None,
+            json!({
+                "format": format_label,
+                "size_bytes": body_bytes.len(),
+                "file_b64": body_b64,
+            }),
+        ))
     })
     .await;
     audit.finish(&result).await;
@@ -2253,68 +2193,60 @@ async fn sys_exchange_import_preview_handler(
     let body = authz.into_body();
     // Owner header is needed inside the work block but `req` is not moved
     // into the closure (we only own a few captures), so resolve it now.
-    let owner_header = req
-        .headers()
-        .get("X-BastionVault-Actor")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string();
+    let owner_header =
+        req.headers().get("X-BastionVault-Actor").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let mut payload: ExchangeImportRequest =
             serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
 
-    let document_bytes = match payload.format.as_str() {
-        "bvx" => {
-            let password = payload.password.as_deref().ok_or(RvError::ErrRequestInvalid)?;
-            let bytes = crate::exchange::decrypt_bvx(payload.file.as_bytes(), password)?;
-            if let Some(ref mut p) = payload.password {
-                p.zeroize();
+        let document_bytes = match payload.format.as_str() {
+            "bvx" => {
+                let password = payload.password.as_deref().ok_or(RvError::ErrRequestInvalid)?;
+                let bytes = crate::exchange::decrypt_bvx(payload.file.as_bytes(), password)?;
+                if let Some(ref mut p) = payload.password {
+                    p.zeroize();
+                }
+                bytes
             }
-            bytes
-        }
-        "json" => {
-            if !payload.allow_plaintext {
-                return Ok(response_error(
-                    StatusCode::BAD_REQUEST,
-                    "plaintext import refused (set allow_plaintext: true to override)",
-                ));
+            "json" => {
+                if !payload.allow_plaintext {
+                    return Ok(response_error(
+                        StatusCode::BAD_REQUEST,
+                        "plaintext import refused (set allow_plaintext: true to override)",
+                    ));
+                }
+                payload.file.as_bytes().to_vec()
             }
-            payload.file.as_bytes().to_vec()
-        }
-        _ => {
-            return Ok(response_error(
-                StatusCode::BAD_REQUEST,
-                "format must be \"bvx\" or \"json\"",
-            ));
-        }
-    };
+            _ => {
+                return Ok(response_error(StatusCode::BAD_REQUEST, "format must be \"bvx\" or \"json\""));
+            }
+        };
 
-    let document: crate::exchange::ExchangeDocument =
-        serde_json::from_slice(&document_bytes).map_err(|_| RvError::ErrRequestInvalid)?;
-    document.validate_schema_tag().map_err(|_| RvError::ErrRequestInvalid)?;
+        let document: crate::exchange::ExchangeDocument =
+            serde_json::from_slice(&document_bytes).map_err(|_| RvError::ErrRequestInvalid)?;
+        document.validate_schema_tag().map_err(|_| RvError::ErrRequestInvalid)?;
 
-    // Classify each item against the destination *without* writing.
-    let (new, identical, conflict, items, warnings) =
-        classify_exchange_items(core.get_ref(), &document).await?;
+        // Classify each item against the destination *without* writing.
+        let (new, identical, conflict, items, warnings) = classify_exchange_items(core.get_ref(), &document).await?;
 
-    // Owner binding: tokens are bound to the actor's display name; the
-    // header was resolved before we moved into the async block.
-    let preview_token = preview_store.insert(document, owner_header);
+        // Owner binding: tokens are bound to the actor's display name; the
+        // header was resolved before we moved into the async block.
+        let preview_token = preview_store.insert(document, owner_header);
 
-    Ok(response_json_ok(
-        None,
-        json!({
-            "token": preview_token,
-            "expires_in_secs": preview_store.ttl_secs(),
-            "total": items.len() as u64,
-            "new": new,
-            "identical": identical,
-            "conflict": conflict,
-            "items": items,
-            "warnings": warnings,
-        }),
-    ))
+        Ok(response_json_ok(
+            None,
+            json!({
+                "token": preview_token,
+                "expires_in_secs": preview_store.ttl_secs(),
+                "total": items.len() as u64,
+                "new": new,
+                "identical": identical,
+                "conflict": conflict,
+                "items": items,
+                "warnings": warnings,
+            }),
+        ))
     })
     .await;
     audit.finish(&result).await;
@@ -2342,26 +2274,17 @@ async fn sys_exchange_import_apply_handler(
 ) -> Result<HttpResponse, HttpError> {
     let audit = SysAuditCtx::new(&authz, &req, &core);
     let body = authz.into_body();
-    let owner_header = req
-        .headers()
-        .get("X-BastionVault-Actor")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string();
+    let owner_header =
+        req.headers().get("X-BastionVault-Actor").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
 
     let result: Result<HttpResponse, HttpError> = (async move {
-        let payload: ExchangeApplyRequest =
-            serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
+        let payload: ExchangeApplyRequest = serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
 
         let document = preview_store.consume(&payload.token, &owner_header)?;
 
-        let result = crate::exchange::import_all_namespaces(
-            &core.get_ref().clone(),
-            &document,
-            payload.conflict_policy,
-            false,
-        )
-        .await?;
+        let result =
+            crate::exchange::import_all_namespaces(&core.get_ref().clone(), &document, payload.conflict_policy, false)
+                .await?;
 
         Ok(response_json_ok(
             None,
@@ -2542,8 +2465,7 @@ async fn sys_plugins_register_handler(
 
     let result: Result<HttpResponse, HttpError> = (async move {
         use base64::Engine;
-        let payload: PluginRegisterRequest =
-            serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
+        let payload: PluginRegisterRequest = serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
         let binary = base64::engine::general_purpose::STANDARD
             .decode(payload.binary_b64.as_bytes())
             .map_err(|_| RvError::ErrRequestInvalid)?;
@@ -2573,24 +2495,15 @@ async fn sys_plugins_register_handler(
                 )
                 .await?;
         } else if surface_present {
-            return Err(RvError::ErrString(
-                "manifest declares a surface but request omitted `surface_b64`".into(),
-            )
-            .into());
+            return Err(
+                RvError::ErrString("manifest declares a surface but request omitted `surface_b64`".into()).into()
+            );
         }
         // Cross-check declared assets against uploaded ones.
         let declared: std::collections::BTreeMap<&str, &crate::plugins::manifest::ClientAssetRef> =
-            payload
-                .manifest
-                .client_assets
-                .iter()
-                .map(|a| (a.name.as_str(), a))
-                .collect();
-        let uploaded: std::collections::BTreeMap<&str, &str> = payload
-            .client_assets_b64
-            .iter()
-            .map(|a| (a.name.as_str(), a.bytes_b64.as_str()))
-            .collect();
+            payload.manifest.client_assets.iter().map(|a| (a.name.as_str(), a)).collect();
+        let uploaded: std::collections::BTreeMap<&str, &str> =
+            payload.client_assets_b64.iter().map(|a| (a.name.as_str(), a.bytes_b64.as_str())).collect();
         for n in declared.keys() {
             if !uploaded.contains_key(n) {
                 return Err(RvError::ErrString(format!(
@@ -2600,9 +2513,9 @@ async fn sys_plugins_register_handler(
             }
         }
         for (n, b64) in &uploaded {
-            let aref = declared.get(n).ok_or_else(|| {
-                RvError::ErrString(format!("uploaded asset `{n}` not declared in manifest"))
-            })?;
+            let aref = declared
+                .get(n)
+                .ok_or_else(|| RvError::ErrString(format!("uploaded asset `{n}` not declared in manifest")))?;
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(b64.as_bytes())
                 .map_err(|_| RvError::ErrRequestInvalid)?;
@@ -2693,13 +2606,8 @@ async fn sys_plugins_versions_list_handler(
     let result: Result<HttpResponse, HttpError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
         let versions = catalog.list_versions(core.barrier().as_storage(), &name).await?;
-        let active = catalog
-            .get_active_version(core.barrier().as_storage(), &name)
-            .await?;
-        Ok(response_json_ok(
-            None,
-            json!({ "versions": versions, "active": active }),
-        ))
+        let active = catalog.get_active_version(core.barrier().as_storage(), &name).await?;
+        Ok(response_json_ok(None, json!({ "versions": versions, "active": active })))
     })
     .await;
     audit.finish(&result).await;
@@ -2717,18 +2625,13 @@ async fn sys_plugins_versions_activate_handler(
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
-        catalog
-            .set_active(core.barrier().as_storage(), &name, &version)
-            .await?;
+        catalog.set_active(core.barrier().as_storage(), &name, &version).await?;
         // Activating a different version means the cached compiled
         // module for the previous binary is no longer the right thing
         // to invoke. Cheap insurance: invalidate.
         let cache = crate::plugins::ModuleCache::shared().map_err(|_| RvError::ErrUnknown)?;
         cache.invalidate(&name);
-        Ok(response_json_ok(
-            None,
-            json!({ "name": name, "active": version }),
-        ))
+        Ok(response_json_ok(None, json!({ "name": name, "active": version })))
     })
     .await;
     audit.finish(&result).await;
@@ -2746,9 +2649,7 @@ async fn sys_plugins_versions_delete_handler(
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
-        catalog
-            .delete_version(core.barrier().as_storage(), &name, &version)
-            .await?;
+        catalog.delete_version(core.barrier().as_storage(), &name, &version).await?;
         Ok(response_ok(None, None))
     })
     .await;
@@ -2772,10 +2673,7 @@ async fn sys_plugins_reload_handler(
         let _reload_guard = match crate::plugins::reload_lock::acquire_reload(&name, drain_timeout).await {
             Ok(g) => g,
             Err(e) => {
-                return Ok(response_error(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    &format!("plugin_reloading: {e}"),
-                ));
+                return Ok(response_error(StatusCode::SERVICE_UNAVAILABLE, &format!("plugin_reloading: {e}")));
             }
         };
 
@@ -2822,17 +2720,12 @@ async fn sys_plugins_config_get_handler(
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
-        let manifest = match catalog
-            .get_manifest(core.barrier().as_storage(), &name)
-            .await?
-        {
+        let manifest = match catalog.get_manifest(core.barrier().as_storage(), &name).await? {
             Some(m) => m,
             None => return Ok(response_error(StatusCode::NOT_FOUND, "plugin not found")),
         };
         let store = crate::plugins::ConfigStore::new();
-        let values = store
-            .get_redacted(core.barrier().as_storage(), &manifest)
-            .await?;
+        let values = store.get_redacted(core.barrier().as_storage(), &manifest).await?;
         Ok(response_json_ok(
             None,
             json!({
@@ -2861,20 +2754,14 @@ async fn sys_plugins_config_put_handler(
     let name = req.match_info().get("name").unwrap_or("").to_string();
 
     let result: Result<HttpResponse, HttpError> = (async move {
-        let payload: PluginConfigPutRequest =
-            serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
+        let payload: PluginConfigPutRequest = serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
         let catalog = crate::plugins::PluginCatalog::new();
-        let manifest = match catalog
-            .get_manifest(core.barrier().as_storage(), &name)
-            .await?
-        {
+        let manifest = match catalog.get_manifest(core.barrier().as_storage(), &name).await? {
             Some(m) => m,
             None => return Ok(response_error(StatusCode::NOT_FOUND, "plugin not found")),
         };
         let store = crate::plugins::ConfigStore::new();
-        store
-            .put(core.barrier().as_storage(), &manifest, payload.values)
-            .await?;
+        store.put(core.barrier().as_storage(), &manifest, payload.values).await?;
         Ok(response_ok(None, None))
     })
     .await;
@@ -2942,32 +2829,19 @@ async fn sys_plugins_grants_get_handler(
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
-        let manifest = match catalog
-            .get_manifest(core.barrier().as_storage(), &name)
-            .await?
-        {
+        let manifest = match catalog.get_manifest(core.barrier().as_storage(), &name).await? {
             Some(m) => m,
             None => return Ok(response_error(StatusCode::NOT_FOUND, "plugin not found")),
         };
         let record = crate::plugins::grants::get(core.barrier().as_storage(), &name).await?;
         // Whether the stored grant is *live* against the active
         // manifest's current net request (a changed request voids it).
-        let live = crate::plugins::grants::active_net_hosts(
-            core.barrier().as_storage(),
-            &name,
-            &manifest,
-        )
-        .await?
-        .is_some();
+        let live =
+            crate::plugins::grants::active_net_hosts(core.barrier().as_storage(), &name, &manifest).await?.is_some();
         // Surface the manifest's requested hosts so the GUI can render
         // the consent panel without a second fetch.
-        let requested_net_hosts: Vec<String> = manifest
-            .capabilities
-            .app
-            .net
-            .as_ref()
-            .map(|n| n.hosts.clone())
-            .unwrap_or_default();
+        let requested_net_hosts: Vec<String> =
+            manifest.capabilities.app.net.as_ref().map(|n| n.hosts.clone()).unwrap_or_default();
         Ok(response_json_ok(
             None,
             json!({
@@ -2993,8 +2867,7 @@ async fn sys_plugins_grants_put_handler(
     let token = request_auth(&req).client_token;
 
     let result: Result<HttpResponse, HttpError> = (async move {
-        let payload: GrantsPutRequest =
-            serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
+        let payload: GrantsPutRequest = serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
         let Some(net) = payload.net else {
             return Ok(response_error(
                 StatusCode::BAD_REQUEST,
@@ -3002,10 +2875,7 @@ async fn sys_plugins_grants_put_handler(
             ));
         };
         let catalog = crate::plugins::PluginCatalog::new();
-        let manifest = match catalog
-            .get_manifest(core.barrier().as_storage(), &name)
-            .await?
-        {
+        let manifest = match catalog.get_manifest(core.barrier().as_storage(), &name).await? {
             Some(m) => m,
             None => return Ok(response_error(StatusCode::NOT_FOUND, "plugin not found")),
         };
@@ -3023,9 +2893,7 @@ async fn sys_plugins_grants_put_handler(
         {
             Ok(g) => g,
             // Superset / no-request refusals are client errors, not 500s.
-            Err(RvError::ErrString(msg)) => {
-                return Ok(response_error(StatusCode::BAD_REQUEST, &msg))
-            }
+            Err(RvError::ErrString(msg)) => return Ok(response_error(StatusCode::BAD_REQUEST, &msg)),
             Err(e) => return Err(e.into()),
         };
         Ok(response_json_ok(None, json!({ "net": grant })))
@@ -3322,10 +3190,8 @@ async fn sys_plugins_publishers_get_handler(
     let audit = SysAuditCtx::new(&authz, &req, &core);
 
     let result: Result<HttpResponse, HttpError> = (async move {
-        let allow =
-            crate::plugins::verifier::PublisherAllowlist::load(core.barrier().as_storage()).await?;
-        let unsigned =
-            crate::plugins::verifier::read_accept_unsigned(core.barrier().as_storage()).await?;
+        let allow = crate::plugins::verifier::PublisherAllowlist::load(core.barrier().as_storage()).await?;
+        let unsigned = crate::plugins::verifier::read_accept_unsigned(core.barrier().as_storage()).await?;
         Ok(response_json_ok(
             None,
             json!({
@@ -3348,11 +3214,8 @@ async fn sys_plugins_publishers_put_handler(
     let body = authz.into_body();
 
     let result: Result<HttpResponse, HttpError> = (async move {
-        let payload: PublishersPutRequest =
-            serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
-        let allow = crate::plugins::verifier::PublisherAllowlist {
-            keys: payload.keys,
-        };
+        let payload: PublishersPutRequest = serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
+        let allow = crate::plugins::verifier::PublisherAllowlist { keys: payload.keys };
         allow.save(core.barrier().as_storage()).await?;
         Ok(response_json_ok(None, json!({ "ok": true })))
     })
@@ -3377,20 +3240,11 @@ async fn sys_plugins_accept_unsigned_put_handler(
     let result: Result<HttpResponse, HttpError> = (async move {
         let payload: AcceptUnsignedPutRequest =
             serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
-        crate::plugins::verifier::write_accept_unsigned(
-            core.barrier().as_storage(),
-            payload.accept_unsigned,
-        )
-        .await?;
+        crate::plugins::verifier::write_accept_unsigned(core.barrier().as_storage(), payload.accept_unsigned).await?;
         if payload.accept_unsigned {
-            log::warn!(
-                "sys/plugins/accept_unsigned set to true — unsigned plugins will load (development mode)"
-            );
+            log::warn!("sys/plugins/accept_unsigned set to true — unsigned plugins will load (development mode)");
         }
-        Ok(response_json_ok(
-            None,
-            json!({ "accept_unsigned": payload.accept_unsigned }),
-        ))
+        Ok(response_json_ok(None, json!({ "accept_unsigned": payload.accept_unsigned })))
     })
     .await;
     audit.finish(&result).await;
@@ -3406,11 +3260,8 @@ async fn sys_plugins_surface_get_handler(
 ) -> Result<HttpResponse, HttpError> {
     let audit = SysAuditCtx::new(&authz, &req, &core);
     let name = req.match_info().get("name").unwrap_or("").to_string();
-    let if_none_match = req
-        .headers()
-        .get("If-None-Match")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.trim_matches('"').to_string());
+    let if_none_match =
+        req.headers().get("If-None-Match").and_then(|v| v.to_str().ok()).map(|s| s.trim_matches('"').to_string());
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
@@ -3420,15 +3271,9 @@ async fn sys_plugins_surface_get_handler(
                 // Hash is already verified by `read_active_surface`;
                 // use the stored `surface.sha256` directly so we
                 // don't re-hash on every fetch.
-                let etag = manifest
-                    .surface
-                    .as_ref()
-                    .map(|s| s.sha256.clone())
-                    .unwrap_or_default();
+                let etag = manifest.surface.as_ref().map(|s| s.sha256.clone()).unwrap_or_default();
                 if if_none_match.as_deref() == Some(etag.as_str()) {
-                    return Ok(HttpResponse::NotModified()
-                        .insert_header(("ETag", format!("\"{etag}\"")))
-                        .finish());
+                    return Ok(HttpResponse::NotModified().insert_header(("ETag", format!("\"{etag}\""))).finish());
                 }
                 let parsed: bv_plugin_surface::SurfaceManifest =
                     serde_json::from_slice(&bytes).map_err(|_| RvError::ErrRequestInvalid)?;
@@ -3471,18 +3316,11 @@ async fn sys_plugins_surface_get_handler(
 /// waiting and the caching headers. The long-poll re-runs the *whole* logical
 /// request after a wakeup, so the caller's capabilities are re-evaluated
 /// rather than trusted from before the wait.
-async fn sys_cache_version_handler(
-    req: HttpRequest,
-    core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, HttpError> {
+async fn sys_cache_version_handler(req: HttpRequest, core: web::Data<Arc<Core>>) -> Result<HttpResponse, HttpError> {
     let query = req.query_string().to_string();
-    let watch_requested =
-        query.split('&').any(|kv| matches!(kv, "watch=1" | "watch=true"));
-    let if_none_match = req
-        .headers()
-        .get("If-None-Match")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.trim_matches('"').to_string());
+    let watch_requested = query.split('&').any(|kv| matches!(kv, "watch=1" | "watch=true"));
+    let if_none_match =
+        req.headers().get("If-None-Match").and_then(|v| v.to_str().ok()).map(|s| s.trim_matches('"').to_string());
 
     let dispatch = |req: &HttpRequest| {
         let mut r = request_auth(req);
@@ -3514,15 +3352,10 @@ async fn sys_cache_version_handler(
         // uses. A timeout is a 304, not an error: the client re-polls.
         let changed = core
             .change_epochs
-            .wait_for_change(
-                etag.parse::<u64>().unwrap_or(0),
-                std::time::Duration::from_secs(25),
-            )
+            .wait_for_change(etag.parse::<u64>().unwrap_or(0), std::time::Duration::from_secs(25))
             .await;
         if !changed {
-            return Ok(HttpResponse::NotModified()
-                .insert_header(("ETag", format!("\"{etag}\"")))
-                .finish());
+            return Ok(HttpResponse::NotModified().insert_header(("ETag", format!("\"{etag}\""))).finish());
         }
         // Re-run the whole request rather than patching the body we already
         // have: the caller's capabilities are re-evaluated after the wait
@@ -3534,9 +3367,7 @@ async fn sys_cache_version_handler(
     }
 
     if if_none_match.as_deref() == Some(etag.as_str()) {
-        return Ok(HttpResponse::NotModified()
-            .insert_header(("ETag", format!("\"{etag}\"")))
-            .finish());
+        return Ok(HttpResponse::NotModified().insert_header(("ETag", format!("\"{etag}\""))).finish());
     }
     Ok(add_etag(rendered, &etag))
 }
@@ -3561,11 +3392,8 @@ async fn sys_plugins_active_surfaces_handler(
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
     let audit = SysAuditCtx::new(&authz, &req, &core);
-    let if_none_match = req
-        .headers()
-        .get("If-None-Match")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.trim_matches('"').to_string());
+    let if_none_match =
+        req.headers().get("If-None-Match").and_then(|v| v.to_str().ok()).map(|s| s.trim_matches('"').to_string());
 
     // Plugin Extensibility v1 / Phase 5: `?watch=1` upgrades the
     // request to a long-poll. The handler keeps recomputing the
@@ -3575,8 +3403,7 @@ async fn sys_plugins_active_surfaces_handler(
     // plumbing — and a missed wakeup just means the GUI re-polls on
     // the next tick.
     let query = req.query_string();
-    let watch_requested =
-        query.split('&').any(|kv| matches!(kv, "watch=1" | "watch=true"));
+    let watch_requested = query.split('&').any(|kv| matches!(kv, "watch=1" | "watch=true"));
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
@@ -3610,9 +3437,7 @@ async fn sys_plugins_active_surfaces_handler(
         }
 
         if if_none_match.as_deref() == Some(bundle.etag.as_str()) {
-            return Ok(HttpResponse::NotModified()
-                .insert_header(("ETag", format!("\"{}\"", bundle.etag)))
-                .finish());
+            return Ok(HttpResponse::NotModified().insert_header(("ETag", format!("\"{}\"", bundle.etag))).finish());
         }
         Ok(HttpResponse::Ok()
             .insert_header(("ETag", format!("\"{}\"", bundle.etag)))
@@ -3636,9 +3461,7 @@ async fn plugin_surface_mount_router(req: &HttpRequest, core: &Core) -> Result<A
     };
     let raw = raw_header
         .to_str()
-        .map_err(|_| {
-            RvError::ErrResponseStatus(400, "X-BastionVault-Namespace must be valid UTF-8".to_string())
-        })?
+        .map_err(|_| RvError::ErrResponseStatus(400, "X-BastionVault-Namespace must be valid UTF-8".to_string()))?
         .trim();
     if raw.is_empty() {
         return Ok(core.mounts_router());
@@ -3665,14 +3488,10 @@ fn active_plugin_mounts(router: &MountsRouter) -> Result<HashMap<String, String>
         let entry = entry.read()?;
         paths.push((entry.logical_type.clone(), entry.path.clone()));
     }
-    Ok(plugin_surface_mount_map(
-        paths.iter().map(|(logical_type, path)| (logical_type.as_str(), path.as_str())),
-    ))
+    Ok(plugin_surface_mount_map(paths.iter().map(|(logical_type, path)| (logical_type.as_str(), path.as_str()))))
 }
 
-fn plugin_surface_mount_map<'a>(
-    entries: impl IntoIterator<Item = (&'a str, &'a str)>,
-) -> HashMap<String, String> {
+fn plugin_surface_mount_map<'a>(entries: impl IntoIterator<Item = (&'a str, &'a str)>) -> HashMap<String, String> {
     let mut mounts = HashMap::new();
     let mut ambiguous = HashSet::new();
     for (logical_type, path) in entries {
@@ -3702,18 +3521,14 @@ async fn sys_plugins_asset_get_handler(
     // Defence-in-depth: the regex on the route already constrains
     // shape, but reject anything that isn't lowercase hex of length
     // 64 here too.
-    let valid_hash =
-        sha256.len() == 64 && sha256.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase());
+    let valid_hash = sha256.len() == 64 && sha256.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase());
 
     let result: Result<HttpResponse, HttpError> = (async move {
         if !valid_hash {
             return Ok(response_error(StatusCode::BAD_REQUEST, "asset sha256 must be 64 lowercase hex chars"));
         }
         let catalog = crate::plugins::PluginCatalog::new();
-        match catalog
-            .read_asset(core.barrier().as_storage(), &name, &version, &sha256)
-            .await?
-        {
+        match catalog.read_asset(core.barrier().as_storage(), &name, &version, &sha256).await? {
             None => Ok(response_error(StatusCode::NOT_FOUND, "asset not found")),
             Some(bytes) => Ok(HttpResponse::Ok()
                 .content_type("application/octet-stream")
@@ -3740,9 +3555,7 @@ async fn sys_plugins_quarantine_list_handler(
         let names = crate::plugins::quarantine::list(core.barrier().as_storage()).await?;
         let mut entries = serde_json::Map::new();
         for name in names {
-            if let Some(rec) =
-                crate::plugins::quarantine::lookup(core.barrier().as_storage(), &name).await?
-            {
+            if let Some(rec) = crate::plugins::quarantine::lookup(core.barrier().as_storage(), &name).await? {
                 entries.insert(name, serde_json::to_value(rec).unwrap_or(serde_json::Value::Null));
             }
         }
@@ -3763,99 +3576,83 @@ async fn sys_plugins_invoke_handler(
     let name = req.match_info().get("name").unwrap_or("").to_string();
 
     let result: Result<HttpResponse, HttpError> = (async move {
-    use base64::Engine;
-    let payload: PluginInvokeRequest = if body.is_empty() {
-        PluginInvokeRequest { input_b64: String::new(), fuel: None }
-    } else {
-        serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?
-    };
-    let input = base64::engine::general_purpose::STANDARD
-        .decode(payload.input_b64.as_bytes())
-        .map_err(|_| RvError::ErrRequestInvalid)?;
+        use base64::Engine;
+        let payload: PluginInvokeRequest = if body.is_empty() {
+            PluginInvokeRequest { input_b64: String::new(), fuel: None }
+        } else {
+            serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?
+        };
+        let input = base64::engine::general_purpose::STANDARD
+            .decode(payload.input_b64.as_bytes())
+            .map_err(|_| RvError::ErrRequestInvalid)?;
 
-    let catalog = crate::plugins::PluginCatalog::new();
-    let record = match catalog.get(core.barrier().as_storage(), &name).await? {
-        Some(r) => r,
-        None => return Ok(response_error(StatusCode::NOT_FOUND, "plugin not found")),
-    };
+        let catalog = crate::plugins::PluginCatalog::new();
+        let record = match catalog.get(core.barrier().as_storage(), &name).await? {
+            Some(r) => r,
+            None => return Ok(response_error(StatusCode::NOT_FOUND, "plugin not found")),
+        };
 
-    // Load operator-supplied config (if any) before invoking — both
-    // runtimes accept a config map and expose it to the plugin via
-    // `bv.config_get`.
-    let core_arc: Arc<Core> = Arc::clone(&*core);
-    let config_store = crate::plugins::ConfigStore::new();
-    let config = config_store
-        .get(core_arc.barrier.as_storage(), &record.manifest.name)
-        .await
-        .unwrap_or_default();
+        // Load operator-supplied config (if any) before invoking — both
+        // runtimes accept a config map and expose it to the plugin via
+        // `bv.config_get`.
+        let core_arc: Arc<Core> = Arc::clone(&*core);
+        let config_store = crate::plugins::ConfigStore::new();
+        let config = config_store.get(core_arc.barrier.as_storage(), &record.manifest.name).await.unwrap_or_default();
 
-    // Dispatch by manifest.runtime: WASM stays in the wasmtime sandbox,
-    // Process spawns a subprocess and mediates host calls over JSON-RPC
-    // on stdio. The output shape is identical regardless of runtime.
-    // Runtime-level failures (subprocess spawn/exec, temp-file write,
-    // timeouts, WASM traps) are distinct from the plugin reporting a
-    // structured error via its response envelope. Surface the real
-    // message to the caller instead of collapsing it to a generic
-    // "Request is invalid." — the embedded GUI path already returns the
-    // underlying string, and operators need it to diagnose e.g. a
-    // `noexec` temp dir blocking a process-runtime plugin. Still logged
-    // server-side at warn for the audit/ops trail.
-    let output = match record.manifest.runtime {
-        crate::plugins::RuntimeKind::Wasm => {
-            let fuel = payload
-                .fuel
-                .unwrap_or(crate::plugins::DEFAULT_FUEL)
-                .min(crate::plugins::DEFAULT_FUEL.saturating_mul(10));
-            let runtime = crate::plugins::WasmRuntime::with_budgets(
-                fuel,
-                crate::plugins::DEFAULT_MEMORY_BYTES,
-            )
-            .map_err(|_| RvError::ErrUnknown)?;
-            match runtime
-                .invoke_with_config(&record.manifest, &record.binary, &input, Some(core_arc), config)
-                .await
-            {
-                Ok(o) => o,
-                Err(e) => {
-                    log::warn!("plugin {} wasm invoke failed: {e}", record.manifest.name);
-                    return Ok(response_error(
-                        StatusCode::BAD_GATEWAY,
-                        &format!("plugin invoke failed: {e}"),
-                    ));
+        // Dispatch by manifest.runtime: WASM stays in the wasmtime sandbox,
+        // Process spawns a subprocess and mediates host calls over JSON-RPC
+        // on stdio. The output shape is identical regardless of runtime.
+        // Runtime-level failures (subprocess spawn/exec, temp-file write,
+        // timeouts, WASM traps) are distinct from the plugin reporting a
+        // structured error via its response envelope. Surface the real
+        // message to the caller instead of collapsing it to a generic
+        // "Request is invalid." — the embedded GUI path already returns the
+        // underlying string, and operators need it to diagnose e.g. a
+        // `noexec` temp dir blocking a process-runtime plugin. Still logged
+        // server-side at warn for the audit/ops trail.
+        let output = match record.manifest.runtime {
+            crate::plugins::RuntimeKind::Wasm => {
+                let fuel = payload
+                    .fuel
+                    .unwrap_or(crate::plugins::DEFAULT_FUEL)
+                    .min(crate::plugins::DEFAULT_FUEL.saturating_mul(10));
+                let runtime = crate::plugins::WasmRuntime::with_budgets(fuel, crate::plugins::DEFAULT_MEMORY_BYTES)
+                    .map_err(|_| RvError::ErrUnknown)?;
+                match runtime.invoke_with_config(&record.manifest, &record.binary, &input, Some(core_arc), config).await
+                {
+                    Ok(o) => o,
+                    Err(e) => {
+                        log::warn!("plugin {} wasm invoke failed: {e}", record.manifest.name);
+                        return Ok(response_error(StatusCode::BAD_GATEWAY, &format!("plugin invoke failed: {e}")));
+                    }
                 }
             }
-        }
-        crate::plugins::RuntimeKind::Process => {
-            let runtime = crate::plugins::ProcessRuntime::new();
-            match runtime
-                .invoke_with_config(&record.manifest, &record.binary, &input, Some(core_arc), config)
-                .await
-            {
-                Ok(o) => o,
-                Err(e) => {
-                    log::warn!("plugin {} process invoke failed: {e}", record.manifest.name);
-                    return Ok(response_error(
-                        StatusCode::BAD_GATEWAY,
-                        &format!("plugin invoke failed: {e}"),
-                    ));
+            crate::plugins::RuntimeKind::Process => {
+                let runtime = crate::plugins::ProcessRuntime::new();
+                match runtime.invoke_with_config(&record.manifest, &record.binary, &input, Some(core_arc), config).await
+                {
+                    Ok(o) => o,
+                    Err(e) => {
+                        log::warn!("plugin {} process invoke failed: {e}", record.manifest.name);
+                        return Ok(response_error(StatusCode::BAD_GATEWAY, &format!("plugin invoke failed: {e}")));
+                    }
                 }
             }
-        }
-    };
+        };
 
-    let (status, plugin_status) = match output.outcome {
-        crate::plugins::InvokeOutcome::Success => ("success", 0),
-        crate::plugins::InvokeOutcome::PluginError(s) => ("plugin_error", s),
-    };
-    Ok(response_json_ok(
-        None,
-        json!({
-            "status": status,
-            "plugin_status_code": plugin_status,
-            "fuel_consumed": output.fuel_consumed,
-            "response_b64": base64::engine::general_purpose::STANDARD.encode(&output.response),
-        }),
-    ))
+        let (status, plugin_status) = match output.outcome {
+            crate::plugins::InvokeOutcome::Success => ("success", 0),
+            crate::plugins::InvokeOutcome::PluginError(s) => ("plugin_error", s),
+        };
+        Ok(response_json_ok(
+            None,
+            json!({
+                "status": status,
+                "plugin_status_code": plugin_status,
+                "fuel_consumed": output.fuel_consumed,
+                "response_b64": base64::engine::general_purpose::STANDARD.encode(&output.response),
+            }),
+        ))
     })
     .await;
     audit.finish(&result).await;
@@ -4068,31 +3865,30 @@ async fn sys_scheduled_exports_run_now_handler(
 
     let result: Result<HttpResponse, HttpError> = (async move {
         let store = crate::scheduled_exports::ScheduleStore::new();
-        let sched = store.get(core.barrier().as_storage(), &id).await?
-            .ok_or_else(|| RvError::ErrRequestInvalid)?;
+        let sched = store.get(core.barrier().as_storage(), &id).await?.ok_or_else(|| RvError::ErrRequestInvalid)?;
 
-    let core_arc = core.get_ref().clone();
-    let outcome = crate::scheduled_exports::runner::run_once(&core_arc, &sched).await;
-    let record = match outcome {
-        Ok((bytes, dest)) => crate::scheduled_exports::RunRecord {
-            schedule_id: sched.id.clone(),
-            run_at: chrono::Utc::now().to_rfc3339(),
-            status: crate::scheduled_exports::RunStatus::Success,
-            bytes_written: bytes,
-            destination: dest,
-            error: None,
-        },
-        Err(e) => crate::scheduled_exports::RunRecord {
-            schedule_id: sched.id.clone(),
-            run_at: chrono::Utc::now().to_rfc3339(),
-            status: crate::scheduled_exports::RunStatus::Failed,
-            bytes_written: 0,
-            destination: sched.destination.clone(),
-            error: Some(format!("{e}")),
-        },
-    };
-    let _ = store.append_run(core.barrier().as_storage(), &record).await;
-    Ok(response_json_ok(None, json!({ "run": record })))
+        let core_arc = core.get_ref().clone();
+        let outcome = crate::scheduled_exports::runner::run_once(&core_arc, &sched).await;
+        let record = match outcome {
+            Ok((bytes, dest)) => crate::scheduled_exports::RunRecord {
+                schedule_id: sched.id.clone(),
+                run_at: chrono::Utc::now().to_rfc3339(),
+                status: crate::scheduled_exports::RunStatus::Success,
+                bytes_written: bytes,
+                destination: dest,
+                error: None,
+            },
+            Err(e) => crate::scheduled_exports::RunRecord {
+                schedule_id: sched.id.clone(),
+                run_at: chrono::Utc::now().to_rfc3339(),
+                status: crate::scheduled_exports::RunStatus::Failed,
+                bytes_written: 0,
+                destination: sched.destination.clone(),
+                error: Some(format!("{e}")),
+            },
+        };
+        let _ = store.append_run(core.barrier().as_storage(), &record).await;
+        Ok(response_json_ok(None, json!({ "run": record })))
     })
     .await;
     audit.finish(&result).await;
@@ -4170,22 +3966,12 @@ async fn fetch_backup_from_node(
             tls = tls.root_certs(ureq::tls::RootCerts::PlatformVerifier);
         }
 
-        let agent = ureq::Agent::config_builder()
-            .http_status_as_error(false)
-            .tls_config(tls.build())
-            .build()
-            .new_agent();
+        let agent =
+            ureq::Agent::config_builder().http_status_as_error(false).tls_config(tls.build()).build().new_agent();
 
-        let resp = agent
-            .get(&url)
-            .header(crate::VAULT_AUTH_HEADER_NAME, &token)
-            .call()
-            .map_err(|e| e.to_string())?;
+        let resp = agent.get(&url).header(crate::VAULT_AUTH_HEADER_NAME, &token).call().map_err(|e| e.to_string())?;
         let status = resp.status().as_u16();
-        let text = resp
-            .into_body()
-            .read_to_string()
-            .map_err(|e| format!("cannot read peer response: {e}"))?;
+        let text = resp.into_body().read_to_string().map_err(|e| format!("cannot read peer response: {e}"))?;
         if !(200..300).contains(&status) {
             return Err(format!("peer returned HTTP {status}: {text}"));
         }
@@ -4210,9 +3996,7 @@ async fn fetch_backup_from_node(
         if let Some(expected) = expected {
             let got = crate::scheduled_exports::catalog::sha256_hex(&bytes);
             if got != expected {
-                return Err(format!(
-                    "checksum mismatch on fetched backup (expected {expected}, got {got})"
-                ));
+                return Err(format!("checksum mismatch on fetched backup (expected {expected}, got {got})"));
             }
         }
         Ok(bytes)
@@ -4254,17 +4038,10 @@ async fn sys_scheduled_exports_backups_list_handler(
         };
 
         let local_node = crate::scheduled_exports::local_node(core.get_ref());
-        let (dir, files) = crate::scheduled_exports::list_backups(
-            core.barrier().as_storage(),
-            &sched,
-            &local_node,
-        )
-        .await?;
+        let (dir, files) =
+            crate::scheduled_exports::list_backups(core.barrier().as_storage(), &sched, &local_node).await?;
 
-        Ok(response_json_ok(
-            None,
-            json!({ "dir": dir, "files": files, "node": local_node }),
-        ))
+        Ok(response_json_ok(None, json!({ "dir": dir, "files": files, "node": local_node })))
     })
     .await;
     audit.finish(&result).await;
@@ -4293,10 +4070,7 @@ async fn sys_scheduled_exports_backup_fetch_handler(
             return Ok(response_error(StatusCode::BAD_REQUEST, "invalid backup file name"));
         }
         if backup_format_of(&filename).is_none() {
-            return Ok(response_error(
-                StatusCode::BAD_REQUEST,
-                "backup file must be a .bvx or .json file",
-            ));
+            return Ok(response_error(StatusCode::BAD_REQUEST, "backup file must be a .bvx or .json file"));
         }
 
         let store = crate::scheduled_exports::ScheduleStore::new();
@@ -4310,16 +4084,10 @@ async fn sys_scheduled_exports_backup_fetch_handler(
         let bytes = match std::fs::read(&path) {
             Ok(b) => b,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(response_error(
-                    StatusCode::NOT_FOUND,
-                    "backup file not found on this node",
-                ));
+                return Ok(response_error(StatusCode::NOT_FOUND, "backup file not found on this node"));
             }
             Err(e) => {
-                return Ok(response_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("cannot read backup file: {e}"),
-                ))
+                return Ok(response_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("cannot read backup file: {e}")))
             }
         };
 
@@ -4443,15 +4211,14 @@ async fn sys_scheduled_exports_restore_handler(
                     Err(err) => {
                         return Ok(response_error(
                             StatusCode::BAD_GATEWAY,
-                            &format!(
-                                "backup lives on {} and could not be fetched: {err}",
-                                record.node.label()
-                            ),
+                            &format!("backup lives on {} and could not be fetched: {err}", record.node.label()),
                         ))
                     }
                 }
             }
-            Err(e) => return Ok(response_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("cannot read backup file: {e}"))),
+            Err(e) => {
+                return Ok(response_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("cannot read backup file: {e}")))
+            }
         };
 
         let document_bytes = match format {
@@ -4496,13 +4263,9 @@ async fn sys_scheduled_exports_restore_handler(
             ));
         }
 
-        let import = crate::exchange::import_all_namespaces(
-            &core.get_ref().clone(),
-            &document,
-            payload.conflict_policy,
-            false,
-        )
-        .await?;
+        let import =
+            crate::exchange::import_all_namespaces(&core.get_ref().clone(), &document, payload.conflict_policy, false)
+                .await?;
 
         Ok(response_json_ok(
             None,
@@ -4556,23 +4319,16 @@ async fn sys_exchange_import_request_handler(
                 payload.file.as_bytes().to_vec()
             }
             _ => {
-                return Ok(response_error(
-                    StatusCode::BAD_REQUEST,
-                    "format must be \"bvx\" or \"json\"",
-                ));
+                return Ok(response_error(StatusCode::BAD_REQUEST, "format must be \"bvx\" or \"json\""));
             }
         };
 
         let document: crate::exchange::ExchangeDocument =
             serde_json::from_slice(&document_bytes).map_err(|_| RvError::ErrRequestInvalid)?;
 
-        let result = crate::exchange::import_all_namespaces(
-            &core.get_ref().clone(),
-            &document,
-            payload.conflict_policy,
-            false,
-        )
-        .await?;
+        let result =
+            crate::exchange::import_all_namespaces(&core.get_ref().clone(), &document, payload.conflict_policy, false)
+                .await?;
 
         Ok(response_json_ok(
             None,
@@ -4621,13 +4377,8 @@ async fn sys_import_request_handler(
         entries: payload.entries,
     };
 
-    let result = crate::backup::import::import_secrets(
-        core.barrier().as_storage(),
-        &mount,
-        &export_data,
-        payload.force,
-    )
-    .await?;
+    let result =
+        crate::backup::import::import_secrets(core.barrier().as_storage(), &mount, &export_data, payload.force).await?;
 
     Ok(response_json_ok(
         None,
@@ -4864,13 +4615,7 @@ mod plugin_surface_mount_tests {
         let (status, response) = server.mount("root-accounts", "plugin:self-accounts").unwrap();
         assert!(status == 200 || status == 204, "root plugin mount failed: {status} {response:?}");
         let (status, response) = server
-            .request(
-                "POST",
-                "sys/namespaces/tenant-a",
-                json!({}).as_object().cloned(),
-                Some(&root),
-                None,
-            )
+            .request("POST", "sys/namespaces/tenant-a", json!({}).as_object().cloned(), Some(&root), None)
             .unwrap();
         assert!(status == 200 || status == 204, "namespace create failed: {status} {response:?}");
         let (status, response) = server
@@ -4885,9 +4630,7 @@ mod plugin_surface_mount_tests {
             .unwrap();
         assert!(status == 200 || status == 204, "tenant plugin mount failed: {status} {response:?}");
 
-        let request = TestRequest::default()
-            .insert_header(("X-BastionVault-Namespace", "tenant-a"))
-            .to_http_request();
+        let request = TestRequest::default().insert_header(("X-BastionVault-Namespace", "tenant-a")).to_http_request();
         let router = plugin_surface_mount_router(&request, &server.core).await.unwrap();
         let mounts = active_plugin_mounts(&router).unwrap();
         assert_eq!(mounts.get("self-accounts").map(String::as_str), Some("tenant-accounts/"));
@@ -4901,9 +4644,8 @@ mod plugin_surface_mount_tests {
         let (status, response) = server.mount("root-accounts", "plugin:self-accounts").unwrap();
         assert!(status == 200 || status == 204, "root plugin mount failed: {status} {response:?}");
 
-        let request = TestRequest::default()
-            .insert_header(("X-BastionVault-Namespace", "missing-tenant"))
-            .to_http_request();
+        let request =
+            TestRequest::default().insert_header(("X-BastionVault-Namespace", "missing-tenant")).to_http_request();
         let error = match plugin_surface_mount_router(&request, &server.core).await {
             Ok(_) => panic!("unknown namespace must not receive the root mount table"),
             Err(error) => error,
@@ -4938,10 +4680,7 @@ mod sys_info_disclosure_tests {
         assert_eq!(resp["initialized"].as_bool(), Some(true), "init state stays public: {resp:?}");
         assert_eq!(resp["sealed"].as_bool(), Some(false), "seal state stays public: {resp:?}");
         for leaky in ["version", "started_at", "uptime_seconds", "storage_type"] {
-            assert!(
-                resp.get(leaky).is_none(),
-                "`{leaky}` must not reach an unauthenticated caller: {resp:?}"
-            );
+            assert!(resp.get(leaky).is_none(), "`{leaky}` must not reach an unauthenticated caller: {resp:?}");
         }
     }
 
@@ -4979,10 +4718,7 @@ mod sys_info_disclosure_tests {
         let (status, resp) = server.read("sys/info", Some("not-a-real-token")).unwrap();
 
         assert_eq!(status, 200, "{resp:?}");
-        assert!(
-            resp.get("version").is_none(),
-            "an unrecognised token must not unlock the build version: {resp:?}"
-        );
+        assert!(resp.get("version").is_none(), "an unrecognised token must not unlock the build version: {resp:?}");
     }
 
     /// Regression guard for the GUI's health strip rendering "up —", an
@@ -4998,9 +4734,7 @@ mod sys_info_disclosure_tests {
         server.token = server.root_token.clone();
 
         // Same handle shape the GUI stashes on connect, minus the token.
-        let unbound = crate::api::Client::new()
-            .with_addr(&format!("http://{}", server.listen_addr))
-            .build();
+        let unbound = crate::api::Client::new().with_addr(&format!("http://{}", server.listen_addr)).build();
 
         let anon = unbound.sys().info().unwrap();
         let anon_body = anon.response_data.as_ref().unwrap();
@@ -5018,11 +4752,7 @@ mod sys_info_disclosure_tests {
             auth_body["uptime_seconds"].as_i64().is_some(),
             "binding the session token must surface uptime: {auth_body:?}"
         );
-        assert_eq!(
-            auth_body["version"].as_str(),
-            Some(bastion_vault::VERSION),
-            "{auth_body:?}"
-        );
+        assert_eq!(auth_body["version"].as_str(), Some(bastion_vault::VERSION), "{auth_body:?}");
         assert!(auth_body["storage_type"].as_str().is_some(), "{auth_body:?}");
     }
 }
@@ -5062,10 +4792,7 @@ mod sys_privileged_route_auth_tests {
             ("GET", "sys/scheduled-exports"),
         ] {
             let (status, resp) = server.request(method, path, None, ANON, None).unwrap();
-            assert_eq!(
-                status, 403,
-                "{method} {path} must refuse an unauthenticated caller, got {status}: {resp:?}"
-            );
+            assert_eq!(status, 403, "{method} {path} must refuse an unauthenticated caller, got {status}: {resp:?}");
         }
 
         // The refusals must have been refusals, not side effects: the vault is
@@ -5269,10 +4996,7 @@ mod cluster_status_disclosure_tests {
         server.token = server.root_token.clone();
 
         let (status, resp) = server.read("sys/cluster-status", Some("")).unwrap();
-        assert_eq!(
-            status, 200,
-            "a tokenless request from the node itself must still be answered: {resp:?}"
-        );
+        assert_eq!(status, 200, "a tokenless request from the node itself must still be answered: {resp:?}");
         assert!(resp["storage_type"].as_str().is_some(), "{resp:?}");
     }
 
@@ -5300,10 +5024,7 @@ mod cluster_status_disclosure_tests {
         // fallback that happens to spell the same word.
         assert_eq!(cluster["storage_type"].as_str(), Some("file"), "{cluster:?}");
         assert_eq!(cluster["cluster"].as_bool(), Some(false), "a file backend is not a cluster: {cluster:?}");
-        assert!(
-            cluster.get("node_id").is_none(),
-            "a non-clustered node must not claim a raft identity: {cluster:?}"
-        );
+        assert!(cluster.get("node_id").is_none(), "a non-clustered node must not claim a raft identity: {cluster:?}");
 
         let (status, info) = server.read("sys/info", Some(&token)).unwrap();
         assert_eq!(status, 200, "{info:?}");
@@ -5335,9 +5056,7 @@ mod namespace_route_tests {
         let mut server = TestHttpServer::new("test_list_namespaces_http", true).await;
         server.token = server.root_token.clone();
 
-        let (status, resp) = server
-            .list("sys/namespaces", Some(&server.root_token.clone()))
-            .unwrap();
+        let (status, resp) = server.list("sys/namespaces", Some(&server.root_token.clone())).unwrap();
         // The bug: actix returns a bare 404 here. The fix routes the request
         // to the logical namespace-list handler, which returns 200 with a
         // (possibly empty) `keys` list.
@@ -5356,18 +5075,15 @@ mod namespace_route_tests {
 
         // Admin setup: a tenant, an account, and a restriction to that tenant.
         for path in ["sys/namespaces/tenant-a", "sys/namespaces/tenant-a/sub"] {
-            let (status, resp) = server
-                .request("POST", path, json!({}).as_object().cloned(), Some(&root), None)
-                .unwrap();
+            let (status, resp) =
+                server.request("POST", path, json!({}).as_object().cloned(), Some(&root), None).unwrap();
             assert!(status == 200 || status == 204, "create {path} failed: {status} {resp:?}");
         }
         assert!(server.mount_auth("pass", "userpass").is_ok());
         let (status, resp) = server
             .write(
                 "auth/pass/users/tina",
-                json!({ "password": "tenant-pw-1", "policies": "standard-user" })
-                    .as_object()
-                    .cloned(),
+                json!({ "password": "tenant-pw-1", "policies": "standard-user" }).as_object().cloned(),
                 Some(&root),
             )
             .unwrap();
@@ -5384,11 +5100,7 @@ mod namespace_route_tests {
         // Login with no `X-BastionVault-Namespace` header — exactly what the GUI
         // login page sends. This used to come back 403 "permission denied".
         let (status, resp) = server
-            .login(
-                "auth/pass/login/tina",
-                json!({ "password": "tenant-pw-1" }).as_object().cloned(),
-                None,
-            )
+            .login("auth/pass/login/tina", json!({ "password": "tenant-pw-1" }).as_object().cloned(), None)
             .unwrap();
         assert_eq!(status, 200, "an unscoped tenant login must succeed: {resp:?}");
         let tina = resp["auth"]["client_token"].as_str().expect("client_token").to_string();
@@ -5400,8 +5112,7 @@ mod namespace_route_tests {
         assert_eq!(status, 200, "namespaces-self must be granted to any token: {resp:?}");
         let data = resp.get("data").cloned().unwrap_or(resp);
         assert_eq!(data["token_namespace"].as_str(), Some("tenant-a"));
-        let seen: Vec<&str> =
-            data["namespaces"].as_array().unwrap().iter().filter_map(|v| v.as_str()).collect();
+        let seen: Vec<&str> = data["namespaces"].as_array().unwrap().iter().filter_map(|v| v.as_str()).collect();
         // Her tenant and its descendant — never root, which she cannot operate in.
         assert_eq!(seen, vec!["tenant-a", "tenant-a/sub"]);
     }
@@ -5421,22 +5132,16 @@ mod namespace_route_tests {
 
         // Read it back (GET) — proves the create persisted and the path route
         // reaches the logical read handler rather than the actix 404.
-        let (status, resp) = server
-            .request("GET", "sys/namespaces/team-alpha", None, Some(&token), None)
-            .unwrap();
+        let (status, resp) = server.request("GET", "sys/namespaces/team-alpha", None, Some(&token), None).unwrap();
         assert_eq!(status, 200, "read-after-create must reach handler and find ns: {resp:?}");
 
         // Delete it (DELETE).
-        let (status, _resp) = server
-            .request("DELETE", "sys/namespaces/team-alpha", None, Some(&token), None)
-            .unwrap();
+        let (status, _resp) = server.request("DELETE", "sys/namespaces/team-alpha", None, Some(&token), None).unwrap();
         assert!(status == 200 || status == 204, "delete namespace failed: {status}");
 
         // After delete the read must 404 with the *logical* not-found error
         // (handler reached), not the actix mount-not-found 404 the bug produced.
-        let (status, resp) = server
-            .request("GET", "sys/namespaces/team-alpha", None, Some(&token), None)
-            .unwrap();
+        let (status, resp) = server.request("GET", "sys/namespaces/team-alpha", None, Some(&token), None).unwrap();
         assert_eq!(status, 404, "read-after-delete should be not-found: {resp:?}");
         let err = resp.get("error").and_then(|v| v.as_str()).unwrap_or("");
         assert!(
@@ -5456,18 +5161,15 @@ mod namespace_route_tests {
         let root = server.root_token.clone();
 
         for path in ["sys/namespaces/dti", "sys/namespaces/dti/esi"] {
-            let (status, resp) = server
-                .request("POST", path, json!({}).as_object().cloned(), Some(&root), None)
-                .unwrap();
+            let (status, resp) =
+                server.request("POST", path, json!({}).as_object().cloned(), Some(&root), None).unwrap();
             assert!(status == 200 || status == 204, "create {path} failed: {status} {resp:?}");
         }
         assert!(server.mount_auth("userpass", "userpass").is_ok());
         let (status, resp) = server
             .write(
                 "auth/userpass/users/felipe2",
-                json!({ "password": "tenant-pw-felipe2", "policies": "default,standard-user" })
-                    .as_object()
-                    .cloned(),
+                json!({ "password": "tenant-pw-felipe2", "policies": "default,standard-user" }).as_object().cloned(),
                 Some(&root),
             )
             .unwrap();
@@ -5482,11 +5184,7 @@ mod namespace_route_tests {
         assert!(status == 200 || status == 204, "assignment failed: {status} {resp:?}");
 
         let (status, resp) = server
-            .login(
-                "auth/userpass/login/felipe2",
-                json!({ "password": "tenant-pw-felipe2" }).as_object().cloned(),
-                None,
-            )
+            .login("auth/userpass/login/felipe2", json!({ "password": "tenant-pw-felipe2" }).as_object().cloned(), None)
             .unwrap();
         assert_eq!(status, 200, "an unscoped nested-tenant login must succeed: {resp:?}");
 
@@ -5515,19 +5213,14 @@ mod namespace_route_tests {
         let denial = events
             .iter()
             .filter(|e| e.get("op").and_then(|v| v.as_str()) == Some("denied"))
-            .find(|e| {
-                e.get("target").and_then(|v| v.as_str()) == Some("auth/userpass/login/felipe2")
-            })
+            .find(|e| e.get("target").and_then(|v| v.as_str()) == Some("auth/userpass/login/felipe2"))
             .unwrap_or_else(|| panic!("login denial missing (or path truncated): {events:?}"));
         let fields = denial
             .get("changed_fields")
             .and_then(|v| v.as_array())
             .map(|a| a.iter().filter_map(|f| f.as_str()).collect::<Vec<_>>())
             .unwrap_or_default();
-        assert!(
-            fields.contains(&"reason=credential-refused"),
-            "a refused login is not a token problem: {fields:?}"
-        );
+        assert!(fields.contains(&"reason=credential-refused"), "a refused login is not a token problem: {fields:?}");
     }
 
     /// The root namespace (empty path) is configurable over HTTP through the
@@ -5542,9 +5235,7 @@ mod namespace_route_tests {
         let token = server.root_token.clone();
 
         // Read the root config: path "" ⇒ URL `/v1/sys/namespaces/`.
-        let (status, resp) = server
-            .request("GET", "sys/namespaces/", None, Some(&token), None)
-            .unwrap();
+        let (status, resp) = server.request("GET", "sys/namespaces/", None, Some(&token), None).unwrap();
         assert_eq!(status, 200, "read root config must reach the self handler: {resp:?}");
         let data = resp.get("data").cloned().unwrap_or(resp.clone());
         assert_eq!(data["path"], "");
@@ -5563,9 +5254,7 @@ mod namespace_route_tests {
         assert!(status == 200 || status == 204, "write root config failed: {status} {resp:?}");
 
         // Read back: the flag is persisted on the root record.
-        let (status, resp) = server
-            .request("GET", "sys/namespaces/", None, Some(&token), None)
-            .unwrap();
+        let (status, resp) = server.request("GET", "sys/namespaces/", None, Some(&token), None).unwrap();
         assert_eq!(status, 200, "read-after-write must reach the self handler: {resp:?}");
         let data = resp.get("data").cloned().unwrap_or(resp.clone());
         assert_eq!(data["path"], "");
@@ -5612,15 +5301,8 @@ mod default_account_route_tests {
         assert!(status == 200 || status == 204, "write failed: {status} {resp:?}");
 
         // Read it back — proves the v2 shim reaches the logical read handler.
-        let (status, resp) = server
-            .request(
-                "GET",
-                "sys/identity/default-account/userpass/alice",
-                None,
-                Some(&token),
-                None,
-            )
-            .unwrap();
+        let (status, resp) =
+            server.request("GET", "sys/identity/default-account/userpass/alice", None, Some(&token), None).unwrap();
         assert_eq!(status, 200, "read must reach the logical handler: {resp:?}");
         let data = resp.get("data").unwrap_or(&resp);
         assert_eq!(data.get("linux").and_then(|v| v.as_str()), Some("alice-svc"));
@@ -5631,10 +5313,7 @@ mod default_account_route_tests {
             Some(true),
             "admin read must report the password is set: {resp:?}"
         );
-        assert!(
-            data.get("windows_password").is_none(),
-            "admin read must NOT echo the plaintext password: {resp:?}"
-        );
+        assert!(data.get("windows_password").is_none(), "admin read must NOT echo the plaintext password: {resp:?}");
 
         // Re-save with only the login names (no windows_password key) — the
         // stored password must be preserved (write-preserve semantics).
@@ -5642,17 +5321,14 @@ mod default_account_route_tests {
             .request(
                 "POST",
                 "sys/identity/default-account/userpass/alice",
-                json!({ "linux": "alice-svc", "windows": "CORP\\alice" })
-                    .as_object()
-                    .cloned(),
+                json!({ "linux": "alice-svc", "windows": "CORP\\alice" }).as_object().cloned(),
                 Some(&token),
                 None,
             )
             .unwrap();
         assert!(status == 200 || status == 204, "re-write failed: {status}");
-        let (_status, resp) = server
-            .request("GET", "sys/identity/default-account/userpass/alice", None, Some(&token), None)
-            .unwrap();
+        let (_status, resp) =
+            server.request("GET", "sys/identity/default-account/userpass/alice", None, Some(&token), None).unwrap();
         let data = resp.get("data").unwrap_or(&resp);
         assert_eq!(
             data.get("has_windows_password").and_then(|v| v.as_bool()),
@@ -5665,17 +5341,14 @@ mod default_account_route_tests {
             .request(
                 "POST",
                 "sys/identity/default-account/userpass/alice",
-                json!({ "linux": "alice-svc", "windows": "CORP\\alice", "windows_password": "" })
-                    .as_object()
-                    .cloned(),
+                json!({ "linux": "alice-svc", "windows": "CORP\\alice", "windows_password": "" }).as_object().cloned(),
                 Some(&token),
                 None,
             )
             .unwrap();
         assert!(status == 200 || status == 204, "clear-password write failed: {status}");
-        let (_status, resp) = server
-            .request("GET", "sys/identity/default-account/userpass/alice", None, Some(&token), None)
-            .unwrap();
+        let (_status, resp) =
+            server.request("GET", "sys/identity/default-account/userpass/alice", None, Some(&token), None).unwrap();
         let data = resp.get("data").unwrap_or(&resp);
         assert_eq!(
             data.get("has_windows_password").and_then(|v| v.as_bool()),
@@ -5686,40 +5359,19 @@ mod default_account_route_tests {
         // The `self` read is reachable for any authenticated caller. The root
         // token has no userpass alias, so it resolves to empty fields — but it
         // must reach the handler (200), not 404 at the scope.
-        let (status, resp) = server
-            .request(
-                "GET",
-                "sys/identity/default-account/self",
-                None,
-                Some(&token),
-                None,
-            )
-            .unwrap();
+        let (status, resp) =
+            server.request("GET", "sys/identity/default-account/self", None, Some(&token), None).unwrap();
         assert_eq!(status, 200, "self read must reach the handler: {resp:?}");
 
         // Delete clears the record.
-        let (status, _resp) = server
-            .request(
-                "DELETE",
-                "sys/identity/default-account/userpass/alice",
-                None,
-                Some(&token),
-                None,
-            )
-            .unwrap();
+        let (status, _resp) =
+            server.request("DELETE", "sys/identity/default-account/userpass/alice", None, Some(&token), None).unwrap();
         assert!(status == 200 || status == 204, "delete failed: {status}");
 
         // After delete the read returns the explicit empty (unconfigured) state,
         // not a 404 — the GUI renders an editable blank form.
-        let (status, resp) = server
-            .request(
-                "GET",
-                "sys/identity/default-account/userpass/alice",
-                None,
-                Some(&token),
-                None,
-            )
-            .unwrap();
+        let (status, resp) =
+            server.request("GET", "sys/identity/default-account/userpass/alice", None, Some(&token), None).unwrap();
         assert_eq!(status, 200, "read-after-delete should be empty, not 404: {resp:?}");
         let data = resp.get("data").unwrap_or(&resp);
         assert_eq!(data.get("linux").and_then(|v| v.as_str()), Some(""));
@@ -5746,19 +5398,12 @@ mod self_profile_route_tests {
     /// Log in at `auth/pass/login/<user>` and return the issued client token.
     fn login(server: &TestHttpServer, user: &str, password: &str) -> Option<String> {
         let (status, resp) = server
-            .login(
-                &format!("auth/pass/login/{user}"),
-                json!({ "password": password }).as_object().cloned(),
-                None,
-            )
+            .login(&format!("auth/pass/login/{user}"), json!({ "password": password }).as_object().cloned(), None)
             .unwrap();
         if status != 200 {
             return None;
         }
-        resp.get("auth")
-            .and_then(|a| a.get("client_token"))
-            .and_then(|v| v.as_str())
-            .map(String::from)
+        resp.get("auth").and_then(|a| a.get("client_token")).and_then(|v| v.as_str()).map(String::from)
     }
 
     fn data_of(resp: &Value) -> Value {
@@ -5778,9 +5423,7 @@ mod self_profile_route_tests {
         let (status, resp) = server
             .write(
                 "auth/pass/users/alice",
-                json!({ "password": "old-password-1", "policies": "standard-user" })
-                    .as_object()
-                    .cloned(),
+                json!({ "password": "old-password-1", "policies": "standard-user" }).as_object().cloned(),
                 Some(&root),
             )
             .unwrap();
@@ -5789,9 +5432,7 @@ mod self_profile_route_tests {
         let alice = login(&server, "alice", "old-password-1").expect("alice should log in");
 
         // --- Read own profile -------------------------------------------
-        let (status, resp) = server
-            .request("GET", "sys/identity/profile/self", None, Some(&alice), None)
-            .unwrap();
+        let (status, resp) = server.request("GET", "sys/identity/profile/self", None, Some(&alice), None).unwrap();
         assert_eq!(status, 200, "profile read must be granted by `default`: {resp:?}");
         let d = data_of(&resp);
         assert_eq!(d.get("username").and_then(|v| v.as_str()), Some("alice"));
@@ -5805,9 +5446,7 @@ mod self_profile_route_tests {
         let (status, resp) = server
             .write(
                 "sys/identity/profile/self/contact",
-                json!({ "email": "alice@example.com", "phone": "+55 21 1234-5678" })
-                    .as_object()
-                    .cloned(),
+                json!({ "email": "alice@example.com", "phone": "+55 21 1234-5678" }).as_object().cloned(),
                 Some(&alice),
             )
             .unwrap();
@@ -5822,9 +5461,7 @@ mod self_profile_route_tests {
             )
             .unwrap();
         assert_eq!(status, 200);
-        let (_status, resp) = server
-            .request("GET", "sys/identity/profile/self", None, Some(&alice), None)
-            .unwrap();
+        let (_status, resp) = server.request("GET", "sys/identity/profile/self", None, Some(&alice), None).unwrap();
         let d = data_of(&resp);
         assert_eq!(d.get("email").and_then(|v| v.as_str()), Some("alice@example.com"));
         assert_eq!(d.get("phone").and_then(|v| v.as_str()), Some("+55 21 9999-0000"));
@@ -5851,10 +5488,7 @@ mod self_profile_route_tests {
             .unwrap();
         assert_eq!(status, 200, "self default-account write failed: {resp:?}");
         let d = data_of(&resp);
-        assert!(
-            d.get("windows_password").is_none(),
-            "the write response must not echo the stored password: {resp:?}"
-        );
+        assert!(d.get("windows_password").is_none(), "the write response must not echo the stored password: {resp:?}");
 
         // Write-preserve across every field: re-saving only `linux` keeps the
         // Windows login name and the stored RDP password.
@@ -5866,9 +5500,7 @@ mod self_profile_route_tests {
             )
             .unwrap();
         assert_eq!(status, 200);
-        let (_status, resp) = server
-            .request("GET", "sys/identity/profile/self", None, Some(&alice), None)
-            .unwrap();
+        let (_status, resp) = server.request("GET", "sys/identity/profile/self", None, Some(&alice), None).unwrap();
         let acct = data_of(&resp).get("default_account").cloned().unwrap();
         assert_eq!(acct.get("linux").and_then(|v| v.as_str()), Some("alice-ops"));
         assert_eq!(acct.get("windows").and_then(|v| v.as_str()), Some("CORP\\alice"));
@@ -5877,29 +5509,20 @@ mod self_profile_route_tests {
             Some(true),
             "omitting windows_password must preserve it: {resp:?}"
         );
-        assert!(
-            acct.get("windows_password").is_none(),
-            "the profile read must mask the stored RDP password: {resp:?}"
-        );
+        assert!(acct.get("windows_password").is_none(), "the profile read must mask the stored RDP password: {resp:?}");
 
         // The admin view of the same record agrees — the self write landed on
         // the identity principal the admin route addresses.
-        let (_status, resp) = server
-            .request("GET", "sys/identity/default-account/userpass/alice", None, Some(&root), None)
-            .unwrap();
-        assert_eq!(
-            data_of(&resp).get("linux").and_then(|v| v.as_str()),
-            Some("alice-ops")
-        );
+        let (_status, resp) =
+            server.request("GET", "sys/identity/default-account/userpass/alice", None, Some(&root), None).unwrap();
+        assert_eq!(data_of(&resp).get("linux").and_then(|v| v.as_str()), Some("alice-ops"));
 
         // --- Password change --------------------------------------------
         // A wrong current password is refused and does not rotate anything.
         let (status, _resp) = server
             .write(
                 "sys/identity/profile/self/password",
-                json!({ "current_password": "wrong", "new_password": "new-password-1" })
-                    .as_object()
-                    .cloned(),
+                json!({ "current_password": "wrong", "new_password": "new-password-1" }).as_object().cloned(),
                 Some(&alice),
             )
             .unwrap();
@@ -5913,9 +5536,7 @@ mod self_profile_route_tests {
         let (status, _resp) = server
             .write(
                 "sys/identity/profile/self/password",
-                json!({ "current_password": "old-password-1", "new_password": "short" })
-                    .as_object()
-                    .cloned(),
+                json!({ "current_password": "old-password-1", "new_password": "short" }).as_object().cloned(),
                 Some(&alice),
             )
             .unwrap();
@@ -5925,32 +5546,20 @@ mod self_profile_route_tests {
         let (status, resp) = server
             .write(
                 "sys/identity/profile/self/password",
-                json!({ "current_password": "old-password-1", "new_password": "new-password-1" })
-                    .as_object()
-                    .cloned(),
+                json!({ "current_password": "old-password-1", "new_password": "new-password-1" }).as_object().cloned(),
                 Some(&alice),
             )
             .unwrap();
         assert_eq!(status, 200, "password change failed: {resp:?}");
-        assert!(
-            login(&server, "alice", "old-password-1").is_none(),
-            "the old password must stop working"
-        );
-        assert!(
-            login(&server, "alice", "new-password-1").is_some(),
-            "the new password must work"
-        );
+        assert!(login(&server, "alice", "old-password-1").is_none(), "the old password must stop working");
+        assert!(login(&server, "alice", "new-password-1").is_some(), "the new password must work");
 
         // The change did not disturb the rest of the record.
-        let (_status, resp) = server
-            .request("GET", "sys/identity/profile/self", None, Some(&alice), None)
-            .unwrap();
+        let (_status, resp) = server.request("GET", "sys/identity/profile/self", None, Some(&alice), None).unwrap();
         let d = data_of(&resp);
         assert_eq!(d.get("email").and_then(|v| v.as_str()), Some("alice@example.com"));
         assert_eq!(
-            d.get("policies").and_then(|v| v.as_array()).map(|a| a
-                .iter()
-                .any(|p| p.as_str() == Some("standard-user"))),
+            d.get("policies").and_then(|v| v.as_array()).map(|a| a.iter().any(|p| p.as_str() == Some("standard-user"))),
             Some(true),
             "self-service must not drop the user's policies: {resp:?}"
         );
@@ -5978,18 +5587,14 @@ mod self_profile_route_tests {
         }
 
         let bob = login(&server, "bob", "bob-password-1").expect("bob should log in");
-        let (_status, resp) = server
-            .request("GET", "sys/identity/profile/self", None, Some(&bob), None)
-            .unwrap();
+        let (_status, resp) = server.request("GET", "sys/identity/profile/self", None, Some(&bob), None).unwrap();
         assert_eq!(data_of(&resp).get("username").and_then(|v| v.as_str()), Some("bob"));
 
         // Bob's own change must not touch alice: alice's password still works.
         let (status, _resp) = server
             .write(
                 "sys/identity/profile/self/password",
-                json!({ "current_password": "bob-password-1", "new_password": "bob-password-2" })
-                    .as_object()
-                    .cloned(),
+                json!({ "current_password": "bob-password-1", "new_password": "bob-password-2" }).as_object().cloned(),
                 Some(&bob),
             )
             .unwrap();
@@ -6000,20 +5605,13 @@ mod self_profile_route_tests {
         // The root token has no userpass login behind it. The profile read
         // still succeeds (so the GUI renders a read-only page) but reports the
         // password section as unavailable, and the write refuses explicitly.
-        let (status, resp) = server
-            .request("GET", "sys/identity/profile/self", None, Some(&root), None)
-            .unwrap();
+        let (status, resp) = server.request("GET", "sys/identity/profile/self", None, Some(&root), None).unwrap();
         assert_eq!(status, 200, "profile read must not 404 for a non-userpass token: {resp:?}");
-        assert_eq!(
-            data_of(&resp).get("can_change_password").and_then(|v| v.as_bool()),
-            Some(false)
-        );
+        assert_eq!(data_of(&resp).get("can_change_password").and_then(|v| v.as_bool()), Some(false));
         let (status, _resp) = server
             .write(
                 "sys/identity/profile/self/password",
-                json!({ "current_password": "x", "new_password": "whatever-123" })
-                    .as_object()
-                    .cloned(),
+                json!({ "current_password": "x", "new_password": "whatever-123" }).as_object().cloned(),
                 Some(&root),
             )
             .unwrap();
@@ -6045,9 +5643,8 @@ mod scheduled_export_backup_tests {
             "allow_plaintext": true,
             "enabled": true,
         });
-        let (status, resp) = server
-            .request("POST", "sys/scheduled-exports", body.as_object().cloned(), Some(token), None)
-            .unwrap();
+        let (status, resp) =
+            server.request("POST", "sys/scheduled-exports", body.as_object().cloned(), Some(token), None).unwrap();
         assert_eq!(status, 200, "create schedule failed: {resp:?}");
         resp["schedule"]["id"].as_str().unwrap().to_string()
     }
@@ -6068,23 +5665,20 @@ mod scheduled_export_backup_tests {
 
         // No run has fired yet: the destination dir does not exist. Listing must
         // succeed with an empty file set rather than erroring.
-        let (status, resp) = server
-            .request("GET", &format!("sys/scheduled-exports/{id}/backups"), None, Some(&token), None)
-            .unwrap();
+        let (status, resp) =
+            server.request("GET", &format!("sys/scheduled-exports/{id}/backups"), None, Some(&token), None).unwrap();
         assert_eq!(status, 200, "backups list (empty dir) must reach handler: {resp:?}");
         assert_eq!(resp["files"].as_array().map(|a| a.len()), Some(0));
 
         // Fire an immediate run to produce a backup file on disk.
-        let (status, resp) = server
-            .request("POST", &format!("sys/scheduled-exports/{id}/run-now"), None, Some(&token), None)
-            .unwrap();
+        let (status, resp) =
+            server.request("POST", &format!("sys/scheduled-exports/{id}/run-now"), None, Some(&token), None).unwrap();
         assert_eq!(status, 200, "run-now failed: {resp:?}");
         assert_eq!(resp["run"]["status"].as_str(), Some("success"), "run must succeed: {resp:?}");
 
         // The run's file is now listable.
-        let (status, resp) = server
-            .request("GET", &format!("sys/scheduled-exports/{id}/backups"), None, Some(&token), None)
-            .unwrap();
+        let (status, resp) =
+            server.request("GET", &format!("sys/scheduled-exports/{id}/backups"), None, Some(&token), None).unwrap();
         assert_eq!(status, 200, "backups list failed: {resp:?}");
         let files = resp["files"].as_array().cloned().unwrap_or_default();
         assert!(!files.is_empty(), "expected at least one backup file: {resp:?}");
@@ -6094,16 +5688,29 @@ mod scheduled_export_backup_tests {
         // Dry-run restore: classify without writing.
         let body = json!({ "filename": filename, "allow_plaintext": true, "dry_run": true });
         let (status, resp) = server
-            .request("POST", &format!("sys/scheduled-exports/{id}/restore"), body.as_object().cloned(), Some(&token), None)
+            .request(
+                "POST",
+                &format!("sys/scheduled-exports/{id}/restore"),
+                body.as_object().cloned(),
+                Some(&token),
+                None,
+            )
             .unwrap();
         assert_eq!(status, 200, "dry-run restore failed: {resp:?}");
         assert_eq!(resp["dry_run"].as_bool(), Some(true));
         assert!(resp.get("items").is_some(), "dry-run must return classified items: {resp:?}");
 
         // Real apply.
-        let body = json!({ "filename": filename, "allow_plaintext": true, "dry_run": false, "conflict_policy": "overwrite" });
+        let body =
+            json!({ "filename": filename, "allow_plaintext": true, "dry_run": false, "conflict_policy": "overwrite" });
         let (status, resp) = server
-            .request("POST", &format!("sys/scheduled-exports/{id}/restore"), body.as_object().cloned(), Some(&token), None)
+            .request(
+                "POST",
+                &format!("sys/scheduled-exports/{id}/restore"),
+                body.as_object().cloned(),
+                Some(&token),
+                None,
+            )
             .unwrap();
         assert_eq!(status, 200, "apply restore failed: {resp:?}");
         assert_eq!(resp["dry_run"].as_bool(), Some(false));
@@ -6112,14 +5719,26 @@ mod scheduled_export_backup_tests {
         // Path-traversal guard: a name with `..` is rejected before any read.
         let body = json!({ "filename": "../escape.json", "allow_plaintext": true, "dry_run": true });
         let (status, _resp) = server
-            .request("POST", &format!("sys/scheduled-exports/{id}/restore"), body.as_object().cloned(), Some(&token), None)
+            .request(
+                "POST",
+                &format!("sys/scheduled-exports/{id}/restore"),
+                body.as_object().cloned(),
+                Some(&token),
+                None,
+            )
             .unwrap();
         assert_eq!(status, 400, "traversal filename must be rejected with 400");
 
         // Unknown file → 404, not a 500.
         let body = json!({ "filename": "does-not-exist.json", "allow_plaintext": true, "dry_run": true });
         let (status, _resp) = server
-            .request("POST", &format!("sys/scheduled-exports/{id}/restore"), body.as_object().cloned(), Some(&token), None)
+            .request(
+                "POST",
+                &format!("sys/scheduled-exports/{id}/restore"),
+                body.as_object().cloned(),
+                Some(&token),
+                None,
+            )
             .unwrap();
         assert_eq!(status, 404, "missing backup file must be 404");
 
@@ -6152,9 +5771,8 @@ mod scheduled_export_backup_tests {
                 "allow_plaintext": true,
                 "enabled": true,
             });
-            let (status, resp) = server
-                .request("POST", "sys/scheduled-exports", body.as_object().cloned(), Some(&token), None)
-                .unwrap();
+            let (status, resp) =
+                server.request("POST", "sys/scheduled-exports", body.as_object().cloned(), Some(&token), None).unwrap();
             assert_eq!(status, 400, "create with path {bad:?} must be 400: {resp:?}");
         }
 
@@ -6204,9 +5822,8 @@ mod exchange_export_route_tests {
             "scope": { "kind": "every_namespace", "include": [] },
             "password": "correct-horse-battery",
         });
-        let (status, resp) = server
-            .request("POST", "sys/exchange/export", body.as_object().cloned(), Some(&token), None)
-            .unwrap();
+        let (status, resp) =
+            server.request("POST", "sys/exchange/export", body.as_object().cloned(), Some(&token), None).unwrap();
         assert_eq!(status, 400, "unknown scope kind must be 400: {resp:?}");
         let msg = resp.to_string();
         assert!(
@@ -6225,14 +5842,10 @@ mod exchange_export_route_tests {
             "format": "bvx",
             "scope": { "kind": "full", "include": [] },
         });
-        let (status, resp) = server
-            .request("POST", "sys/exchange/export", body.as_object().cloned(), Some(&token), None)
-            .unwrap();
+        let (status, resp) =
+            server.request("POST", "sys/exchange/export", body.as_object().cloned(), Some(&token), None).unwrap();
         assert_eq!(status, 400, "missing password must be 400: {resp:?}");
-        assert!(
-            resp.to_string().contains("password required"),
-            "400 must name the missing password: {resp:?}"
-        );
+        assert!(resp.to_string().contains("password required"), "400 must name the missing password: {resp:?}");
     }
 
     /// The scope this release added must survive the round trip the GUI makes,
@@ -6249,15 +5862,11 @@ mod exchange_export_route_tests {
             "scope": { "kind": "all_namespaces", "include": [] },
             "password": "correct-horse-battery",
         });
-        let (status, resp) = server
-            .request("POST", "sys/exchange/export", body.as_object().cloned(), Some(&token), None)
-            .unwrap();
+        let (status, resp) =
+            server.request("POST", "sys/exchange/export", body.as_object().cloned(), Some(&token), None).unwrap();
         assert_eq!(status, 200, "all_namespaces export must be accepted: {resp:?}");
         assert_eq!(resp["format"].as_str(), Some("bvx"));
-        assert!(
-            resp["size_bytes"].as_u64().unwrap_or(0) > 0,
-            "export must produce bytes: {resp:?}"
-        );
+        assert!(resp["size_bytes"].as_u64().unwrap_or(0) > 0, "export must produce bytes: {resp:?}");
     }
 }
 

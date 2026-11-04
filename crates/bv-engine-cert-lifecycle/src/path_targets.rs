@@ -17,8 +17,8 @@ use crate::{
     context::Context,
     errors::RvError,
     logical::{
-        field::FieldTrait, page_response, paginate, Backend, Field, FieldType, Operation,
-        PageLimits, Path, PathOperation, Request, Response,
+        field::FieldTrait, page_response, paginate, Backend, Field, FieldType, Operation, PageLimits, Path,
+        PathOperation, Request, Response,
     },
     new_fields, new_fields_internal, new_path, new_path_internal,
 };
@@ -126,20 +126,20 @@ impl CertLifecycleBackendInner {
             // a `name` field, and several callers pass the state straight to
             // code that expects `state/<name>`'s shape.
             let state: TargetState =
-                storage::get_json(req, &storage::state_storage_key(name))
-                    .await
-                    .unwrap_or(None)
-                    .unwrap_or_default();
-            row.insert("state".into(), json!({
-                "name": name,
-                "current_serial": state.current_serial,
-                "current_not_after": state.current_not_after_unix,
-                "last_renewal": state.last_renewal_unix,
-                "last_attempt": state.last_attempt_unix,
-                "last_error": state.last_error,
-                "next_attempt": state.next_attempt_unix,
-                "failure_count": state.failure_count,
-            }));
+                storage::get_json(req, &storage::state_storage_key(name)).await.unwrap_or(None).unwrap_or_default();
+            row.insert(
+                "state".into(),
+                json!({
+                    "name": name,
+                    "current_serial": state.current_serial,
+                    "current_not_after": state.current_not_after_unix,
+                    "last_renewal": state.last_renewal_unix,
+                    "last_attempt": state.last_attempt_unix,
+                    "last_error": state.last_error,
+                    "next_attempt": state.next_attempt_unix,
+                    "failure_count": state.failure_count,
+                }),
+            );
             records.push(Value::Object(row));
         }
         Ok(Some(page_response(&page, records)))
@@ -161,29 +161,27 @@ impl CertLifecycleBackendInner {
         let address = req.get_data_or_default("address")?.as_str().unwrap_or("").to_string();
         let pki_mount = {
             let v = req.get_data_or_default("pki_mount")?.as_str().unwrap_or("").to_string();
-            if v.is_empty() { "pki".to_string() } else { v }
+            if v.is_empty() {
+                "pki".to_string()
+            } else {
+                v
+            }
         };
         let role_ref = req.get_data_or_default("role_ref")?.as_str().unwrap_or("").to_string();
         let common_name = req.get_data_or_default("common_name")?.as_str().unwrap_or("").to_string();
-        let alt_names = req
-            .get_data_or_default("alt_names")?
-            .as_comma_string_slice()
-            .unwrap_or_default();
-        let ip_sans = req
-            .get_data_or_default("ip_sans")?
-            .as_comma_string_slice()
-            .unwrap_or_default();
+        let alt_names = req.get_data_or_default("alt_names")?.as_comma_string_slice().unwrap_or_default();
+        let ip_sans = req.get_data_or_default("ip_sans")?.as_comma_string_slice().unwrap_or_default();
         let ttl = req.get_data_or_default("ttl")?.as_str().unwrap_or("").to_string();
-        let key_policy_raw = req
-            .get_data_or_default("key_policy")?
-            .as_str()
-            .unwrap_or("rotate")
-            .to_string();
+        let key_policy_raw = req.get_data_or_default("key_policy")?.as_str().unwrap_or("rotate").to_string();
         let key_policy = KeyPolicy::from_str(&key_policy_raw)?;
         let key_ref = req.get_data_or_default("key_ref")?.as_str().unwrap_or("").to_string();
         let renew_before = {
             let v = req.get_data_or_default("renew_before")?.as_str().unwrap_or("").to_string();
-            if v.is_empty() { "168h".to_string() } else { v }
+            if v.is_empty() {
+                "168h".to_string()
+            } else {
+                v
+            }
         };
 
         // Up-front sanity checks. These produce clear errors at write
@@ -200,17 +198,14 @@ impl CertLifecycleBackendInner {
                 kind.as_str(),
             )));
         }
-        if matches!(kind, TargetKind::HttpPush)
-            && !(address.starts_with("http://") || address.starts_with("https://"))
+        if matches!(kind, TargetKind::HttpPush) && !(address.starts_with("http://") || address.starts_with("https://"))
         {
             return Err(RvError::ErrString(
                 "cert-lifecycle: kind=http-push requires `address` to be an http(s) URL".into(),
             ));
         }
         if matches!(key_policy, KeyPolicy::Reuse) && key_ref.is_empty() {
-            return Err(RvError::ErrString(
-                "cert-lifecycle: `key_ref` is required when key_policy=reuse".into(),
-            ));
+            return Err(RvError::ErrString("cert-lifecycle: `key_ref` is required when key_policy=reuse".into()));
         }
         if matches!(key_policy, KeyPolicy::AgentGenerates) {
             return Err(RvError::ErrString(
@@ -220,17 +215,11 @@ impl CertLifecycleBackendInner {
 
         // Preserve `created_at_unix` on update; first write gets a
         // fresh timestamp.
-        let created_at_unix = match storage::get_json::<Target>(
-            req,
-            &storage::target_storage_key(&name),
-        )
-        .await?
-        {
+        let created_at_unix = match storage::get_json::<Target>(req, &storage::target_storage_key(&name)).await? {
             Some(existing) => existing.created_at_unix,
-            None => std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
+            None => {
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+            }
         };
 
         let target = Target {
@@ -263,11 +252,7 @@ impl CertLifecycleBackendInner {
 }
 
 fn require_name(req: &Request) -> Result<String, RvError> {
-    let name = req
-        .get_data("name")?
-        .as_str()
-        .ok_or(RvError::ErrRequestFieldInvalid)?
-        .to_string();
+    let name = req.get_data("name")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
     if name.is_empty() {
         return Err(RvError::ErrRequestNoDataField);
     }

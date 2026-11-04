@@ -58,8 +58,7 @@ const MAX_EMAIL_LEN: usize = 254;
 pub fn validate_email(role: &RoleEntry, addr: &str) -> Result<(), RvError> {
     if !role.allow_email_sans {
         return Err(RvError::ErrString(
-            "email_sans: this role does not permit rfc822Name SANs (set allow_email_sans=true on the role)"
-                .into(),
+            "email_sans: this role does not permit rfc822Name SANs (set allow_email_sans=true on the role)".into(),
         ));
     }
     if addr.is_empty() {
@@ -79,9 +78,7 @@ pub fn validate_email(role: &RoleEntry, addr: &str) -> Result<(), RvError> {
         )));
     }
     if addr.chars().any(|c| c.is_whitespace() || c.is_control()) {
-        return Err(RvError::ErrString(format!(
-            "email_sans: `{addr}` contains whitespace or control characters"
-        )));
+        return Err(RvError::ErrString(format!("email_sans: `{addr}` contains whitespace or control characters")));
     }
 
     let mut parts = addr.split('@');
@@ -105,9 +102,7 @@ pub fn validate_email(role: &RoleEntry, addr: &str) -> Result<(), RvError> {
     if permitted {
         Ok(())
     } else {
-        Err(RvError::ErrString(format!(
-            "email_sans: domain `{domain}` is not in the role's allowed_email_domains"
-        )))
+        Err(RvError::ErrString(format!("email_sans: domain `{domain}` is not in the role's allowed_email_domains")))
     }
 }
 
@@ -154,17 +149,15 @@ pub fn validate_email_list(role: &RoleEntry, addrs: &[String]) -> Result<Vec<Str
 /// The `rfc822Name` `GeneralName` for the hand-rolled DER paths (ML-DSA /
 /// composite).
 pub fn rfc822_general_name(addr: &str) -> Result<GeneralName, RvError> {
-    let ia5 = Ia5String::new(addr).map_err(|e| {
-        RvError::ErrString(format!("email_sans: cannot encode `{addr}` as an IA5String ({e})"))
-    })?;
+    let ia5 = Ia5String::new(addr)
+        .map_err(|e| RvError::ErrString(format!("email_sans: cannot encode `{addr}` as an IA5String ({e})")))?;
     Ok(GeneralName::Rfc822Name(ia5))
 }
 
 /// The `rfc822Name` SAN entry for the classical (rcgen) path.
 pub fn rcgen_rfc822_san(addr: &str) -> Result<rcgen::SanType, RvError> {
-    let ia5 = rcgen::string::Ia5String::try_from(addr).map_err(|e| {
-        RvError::ErrString(format!("email_sans: cannot encode `{addr}` as an IA5String ({e})"))
-    })?;
+    let ia5 = rcgen::string::Ia5String::try_from(addr)
+        .map_err(|e| RvError::ErrString(format!("email_sans: cannot encode `{addr}` as an IA5String ({e})")))?;
     Ok(rcgen::SanType::Rfc822Name(ia5))
 }
 
@@ -262,9 +255,7 @@ mod tests {
     #[test]
     fn validate_list_matches_resolve_semantics() {
         let r = role(true);
-        let out =
-            validate_email_list(&r, &["a@x.com".into(), " b@x.com ".into(), "a@x.com".into()])
-                .unwrap();
+        let out = validate_email_list(&r, &["a@x.com".into(), " b@x.com ".into(), "a@x.com".into()]).unwrap();
         assert_eq!(out, vec!["a@x.com".to_string(), "b@x.com".to_string()]);
         assert!(validate_email_list(&role(false), &["a@x.com".into()]).is_err());
     }

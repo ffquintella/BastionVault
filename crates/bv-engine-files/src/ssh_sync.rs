@@ -117,23 +117,12 @@ impl Transport {
     }
 }
 
-fn push_ssh(
-    transport: Transport,
-    target: &FileSyncTarget,
-    bytes: &[u8],
-) -> Result<(), RvError> {
-    if target.ssh_username.trim().is_empty() && parse_ssh_url(&target.target_path, transport.scheme())?
-        .user
-        .is_none()
-    {
-        return Err(RvError::ErrString(
-            "ssh: ssh_username (or user@ in URL) is required".into(),
-        ));
+fn push_ssh(transport: Transport, target: &FileSyncTarget, bytes: &[u8]) -> Result<(), RvError> {
+    if target.ssh_username.trim().is_empty() && parse_ssh_url(&target.target_path, transport.scheme())?.user.is_none() {
+        return Err(RvError::ErrString("ssh: ssh_username (or user@ in URL) is required".into()));
     }
     if target.ssh_password.is_empty() && target.ssh_private_key.is_empty() {
-        return Err(RvError::ErrString(
-            "ssh: at least one of ssh_password / ssh_private_key is required".into(),
-        ));
+        return Err(RvError::ErrString("ssh: at least one of ssh_password / ssh_private_key is required".into()));
     }
     let parsed = parse_ssh_url(&target.target_path, transport.scheme())?;
 
@@ -144,11 +133,7 @@ fn push_ssh(
     };
     let password = target.ssh_password.clone();
     let private_key = target.ssh_private_key.clone();
-    let passphrase = if target.ssh_passphrase.is_empty() {
-        None
-    } else {
-        Some(target.ssh_passphrase.clone())
-    };
+    let passphrase = if target.ssh_passphrase.is_empty() { None } else { Some(target.ssh_passphrase.clone()) };
     let host_key_fp = target.ssh_host_key_fingerprint.clone();
     let bytes = bytes.to_vec();
 
@@ -166,10 +151,7 @@ fn push_ssh(
             rt.block_on(async move {
                 tokio::time::timeout(
                     Duration::from_secs(PUSH_TIMEOUT_SECS),
-                    push_ssh_inner(
-                        transport, parsed, username, password, private_key, passphrase,
-                        host_key_fp, bytes,
-                    ),
+                    push_ssh_inner(transport, parsed, username, password, private_key, passphrase, host_key_fp, bytes),
                 )
                 .await
                 .map_err(|_| format!("ssh: push timed out after {PUSH_TIMEOUT_SECS}s"))
@@ -178,10 +160,7 @@ fn push_ssh(
         })
         .map_err(|e| RvError::ErrString(format!("ssh: spawn worker thread: {e}")))?;
 
-    handle
-        .join()
-        .map_err(|_| RvError::ErrString("ssh: worker thread panicked".into()))?
-        .map_err(RvError::ErrString)
+    handle.join().map_err(|_| RvError::ErrString("ssh: worker thread panicked".into()))?.map_err(RvError::ErrString)
 }
 
 async fn push_ssh_inner(
@@ -200,10 +179,7 @@ async fn push_ssh_inner(
     // post-connect is through a shared cell the handler also writes
     // through.
     let observed = Arc::new(Mutex::new(String::new()));
-    let handler = HostKeyHandler {
-        expected_fp: expected_host_key_fp.clone(),
-        observed: observed.clone(),
-    };
+    let handler = HostKeyHandler { expected_fp: expected_host_key_fp.clone(), observed: observed.clone() };
     let mut session = client::connect(cfg, (target.host.as_str(), target.port), handler)
         .await
         .map_err(|e| format!("ssh: connect {}:{}: {e}", target.host, target.port))?;
@@ -240,19 +216,15 @@ async fn push_ssh_inner(
     // auth so the operator gets a useful WARN-log fingerprint even
     // for the very first connect (when expected_fp is empty and we
     // accepted any key).
-    let observed_fp = observed
-        .lock()
-        .map(|g| g.clone())
-        .unwrap_or_default();
+    let observed_fp = observed.lock().map(|g| g.clone()).unwrap_or_default();
     if !expected_host_key_fp.is_empty() && observed_fp != expected_host_key_fp {
-        return Err(format!(
-            "ssh: host key fingerprint mismatch (expected {expected_host_key_fp}, got {observed_fp})"
-        ));
+        return Err(format!("ssh: host key fingerprint mismatch (expected {expected_host_key_fp}, got {observed_fp})"));
     }
     if expected_host_key_fp.is_empty() && !observed_fp.is_empty() {
         log::warn!(
             "ssh-sync: accepted unpinned host key for {}:{} — pin {observed_fp} in ssh_host_key_fingerprint to lock",
-            target.host, target.port
+            target.host,
+            target.port
         );
     }
 
@@ -272,21 +244,11 @@ async fn sftp_push(
     final_path: &str,
     bytes: &[u8],
 ) -> Result<(), String> {
-    let channel = session
-        .channel_open_session()
-        .await
-        .map_err(|e| format!("sftp: channel_open_session: {e}"))?;
-    channel
-        .request_subsystem(true, "sftp")
-        .await
-        .map_err(|e| format!("sftp: request_subsystem: {e}"))?;
-    let sftp = SftpSession::new(channel.into_stream())
-        .await
-        .map_err(|e| format!("sftp: handshake: {e}"))?;
+    let channel = session.channel_open_session().await.map_err(|e| format!("sftp: channel_open_session: {e}"))?;
+    channel.request_subsystem(true, "sftp").await.map_err(|e| format!("sftp: request_subsystem: {e}"))?;
+    let sftp = SftpSession::new(channel.into_stream()).await.map_err(|e| format!("sftp: handshake: {e}"))?;
 
-    sftp.write(tmp_path, bytes)
-        .await
-        .map_err(|e| format!("sftp: write `{tmp_path}`: {e}"))?;
+    sftp.write(tmp_path, bytes).await.map_err(|e| format!("sftp: write `{tmp_path}`: {e}"))?;
 
     // Best-effort drop of any pre-existing destination so rename
     // succeeds on servers whose SFTP rename refuses to overwrite.
@@ -315,25 +277,13 @@ async fn scp_push(
     push_one_scp(session, tmp_path, bytes).await?;
 
     // Step 2: rename via a separate exec channel.
-    let mv_channel = session
-        .channel_open_session()
-        .await
-        .map_err(|e| format!("scp: open mv channel: {e}"))?;
+    let mv_channel = session.channel_open_session().await.map_err(|e| format!("scp: open mv channel: {e}"))?;
     // Single-quote both paths after escaping any embedded single-
     // quotes — operator-controlled paths only, but worth being
     // careful since this becomes shell input on the far side.
-    let cmd = format!(
-        "mv -- {} {}",
-        shell_single_quote(tmp_path),
-        shell_single_quote(final_path)
-    );
-    mv_channel
-        .exec(true, cmd.as_bytes())
-        .await
-        .map_err(|e| format!("scp: exec mv: {e}"))?;
-    wait_exit_status(mv_channel)
-        .await
-        .map_err(|e| format!("scp: mv `{tmp_path}` -> `{final_path}`: {e}"))?;
+    let cmd = format!("mv -- {} {}", shell_single_quote(tmp_path), shell_single_quote(final_path));
+    mv_channel.exec(true, cmd.as_bytes()).await.map_err(|e| format!("scp: exec mv: {e}"))?;
+    wait_exit_status(mv_channel).await.map_err(|e| format!("scp: mv `{tmp_path}` -> `{final_path}`: {e}"))?;
     Ok(())
 }
 
@@ -342,15 +292,9 @@ async fn push_one_scp(
     remote_path: &str,
     bytes: &[u8],
 ) -> Result<(), String> {
-    let mut channel = session
-        .channel_open_session()
-        .await
-        .map_err(|e| format!("scp: channel_open_session: {e}"))?;
+    let mut channel = session.channel_open_session().await.map_err(|e| format!("scp: channel_open_session: {e}"))?;
     let cmd = format!("scp -t -- {}", shell_single_quote(remote_path));
-    channel
-        .exec(true, cmd.as_bytes())
-        .await
-        .map_err(|e| format!("scp: exec: {e}"))?;
+    channel.exec(true, cmd.as_bytes()).await.map_err(|e| format!("scp: exec: {e}"))?;
 
     // Pull the streams. We read acks via a separate reader so we
     // can interleave write + read in the protocol's request-ack
@@ -361,36 +305,21 @@ async fn push_one_scp(
     expect_zero_ack(&mut reader).await?;
     let basename = remote_path.rsplit('/').next().unwrap_or(remote_path);
     let header = format!("C0644 {} {}\n", bytes.len(), basename);
-    writer
-        .write_all(header.as_bytes())
-        .await
-        .map_err(|e| format!("scp: write header: {e}"))?;
+    writer.write_all(header.as_bytes()).await.map_err(|e| format!("scp: write header: {e}"))?;
     expect_zero_ack(&mut reader).await?;
-    writer
-        .write_all(bytes)
-        .await
-        .map_err(|e| format!("scp: write body: {e}"))?;
-    writer
-        .write_all(&[0u8])
-        .await
-        .map_err(|e| format!("scp: write trailing zero: {e}"))?;
+    writer.write_all(bytes).await.map_err(|e| format!("scp: write body: {e}"))?;
+    writer.write_all(&[0u8]).await.map_err(|e| format!("scp: write trailing zero: {e}"))?;
     expect_zero_ack(&mut reader).await?;
     drop(writer);
     drop(reader);
-    channel
-        .eof()
-        .await
-        .map_err(|e| format!("scp: eof: {e}"))?;
+    channel.eof().await.map_err(|e| format!("scp: eof: {e}"))?;
     wait_exit_status(channel).await
 }
 
 async fn expect_zero_ack<R: tokio::io::AsyncRead + Unpin>(r: &mut R) -> Result<(), String> {
     use tokio::io::AsyncReadExt;
     let mut buf = [0u8; 1];
-    let n = r
-        .read(&mut buf)
-        .await
-        .map_err(|e| format!("scp: read ack: {e}"))?;
+    let n = r.read(&mut buf).await.map_err(|e| format!("scp: read ack: {e}"))?;
     if n == 0 {
         return Err("scp: server closed channel before ack".into());
     }
@@ -444,10 +373,7 @@ struct HostKeyHandler {
 // objects so the dynamic-dispatch friendly attribute isn't needed.
 impl Handler for HostKeyHandler {
     type Error = russh::Error;
-    async fn check_server_key(
-        &mut self,
-        server_public_key: &PublicKey,
-    ) -> Result<bool, Self::Error> {
+    async fn check_server_key(&mut self, server_public_key: &PublicKey) -> Result<bool, Self::Error> {
         let fp = openssh_sha256_fingerprint(server_public_key);
         if let Ok(mut g) = self.observed.lock() {
             *g = fp.clone();
@@ -493,50 +419,36 @@ fn parse_ssh_url(input: &str, expected_scheme: &str) -> Result<SshTarget, RvErro
     }
     let scheme_prefix = format!("{expected_scheme}://");
     let after_scheme = raw.strip_prefix(scheme_prefix.as_str()).ok_or_else(|| {
-        RvError::ErrString(format!(
-            "ssh: target_path `{raw}` must start with `{expected_scheme}://`"
-        ))
+        RvError::ErrString(format!("ssh: target_path `{raw}` must start with `{expected_scheme}://`"))
     })?;
 
     // Optional user@ before host.
     let (user, host_rest) = if let Some((u, h)) = after_scheme.split_once('@') {
         if u.is_empty() {
-            return Err(RvError::ErrString(format!(
-                "ssh: target_path `{raw}` has empty user before `@`"
-            )));
+            return Err(RvError::ErrString(format!("ssh: target_path `{raw}` has empty user before `@`")));
         }
         (Some(u.to_string()), h)
     } else {
         (None, after_scheme)
     };
 
-    let (host_port, path) = host_rest.split_once('/').ok_or_else(|| {
-        RvError::ErrString(format!(
-            "ssh: target_path `{raw}` is missing the remote path"
-        ))
-    })?;
+    let (host_port, path) = host_rest
+        .split_once('/')
+        .ok_or_else(|| RvError::ErrString(format!("ssh: target_path `{raw}` is missing the remote path")))?;
     if host_port.is_empty() {
-        return Err(RvError::ErrString(format!(
-            "ssh: target_path `{raw}` has empty host"
-        )));
+        return Err(RvError::ErrString(format!("ssh: target_path `{raw}` has empty host")));
     }
     let (host, port) = if let Some((h, p)) = host_port.rsplit_once(':') {
         if h.is_empty() {
-            return Err(RvError::ErrString(format!(
-                "ssh: target_path `{raw}` has empty host"
-            )));
+            return Err(RvError::ErrString(format!("ssh: target_path `{raw}` has empty host")));
         }
-        let parsed_port = p
-            .parse::<u16>()
-            .map_err(|_| RvError::ErrString(format!("ssh: invalid port `{p}`")))?;
+        let parsed_port = p.parse::<u16>().map_err(|_| RvError::ErrString(format!("ssh: invalid port `{p}`")))?;
         (h.to_string(), parsed_port)
     } else {
         (host_port.to_string(), 22u16)
     };
     if path.is_empty() {
-        return Err(RvError::ErrString(format!(
-            "ssh: target_path `{raw}` is missing the remote path"
-        )));
+        return Err(RvError::ErrString(format!("ssh: target_path `{raw}` is missing the remote path")));
     }
     if path.ends_with('/') {
         return Err(RvError::ErrString(format!(
@@ -544,12 +456,7 @@ fn parse_ssh_url(input: &str, expected_scheme: &str) -> Result<SshTarget, RvErro
         )));
     }
     // Re-introduce the leading slash that split_once stripped.
-    Ok(SshTarget {
-        host,
-        port,
-        user,
-        path: format!("/{path}"),
-    })
+    Ok(SshTarget { host, port, user, path: format!("/{path}") })
 }
 
 fn tmp_path_for(path: &str) -> String {
@@ -638,9 +545,7 @@ mod tests {
     #[test]
     fn tmp_path_lives_in_same_directory() {
         let pid = std::process::id();
-        assert_eq!(tmp_path_for("/srv/app/config.yaml"),
-                   format!("/srv/app/config.yaml.bvsync.{pid}.tmp"));
-        assert_eq!(tmp_path_for("file.txt"),
-                   format!("file.txt.bvsync.{pid}.tmp"));
+        assert_eq!(tmp_path_for("/srv/app/config.yaml"), format!("/srv/app/config.yaml.bvsync.{pid}.tmp"));
+        assert_eq!(tmp_path_for("file.txt"), format!("file.txt.bvsync.{pid}.tmp"));
     }
 }

@@ -220,29 +220,23 @@ impl fmt::Display for ManifestError {
                 "file {entry:?}: path {path:?} is not a safe root-relative path \
                  (no leading `/`, no `..`, no backslashes)"
             ),
-            Self::BadDigest { name, sha256 } => write!(
-                f,
-                "file {name:?}: sha256 {sha256:?} is not 64 lowercase hex characters"
-            ),
-            Self::Missing { name, path } => write!(
-                f,
-                "file {name:?} is listed in the manifest but missing from disk at {}",
-                path.display()
-            ),
+            Self::BadDigest { name, sha256 } => {
+                write!(f, "file {name:?}: sha256 {sha256:?} is not 64 lowercase hex characters")
+            }
+            Self::Missing { name, path } => {
+                write!(f, "file {name:?} is listed in the manifest but missing from disk at {}", path.display())
+            }
             Self::NotAFile { name, path } => write!(
                 f,
                 "file {name:?} at {} is not a regular file (directories and symlinks are refused)",
                 path.display()
             ),
-            Self::Escapes { name, path } => write!(
-                f,
-                "file {name:?} at {} resolves outside the served root",
-                path.display()
-            ),
-            Self::DigestMismatch { name, expected, actual } => write!(
-                f,
-                "file {name:?}: manifest sha256 {expected} does not match the bytes on disk ({actual})"
-            ),
+            Self::Escapes { name, path } => {
+                write!(f, "file {name:?} at {} resolves outside the served root", path.display())
+            }
+            Self::DigestMismatch { name, expected, actual } => {
+                write!(f, "file {name:?}: manifest sha256 {expected} does not match the bytes on disk ({actual})")
+            }
             Self::DuplicateUrl { url } => {
                 write!(f, "two manifest entries resolve to the same URL {url:?}")
             }
@@ -283,14 +277,9 @@ impl Manifest {
     /// Parse `<root>/manifest.json`.
     pub fn load(root: &Path) -> Result<(Manifest, Vec<u8>), ManifestError> {
         let path = root.join("manifest.json");
-        let raw = std::fs::read(&path).map_err(|source| ManifestError::Read {
-            path: path.clone(),
-            source,
-        })?;
-        let manifest = serde_json::from_slice(&raw).map_err(|source| ManifestError::Parse {
-            path: path.clone(),
-            source,
-        })?;
+        let raw = std::fs::read(&path).map_err(|source| ManifestError::Read { path: path.clone(), source })?;
+        let manifest =
+            serde_json::from_slice(&raw).map_err(|source| ManifestError::Parse { path: path.clone(), source })?;
         Ok((manifest, raw))
     }
 
@@ -304,10 +293,7 @@ impl Manifest {
 /// compares its SHA-256 against the manifest; it is off by default because a
 /// full release directory is gigabytes and most operators would rather the
 /// container start in a second.
-pub fn load_and_validate(
-    root: &Path,
-    verify_hashes: bool,
-) -> Result<ValidatedManifest, ManifestError> {
+pub fn load_and_validate(root: &Path, verify_hashes: bool) -> Result<ValidatedManifest, ManifestError> {
     let (manifest, raw) = Manifest::load(root)?;
     validate(manifest, raw, root, verify_hashes)
 }
@@ -322,19 +308,14 @@ fn validate(
         return Err(ManifestError::EmptyVersion);
     }
     if !is_safe_component(&manifest.version) {
-        return Err(ManifestError::BadVersion {
-            version: manifest.version.clone(),
-        });
+        return Err(ManifestError::BadVersion { version: manifest.version.clone() });
     }
 
     // Canonicalising the root once is what makes the escape check below
     // meaningful: every artefact path is canonicalised too, so a symlink
     // pointing anywhere outside this prefix is caught here rather than at
     // request time.
-    let root = root.canonicalize().map_err(|source| ManifestError::Read {
-        path: root.to_path_buf(),
-        source,
-    })?;
+    let root = root.canonicalize().map_err(|source| ManifestError::Read { path: root.to_path_buf(), source })?;
 
     let mut assets: Vec<Asset> = Vec::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
@@ -343,15 +324,10 @@ fn validate(
 
     for entry in &manifest.files {
         if !is_safe_component(&entry.name) {
-            return Err(ManifestError::BadName {
-                name: entry.name.clone(),
-            });
+            return Err(ManifestError::BadName { name: entry.name.clone() });
         }
         if !is_hex64(&entry.sha256) {
-            return Err(ManifestError::BadDigest {
-                name: entry.name.clone(),
-                sha256: entry.sha256.clone(),
-            });
+            return Err(ManifestError::BadDigest { name: entry.name.clone(), sha256: entry.sha256.clone() });
         }
 
         let url = format!("{version_dir}/{}", entry.name);
@@ -387,20 +363,10 @@ fn validate(
 
     warnings.extend(unlisted_files(&root, &version_dir, &seen));
 
-    Ok(ValidatedManifest {
-        manifest,
-        raw,
-        assets,
-        warnings,
-        root,
-    })
+    Ok(ValidatedManifest { manifest, raw, assets, warnings, root })
 }
 
-fn push_unique(
-    assets: &mut Vec<Asset>,
-    seen: &mut BTreeSet<String>,
-    asset: Asset,
-) -> Result<(), ManifestError> {
+fn push_unique(assets: &mut Vec<Asset>, seen: &mut BTreeSet<String>, asset: Asset) -> Result<(), ManifestError> {
     if !seen.insert(asset.url.clone()) {
         return Err(ManifestError::DuplicateUrl { url: asset.url });
     }
@@ -427,34 +393,22 @@ fn resolve(
     // `symlink_metadata` does not follow the final component, so a symlinked
     // artefact is refused outright rather than silently followed. Intermediate
     // components are covered by the canonical-prefix check below.
-    let meta = std::fs::symlink_metadata(&joined).map_err(|_| ManifestError::Missing {
-        name: name.to_string(),
-        path: joined.clone(),
-    })?;
+    let meta = std::fs::symlink_metadata(&joined)
+        .map_err(|_| ManifestError::Missing { name: name.to_string(), path: joined.clone() })?;
     if !meta.is_file() {
-        return Err(ManifestError::NotAFile {
-            name: name.to_string(),
-            path: joined,
-        });
+        return Err(ManifestError::NotAFile { name: name.to_string(), path: joined });
     }
 
-    let canonical = joined.canonicalize().map_err(|_| ManifestError::Missing {
-        name: name.to_string(),
-        path: joined.clone(),
-    })?;
+    let canonical =
+        joined.canonicalize().map_err(|_| ManifestError::Missing { name: name.to_string(), path: joined.clone() })?;
     if !canonical.starts_with(root) {
-        return Err(ManifestError::Escapes {
-            name: name.to_string(),
-            path: canonical,
-        });
+        return Err(ManifestError::Escapes { name: name.to_string(), path: canonical });
     }
 
     if verify_hash {
         if let Some(expected) = expected_sha256 {
-            let actual = sha256_file(&canonical).map_err(|source| ManifestError::Read {
-                path: canonical.clone(),
-                source,
-            })?;
+            let actual =
+                sha256_file(&canonical).map_err(|source| ManifestError::Read { path: canonical.clone(), source })?;
             if actual != expected {
                 return Err(ManifestError::DigestMismatch {
                     name: name.to_string(),
@@ -465,12 +419,7 @@ fn resolve(
         }
     }
 
-    Ok(Asset {
-        url: url.to_string(),
-        path: canonical,
-        mime,
-        len: meta.len(),
-    })
+    Ok(Asset { url: url.to_string(), path: canonical, mime, len: meta.len() })
 }
 
 /// Streaming SHA-256 so `--verify-hashes` does not pull a 400 MB installer
@@ -516,9 +465,7 @@ fn unlisted_files(root: &Path, version_dir: &str, listed: &BTreeSet<String>) -> 
         };
         let url = format!("{version_dir}/{name}");
         if !listed.contains(&url) {
-            out.push(format!(
-                "{url} is present on disk but not in the manifest; it will not be served"
-            ));
+            out.push(format!("{url} is present on disk but not in the manifest; it will not be served"));
         }
     }
     out.sort();
@@ -543,9 +490,7 @@ fn is_safe_component(s: &str) -> bool {
     !s.is_empty()
         && s != "."
         && s != ".."
-        && s
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'+' | b'-'))
+        && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'+' | b'-'))
 }
 
 /// A root-relative path: one or more safe components joined by `/`.
@@ -553,9 +498,7 @@ fn is_safe_relative(s: &str) -> bool {
     !s.is_empty()
         && !s.starts_with('/')
         && !s.contains('\\')
-        && Path::new(s)
-            .components()
-            .all(|c| matches!(c, Component::Normal(_)))
+        && Path::new(s).components().all(|c| matches!(c, Component::Normal(_)))
         && s.split('/').all(is_safe_component)
 }
 
@@ -608,23 +551,14 @@ mod tests {
 
     #[test]
     fn accepts_a_well_formed_manifest() {
-        let dir = fixture(&[
-            "v0.4.0/bvault_0.4.0_amd64.deb",
-            "v0.4.0/bvault_0.4.0_amd64.deb.sig",
-        ]);
+        let dir = fixture(&["v0.4.0/bvault_0.4.0_amd64.deb", "v0.4.0/bvault_0.4.0_amd64.deb.sig"]);
         write_manifest(dir.path(), &good_manifest());
 
         let v = load_and_validate(dir.path(), true).expect("valid manifest");
         assert_eq!(v.manifest.version, "0.4.0");
         assert_eq!(v.manifest.files.len(), 1);
         let urls: Vec<_> = v.assets.iter().map(|a| a.url.as_str()).collect();
-        assert_eq!(
-            urls,
-            vec![
-                "v0.4.0/bvault_0.4.0_amd64.deb",
-                "v0.4.0/bvault_0.4.0_amd64.deb.sig",
-            ]
-        );
+        assert_eq!(urls, vec!["v0.4.0/bvault_0.4.0_amd64.deb", "v0.4.0/bvault_0.4.0_amd64.deb.sig",]);
         assert_eq!(v.assets[0].mime, mime::DEB);
         assert_eq!(v.assets[1].mime, mime::SIG);
         assert!(v.warnings.is_empty(), "unexpected warnings: {:?}", v.warnings);
@@ -633,15 +567,9 @@ mod tests {
     #[test]
     fn rejects_a_manifest_without_a_version() {
         let dir = fixture(&[]);
-        write_manifest(
-            dir.path(),
-            r#"{"released": "2026-06-01", "files": []}"#,
-        );
+        write_manifest(dir.path(), r#"{"released": "2026-06-01", "files": []}"#);
         let err = load_and_validate(dir.path(), false).expect_err("missing version");
-        assert!(
-            matches!(err, ManifestError::Parse { .. }),
-            "expected a parse error, got {err}"
-        );
+        assert!(matches!(err, ManifestError::Parse { .. }), "expected a parse error, got {err}");
         assert!(err.to_string().contains("version"), "{err}");
     }
 
@@ -682,12 +610,9 @@ mod tests {
 
     #[test]
     fn accepts_both_spellings_of_each_arch() {
-        for (spelling, expected) in [
-            ("amd64", "x86-64"),
-            ("x86_64", "x86-64"),
-            ("arm64", "arm64"),
-            ("aarch64", "arm64"),
-        ] {
+        for (spelling, expected) in
+            [("amd64", "x86-64"), ("x86_64", "x86-64"), ("arm64", "arm64"), ("aarch64", "arm64")]
+        {
             let dir = fixture(&["v0.4.0/x.deb"]);
             write_manifest(
                 dir.path(),
@@ -698,8 +623,7 @@ mod tests {
                     digest_of("v0.4.0/x.deb")
                 ),
             );
-            let v = load_and_validate(dir.path(), false)
-                .unwrap_or_else(|e| panic!("arch {spelling}: {e}"));
+            let v = load_and_validate(dir.path(), false).unwrap_or_else(|e| panic!("arch {spelling}: {e}"));
             assert_eq!(v.manifest.files[0].arch.label(), expected);
         }
     }
@@ -770,11 +694,8 @@ mod tests {
         fs::write(outside.path().join("secret"), b"not yours").expect("write");
 
         let dir = fixture(&[]);
-        std::os::unix::fs::symlink(
-            outside.path().join("secret"),
-            dir.path().join("v0.4.0").join("x.deb"),
-        )
-        .expect("symlink");
+        std::os::unix::fs::symlink(outside.path().join("secret"), dir.path().join("v0.4.0").join("x.deb"))
+            .expect("symlink");
         write_manifest(
             dir.path(),
             &format!(
@@ -785,10 +706,7 @@ mod tests {
             ),
         );
         let err = load_and_validate(dir.path(), false).expect_err("symlink");
-        assert!(
-            matches!(err, ManifestError::NotAFile { .. }),
-            "expected a regular-file refusal, got {err}"
-        );
+        assert!(matches!(err, ManifestError::NotAFile { .. }), "expected a regular-file refusal, got {err}");
     }
 
     #[test]
@@ -825,22 +743,12 @@ mod tests {
 
     #[test]
     fn warns_about_files_on_disk_that_the_manifest_omits() {
-        let dir = fixture(&[
-            "v0.4.0/bvault_0.4.0_amd64.deb",
-            "v0.4.0/bvault_0.4.0_amd64.deb.sig",
-            "v0.4.0/forgotten.rpm",
-        ]);
+        let dir =
+            fixture(&["v0.4.0/bvault_0.4.0_amd64.deb", "v0.4.0/bvault_0.4.0_amd64.deb.sig", "v0.4.0/forgotten.rpm"]);
         write_manifest(dir.path(), &good_manifest());
         let v = load_and_validate(dir.path(), false).expect("valid");
-        assert!(
-            v.warnings.iter().any(|w| w.contains("forgotten.rpm")),
-            "{:?}",
-            v.warnings
-        );
-        assert!(
-            !v.assets.iter().any(|a| a.url.contains("forgotten")),
-            "an unlisted file must not become servable"
-        );
+        assert!(v.warnings.iter().any(|w| w.contains("forgotten.rpm")), "{:?}", v.warnings);
+        assert!(!v.assets.iter().any(|a| a.url.contains("forgotten")), "an unlisted file must not become servable");
     }
 
     #[test]
@@ -862,10 +770,7 @@ mod tests {
     #[test]
     fn rejects_unknown_manifest_fields() {
         let dir = fixture(&[]);
-        write_manifest(
-            dir.path(),
-            r#"{"version":"0.4.0","released":"d","files":[],"upload_url":"http://x/"}"#,
-        );
+        write_manifest(dir.path(), r#"{"version":"0.4.0","released":"d","files":[],"upload_url":"http://x/"}"#);
         let err = load_and_validate(dir.path(), false).expect_err("unknown field");
         assert!(err.to_string().contains("upload_url"), "{err}");
     }

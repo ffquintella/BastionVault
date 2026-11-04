@@ -50,7 +50,12 @@ struct FakeSource {
 
 impl FakeSource {
     fn bound() -> Self {
-        Self { protocol: "sql", transport: "direct", sql_endpoint: Some(json!("db1.example.net:5432")), require_mfa: false }
+        Self {
+            protocol: "sql",
+            transport: "direct",
+            sql_endpoint: Some(json!("db1.example.net:5432")),
+            require_mfa: false,
+        }
     }
 }
 
@@ -65,17 +70,19 @@ impl SqlResourceSource for FakeSource {
         _: &'a str,
         _: &'a str,
     ) -> SqlFuture<'a, SqlReleaseMaterial> {
-        Box::pin(async move { Ok(SqlReleaseMaterial {
-            protocol: self.protocol.into(),
-            endpoint: SqlEndpoint::parse("DB1.example.net:5432").unwrap(),
-            transport: self.transport.into(),
-            transport_source: "resource tier".into(),
-            secret_id: "svc_netrisk_ro".into(),
-            sql_endpoint: self.sql_endpoint.clone(),
-            username: "svc_netrisk_ro".into(),
-            password: Zeroizing::new(PASSWORD.to_string()),
-            require_mfa: self.require_mfa,
-        }) })
+        Box::pin(async move {
+            Ok(SqlReleaseMaterial {
+                protocol: self.protocol.into(),
+                endpoint: SqlEndpoint::parse("DB1.example.net:5432").unwrap(),
+                transport: self.transport.into(),
+                transport_source: "resource tier".into(),
+                secret_id: "svc_netrisk_ro".into(),
+                sql_endpoint: self.sql_endpoint.clone(),
+                username: "svc_netrisk_ro".into(),
+                password: Zeroizing::new(PASSWORD.to_string()),
+                require_mfa: self.require_mfa,
+            })
+        })
     }
 }
 
@@ -400,7 +407,9 @@ async fn credential_release_refusals_and_the_release_audit() {
         .collect();
     let outcomes: Vec<(&str, &str)> = releases
         .iter()
-        .map(|e| (e["request"]["data"]["outcome"].as_str().unwrap(), e["request"]["data"]["reason"].as_str().unwrap_or("")))
+        .map(|e| {
+            (e["request"]["data"]["outcome"].as_str().unwrap(), e["request"]["data"]["reason"].as_str().unwrap_or(""))
+        })
         .collect();
     assert!(outcomes.contains(&("released", "")), "{outcomes:?}");
     for reason in ["endpoint_unbound", "endpoint_mismatch", "profile_not_sql", "rustion_required", "no_sql_privilege"] {
@@ -443,7 +452,8 @@ async fn ticket_redeem_parses_the_action_strictly() {
     let m = sql_manifest();
     grant_all(&vault, &m).await;
     let c = caller(&["sql-reader"]);
-    for bad in [json!(""), json!("drop"), json!("sql_drop,sql_drop"), json!("sql_drop, sql_script"), json!(["sql_drop"])]
+    for bad in
+        [json!(""), json!("drop"), json!("sql_drop,sql_drop"), json!("sql_drop, sql_script"), json!(["sql_drop"])]
     {
         let p = json!({"resource": "netrisk-db", "profile": "ro", "ticket": "t-1", "action": bad});
         let e = handle(&m, Some(&vault), "connect_ticket_redeem", &p, Some(&c)).await.unwrap_err();

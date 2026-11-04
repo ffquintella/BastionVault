@@ -61,11 +61,7 @@ pub trait CertDeliveryPlugin: Send + Sync {
     /// string.
     fn name(&self) -> &'static str;
 
-    fn deliver(
-        &self,
-        target: &Target,
-        bundle: &CertBundle,
-    ) -> Result<DeliveryReceipt, String>;
+    fn deliver(&self, target: &Target, bundle: &CertBundle) -> Result<DeliveryReceipt, String>;
 }
 
 /// Plugin lookup table held by [`CertLifecycleBackendInner`](crate::CertLifecycleBackendInner). Built
@@ -115,33 +111,19 @@ impl CertDeliveryPlugin for FileDeliverer {
         "file"
     }
 
-    fn deliver(
-        &self,
-        target: &Target,
-        bundle: &CertBundle,
-    ) -> Result<DeliveryReceipt, String> {
+    fn deliver(&self, target: &Target, bundle: &CertBundle) -> Result<DeliveryReceipt, String> {
         let dir = std::path::Path::new(&target.address);
         if !dir.is_dir() {
-            return Err(format!(
-                "address `{}` is not an existing directory",
-                target.address
-            ));
+            return Err(format!("address `{}` is not an existing directory", target.address));
         }
         atomic_write(dir.join("cert.pem"), bundle.certificate_pem.as_bytes())
             .map_err(|e| format!("write cert.pem: {e}"))?;
         atomic_write(dir.join("key.pem"), bundle.private_key_pem.as_bytes())
             .map_err(|e| format!("write key.pem: {e}"))?;
-        let chain_pem = if bundle.chain_pems.is_empty() {
-            bundle.certificate_pem.clone()
-        } else {
-            bundle.chain_pems.join("")
-        };
-        atomic_write(dir.join("chain.pem"), chain_pem.as_bytes())
-            .map_err(|e| format!("write chain.pem: {e}"))?;
-        Ok(DeliveryReceipt {
-            destination: target.address.clone(),
-            note: "wrote cert.pem / key.pem / chain.pem".into(),
-        })
+        let chain_pem =
+            if bundle.chain_pems.is_empty() { bundle.certificate_pem.clone() } else { bundle.chain_pems.join("") };
+        atomic_write(dir.join("chain.pem"), chain_pem.as_bytes()).map_err(|e| format!("write chain.pem: {e}"))?;
+        Ok(DeliveryReceipt { destination: target.address.clone(), note: "wrote cert.pem / key.pem / chain.pem".into() })
     }
 }
 
@@ -170,16 +152,10 @@ impl CertDeliveryPlugin for HttpPushDeliverer {
         "http-push"
     }
 
-    fn deliver(
-        &self,
-        target: &Target,
-        bundle: &CertBundle,
-    ) -> Result<DeliveryReceipt, String> {
+    fn deliver(&self, target: &Target, bundle: &CertBundle) -> Result<DeliveryReceipt, String> {
         let url = target.address.trim();
         if !(url.starts_with("http://") || url.starts_with("https://")) {
-            return Err(format!(
-                "http-push: address must be an http(s) URL, got `{url}`"
-            ));
+            return Err(format!("http-push: address must be an http(s) URL, got `{url}`"));
         }
         let body = serde_json::json!({
             "target":      target.name,
@@ -194,15 +170,9 @@ impl CertDeliveryPlugin for HttpPushDeliverer {
             .map_err(|e| format!("http-push: POST {url} failed: {e}"))?;
         let status = resp.status();
         if !status.is_success() {
-            return Err(format!(
-                "http-push: POST {url} returned status {}",
-                status.as_u16()
-            ));
+            return Err(format!("http-push: POST {url} returned status {}", status.as_u16()));
         }
-        Ok(DeliveryReceipt {
-            destination: url.to_string(),
-            note: format!("HTTP {}", status.as_u16()),
-        })
+        Ok(DeliveryReceipt { destination: url.to_string(), note: format!("HTTP {}", status.as_u16()) })
     }
 }
 

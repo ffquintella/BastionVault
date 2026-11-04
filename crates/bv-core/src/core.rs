@@ -203,10 +203,7 @@ pub struct Core {
 fn change_topic_mount(namespace: &str, path: &str) -> Option<String> {
     let rel = match namespace.is_empty() {
         true => path,
-        false => path
-            .strip_prefix(namespace.trim_end_matches('/'))
-            .map(|r| r.trim_start_matches('/'))
-            .unwrap_or(path),
+        false => path.strip_prefix(namespace.trim_end_matches('/')).map(|r| r.trim_start_matches('/')).unwrap_or(path),
     };
     let rel = rel.trim_start_matches('/');
     let mut segments = rel.split('/');
@@ -347,8 +344,7 @@ impl Core {
         self.root_storage_prefix.store(Arc::new(format!("namespaces/{root_uuid}/")));
 
         let mut state = (*self.state.load_full()).clone();
-        state.system_view =
-            Some(Arc::new(BarrierView::new(self.barrier.clone(), &self.root_system_prefix())));
+        state.system_view = Some(Arc::new(BarrierView::new(self.barrier.clone(), &self.root_system_prefix())));
         self.state.store(Arc::new(state));
 
         let new_router = MountsRouter::new(
@@ -510,10 +506,7 @@ impl Core {
     /// request after unseal sees the correct, restart-durable value.
     pub async fn load_require_machine_identity(&self) -> Result<(), RvError> {
         let required = match self.get_system_view() {
-            Some(view) => view
-                .get(FERROGATE_REQUIRE_MI_PATH)
-                .await?
-                .is_some_and(|e| e.value == b"true"),
+            Some(view) => view.get(FERROGATE_REQUIRE_MI_PATH).await?.is_some_and(|e| e.value == b"true"),
             None => false,
         };
         self.require_machine_identity.store(required, Ordering::Relaxed);
@@ -539,11 +532,7 @@ impl Core {
     /// default). Called once at `post_unseal`.
     pub async fn load_approle_require_machine(&self) -> Result<(), RvError> {
         let required = match self.get_system_view() {
-            Some(view) => view
-                .get(APPROLE_REQUIRE_MACHINE_PATH)
-                .await?
-                .map(|e| e.value != b"false")
-                .unwrap_or(true),
+            Some(view) => view.get(APPROLE_REQUIRE_MACHINE_PATH).await?.map(|e| e.value != b"false").unwrap_or(true),
             None => true,
         };
         self.approle_require_machine.store(required, Ordering::Relaxed);
@@ -594,17 +583,10 @@ impl Core {
     }
 
     /// Apply a manual ban: persist it, then enforce it in the local guard.
-    pub async fn dos_manual_ban(
-        &self,
-        ip: std::net::IpAddr,
-        ttl_secs: u64,
-        reason: &str,
-    ) -> Result<(), RvError> {
+    pub async fn dos_manual_ban(&self, ip: std::net::IpAddr, ttl_secs: u64, reason: &str) -> Result<(), RvError> {
         let until_unix = self.dos_guard.manual_ban(ip, ttl_secs, reason);
         let store = crate::dos::DosStore::new(self)?;
-        store
-            .add_manual_ban(crate::dos::ManualBan { ip, until_unix, reason: reason.to_string() })
-            .await
+        store.add_manual_ban(crate::dos::ManualBan { ip, until_unix, reason: reason.to_string() }).await
     }
 
     /// Lift any ban on `ip`: remove it from the local guard and drop any
@@ -1064,19 +1046,11 @@ impl Core {
                     // `<log_dir>/audit.log` so the third structured
                     // stream lights up alongside operations + security.
                     // No-ops on re-unseal once a device exists.
-                    if let Some((path, rotate_size, rotate_keep)) =
-                        crate::logging::default_audit_options()
-                    {
+                    if let Some((path, rotate_size, rotate_keep)) = crate::logging::default_audit_options() {
                         if !broker.has_devices() {
                             let mut opts = std::collections::HashMap::new();
-                            opts.insert(
-                                "file_path".to_string(),
-                                path.to_string_lossy().into_owned(),
-                            );
-                            opts.insert(
-                                "rotate_size_bytes".to_string(),
-                                rotate_size.to_string(),
-                            );
+                            opts.insert("file_path".to_string(), path.to_string_lossy().into_owned());
+                            opts.insert("rotate_size_bytes".to_string(), rotate_size.to_string());
                             opts.insert("rotate_keep".to_string(), rotate_keep.to_string());
                             let cfg = crate::audit::AuditDeviceConfig {
                                 path: "file/".to_string(),
@@ -1091,10 +1065,7 @@ impl Core {
                                     path.display()
                                 );
                             } else {
-                                log::info!(
-                                    "audit: auto-enabled default file device at {}",
-                                    path.display()
-                                );
+                                log::info!("audit: auto-enabled default file device at {}", path.display());
                             }
                         }
                     }
@@ -1323,13 +1294,7 @@ impl Core {
     /// password (no `auth` on the response). A denial is
     /// `ErrPermissionDenied` on any route. A denied login increments
     /// both, since they answer different operator questions.
-    fn record_request_stats(
-        &self,
-        req: &Request,
-        resp: &Option<Response>,
-        err: Option<&RvError>,
-        now: i64,
-    ) {
+    fn record_request_stats(&self, req: &Request, resp: &Option<Response>, err: Option<&RvError>, now: i64) {
         self.stats.record_request(now);
 
         if req.path.contains("/login") {
@@ -1441,13 +1406,7 @@ impl Core {
         // the request fails here.
         if let Some(broker) = self.audit_broker.load().as_ref().cloned() {
             if broker.has_devices() {
-                let mut entry = crate::audit::AuditEntry::from_response(
-                    req,
-                    resp,
-                    None,
-                    broker.hmac_key(),
-                    false,
-                );
+                let mut entry = crate::audit::AuditEntry::from_response(req, resp, None, broker.hmac_key(), false);
                 broker.log(&mut entry).await?;
             }
         }
@@ -1472,10 +1431,7 @@ mod change_topic_tests {
         // Without stripping it, every namespaced write would file under a
         // mount named after the namespace.
         assert_eq!(change_topic_mount("acme", "acme/pki/issue/web"), Some("pki/".into()));
-        assert_eq!(
-            change_topic_mount("dti/esi", "dti/esi/pki/issue/web"),
-            Some("pki/".into())
-        );
+        assert_eq!(change_topic_mount("dti/esi", "dti/esi/pki/issue/web"), Some("pki/".into()));
         // A trailing slash on the namespace must not change the answer.
         assert_eq!(change_topic_mount("acme/", "acme/pki/issue/web"), Some("pki/".into()));
     }
@@ -1484,14 +1440,8 @@ mod change_topic_tests {
     fn auth_mounts_take_two_segments() {
         // `auth/` is not a mount. Filing every credential backend under one
         // topic would make a userpass write invalidate an AppRole listing.
-        assert_eq!(
-            change_topic_mount("", "auth/userpass/users/alice"),
-            Some("auth/userpass/".into())
-        );
-        assert_eq!(
-            change_topic_mount("acme", "acme/auth/approle/role/ci"),
-            Some("auth/approle/".into())
-        );
+        assert_eq!(change_topic_mount("", "auth/userpass/users/alice"), Some("auth/userpass/".into()));
+        assert_eq!(change_topic_mount("acme", "acme/auth/approle/role/ci"), Some("auth/approle/".into()));
     }
 
     #[test]
@@ -1513,9 +1463,6 @@ mod change_topic_tests {
     fn a_path_that_does_not_carry_its_namespace_prefix_is_left_alone() {
         // Header-scoped paths keep an unprefixed path while still recording
         // `namespace_path`; they must still resolve to their real mount.
-        assert_eq!(
-            change_topic_mount("acme", "identity/share/resource/db"),
-            Some("identity/".into())
-        );
+        assert_eq!(change_topic_mount("acme", "identity/share/resource/db"), Some("identity/".into()));
     }
 }

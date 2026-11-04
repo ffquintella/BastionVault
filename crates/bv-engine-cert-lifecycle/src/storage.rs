@@ -153,9 +153,7 @@ impl KeyPolicy {
             "" | "rotate" => Ok(Self::Rotate),
             "reuse" => Ok(Self::Reuse),
             "agent-generates" | "agent_generates" => Ok(Self::AgentGenerates),
-            other => Err(RvError::ErrString(format!(
-                "cert-lifecycle: unsupported key_policy `{other}`"
-            ))),
+            other => Err(RvError::ErrString(format!("cert-lifecycle: unsupported key_policy `{other}`"))),
         }
     }
 }
@@ -241,10 +239,7 @@ pub async fn put_json<T: Serialize>(req: &Request, key: &str, value: &T) -> Resu
 }
 
 #[maybe_async::maybe_async]
-pub async fn get_json<T: for<'de> Deserialize<'de>>(
-    req: &Request,
-    key: &str,
-) -> Result<Option<T>, RvError> {
+pub async fn get_json<T: for<'de> Deserialize<'de>>(req: &Request, key: &str) -> Result<Option<T>, RvError> {
     match req.storage_get(key).await? {
         Some(e) => Ok(Some(serde_json::from_slice(&e.value)?)),
         None => Ok(None),

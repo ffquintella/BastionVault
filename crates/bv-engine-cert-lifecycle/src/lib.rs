@@ -33,23 +33,23 @@ use bv_logical as logical;
 // which places them at *that* crate's root; the call sites import them as
 // `crate::new_path` and friends. The `_internal` halves are the recursive arms
 // the public macros expand into, so they must travel with them.
-pub use bv_logical::{
-    new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path,
-    new_path_internal, new_secret, new_secret_internal,
-};
 pub use bv_errors::{bv_error_response, bv_error_response_status, bv_error_string};
+pub use bv_logical::{
+    new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path, new_path_internal,
+    new_secret, new_secret_internal,
+};
 
 use std::{any::Any, collections::HashMap, sync::Arc};
 
 use derive_more::Deref;
 use serde_json::{json, Map, Value};
 
-use bv_kernel_api::{Module, VaultCtx};
 use crate::{
     context::Context,
     errors::RvError,
     logical::{Backend, LogicalBackend, Operation, Path, PathOperation, Request, Response},
 };
+use bv_kernel_api::{Module, VaultCtx};
 
 pub mod delivery;
 pub mod path_renew;
@@ -123,11 +123,7 @@ impl CertLifecycleBackend {
 
 #[maybe_async::maybe_async]
 impl CertLifecycleBackendInner {
-    pub async fn list_deliverers(
-        &self,
-        _b: &dyn Backend,
-        _req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn list_deliverers(&self, _b: &dyn Backend, _req: &mut Request) -> Result<Option<Response>, RvError> {
         let names = self.deliverers.names();
         let mut data: Map<String, Value> = Map::new();
         data.insert("deliverers".into(), json!(names));
@@ -142,10 +138,7 @@ pub struct CertLifecycleModule {
 
 impl CertLifecycleModule {
     pub fn new(core: Arc<dyn VaultCtx>) -> Self {
-        Self {
-            name: "cert-lifecycle".to_string(),
-            backend: Arc::new(CertLifecycleBackend::new(core)),
-        }
+        Self { name: "cert-lifecycle".to_string(), backend: Arc::new(CertLifecycleBackend::new(core)) }
     }
 }
 

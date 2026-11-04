@@ -22,10 +22,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
-use crate::kernel_api::VaultCtx;
-use crate::errors::RvError;
-use crate::storage::{barrier_view::BarrierView, Storage, StorageEntry};
 use crate::bv_error_string;
+use crate::errors::RvError;
+use crate::kernel_api::VaultCtx;
+use crate::storage::{barrier_view::BarrierView, Storage, StorageEntry};
 
 pub const TICK_INTERVAL: Duration = Duration::from_secs(60);
 const CURSOR_SUB_PATH: &str = "rustion/telemetry/";
@@ -123,12 +123,7 @@ impl TelemetryCache {
     }
 
     pub async fn list_snapshots(&self) -> Vec<TargetSnapshot> {
-        self.by_target
-            .read()
-            .await
-            .values()
-            .cloned()
-            .collect()
+        self.by_target.read().await.values().cloned().collect()
     }
 
     pub async fn get(&self, target_id: &str) -> Option<TargetSnapshot> {
@@ -148,44 +143,25 @@ pub struct TargetCursor {
 }
 
 #[maybe_async::maybe_async]
-pub async fn read_cursor(
-    view: &BarrierView,
-    target_id: &str,
-) -> Result<TargetCursor, RvError> {
+pub async fn read_cursor(view: &BarrierView, target_id: &str) -> Result<TargetCursor, RvError> {
     let key = format!("{target_id}/cursor");
     let Some(entry) = view.get(&key).await? else {
         return Ok(TargetCursor::default());
     };
-    serde_json::from_slice(&entry.value)
-        .map_err(|e| bv_error_string!(&format!("decode telemetry cursor: {e}")))
+    serde_json::from_slice(&entry.value).map_err(|e| bv_error_string!(&format!("decode telemetry cursor: {e}")))
 }
 
 #[maybe_async::maybe_async]
-pub async fn write_cursor(
-    view: &BarrierView,
-    target_id: &str,
-    cursor: &TargetCursor,
-) -> Result<(), RvError> {
-    let value = serde_json::to_vec(cursor)
-        .map_err(|e| bv_error_string!(&format!("encode telemetry cursor: {e}")))?;
-    view.put(&StorageEntry {
-        key: format!("{target_id}/cursor"),
-        value,
-    })
-    .await
+pub async fn write_cursor(view: &BarrierView, target_id: &str, cursor: &TargetCursor) -> Result<(), RvError> {
+    let value = serde_json::to_vec(cursor).map_err(|e| bv_error_string!(&format!("encode telemetry cursor: {e}")))?;
+    view.put(&StorageEntry { key: format!("{target_id}/cursor"), value }).await
 }
 
 /// Spawn the polling task. Mirrors `probe::start_pinger`. The cache
 /// is held inside the module's `telemetry_cache` field.
-pub fn start_poller(
-    core: Arc<dyn VaultCtx>,
-    stores: Arc<super::RustionStores>,
-) -> tokio::task::JoinHandle<()> {
+pub fn start_poller(core: Arc<dyn VaultCtx>, stores: Arc<super::RustionStores>) -> tokio::task::JoinHandle<()> {
     tokio::task::spawn(async move {
-        log::info!(
-            "rustion/telemetry: started (tick every {}s)",
-            TICK_INTERVAL.as_secs()
-        );
+        log::info!("rustion/telemetry: started (tick every {}s)", TICK_INTERVAL.as_secs());
         let mut interval = tokio::time::interval(TICK_INTERVAL);
         interval.tick().await; // skip immediate first tick
         loop {
@@ -201,10 +177,7 @@ pub fn start_poller(
 }
 
 /// Run one polling pass. Exposed for tests / admin endpoints.
-pub async fn run_pass(
-    core: &dyn VaultCtx,
-    stores: &super::RustionStores,
-) -> Result<(), RvError> {
+pub async fn run_pass(core: &dyn VaultCtx, stores: &super::RustionStores) -> Result<(), RvError> {
     tick(core, stores).await
 }
 
@@ -246,11 +219,7 @@ async fn tick(core: &dyn VaultCtx, stores: &super::RustionStores) -> Result<(), 
         let client = match super::http::build_client_for(&target, Duration::from_secs(10)) {
             Ok(c) => c,
             Err(e) => {
-                log::warn!(
-                    "rustion/telemetry: build http client for {} ({}): {e}",
-                    target.id,
-                    target.name
-                );
+                log::warn!("rustion/telemetry: build http client for {} ({}): {e}", target.id, target.name);
                 continue;
             }
         };
@@ -265,12 +234,7 @@ async fn tick(core: &dyn VaultCtx, stores: &super::RustionStores) -> Result<(), 
             ..Default::default()
         };
         // Active
-        match client
-            .get(format!("{base}/v1/sessions/active"))
-            .header("X-Rustion-Authority", auth_header)
-            .send()
-            .await
-        {
+        match client.get(format!("{base}/v1/sessions/active")).header("X-Rustion-Authority", auth_header).send().await {
             Ok(r) if r.status().is_success() => {
                 #[derive(Deserialize)]
                 struct Body {
@@ -281,8 +245,7 @@ async fn tick(core: &dyn VaultCtx, stores: &super::RustionStores) -> Result<(), 
                 }
             }
             Ok(r) => {
-                snap.last_pull_error =
-                    Some(format!("active: HTTP {}", r.status().as_u16()));
+                snap.last_pull_error = Some(format!("active: HTTP {}", r.status().as_u16()));
             }
             Err(e) => {
                 snap.last_pull_error = Some(format!("active transport: {e}"));
@@ -291,19 +254,11 @@ async fn tick(core: &dyn VaultCtx, stores: &super::RustionStores) -> Result<(), 
         // History (last 200 by default, since last cursor)
         let cursor = read_cursor(&cursors_view, &id).await.unwrap_or_default();
         let history_url = if let Some(ref since) = cursor.last_pull_at {
-            format!(
-                "{base}/v1/sessions/history?since={}",
-                urlencode(&since.to_rfc3339())
-            )
+            format!("{base}/v1/sessions/history?since={}", urlencode(&since.to_rfc3339()))
         } else {
             format!("{base}/v1/sessions/history")
         };
-        match client
-            .get(&history_url)
-            .header("X-Rustion-Authority", auth_header)
-            .send()
-            .await
-        {
+        match client.get(&history_url).header("X-Rustion-Authority", auth_header).send().await {
             Ok(r) if r.status().is_success() => {
                 #[derive(Deserialize)]
                 struct Body {
@@ -322,23 +277,14 @@ async fn tick(core: &dyn VaultCtx, stores: &super::RustionStores) -> Result<(), 
                 }
             }
             Ok(r) => {
-                let _ = snap
-                    .last_pull_error
-                    .get_or_insert(format!("history: HTTP {}", r.status().as_u16()));
+                let _ = snap.last_pull_error.get_or_insert(format!("history: HTTP {}", r.status().as_u16()));
             }
             Err(e) => {
-                let _ = snap
-                    .last_pull_error
-                    .get_or_insert(format!("history transport: {e}"));
+                let _ = snap.last_pull_error.get_or_insert(format!("history transport: {e}"));
             }
         }
         // Stats
-        match client
-            .get(format!("{base}/v1/stats"))
-            .header("X-Rustion-Authority", auth_header)
-            .send()
-            .await
-        {
+        match client.get(format!("{base}/v1/stats")).header("X-Rustion-Authority", auth_header).send().await {
             Ok(r) if r.status().is_success() => {
                 if let Ok(s) = r.json::<AuthorityStats>().await {
                     snap.stats = s;
@@ -350,16 +296,8 @@ async fn tick(core: &dyn VaultCtx, stores: &super::RustionStores) -> Result<(), 
         // Phase 8.2 — audit witness pull. Reads entries since the
         // last cursor; the per-entry hash chains forward, so BV
         // gets tamper-evident replication.
-        let audit_url = format!(
-            "{base}/v1/sessions/audit?since={}&limit=500",
-            cursor.last_audit_seq
-        );
-        match client
-            .get(&audit_url)
-            .header("X-Rustion-Authority", auth_header)
-            .send()
-            .await
-        {
+        let audit_url = format!("{base}/v1/sessions/audit?since={}&limit=500", cursor.last_audit_seq);
+        match client.get(&audit_url).header("X-Rustion-Authority", auth_header).send().await {
             Ok(r) if r.status().is_success() => {
                 #[derive(Deserialize)]
                 struct Body {
@@ -383,11 +321,7 @@ async fn tick(core: &dyn VaultCtx, stores: &super::RustionStores) -> Result<(), 
                     // entries. Dedup by hash, then cap at the 200 latest;
                     // the persistent witness store keeps the full set under
                     // rustion/audit_witness/.
-                    let mut combined = cache
-                        .get(&id)
-                        .await
-                        .map(|prev| prev.recent_audit)
-                        .unwrap_or_default();
+                    let mut combined = cache.get(&id).await.map(|prev| prev.recent_audit).unwrap_or_default();
                     for e in stamped.iter() {
                         if !combined.iter().any(|c| c.hash == e.hash) {
                             combined.push(e.clone());
@@ -400,16 +334,11 @@ async fn tick(core: &dyn VaultCtx, stores: &super::RustionStores) -> Result<(), 
                     snap.recent_audit = combined;
 
                     // Persistent witness store + audit-log emission.
-                    let witness_view = std::sync::Arc::new(
-                        system_view.new_sub_view(AUDIT_WITNESS_SUB_PATH),
-                    );
+                    let witness_view = std::sync::Arc::new(system_view.new_sub_view(AUDIT_WITNESS_SUB_PATH));
                     for e in &stamped {
                         let key = format!("{}/{}", id, e.hash);
-                        let v = serde_json::to_vec(e)
-                            .unwrap_or_default();
-                        let _ = witness_view
-                            .put(&StorageEntry { key, value: v })
-                            .await;
+                        let v = serde_json::to_vec(e).unwrap_or_default();
+                        let _ = witness_view.put(&StorageEntry { key, value: v }).await;
                         log::info!(
                             "{}: bastion={} seq={} hash={} actor={}",
                             super::audit::RUSTION_AUDIT_WITNESS,
@@ -429,9 +358,7 @@ async fn tick(core: &dyn VaultCtx, stores: &super::RustionStores) -> Result<(), 
                 }
             }
             Ok(r) if r.status().as_u16() == 429 => {
-                let _ = snap
-                    .last_pull_error
-                    .get_or_insert("audit: rate-limited".into());
+                let _ = snap.last_pull_error.get_or_insert("audit: rate-limited".into());
             }
             Ok(_) | Err(_) => {} // soft fail; audit is best-effort
         }

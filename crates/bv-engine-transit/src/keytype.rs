@@ -180,13 +180,7 @@ mod tests {
         // No key supports both signing and encryption simultaneously.
         // This is the property that path handlers rely on to refuse
         // misuse.
-        for kt in [
-            KeyType::Chacha20Poly1305,
-            KeyType::Hmac,
-            KeyType::Ed25519,
-            KeyType::MlKem768,
-            KeyType::MlDsa65,
-        ] {
+        for kt in [KeyType::Chacha20Poly1305, KeyType::Hmac, KeyType::Ed25519, KeyType::MlKem768, KeyType::MlDsa65] {
             assert!(
                 !(kt.supports_sign() && kt.supports_encrypt()),
                 "{kt:?} claims both sign and encrypt — algorithm misuse possible"

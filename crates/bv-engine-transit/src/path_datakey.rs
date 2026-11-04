@@ -49,18 +49,12 @@ impl TransitBackend {
 
 #[maybe_async::maybe_async]
 impl TransitBackendInner {
-    pub async fn handle_datakey(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_datakey(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let mode = take_str(req, "plaintext_or_wrapped");
         let name = take_str(req, "name");
 
-        let p = self
-            .get_policy(req, &name)
-            .await?
-            .ok_or_else(|| RvError::ErrString(format!("unknown key `{name}`")))?;
+        let p =
+            self.get_policy(req, &name).await?.ok_or_else(|| RvError::ErrString(format!("unknown key `{name}`")))?;
         if !p.key_type.supports_datakey() {
             return Err(RvError::ErrString(format!(
                 "{} keys do not support /datakey; this engine ships KEM-based datakey only (ml-kem-768)",
@@ -72,9 +66,7 @@ impl TransitBackendInner {
         let (plaintext_dk, kem_ct) = match p.key_type {
             KeyType::MlKem768 => ml_kem::encapsulate_datakey(&v.pk)?,
             #[cfg(feature = "transit_pqc_hybrid")]
-            KeyType::HybridX25519MlKem768 => {
-                super::crypto::hybrid::encapsulate_hybrid_datakey(&v.pk)?
-            }
+            KeyType::HybridX25519MlKem768 => super::crypto::hybrid::encapsulate_hybrid_datakey(&v.pk)?,
             _ => unreachable!("supports_datakey() guarded above"),
         };
         let wrapped = ciphertext::build(v.version, p.key_type.pqc_wire_tag(), &kem_ct);
@@ -85,9 +77,7 @@ impl TransitBackendInner {
         if mode == "plaintext" {
             data.insert("plaintext".into(), Value::String(B64.encode(&plaintext_dk)));
         } else if mode != "wrapped" {
-            return Err(RvError::ErrString(format!(
-                "datakey mode must be `plaintext` or `wrapped`, got `{mode}`"
-            )));
+            return Err(RvError::ErrString(format!("datakey mode must be `plaintext` or `wrapped`, got `{mode}`")));
         }
         Ok(Some(Response::data_response(Some(data))))
     }
@@ -106,15 +96,10 @@ impl TransitBackendInner {
         let name = take_str(req, "name");
         let ct_str = take_str(req, "ciphertext");
         let framed = ciphertext::parse(&ct_str)?;
-        let p = self
-            .get_policy(req, &name)
-            .await?
-            .ok_or_else(|| RvError::ErrString(format!("unknown key `{name}`")))?;
+        let p =
+            self.get_policy(req, &name).await?.ok_or_else(|| RvError::ErrString(format!("unknown key `{name}`")))?;
         if !p.key_type.supports_datakey() {
-            return Err(RvError::ErrString(format!(
-                "{} keys do not support datakey unwrap",
-                p.key_type.as_str()
-            )));
+            return Err(RvError::ErrString(format!("{} keys do not support datakey unwrap", p.key_type.as_str())));
         }
         if framed.pqc_algo.as_deref() != p.key_type.pqc_wire_tag() {
             return Err(RvError::ErrString(format!(
@@ -123,9 +108,7 @@ impl TransitBackendInner {
                 p.key_type.as_str()
             )));
         }
-        let v = p
-            .version_for_decrypt(framed.version)
-            .map_err(RvError::ErrString)?;
+        let v = p.version_for_decrypt(framed.version).map_err(RvError::ErrString)?;
         let dk = match p.key_type {
             KeyType::MlKem768 => ml_kem::decapsulate_datakey(&v.material, &framed.bytes)?,
             #[cfg(feature = "transit_pqc_hybrid")]
@@ -156,8 +139,5 @@ impl TransitBackend {
 }
 
 fn take_str(req: &Request, key: &str) -> String {
-    req.get_data(key)
-        .ok()
-        .and_then(|v| v.as_str().map(|s| s.to_string()))
-        .unwrap_or_default()
+    req.get_data(key).ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default()
 }

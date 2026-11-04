@@ -227,8 +227,7 @@ impl CompositeSigner {
     /// key (1312 / 1952 / 2592 bytes for L44 / L65 / L87).
     pub fn composite_public_key_der(&self) -> Result<Vec<u8>, RvError> {
         let pq_bits = BitString::from_bytes(self.pqc.public_key()).map_err(der_err)?;
-        let classical_bits =
-            BitString::from_bytes(self.classical.key_pair().der_bytes()).map_err(der_err)?;
+        let classical_bits = BitString::from_bytes(self.classical.key_pair().der_bytes()).map_err(der_err)?;
         let mut seq: SequenceOf<BitString, 2> = SequenceOf::new();
         seq.add(pq_bits).map_err(der_err)?;
         seq.add(classical_bits).map_err(der_err)?;
@@ -298,13 +297,9 @@ impl CompositeSigner {
 
     pub fn from_storage_pem(pem: &str) -> Result<Self, RvError> {
         use base64::Engine;
-        let begin = pem
-            .find("-----BEGIN BV PQC COMPOSITE SIGNER-----")
-            .ok_or(RvError::ErrPkiPemBundleInvalid)?;
-        let end =
-            pem.find("-----END BV PQC COMPOSITE SIGNER-----").ok_or(RvError::ErrPkiPemBundleInvalid)?;
-        let body_start =
-            pem[begin..].find('\n').map(|i| begin + i + 1).ok_or(RvError::ErrPkiPemBundleInvalid)?;
+        let begin = pem.find("-----BEGIN BV PQC COMPOSITE SIGNER-----").ok_or(RvError::ErrPkiPemBundleInvalid)?;
+        let end = pem.find("-----END BV PQC COMPOSITE SIGNER-----").ok_or(RvError::ErrPkiPemBundleInvalid)?;
+        let body_start = pem[begin..].find('\n').map(|i| begin + i + 1).ok_or(RvError::ErrPkiPemBundleInvalid)?;
         let body_b64: String = pem[body_start..end].chars().filter(|c| !c.is_whitespace()).collect();
         let body_bytes = base64::engine::general_purpose::STANDARD
             .decode(body_b64.as_bytes())
@@ -437,14 +432,11 @@ mod tests {
         use base64::Engine;
         let begin = "-----BEGIN BV PQC COMPOSITE SIGNER-----";
         let end = "-----END BV PQC COMPOSITE SIGNER-----";
-        let body_b64: String = pem_with
-            [pem_with.find(begin).unwrap() + begin.len()..pem_with.find(end).unwrap()]
+        let body_b64: String = pem_with[pem_with.find(begin).unwrap() + begin.len()..pem_with.find(end).unwrap()]
             .chars()
             .filter(|c| !c.is_whitespace())
             .collect();
-        let body_bytes = base64::engine::general_purpose::STANDARD
-            .decode(body_b64.as_bytes())
-            .unwrap();
+        let body_bytes = base64::engine::general_purpose::STANDARD.decode(body_b64.as_bytes()).unwrap();
         let mut body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
         body.as_object_mut().unwrap().remove("variant");
         let new_b64 = base64::engine::general_purpose::STANDARD.encode(body.to_string().as_bytes());

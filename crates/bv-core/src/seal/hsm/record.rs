@@ -545,7 +545,8 @@ mod tests {
         assert_eq!(HsmSealRecord::decode(&r.encode().unwrap()).unwrap().record, r);
 
         let good = r.clone();
-        r.recovery_pub = Some(RecoveryPublicKey { fingerprint: "00".into(), ..RecoveryPublicKey::new(public_key.clone(), split) });
+        r.recovery_pub =
+            Some(RecoveryPublicKey { fingerprint: "00".into(), ..RecoveryPublicKey::new(public_key.clone(), split) });
         assert!(r.encode().is_err());
         for (shares, threshold) in [(5, 1), (2, 3), (255, 3)] {
             let mut bad = good.clone();
@@ -569,7 +570,8 @@ mod tests {
         let keypair = MlKem768Provider.generate_keypair().unwrap();
         let mut r = pool_record();
         let mut kek = r.kek.clone().unwrap();
-        kek.recovery = Some(bv_crypto::KemDemEnvelopeV1::seal(&MlKem768Provider, keypair.public_key(), b"a", b"k").unwrap());
+        kek.recovery =
+            Some(bv_crypto::KemDemEnvelopeV1::seal(&MlKem768Provider, keypair.public_key(), b"a", b"k").unwrap());
         r.kek = Some(kek);
         assert!(r.encode().is_err(), "a stray recovery copy is refused");
         r.recovery_pub = Some(RecoveryPublicKey::new(keypair.public_key().to_vec(), RecoverySplit::default()));

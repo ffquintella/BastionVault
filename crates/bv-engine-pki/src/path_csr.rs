@@ -42,8 +42,8 @@ use crate::{
     context::Context,
     errors::RvError,
     logical::{
-        page_response, paginate, Backend, Field, FieldType, Operation, PageLimits, Path,
-        PathOperation, Request, Response,
+        page_response, paginate, Backend, Field, FieldType, Operation, PageLimits, Path, PathOperation, Request,
+        Response,
     },
     new_fields, new_fields_internal, new_path, new_path_internal,
 };
@@ -131,42 +131,19 @@ impl PkiBackend {
 
 #[maybe_async::maybe_async]
 impl PkiBackendInner {
-    pub async fn csr_generate(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
-        let role_name = req
-            .get_data("role")?
-            .as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?
-            .to_string();
-        let role = self
-            .get_role(req, &role_name)
-            .await?
-            .ok_or(RvError::ErrPkiRoleNotFound)?;
+    pub async fn csr_generate(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let role_name = req.get_data("role")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
+        let role = self.get_role(req, &role_name).await?.ok_or(RvError::ErrPkiRoleNotFound)?;
 
-        let common_name = req
-            .get_data("common_name")?
-            .as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?
-            .trim()
-            .to_string();
+        let common_name =
+            req.get_data("common_name")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.trim().to_string();
         // Run the same shape check as `pki/issue/:role` so a malformed
         // CN is caught locally instead of bouncing off the upstream CA.
         x509::validate_common_name(&role, &common_name)?;
 
-        let alt_str = req
-            .get_data_or_default("alt_names")?
-            .as_str()
-            .unwrap_or("")
-            .to_string();
+        let alt_str = req.get_data_or_default("alt_names")?.as_str().unwrap_or("").to_string();
         let (mut alt_dns, mut alt_ips) = x509::split_alt_names(&alt_str);
-        let ip_str = req
-            .get_data_or_default("ip_sans")?
-            .as_str()
-            .unwrap_or("")
-            .to_string();
+        let ip_str = req.get_data_or_default("ip_sans")?.as_str().unwrap_or("").to_string();
         let (extra_dns, extra_ips) = x509::split_alt_names(&ip_str);
         alt_dns.extend(extra_dns);
         alt_ips.extend(extra_ips);
@@ -181,11 +158,7 @@ impl PkiBackendInner {
         // on `pki/issue/:role`. The upstream CA will apply its own policy
         // to the finished CSR, but a request this mount's own role would
         // refuse should not leave the building.
-        let email_raw = req
-            .get_data_or_default("email_sans")?
-            .as_str()
-            .unwrap_or("")
-            .to_string();
+        let email_raw = req.get_data_or_default("email_sans")?.as_str().unwrap_or("").to_string();
         let email_sans = super::email_san::resolve_email_sans(&role, &email_raw)?;
 
         let role_alg = role.algorithm()?;
@@ -194,12 +167,7 @@ impl PkiBackendInner {
         // gating as `pki/issue/:role`: roles must opt in via
         // `allow_key_reuse`, and `allowed_key_refs` (when non-empty)
         // narrows which keys are acceptable.
-        let request_key_ref = req
-            .get_data_or_default("key_ref")?
-            .as_str()
-            .unwrap_or("")
-            .trim()
-            .to_string();
+        let request_key_ref = req.get_data_or_default("key_ref")?.as_str().unwrap_or("").trim().to_string();
         let pinned_key: Option<KeyEntry> = if request_key_ref.is_empty() {
             None
         } else {
@@ -231,10 +199,7 @@ impl PkiBackendInner {
         // it as a managed key so `set-signed` can bind the resulting cert
         // serial to it. We always end up with a `key_id` in the pending
         // record — there's no "ephemeral CSR" mode here.
-        let exported = req
-            .get_data_or_default("exported")?
-            .as_bool()
-            .unwrap_or(false);
+        let exported = req.get_data_or_default("exported")?.as_bool().unwrap_or(false);
         let (key_entry, signer, exported_pem) = match pinned_key {
             Some(entry) => {
                 let signer = Signer::from_storage_pem(&entry.private_key_pem)?;
@@ -247,17 +212,9 @@ impl PkiBackendInner {
                 // creation: the key is meant to live in the vault while
                 // the external CA signs the CSR. The operator can opt
                 // in via the `exportable` body parameter.
-                let exportable = req
-                    .get_data_or_default("exportable")?
-                    .as_bool()
-                    .unwrap_or(false);
-                let (entry, signer) =
-                    keys::generate_managed_key(req, role_alg, "", exported, exportable).await?;
-                let exported_pem = if exported {
-                    Some(signer.to_pkcs8_pem()?)
-                } else {
-                    None
-                };
+                let exportable = req.get_data_or_default("exportable")?.as_bool().unwrap_or(false);
+                let (entry, signer) = keys::generate_managed_key(req, role_alg, "", exported, exportable).await?;
+                let exported_pem = if exported { Some(signer.to_pkcs8_pem()?) } else { None };
                 // Replace the source on the persisted entry — `generate_managed_key`
                 // tags it as `Generated` which is fine, but we'd like the
                 // operator to see "csr-external" provenance on the Keys tab.
@@ -291,10 +248,7 @@ impl PkiBackendInner {
 
         // Persist the pending record.
         let csr_id = Uuid::new_v4().to_string();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         let record = PendingCsr {
             id: csr_id.clone(),
             role_name: role_name.clone(),
@@ -320,21 +274,13 @@ impl PkiBackendInner {
         Ok(Some(Response::data_response(Some(data))))
     }
 
-    pub async fn csr_list(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn csr_list(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let ids = req.storage_list(storage::KEY_PREFIX_CSR_PENDING).await?;
         Ok(Some(Response::list_response(&ids)))
     }
 
     /// Handler for `pki/csr-info`. See [`PkiBackend::csr_list_info_path`].
-    pub async fn csr_list_info(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn csr_list_info(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let ids = req.storage_list(storage::KEY_PREFIX_CSR_PENDING).await?;
         let page = paginate(req, ids, PageLimits::new(100, 500))?;
         let mut records: Vec<Value> = Vec::with_capacity(page.keys.len());
@@ -358,16 +304,8 @@ impl PkiBackendInner {
         Ok(Some(page_response(&page, records)))
     }
 
-    pub async fn csr_read(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
-        let csr_id = req
-            .get_data("csr_id")?
-            .as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?
-            .to_string();
+    pub async fn csr_read(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let csr_id = req.get_data("csr_id")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
         let record: PendingCsr = match storage::get_json(req, &storage::pending_csr_storage_key(&csr_id)).await? {
             Some(r) => r,
             None => return Ok(None),
@@ -382,16 +320,8 @@ impl PkiBackendInner {
         Ok(Some(Response::data_response(Some(data))))
     }
 
-    pub async fn csr_delete(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
-        let csr_id = req
-            .get_data("csr_id")?
-            .as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?
-            .to_string();
+    pub async fn csr_delete(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let csr_id = req.get_data("csr_id")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
         let key = storage::pending_csr_storage_key(&csr_id);
         if req.storage_get(&key).await?.is_none() {
             return Ok(None);
@@ -400,31 +330,15 @@ impl PkiBackendInner {
         Ok(None)
     }
 
-    pub async fn csr_set_signed(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
-        let csr_id = req
-            .get_data("csr_id")?
-            .as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?
-            .to_string();
+    pub async fn csr_set_signed(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let csr_id = req.get_data("csr_id")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
         let storage_key = storage::pending_csr_storage_key(&csr_id);
         let record: PendingCsr = storage::get_json(req, &storage_key)
             .await?
-            .ok_or_else(|| {
-                RvError::ErrString(format!(
-                    "csr/set-signed: no pending CSR record for id `{csr_id}`"
-                ))
-            })?;
+            .ok_or_else(|| RvError::ErrString(format!("csr/set-signed: no pending CSR record for id `{csr_id}`")))?;
 
-        let signed_pem = req
-            .get_data("certificate")?
-            .as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?
-            .trim()
-            .to_string();
+        let signed_pem =
+            req.get_data("certificate")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.trim().to_string();
         if signed_pem.is_empty() {
             return Err(RvError::ErrRequestFieldInvalid);
         }
@@ -446,9 +360,8 @@ impl PkiBackendInner {
         // accidentally pasting the wrong signed cert (or a cert minted
         // for a different CSR) on top of this pending record.
         let csr_der = super::csr::decode_pem_or_der(&record.csr_pem)?;
-        let (_, csr_parsed) =
-            x509_parser::certification_request::X509CertificationRequest::from_der(&csr_der)
-                .map_err(|_| RvError::ErrString("csr/set-signed: pending CSR is not parseable".into()))?;
+        let (_, csr_parsed) = x509_parser::certification_request::X509CertificationRequest::from_der(&csr_der)
+            .map_err(|_| RvError::ErrString("csr/set-signed: pending CSR is not parseable".into()))?;
         let (_, cert_parsed) = x509_parser::certificate::X509Certificate::from_der(cert_der)
             .map_err(|_| RvError::ErrString("csr/set-signed: certificate not parseable".into()))?;
         let csr_spki = csr_parsed.certification_request_info.subject_pki.raw;
@@ -472,10 +385,7 @@ impl PkiBackendInner {
             )));
         }
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         let cert_record = storage::CertRecord {
             serial_hex: serial_hex.clone(),
             certificate_pem: pem::encode(&pem::Pem::new("CERTIFICATE", cert_der.to_vec())),

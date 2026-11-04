@@ -33,9 +33,9 @@ use super::{acl::ACLResults, core_bridge};
 #[cfg(test)]
 use crate::logical::Operation;
 use crate::{
+    bv_error_string,
     errors::RvError,
     logical::{auth::PolicyInfo, Request, Response},
-    bv_error_string,
     utils::{deserialize_duration, string::ensure_no_leading_slash},
 };
 
@@ -561,11 +561,7 @@ impl Policy {
         // `Group_Shared_Resources = true` if they want — matches the
         // case-insensitive ergonomics already applied to capability /
         // parameter keys elsewhere.
-        self.metadata = policy_config
-            .metadata
-            .iter()
-            .map(|(k, v)| (k.trim().to_lowercase(), v.clone()))
-            .collect();
+        self.metadata = policy_config.metadata.iter().map(|(k, v)| (k.trim().to_lowercase(), v.clone())).collect();
 
         Ok(())
     }

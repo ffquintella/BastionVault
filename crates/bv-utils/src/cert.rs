@@ -66,11 +66,8 @@ pub fn certificate_pem_string_from_der(cert_der: &[u8]) -> Result<String, RvErro
 }
 
 pub fn certificate_chain_pem_string(chain: &[Vec<u8>], reverse: bool) -> Result<String, RvError> {
-    let iter: Box<dyn Iterator<Item = &Vec<u8>>> = if reverse {
-        Box::new(chain.iter().rev())
-    } else {
-        Box::new(chain.iter())
-    };
+    let iter: Box<dyn Iterator<Item = &Vec<u8>>> =
+        if reverse { Box::new(chain.iter().rev()) } else { Box::new(chain.iter()) };
 
     let mut pem = String::new();
     for cert in iter {

@@ -123,8 +123,7 @@ impl SurfaceCache {
             if !verify_hash(&bytes, &snap.surface_sha256) {
                 return None;
             }
-            let surface: bv_plugin_surface::SurfaceManifest =
-                serde_json::from_slice(&bytes).ok()?;
+            let surface: bv_plugin_surface::SurfaceManifest = serde_json::from_slice(&bytes).ok()?;
             // We don't have the mount or asset name pairs cached
             // (they live in the bundle envelope, not on the surface
             // file itself); reconstitute the assets list from the
@@ -137,11 +136,7 @@ impl SurfaceCache {
                 version: snap.version.clone(),
                 mount: String::new(),
                 surface,
-                assets: snap
-                    .asset_hashes
-                    .iter()
-                    .map(|h| (String::new(), h.clone()))
-                    .collect(),
+                assets: snap.asset_hashes.iter().map(|h| (String::new(), h.clone())).collect(),
                 // Grants and the app-module descriptor live in the
                 // bundle envelope, not the cached per-plugin snapshot;
                 // the GUI cache layer replaces this synthesised bundle
@@ -164,8 +159,8 @@ impl SurfaceCache {
         let mut snapshots = Vec::with_capacity(bundle.entries.len());
         let mut keep_dirs: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for entry in &bundle.entries {
-            let bytes = serde_json::to_vec(&entry.surface)
-                .map_err(|e| CacheError::Encode(format!("surface.json: {e}")))?;
+            let bytes =
+                serde_json::to_vec(&entry.surface).map_err(|e| CacheError::Encode(format!("surface.json: {e}")))?;
             let surface_sha256 = sha256_hex(&bytes);
             let dir = self.surface_path(&entry.plugin, &entry.version);
             if let Some(parent) = dir.parent() {
@@ -178,10 +173,7 @@ impl SurfaceCache {
                 surface_sha256,
                 asset_hashes: entry.assets.iter().map(|(_, h)| h.clone()).collect(),
             });
-            keep_dirs
-                .entry(entry.plugin.clone())
-                .or_default()
-                .push(entry.version.clone());
+            keep_dirs.entry(entry.plugin.clone()).or_default().push(entry.version.clone());
         }
 
         // Tombstone old plugin/version subtrees the new bundle didn't
@@ -212,13 +204,9 @@ impl SurfaceCache {
             }
         }
 
-        let meta = SurfaceCacheMeta {
-            etag: bundle.etag.clone(),
-            fetched_at_ms: now_unix_ms(),
-            plugins: snapshots,
-        };
-        let meta_bytes = serde_json::to_vec_pretty(&meta)
-            .map_err(|e| CacheError::Encode(format!("_meta.json: {e}")))?;
+        let meta = SurfaceCacheMeta { etag: bundle.etag.clone(), fetched_at_ms: now_unix_ms(), plugins: snapshots };
+        let meta_bytes =
+            serde_json::to_vec_pretty(&meta).map_err(|e| CacheError::Encode(format!("_meta.json: {e}")))?;
         atomic_write(&self.meta_path(), &meta_bytes)?;
         Ok(())
     }
@@ -239,10 +227,7 @@ impl SurfaceCache {
     /// to have already verified the bytes against the manifest.
     pub fn write_asset(&self, sha256: &str, bytes: &[u8]) -> Result<(), CacheError> {
         if !verify_hash(bytes, sha256) {
-            return Err(CacheError::HashMismatch {
-                expected: sha256.to_string(),
-                actual: sha256_hex(bytes),
-            });
+            return Err(CacheError::HashMismatch { expected: sha256.to_string(), actual: sha256_hex(bytes) });
         }
         std::fs::create_dir_all(self.assets_dir())?;
         atomic_write(&self.asset_path(sha256), bytes)?;
@@ -312,10 +297,7 @@ pub async fn fetch_with_namespace<B: Backend + ?Sized>(
                 // path handles a deliberately lossy non-empty disk cache.
                 match backend.active_surfaces_with_namespace(token, None, namespace).await? {
                     SurfaceFetch::Bundle(b) => Ok(b),
-                    SurfaceFetch::NotModified => Ok(ActiveSurfaceBundle {
-                        etag: String::new(),
-                        entries: Vec::new(),
-                    }),
+                    SurfaceFetch::NotModified => Ok(ActiveSurfaceBundle { etag: String::new(), entries: Vec::new() }),
                 }
             }
         },
@@ -431,10 +413,7 @@ fn verify_hash(bytes: &[u8], expected_hex: &str) -> bool {
 
 fn now_unix_ms() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
 /// Write `bytes` to `path` via a `<path>.tmp` rename so a power loss
@@ -456,8 +435,8 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use bv_plugin_surface::{
-        ActiveSurfaceEntry, SurfaceBinding, SurfaceColumn, SurfaceComponent, SurfaceManifest,
-        SurfaceMenu, SurfaceOp, SurfacePage, SurfaceSection, SurfaceTable,
+        ActiveSurfaceEntry, SurfaceBinding, SurfaceColumn, SurfaceComponent, SurfaceManifest, SurfaceMenu, SurfaceOp,
+        SurfacePage, SurfaceSection, SurfaceTable,
     };
     use serde_json::{Map, Value};
 
@@ -502,21 +481,14 @@ mod tests {
             unimplemented!("stub doesn't dispatch logical requests")
         }
 
-        async fn active_surfaces(
-            &self,
-            _token: &str,
-            etag: Option<&str>,
-        ) -> Result<SurfaceFetch, ClientError> {
-            self.surface_calls
-                .lock()
-                .unwrap()
-                .push(etag.map(|s| s.to_string()));
+        async fn active_surfaces(&self, _token: &str, etag: Option<&str>) -> Result<SurfaceFetch, ClientError> {
+            self.surface_calls.lock().unwrap().push(etag.map(|s| s.to_string()));
             let mut idx = self.idx.lock().unwrap();
             let bundles = self.bundles.lock().unwrap();
-            let next = bundles.get(*idx).cloned().unwrap_or_else(|| ActiveSurfaceBundle {
-                etag: "empty".into(),
-                entries: vec![],
-            });
+            let next = bundles
+                .get(*idx)
+                .cloned()
+                .unwrap_or_else(|| ActiveSurfaceBundle { etag: "empty".into(), entries: vec![] });
             *idx += 1;
             // If etag matches the next bundle, return NotModified.
             if let Some(e) = etag {
@@ -533,10 +505,7 @@ mod tests {
             etag: Option<&str>,
             namespace: Option<&str>,
         ) -> Result<SurfaceFetch, ClientError> {
-            self.surface_namespaces
-                .lock()
-                .unwrap()
-                .push(namespace.map(str::to_string));
+            self.surface_namespaces.lock().unwrap().push(namespace.map(str::to_string));
             self.active_surfaces(token, etag).await
         }
 
@@ -570,14 +539,8 @@ mod tests {
                 title: "Codes".into(),
                 components: vec![SurfaceComponent::Table(SurfaceTable {
                     id: format!("{plugin}.list"),
-                    binding: SurfaceBinding {
-                        op: SurfaceOp::List,
-                        path: "{mount}/codes".into(),
-                    },
-                    columns: vec![SurfaceColumn {
-                        field: "name".into(),
-                        label: "Name".into(),
-                    }],
+                    binding: SurfaceBinding { op: SurfaceOp::List, path: "{mount}/codes".into() },
+                    columns: vec![SurfaceColumn { field: "name".into(), label: "Name".into() }],
                     row_actions: vec![],
                     empty_text: String::new(),
                     actions: vec![],
@@ -597,10 +560,7 @@ mod tests {
             grant: None,
             app_module: None,
         };
-        ActiveSurfaceBundle {
-            etag: etag.to_string(),
-            entries: vec![entry],
-        }
+        ActiveSurfaceBundle { etag: etag.to_string(), entries: vec![entry] }
     }
 
     #[tokio::test]
@@ -651,10 +611,7 @@ mod tests {
     async fn etag_change_swaps_bundle() {
         let tmp = tempfile::tempdir().unwrap();
         let cache = SurfaceCache::new(tmp.path(), "vault-a");
-        let backend = StubBackend::new(vec![
-            bundle_with("totp", "etag-1"),
-            bundle_with("totp", "etag-2"),
-        ]);
+        let backend = StubBackend::new(vec![bundle_with("totp", "etag-1"), bundle_with("totp", "etag-2")]);
         let _ = refresh(&backend, &cache, "tok").await.unwrap();
         let bundle = refresh(&backend, &cache, "tok").await.unwrap();
         assert_eq!(bundle.etag, "etag-2");
@@ -667,10 +624,7 @@ mod tests {
     async fn corrupt_surface_falls_back_to_cold_fetch() {
         let tmp = tempfile::tempdir().unwrap();
         let cache = SurfaceCache::new(tmp.path(), "vault-a");
-        let backend = StubBackend::new(vec![
-            bundle_with("totp", "etag-1"),
-            bundle_with("totp", "etag-1"),
-        ]);
+        let backend = StubBackend::new(vec![bundle_with("totp", "etag-1"), bundle_with("totp", "etag-1")]);
         let _ = refresh(&backend, &cache, "tok").await.unwrap();
 
         // Tamper: rewrite the cached surface with random bytes. The
@@ -727,16 +681,10 @@ mod tests {
         let backend = StubBackend::new(vec![]);
         backend.put_asset(&h, asset.clone());
 
-        let got1 = ensure_asset(&backend, &cache, "totp", "1.0.0", &h, "tok")
-            .await
-            .unwrap()
-            .unwrap();
+        let got1 = ensure_asset(&backend, &cache, "totp", "1.0.0", &h, "tok").await.unwrap().unwrap();
         assert_eq!(got1, asset);
 
-        let got2 = ensure_asset(&backend, &cache, "totp", "1.0.0", &h, "tok")
-            .await
-            .unwrap()
-            .unwrap();
+        let got2 = ensure_asset(&backend, &cache, "totp", "1.0.0", &h, "tok").await.unwrap().unwrap();
         assert_eq!(got2, asset);
 
         // Backend was hit once; the second call resolved from cache.
@@ -748,9 +696,7 @@ mod tests {
     async fn write_asset_rejects_hash_mismatch() {
         let tmp = tempfile::tempdir().unwrap();
         let cache = SurfaceCache::new(tmp.path(), "vault-a");
-        let err = cache
-            .write_asset(&"a".repeat(64), b"different bytes")
-            .unwrap_err();
+        let err = cache.write_asset(&"a".repeat(64), b"different bytes").unwrap_err();
         assert!(matches!(err, CacheError::HashMismatch { .. }));
     }
 
@@ -758,10 +704,7 @@ mod tests {
     async fn watch_once_returns_new_bundle_when_etag_changed() {
         let tmp = tempfile::tempdir().unwrap();
         let cache = SurfaceCache::new(tmp.path(), "vault-a");
-        let backend = StubBackend::new(vec![
-            bundle_with("totp", "etag-1"),
-            bundle_with("totp", "etag-2"),
-        ]);
+        let backend = StubBackend::new(vec![bundle_with("totp", "etag-1"), bundle_with("totp", "etag-2")]);
         // Seed the cache with etag-1 so watch_once can compare.
         let _ = refresh(&backend, &cache, "tok").await.unwrap();
         // Now the stub will hand back etag-2 — watch_once should
@@ -781,15 +724,10 @@ mod tests {
         let cache = SurfaceCache::new(tmp.path(), "vault-a");
         let backend = StubBackend::new(vec![bundle_with("self-accounts", "etag-tenant")]);
 
-        let bundle = refresh_with_namespace(&backend, &cache, "tok", Some("dti/esi"))
-            .await
-            .unwrap();
+        let bundle = refresh_with_namespace(&backend, &cache, "tok", Some("dti/esi")).await.unwrap();
 
         assert_eq!(bundle.etag, "etag-tenant");
-        assert_eq!(
-            backend.surface_namespaces.lock().unwrap().as_slice(),
-            &[Some("dti/esi".to_string())]
-        );
+        assert_eq!(backend.surface_namespaces.lock().unwrap().as_slice(), &[Some("dti/esi".to_string())]);
     }
 
     #[tokio::test]
@@ -810,11 +748,7 @@ mod tests {
                 unimplemented!("stub doesn't dispatch logical requests")
             }
 
-            async fn active_surfaces(
-                &self,
-                _token: &str,
-                _etag: Option<&str>,
-            ) -> Result<SurfaceFetch, ClientError> {
+            async fn active_surfaces(&self, _token: &str, _etag: Option<&str>) -> Result<SurfaceFetch, ClientError> {
                 panic!("the namespaced watch adapter must preserve the legacy watch override")
             }
 
@@ -848,10 +782,7 @@ mod tests {
         // Both queued bundles share the same etag — the stub maps
         // matching etag to NotModified, which watch_once surfaces
         // as None to its caller.
-        let backend = StubBackend::new(vec![
-            bundle_with("totp", "etag-1"),
-            bundle_with("totp", "etag-1"),
-        ]);
+        let backend = StubBackend::new(vec![bundle_with("totp", "etag-1"), bundle_with("totp", "etag-1")]);
         let _ = refresh(&backend, &cache, "tok").await.unwrap();
         let got = watch_once(&backend, &cache, "tok").await.unwrap();
         assert!(got.is_none());

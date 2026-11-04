@@ -5,11 +5,7 @@ use std::io::BufReader;
 use clap::Parser;
 use serde_json::Value;
 
-use crate::{
-    command::CommandExecutor,
-    errors::RvError,
-    storage,
-};
+use crate::{command::CommandExecutor, errors::RvError, storage};
 
 #[derive(Parser)]
 #[command(
@@ -71,8 +67,7 @@ impl CommandExecutor for Restore {
     #[inline]
     fn main(&self) -> Result<(), RvError> {
         let conf = parse_config_pairs(&self.backend_config)?;
-        let hmac_key = hex::decode(&self.hmac_key)
-            .map_err(|_| RvError::ErrBackupHmacFailed)?;
+        let hmac_key = hex::decode(&self.hmac_key).map_err(|_| RvError::ErrBackupHmacFailed)?;
 
         println!("Creating backend ({})...", self.backend_type);
         let backend = storage::new_backend(&self.backend_type, &conf)?;
@@ -89,11 +84,7 @@ impl CommandExecutor for Restore {
                 let handle = s.spawn(move || {
                     let rt = tokio::runtime::Runtime::new().unwrap();
                     rt.block_on(async {
-                        crate::backup::restore::restore_backup(
-                            backend.as_ref(),
-                            &hmac_key,
-                            &mut reader,
-                        ).await
+                        crate::backup::restore::restore_backup(backend.as_ref(), &hmac_key, &mut reader).await
                     })
                 });
                 handle.join().unwrap()
@@ -101,11 +92,7 @@ impl CommandExecutor for Restore {
             Err(_) => {
                 let rt = tokio::runtime::Runtime::new()?;
                 rt.block_on(async {
-                    crate::backup::restore::restore_backup(
-                        backend.as_ref(),
-                        &hmac_key,
-                        &mut reader,
-                    ).await
+                    crate::backup::restore::restore_backup(backend.as_ref(), &hmac_key, &mut reader).await
                 })
             }
         }?;

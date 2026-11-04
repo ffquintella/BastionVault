@@ -764,11 +764,10 @@ mod tests {
             (empty.clone(), TargetCidrSource::Runtime)
         );
         // The names `sys/mcp/config` reports for each layer.
-        let names: Vec<&str> =
-            [TargetCidrSource::Runtime, TargetCidrSource::ServerConfig, TargetCidrSource::Default]
-                .iter()
-                .map(|s| s.as_str())
-                .collect();
+        let names: Vec<&str> = [TargetCidrSource::Runtime, TargetCidrSource::ServerConfig, TargetCidrSource::Default]
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
         assert_eq!(names, ["runtime", "hcl", "default"]);
         let classes: Vec<&str> = AlwaysDenied::ALL.iter().map(|c| c.as_str()).collect();
         assert_eq!(

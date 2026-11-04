@@ -38,64 +38,40 @@ pub enum VerifyError {
 /// Verify the signature header against `body` using the pinned
 /// hybrid pubkey halves (`ed25519_b64` and `mldsa65_b64` come straight
 /// off `RustionTarget.public_key`).
-pub fn verify(
-    ed25519_b64: &str,
-    mldsa65_b64: &str,
-    header_value: &str,
-    body: &[u8],
-) -> Result<(), VerifyError> {
+pub fn verify(ed25519_b64: &str, mldsa65_b64: &str, header_value: &str, body: &[u8]) -> Result<(), VerifyError> {
     let (ed_sig_b64, ml_sig_b64) = parse_header(header_value)?;
-    let ed_sig_bytes = B64
-        .decode(ed_sig_b64.as_bytes())
-        .map_err(|e| VerifyError::Base64(format!("ed25519: {e}")))?;
-    let ml_sig_bytes = B64
-        .decode(ml_sig_b64.as_bytes())
-        .map_err(|e| VerifyError::Base64(format!("mldsa65: {e}")))?;
+    let ed_sig_bytes = B64.decode(ed_sig_b64.as_bytes()).map_err(|e| VerifyError::Base64(format!("ed25519: {e}")))?;
+    let ml_sig_bytes = B64.decode(ml_sig_b64.as_bytes()).map_err(|e| VerifyError::Base64(format!("mldsa65: {e}")))?;
 
-    let ed_pub_bytes = B64
-        .decode(ed25519_b64.trim().as_bytes())
-        .map_err(|e| VerifyError::PinnedPubkey(format!("ed25519: {e}")))?;
-    let ml_pub_bytes = B64
-        .decode(mldsa65_b64.trim().as_bytes())
-        .map_err(|e| VerifyError::PinnedPubkey(format!("mldsa65: {e}")))?;
+    let ed_pub_bytes =
+        B64.decode(ed25519_b64.trim().as_bytes()).map_err(|e| VerifyError::PinnedPubkey(format!("ed25519: {e}")))?;
+    let ml_pub_bytes =
+        B64.decode(mldsa65_b64.trim().as_bytes()).map_err(|e| VerifyError::PinnedPubkey(format!("mldsa65: {e}")))?;
 
     if ml_pub_bytes.len() != MLDSA65_PK_LEN {
         return Err(VerifyError::PubkeyLen);
     }
     let ed_pub_arr = normalize_ed25519(&ed_pub_bytes)?;
-    let ed_pub =
-        VerifyingKey::from_bytes(&ed_pub_arr).map_err(|_| VerifyError::Ed25519Invalid)?;
+    let ed_pub = VerifyingKey::from_bytes(&ed_pub_arr).map_err(|_| VerifyError::Ed25519Invalid)?;
 
     if ed_sig_bytes.len() != 64 {
         return Err(VerifyError::Ed25519Invalid);
     }
-    let ed_sig =
-        Ed25519Signature::from_slice(&ed_sig_bytes).map_err(|_| VerifyError::Ed25519Invalid)?;
+    let ed_sig = Ed25519Signature::from_slice(&ed_sig_bytes).map_err(|_| VerifyError::Ed25519Invalid)?;
 
     let mut h = Sha256::new();
     h.update(body);
     let tbs: [u8; 32] = h.finalize().into();
 
     use ed25519_dalek::Verifier;
-    ed_pub
-        .verify(&tbs, &ed_sig)
-        .map_err(|_| VerifyError::Ed25519Invalid)?;
+    ed_pub.verify(&tbs, &ed_sig).map_err(|_| VerifyError::Ed25519Invalid)?;
 
     // ML-DSA-65 verify via fips204 — BV already uses fips204 for the
     // outbound BVRG-v1 signing path, so we keep a single PQC crate.
-    let pk_arr: [u8; MLDSA65_PK_LEN] = ml_pub_bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| VerifyError::PubkeyLen)?;
-    let pk = ml_dsa_65::PublicKey::try_from_bytes(pk_arr)
-        .map_err(|_| VerifyError::PubkeyLen)?;
-    let ml_sig_arr: [u8; 3309] = ml_sig_bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| VerifyError::MlDsa65Invalid)?;
-    pk.verify(&tbs, &ml_sig_arr, &[])
-        .then_some(())
-        .ok_or(VerifyError::MlDsa65Invalid)
+    let pk_arr: [u8; MLDSA65_PK_LEN] = ml_pub_bytes.as_slice().try_into().map_err(|_| VerifyError::PubkeyLen)?;
+    let pk = ml_dsa_65::PublicKey::try_from_bytes(pk_arr).map_err(|_| VerifyError::PubkeyLen)?;
+    let ml_sig_arr: [u8; 3309] = ml_sig_bytes.as_slice().try_into().map_err(|_| VerifyError::MlDsa65Invalid)?;
+    pk.verify(&tbs, &ml_sig_arr, &[]).then_some(()).ok_or(VerifyError::MlDsa65Invalid)
 }
 
 /// Normalise a pinned Ed25519 public key to its raw 32 bytes.
@@ -108,14 +84,10 @@ pub fn verify(
 /// value with `PubkeyLen`, so no live webhook could ever verify.
 /// Accept both the SPKI form and a bare 32-byte key.
 fn normalize_ed25519(bytes: &[u8]) -> Result<[u8; 32], VerifyError> {
-    const SPKI_PREFIX: [u8; 12] = [
-        0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
-    ];
+    const SPKI_PREFIX: [u8; 12] = [0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00];
     match bytes.len() {
         32 => bytes.try_into().map_err(|_| VerifyError::PubkeyLen),
-        44 if bytes[..12] == SPKI_PREFIX => {
-            bytes[12..].try_into().map_err(|_| VerifyError::PubkeyLen)
-        }
+        44 if bytes[..12] == SPKI_PREFIX => bytes[12..].try_into().map_err(|_| VerifyError::PubkeyLen),
         _ => Err(VerifyError::PubkeyLen),
     }
 }
@@ -147,9 +119,8 @@ mod tests {
         // Deterministic seed is fine here — these tests round-trip
         // sign/verify and don't care about cryptographic randomness.
         let sk_seed: [u8; 32] = [
+            0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42,
             0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42,
-            0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42,
-            0x42, 0x42, 0x42, 0x42,
         ];
         let ed_sk = ed25519_dalek::SigningKey::from_bytes(&sk_seed);
         let ed_pk = ed_sk.verifying_key();
@@ -160,22 +131,14 @@ mod tests {
         (ed_pk_b64, ml_pk_b64, sk_seed, ml_sk)
     }
 
-    fn sign(
-        sk_seed: &[u8; 32],
-        ml_sk: &ml_dsa_65::PrivateKey,
-        body: &[u8],
-    ) -> String {
+    fn sign(sk_seed: &[u8; 32], ml_sk: &ml_dsa_65::PrivateKey, body: &[u8]) -> String {
         let ed_sk = ed25519_dalek::SigningKey::from_bytes(sk_seed);
         let mut h = Sha256::new();
         h.update(body);
         let tbs: [u8; 32] = h.finalize().into();
         let ed_sig = ed_sk.sign(&tbs);
         let ml_sig = ml_sk.try_sign(&tbs, &[]).unwrap();
-        format!(
-            "ed25519={} mldsa65={}",
-            B64.encode(ed_sig.to_bytes()),
-            B64.encode(ml_sig.as_slice())
-        )
+        format!("ed25519={} mldsa65={}", B64.encode(ed_sig.to_bytes()), B64.encode(ml_sig.as_slice()))
     }
 
     #[test]
@@ -193,9 +156,7 @@ mod tests {
         // Verification must succeed against that form too.
         let (raw_ed_pk_b64, ml_pk_b64, sk_seed, ml_sk) = synth();
         let raw = B64.decode(raw_ed_pk_b64.as_bytes()).unwrap();
-        let mut spki = vec![
-            0x30u8, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
-        ];
+        let mut spki = vec![0x30u8, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00];
         spki.extend_from_slice(&raw);
         let spki_b64 = B64.encode(spki);
         let body = br#"{"recording_id":"rec_x"}"#;
@@ -222,13 +183,8 @@ mod tests {
     fn classical_only_rejected() {
         let (ed_pk_b64, ml_pk_b64, sk_seed, ml_sk) = synth();
         let header_full = sign(&sk_seed, &ml_sk, b"x");
-        let classical_only = header_full
-            .split_whitespace()
-            .find(|t| t.starts_with("ed25519="))
-            .unwrap()
-            .to_string();
-        let err = verify(&ed_pk_b64, &ml_pk_b64, &classical_only, b"x")
-            .expect_err("downgrade");
+        let classical_only = header_full.split_whitespace().find(|t| t.starts_with("ed25519=")).unwrap().to_string();
+        let err = verify(&ed_pk_b64, &ml_pk_b64, &classical_only, b"x").expect_err("downgrade");
         assert!(matches!(err, VerifyError::HeaderMalformed));
     }
 }

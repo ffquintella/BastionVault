@@ -46,9 +46,9 @@ use bv_kernel_api::dos;
 use bv_kernel_api::router;
 // The policy store records its cache hit/miss counters; the families are Tier
 // 0, and the actix middleware that scrapes them is in `bv-server`.
-use bv_metrics as metrics;
 use bv_logical as logical;
 use bv_logical::handler;
+use bv_metrics as metrics;
 use bv_storage as storage;
 use bv_storage::cache;
 use bv_utils as utils;
@@ -57,8 +57,8 @@ use bv_utils as utils;
 // call sites here reach them as `crate::<name>`.
 pub use bv_errors::{bv_error_response, bv_error_response_status, bv_error_string};
 pub use bv_logical::{
-    new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path,
-    new_path_internal, new_secret, new_secret_internal,
+    new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path, new_path_internal,
+    new_secret, new_secret_internal,
 };
 
 pub mod modules;

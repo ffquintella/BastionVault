@@ -19,9 +19,7 @@ use crate::{
     dos::DosGuard,
     errors::RvError,
     handler::{AuthHandler, Handler},
-    kernel_api::{
-        ctx::MountEntryHMACLevel, KernelServices, LogicalBackendNewFunc, VaultCtx,
-    },
+    kernel_api::{ctx::MountEntryHMACLevel, KernelServices, LogicalBackendNewFunc, VaultCtx},
     logical::{Request, Response},
     mount::{MountsMonitor, MountsRouter},
     router::Router,
@@ -155,7 +153,6 @@ impl VaultCtx for Core {
         Core::set_require_machine_identity(self, required).await
     }
 }
-
 
 #[cfg(test)]
 mod tests {

@@ -37,9 +37,8 @@ use uuid::Uuid;
 use super::{
     crypto::{KeyAlgorithm, Signer},
     storage::{
-        self, CaKind, CaMetadata, CrlConfig, CrlState, IssuerUsages, IssuersConfig, IssuersIndex,
-        KEY_CA_CERT, KEY_CA_KEY, KEY_CA_META, KEY_CONFIG_CRL, KEY_CONFIG_ISSUERS, KEY_CRL_CACHED,
-        KEY_CRL_STATE, KEY_ISSUERS_INDEX,
+        self, CaKind, CaMetadata, CrlConfig, CrlState, IssuerUsages, IssuersConfig, IssuersIndex, KEY_CA_CERT,
+        KEY_CA_KEY, KEY_CA_META, KEY_CONFIG_CRL, KEY_CONFIG_ISSUERS, KEY_CRL_CACHED, KEY_CRL_STATE, KEY_ISSUERS_INDEX,
     },
 };
 use crate::{errors::RvError, logical::Request};
@@ -75,10 +74,8 @@ pub fn clamp_ttl_to_issuer(
     issuer: &IssuerHandle,
     requested: std::time::Duration,
 ) -> Result<(std::time::Duration, bool), RvError> {
-    let now_unix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+    let now_unix =
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
     if issuer.meta.not_after_unix <= now_unix {
         return Err(issuer_expired_error(&issuer.name, issuer.meta.not_after_unix));
     }
@@ -104,8 +101,7 @@ pub async fn build_issuer_chain(req: &Request, leaf: &IssuerHandle) -> Result<Ve
     use x509_parser::prelude::FromDer;
 
     let mut chain: Vec<String> = vec![leaf.cert_pem.clone()];
-    let mut visited: std::collections::BTreeSet<String> =
-        std::collections::BTreeSet::from([leaf.id.clone()]);
+    let mut visited: std::collections::BTreeSet<String> = std::collections::BTreeSet::from([leaf.id.clone()]);
 
     // Snapshot the local issuer index once; the walk only needs read
     // access and the index changes infrequently relative to issuance.
@@ -113,11 +109,9 @@ pub async fn build_issuer_chain(req: &Request, leaf: &IssuerHandle) -> Result<Ve
 
     let mut current_pem = leaf.cert_pem.clone();
     loop {
-        let der = pem::parse(current_pem.as_bytes())
-            .map_err(|_| RvError::ErrPkiPemBundleInvalid)?
-            .into_contents();
-        let (_, parsed) = x509_parser::certificate::X509Certificate::from_der(&der)
-            .map_err(|_| RvError::ErrPkiPemBundleInvalid)?;
+        let der = pem::parse(current_pem.as_bytes()).map_err(|_| RvError::ErrPkiPemBundleInvalid)?.into_contents();
+        let (_, parsed) =
+            x509_parser::certificate::X509Certificate::from_der(&der).map_err(|_| RvError::ErrPkiPemBundleInvalid)?;
         let subject_dn = parsed.tbs_certificate.subject.to_string();
         let issuer_dn = parsed.tbs_certificate.issuer.to_string();
         if subject_dn == issuer_dn {
@@ -206,9 +200,8 @@ async fn load_issuer_by_id(req: &Request, id: &str) -> Result<IssuerHandle, RvEr
     let signer = match meta.key_id.as_str() {
         "" => {
             // Legacy path: read + migrate.
-            let legacy_pem = storage::get_string(req, &storage::issuer_key_key(id))
-                .await?
-                .ok_or(RvError::ErrPkiCaKeyNotFound)?;
+            let legacy_pem =
+                storage::get_string(req, &storage::issuer_key_key(id)).await?.ok_or(RvError::ErrPkiCaKeyNotFound)?;
             let signer = Signer::from_storage_pem(&legacy_pem)?;
             let key_name = format!("{name}-key");
             // Disambiguate if a key with this name already exists
@@ -238,9 +231,7 @@ async fn load_issuer_by_id(req: &Request, id: &str) -> Result<IssuerHandle, RvEr
         }
         key_id => {
             let entry = super::keys::load_key(req, key_id).await?.ok_or_else(|| {
-                RvError::ErrString(format!(
-                    "issuer `{id}` references managed key `{key_id}` which is missing"
-                ))
+                RvError::ErrString(format!("issuer `{id}` references managed key `{key_id}` which is missing"))
             })?;
             Signer::from_storage_pem(&entry.private_key_pem)?
         }
@@ -258,11 +249,7 @@ async fn load_issuer_by_id(req: &Request, id: &str) -> Result<IssuerHandle, RvEr
 /// caller-supplied `IssuerUsages` is stored verbatim in the index so a
 /// subsequent read returns exactly what was set.
 #[maybe_async::maybe_async]
-pub async fn set_issuer_usages(
-    req: &Request,
-    reference: &str,
-    usages: IssuerUsages,
-) -> Result<(), RvError> {
+pub async fn set_issuer_usages(req: &Request, reference: &str, usages: IssuerUsages) -> Result<(), RvError> {
     if !usages.issuing_certificates && !usages.crl_signing && !usages.ocsp_signing {
         return Err(RvError::ErrRequestFieldInvalid);
     }
@@ -316,10 +303,7 @@ pub async fn add_issuer(
         return Err(issuer_name_conflict_error(name));
     }
     let id = Uuid::new_v4().to_string();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let alg = signer.algorithm();
 
     // Resolve the managed-key UUID. If the caller already pinned one
@@ -339,13 +323,9 @@ pub async fn add_issuer(
                 Some(_) => format!("{name}-key-{}", &id.split('-').next().unwrap_or(&id)),
                 None => proposed,
             };
-            let entry = super::keys::create_managed_key_from_signer(
-                req,
-                signer,
-                &key_name,
-                super::keys::KeySource::Generated,
-            )
-            .await?;
+            let entry =
+                super::keys::create_managed_key_from_signer(req, signer, &key_name, super::keys::KeySource::Generated)
+                    .await?;
             entry.id
         }
     };
@@ -426,15 +406,10 @@ pub async fn add_issuer_keyless(
 
     let mut index: IssuersIndex = storage::get_json(req, KEY_ISSUERS_INDEX).await?.unwrap_or_default();
     if index.name_to_id(name).is_some() {
-        return Err(RvError::ErrString(format!(
-            "issuer name `{name}` already exists at this mount"
-        )));
+        return Err(RvError::ErrString(format!("issuer name `{name}` already exists at this mount")));
     }
     let id = Uuid::new_v4().to_string();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
 
     // We can't consult a signer for the algorithm on a key-less issuer,
     // so read the key type straight off the certificate's SPKI. This is
@@ -518,9 +493,7 @@ pub fn take_signer(signer: Option<Signer>, issuer_name: &str) -> Result<Signer, 
 pub(crate) fn keyless_signing_error(issuer_name: &str) -> RvError {
     RvError::ErrResponseStatus(
         400,
-        format!(
-            "issuer `{issuer_name}` is trust/chain-only (imported without a private key) and cannot sign"
-        ),
+        format!("issuer `{issuer_name}` is trust/chain-only (imported without a private key) and cannot sign"),
     )
 }
 
@@ -608,10 +581,7 @@ pub async fn list_issuers(req: &Request) -> Result<IssuersIndex, RvError> {
 /// alongside two intermediates in separate imports) is skipped rather
 /// than rejected as a duplicate. Returns `(issuer_id, issuer_name)`.
 #[maybe_async::maybe_async]
-pub async fn find_issuer_by_serial(
-    req: &Request,
-    serial_hex: &str,
-) -> Result<Option<(String, String)>, RvError> {
+pub async fn find_issuer_by_serial(req: &Request, serial_hex: &str) -> Result<Option<(String, String)>, RvError> {
     if serial_hex.is_empty() {
         return Ok(None);
     }
@@ -779,18 +749,11 @@ pub async fn delete_issuer(req: &Request, reference: &str) -> Result<(), RvError
     // can't be read, the issuer delete still proceeds; the worst
     // case is a stale ref the operator has to clear by re-reading
     // the key (which surfaces a count) and using `force=true`.
-    if let Ok(Some(meta)) =
-        storage::get_json::<CaMetadata>(req, &storage::issuer_meta_key(&id)).await
-    {
+    if let Ok(Some(meta)) = storage::get_json::<CaMetadata>(req, &storage::issuer_meta_key(&id)).await {
         if !meta.key_id.is_empty() {
             let mut refs = super::keys::load_refs(req, &meta.key_id).await.unwrap_or_default();
             if refs.issuer_ids.remove(&id) {
-                let _ = storage::put_json(
-                    req,
-                    &super::keys::refs_storage_key(&meta.key_id),
-                    &refs,
-                )
-                .await;
+                let _ = storage::put_json(req, &super::keys::refs_storage_key(&meta.key_id), &refs).await;
             }
         }
     }
@@ -823,11 +786,7 @@ pub fn require_issuing(issuer: &IssuerHandle) -> Result<(), RvError> {
     if issuer.usages.issuing_certificates {
         Ok(())
     } else {
-        log::warn!(
-            "pki: issuer {} ({}) is not authorised for issuing-certificates",
-            issuer.name,
-            issuer.id
-        );
+        log::warn!("pki: issuer {} ({}) is not authorised for issuing-certificates", issuer.name, issuer.id);
         Err(RvError::ErrPkiKeyTypeInvalid)
     }
 }
@@ -840,11 +799,7 @@ pub fn require_crl_signing(issuer: &IssuerHandle) -> Result<(), RvError> {
     if issuer.usages.crl_signing {
         Ok(())
     } else {
-        log::warn!(
-            "pki: issuer {} ({}) is not authorised for crl-signing",
-            issuer.name,
-            issuer.id
-        );
+        log::warn!("pki: issuer {} ({}) is not authorised for crl-signing", issuer.name, issuer.id);
         Err(RvError::ErrPkiKeyTypeInvalid)
     }
 }

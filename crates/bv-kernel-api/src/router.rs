@@ -268,9 +268,7 @@ impl Router {
                 let mount_entry = me.mount_entry.read().map_err(|_| RvError::ErrRequestInvalid)?;
                 if mount_entry.logical_type == "kv-v2" {
                     let kv_v2_prefixes = ["data/", "metadata/", "metadata", "destroy/", "undelete/", "config"];
-                    if !req.path.is_empty()
-                        && !kv_v2_prefixes.iter().any(|prefix| req.path.starts_with(prefix))
-                    {
+                    if !req.path.is_empty() && !kv_v2_prefixes.iter().any(|prefix| req.path.starts_with(prefix)) {
                         req.path = format!("data/{}", req.path);
                     }
                 } else if mount_entry.logical_type == "kv" {

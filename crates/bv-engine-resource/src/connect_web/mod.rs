@@ -808,8 +808,7 @@ impl super::ResourceBackendInner {
                          picked from `resources/v2/connect/provider/candidates`",
                     )
                 })?;
-                let resource_desc =
-                    provider_resource(meta).map_err(|m| WebRefusal::new(422, "invalid_profile", m))?;
+                let resource_desc = provider_resource(meta).map_err(|m| WebRefusal::new(422, "invalid_profile", m))?;
                 // The fill scope the server just checked, start origin first:
                 // every origin the recipe may fill must match the account.
                 let target = ProviderTarget::Origins { origins: profile.origins.clone() };
@@ -817,12 +816,7 @@ impl super::ResourceBackendInner {
                     .provider_launch(req, provider, "web", resource_desc, target)
                     .await
                     .map_err(provider_refusal)?;
-                Ok(PreparedCredential::Provider {
-                    launch,
-                    account_id,
-                    needs: provider_needs(needs),
-                    totp: *params,
-                })
+                Ok(PreparedCredential::Provider { launch, account_id, needs: provider_needs(needs), totp: *params })
             }
         }
     }
@@ -851,17 +845,15 @@ impl super::ResourceBackendInner {
                 provider_audit.protocol = launch.protocol.into();
                 provider_audit.provider = launch.provider.clone();
                 provider_audit.account_id = account_id.clone();
-                let released = match self
-                    .release_provider(&launch, &account_id, provider_needs, mfa_verified, "web")
-                    .await
-                {
-                    Ok(c) => c,
-                    Err(e) => {
-                        let r = provider_refusal(e);
-                        provider_audit.denied(r.code);
-                        return Err(r);
-                    }
-                };
+                let released =
+                    match self.release_provider(&launch, &account_id, provider_needs, mfa_verified, "web").await {
+                        Ok(c) => c,
+                        Err(e) => {
+                            let r = provider_refusal(e);
+                            provider_audit.denied(r.code);
+                            return Err(r);
+                        }
+                    };
                 let login = released.username.clone();
                 match provider_credential(released, needs, params, now_secs) {
                     Ok(c) => {
@@ -1631,13 +1623,14 @@ mod tests {
 
         // A seed becomes the code for `now`, and no refresh source is kept.
         let seed = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
-        let c = provider_credential(released(Some(seed)), &explicit(true, true, true), TotpParams::default(), 59)
-            .unwrap();
+        let c =
+            provider_credential(released(Some(seed)), &explicit(true, true, true), TotpParams::default(), 59).unwrap();
         assert_eq!(c.totp.unwrap().code.as_str(), "287082", "RFC 6238 SHA1 vector at t=59, 6 digits");
         assert!(c.totp_source.is_none());
 
         // A recipe that fills `totp` with no seed released is refused.
-        let r = provider_credential(released(None), &explicit(true, true, true), TotpParams::default(), 59).err().unwrap();
+        let r =
+            provider_credential(released(None), &explicit(true, true, true), TotpParams::default(), 59).err().unwrap();
         assert_eq!(r.code, "totp_not_configured");
 
         // An SSH key is never a web credential.

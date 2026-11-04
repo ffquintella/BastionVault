@@ -45,9 +45,7 @@ impl CommandExecutor for ClusterMembers {
                             if !cluster {
                                 let storage_type =
                                     obj.get("storage_type").and_then(|v| v.as_str()).unwrap_or("unknown");
-                                println!(
-                                    "Clustering is not active. Storage backend: {storage_type}"
-                                );
+                                println!("Clustering is not active. Storage backend: {storage_type}");
                                 return Ok(());
                             }
 

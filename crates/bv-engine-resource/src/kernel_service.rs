@@ -30,26 +30,13 @@ impl ConnectMfaGate for ResourceModule {
         profile_id: &str,
         ticket: Option<&str>,
     ) -> Result<Option<ConnectMfaGrant>, RvError> {
-        let redeemed = connect_mfa::enforce(
-            self.backend.core.as_ref(),
-            req,
-            ns_prefix,
-            resource,
-            profile_id,
-            ticket,
-        )
-        .await?;
-        Ok(redeemed
-            .map(|t| ConnectMfaGrant { principal: t.principal, method: t.method }))
+        let redeemed =
+            connect_mfa::enforce(self.backend.core.as_ref(), req, ns_prefix, resource, profile_id, ticket).await?;
+        Ok(redeemed.map(|t| ConnectMfaGrant { principal: t.principal, method: t.method }))
     }
 
-    async fn resource_has_gated_profile(
-        &self,
-        ns_prefix: &str,
-        resource: &str,
-    ) -> Result<bool, RvError> {
-        connect_mfa::resource_has_gated_profile(self.backend.core.as_ref(), ns_prefix, resource)
-            .await
+    async fn resource_has_gated_profile(&self, ns_prefix: &str, resource: &str) -> Result<bool, RvError> {
+        connect_mfa::resource_has_gated_profile(self.backend.core.as_ref(), ns_prefix, resource).await
     }
 }
 

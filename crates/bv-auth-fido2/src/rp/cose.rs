@@ -18,18 +18,13 @@ use super::errors::RpError;
 
 #[derive(Debug)]
 pub enum PublicKey {
-    Es256 {
-        verifying_key: p256::ecdsa::VerifyingKey,
-    },
-    Ed25519 {
-        verifying_key: ed25519_dalek::VerifyingKey,
-    },
+    Es256 { verifying_key: p256::ecdsa::VerifyingKey },
+    Ed25519 { verifying_key: ed25519_dalek::VerifyingKey },
 }
 
 /// Parse a COSE_Key CBOR blob into a verifier-ready public key.
 pub fn parse_public_key(cbor: &[u8]) -> Result<PublicKey, RpError> {
-    let val: CborValue = ciborium::de::from_reader(cbor)
-        .map_err(|e| RpError::Cbor(format!("COSE_Key: {e}")))?;
+    let val: CborValue = ciborium::de::from_reader(cbor).map_err(|e| RpError::Cbor(format!("COSE_Key: {e}")))?;
     let map = match val {
         CborValue::Map(m) => m,
         _ => return Err(RpError::BadCoseKey("not a CBOR map".into())),
@@ -61,14 +56,10 @@ pub fn parse_public_key(cbor: &[u8]) -> Result<PublicKey, RpError> {
         -7 => {
             // ES256 / ECDSA over P-256.
             if kty != Some(2) {
-                return Err(RpError::BadCoseKey(format!(
-                    "ES256 expects kty=2 (EC2), got {kty:?}"
-                )));
+                return Err(RpError::BadCoseKey(format!("ES256 expects kty=2 (EC2), got {kty:?}")));
             }
             if crv != Some(1) {
-                return Err(RpError::BadCoseKey(format!(
-                    "ES256 expects crv=1 (P-256), got {crv:?}"
-                )));
+                return Err(RpError::BadCoseKey(format!("ES256 expects crv=1 (P-256), got {crv:?}")));
             }
             let x = x.ok_or_else(|| RpError::BadCoseKey("missing x".into()))?;
             let y = y.ok_or_else(|| RpError::BadCoseKey("missing y".into()))?;
@@ -90,20 +81,14 @@ pub fn parse_public_key(cbor: &[u8]) -> Result<PublicKey, RpError> {
         -8 => {
             // EdDSA / Ed25519 (OKP).
             if kty != Some(1) {
-                return Err(RpError::BadCoseKey(format!(
-                    "EdDSA expects kty=1 (OKP), got {kty:?}"
-                )));
+                return Err(RpError::BadCoseKey(format!("EdDSA expects kty=1 (OKP), got {kty:?}")));
             }
             if crv != Some(6) {
-                return Err(RpError::BadCoseKey(format!(
-                    "EdDSA expects crv=6 (Ed25519), got {crv:?}"
-                )));
+                return Err(RpError::BadCoseKey(format!("EdDSA expects crv=6 (Ed25519), got {crv:?}")));
             }
             let x = x.ok_or_else(|| RpError::BadCoseKey("missing x".into()))?;
-            let bytes: [u8; 32] = x
-                .as_slice()
-                .try_into()
-                .map_err(|_| RpError::BadCoseKey("Ed25519 key must be 32 bytes".into()))?;
+            let bytes: [u8; 32] =
+                x.as_slice().try_into().map_err(|_| RpError::BadCoseKey("Ed25519 key must be 32 bytes".into()))?;
             let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&bytes)
                 .map_err(|e| RpError::BadCoseKey(format!("invalid Ed25519 key: {e}")))?;
             Ok(PublicKey::Ed25519 { verifying_key })

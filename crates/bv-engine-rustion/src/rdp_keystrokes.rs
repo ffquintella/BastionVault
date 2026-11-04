@@ -342,10 +342,9 @@ impl std::fmt::Display for TrailerError {
                 f,
                 "record at EOF-record_len has event_type 0x{event_type:02x}, expected 0x{EVENT_KEYSTROKE_TRAILER:02x}"
             ),
-            Self::LengthMismatch { payload_len, record_len } => write!(
-                f,
-                "keystroke trailer payload_len={payload_len} disagrees with footer record_len={record_len}"
-            ),
+            Self::LengthMismatch { payload_len, record_len } => {
+                write!(f, "keystroke trailer payload_len={payload_len} disagrees with footer record_len={record_len}")
+            }
             Self::NotUtf8 => write!(f, "keystroke trailer JSON is not valid UTF-8"),
             Self::BadJson(e) => write!(f, "keystroke trailer JSON did not parse: {e}"),
         }
@@ -369,22 +368,10 @@ pub fn parse_keystroke_header(header_json: &str) -> KeystrokeHeader {
     };
     KeystrokeHeader {
         version: obj.get("version").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-        keystroke_metadata: obj
-            .get("keystroke_metadata")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
-        keyboard_layout: obj
-            .get("keyboard_layout")
-            .and_then(|v| v.as_str())
-            .map(str::to_string),
-        keyboard_layout_source: obj
-            .get("keyboard_layout_source")
-            .and_then(|v| v.as_str())
-            .map(str::to_string),
-        max_reorder_ms: obj
-            .get("max_reorder_ms")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0),
+        keystroke_metadata: obj.get("keystroke_metadata").and_then(|v| v.as_bool()).unwrap_or(false),
+        keyboard_layout: obj.get("keyboard_layout").and_then(|v| v.as_str()).map(str::to_string),
+        keyboard_layout_source: obj.get("keyboard_layout_source").and_then(|v| v.as_str()).map(str::to_string),
+        max_reorder_ms: obj.get("max_reorder_ms").and_then(|v| v.as_u64()).unwrap_or(0),
     }
 }
 
@@ -428,20 +415,15 @@ pub fn read_trailer(bytes: &[u8]) -> Result<Transcript, TrailerError> {
     if event_type != EVENT_KEYSTROKE_TRAILER {
         return Err(TrailerError::NotTrailerRecord { event_type });
     }
-    let payload_len = u32::from_le_bytes([
-        bytes[start + 9],
-        bytes[start + 10],
-        bytes[start + 11],
-        bytes[start + 12],
-    ]) as usize;
+    let payload_len =
+        u32::from_le_bytes([bytes[start + 9], bytes[start + 10], bytes[start + 11], bytes[start + 12]]) as usize;
     if payload_len != record_len - RECORD_HEADER_LEN {
         return Err(TrailerError::LengthMismatch { payload_len, record_len });
     }
     let json_len = payload_len - TRAILER_FOOTER_LEN;
     let json_bytes = &bytes[start + RECORD_HEADER_LEN..start + RECORD_HEADER_LEN + json_len];
     let json = std::str::from_utf8(json_bytes).map_err(|_| TrailerError::NotUtf8)?;
-    let parsed: TrailerJson =
-        serde_json::from_str(json).map_err(|e| TrailerError::BadJson(e.to_string()))?;
+    let parsed: TrailerJson = serde_json::from_str(json).map_err(|e| TrailerError::BadJson(e.to_string()))?;
 
     Ok(transcript_from_trailer(parsed, TRAILER_FOOTER_LEN + record_len))
 }
@@ -466,11 +448,7 @@ fn transcript_from_trailer(t: TrailerJson, bytes_examined: usize) -> Transcript 
         warnings.push(format!(
             "text_decoding is `{}`, not `exact` — the transcript was not decoded through a \
              layout table matching the session's own keyboard layout",
-            if t.text_decoding.is_empty() {
-                "unset"
-            } else {
-                t.text_decoding.as_str()
-            }
+            if t.text_decoding.is_empty() { "unset" } else { t.text_decoding.as_str() }
         ));
     }
 
@@ -582,12 +560,7 @@ pub fn scan_text_records(bytes: &[u8]) -> Transcript {
             bytes[pos + 7],
         ]);
         let kind = bytes[pos + 8];
-        let len = u32::from_le_bytes([
-            bytes[pos + 9],
-            bytes[pos + 10],
-            bytes[pos + 11],
-            bytes[pos + 12],
-        ]) as usize;
+        let len = u32::from_le_bytes([bytes[pos + 9], bytes[pos + 10], bytes[pos + 11], bytes[pos + 12]]) as usize;
         let data_start = pos + RECORD_HEADER_LEN;
         let Some(next) = data_start.checked_add(len) else {
             break;
@@ -609,10 +582,7 @@ pub fn scan_text_records(bytes: &[u8]) -> Transcript {
                         any_approximate = true;
                     }
                     let closed = frag.run_end;
-                    let acc = open.get_or_insert_with(|| Run {
-                        t: frag.timestamp_ms,
-                        ..Run::default()
-                    });
+                    let acc = open.get_or_insert_with(|| Run { t: frag.timestamp_ms, ..Run::default() });
                     merge_fragment(acc, frag);
                     if closed {
                         if runs.len() >= MAX_SCANNED_RUNS {
@@ -638,9 +608,7 @@ pub fn scan_text_records(bytes: &[u8]) -> Transcript {
                     }
                 }
                 None => {
-                    warnings.push(format!(
-                        "skipped a malformed 0x08 text-input record ({len} payload bytes)"
-                    ));
+                    warnings.push(format!("skipped a malformed 0x08 text-input record ({len} payload bytes)"));
                 }
             }
         }
@@ -683,11 +651,7 @@ pub fn scan_text_records(bytes: &[u8]) -> Transcript {
         // A scan can prove "approximate" from a flag but can never
         // prove "exact" — the layout match is a fact only the trailer
         // carries. Say `unknown` rather than claim exactness.
-        text_decoding: if any_approximate {
-            "approximate".into()
-        } else {
-            "unknown".into()
-        },
+        text_decoding: if any_approximate { "approximate".into() } else { "unknown".into() },
         runs,
         search_text,
         census,
@@ -729,12 +693,7 @@ fn parse_text_input(timestamp_ms: u64, payload: &[u8]) -> Option<TextInputFragme
     let text = if redacted {
         None
     } else {
-        Some(
-            String::from_utf8_lossy(
-                &payload[TEXT_INPUT_PREFIX_LEN..TEXT_INPUT_PREFIX_LEN + text_len],
-            )
-            .into_owned(),
-        )
+        Some(String::from_utf8_lossy(&payload[TEXT_INPUT_PREFIX_LEN..TEXT_INPUT_PREFIX_LEN + text_len]).into_owned())
     };
     Some(TextInputFragment {
         timestamp_ms,
@@ -790,9 +749,7 @@ fn merge_fragment(acc: &mut Run, frag: TextInputFragment) {
 /// must render it as "keystroke recording was not enabled for this
 /// session", never as an empty transcript.
 pub fn read_transcript(bytes: &[u8]) -> Result<Option<Transcript>, String> {
-    let header = header_and_start(bytes)
-        .map(|(h, _)| parse_keystroke_header(h))
-        .unwrap_or_default();
+    let header = header_and_start(bytes).map(|(h, _)| parse_keystroke_header(h)).unwrap_or_default();
 
     match read_trailer(bytes) {
         Ok(t) => Ok(Some(t)),
@@ -901,10 +858,8 @@ mod tests {
 
     #[test]
     fn keystroke_metadata_false_at_version_4_is_not_an_empty_transcript() {
-        let bytes = file(
-            r#"{"version":4,"keystroke_metadata":false,"max_reorder_ms":0}"#,
-            &[record(10, 0x01, b"graphics")],
-        );
+        let bytes =
+            file(r#"{"version":4,"keystroke_metadata":false,"max_reorder_ms":0}"#, &[record(10, 0x01, b"graphics")]);
         // `Ok(None)` is the "recording was not enabled" state, which a
         // caller must render differently from "nobody typed".
         assert!(read_transcript(&bytes).unwrap().is_none());
@@ -931,30 +886,15 @@ mod tests {
         // The acceptance criterion for the fast path: growing the
         // graphics ahead of the trailer must not grow what a trailer
         // read looks at.
-        let small = file(
-            V4_HEADER,
-            &[
-                record(1, 0x07, &vec![0u8; 1024]),
-                trailer_record(30_000, TRAILER_JSON),
-            ],
-        );
-        let large = file(
-            V4_HEADER,
-            &[
-                record(1, 0x07, &vec![0u8; 4 * 1024 * 1024]),
-                trailer_record(30_000, TRAILER_JSON),
-            ],
-        );
+        let small = file(V4_HEADER, &[record(1, 0x07, &vec![0u8; 1024]), trailer_record(30_000, TRAILER_JSON)]);
+        let large =
+            file(V4_HEADER, &[record(1, 0x07, &vec![0u8; 4 * 1024 * 1024]), trailer_record(30_000, TRAILER_JSON)]);
         let a = read_trailer(&small).unwrap();
         let b = read_trailer(&large).unwrap();
         assert_eq!(a.bytes_examined, b.bytes_examined);
         // And it is bounded by the trailer, not the file: the large
         // artifact is >4 MiB, the read is a few hundred bytes.
-        assert!(
-            b.bytes_examined < 2048,
-            "examined {} bytes",
-            b.bytes_examined
-        );
+        assert!(b.bytes_examined < 2048, "examined {} bytes", b.bytes_examined);
         assert!(large.len() > 4 * 1024 * 1024);
     }
 
@@ -988,11 +928,7 @@ mod tests {
         let t = read_trailer(&bytes).unwrap();
         assert_eq!(t.search_text, "ls -l");
         assert!(!t.search_text.contains("hunter22"));
-        assert!(
-            t.warnings.iter().any(|w| w.contains("differs from")),
-            "warnings: {:?}",
-            t.warnings
-        );
+        assert!(t.warnings.iter().any(|w| w.contains("differs from")), "warnings: {:?}", t.warnings);
     }
 
     #[test]
@@ -1068,21 +1004,14 @@ mod tests {
     fn an_absurd_record_len_is_capped_before_any_allocation() {
         let mut bytes = vec![0u8; MAX_TRAILER_RECORD_BYTES + 64];
         let n = bytes.len();
-        bytes[n - 8..n - 4]
-            .copy_from_slice(&((MAX_TRAILER_RECORD_BYTES + 32) as u32).to_le_bytes());
+        bytes[n - 8..n - 4].copy_from_slice(&((MAX_TRAILER_RECORD_BYTES + 32) as u32).to_le_bytes());
         bytes[n - 4..].copy_from_slice(TRAILER_MAGIC);
-        assert!(matches!(
-            read_trailer(&bytes),
-            Err(TrailerError::BadRecordLen { .. })
-        ));
+        assert!(matches!(read_trailer(&bytes), Err(TrailerError::BadRecordLen { .. })));
     }
 
     #[test]
     fn a_short_artifact_is_rejected_without_indexing_past_the_end() {
-        assert!(matches!(
-            read_trailer(b"RREC"),
-            Err(TrailerError::TooShort { len: 4 })
-        ));
+        assert!(matches!(read_trailer(b"RREC"), Err(TrailerError::TooShort { len: 4 })));
     }
 
     #[test]
@@ -1145,13 +1074,7 @@ mod tests {
 
     #[test]
     fn a_scan_drops_the_final_unclosed_run() {
-        let bytes = file(
-            V4_HEADER,
-            &[
-                text_input(10, FLAG_RUN_END, 1, 2, "ok"),
-                text_input(20, 0, 2, 6, "unterm"),
-            ],
-        );
+        let bytes = file(V4_HEADER, &[text_input(10, FLAG_RUN_END, 1, 2, "ok"), text_input(20, 0, 2, 6, "unterm")]);
         let t = scan_text_records(&bytes);
         assert_eq!(t.runs.len(), 1);
         assert_eq!(t.search_text, "ok");
@@ -1162,13 +1085,8 @@ mod tests {
     fn a_redacted_fragment_poisons_the_whole_run() {
         // A run whose verdict lands on a later fragment must not
         // publish the text its earlier fragments carried.
-        let bytes = file(
-            V4_HEADER,
-            &[
-                text_input(10, 0, 1, 4, "pass"),
-                text_input(20, FLAG_REDACTED | FLAG_RUN_END, 1, 4, ""),
-            ],
-        );
+        let bytes =
+            file(V4_HEADER, &[text_input(10, 0, 1, 4, "pass"), text_input(20, FLAG_REDACTED | FLAG_RUN_END, 1, 4, "")]);
         let t = scan_text_records(&bytes);
         assert_eq!(t.runs.len(), 1);
         assert!(t.runs[0].redacted);
@@ -1179,10 +1097,7 @@ mod tests {
 
     #[test]
     fn a_scan_marks_approximate_but_never_claims_exact() {
-        let approx = file(
-            V4_HEADER,
-            &[text_input(10, FLAG_RUN_END | FLAG_APPROXIMATE, 1, 2, "ab")],
-        );
+        let approx = file(V4_HEADER, &[text_input(10, FLAG_RUN_END | FLAG_APPROXIMATE, 1, 2, "ab")]);
         assert_eq!(scan_text_records(&approx).text_decoding, "approximate");
         let plain = file(V4_HEADER, &[text_input(10, FLAG_RUN_END, 1, 2, "ab")]);
         assert_eq!(scan_text_records(&plain).text_decoding, "unknown");
@@ -1236,10 +1151,7 @@ mod tests {
     fn a_v4_file_with_a_trailer_prefers_the_trailer_over_the_scan() {
         let bytes = file(
             V4_HEADER,
-            &[
-                text_input(4120, FLAG_RUN_END, 3, 11, "notepad.exe[Enter]"),
-                trailer_record(40_000, TRAILER_JSON),
-            ],
+            &[text_input(4120, FLAG_RUN_END, 3, 11, "notepad.exe[Enter]"), trailer_record(40_000, TRAILER_JSON)],
         );
         let t = read_transcript(&bytes).unwrap().unwrap();
         assert_eq!(t.source, TranscriptSource::TrailerFooter);
@@ -1249,10 +1161,7 @@ mod tests {
 
     #[test]
     fn a_v4_file_whose_trailer_was_never_written_falls_back() {
-        let bytes = file(
-            V4_HEADER,
-            &[text_input(4120, FLAG_RUN_END, 3, 11, "notepad.exe[Enter]")],
-        );
+        let bytes = file(V4_HEADER, &[text_input(4120, FLAG_RUN_END, 3, 11, "notepad.exe[Enter]")]);
         let t = read_transcript(&bytes).unwrap().unwrap();
         assert_eq!(t.source, TranscriptSource::TextRecordScan);
         assert_eq!(t.search_text, "notepad.exe[Enter]");

@@ -117,10 +117,7 @@ async fn save_cursor(log_path: &Path, cursor: &Cursor) {
     match serde_json::to_vec(cursor) {
         Ok(bytes) => {
             if let Err(e) = tokio::fs::write(&path, bytes).await {
-                log::warn!(
-                    "access-audit: failed to persist cursor {}: {e}",
-                    path.display()
-                );
+                log::warn!("access-audit: failed to persist cursor {}: {e}", path.display());
             }
         }
         Err(e) => log::warn!("access-audit: cursor serialize failed: {e}"),
@@ -140,10 +137,7 @@ fn rotated_sibling(log_path: &Path) -> PathBuf {
 pub fn start_access_audit_reconciler(core: Arc<Core>) -> tokio::task::JoinHandle<()> {
     tokio::task::spawn(async move {
         let running: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
-        log::info!(
-            "access-audit: reconciler started (tick every {}s)",
-            TICK_INTERVAL.as_secs()
-        );
+        log::info!("access-audit: reconciler started (tick every {}s)", TICK_INTERVAL.as_secs());
 
         let mut interval = tokio::time::interval(TICK_INTERVAL);
         loop {
@@ -183,10 +177,7 @@ pub async fn run_tick(core: &Arc<Core>) -> Result<usize, RvError> {
     for path in broker.file_source_paths() {
         match reconcile_file(&store, &path).await {
             Ok(n) => total += n,
-            Err(e) => log::warn!(
-                "access-audit: reconcile of {} failed: {e}",
-                path.display()
-            ),
+            Err(e) => log::warn!("access-audit: reconcile of {} failed: {e}", path.display()),
         }
     }
     Ok(total)
@@ -214,10 +205,7 @@ async fn reconcile_file(store: &AccessAuditStore, log_path: &Path) -> Result<usi
         if tokio::fs::try_exists(&sibling).await.unwrap_or(false) {
             match read_new_lines(&sibling, cursor.offset).await {
                 Ok((lines, _)) => ingested += ingest_lines(store, &lines).await,
-                Err(e) => log::warn!(
-                    "access-audit: rotation tail drain of {} failed: {e}",
-                    sibling.display()
-                ),
+                Err(e) => log::warn!("access-audit: rotation tail drain of {} failed: {e}", sibling.display()),
             }
         }
         cursor.offset = 0;
@@ -238,13 +226,9 @@ async fn read_new_lines(path: &Path, offset: u64) -> Result<(Vec<String>, u64), 
     let mut file = tokio::fs::File::open(path)
         .await
         .map_err(|e| crate::bv_error_string!(format!("open {} failed: {e}", path.display())))?;
-    file.seek(SeekFrom::Start(offset))
-        .await
-        .map_err(|e| crate::bv_error_string!(format!("seek failed: {e}")))?;
+    file.seek(SeekFrom::Start(offset)).await.map_err(|e| crate::bv_error_string!(format!("seek failed: {e}")))?;
     let mut buf = Vec::new();
-    file.read_to_end(&mut buf)
-        .await
-        .map_err(|e| crate::bv_error_string!(format!("read failed: {e}")))?;
+    file.read_to_end(&mut buf).await.map_err(|e| crate::bv_error_string!(format!("read failed: {e}")))?;
 
     // Only consume through the last complete line.
     let last_nl = buf.iter().rposition(|&b| b == b'\n');
@@ -256,11 +240,7 @@ async fn read_new_lines(path: &Path, offset: u64) -> Result<(Vec<String>, u64), 
     let new_offset = offset + consumed.len() as u64;
 
     let text = String::from_utf8_lossy(consumed);
-    let lines: Vec<String> = text
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| l.to_string())
-        .collect();
+    let lines: Vec<String> = text.lines().filter(|l| !l.trim().is_empty()).map(|l| l.to_string()).collect();
     Ok((lines, new_offset))
 }
 
@@ -309,8 +289,7 @@ fn parse_ingestable(line: &str) -> Option<AccessAuditEntry> {
     // secret whose own path embeds it — e.g. `secret/data/login` or
     // `secret/data/app/login-config` — so those legitimate reads would
     // silently never reach the Audit page.
-    let is_auth_login =
-        path.starts_with("auth/") && path.split('/').any(|seg| seg == "login");
+    let is_auth_login = path.starts_with("auth/") && path.split('/').any(|seg| seg == "login");
     if is_auth_login || path == "sys/audit/events" {
         return None;
     }
@@ -349,11 +328,7 @@ pub async fn set_config(core: &dyn VaultCtx, cfg: &AccessAuditConfig) -> Result<
     };
     let view: Arc<BarrierView> = Arc::new(system_view.new_sub_view(CONFIG_SUB_PATH));
     let value = serde_json::to_vec(cfg)?;
-    view.put(&StorageEntry {
-        key: CONFIG_KEY.to_string(),
-        value,
-    })
-    .await
+    view.put(&StorageEntry { key: CONFIG_KEY.to_string(), value }).await
 }
 
 #[cfg(test)]
@@ -361,11 +336,7 @@ mod tests {
     use super::*;
 
     fn response_line(path: &str, op: &str, name: &str, error: &str) -> String {
-        let mut e = AuditEntry {
-            time: "2026-07-21T09:15:19Z".into(),
-            r#type: "response".into(),
-            ..Default::default()
-        };
+        let mut e = AuditEntry { time: "2026-07-21T09:15:19Z".into(), r#type: "response".into(), ..Default::default() };
         e.request.path = path.into();
         e.request.operation = op.into();
         e.request.remote_address = "10.0.0.5".into();
@@ -386,11 +357,7 @@ mod tests {
 
     #[test]
     fn skips_request_type_entries() {
-        let mut e = AuditEntry {
-            time: "2026-07-21T09:15:19Z".into(),
-            r#type: "request".into(),
-            ..Default::default()
-        };
+        let mut e = AuditEntry { time: "2026-07-21T09:15:19Z".into(), r#type: "request".into(), ..Default::default() };
         e.request.path = "secret/data/foo".into();
         let line = crate::audit::entry::serialize_line(&e).unwrap();
         assert!(parse_ingestable(&line).is_none());
@@ -405,26 +372,16 @@ mod tests {
     #[test]
     fn skips_login_paths() {
         let line = response_line("auth/userpass/login/felipe", "write", "felipe", "");
-        assert!(
-            parse_ingestable(&line).is_none(),
-            "logins are covered by the login store"
-        );
+        assert!(parse_ingestable(&line).is_none(), "logins are covered by the login store");
     }
 
     #[test]
     fn ingests_secret_whose_path_embeds_login() {
         // A `contains("/login")` filter would wrongly drop these; the
         // segment-precise check keeps them.
-        for p in [
-            "secret/data/login",
-            "secret/data/app/login-config",
-            "secret/data/logins",
-        ] {
+        for p in ["secret/data/login", "secret/data/app/login-config", "secret/data/logins"] {
             let line = response_line(p, "read", "felipe", "");
-            assert!(
-                parse_ingestable(&line).is_some(),
-                "secret path {p} should be ingested"
-            );
+            assert!(parse_ingestable(&line).is_some(), "secret path {p} should be ingested");
         }
     }
 
@@ -454,20 +411,12 @@ mod tests {
     #[test]
     fn machine_bound_read_records_user_and_machine_separately() {
         let spiffe = "ferrogate-spiffe://ferrogate-hml/host/5376139b";
-        let mut e = AuditEntry {
-            time: "2026-07-21T09:15:19Z".into(),
-            r#type: "response".into(),
-            ..Default::default()
-        };
+        let mut e = AuditEntry { time: "2026-07-21T09:15:19Z".into(), r#type: "response".into(), ..Default::default() };
         e.request.path = "notifications/inbox/unread-count".into();
         e.request.operation = "read".into();
         e.auth.display_name = spiffe.into();
-        e.auth
-            .metadata
-            .insert("spiffe_id".into(), serde_json::Value::String(spiffe.into()));
-        e.auth
-            .metadata
-            .insert("username".into(), serde_json::Value::String("felipe".into()));
+        e.auth.metadata.insert("spiffe_id".into(), serde_json::Value::String(spiffe.into()));
+        e.auth.metadata.insert("username".into(), serde_json::Value::String("felipe".into()));
         let line = crate::audit::entry::serialize_line(&e).unwrap();
 
         let out = parse_ingestable(&line).expect("should ingest");
@@ -480,17 +429,11 @@ mod tests {
     #[test]
     fn unbound_machine_read_keeps_the_machine_as_actor() {
         let spiffe = "ferrogate-spiffe://ferrogate-hml/host/5376139b";
-        let mut e = AuditEntry {
-            time: "2026-07-21T09:15:19Z".into(),
-            r#type: "response".into(),
-            ..Default::default()
-        };
+        let mut e = AuditEntry { time: "2026-07-21T09:15:19Z".into(), r#type: "response".into(), ..Default::default() };
         e.request.path = "secret/data/foo".into();
         e.request.operation = "read".into();
         e.auth.display_name = spiffe.into();
-        e.auth
-            .metadata
-            .insert("spiffe_id".into(), serde_json::Value::String(spiffe.into()));
+        e.auth.metadata.insert("spiffe_id".into(), serde_json::Value::String(spiffe.into()));
         let line = crate::audit::entry::serialize_line(&e).unwrap();
 
         let out = parse_ingestable(&line).expect("should ingest");

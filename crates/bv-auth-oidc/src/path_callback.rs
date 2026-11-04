@@ -23,8 +23,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use openidconnect::{
     core::{CoreClient, CoreProviderMetadata},
-    AuthorizationCode, ClientId, ClientSecret, IssuerUrl, Nonce, PkceCodeVerifier, RedirectUrl,
-    TokenResponse,
+    AuthorizationCode, ClientId, ClientSecret, IssuerUrl, Nonce, PkceCodeVerifier, RedirectUrl, TokenResponse,
 };
 use serde_json::{Map, Value};
 
@@ -37,9 +36,7 @@ use super::{
 use crate::{
     context::Context,
     errors::RvError,
-    logical::{
-        Auth, Backend, Field, FieldType, Lease, Operation, Path, PathOperation, Request, Response,
-    },
+    logical::{Auth, Backend, Field, FieldType, Lease, Operation, Path, PathOperation, Request, Response},
     new_fields, new_fields_internal, new_path, new_path_internal,
     utils::policy::equivalent_policies,
 };
@@ -79,15 +76,10 @@ impl OidcBackendInner {
     /// on a rejected attempt (the user is only known once the ID token
     /// verifies). The audit write is best-effort and never alters the
     /// login result.
-    pub async fn callback(
-        &self,
-        backend: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn callback(&self, backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let remote_addr = req.connection.as_ref().map(|c| c.peer_addr.clone()).unwrap_or_default();
         let result = self.callback_inner(backend, req).await;
-        let (success, details) =
-            bv_auth_audit::login_outcome(&result);
+        let (success, details) = bv_auth_audit::login_outcome(&result);
         let username = match &result {
             Ok(Some(resp)) => resp
                 .auth
@@ -97,37 +89,15 @@ impl OidcBackendInner {
                 .unwrap_or_else(|| "(unknown)".to_string()),
             _ => "(unknown)".to_string(),
         };
-        bv_auth_audit::record_login(
-            &self.core,
-            "oidc/",
-            &username,
-            success,
-            &remote_addr,
-            &details,
-        )
-        .await;
+        bv_auth_audit::record_login(&self.core, "oidc/", &username, success, &remote_addr, &details).await;
         result
     }
 
-    async fn callback_inner(
-        &self,
-        _backend: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
-        let state = req
-            .get_data_as_str("state")
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        let code = req
-            .get_data_as_str("code")
-            .unwrap_or_default()
-            .trim()
-            .to_string();
+    async fn callback_inner(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let state = req.get_data_as_str("state").unwrap_or_default().trim().to_string();
+        let code = req.get_data_as_str("code").unwrap_or_default().trim().to_string();
         if state.is_empty() || code.is_empty() {
-            return Err(RvError::ErrString(
-                "oidc: `state` and `code` are required".into(),
-            ));
+            return Err(RvError::ErrString("oidc: `state` and `code` are required".into()));
         }
 
         // Load-and-delete the per-flow state. Deleting first defends
@@ -136,32 +106,21 @@ impl OidcBackendInner {
         // other falls into the "no such state" branch below.
         let state_key = format!("{STATE_PREFIX}{state}");
         let stored = req.storage_get(&state_key).await?.ok_or_else(|| {
-            RvError::ErrString(
-                "oidc: unknown or expired state — re-run `auth_url` to start over".into(),
-            )
+            RvError::ErrString("oidc: unknown or expired state — re-run `auth_url` to start over".into())
         })?;
         req.storage_delete(&state_key).await?;
         let auth_state: OidcAuthState = serde_json::from_slice(&stored.value)?;
 
         if auth_state.is_expired(super::path_auth_url::unix_now()) {
-            return Err(RvError::ErrString(
-                "oidc: state expired — re-run `auth_url`".into(),
-            ));
+            return Err(RvError::ErrString("oidc: state expired — re-run `auth_url`".into()));
         }
 
         let cfg = OidcConfig::load(req).await?.ok_or_else(|| {
-            RvError::ErrString(
-                "oidc: provider config missing during callback — mount may be misconfigured"
-                    .into(),
-            )
+            RvError::ErrString("oidc: provider config missing during callback — mount may be misconfigured".into())
         })?;
-        let role =
-            OidcRoleEntry::load(req, &auth_state.role_name).await?.ok_or_else(|| {
-                RvError::ErrString(format!(
-                    "oidc: role `{}` no longer exists — rejecting login",
-                    auth_state.role_name
-                ))
-            })?;
+        let role = OidcRoleEntry::load(req, &auth_state.role_name).await?.ok_or_else(|| {
+            RvError::ErrString(format!("oidc: role `{}` no longer exists — rejecting login", auth_state.role_name))
+        })?;
 
         // Re-construct the client the same way `auth_url` did. We
         // rediscover every callback so an IdP-side key rotation
@@ -209,8 +168,8 @@ impl OidcBackendInner {
         // role.validate_claims + role.claim_mappings can work on
         // arbitrary fields without having to hand-enumerate every
         // well-known claim.
-        let claims_json = serde_json::to_value(claims)
-            .map_err(|e| RvError::ErrString(format!("oidc: serialize claims: {e}")))?;
+        let claims_json =
+            serde_json::to_value(claims).map_err(|e| RvError::ErrString(format!("oidc: serialize claims: {e}")))?;
         let claims_map: Map<String, Value> = match claims_json {
             Value::Object(m) => m,
             _ => Map::new(),
@@ -218,20 +177,12 @@ impl OidcBackendInner {
 
         // Audience(s). openidconnect returns a Vec<Audience>; we
         // project to Vec<String> for `validate_claims`.
-        let audiences: Vec<String> = claims
-            .audiences()
-            .iter()
-            .map(|a| a.to_string())
-            .collect();
+        let audiences: Vec<String> = claims.audiences().iter().map(|a| a.to_string()).collect();
 
         role.validate_claims(&audiences, &claims_map)?;
 
         // Build the Auth reply.
-        let user_claim_name = if role.user_claim.is_empty() {
-            "sub"
-        } else {
-            role.user_claim.as_str()
-        };
+        let user_claim_name = if role.user_claim.is_empty() { "sub" } else { role.user_claim.as_str() };
         let display_name = claims_map
             .get(user_claim_name)
             .and_then(|v| v.as_str())
@@ -245,23 +196,13 @@ impl OidcBackendInner {
         // back as root-bound and non-child-visible, and — with no `mount_path`
         // below — could not be widened by a namespace assignment either, so an
         // SSO principal granted several namespaces could reach none of them.
-        let (ns_path, ns_uuid) = crate::kernel_api::namespace::login_namespace_for_principal(
-            &self.core,
-            req,
-            "oidc/",
-            &display_name,
-        )
-        .await?;
+        let (ns_path, ns_uuid) =
+            crate::kernel_api::namespace::login_namespace_for_principal(&self.core, req, "oidc/", &display_name)
+                .await?;
 
         // Refuse the login if the principal's assignment excludes that namespace.
         // No record ⇒ unrestricted; fails closed otherwise.
-        crate::kernel_api::namespace::enforce_login_assignment(
-            &self.core,
-            "oidc/",
-            &display_name,
-            &ns_path,
-        )
-        .await?;
+        crate::kernel_api::namespace::enforce_login_assignment(&self.core, "oidc/", &display_name, &ns_path).await?;
 
         let mut metadata: HashMap<String, String> = HashMap::new();
         metadata.insert("role".to_string(), auth_state.role_name.clone());
@@ -269,18 +210,10 @@ impl OidcBackendInner {
         metadata.insert("username".to_string(), display_name.clone());
         metadata.insert("auth_method".to_string(), "oidc".to_string());
 
-        project_claim_mappings(
-            &auth_state.role_name,
-            &role.claim_mappings,
-            &claims_map,
-            &mut metadata,
-        );
+        project_claim_mappings(&auth_state.role_name, &role.claim_mappings, &claims_map, &mut metadata);
         if !role.groups_claim.is_empty() {
             if let Some(v) = claims_map.get(&role.groups_claim) {
-                metadata.insert(
-                    "groups".to_string(),
-                    claim_to_string(v),
-                );
+                metadata.insert("groups".to_string(), claim_to_string(v));
             }
         }
         // The `(mount, name)` pair `NsAssignmentStore` is keyed by. Without it
@@ -297,14 +230,8 @@ impl OidcBackendInner {
         auth.metadata = metadata;
         // Stamp the namespace binding. `child_visible` follows the namespace's
         // `child_visible_default` and fails safe to false.
-        let child_visible =
-            crate::kernel_api::namespace::login_child_visible(&self.core, &ns_path).await;
-        crate::kernel_api::namespace::stamp_binding(
-            &mut auth.metadata,
-            &ns_path,
-            &ns_uuid,
-            child_visible,
-        );
+        let child_visible = crate::kernel_api::namespace::login_child_visible(&self.core, &ns_path).await;
+        crate::kernel_api::namespace::stamp_binding(&mut auth.metadata, &ns_path, &ns_uuid, child_visible);
         auth.lease = Lease::default();
         if role.token_ttl_secs > 0 {
             auth.lease.ttl = Duration::from_secs(role.token_ttl_secs);
@@ -313,10 +240,7 @@ impl OidcBackendInner {
             auth.lease.max_ttl = Duration::from_secs(role.token_max_ttl_secs);
         }
 
-        Ok(Some(Response {
-            auth: Some(auth),
-            ..Default::default()
-        }))
+        Ok(Some(Response { auth: Some(auth), ..Default::default() }))
     }
 
     /// Renewal path — the token store calls this when a client
@@ -324,32 +248,17 @@ impl OidcBackendInner {
     /// make sure it still exists and its policies haven't drifted;
     /// if they have, renewal fails and the client gets a fresh
     /// token by running the consent flow again.
-    pub async fn login_renew(
-        &self,
-        _backend: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
-        let auth = req
-            .auth
-            .as_ref()
-            .ok_or_else(|| RvError::ErrString("oidc renew: missing auth on request".into()))?;
-        let role_name = auth
-            .metadata
-            .get("role")
-            .cloned()
-            .unwrap_or_default();
+    pub async fn login_renew(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let auth = req.auth.as_ref().ok_or_else(|| RvError::ErrString("oidc renew: missing auth on request".into()))?;
+        let role_name = auth.metadata.get("role").cloned().unwrap_or_default();
         if role_name.is_empty() {
-            return Err(RvError::ErrString(
-                "oidc renew: role metadata missing on token".into(),
-            ));
+            return Err(RvError::ErrString("oidc renew: role metadata missing on token".into()));
         }
-        let role = OidcRoleEntry::load(req, &role_name).await?.ok_or_else(|| {
-            RvError::ErrString(format!("oidc renew: role `{role_name}` no longer exists"))
-        })?;
+        let role = OidcRoleEntry::load(req, &role_name)
+            .await?
+            .ok_or_else(|| RvError::ErrString(format!("oidc renew: role `{role_name}` no longer exists")))?;
         if !equivalent_policies(&auth.policies, &role.policies) {
-            return Err(RvError::ErrString(
-                "oidc renew: role policies drifted since token was minted".into(),
-            ));
+            return Err(RvError::ErrString("oidc renew: role policies drifted since token was minted".into()));
         }
 
         let mut renewed = Auth::default();
@@ -363,10 +272,7 @@ impl OidcBackendInner {
         if role.token_max_ttl_secs > 0 {
             renewed.lease.max_ttl = Duration::from_secs(role.token_max_ttl_secs);
         }
-        Ok(Some(Response {
-            auth: Some(renewed),
-            ..Default::default()
-        }))
+        Ok(Some(Response { auth: Some(renewed), ..Default::default() }))
     }
 }
 
@@ -416,11 +322,7 @@ fn claim_to_string(v: &Value) -> String {
         Value::Number(n) => n.to_string(),
         Value::Bool(b) => b.to_string(),
         Value::Null => String::new(),
-        Value::Array(arr) => arr
-            .iter()
-            .map(claim_to_string)
-            .collect::<Vec<_>>()
-            .join(","),
+        Value::Array(arr) => arr.iter().map(claim_to_string).collect::<Vec<_>>().join(","),
         Value::Object(_) => serde_json::to_string(v).unwrap_or_default(),
     }
 }
@@ -439,10 +341,7 @@ mod tests {
 
     #[test]
     fn claim_to_string_joins_arrays() {
-        let v = Value::Array(vec![
-            Value::String("admins".into()),
-            Value::String("devs".into()),
-        ]);
+        let v = Value::Array(vec![Value::String("admins".into()), Value::String("devs".into())]);
         assert_eq!(claim_to_string(&v), "admins,devs");
     }
 
@@ -457,10 +356,7 @@ mod tests {
     }
 
     fn claims(pairs: &[(&str, &str)]) -> Map<String, Value> {
-        pairs
-            .iter()
-            .map(|(k, v)| (k.to_string(), Value::String(v.to_string())))
-            .collect()
+        pairs.iter().map(|(k, v)| (k.to_string(), Value::String(v.to_string()))).collect()
     }
 
     #[test]

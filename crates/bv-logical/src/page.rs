@@ -101,17 +101,10 @@ pub fn optional_param(req: &Request, key: &str) -> Value {
 /// Callers whose keys have a known shape (a hex serial, a UUID) should check
 /// that themselves before calling; this can only enforce what is true of
 /// every key.
-pub fn paginate(
-    req: &Request,
-    mut keys: Vec<String>,
-    limits: PageLimits,
-) -> Result<Page, RvError> {
+pub fn paginate(req: &Request, mut keys: Vec<String>, limits: PageLimits) -> Result<Page, RvError> {
     let after = optional_param(req, "after").as_str().unwrap_or("").trim().to_string();
     if after.len() > MAX_CURSOR_LEN {
-        return Err(bv_errors::bv_error_response_status!(
-            400,
-            "`after` is not a valid cursor: too long"
-        ));
+        return Err(bv_errors::bv_error_response_status!(400, "`after` is not a valid cursor: too long"));
     }
     let limit = match optional_param(req, "limit").as_u64().unwrap_or(0) {
         0 => limits.default_limit,
@@ -143,11 +136,7 @@ pub fn paginate(
 /// metadata: a listing that silently omits an object is worse than one that
 /// shows a row the operator can drill into to find out why.
 pub fn page_response(page: &Page, records: Vec<Value>) -> Response {
-    debug_assert_eq!(
-        page.keys.len(),
-        records.len(),
-        "page_response: one record per key, in key order"
-    );
+    debug_assert_eq!(page.keys.len(), records.len(), "page_response: one record per key, in key order");
     let mut data: Map<String, Value> = Map::new();
     data.insert("keys".into(), json!(page.keys));
     data.insert("records".into(), Value::Array(records));
@@ -234,8 +223,7 @@ mod tests {
                 true => json!({"limit": 5}),
                 false => json!({"limit": 5, "after": cursor}),
             };
-            let page = paginate(&req_with(Some(params)), all.clone(), PageLimits::default())
-                .unwrap();
+            let page = paginate(&req_with(Some(params)), all.clone(), PageLimits::default()).unwrap();
             seen.extend(page.keys.iter().cloned());
             cursor = page.next.clone();
             if cursor.is_empty() {
@@ -251,17 +239,12 @@ mod tests {
         // The reason the cursor is a key and not an offset: with an offset,
         // this insert makes the next page re-serve `key-002`.
         let mut all = keys(6);
-        let first = paginate(&req_with(Some(json!({"limit": 3}))), all.clone(), PageLimits::default())
-            .unwrap();
+        let first = paginate(&req_with(Some(json!({"limit": 3}))), all.clone(), PageLimits::default()).unwrap();
         assert_eq!(first.next, "key-002");
 
         all.push("key-000a".to_string());
-        let second = paginate(
-            &req_with(Some(json!({"limit": 3, "after": first.next}))),
-            all,
-            PageLimits::default(),
-        )
-        .unwrap();
+        let second =
+            paginate(&req_with(Some(json!({"limit": 3, "after": first.next}))), all, PageLimits::default()).unwrap();
         assert_eq!(second.total, 7, "the new key is counted");
         for k in &second.keys {
             assert!(!first.keys.contains(k), "`{k}` served twice across the insert");
@@ -274,12 +257,8 @@ mod tests {
         // deleted. Resuming must continue at `key-003`, not restart.
         let mut all = keys(6);
         all.retain(|k| k != "key-002");
-        let page = paginate(
-            &req_with(Some(json!({"after": "key-002", "limit": 2}))),
-            all,
-            PageLimits::default(),
-        )
-        .unwrap();
+        let page =
+            paginate(&req_with(Some(json!({"after": "key-002", "limit": 2}))), all, PageLimits::default()).unwrap();
         assert_eq!(page.keys, vec!["key-003", "key-004"]);
     }
 
@@ -316,11 +295,7 @@ mod tests {
 
     #[test]
     fn response_carries_the_page_envelope() {
-        let page = Page {
-            keys: vec!["a".into(), "b".into()],
-            total: 7,
-            next: "b".into(),
-        };
+        let page = Page { keys: vec!["a".into(), "b".into()], total: 7, next: "b".into() };
         let resp = page_response(&page, vec![json!({"name": "a"}), json!({"name": "b"})]);
         let data = resp.data.unwrap();
         assert_eq!(data["total"], json!(7));

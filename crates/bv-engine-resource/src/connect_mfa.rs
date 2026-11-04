@@ -194,7 +194,9 @@ fn sql_action_field(req: &Request) -> Result<Option<String>, RvError> {
         Ok(Value::String(s)) => s,
         Ok(Value::Array(items)) => {
             let names: Option<Vec<&str>> = items.iter().map(Value::as_str).collect();
-            names.ok_or_else(|| bv_error_response_status!(400, "`action` must be a string or a list of strings"))?.join(",")
+            names
+                .ok_or_else(|| bv_error_response_status!(400, "`action` must be a string or a list of strings"))?
+                .join(",")
         }
         _ => return Err(bv_error_response_status!(400, "`action` must be a string or a list of strings")),
     };
@@ -223,7 +225,9 @@ pub enum TicketError {
     /// No record under that hash: never minted, already consumed, or the
     /// storage entry was reaped.
     Unknown,
-    Expired { expires_at: String },
+    Expired {
+        expires_at: String,
+    },
     /// The record exists but was minted for a different principal, tenant,
     /// resource, or profile.
     Mismatch(&'static str),
@@ -238,10 +242,9 @@ impl std::fmt::Display for TicketError {
                 "connect MFA ticket is unknown or has already been used; \
                  re-run the MFA prompt"
             ),
-            Self::Expired { expires_at } => write!(
-                f,
-                "connect MFA ticket expired at {expires_at}; re-run the MFA prompt"
-            ),
+            Self::Expired { expires_at } => {
+                write!(f, "connect MFA ticket expired at {expires_at}; re-run the MFA prompt")
+            }
             Self::Mismatch(what) => write!(
                 f,
                 "connect MFA ticket was not issued for this {what}; \
@@ -289,11 +292,7 @@ impl ConnectMfaTicketStore {
     /// Mint a ticket for `binding`, proved by `method`. Returns the raw
     /// ticket (the only time it exists in plaintext) alongside the stored
     /// record.
-    pub async fn mint(
-        &self,
-        binding: &TicketBinding,
-        method: &str,
-    ) -> Result<(String, ConnectMfaTicket), RvError> {
+    pub async fn mint(&self, binding: &TicketBinding, method: &str) -> Result<(String, ConnectMfaTicket), RvError> {
         // Scope the (`!Send`) ThreadRng so it is dropped before the awaits
         // below — otherwise this future stops being `Send` and no handler can
         // call it. Same pattern as the Rustion dispatcher's planning step.
@@ -331,11 +330,7 @@ impl ConnectMfaTicketStore {
     /// [`TicketError::Unknown`]. A validation failure after the delete is
     /// intentional too: a ticket presented against the wrong profile is
     /// burnt, not retried.
-    pub async fn consume(
-        &self,
-        ticket: &str,
-        expect: &TicketBinding,
-    ) -> Result<ConnectMfaTicket, TicketError> {
+    pub async fn consume(&self, ticket: &str, expect: &TicketBinding) -> Result<ConnectMfaTicket, TicketError> {
         let ticket = ticket.trim();
         if ticket.is_empty() {
             return Err(TicketError::Unknown);
@@ -348,8 +343,8 @@ impl ConnectMfaTicketStore {
         };
         self.view.delete(&key).await.map_err(TicketError::Storage)?;
 
-        let record: ConnectMfaTicket = serde_json::from_slice(&entry.value)
-            .map_err(|e| TicketError::Storage(e.into()))?;
+        let record: ConnectMfaTicket =
+            serde_json::from_slice(&entry.value).map_err(|e| TicketError::Storage(e.into()))?;
 
         if record.mount != expect.mount || record.principal != expect.principal {
             return Err(TicketError::Mismatch("principal"));
@@ -365,12 +360,8 @@ impl ConnectMfaTicketStore {
         }
         match (&record.mcp_call, &expect.mcp_call) {
             (None, None) => {}
-            (Some(_), None) => {
-                return Err(TicketError::Mismatch("connect (it was issued for one MCP agent call)"))
-            }
-            (None, Some(_)) => {
-                return Err(TicketError::Mismatch("MCP agent call (it was issued for a human connect)"))
-            }
+            (Some(_), None) => return Err(TicketError::Mismatch("connect (it was issued for one MCP agent call)")),
+            (None, Some(_)) => return Err(TicketError::Mismatch("MCP agent call (it was issued for a human connect)")),
             (Some(minted), Some(expected)) if minted != expected => {
                 return Err(TicketError::Mismatch("MCP agent call"))
             }
@@ -380,12 +371,8 @@ impl ConnectMfaTicketStore {
         // in for a step-up; an action ticket never opens a connect.
         match (&record.action, &expect.action) {
             (None, None) => {}
-            (Some(_), None) => {
-                return Err(TicketError::Mismatch("connect (it was issued for a SQL step-up action)"))
-            }
-            (None, Some(_)) => {
-                return Err(TicketError::Mismatch("SQL step-up action (it was issued for a connect)"))
-            }
+            (Some(_), None) => return Err(TicketError::Mismatch("connect (it was issued for a SQL step-up action)")),
+            (None, Some(_)) => return Err(TicketError::Mismatch("SQL step-up action (it was issued for a connect)")),
             (Some(minted), Some(expected)) if minted != expected => {
                 return Err(TicketError::Mismatch("SQL step-up action"))
             }
@@ -441,9 +428,10 @@ impl ConnectMfaTicketStore {
 /// error names the reason so an operator who gates a profile and then hits
 /// it with an AppRole token gets a diagnosis, not a generic denial.
 pub fn caller_principal(req: &Request) -> Result<(String, String), RvError> {
-    let auth = req.auth.as_ref().ok_or_else(|| {
-        bv_error_response_status!(401, "connect MFA requires an authenticated caller")
-    })?;
+    let auth = req
+        .auth
+        .as_ref()
+        .ok_or_else(|| bv_error_response_status!(401, "connect MFA requires an authenticated caller"))?;
     let mount = auth.metadata.get("mount_path").map(|s| s.as_str()).unwrap_or_default();
     let username = auth.metadata.get("username").map(|s| s.as_str()).unwrap_or_default();
 
@@ -499,9 +487,7 @@ pub async fn load_profile(
 pub fn find_profile(meta: &Map<String, Value>, profile_id: &str) -> Option<Value> {
     meta.get("connection_profiles")
         .and_then(|v| v.as_array())
-        .and_then(|arr| {
-            arr.iter().find(|p| p.get("id").and_then(|i| i.as_str()) == Some(profile_id)).cloned()
-        })
+        .and_then(|arr| arr.iter().find(|p| p.get("id").and_then(|i| i.as_str()) == Some(profile_id)).cloned())
 }
 
 /// Whether a profile value carries the gate: the profile's `require_mfa`
@@ -523,11 +509,7 @@ pub fn profile_gate_flag(profile: &Value) -> bool {
 /// Moved here from the Rustion transport, which is where it was written and
 /// where it did not belong: the gate is the resource engine's, and the second
 /// transport to need it would otherwise have copied the check.
-pub async fn resource_has_gated_profile(
-    core: &dyn VaultCtx,
-    ns_prefix: &str,
-    resource: &str,
-) -> Result<bool, RvError> {
+pub async fn resource_has_gated_profile(core: &dyn VaultCtx, ns_prefix: &str, resource: &str) -> Result<bool, RvError> {
     let path = format!("{ns_prefix}resources/resources/{resource}");
     let mut sub = Request::new(&path);
     sub.operation = crate::logical::Operation::Read;
@@ -553,10 +535,7 @@ pub async fn profile_requires_mfa(
     resource: &str,
     profile_id: &str,
 ) -> Result<bool, RvError> {
-    Ok(load_profile(core, ns_prefix, resource, profile_id)
-        .await?
-        .map(|p| profile_gate_flag(&p))
-        .unwrap_or(false))
+    Ok(load_profile(core, ns_prefix, resource, profile_id).await?.map(|p| profile_gate_flag(&p)).unwrap_or(false))
 }
 
 // ── The guard ──────────────────────────────────────────────────────
@@ -692,10 +671,7 @@ impl super::ResourceBackendInner {
         if req.auth.is_none() {
             return Err(bv_error_response_status!(401, "no authenticated caller"));
         }
-        let policy = self
-            .core
-            .policy()
-            .ok_or_else(|| crate::bv_error_string!("policy module not registered"))?;
+        let policy = self.core.policy().ok_or_else(|| crate::bv_error_string!("policy module not registered"))?;
 
         let ns = caller_namespace(&self.core, req).await?;
         let ns_prefix = if ns.is_empty() { String::new() } else { format!("{ns}/") };
@@ -840,10 +816,7 @@ impl super::ResourceBackendInner {
     ) -> Result<Option<crate::logical::Response>, RvError> {
         let (resource, profile_id, profile, sql_profile) = self.mfa_target(req).await?;
         let profile = profile.ok_or_else(|| {
-            bv_error_response_status!(
-                404,
-                &format!("profile `{profile_id}` not found on resource `{resource}`")
-            )
+            bv_error_response_status!(404, &format!("profile `{profile_id}` not found on resource `{resource}`"))
         })?;
         // A step-up action (features/sql-browser.md §8.3) is gated by the
         // profile's `sql.step_up`, whatever `require_mfa` says.
@@ -910,10 +883,7 @@ impl super::ResourceBackendInner {
     ) -> Result<Option<crate::logical::Response>, RvError> {
         let (resource, profile_id, profile, sql_profile) = self.mfa_target(req).await?;
         let profile = profile.ok_or_else(|| {
-            bv_error_response_status!(
-                404,
-                &format!("profile `{profile_id}` not found on resource `{resource}`")
-            )
+            bv_error_response_status!(404, &format!("profile `{profile_id}` not found on resource `{resource}`"))
         })?;
         // Read before the ceremony: a malformed or ungated action must not
         // cost the operator a factor.
@@ -926,11 +896,9 @@ impl super::ResourceBackendInner {
             ));
         }
 
+        let method = req.get_data("method").ok().and_then(|v| v.as_str().map(|s| s.trim().to_lowercase()));
         let method =
-            req.get_data("method").ok().and_then(|v| v.as_str().map(|s| s.trim().to_lowercase()));
-        let method = method
-            .filter(|m| !m.is_empty())
-            .ok_or_else(|| bv_error_response_status!(400, "`method` is required"))?;
+            method.filter(|m| !m.is_empty()).ok_or_else(|| bv_error_response_status!(400, "`method` is required"))?;
 
         // Read before the ceremony: a malformed block must not cost the
         // operator a factor.
@@ -976,10 +944,8 @@ impl super::ResourceBackendInner {
         // rather than a falsy body, so there is no success-shaped failure to
         // mistake for a pass.
         let resp = self.core.router().handle_request(&mut sub).await?;
-        let verified = resp
-            .and_then(|r| r.data)
-            .and_then(|d| d.get("verified").and_then(|v| v.as_bool()))
-            .unwrap_or(false);
+        let verified =
+            resp.and_then(|r| r.data).and_then(|d| d.get("verified").and_then(|v| v.as_bool())).unwrap_or(false);
         if !verified {
             return Err(bv_error_response_status!(403, "second-factor verification failed"));
         }
@@ -1033,10 +999,7 @@ impl super::ResourceBackendInner {
     ) -> Result<Option<crate::logical::Response>, RvError> {
         let (resource, profile_id, meta) = self.connect_target_record(req).await?;
         let profile = meta.as_ref().and_then(|m| find_profile(m, &profile_id)).ok_or_else(|| {
-            bv_error_response_status!(
-                404,
-                &format!("profile `{profile_id}` not found on resource `{resource}`")
-            )
+            bv_error_response_status!(404, &format!("profile `{profile_id}` not found on resource `{resource}`"))
         })?;
 
         // An `sql` session is opened by the SQL browser plugin, which redeems
@@ -1179,10 +1142,7 @@ mod tests {
         auth.metadata.insert("mount_path".into(), "userpass/".into());
         auth.metadata.insert("username".into(), "Alice".into());
         req.auth = Some(auth);
-        assert_eq!(
-            caller_principal(&req).unwrap(),
-            ("userpass/".to_string(), "alice".to_string())
-        );
+        assert_eq!(caller_principal(&req).unwrap(), ("userpass/".to_string(), "alice".to_string()));
     }
 
     #[test]

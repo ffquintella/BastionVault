@@ -2561,7 +2561,11 @@ mod tests {
         assert_eq!(out["complete"], true, "{out}");
         assert_eq!(out["share_indexes"], serde_json::json!([4, 2, 5]), "{out}");
         assert_eq!(out["custody_recovered"], 2, "{out}");
-        assert_eq!((out["epoch"].as_u64(), out["epoch_rotated"].as_bool()), (Some(before.epoch + 1), Some(true)), "{out}");
+        assert_eq!(
+            (out["epoch"].as_u64(), out["epoch_rotated"].as_bool()),
+            (Some(before.epoch + 1), Some(true)),
+            "{out}"
+        );
         assert!(barrier.sealed().unwrap(), "the ceremony leaves the barrier sealed");
         assert_eq!(n1.recovery_progress(), 0, "the shares are gone");
 
@@ -2571,11 +2575,19 @@ mod tests {
         assert!(after.members[&id_of(&p.a)].state == MemberState::Retired);
         assert!(after.members[&id_of(&p.b)].state == MemberState::Retired);
         let kek_set = after.kek.as_ref().unwrap();
-        assert_eq!(kek_set.copies.keys().cloned().collect::<Vec<_>>(), vec![id_of(&c), id_of(&d)], "old copies dropped");
+        assert_eq!(
+            kek_set.copies.keys().cloned().collect::<Vec<_>>(),
+            vec![id_of(&c), id_of(&d)],
+            "old copies dropped"
+        );
         assert_eq!(after.recovery_pub, before.recovery_pub, "the recovery key carries over");
         let key = recombined(&shares, &[0, 1, 2], &after);
         let aad = kek_recovery_aad(&after.cluster_uuid, after.epoch);
-        assert_eq!(key.open(kek_set.recovery.as_ref().unwrap(), &aad).unwrap().as_slice(), &KEK, "re-sealed at the new epoch");
+        assert_eq!(
+            key.open(kek_set.recovery.as_ref().unwrap(), &aad).unwrap().as_slice(),
+            &KEK,
+            "re-sealed at the new epoch"
+        );
 
         assert_eq!(n1.recover_kek().await.unwrap().as_slice(), &KEK, "n1 unseals through the new devices");
         n2.refresh_membership().await.unwrap();
@@ -2690,7 +2702,10 @@ mod tests {
         let after = n1.pool_record().await.unwrap();
         let key = recombined(&shares, &[1, 3, 4], &after);
         let kek = after.kek.as_ref().unwrap();
-        assert!(key.open(kek.recovery.as_ref().unwrap(), &kek_recovery_aad(&after.cluster_uuid, 0)).is_err(), "old epoch");
+        assert!(
+            key.open(kek.recovery.as_ref().unwrap(), &kek_recovery_aad(&after.cluster_uuid, 0)).is_err(),
+            "old epoch"
+        );
         assert_eq!(
             key.open(kek.recovery.as_ref().unwrap(), &kek_recovery_aad(&after.cluster_uuid, 1)).unwrap().as_slice(),
             &KEK
@@ -2708,7 +2723,8 @@ mod tests {
         let p = Pool::with_recovery(1).await;
         let mut per_node = p.config("n1");
         per_node.pool = None;
-        per_node.state_path = std::env::temp_dir().join(format!("bv-recovery-pn-{}.json", rand_tag())).to_string_lossy().to_string();
+        per_node.state_path =
+            std::env::temp_dir().join(format!("bv-recovery-pn-{}.json", rand_tag())).to_string_lossy().to_string();
         let backend: Arc<dyn HsmBackend> = Arc::new(MockHsmBackend::open(&per_node).await.unwrap());
         let n = p.provider("n1").with_migration_source(backend.clone());
         let err = n.migrate_to_pool("root").await.unwrap_err();

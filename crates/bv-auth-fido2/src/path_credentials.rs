@@ -114,10 +114,7 @@ impl Fido2BackendInner {
             Some(e) => {
                 let mut data = serde_json::Map::new();
                 data.insert("username".to_string(), Value::String(e.username.clone()));
-                data.insert(
-                    "policies".to_string(),
-                    Value::String(e.policies.join(", ")),
-                );
+                data.insert("policies".to_string(), Value::String(e.policies.join(", ")));
                 data.insert("ttl".to_string(), Value::Number(e.ttl.as_secs().into()));
                 data.insert("max_ttl".to_string(), Value::Number(e.max_ttl.as_secs().into()));
 
@@ -138,19 +135,15 @@ impl Fido2BackendInner {
     ) -> Result<Option<Response>, RvError> {
         let username = req.get_data("username")?.as_str().unwrap().to_lowercase();
 
-        let mut entry = self.get_user_credentials(req, &username).await?
-            .unwrap_or_else(|| UserCredentialEntry {
-                username: username.clone(),
-                ..Default::default()
-            });
+        let mut entry = self
+            .get_user_credentials(req, &username)
+            .await?
+            .unwrap_or_else(|| UserCredentialEntry { username: username.clone(), ..Default::default() });
 
         if let Ok(policies_value) = req.get_data("policies") {
             if let Some(policies_str) = policies_value.as_str() {
-                entry.policies = policies_str
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
+                entry.policies =
+                    policies_str.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
             }
         }
 

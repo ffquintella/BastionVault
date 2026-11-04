@@ -555,7 +555,10 @@ mod tests {
     #[test]
     fn script_and_export_bodies_carry_only_the_plugins_fields() {
         let b = script_body("SELECT 1; SELECT 2", Some("continue"), Some("none")).unwrap();
-        assert_eq!(Value::Object(b), json!({"sql": "SELECT 1; SELECT 2", "on_error": "continue", "transaction": "none"}));
+        assert_eq!(
+            Value::Object(b),
+            json!({"sql": "SELECT 1; SELECT 2", "on_error": "continue", "transaction": "none"})
+        );
         assert!(script_body(" ", None, None).is_err());
         assert!(script_body("SELECT 1", Some("ignore"), None).is_err());
         assert!(script_body("SELECT 1", None, Some("nested")).is_err());

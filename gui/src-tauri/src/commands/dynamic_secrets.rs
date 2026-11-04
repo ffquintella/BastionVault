@@ -96,8 +96,7 @@ fn checked_mount(mount: &str) -> Result<&str, CommandError> {
 /// One role name: a single path segment.
 fn checked_role(role: &str) -> Result<&str, CommandError> {
     let role = role.trim();
-    if role.is_empty() || role.contains(['/', '?', '#']) || role.contains("..") || role.chars().any(char::is_control)
-    {
+    if role.is_empty() || role.contains(['/', '?', '#']) || role.contains("..") || role.chars().any(char::is_control) {
         return Err("invalid role name".into());
     }
     Ok(role)

@@ -18,24 +18,23 @@ use std::{any::Any, collections::HashMap, sync::Arc, time::Duration};
 
 use arc_swap::ArcSwap;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use chrono::Utc;
 use derive_more::Deref;
 use serde::Deserialize;
 use serde_json::{Map, Value};
-use chrono::Utc;
 
 use super::Module;
 use crate::kernel_api::VaultCtx;
 use crate::{
+    bv_error_response_status, bv_error_string,
     context::Context,
     core::Core,
     errors::RvError,
     logical::{
-        secret::Secret, Backend, Field, FieldType, LogicalBackend, Operation, Path, PathOperation,
-        Request, Response,
+        secret::Secret, Backend, Field, FieldType, LogicalBackend, Operation, Path, PathOperation, Request, Response,
     },
-    new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path,
-    new_path_internal, new_secret, new_secret_internal,
-    bv_error_response_status, bv_error_string,
+    new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path, new_path_internal,
+    new_secret, new_secret_internal,
 };
 
 pub mod group_store;
@@ -292,16 +291,9 @@ async fn secret_member_readable(
     ns_path: Option<&str>,
     secret: &str,
 ) -> bool {
-    store
-        .can_operate(auth, &namespaced_probe_path(ns_path, secret), Operation::Read, ns_path)
-        .await
+    store.can_operate(auth, &namespaced_probe_path(ns_path, secret), Operation::Read, ns_path).await
         || store
-            .can_operate(
-                auth,
-                &namespaced_probe_path(ns_path, &kv_v2_data_form(secret)),
-                Operation::Read,
-                ns_path,
-            )
+            .can_operate(auth, &namespaced_probe_path(ns_path, &kv_v2_data_form(secret)), Operation::Read, ns_path)
             .await
 }
 
@@ -451,22 +443,10 @@ fn group_to_response(entry: &ResourceGroupEntry) -> Response {
     let mut data: Map<String, Value> = Map::new();
     data.insert("name".into(), Value::String(entry.name.clone()));
     data.insert("description".into(), Value::String(entry.description.clone()));
-    data.insert(
-        "members".into(),
-        Value::Array(entry.members.iter().cloned().map(Value::String).collect()),
-    );
-    data.insert(
-        "secrets".into(),
-        Value::Array(entry.secrets.iter().cloned().map(Value::String).collect()),
-    );
-    data.insert(
-        "files".into(),
-        Value::Array(entry.files.iter().cloned().map(Value::String).collect()),
-    );
-    data.insert(
-        "owner_entity_id".into(),
-        Value::String(entry.owner_entity_id.clone()),
-    );
+    data.insert("members".into(), Value::Array(entry.members.iter().cloned().map(Value::String).collect()));
+    data.insert("secrets".into(), Value::Array(entry.secrets.iter().cloned().map(Value::String).collect()));
+    data.insert("files".into(), Value::Array(entry.files.iter().cloned().map(Value::String).collect()));
+    data.insert("owner_entity_id".into(), Value::String(entry.owner_entity_id.clone()));
     data.insert("created_at".into(), Value::String(entry.created_at.clone()));
     data.insert("updated_at".into(), Value::String(entry.updated_at.clone()));
     Response::data_response(Some(data))
@@ -498,16 +478,10 @@ fn parse_write_payload(req: &Request) -> Result<WritePayload, RvError> {
 
 fn value_to_string_vec(v: &Value) -> Vec<String> {
     match v {
-        Value::Array(arr) => arr
-            .iter()
-            .filter_map(|x| x.as_str().map(|s| s.to_string()))
-            .filter(|s| !s.trim().is_empty())
-            .collect(),
-        Value::String(s) => s
-            .split(',')
-            .map(|x| x.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect(),
+        Value::Array(arr) => {
+            arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).filter(|s| !s.trim().is_empty()).collect()
+        }
+        Value::String(s) => s.split(',').map(|x| x.trim().to_string()).filter(|s| !s.is_empty()).collect(),
         _ => Vec::new(),
     }
 }
@@ -522,11 +496,7 @@ impl ResourceGroupBackendInner {
             .ok_or_else(|| bv_error_string!("resource-group store unavailable"))
     }
 
-    pub async fn handle_list(
-        &self,
-        _backend: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_list(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let store = self.resolve_store()?;
         let keys = store.list_groups().await?;
 
@@ -540,10 +510,8 @@ impl ResourceGroupBackendInner {
             Some(a) => a.clone(),
             None => return Ok(Some(Response::list_response(&keys))),
         };
-        let is_admin = auth
-            .policies
-            .iter()
-            .any(|p| p == "root" || p == "admin" || p == "administrator" || p == "super-admin");
+        let is_admin =
+            auth.policies.iter().any(|p| p == "root" || p == "admin" || p == "administrator" || p == "super-admin");
         if is_admin {
             return Ok(Some(Response::list_response(&keys)));
         }
@@ -552,17 +520,13 @@ impl ResourceGroupBackendInner {
         let username = auth.metadata.get("username").cloned().unwrap_or_default();
         let role_name = auth.metadata.get("role_name").cloned().unwrap_or_default();
 
-        let id_module = self
-            .core
-            .module_manager()
-            .get_module::<crate::modules::identity::IdentityModule>("identity");
+        let id_module = self.core.module_manager().get_module::<crate::modules::identity::IdentityModule>("identity");
         let share_store = id_module.as_ref().and_then(|m| m.share_store());
         let group_store = id_module.as_ref().and_then(|m| m.group_store());
 
         // Identity groups the caller belongs to (used to resolve
         // group-grantee shares against the asset group).
-        let mut caller_groups: Vec<(crate::modules::identity::ShareGranteeKind, String)> =
-            Vec::new();
+        let mut caller_groups: Vec<(crate::modules::identity::ShareGranteeKind, String)> = Vec::new();
         if let Some(gs) = &group_store {
             for (kind, member, gk) in [
                 (
@@ -610,13 +574,8 @@ impl ResourceGroupBackendInner {
             let mut has_share = false;
             if let Some(ss) = &share_store {
                 if !caller_id.is_empty() {
-                    if let Ok(Some(s)) = ss
-                        .get_share(
-                            crate::modules::identity::ShareTargetKind::AssetGroup,
-                            &name,
-                            &caller_id,
-                        )
-                        .await
+                    if let Ok(Some(s)) =
+                        ss.get_share(crate::modules::identity::ShareTargetKind::AssetGroup, &name, &caller_id).await
                     {
                         if !s.is_expired() {
                             has_share = true;
@@ -625,13 +584,8 @@ impl ResourceGroupBackendInner {
                 }
                 if !has_share {
                     for (_gk, g_name) in &caller_groups {
-                        if let Ok(Some(s)) = ss
-                            .get_share(
-                                crate::modules::identity::ShareTargetKind::AssetGroup,
-                                &name,
-                                g_name,
-                            )
-                            .await
+                        if let Ok(Some(s)) =
+                            ss.get_share(crate::modules::identity::ShareTargetKind::AssetGroup, &name, g_name).await
                         {
                             if !s.is_expired() {
                                 has_share = true;
@@ -660,11 +614,7 @@ impl ResourceGroupBackendInner {
         Ok(Some(Response::list_response(&visible)))
     }
 
-    pub async fn handle_read(
-        &self,
-        _backend: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_read(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let store = self.resolve_store()?;
         let name = req.get_data("name")?.as_str().unwrap_or("").to_string();
         match store.get_group(&name).await? {
@@ -681,19 +631,11 @@ impl ResourceGroupBackendInner {
                 // probe `Read` on each member's logical path via
                 // `PolicyStore::can_operate` and swap the path for
                 // the sentinel string on denial.
-                let caller_entity_id = req
-                    .auth
-                    .as_ref()
-                    .and_then(|a| a.metadata.get("entity_id"))
-                    .cloned()
-                    .unwrap_or_default();
-                let caller_is_owner = !entry.owner_entity_id.is_empty()
-                    && entry.owner_entity_id == caller_entity_id;
-                let caller_is_admin = req
-                    .auth
-                    .as_ref()
-                    .map(|a| a.policies.iter().any(|p| p == "root" || p == "admin"))
-                    .unwrap_or(false);
+                let caller_entity_id =
+                    req.auth.as_ref().and_then(|a| a.metadata.get("entity_id")).cloned().unwrap_or_default();
+                let caller_is_owner = !entry.owner_entity_id.is_empty() && entry.owner_entity_id == caller_entity_id;
+                let caller_is_admin =
+                    req.auth.as_ref().map(|a| a.policies.iter().any(|p| p == "root" || p == "admin")).unwrap_or(false);
 
                 if !caller_is_owner && !caller_is_admin {
                     if let Some(auth) = req.auth.clone() {
@@ -707,11 +649,7 @@ impl ResourceGroupBackendInner {
         }
     }
 
-    pub async fn handle_write(
-        &self,
-        _backend: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_write(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let store = self.resolve_store()?;
         let name = req.get_data("name")?.as_str().unwrap_or("").to_string();
         if name.trim().is_empty() {
@@ -743,12 +681,8 @@ impl ResourceGroupBackendInner {
             // Capture the caller's `entity_id` as the group owner on
             // the first write. Empty for root-token callers — admins
             // can use `sys/asset-group-owner/transfer` to adopt.
-            entry.owner_entity_id = req
-                .auth
-                .as_ref()
-                .and_then(|a| a.metadata.get("entity_id"))
-                .cloned()
-                .unwrap_or_default();
+            entry.owner_entity_id =
+                req.auth.as_ref().and_then(|a| a.metadata.get("entity_id")).cloned().unwrap_or_default();
         }
         entry.updated_at = now;
 
@@ -758,8 +692,7 @@ impl ResourceGroupBackendInner {
         let stored = store.set_group(entry).await?;
 
         let op = if existing.is_some() { "update" } else { "create" };
-        let (changed_fields, before, after) =
-            diff_with_values(existing.as_ref(), Some(&stored));
+        let (changed_fields, before, after) = diff_with_values(existing.as_ref(), Some(&stored));
         let record_history = op == "create" || !changed_fields.is_empty();
         if record_history {
             let hist = ResourceGroupHistoryEntry {
@@ -777,11 +710,7 @@ impl ResourceGroupBackendInner {
         Ok(None)
     }
 
-    pub async fn handle_delete(
-        &self,
-        _backend: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_delete(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let store = self.resolve_store()?;
         let name = req.get_data("name")?.as_str().unwrap_or("").to_string();
 
@@ -801,11 +730,7 @@ impl ResourceGroupBackendInner {
         Ok(None)
     }
 
-    pub async fn handle_history(
-        &self,
-        _backend: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_history(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let store = self.resolve_store()?;
         let name = req.get_data("name")?.as_str().unwrap_or("").to_string();
         let entries = store.list_history(&name).await?;
@@ -820,13 +745,7 @@ impl ResourceGroupBackendInner {
                     m.insert("op".into(), Value::String(e.op.clone()));
                     m.insert(
                         "changed_fields".into(),
-                        Value::Array(
-                            e.changed_fields
-                                .iter()
-                                .cloned()
-                                .map(Value::String)
-                                .collect(),
-                        ),
+                        Value::Array(e.changed_fields.iter().cloned().map(Value::String).collect()),
                     );
                     m.insert("before".into(), Value::Object(e.before.clone()));
                     m.insert("after".into(), Value::Object(e.after.clone()));
@@ -884,22 +803,14 @@ impl ResourceGroupBackendInner {
         Ok(Some(Response::data_response(Some(data))))
     }
 
-    pub async fn handle_noop(
-        &self,
-        _backend: &dyn Backend,
-        _req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_noop(&self, _backend: &dyn Backend, _req: &mut Request) -> Result<Option<Response>, RvError> {
         Ok(None)
     }
 }
 
 impl ResourceGroupModule {
     pub fn new(core: Arc<Core>) -> Self {
-        Self {
-            name: "resource-group".to_string(),
-            core,
-            store: ArcSwap::new(Arc::new(None)),
-        }
+        Self { name: "resource-group".to_string(), core, store: ArcSwap::new(Arc::new(None)) }
     }
 
     pub fn store(&self) -> Option<Arc<ResourceGroupStore>> {
@@ -949,5 +860,3 @@ impl Module for ResourceGroupModule {
         core.delete_logical_backend("resource-group")
     }
 }
-
-

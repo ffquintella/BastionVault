@@ -95,10 +95,8 @@ struct PoolDevices {
 }
 
 fn membership_of(specs: &[PoolMemberSpec], generation: u64) -> Membership {
-    let mut members: Vec<_> = specs
-        .iter()
-        .map(|s| (s.name.clone(), s.hsm_id.clone(), s.prefer, s.device.as_ref().err().cloned()))
-        .collect();
+    let mut members: Vec<_> =
+        specs.iter().map(|s| (s.name.clone(), s.hsm_id.clone(), s.prefer, s.device.as_ref().err().cloned())).collect();
     members.sort();
     (members, generation)
 }
@@ -170,7 +168,11 @@ impl ClientCache {
 
     /// Specs for `members` (where to reach each, and the nodes whose
     /// revocation is pending on it), with this node's clients.
-    fn specs_for(&self, pool_cfg: &ResolvedPoolConfig, members: Vec<(MemberTarget, Vec<String>)>) -> Vec<PoolMemberSpec> {
+    fn specs_for(
+        &self,
+        pool_cfg: &ResolvedPoolConfig,
+        members: Vec<(MemberTarget, Vec<String>)>,
+    ) -> Vec<PoolMemberSpec> {
         let by_name = |name: &str| pool_cfg.members.iter().find(|m| m.name == name);
         members
             .into_iter()
@@ -417,7 +419,8 @@ impl HsmSealProvider {
             .collect::<Result<Vec<_>, RvError>>()?;
         let specs = cache.specs_for(pool_cfg, bootstrap);
         let current = build_pool(&config.node_id, pool_cfg, specs, 0, &clock, &events)?;
-        let devices = PoolDevices { cache, clock, events, current: Mutex::new(current), probing: AtomicBool::new(false) };
+        let devices =
+            PoolDevices { cache, clock, events, current: Mutex::new(current), probing: AtomicBool::new(false) };
         Ok(Self {
             devices: Devices::Pool(devices),
             physical,
@@ -450,8 +453,7 @@ impl HsmSealProvider {
             Some(store)
         };
         let hooks = hooks::ProviderHooks::new();
-        let mut provider =
-            Self::new_pool_with(opener, credentials, physical, config.clone(), clock, hooks.clone())?;
+        let mut provider = Self::new_pool_with(opener, credentials, physical, config.clone(), clock, hooks.clone())?;
         provider.hooks = Some(hooks);
         if let Some(from) = &pool_cfg.migrate_from {
             // Explicit: a configured migration source that cannot open stops
@@ -900,7 +902,9 @@ impl HsmSealProvider {
                 }
                 (Some(old), Some(cur)) if cur == old => {}
                 (Some(_), _) => {
-                    return Err(RvError::ErrHsm("the HSM seal record changed during migration; nothing was written".into()))
+                    return Err(RvError::ErrHsm(
+                        "the HSM seal record changed during migration; nothing was written".into(),
+                    ))
                 }
             }
             self.store_record(&record).await?;
@@ -1137,7 +1141,9 @@ impl HsmSealProvider {
             .map(|r| {
                 r.members
                     .values()
-                    .flat_map(|m| m.pending_revocations.iter().map(move |node| json!({ "member": m.name, "node": node })))
+                    .flat_map(|m| {
+                        m.pending_revocations.iter().map(move |node| json!({ "member": m.name, "node": node }))
+                    })
                     .collect()
             })
             .unwrap_or_default();

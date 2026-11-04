@@ -48,10 +48,7 @@ pub trait Directory: Send + Sync {
     /// password to `new_password`. For AD this is one
     /// `Replace(unicodePwd, [UTF-16LE-quoted-bytes])`; for OpenLDAP
     /// this is `Replace(userPassword, [utf8-bytes])`.
-    fn password_modify_op(
-        &self,
-        new_password: &str,
-    ) -> Vec<Mod<Vec<u8>>>;
+    fn password_modify_op(&self, new_password: &str) -> Vec<Mod<Vec<u8>>>;
 }
 
 pub struct OpenLdapDirectory;
@@ -94,12 +91,8 @@ pub fn encode_unicode_pwd(password: &str) -> Vec<u8> {
 }
 
 /// Connect, optionally StartTLS, simple-bind as the configured user.
-pub async fn bind(
-    cfg: &LdapConfig,
-) -> Result<ldap3::Ldap, LdapClientError> {
-    let mut settings = LdapConnSettings::new()
-        .set_conn_timeout(cfg.request_timeout)
-        .set_starttls(cfg.starttls);
+pub async fn bind(cfg: &LdapConfig) -> Result<ldap3::Ldap, LdapClientError> {
+    let mut settings = LdapConnSettings::new().set_conn_timeout(cfg.request_timeout).set_starttls(cfg.starttls);
     if cfg.insecure_tls {
         settings = settings.set_no_tls_verify(true);
     }
@@ -114,9 +107,8 @@ pub async fn bind(
         TlsMinVersion::Tls13 => "tls13",
     };
 
-    let (conn, mut ldap) = LdapConnAsync::with_settings(settings, &cfg.url)
-        .await
-        .map_err(|e| LdapClientError::Connect(format!("{e}")))?;
+    let (conn, mut ldap) =
+        LdapConnAsync::with_settings(settings, &cfg.url).await.map_err(|e| LdapClientError::Connect(format!("{e}")))?;
     ldap3::drive!(conn);
 
     ldap.simple_bind(&cfg.binddn, &cfg.bindpass)
@@ -165,9 +157,7 @@ mod tests {
         // `"Password1"` is 11 chars → 22 bytes UTF-16LE.
         let expected: Vec<u8> = vec![
             0x22, 0x00, // "
-            b'P', 0x00, b'a', 0x00, b's', 0x00, b's', 0x00,
-            b'w', 0x00, b'o', 0x00, b'r', 0x00, b'd', 0x00,
-            b'1', 0x00,
+            b'P', 0x00, b'a', 0x00, b's', 0x00, b's', 0x00, b'w', 0x00, b'o', 0x00, b'r', 0x00, b'd', 0x00, b'1', 0x00,
             0x22, 0x00, // "
         ];
         assert_eq!(got, expected, "unicodePwd byte sequence drift");

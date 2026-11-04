@@ -26,20 +26,17 @@ pub fn hotp(key: &[u8], counter: u64, algo: Algorithm, digits: u32) -> String {
     let counter_be = counter.to_be_bytes();
     let mac = match algo {
         Algorithm::Sha1 => {
-            let mut m = <HmacSha1 as KeyInit>::new_from_slice(key)
-                .expect("hmac accepts any key length");
+            let mut m = <HmacSha1 as KeyInit>::new_from_slice(key).expect("hmac accepts any key length");
             m.update(&counter_be);
             m.finalize().into_bytes().to_vec()
         }
         Algorithm::Sha256 => {
-            let mut m = <HmacSha256 as KeyInit>::new_from_slice(key)
-                .expect("hmac accepts any key length");
+            let mut m = <HmacSha256 as KeyInit>::new_from_slice(key).expect("hmac accepts any key length");
             m.update(&counter_be);
             m.finalize().into_bytes().to_vec()
         }
         Algorithm::Sha512 => {
-            let mut m = <HmacSha512 as KeyInit>::new_from_slice(key)
-                .expect("hmac accepts any key length");
+            let mut m = <HmacSha512 as KeyInit>::new_from_slice(key).expect("hmac accepts any key length");
             m.update(&counter_be);
             m.finalize().into_bytes().to_vec()
         }
@@ -88,10 +85,8 @@ mod tests {
     #[test]
     fn rfc4226_appendix_d() {
         let key = b"12345678901234567890";
-        let expected = [
-            "755224", "287082", "359152", "969429", "338314", "254676", "287922", "162583",
-            "399871", "520489",
-        ];
+        let expected =
+            ["755224", "287082", "359152", "969429", "338314", "254676", "287922", "162583", "399871", "520489"];
         for (counter, want) in expected.iter().enumerate() {
             let got = hotp(key, counter as u64, Algorithm::Sha1, 6);
             assert_eq!(&got, want, "HOTP(K, {counter}) mismatch");
@@ -107,8 +102,7 @@ mod tests {
     fn rfc6238_appendix_b() {
         let key_sha1 = b"12345678901234567890".to_vec();
         let key_sha256 = b"12345678901234567890123456789012".to_vec();
-        let key_sha512 =
-            b"1234567890123456789012345678901234567890123456789012345678901234".to_vec();
+        let key_sha512 = b"1234567890123456789012345678901234567890123456789012345678901234".to_vec();
 
         // Selected (T, expected) per algo from Appendix B.
         let cases: &[(u64, Algorithm, &[u8], &str)] = &[

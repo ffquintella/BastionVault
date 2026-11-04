@@ -89,7 +89,6 @@ pub struct CacheMetrics {
     size: Family<CacheLabel, Gauge<i64, AtomicI64>>,
 }
 
-
 static GLOBAL: OnceLock<CacheMetrics> = OnceLock::new();
 
 /// Return the shared process-wide `CacheMetrics` instance, lazily

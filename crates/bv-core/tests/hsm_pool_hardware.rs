@@ -199,7 +199,10 @@ impl Run {
                     let bundle =
                         yubihsm2::provision(&url, factory.expose(), admin.expose(), &self.objects, false).await?;
                     if bundle.serial != format_serial(serial) {
-                        return Err(harness_error(format!("provision on {url} produced a bundle for {}", bundle.serial)));
+                        return Err(harness_error(format!(
+                            "provision on {url} produced a bundle for {}",
+                            bundle.serial
+                        )));
                     }
                     write_json(&self.env.out_dir.join(format!("bundle-{}.json", bundle.serial)), &bundle)?;
                     println!("    provisioned {}", bundle.serial);
@@ -224,9 +227,11 @@ impl Run {
                     let backend = self.member(i)?;
                     let label = format_serial(self.connectors[i].serial);
                     let iterations = self.env.latency_iterations;
-                    let result =
-                        device::measure(&backend, &label, &self.objects, iterations, &mut self.samples).await;
-                    self.check(format!("latency {label}"), result.map(|_| format!("{iterations} rounds")).map_err(|e| e.to_string()));
+                    let result = device::measure(&backend, &label, &self.objects, iterations, &mut self.samples).await;
+                    self.check(
+                        format!("latency {label}"),
+                        result.map(|_| format!("{iterations} rounds")).map_err(|e| e.to_string()),
+                    );
                 }
                 let table = format!("{}\n\n{}", self.heading(), self.samples.to_markdown());
                 println!("{table}");
@@ -283,7 +288,9 @@ impl Run {
             let verified = verify_member(&session, &bundle, &self.objects).await;
             self.check(
                 format!("attest {}", bundle.serial),
-                verified.map(|v| format!("{} fingerprints {:?}", v.hsm_id, v.attestation_fps)).map_err(|e| e.to_string()),
+                verified
+                    .map(|v| format!("{} fingerprints {:?}", v.hsm_id, v.attestation_fps))
+                    .map_err(|e| e.to_string()),
             );
             for (what, hex_value) in [
                 ("identity", &bundle.identity_attestation),

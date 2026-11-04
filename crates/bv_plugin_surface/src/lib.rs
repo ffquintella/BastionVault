@@ -332,11 +332,7 @@ impl SurfaceManifest {
     /// we can verify menu routes are scoped, plus the set of asset
     /// names declared in the bundle's manifest so hook references
     /// can be checked against actual files.
-    pub fn validate(
-        &self,
-        plugin_name: &str,
-        declared_asset_names: &BTreeSet<&str>,
-    ) -> Result<(), SurfaceError> {
+    pub fn validate(&self, plugin_name: &str, declared_asset_names: &BTreeSet<&str>) -> Result<(), SurfaceError> {
         if self.schema_version > CURRENT_SCHEMA_VERSION {
             return Err(SurfaceError::UnsupportedSchemaVersion {
                 got: self.schema_version,
@@ -367,9 +363,7 @@ impl SurfaceManifest {
             // don't strictly require a menu per page (a page can be
             // a sub-detail target), but we flag totally-orphan
             // pages as a likely authoring mistake.
-            if !menu_routes.contains(p.route.as_str())
-                && !is_subroute_of_any(&p.route, &menu_routes)
-            {
+            if !menu_routes.contains(p.route.as_str()) && !is_subroute_of_any(&p.route, &menu_routes) {
                 return Err(SurfaceError::OrphanPageRoute(p.route.clone()));
             }
             for c in &p.components {
@@ -436,11 +430,7 @@ fn check_component(
 
 fn require_schema_version(feature: &'static str, got: u32) -> Result<(), SurfaceError> {
     if got < MODAL_FORMS_SCHEMA_VERSION {
-        return Err(SurfaceError::FeatureNeedsSchemaVersion {
-            feature,
-            min: MODAL_FORMS_SCHEMA_VERSION,
-            got,
-        });
+        return Err(SurfaceError::FeatureNeedsSchemaVersion { feature, min: MODAL_FORMS_SCHEMA_VERSION, got });
     }
     Ok(())
 }
@@ -537,17 +527,12 @@ fn check_hook(hook: &str, asset_names: &BTreeSet<&str>) -> Result<(), SurfaceErr
     if hook.is_empty() {
         return Ok(());
     }
-    let (asset, export) = hook
-        .split_once('#')
-        .ok_or_else(|| SurfaceError::BadHookRef(hook.to_string()))?;
+    let (asset, export) = hook.split_once('#').ok_or_else(|| SurfaceError::BadHookRef(hook.to_string()))?;
     if asset.is_empty() || export.is_empty() {
         return Err(SurfaceError::BadHookRef(hook.to_string()));
     }
     if !asset_names.contains(asset) {
-        return Err(SurfaceError::UnknownHookAsset {
-            hook: hook.to_string(),
-            asset: asset.to_string(),
-        });
+        return Err(SurfaceError::UnknownHookAsset { hook: hook.to_string(), asset: asset.to_string() });
     }
     Ok(())
 }
@@ -765,10 +750,7 @@ mod tests {
         let mut s = minimal_surface();
         s.menus[0].route = "/plugin/other/list".into();
         let assets = BTreeSet::new();
-        assert!(matches!(
-            s.validate("totp", &assets),
-            Err(SurfaceError::BadMenuRoute(_))
-        ));
+        assert!(matches!(s.validate("totp", &assets), Err(SurfaceError::BadMenuRoute(_))));
     }
 
     #[test]
@@ -778,10 +760,7 @@ mod tests {
             t.binding.path = "sys/plugins".into();
         }
         let assets = BTreeSet::new();
-        assert!(matches!(
-            s.validate("totp", &assets),
-            Err(SurfaceError::BadBindingPath(_))
-        ));
+        assert!(matches!(s.validate("totp", &assets), Err(SurfaceError::BadBindingPath(_))));
     }
 
     #[test]
@@ -791,10 +770,7 @@ mod tests {
             t.binding.path = "{mount}/../other".into();
         }
         let assets = BTreeSet::new();
-        assert!(matches!(
-            s.validate("totp", &assets),
-            Err(SurfaceError::BadBindingPath(_))
-        ));
+        assert!(matches!(s.validate("totp", &assets), Err(SurfaceError::BadBindingPath(_))));
     }
 
     #[test]
@@ -809,10 +785,7 @@ mod tests {
             actions: vec![],
         }));
         let assets = BTreeSet::new();
-        assert!(matches!(
-            s.validate("totp", &assets),
-            Err(SurfaceError::DuplicateComponentId(_))
-        ));
+        assert!(matches!(s.validate("totp", &assets), Err(SurfaceError::DuplicateComponentId(_))));
     }
 
     #[test]
@@ -830,10 +803,7 @@ mod tests {
             presentation: SurfacePresentation::Inline,
         }));
         let assets = BTreeSet::new();
-        assert!(matches!(
-            s.validate("totp", &assets),
-            Err(SurfaceError::UnknownHookAsset { .. })
-        ));
+        assert!(matches!(s.validate("totp", &assets), Err(SurfaceError::UnknownHookAsset { .. })));
     }
 
     #[test]
@@ -1064,10 +1034,7 @@ mod tests {
                 }) as fn(&mut serde_json::Value),
                 "modal forms",
             ),
-            (
-                |v: &mut serde_json::Value| remove(&mut table_mut(v)["row_actions"][0], "open_form"),
-                "table actions",
-            ),
+            (|v: &mut serde_json::Value| remove(&mut table_mut(v)["row_actions"][0], "open_form"), "table actions"),
             (|v: &mut serde_json::Value| remove(table_mut(v), "actions"), "row actions that open a form"),
         ] {
             let mut v = v2_json();
@@ -1143,10 +1110,7 @@ mod tests {
             (|v| table_mut(v)["row_actions"][0]["binding"]["op"] = json!("write"), "must bind a `read`"),
             (|v| table_mut(v)["row_actions"][0]["confirm"] = json!(true), "`confirm`"),
             (|v| table_mut(v)["row_actions"][0]["open_form"]["form"] = json!("edit-pw"), "either `form`"),
-            (
-                |v| table_mut(v)["row_actions"][0]["open_form"]["forms_by_value"][""] = json!("edit-pw"),
-                "empty value",
-            ),
+            (|v| table_mut(v)["row_actions"][0]["open_form"]["forms_by_value"][""] = json!("edit-pw"), "empty value"),
         ];
         for (mutate, needle) in cases {
             let mut v = v2_json();

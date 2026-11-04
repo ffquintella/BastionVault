@@ -13,8 +13,7 @@ use serde_json::{json, Map, Value};
 use super::{
     crypto::{KeyAlgorithm, Signer},
     storage::{self, CrlConfig, KEY_CA_CERT, KEY_CA_KEY, KEY_CA_META, KEY_CONFIG_CRL, KEY_CRL_STATE},
-    x509, x509_pqc,
-    PkiBackend, PkiBackendInner,
+    x509, x509_pqc, PkiBackend, PkiBackendInner,
 };
 use crate::{
     context::Context,
@@ -44,7 +43,6 @@ impl PkiBackend {
             help: "Generate a self-signed root CA."
         })
     }
-
 }
 
 #[maybe_async::maybe_async]
@@ -56,8 +54,7 @@ impl PkiBackendInner {
         // `issuers::add_issuer`.
 
         let exported = req.get_data("exported")?.as_str().unwrap_or("").to_string();
-        let common_name = req.get_data("common_name")?.as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
+        let common_name = req.get_data("common_name")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
         let organization = req.get_data_or_default("organization")?.as_str().unwrap_or("").to_string();
         let key_type = req.get_data_or_default("key_type")?.as_str().unwrap_or("ec").to_string();
         let key_bits = req.get_data_or_default("key_bits")?.as_u64().unwrap_or(0) as u32;
@@ -81,12 +78,7 @@ impl PkiBackendInner {
         // `pki/keys/*` to issuer status. The signer is reconstructed
         // from the stored material and the binding gets recorded in
         // the key's refs file after `add_issuer` succeeds.
-        let request_key_ref = req
-            .get_data_or_default("key_ref")?
-            .as_str()
-            .unwrap_or("")
-            .trim()
-            .to_string();
+        let request_key_ref = req.get_data_or_default("key_ref")?.as_str().unwrap_or("").trim().to_string();
         let pinned_key = if request_key_ref.is_empty() {
             None
         } else {
@@ -111,16 +103,11 @@ impl PkiBackendInner {
             }
             Signer::MlDsa(ml) => x509_pqc::build_root_ca(&common_name, &organization, ttl, ml)?,
             #[cfg(feature = "pki_pqc_composite")]
-            Signer::Composite(c) => {
-                super::x509_composite::build_root_ca(&common_name, &organization, ttl, c)?
-            }
+            Signer::Composite(c) => super::x509_composite::build_root_ca(&common_name, &organization, ttl, c)?,
         };
         let _ = &signer; // captured for `add_issuer` below
         let serial_hex = storage::serial_to_hex(&serial_bytes);
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         let not_after_unix = (now as i64) + (ttl.as_secs() as i64);
 
         // Resolve the issuer name. Empty → next-default-name (`"default"`,

@@ -20,22 +20,16 @@ use crate::errors::RvError;
 /// zero-sized image.
 pub fn render_png_b64(text: &str, pixel_size: u32) -> Result<String, RvError> {
     if pixel_size == 0 {
-        return Err(RvError::ErrString(
-            "qr_size = 0 disables rendering; do not call render_png_b64".into(),
-        ));
+        return Err(RvError::ErrString("qr_size = 0 disables rendering; do not call render_png_b64".into()));
     }
 
-    let code = QrCode::new(text.as_bytes())
-        .map_err(|e| RvError::ErrString(format!("qr encode failed: {e}")))?;
+    let code = QrCode::new(text.as_bytes()).map_err(|e| RvError::ErrString(format!("qr encode failed: {e}")))?;
 
     // `qrcode` lays out modules; render to a Luma8 buffer scaled so
     // the *image* (not the module count) lands near `pixel_size`. The
     // builder picks a per-module pixel count internally given
     // min_dimensions; supplying both axes keeps it square.
-    let img = code
-        .render::<Luma<u8>>()
-        .min_dimensions(pixel_size, pixel_size)
-        .build();
+    let img = code.render::<Luma<u8>>().min_dimensions(pixel_size, pixel_size).build();
 
     let mut png = Vec::<u8>::new();
     let mut cur = std::io::Cursor::new(&mut png);

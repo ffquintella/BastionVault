@@ -43,11 +43,11 @@ use super::{
     storage::{self, AutoTidyConfig, KEY_CONFIG_AUTO_TIDY},
 };
 use crate::kernel_api::VaultCtx;
-use bv_storage::Storage;
 use crate::{
     errors::RvError,
     logical::{Operation, Request},
 };
+use bv_storage::Storage;
 
 const TICK_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -181,19 +181,16 @@ async fn run_one(
 
     log::info!(
         "pki/auto-tidy: firing on mount {mount_path} (interval={}s, safety_buffer={}s)",
-        cfg.interval_seconds, cfg.safety_buffer_seconds,
-    );
-    let summary = run_tidy_inner(
-        &req,
-        cfg.tidy_cert_store,
-        cfg.tidy_revoked_certs,
+        cfg.interval_seconds,
         cfg.safety_buffer_seconds,
-        "auto",
-    )
-    .await?;
+    );
+    let summary =
+        run_tidy_inner(&req, cfg.tidy_cert_store, cfg.tidy_revoked_certs, cfg.safety_buffer_seconds, "auto").await?;
     log::info!(
         "pki/auto-tidy: mount {mount_path} swept: certs_deleted={} revoked_entries_deleted={} duration_ms={}",
-        summary.certs_deleted, summary.revoked_entries_deleted, summary.last_run_duration_ms,
+        summary.certs_deleted,
+        summary.revoked_entries_deleted,
+        summary.last_run_duration_ms,
     );
     Ok(())
 }

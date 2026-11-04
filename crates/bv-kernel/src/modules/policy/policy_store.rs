@@ -20,7 +20,10 @@
 
 use std::{
     str::FromStr,
-    sync::{atomic::{AtomicBool, AtomicU64}, Arc, Weak},
+    sync::{
+        atomic::{AtomicBool, AtomicU64},
+        Arc, Weak,
+    },
 };
 
 use better_default::Default;
@@ -36,6 +39,7 @@ use super::{
 };
 use crate::kernel_api::VaultCtx;
 use crate::{
+    bv_error_response_status, bv_error_string,
     core::Core,
     errors::RvError,
     handler::{AuthHandler, Handler},
@@ -45,11 +49,10 @@ use crate::{
         resource_group::{ResourceGroupModule, ResourceGroupStore},
     },
     router::Router,
-    bv_error_response_status, bv_error_string,
     storage::{barrier_view::BarrierView, Storage, StorageEntry},
 };
-use serde_json::Value;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use serde_json::Value;
 
 // POLICY_ACL_SUB_PATH is the sub-path used for the policy store view. This is
 // nested under the system view. POLICY_RGP_SUB_PATH/POLICY_EGP_SUB_PATH are
@@ -2055,10 +2058,7 @@ impl PolicyStore {
             return Err(bv_error_string!("policy name missing"));
         }
         if policy.policy_type != PolicyType::Acl {
-            return Err(bv_error_response_status!(
-                400,
-                "only ACL policies may be created inside a namespace"
-            ));
+            return Err(bv_error_response_status!(400, "only ACL policies may be created inside a namespace"));
         }
         let name = self.sanitize_name(&policy.name);
         if IMMUTABLE_POLICIES.contains(&name.as_str()) {
@@ -2086,11 +2086,7 @@ impl PolicyStore {
 
     /// List ACL policy names in a specific namespace. Root delegates to the
     /// global [`list_policy`]; a non-root namespace lists only its own keyspace.
-    pub async fn list_policy_ns(
-        &self,
-        policy_type: PolicyType,
-        ns_path: &str,
-    ) -> Result<Vec<String>, RvError> {
+    pub async fn list_policy_ns(&self, policy_type: PolicyType, ns_path: &str) -> Result<Vec<String>, RvError> {
         if ns_path.is_empty() {
             return self.list_policy(policy_type).await;
         }
@@ -2102,12 +2098,7 @@ impl PolicyStore {
 
     /// Delete an ACL policy from a specific namespace. Root delegates to the
     /// global [`delete_policy`].
-    pub async fn delete_policy_ns(
-        &self,
-        name: &str,
-        policy_type: PolicyType,
-        ns_path: &str,
-    ) -> Result<(), RvError> {
+    pub async fn delete_policy_ns(&self, name: &str, policy_type: PolicyType, ns_path: &str) -> Result<(), RvError> {
         if ns_path.is_empty() {
             return self.delete_policy(name, policy_type).await;
         }
@@ -2239,8 +2230,7 @@ impl PolicyStore {
             self.sql_baselines_full.store(true, std::sync::atomic::Ordering::Release);
         }
         // Ownership-aware baselines. See `features/per-user-scoping.md`.
-        self.load_acl_policy(STANDARD_USER_READONLY_POLICY_NAME, STANDARD_USER_READONLY_POLICY)
-            .await?;
+        self.load_acl_policy(STANDARD_USER_READONLY_POLICY_NAME, STANDARD_USER_READONLY_POLICY).await?;
         self.load_acl_policy(SECRET_AUTHOR_POLICY_NAME, SECRET_AUTHOR_POLICY).await?;
         // PKI delegated baselines. `pki-user` grants issuance/signing
         // without admin authority; `pki-admin` grants full mount
@@ -2307,8 +2297,7 @@ impl PolicyStore {
         auth: &crate::logical::Auth,
         request_ns: Option<&str>,
     ) -> Result<ACL, RvError> {
-        self.new_acl_inner(policy_names, additional_policies, Some(auth), request_ns)
-            .await
+        self.new_acl_inner(policy_names, additional_policies, Some(auth), request_ns).await
     }
 
     /// Which of `target_paths` may this caller actually *read*? Returns a
@@ -2338,11 +2327,7 @@ impl PolicyStore {
     /// Cost is one ACL build plus, per candidate, up to three store lookups
     /// when the ACL has a gated or scoped rule. Callers filtering a large
     /// candidate set should narrow it first.
-    pub async fn readable_targets(
-        &self,
-        req: &Request,
-        target_paths: &[String],
-    ) -> Vec<bool> {
+    pub async fn readable_targets(&self, req: &Request, target_paths: &[String]) -> Vec<bool> {
         let mut out = vec![false; target_paths.len()];
         let Some(auth) = req.auth.as_ref() else {
             return out;
@@ -2431,10 +2416,7 @@ impl PolicyStore {
         if auth.policies.is_empty() {
             return false;
         }
-        let Ok(acl) = self
-            .new_acl_for_request(&auth.policies, None, auth, req.namespace_path.as_deref())
-            .await
-        else {
+        let Ok(acl) = self.new_acl_for_request(&auth.policies, None, auth, req.namespace_path.as_deref()).await else {
             return false;
         };
 
@@ -2906,15 +2888,8 @@ impl PolicyStore {
     /// Append an audit entry for a policy change. The entry is keyed by
     /// `{name}/{20-digit-nanos}` so history for a single policy can be
     /// listed in chronological order by sorting.
-    pub async fn append_history(
-        &self,
-        name: &str,
-        entry: PolicyHistoryEntry,
-    ) -> Result<(), RvError> {
-        let view = self
-            .history_view
-            .as_ref()
-            .ok_or_else(|| bv_error_string!("policy history view unavailable"))?;
+    pub async fn append_history(&self, name: &str, entry: PolicyHistoryEntry) -> Result<(), RvError> {
+        let view = self.history_view.as_ref().ok_or_else(|| bv_error_string!("policy history view unavailable"))?;
         let name = self.sanitize_name(name);
         let key = format!("{name}/{}", hist_seq());
         let value = serde_json::to_vec(&entry)?;
@@ -2924,14 +2899,8 @@ impl PolicyStore {
     /// Return the full history for a single policy, newest entry first.
     /// History persists after the policy is deleted so audit records
     /// remain available until explicitly purged.
-    pub async fn list_history(
-        &self,
-        name: &str,
-    ) -> Result<Vec<PolicyHistoryEntry>, RvError> {
-        let view = self
-            .history_view
-            .as_ref()
-            .ok_or_else(|| bv_error_string!("policy history view unavailable"))?;
+    pub async fn list_history(&self, name: &str) -> Result<Vec<PolicyHistoryEntry>, RvError> {
+        let view = self.history_view.as_ref().ok_or_else(|| bv_error_string!("policy history view unavailable"))?;
         let name = self.sanitize_name(name);
         let prefix = format!("{name}/");
         let mut keys = view.list(&prefix).await?;
@@ -2959,10 +2928,7 @@ impl PolicyStore {
     /// queryable backend. The caller filters by name and timestamp in
     /// memory. Order is unspecified; undecodable rows are skipped.
     pub async fn list_history_all(&self) -> Result<Vec<(String, PolicyHistoryEntry)>, RvError> {
-        let view = self
-            .history_view
-            .as_ref()
-            .ok_or_else(|| bv_error_string!("policy history view unavailable"))?;
+        let view = self.history_view.as_ref().ok_or_else(|| bv_error_string!("policy history view unavailable"))?;
         let entries = view.get_entries("").await?;
         Ok(entries
             .into_iter()
@@ -2978,12 +2944,7 @@ impl PolicyStore {
 
     /// Namespace-scoped variant of [`append_history`]. Root delegates to the
     /// global history keyspace; a non-root namespace keeps its own audit trail.
-    pub async fn append_history_ns(
-        &self,
-        name: &str,
-        entry: PolicyHistoryEntry,
-        ns_path: &str,
-    ) -> Result<(), RvError> {
+    pub async fn append_history_ns(&self, name: &str, entry: PolicyHistoryEntry, ns_path: &str) -> Result<(), RvError> {
         if ns_path.is_empty() {
             return self.append_history(name, entry).await;
         }
@@ -2995,11 +2956,7 @@ impl PolicyStore {
     }
 
     /// Namespace-scoped variant of [`list_history`].
-    pub async fn list_history_ns(
-        &self,
-        name: &str,
-        ns_path: &str,
-    ) -> Result<Vec<PolicyHistoryEntry>, RvError> {
+    pub async fn list_history_ns(&self, name: &str, ns_path: &str) -> Result<Vec<PolicyHistoryEntry>, RvError> {
         if ns_path.is_empty() {
             return self.list_history(name).await;
         }
@@ -3026,11 +2983,7 @@ impl PolicyStore {
     /// keyspace, mirroring [`PolicyStore::history_view_for`].
     fn tests_view_for(&self, ns_path: &str) -> Result<Arc<BarrierView>, RvError> {
         if ns_path.is_empty() {
-            return self
-                .tests_view
-                .as_ref()
-                .cloned()
-                .ok_or_else(|| bv_error_string!("policy tests view unavailable"));
+            return self.tests_view.as_ref().cloned().ok_or_else(|| bv_error_string!("policy tests view unavailable"));
         }
         let sv = self
             .system_view
@@ -3041,11 +2994,7 @@ impl PolicyStore {
 
     /// Return the saved effectivity test cases for a policy (empty when
     /// none have been saved). Namespace-scoped; root passes `""`.
-    pub async fn get_policy_tests_ns(
-        &self,
-        name: &str,
-        ns_path: &str,
-    ) -> Result<Vec<PolicyTestCase>, RvError> {
+    pub async fn get_policy_tests_ns(&self, name: &str, ns_path: &str) -> Result<Vec<PolicyTestCase>, RvError> {
         let view = self.tests_view_for(ns_path)?;
         let name = self.sanitize_name(name);
         match view.get(&name).await? {
@@ -3182,15 +3131,8 @@ fn asset_group_name_from_path(req_path: &str, ns_path: Option<&str>) -> Option<S
 /// a tenant's resource request is misclassified as a KV path.
 fn looks_like_kv_path(req_path: &str, ns_path: Option<&str>) -> bool {
     let p = mount_relative_path(req_path, ns_path);
-    const NON_KV_PREFIXES: &[&str] = &[
-        "sys/",
-        "auth/",
-        "identity/",
-        "resource-group/",
-        "cubbyhole/",
-        "resources/",
-        "files/",
-    ];
+    const NON_KV_PREFIXES: &[&str] =
+        &["sys/", "auth/", "identity/", "resource-group/", "cubbyhole/", "resources/", "files/"];
     !p.is_empty() && !NON_KV_PREFIXES.iter().any(|pref| p.starts_with(pref))
 }
 
@@ -3223,8 +3165,7 @@ pub(super) async fn resolve_asset_owner(core: &Weak<Core>, req_path: &str, ns_pa
         // Key on the namespace-scoped canonical path so a child-namespace
         // secret's owner (stamped under `<ns>/<mount>/<key>` by
         // `post_route`) is found here. Falls back to the raw path for root.
-        let key = OwnerStore::canonicalize_kv_path_scoped(req_path, ns_path)
-            .unwrap_or_else(|| req_path.to_string());
+        let key = OwnerStore::canonicalize_kv_path_scoped(req_path, ns_path).unwrap_or_else(|| req_path.to_string());
         if let Ok(Some(rec)) = store.get_kv_owner(&key).await {
             return rec.entity_id;
         }
@@ -3239,10 +3180,7 @@ pub(super) async fn resolve_asset_owner(core: &Weak<Core>, req_path: &str, ns_pa
     // namespace-aware, and deliberately not a silent fall back to root's group
     // of the same name. Namespacing `ResourceGroupStore` is the follow-up.
     if let Some(name) = asset_group_name_from_path(req_path, ns_path) {
-        if let Some(rg_module) = core
-            .module_manager()
-            .get_module::<ResourceGroupModule>("resource-group")
-        {
+        if let Some(rg_module) = core.module_manager().get_module::<ResourceGroupModule>("resource-group") {
             if let Some(rg_store) = rg_module.store() {
                 if let Ok(Some(g)) = rg_store.get_group(&name).await {
                     return g.owner_entity_id;
@@ -3259,16 +3197,8 @@ pub(super) async fn resolve_asset_owner(core: &Weak<Core>, req_path: &str, ns_pa
 /// initialized, caller has no `entity_id`, path shape we don't
 /// recognize). A resolution miss can only narrow access for
 /// shared-scoped rules — fail-closed.
-pub(super) async fn resolve_target_shared_caps(
-    core: &Weak<Core>,
-    req: &Request,
-) -> Vec<String> {
-    let Some(caller_id) = req
-        .auth
-        .as_ref()
-        .and_then(|a| a.metadata.get("entity_id"))
-        .cloned()
-    else {
+pub(super) async fn resolve_target_shared_caps(core: &Weak<Core>, req: &Request) -> Vec<String> {
+    let Some(caller_id) = req.auth.as_ref().and_then(|a| a.metadata.get("entity_id")).cloned() else {
         return Vec::new();
     };
     if caller_id.is_empty() {
@@ -3299,10 +3229,7 @@ pub(super) async fn resolve_target_shared_caps(
 
     let ns = req.namespace_path.as_deref();
     if let Some(name) = resource_name_from_path(&req.path, ns) {
-        if let Ok(v) = store
-            .shared_capabilities(ShareTargetKind::Resource, &name, &caller_id)
-            .await
-        {
+        if let Ok(v) = store.shared_capabilities(ShareTargetKind::Resource, &name, &caller_id).await {
             merge(v);
         }
     }
@@ -3312,18 +3239,12 @@ pub(super) async fn resolve_target_shared_caps(
         // looking up the caller's shared capabilities.
         let key = OwnerStore::canonicalize_kv_path_scoped(&req.path, req.namespace_path.as_deref())
             .unwrap_or_else(|| req.path.clone());
-        if let Ok(v) = store
-            .shared_capabilities(ShareTargetKind::KvSecret, &key, &caller_id)
-            .await
-        {
+        if let Ok(v) = store.shared_capabilities(ShareTargetKind::KvSecret, &key, &caller_id).await {
             merge(v);
         }
     }
     if let Some(id) = file_id_from_path(&req.path, ns) {
-        if let Ok(v) = store
-            .shared_capabilities(ShareTargetKind::File, &id, &caller_id)
-            .await
-        {
+        if let Ok(v) = store.shared_capabilities(ShareTargetKind::File, &id, &caller_id).await {
             merge(v);
         }
     }
@@ -3331,10 +3252,7 @@ pub(super) async fn resolve_target_shared_caps(
     // (`resource-group/groups/<name>`). Look up any asset-group share
     // addressed to the caller entity for this group.
     if let Some(name) = asset_group_name_from_path(&req.path, ns) {
-        if let Ok(v) = store
-            .shared_capabilities(ShareTargetKind::AssetGroup, &name, &caller_id)
-            .await
-        {
+        if let Ok(v) = store.shared_capabilities(ShareTargetKind::AssetGroup, &name, &caller_id).await {
             merge(v);
         }
     }
@@ -3346,10 +3264,7 @@ pub(super) async fn resolve_target_shared_caps(
     // needed against the reverse index. Silent on any failure.
     if !req.asset_groups.is_empty() {
         for group in &req.asset_groups {
-            if let Ok(v) = store
-                .shared_capabilities(ShareTargetKind::AssetGroup, group, &caller_id)
-                .await
-            {
+            if let Ok(v) = store.shared_capabilities(ShareTargetKind::AssetGroup, group, &caller_id).await {
                 merge(v);
             }
         }
@@ -3371,24 +3286,11 @@ pub(super) async fn resolve_target_shared_caps(
             .as_ref()
             .map(|a| crate::modules::namespace::token_binding::binding_from_metadata(&a.metadata).0)
             .unwrap_or_default();
-        let username = req
-            .auth
-            .as_ref()
-            .and_then(|a| a.metadata.get("username"))
-            .cloned()
-            .unwrap_or_default();
-        let role_name = req
-            .auth
-            .as_ref()
-            .and_then(|a| a.metadata.get("role_name"))
-            .cloned()
-            .unwrap_or_default();
+        let username = req.auth.as_ref().and_then(|a| a.metadata.get("username")).cloned().unwrap_or_default();
+        let role_name = req.auth.as_ref().and_then(|a| a.metadata.get("role_name")).cloned().unwrap_or_default();
 
         if let Some(gs) = module.group_store() {
-            for (kind, member) in [
-                (GroupKind::User, &username),
-                (GroupKind::App, &role_name),
-            ] {
+            for (kind, member) in [(GroupKind::User, &username), (GroupKind::App, &role_name)] {
                 if member.is_empty() {
                     continue;
                 }
@@ -3400,18 +3302,14 @@ pub(super) async fn resolve_target_shared_caps(
                     let Ok(Some(g)) = gs.get_group_ns(kind, &g_name, &binding_ns).await else {
                         continue;
                     };
-                    let is_member =
-                        g.members.iter().any(|m| m.trim().to_lowercase() == m_lc);
+                    let is_member = g.members.iter().any(|m| m.trim().to_lowercase() == m_lc);
                     if !is_member {
                         continue;
                     }
 
                     // Direct shares granted to this group on the target.
                     if let Some(name) = resource_name_from_path(&req.path, ns) {
-                        if let Ok(v) = store
-                            .shared_capabilities(ShareTargetKind::Resource, &name, &g_name)
-                            .await
-                        {
+                        if let Ok(v) = store.shared_capabilities(ShareTargetKind::Resource, &name, &g_name).await {
                             merge(v);
                         }
                     }
@@ -3421,24 +3319,14 @@ pub(super) async fn resolve_target_shared_caps(
                         // canonical path, so passing the raw request path here
                         // missed every KV group-share in a namespace (and every
                         // v2 `data/`-infixed one at root).
-                        let key = OwnerStore::canonicalize_kv_path_scoped(&req.path, ns)
-                            .unwrap_or_else(|| req.path.clone());
-                        if let Ok(v) = store
-                            .shared_capabilities(
-                                ShareTargetKind::KvSecret,
-                                &key,
-                                &g_name,
-                            )
-                            .await
-                        {
+                        let key =
+                            OwnerStore::canonicalize_kv_path_scoped(&req.path, ns).unwrap_or_else(|| req.path.clone());
+                        if let Ok(v) = store.shared_capabilities(ShareTargetKind::KvSecret, &key, &g_name).await {
                             merge(v);
                         }
                     }
                     if let Some(id) = file_id_from_path(&req.path, ns) {
-                        if let Ok(v) = store
-                            .shared_capabilities(ShareTargetKind::File, &id, &g_name)
-                            .await
-                        {
+                        if let Ok(v) = store.shared_capabilities(ShareTargetKind::File, &id, &g_name).await {
                             merge(v);
                         }
                     }
@@ -3446,14 +3334,7 @@ pub(super) async fn resolve_target_shared_caps(
                     // Asset-group shares granted to this group, where
                     // the target is a member of the asset group.
                     for ag in &req.asset_groups {
-                        if let Ok(v) = store
-                            .shared_capabilities(
-                                ShareTargetKind::AssetGroup,
-                                ag,
-                                &g_name,
-                            )
-                            .await
-                        {
+                        if let Ok(v) = store.shared_capabilities(ShareTargetKind::AssetGroup, ag, &g_name).await {
                             merge(v);
                         }
                     }
@@ -3464,14 +3345,7 @@ pub(super) async fn resolve_target_shared_caps(
                     // of grp-teste read the do-tic-esi group metadata
                     // when the share grants it.
                     if let Some(ag_name) = asset_group_name_from_path(&req.path, ns) {
-                        if let Ok(v) = store
-                            .shared_capabilities(
-                                ShareTargetKind::AssetGroup,
-                                &ag_name,
-                                &g_name,
-                            )
-                            .await
-                        {
+                        if let Ok(v) = store.shared_capabilities(ShareTargetKind::AssetGroup, &ag_name, &g_name).await {
                             merge(v);
                         }
                     }
@@ -3498,10 +3372,7 @@ async fn caller_policies_opt_in_group_shared(core: &crate::core::Core, req: &Req
     if auth.policies.is_empty() {
         return false;
     }
-    let Some(pmodule) = core
-        .module_manager()
-        .get_module::<crate::modules::policy::PolicyModule>("policy")
-    else {
+    let Some(pmodule) = core.module_manager().get_module::<crate::modules::policy::PolicyModule>("policy") else {
         return false;
     };
     // Policies resolve from the same keyspace the ACL itself was built from
@@ -3511,15 +3382,10 @@ async fn caller_policies_opt_in_group_shared(core: &crate::core::Core, req: &Req
     };
     let pstore = pmodule.policy_store.load();
     for name in &auth.policies {
-        if let Ok(Some(p)) = pstore
-            .get_policy_ns(name, crate::modules::policy::policy::PolicyType::Acl, &binding_ns)
-            .await
+        if let Ok(Some(p)) =
+            pstore.get_policy_ns(name, crate::modules::policy::policy::PolicyType::Acl, &binding_ns).await
         {
-            if p.metadata
-                .get("group_shared_resources")
-                .map(|v| v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false)
-            {
+            if p.metadata.get("group_shared_resources").map(|v| v.eq_ignore_ascii_case("true")).unwrap_or(false) {
                 return true;
             }
         }
@@ -3539,11 +3405,7 @@ async fn caller_policies_opt_in_group_shared(core: &crate::core::Core, req: &Req
 /// initialized, path we don't recognize, storage error). The ACL
 /// evaluator treats empty here as "target is in no groups", so a
 /// lookup failure can only narrow access, never widen it.
-pub(super) async fn resolve_asset_groups(
-    core: &Weak<Core>,
-    req_path: &str,
-    ns_path: Option<&str>,
-) -> Vec<String> {
+pub(super) async fn resolve_asset_groups(core: &Weak<Core>, req_path: &str, ns_path: Option<&str>) -> Vec<String> {
     let Some(core) = core.upgrade() else {
         return Vec::new();
     };
@@ -3611,11 +3473,7 @@ pub(super) async fn resolve_asset_groups(
 ///                      (root = "", a legitimate value). Fail-closed when
 ///                      `request_ns` is `None`, i.e. outside the request
 ///                      pipeline. See `substitute_path`.
-fn apply_templates(
-    policy: &Arc<Policy>,
-    auth: &crate::logical::Auth,
-    request_ns: Option<&str>,
-) -> Option<Arc<Policy>> {
+fn apply_templates(policy: &Arc<Policy>, auth: &crate::logical::Auth, request_ns: Option<&str>) -> Option<Arc<Policy>> {
     // A narrowed MCP token reads its session's policies (T470); those must
     // not see `{{username}}` as the token's display name, which would point a
     // per-user rule at `mcp-pairing-<id>` in the target namespace. Unresolved
@@ -3628,16 +3486,8 @@ fn apply_templates(
         .filter(|s| !s.is_empty())
         .or_else(|| (!narrowed_mcp).then(|| auth.display_name.clone()))
         .unwrap_or_default();
-    let entity_id = auth
-        .metadata
-        .get("entity_id")
-        .cloned()
-        .unwrap_or_default();
-    let auth_mount = auth
-        .metadata
-        .get("mount_path")
-        .cloned()
-        .unwrap_or_default();
+    let entity_id = auth.metadata.get("entity_id").cloned().unwrap_or_default();
+    let auth_mount = auth.metadata.get("mount_path").cloned().unwrap_or_default();
     // Multi-tenancy templates: the namespace the token's policies resolve in
     // (its binding, or a narrowed MCP token's recorded one, `acl_namespace`).
     // `namespace.path` defaults to the root namespace (empty string), which is
@@ -3645,8 +3495,7 @@ fn apply_templates(
     let (namespace_path, namespace_id) = crate::modules::namespace::token_binding::acl_namespace(auth).ok()?;
 
     let mut cloned: Policy = Policy::clone(policy);
-    let mut kept: Vec<crate::modules::policy::PolicyPathRules> =
-        Vec::with_capacity(cloned.paths.len());
+    let mut kept: Vec<crate::modules::policy::PolicyPathRules> = Vec::with_capacity(cloned.paths.len());
     let mut dropped = 0usize;
 
     for mut rule in cloned.paths.drain(..) {
@@ -3776,9 +3625,8 @@ fn substitute_path(
 /// as the suffix of history log keys so listing returns entries in
 /// chronological order. Mirrors the resource/identity modules.
 fn hist_seq() -> String {
-    let n = chrono::Utc::now()
-        .timestamp_nanos_opt()
-        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis() * 1_000_000);
+    let n =
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_else(|| chrono::Utc::now().timestamp_millis() * 1_000_000);
     format!("{:020}", n.max(0) as u128)
 }
 
@@ -3811,14 +3659,12 @@ impl AuthHandler for PolicyStore {
             // the reverse member-index view. Absence of the subsystem, or a
             // non-resource path, leaves `asset_groups` empty (= the path
             // matches no groups, and any `groups`-gated rule is skipped).
-            req.asset_groups =
-                resolve_asset_groups(&self.core, &req.path, req.namespace_path.as_deref()).await;
+            req.asset_groups = resolve_asset_groups(&self.core, &req.path, req.namespace_path.as_deref()).await;
             // Resolve the request target's owner entity_id for the
             // `scopes = ["owner"]` check. Same shape as asset_groups:
             // empty on any failure, which is fail-closed for
             // owner-scoped rules.
-            req.asset_owner =
-                resolve_asset_owner(&self.core, &req.path, req.namespace_path.as_deref()).await;
+            req.asset_owner = resolve_asset_owner(&self.core, &req.path, req.namespace_path.as_deref()).await;
             // Resolve any active `SecretShare` capabilities the caller
             // has on this target so `scopes = ["shared"]` rules can be
             // evaluated synchronously downstream. Empty when the
@@ -4196,11 +4042,7 @@ impl Handler for PolicyStore {
     ///    of. Parallels the resource-delete hook in the resource
     ///    module. Failures are logged but never fail the delete —
     ///    `resource-group/reindex` is the recovery path.
-    async fn post_route(
-        &self,
-        req: &mut Request,
-        resp: &mut Option<Response>,
-    ) -> Result<(), RvError> {
+    async fn post_route(&self, req: &mut Request, resp: &mut Option<Response>) -> Result<(), RvError> {
         let rg_store = self.resource_group_store();
         let owner_store = self.owner_store();
         // Active namespace, and the mount-relative view of the request path.
@@ -4213,8 +4055,7 @@ impl Handler for PolicyStore {
         if let Some(store) = rg_store.as_ref() {
             if req.operation == Operation::List && !req.list_filter_groups.is_empty() {
                 if let Some(response) = resp.as_mut() {
-                    filter_list_response(response, &req.path, &req.list_filter_groups, store, ns)
-                        .await;
+                    filter_list_response(response, &req.path, &req.list_filter_groups, store, ns).await;
                 }
             }
         }
@@ -4229,12 +4070,8 @@ impl Handler for PolicyStore {
         if let Some(store) = owner_store.as_ref() {
             if req.operation == Operation::List && !req.list_filter_scopes.is_empty() {
                 if let Some(response) = resp.as_mut() {
-                    let caller_id = req
-                        .auth
-                        .as_ref()
-                        .and_then(|a| a.metadata.get("entity_id"))
-                        .cloned()
-                        .unwrap_or_default();
+                    let caller_id =
+                        req.auth.as_ref().and_then(|a| a.metadata.get("entity_id")).cloned().unwrap_or_default();
                     let share_store = self.share_store();
                     filter_list_by_ownership(
                         response,
@@ -4278,11 +4115,8 @@ impl Handler for PolicyStore {
                         // Stamp under the namespace-scoped canonical key so a
                         // child-namespace secret's owner is stored where the
                         // owner-read, share, and ACL paths look for it.
-                        let key = OwnerStore::canonicalize_kv_path_scoped(
-                            &req.path,
-                            req.namespace_path.as_deref(),
-                        )
-                        .unwrap_or_else(|| req.path.clone());
+                        let key = OwnerStore::canonicalize_kv_path_scoped(&req.path, req.namespace_path.as_deref())
+                            .unwrap_or_else(|| req.path.clone());
                         let _ = store.record_kv_owner_if_absent(&key, &caller_id).await;
                     }
                     if let Some(name) = resource_name_from_path(&req.path, ns) {
@@ -4291,9 +4125,7 @@ impl Handler for PolicyStore {
                         // per-resource secret writes under
                         // `resources/secrets/<name>/...`.
                         if rel.starts_with("resources/resources/") && !caller_id.is_empty() {
-                            let _ = store
-                                .record_resource_owner_if_absent(&name, &caller_id)
-                                .await;
+                            let _ = store.record_resource_owner_if_absent(&name, &caller_id).await;
                         }
                     }
                     // File resources: stamp owner on the metadata
@@ -4304,16 +4136,14 @@ impl Handler for PolicyStore {
                     // only visible to the module that assigned it.
                     if let Some(id) = file_id_from_metadata_path(&req.path, ns) {
                         if !caller_id.is_empty() {
-                            let _ = store
-                                .record_file_owner_if_absent(&id, &caller_id)
-                                .await;
+                            let _ = store.record_file_owner_if_absent(&id, &caller_id).await;
                         }
                     }
                 }
                 Operation::Delete => {
                     if looks_like_kv_path(&req.path, ns) {
-                        let key = OwnerStore::canonicalize_kv_path_scoped(&req.path, ns)
-                            .unwrap_or_else(|| req.path.clone());
+                        let key =
+                            OwnerStore::canonicalize_kv_path_scoped(&req.path, ns).unwrap_or_else(|| req.path.clone());
                         let _ = store.forget_kv_owner(&key).await;
                     }
                     if let Some(name) = resource_name_from_path(&req.path, ns) {
@@ -4342,49 +4172,27 @@ impl Handler for PolicyStore {
                             let key = OwnerStore::canonicalize_kv_path_scoped(&req.path, ns)
                                 .unwrap_or_else(|| req.path.clone());
                             if let Err(e) = sshare
-                                .cascade_delete_target_audited(
-                                    ShareTargetKind::KvSecret,
-                                    &key,
-                                    &audit_actor,
-                                )
+                                .cascade_delete_target_audited(ShareTargetKind::KvSecret, &key, &audit_actor)
                                 .await
                             {
-                                log::warn!(
-                                    "share cascade-delete failed for KV path '{}': {e}",
-                                    req.path,
-                                );
+                                log::warn!("share cascade-delete failed for KV path '{}': {e}", req.path,);
                             }
                         }
                         if let Some(name) = resource_name_from_path(&req.path, ns) {
                             if rel.starts_with("resources/resources/") {
                                 if let Err(e) = sshare
-                                    .cascade_delete_target_audited(
-                                        ShareTargetKind::Resource,
-                                        &name,
-                                        &audit_actor,
-                                    )
+                                    .cascade_delete_target_audited(ShareTargetKind::Resource, &name, &audit_actor)
                                     .await
                                 {
-                                    log::warn!(
-                                        "share cascade-delete failed for resource '{}': {e}",
-                                        name,
-                                    );
+                                    log::warn!("share cascade-delete failed for resource '{}': {e}", name,);
                                 }
                             }
                         }
                         if let Some(id) = file_id_from_metadata_path(&req.path, ns) {
-                            if let Err(e) = sshare
-                                .cascade_delete_target_audited(
-                                    ShareTargetKind::File,
-                                    &id,
-                                    &audit_actor,
-                                )
-                                .await
+                            if let Err(e) =
+                                sshare.cascade_delete_target_audited(ShareTargetKind::File, &id, &audit_actor).await
                             {
-                                log::warn!(
-                                    "share cascade-delete failed for file '{}': {e}",
-                                    id,
-                                );
+                                log::warn!("share cascade-delete failed for file '{}': {e}", id,);
                             }
                         }
                     }
@@ -4432,9 +4240,7 @@ impl PolicyStore {
     /// callers treat that as "no asset-group integration this turn".
     fn resource_group_store(&self) -> Option<Arc<ResourceGroupStore>> {
         let core = self.core.upgrade()?;
-        let module = core
-            .module_manager()
-            .get_module::<ResourceGroupModule>("resource-group")?;
+        let module = core.module_manager().get_module::<ResourceGroupModule>("resource-group")?;
         module.store()
     }
 
@@ -4443,9 +4249,7 @@ impl PolicyStore {
     /// loaded — callers treat that as "no per-user-scoping this turn".
     fn owner_store(&self) -> Option<Arc<OwnerStore>> {
         let core = self.core.upgrade()?;
-        let module = core
-            .module_manager()
-            .get_module::<IdentityModule>("identity")?;
+        let module = core.module_manager().get_module::<IdentityModule>("identity")?;
         module.owner_store()
     }
 
@@ -4498,10 +4302,7 @@ impl PolicyStore {
         req.asset_owner = asset_owner;
         req.target_shared_caps = resolve_target_shared_caps(&self.core, &req).await;
 
-        let acl = match self
-            .new_acl_for_request(&auth.policies, None, auth, ns_path)
-            .await
-        {
+        let acl = match self.new_acl_for_request(&auth.policies, None, auth, ns_path).await {
             Ok(a) => a,
             Err(_) => return false,
         };
@@ -4516,9 +4317,7 @@ impl PolicyStore {
     /// loaded.
     fn share_store(&self) -> Option<Arc<ShareStore>> {
         let core = self.core.upgrade()?;
-        let module = core
-            .module_manager()
-            .get_module::<IdentityModule>("identity")?;
+        let module = core.module_manager().get_module::<IdentityModule>("identity")?;
         module.share_store()
     }
 }
@@ -4540,11 +4339,7 @@ async fn filter_list_response(
     let Some(keys_val) = data.get_mut("keys") else { return };
     let Some(keys_arr) = keys_val.as_array() else { return };
 
-    let prefix = if list_path.ends_with('/') {
-        list_path.to_string()
-    } else {
-        format!("{list_path}/")
-    };
+    let prefix = if list_path.ends_with('/') { list_path.to_string() } else { format!("{list_path}/") };
 
     let mut kept: Vec<Value> = Vec::with_capacity(keys_arr.len());
     for v in keys_arr.iter() {
@@ -4596,11 +4391,7 @@ async fn filter_list_by_ownership(
     let want_owner = filter_scopes.iter().any(|s| s == "owner");
     let want_shared = filter_scopes.iter().any(|s| s == "shared");
 
-    let prefix = if list_path.ends_with('/') {
-        list_path.to_string()
-    } else {
-        format!("{list_path}/")
-    };
+    let prefix = if list_path.ends_with('/') { list_path.to_string() } else { format!("{list_path}/") };
 
     // No entity, no scope can match: every key drops out.
     if caller_entity_id.is_empty() {
@@ -4624,19 +4415,12 @@ async fn filter_list_by_ownership(
             let dir_prefix = format!("{dir}/");
             let mut included = false;
             if want_owner {
-                included = store
-                    .has_owned_kv_under(&dir_prefix, caller_entity_id)
-                    .await
-                    .unwrap_or(false);
+                included = store.has_owned_kv_under(&dir_prefix, caller_entity_id).await.unwrap_or(false);
             }
             if !included && want_shared {
                 if let Some(sstore) = share_store {
                     included = sstore
-                        .has_share_under(
-                            ShareTargetKind::KvSecret,
-                            &dir_prefix,
-                            caller_entity_id,
-                        )
+                        .has_share_under(ShareTargetKind::KvSecret, &dir_prefix, caller_entity_id)
                         .await
                         .unwrap_or(false);
                 }
@@ -4650,8 +4434,7 @@ async fn filter_list_by_ownership(
         // `full` is a rewritten request path in child namespaces; scope it
         // to the canonical owner/share key so lookups hit the records
         // stamped by `post_route` / `create_share`.
-        let scoped = OwnerStore::canonicalize_kv_path_scoped(&full, ns_path)
-            .unwrap_or_else(|| full.clone());
+        let scoped = OwnerStore::canonicalize_kv_path_scoped(&full, ns_path).unwrap_or_else(|| full.clone());
 
         let mut included = false;
 
@@ -4676,9 +4459,7 @@ async fn filter_list_by_ownership(
 
         if !included && want_shared {
             if let Some(sstore) = share_store {
-                if let Ok(caps) = sstore
-                    .shared_capabilities(ShareTargetKind::KvSecret, &scoped, caller_entity_id)
-                    .await
+                if let Ok(caps) = sstore.shared_capabilities(ShareTargetKind::KvSecret, &scoped, caller_entity_id).await
                 {
                     if !caps.is_empty() {
                         included = true;
@@ -4686,9 +4467,8 @@ async fn filter_list_by_ownership(
                 }
                 if !included {
                     if let Some(name) = resource_name_from_path(&full, ns_path) {
-                        if let Ok(caps) = sstore
-                            .shared_capabilities(ShareTargetKind::Resource, &name, caller_entity_id)
-                            .await
+                        if let Ok(caps) =
+                            sstore.shared_capabilities(ShareTargetKind::Resource, &name, caller_entity_id).await
                         {
                             if !caps.is_empty() {
                                 included = true;
@@ -4712,11 +4492,7 @@ async fn filter_list_by_ownership(
 /// and `resources/secrets/<name>/...`), then falls back to the
 /// secret-index (treating the path as a KV path). Mirrors
 /// `resolve_asset_groups`.
-async fn resolve_groups_for_any(
-    store: &Arc<ResourceGroupStore>,
-    path: &str,
-    ns_path: Option<&str>,
-) -> Vec<String> {
+async fn resolve_groups_for_any(store: &Arc<ResourceGroupStore>, path: &str, ns_path: Option<&str>) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     if let Some(name) = resource_name_from_path(path, ns_path) {
         if let Ok(groups) = store.groups_for_resource(&name).await {
@@ -4760,10 +4536,7 @@ mod implicit_rustion_grant_tests {
 
         for path in ["rustion/policy/effective", "rustion/dispatcher/preview"] {
             let r = rule(p, path).unwrap_or_else(|| panic!("{path} must be granted"));
-            assert!(
-                r.capabilities.contains(&Capability::Update),
-                "{path} is a POST endpoint, so it needs `update`"
-            );
+            assert!(r.capabilities.contains(&Capability::Update), "{path} is a POST endpoint, so it needs `update`");
         }
 
         // The brokered dial verifies the bastion's transport pin off the
@@ -4801,12 +4574,8 @@ mod implicit_rustion_grant_tests {
     fn namespace_self_grants_the_ssh_login_class_resolver() {
         let p = &*NAMESPACE_SELF_POLICY_PARSED;
 
-        let r = rule(p, "ssh-broker/policy/effective")
-            .expect("ssh-broker/policy/effective must be granted");
-        assert!(
-            r.capabilities.contains(&Capability::Update),
-            "it is a POST endpoint, so it needs `update`"
-        );
+        let r = rule(p, "ssh-broker/policy/effective").expect("ssh-broker/policy/effective must be granted");
+        assert!(r.capabilities.contains(&Capability::Update), "it is a POST endpoint, so it needs `update`");
 
         // The four write tiers stay withheld, and no wildcard may reach them:
         // a tenant reads the resolved class, it does not author the policy.
@@ -4837,12 +4606,8 @@ mod implicit_rustion_grant_tests {
         // brokered RDP and the client-resolved SSH kinds still take; its
         // unbound shape is separately gated on `sudo`, which is NOT granted
         // here (see `namespace_self_grants_no_sudo_on_rustion`).
-        for path in [
-            "rustion/session/open",
-            "rustion/v2/session/open",
-            "rustion/session/renew",
-            "rustion/session/kill",
-        ] {
+        for path in ["rustion/session/open", "rustion/v2/session/open", "rustion/session/renew", "rustion/session/kill"]
+        {
             let r = rule(p, path).unwrap_or_else(|| panic!("{path} must be granted"));
             assert!(r.capabilities.contains(&Capability::Update));
         }
@@ -4864,11 +4629,7 @@ mod implicit_rustion_grant_tests {
     fn namespace_self_grants_no_sudo_on_rustion() {
         for p in [&*NAMESPACE_SELF_POLICY_PARSED, &Policy::from_str(DEFAULT_POLICY).unwrap()] {
             for r in p.paths.iter().filter(|r| r.path.starts_with("rustion")) {
-                assert!(
-                    !r.capabilities.contains(&Capability::Sudo),
-                    "{} must not carry sudo",
-                    r.path
-                );
+                assert!(!r.capabilities.contains(&Capability::Sudo), "{} must not carry sudo", r.path);
             }
         }
     }
@@ -4880,9 +4641,7 @@ mod implicit_rustion_grant_tests {
     fn default_policy_grants_the_read_only_resolvers_only() {
         let p = Policy::from_str(DEFAULT_POLICY).expect("built-in default policy must parse");
 
-        for path in
-            ["rustion/policy/effective", "rustion/dispatcher/preview", "ssh-broker/policy/effective"]
-        {
+        for path in ["rustion/policy/effective", "rustion/dispatcher/preview", "ssh-broker/policy/effective"] {
             let r = rule(&p, path).unwrap_or_else(|| panic!("{path} must be granted"));
             assert!(r.capabilities.contains(&Capability::Update));
         }
@@ -4928,10 +4687,7 @@ mod implicit_rustion_grant_tests {
         let default = Policy::from_str(DEFAULT_POLICY).expect("default policy must parse");
         for path in CONNECT_ENDPOINTS {
             let r = rule(&default, path).unwrap_or_else(|| panic!("{path} must be granted"));
-            assert!(
-                r.capabilities.contains(&Capability::Update),
-                "{path} is a POST endpoint, so it needs `update`"
-            );
+            assert!(r.capabilities.contains(&Capability::Update), "{path} is a POST endpoint, so it needs `update`");
         }
 
         // Tenant side must be TEMPLATED: `resources/` is namespace-rewritten
@@ -4943,8 +4699,7 @@ mod implicit_rustion_grant_tests {
                 "{path} must not be granted bare — the request arrives as `<ns>/{path}`"
             );
             let templated = format!("{{{{namespace.path}}}}/{path}");
-            let r = rule(shared, &templated)
-                .unwrap_or_else(|| panic!("{templated} must be granted"));
+            let r = rule(shared, &templated).unwrap_or_else(|| panic!("{templated} must be granted"));
             assert!(r.capabilities.contains(&Capability::Update));
         }
     }
@@ -5002,8 +4757,11 @@ mod implicit_rustion_grant_tests {
                 "{name}: the closed-gate text must name no sql_* capability"
             );
             assert!(
-                closed_policy.paths.iter().any(|r| r.path.ends_with("resources/v2/sql/privileges/+")
-                    && r.capabilities == vec![Capability::Read]),
+                closed_policy
+                    .paths
+                    .iter()
+                    .any(|r| r.path.ends_with("resources/v2/sql/privileges/+")
+                        && r.capabilities == vec![Capability::Read]),
                 "{name}: the privileges read survives a closed gate"
             );
             assert_eq!(closed.matches("v2/sql/privileges/+").count(), 1, "{name}");
@@ -5025,10 +4783,7 @@ mod implicit_rustion_grant_tests {
             ("standard-user-readonly", &readonly, "resources/"),
         ] {
             let r = rule(p, path).unwrap_or_else(|| panic!("{name} must rule on {path}"));
-            assert!(
-                r.capabilities.contains(&Capability::Connect),
-                "{name}'s `resources/*` rule must carry `connect`"
-            );
+            assert!(r.capabilities.contains(&Capability::Connect), "{name}'s `resources/*` rule must carry `connect`");
         }
 
         let shared = &*NAMESPACE_SHARED_POLICY_PARSED;
@@ -5124,11 +4879,7 @@ mod implicit_rustion_grant_tests {
                  inside a namespace",
                 r.path,
             );
-            assert!(
-                !r.path.contains("{{namespace.path}}"),
-                "{} must not use the token-binding template",
-                r.path,
-            );
+            assert!(!r.path.contains("{{namespace.path}}"), "{} must not use the token-binding template", r.path,);
         }
     }
 
@@ -5149,37 +4900,13 @@ mod templating_tests {
 
     #[test]
     fn test_substitute_path_happy_cases() {
-        let got = substitute_path(
-            "secret/data/users/{{username}}/*",
-            "alice",
-            "ent-123",
-            "userpass/",
-            "",
-            "",
-            None,
-        );
+        let got = substitute_path("secret/data/users/{{username}}/*", "alice", "ent-123", "userpass/", "", "", None);
         assert_eq!(got.as_deref(), Some("secret/data/users/alice/*"));
 
-        let got = substitute_path(
-            "kv/{{entity.id}}/inbox",
-            "alice",
-            "ent-123",
-            "",
-            "",
-            "",
-            None,
-        );
+        let got = substitute_path("kv/{{entity.id}}/inbox", "alice", "ent-123", "", "", "", None);
         assert_eq!(got.as_deref(), Some("kv/ent-123/inbox"));
 
-        let got = substitute_path(
-            "{{auth.mount}}login",
-            "alice",
-            "ent-123",
-            "userpass/",
-            "",
-            "",
-            None,
-        );
+        let got = substitute_path("{{auth.mount}}login", "alice", "ent-123", "userpass/", "", "", None);
         assert_eq!(got.as_deref(), Some("userpass/login"));
     }
 
@@ -5198,15 +4925,7 @@ mod templating_tests {
         assert_eq!(got.as_deref(), Some("engineering/platform/secret/*"));
 
         // Root namespace path is the empty string — a legitimate substitution.
-        let got = substitute_path(
-            "{{namespace.path}}secret/*",
-            "alice",
-            "ent-123",
-            "userpass/",
-            "",
-            "",
-            None,
-        );
+        let got = substitute_path("{{namespace.path}}secret/*", "alice", "ent-123", "userpass/", "", "", None);
         assert_eq!(got.as_deref(), Some("secret/*"));
 
         // {{namespace.id}} substitutes the opaque id when present.
@@ -5222,10 +4941,7 @@ mod templating_tests {
         assert_eq!(got.as_deref(), Some("audit/ns-uuid-1"));
 
         // {{namespace.id}} fails closed when absent (root/login tokens).
-        assert_eq!(
-            substitute_path("audit/{{namespace.id}}", "alice", "ent-123", "userpass/", "", "", None),
-            None
-        );
+        assert_eq!(substitute_path("audit/{{namespace.id}}", "alice", "ent-123", "userpass/", "", "", None), None);
     }
 
     /// `{{request.namespace}}` addresses the namespace the request names, and
@@ -5237,14 +4953,8 @@ mod templating_tests {
     fn test_substitute_path_request_namespace() {
         let sub = |path, ns| substitute_path(path, "alice", "ent-1", "userpass/", "", "", ns);
 
-        assert_eq!(
-            sub("{{request.namespace}}/resources/*", Some("dti/esi")).as_deref(),
-            Some("dti/esi/resources/*"),
-        );
-        assert_eq!(
-            sub("{{request.namespace}}/resources/*", Some("")).as_deref(),
-            Some("resources/*"),
-        );
+        assert_eq!(sub("{{request.namespace}}/resources/*", Some("dti/esi")).as_deref(), Some("dti/esi/resources/*"),);
+        assert_eq!(sub("{{request.namespace}}/resources/*", Some("")).as_deref(), Some("resources/*"),);
         // Nested deeper than the two levels the `+`-wildcard workaround could
         // have enumerated — the template is depth-agnostic by construction.
         assert_eq!(
@@ -5261,16 +4971,7 @@ mod templating_tests {
         // it does NOT swallow the separator — so policies already in the field
         // do not change meaning on upgrade.
         assert_eq!(
-            substitute_path(
-                "{{namespace.path}}/secret/*",
-                "alice",
-                "ent-1",
-                "userpass/",
-                "",
-                "",
-                Some(""),
-            )
-            .as_deref(),
+            substitute_path("{{namespace.path}}/secret/*", "alice", "ent-1", "userpass/", "", "", Some(""),).as_deref(),
             Some("/secret/*"),
         );
     }
@@ -5278,24 +4979,15 @@ mod templating_tests {
     #[test]
     fn test_substitute_path_fail_closed_on_unknown_placeholder() {
         // Unknown key — typo — must drop the rule, not widen access.
-        assert_eq!(
-            substitute_path("secret/{{uzername}}", "alice", "ent-123", "userpass/", "", "", None),
-            None
-        );
+        assert_eq!(substitute_path("secret/{{uzername}}", "alice", "ent-123", "userpass/", "", "", None), None);
     }
 
     #[test]
     fn test_substitute_path_fail_closed_on_missing_value() {
         // `{{username}}` but username is empty — drop.
-        assert_eq!(
-            substitute_path("secret/{{username}}/*", "", "ent-123", "userpass/", "", "", None),
-            None
-        );
+        assert_eq!(substitute_path("secret/{{username}}/*", "", "ent-123", "userpass/", "", "", None), None);
         // `{{entity.id}}` but entity_id empty — drop.
-        assert_eq!(
-            substitute_path("secret/{{entity.id}}", "alice", "", "userpass/", "", "", None),
-            None
-        );
+        assert_eq!(substitute_path("secret/{{entity.id}}", "alice", "", "userpass/", "", "", None), None);
     }
 
     #[test]
@@ -5347,19 +5039,12 @@ mod templating_tests {
         if let Some(m) = mount_path {
             meta.insert("mount_path".into(), m.into());
         }
-        Auth {
-            display_name: display_name.into(),
-            metadata: meta,
-            ..Auth::default()
-        }
+        Auth { display_name: display_name.into(), metadata: meta, ..Auth::default() }
     }
 
     #[test]
     fn test_apply_templates_substitutes_in_all_paths() {
-        let policy = policy_with_paths(vec![
-            "secret/data/users/{{username}}/*",
-            "kv/{{entity.id}}/inbox",
-        ]);
+        let policy = policy_with_paths(vec!["secret/data/users/{{username}}/*", "kv/{{entity.id}}/inbox"]);
         let auth = auth_with(Some("alice"), Some("ent-abc"), Some("userpass/"), "alice");
         let got = apply_templates(&policy, &auth, None).expect("policy must survive");
         let paths: Vec<&str> = got.paths.iter().map(|r| r.path.as_str()).collect();
@@ -5386,10 +5071,7 @@ mod templating_tests {
         // Two rules: one resolvable, one needs `{{auth.mount}}` which is
         // absent from metadata. The resolvable rule survives; the other
         // is dropped fail-closed, policy still contributes.
-        let policy = policy_with_paths(vec![
-            "secret/data/users/{{username}}/*",
-            "{{auth.mount}}login",
-        ]);
+        let policy = policy_with_paths(vec!["secret/data/users/{{username}}/*", "{{auth.mount}}login"]);
         let auth = auth_with(Some("alice"), Some("ent-abc"), None, "alice");
         let got = apply_templates(&policy, &auth, None).expect("at least one rule survives");
         let paths: Vec<&str> = got.paths.iter().map(|r| r.path.as_str()).collect();
@@ -5400,10 +5082,7 @@ mod templating_tests {
     fn test_apply_templates_returns_none_when_all_rules_drop() {
         // Every rule references something the auth doesn't have. Fail
         // closed: policy contributes no authorization.
-        let policy = policy_with_paths(vec![
-            "{{auth.mount}}login",
-            "secret/{{entity.id}}",
-        ]);
+        let policy = policy_with_paths(vec!["{{auth.mount}}login", "secret/{{entity.id}}"]);
         let auth = auth_with(Some("alice"), None, None, "alice");
         assert!(
             apply_templates(&policy, &auth, None).is_none(),
@@ -5420,10 +5099,8 @@ mod templating_tests {
         policy.templated = true;
         let mut rule = PolicyPathRules::default();
         rule.path = "secret/data/users/{{username}}/*".into();
-        rule.capabilities = vec![
-            crate::modules::policy::policy::Capability::Read,
-            crate::modules::policy::policy::Capability::Update,
-        ];
+        rule.capabilities =
+            vec![crate::modules::policy::policy::Capability::Read, crate::modules::policy::policy::Capability::Update];
         rule.scopes = vec!["owner".into(), "shared".into()];
         policy.paths = vec![rule];
 
@@ -5511,21 +5188,16 @@ mod mod_policy_store_tests {
         use crate::logical::Auth;
         use crate::modules::namespace::token_binding::stamp_binding;
 
-        let (_bvault, core, _root_token) =
-            new_unseal_test_bastion_vault("test_ns_self_service_acl").await;
+        let (_bvault, core, _root_token) = new_unseal_test_bastion_vault("test_ns_self_service_acl").await;
         let policy_store = PolicyStore::new(&core).await.unwrap();
 
         // A namespace-bound token. Its named policies (`default`, plus one that
         // does not exist) resolve to nothing in the empty `nsa` keyspace — the
         // exact "child namespace starts empty" condition.
-        let mut ns_auth =
-            Auth { policies: vec!["default".into(), "nonexistent".into()], ..Default::default() };
+        let mut ns_auth = Auth { policies: vec!["default".into(), "nonexistent".into()], ..Default::default() };
         stamp_binding(&mut ns_auth.metadata, "nsa", "uuid-nsa", false);
 
-        let acl = policy_store
-            .new_acl_for_request(&ns_auth.policies, None, &ns_auth, None)
-            .await
-            .unwrap();
+        let acl = policy_store.new_acl_for_request(&ns_auth.policies, None, &ns_auth, None).await.unwrap();
 
         // Self-service endpoints are reachable despite the empty keyspace.
         for (path, cap) in [
@@ -5537,14 +5209,8 @@ mod mod_policy_store_tests {
             ("cubbyhole/scratch", "read"),
         ] {
             let caps = acl.capabilities(path.to_string());
-            assert!(
-                caps.iter().any(|c| c == cap),
-                "namespace token must have `{cap}` on `{path}`, got {caps:?}"
-            );
-            assert!(
-                !caps.iter().any(|c| c == "deny"),
-                "namespace token must not be denied on `{path}`, got {caps:?}"
-            );
+            assert!(caps.iter().any(|c| c == cap), "namespace token must have `{cap}` on `{path}`, got {caps:?}");
+            assert!(!caps.iter().any(|c| c == "deny"), "namespace token must not be denied on `{path}`, got {caps:?}");
         }
 
         // No privilege over-grant: tenant data paths remain denied. The
@@ -5564,10 +5230,7 @@ mod mod_policy_store_tests {
         policy_store.set_policy(rootonly).await.unwrap();
 
         let root_auth = Auth { policies: vec!["rootonly".into()], ..Default::default() };
-        let root_acl = policy_store
-            .new_acl_for_request(&root_auth.policies, None, &root_auth, None)
-            .await
-            .unwrap();
+        let root_acl = policy_store.new_acl_for_request(&root_auth.policies, None, &root_auth, None).await.unwrap();
         assert_eq!(
             root_acl.capabilities("sys/capabilities-self".to_string()),
             vec!["deny".to_string()],
@@ -5591,8 +5254,7 @@ mod mod_policy_store_tests {
         use crate::logical::Auth;
         use crate::modules::namespace::token_binding::stamp_binding;
 
-        let (_bvault, core, _root_token) =
-            new_unseal_test_bastion_vault("test_ns_shared_target_acl").await;
+        let (_bvault, core, _root_token) = new_unseal_test_bastion_vault("test_ns_shared_target_acl").await;
         let policy_store = PolicyStore::new(&core).await.unwrap();
 
         let mut ns_auth = Auth { policies: vec!["default".into()], ..Default::default() };
@@ -5600,28 +5262,19 @@ mod mod_policy_store_tests {
         // `scope_passes` resolves the grantee from the caller's entity_id; an
         // anonymous caller can never satisfy a `shared` scope.
         ns_auth.metadata.insert("entity_id".to_string(), "entity-tina".to_string());
-        let acl = policy_store
-            .new_acl_for_request(&ns_auth.policies, None, &ns_auth, None)
-            .await
-            .unwrap();
+        let acl = policy_store.new_acl_for_request(&ns_auth.policies, None, &ns_auth, None).await.unwrap();
 
         // The token's own namespace: the mount is reachable, which is what
         // `has_mount_access` (and therefore the GUI's nav gate) keys on.
         for mount in ["dti/esi/resources/", "dti/esi/secret/", "dti/esi/resource-group/"] {
-            assert!(
-                acl.has_mount_access(mount),
-                "tenant must have mount access on its own `{mount}`"
-            );
+            assert!(acl.has_mount_access(mount), "tenant must have mount access on its own `{mount}`");
         }
 
         // Another tenant's identical mounts stay unreachable — the rules are
         // `{{namespace.path}}`-templated against this token's binding, so they
         // can never widen into a sibling namespace.
         for mount in ["dti/outro/resources/", "resources/"] {
-            assert!(
-                !acl.has_mount_access(mount),
-                "tenant must NOT have mount access on `{mount}`"
-            );
+            assert!(!acl.has_mount_access(mount), "tenant must NOT have mount access on `{mount}`");
         }
 
         // Visibility is not access: every data rule is `scopes = ["shared"]`,
@@ -5641,10 +5294,7 @@ mod mod_policy_store_tests {
 
         // The same read succeeds once the request carries the share the
         // `shared` scope looks for, proving the rule is live and not inert.
-        let shared_req = Request {
-            target_shared_caps: vec!["read".to_string()],
-            ..req.clone()
-        };
+        let shared_req = Request { target_shared_caps: vec!["read".to_string()], ..req.clone() };
         assert!(
             acl.allow_operation(&shared_req, false).unwrap().allowed,
             "share-scoped rule must grant a read backed by an active share"
@@ -5745,14 +5395,10 @@ mod mod_policy_store_tests {
     /// the replicated ACL keyspace rather than fail the request.
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_token_policy_reads_through_a_cold_type_map() {
-        let (_bvault, core, _root_token) =
-            new_unseal_test_bastion_vault("test_policy_cold_type_map").await;
+        let (_bvault, core, _root_token) = new_unseal_test_bastion_vault("test_policy_cold_type_map").await;
         let policy_store = PolicyStore::new(&core).await.unwrap();
 
-        let mut peer = Policy::from_str(
-            r#"path "secret/data/peer/*" { capabilities = ["read"] }"#,
-        )
-        .unwrap();
+        let mut peer = Policy::from_str(r#"path "secret/data/peer/*" { capabilities = ["read"] }"#).unwrap();
         peer.name = "peer-written".to_string();
         policy_store.set_policy(peer).await.unwrap();
 
@@ -5788,8 +5434,7 @@ mod mod_policy_store_tests {
     async fn test_root_bound_token_with_unresolvable_policy_is_denied_not_error() {
         use crate::logical::Auth;
 
-        let (_bvault, core, _root_token) =
-            new_unseal_test_bastion_vault("test_policy_unresolvable_root").await;
+        let (_bvault, core, _root_token) = new_unseal_test_bastion_vault("test_policy_unresolvable_root").await;
         let policy_store = PolicyStore::new(&core).await.unwrap();
 
         assert!(
@@ -5801,8 +5446,7 @@ mod mod_policy_store_tests {
             "an unresolvable policy name must resolve to None so the caller can skip it"
         );
 
-        let auth =
-            Auth { policies: vec!["lives-in-a-child-namespace".into()], ..Default::default() };
+        let auth = Auth { policies: vec!["lives-in-a-child-namespace".into()], ..Default::default() };
         let acl = policy_store
             .new_acl_for_request(&auth.policies, None, &auth, None)
             .await
@@ -5836,10 +5480,8 @@ mod default_policy_does_not_narrow_admins_tests {
     use super::*;
 
     fn acl_of(hcls: &[&str]) -> ACL {
-        let policies: Vec<Arc<Policy>> = hcls
-            .iter()
-            .map(|h| Arc::new(Policy::from_str(h).expect("built-in policy must parse")))
-            .collect();
+        let policies: Vec<Arc<Policy>> =
+            hcls.iter().map(|h| Arc::new(Policy::from_str(h).expect("built-in policy must parse"))).collect();
         ACL::new(&policies).expect("ACL must build")
     }
 
@@ -6083,7 +5725,8 @@ mod policy_cache_ttl_tests {
         let cache = store.token_policies_lru.as_ref().unwrap();
 
         store.set_policy_ns(acl("p", "v1"), "tenant-a").await.unwrap();
-        let read = || async { store.get_policy_ns("p", PolicyType::Acl, "tenant-a").await.unwrap().unwrap().raw.clone() };
+        let read =
+            || async { store.get_policy_ns("p", PolicyType::Acl, "tenant-a").await.unwrap().unwrap().raw.clone() };
         cache.wait().unwrap();
         assert!(read().await.contains("v1/"));
 

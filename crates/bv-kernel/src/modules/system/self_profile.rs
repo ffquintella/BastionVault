@@ -90,10 +90,7 @@ impl SystemBackend {
     /// entry. Two mounts can hold different accounts that happen to share a
     /// username; picking the wrong one would let one of them rewrite the
     /// other's record.
-    async fn resolve_self_userpass(
-        &self,
-        req: &Request,
-    ) -> Result<Option<SelfUserpassPrincipal>, RvError> {
+    async fn resolve_self_userpass(&self, req: &Request) -> Result<Option<SelfUserpassPrincipal>, RvError> {
         let auth_module = self.get_module::<AuthModule>("auth")?;
         let Some(token_store) = auth_module.token_store.load_full() else {
             return Err(RvError::ErrPermissionDenied);
@@ -119,11 +116,7 @@ impl SystemBackend {
             }
         }
 
-        let username = te
-            .meta
-            .get("username")
-            .map(|s| s.trim().to_lowercase())
-            .unwrap_or_default();
+        let username = te.meta.get("username").map(|s| s.trim().to_lowercase()).unwrap_or_default();
         if username.is_empty() {
             return Ok(None);
         }
@@ -144,20 +137,11 @@ impl SystemBackend {
     ///
     /// Writes the whole `UserEntry` after a read-modify-write, exactly like the
     /// userpass backend's own `set_user`, so no unrelated field is disturbed.
-    async fn store_self_userpass(
-        &self,
-        principal: &SelfUserpassPrincipal,
-    ) -> Result<(), RvError> {
+    async fn store_self_userpass(&self, principal: &SelfUserpassPrincipal) -> Result<(), RvError> {
         let Some(view) = self.core.router().matching_view(&principal.mount)? else {
-            return Err(bv_error_response_status!(
-                500,
-                "the auth mount that issued this token is no longer available"
-            ));
+            return Err(bv_error_response_status!(500, "the auth mount that issued this token is no longer available"));
         };
-        let entry = StorageEntry::new(
-            format!("user/{}", principal.username).as_str(),
-            &principal.entry,
-        )?;
+        let entry = StorageEntry::new(format!("user/{}", principal.username).as_str(), &principal.entry)?;
         view.put(&entry).await
     }
 
@@ -195,21 +179,12 @@ impl SystemBackend {
         _backend: &dyn Backend,
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        let auth = req
-            .auth
-            .as_ref()
-            .ok_or_else(|| bv_error_response_status!(401, "no authenticated caller"))?;
+        let auth = req.auth.as_ref().ok_or_else(|| bv_error_response_status!(401, "no authenticated caller"))?;
 
         let mut data = Map::new();
-        data.insert(
-            "entity_id".into(),
-            Value::String(auth.metadata.get("entity_id").cloned().unwrap_or_default()),
-        );
+        data.insert("entity_id".into(), Value::String(auth.metadata.get("entity_id").cloned().unwrap_or_default()));
         data.insert("display_name".into(), Value::String(auth.display_name.clone()));
-        data.insert(
-            "policies".into(),
-            Value::Array(auth.policies.iter().cloned().map(Value::String).collect()),
-        );
+        data.insert("policies".into(), Value::Array(auth.policies.iter().cloned().map(Value::String).collect()));
 
         let principal = self.resolve_self_userpass(req).await?;
         match &principal {
@@ -224,10 +199,7 @@ impl SystemBackend {
                 data.insert("phone".into(), Value::String(p.entry.phone.clone()));
                 data.insert("disabled".into(), Value::Bool(p.entry.disabled));
                 data.insert("fido2_enabled".into(), Value::Bool(p.entry.fido2_enabled));
-                data.insert(
-                    "totp_mfa_enabled".into(),
-                    Value::Bool(p.entry.totp_mfa_enabled),
-                );
+                data.insert("totp_mfa_enabled".into(), Value::Bool(p.entry.totp_mfa_enabled));
                 data.insert("can_change_password".into(), Value::Bool(can_change_password));
                 data.insert("can_edit_contact".into(), Value::Bool(!p.entry.disabled));
             }
@@ -247,9 +219,7 @@ impl SystemBackend {
                 data.insert("auth_mount".into(), Value::String(String::new()));
                 data.insert(
                     "auth_method".into(),
-                    Value::String(
-                        auth.metadata.get("mount_path").cloned().unwrap_or_default(),
-                    ),
+                    Value::String(auth.metadata.get("mount_path").cloned().unwrap_or_default()),
                 );
                 data.insert("email".into(), Value::String(String::new()));
                 data.insert("phone".into(), Value::String(String::new()));
@@ -273,10 +243,7 @@ impl SystemBackend {
                 account.insert("linux".into(), Value::String(a.linux.clone()));
                 account.insert("macos".into(), Value::String(a.macos.clone()));
                 account.insert("windows".into(), Value::String(a.windows.clone()));
-                account.insert(
-                    "has_windows_password".into(),
-                    Value::Bool(a.has_windows_password()),
-                );
+                account.insert("has_windows_password".into(), Value::Bool(a.has_windows_password()));
                 account.insert("updated_at".into(), Value::String(a.updated_at.clone()));
             }
             None => {
@@ -292,10 +259,7 @@ impl SystemBackend {
         // The default-account store is keyed on the identity principal, which
         // exists for AppRole / OIDC / cert logins too — so this stays editable
         // even when the password section does not.
-        data.insert(
-            "can_edit_default_account".into(),
-            Value::Bool(!candidates.is_empty()),
-        );
+        data.insert("can_edit_default_account".into(), Value::Bool(!candidates.is_empty()));
         data.insert("default_account".into(), Value::Object(account));
 
         Ok(Some(Response::data_response(Some(data))))
@@ -327,16 +291,8 @@ impl SystemBackend {
             ));
         }
 
-        let current = req
-            .get_data("current_password")?
-            .as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?
-            .to_string();
-        let new_password = req
-            .get_data("new_password")?
-            .as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?
-            .to_string();
+        let current = req.get_data("current_password")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
+        let new_password = req.get_data("new_password")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
 
         if new_password.len() < MIN_SELF_PASSWORD_LEN {
             return Err(bv_error_response_status!(
@@ -345,10 +301,7 @@ impl SystemBackend {
             ));
         }
         if new_password == current {
-            return Err(bv_error_response_status!(
-                400,
-                "new password must differ from the current one"
-            ));
+            return Err(bv_error_response_status!(400, "new password must differ from the current one"));
         }
 
         // Re-authenticate. A miss is recorded but deliberately does NOT feed the
@@ -374,14 +327,7 @@ impl SystemBackend {
         principal.entry.password_hash = bcrypt::hash(&new_password, bcrypt::DEFAULT_COST)?;
         self.store_self_userpass(&principal).await?;
 
-        self.record_self_audit(
-            req,
-            "password-change",
-            &principal.mount,
-            &principal.username,
-            "self-service",
-        )
-        .await;
+        self.record_self_audit(req, "password-change", &principal.mount, &principal.username, "self-service").await;
 
         Ok(Some(Response::data_response(
             json!({ "updated": true, "username": principal.username }).as_object().cloned(),

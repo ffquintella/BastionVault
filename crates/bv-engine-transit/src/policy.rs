@@ -143,14 +143,9 @@ impl KeyPolicy {
     /// `min_decryption_version` or absent.
     pub fn version_for_decrypt(&self, v: u32) -> Result<&KeyVersion, String> {
         if v < self.min_decryption_version {
-            return Err(format!(
-                "version {v} is below min_decryption_version {}",
-                self.min_decryption_version
-            ));
+            return Err(format!("version {v} is below min_decryption_version {}", self.min_decryption_version));
         }
-        self.versions
-            .get(&v)
-            .ok_or_else(|| format!("version {v} not found on key `{}`", self.name))
+        self.versions.get(&v).ok_or_else(|| format!("version {v} not found on key `{}`", self.name))
     }
 }
 
@@ -159,26 +154,13 @@ mod tests {
     use super::*;
 
     fn sample(material: Vec<u8>) -> KeyVersion {
-        KeyVersion {
-            version: 1,
-            created_at: 0,
-            material,
-            pk: Vec::new(),
-        }
+        KeyVersion { version: 1, created_at: 0, material, pk: Vec::new() }
     }
 
     #[test]
     fn version_for_decrypt_respects_min() {
         let mut p = KeyPolicy::new("k".into(), KeyType::Chacha20Poly1305, sample(vec![0; 32]));
-        p.versions.insert(
-            2,
-            KeyVersion {
-                version: 2,
-                created_at: 1,
-                material: vec![0; 32],
-                pk: Vec::new(),
-            },
-        );
+        p.versions.insert(2, KeyVersion { version: 2, created_at: 1, material: vec![0; 32], pk: Vec::new() });
         p.latest_version = 2;
         p.min_decryption_version = 2;
         assert!(p.version_for_decrypt(1).is_err());
@@ -212,12 +194,7 @@ mod tests {
 
     #[test]
     fn key_version_serialized_form_is_unchanged() {
-        let v = KeyVersion {
-            version: 3,
-            created_at: 7,
-            material: vec![1, 2],
-            pk: vec![9],
-        };
+        let v = KeyVersion { version: 3, created_at: 7, material: vec![1, 2], pk: vec![9] };
         let json = serde_json::to_string(&v).unwrap();
         assert_eq!(json, r#"{"version":3,"created_at":7,"material":[1,2],"pk":[9]}"#);
         let back: KeyVersion = serde_json::from_str(&json).unwrap();

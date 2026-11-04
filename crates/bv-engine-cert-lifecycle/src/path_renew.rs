@@ -47,17 +47,11 @@ impl CertLifecycleBackend {
 #[maybe_async::maybe_async]
 impl CertLifecycleBackendInner {
     pub async fn renew_target(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
-        let name = req
-            .get_data("name")?
-            .as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?
-            .to_string();
+        let name = req.get_data("name")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
 
         let target: Target = storage::get_json(req, &storage::target_storage_key(&name))
             .await?
-            .ok_or_else(|| {
-                RvError::ErrString(format!("cert-lifecycle: target `{name}` not found"))
-            })?;
+            .ok_or_else(|| RvError::ErrString(format!("cert-lifecycle: target `{name}` not found")))?;
 
         // Snapshot the calling token; the sub-request inherits it so the
         // PKI mount enforces the same policy boundary.
@@ -103,9 +97,7 @@ impl CertLifecycleBackendInner {
                 state.last_error = msg.clone();
                 state.failure_count = state.failure_count.saturating_add(1);
                 storage::put_json(req, &storage::state_storage_key(&name), &state).await?;
-                Err(RvError::ErrString(format!(
-                    "cert-lifecycle: renew of `{name}` failed: {msg}"
-                )))
+                Err(RvError::ErrString(format!("cert-lifecycle: renew of `{name}` failed: {msg}")))
             }
         }
     }
@@ -148,8 +140,7 @@ async fn perform_renewal(
         body.insert("key_ref".into(), json!(target.key_ref));
     }
 
-    let mut sub_req =
-        Request::new(format!("{}/issue/{}", target.pki_mount.trim_end_matches('/'), target.role_ref));
+    let mut sub_req = Request::new(format!("{}/issue/{}", target.pki_mount.trim_end_matches('/'), target.role_ref));
     sub_req.operation = Operation::Write;
     sub_req.client_token = token.to_string();
     sub_req.body = Some(body);
@@ -164,10 +155,7 @@ async fn perform_renewal(
     let serial = string_field(&data, "serial_number")?;
 
     let chain_pems = match data.get("ca_chain") {
-        Some(Value::Array(arr)) => arr
-            .iter()
-            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-            .collect(),
+        Some(Value::Array(arr)) => arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect(),
         _ => Vec::new(),
     };
 
@@ -176,13 +164,7 @@ async fn perform_renewal(
     // got signed (e.g. clamped to issuer NotAfter in L4).
     let not_after_unix = parse_not_after(&certificate_pem)?;
 
-    Ok(RenewedCert {
-        certificate_pem,
-        private_key_pem,
-        chain_pems,
-        serial,
-        not_after_unix,
-    })
+    Ok(RenewedCert { certificate_pem, private_key_pem, chain_pems, serial, not_after_unix })
 }
 
 /// Phase L7: dispatch the renewal to a registered
@@ -196,10 +178,7 @@ fn deliver(
     issued: &RenewedCert,
 ) -> Result<DeliveryReceipt, String> {
     let key = registry_key_for(&target.kind);
-    let plugin = backend
-        .deliverers
-        .get(key)
-        .ok_or_else(|| format!("no deliverer registered for kind `{key}`"))?;
+    let plugin = backend.deliverers.get(key).ok_or_else(|| format!("no deliverer registered for kind `{key}`"))?;
     let bundle = CertBundle {
         certificate_pem: issued.certificate_pem.clone(),
         private_key_pem: issued.private_key_pem.clone(),
@@ -213,11 +192,7 @@ fn string_field(data: &Map<String, Value>, key: &str) -> Result<String, RvError>
     data.get(key)
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
-        .ok_or_else(|| {
-            RvError::ErrString(format!(
-                "cert-lifecycle: PKI response missing `{key}` field"
-            ))
-        })
+        .ok_or_else(|| RvError::ErrString(format!("cert-lifecycle: PKI response missing `{key}` field")))
 }
 
 fn parse_not_after(cert_pem: &str) -> Result<i64, RvError> {
@@ -230,8 +205,5 @@ fn parse_not_after(cert_pem: &str) -> Result<i64, RvError> {
 }
 
 fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }

@@ -16,11 +16,7 @@ use super::{
     policy::{KeyPolicy, KEY_PREFIX, USED_PREFIX},
     TotpBackendInner,
 };
-use crate::{
-    errors::RvError,
-    logical::Request,
-    storage::StorageEntry,
-};
+use crate::{errors::RvError, logical::Request, storage::StorageEntry};
 
 /// Per-step replay record. `code_hash` lets the validator detect a
 /// re-presented code within the same step window even if two
@@ -45,29 +41,16 @@ impl TotpBackendInner {
         format!("{KEY_PREFIX}{name}")
     }
 
-    pub async fn get_key(
-        &self,
-        req: &Request,
-        name: &str,
-    ) -> Result<Option<KeyPolicy>, RvError> {
+    pub async fn get_key(&self, req: &Request, name: &str) -> Result<Option<KeyPolicy>, RvError> {
         match req.storage_get(&Self::key_storage_path(name)).await? {
             Some(e) => Ok(Some(serde_json::from_slice(&e.value)?)),
             None => Ok(None),
         }
     }
 
-    pub async fn put_key(
-        &self,
-        req: &mut Request,
-        name: &str,
-        policy: &KeyPolicy,
-    ) -> Result<(), RvError> {
+    pub async fn put_key(&self, req: &mut Request, name: &str, policy: &KeyPolicy) -> Result<(), RvError> {
         let bytes = serde_json::to_vec(policy)?;
-        req.storage_put(&StorageEntry {
-            key: Self::key_storage_path(name),
-            value: bytes,
-        })
-        .await
+        req.storage_put(&StorageEntry { key: Self::key_storage_path(name), value: bytes }).await
     }
 
     pub async fn delete_key(&self, req: &mut Request, name: &str) -> Result<(), RvError> {
@@ -94,33 +77,16 @@ impl TotpBackendInner {
         format!("{USED_PREFIX}{name}/{step}")
     }
 
-    pub async fn get_used(
-        &self,
-        req: &Request,
-        name: &str,
-        step: u64,
-    ) -> Result<Option<UsedEntry>, RvError> {
-        match req
-            .storage_get(&Self::used_storage_path(name, step))
-            .await?
-        {
+    pub async fn get_used(&self, req: &Request, name: &str, step: u64) -> Result<Option<UsedEntry>, RvError> {
+        match req.storage_get(&Self::used_storage_path(name, step)).await? {
             Some(e) => Ok(Some(serde_json::from_slice(&e.value)?)),
             None => Ok(None),
         }
     }
 
-    pub async fn put_used(
-        &self,
-        req: &mut Request,
-        name: &str,
-        entry: &UsedEntry,
-    ) -> Result<(), RvError> {
+    pub async fn put_used(&self, req: &mut Request, name: &str, entry: &UsedEntry) -> Result<(), RvError> {
         let bytes = serde_json::to_vec(entry)?;
-        req.storage_put(&StorageEntry {
-            key: Self::used_storage_path(name, entry.step),
-            value: bytes,
-        })
-        .await
+        req.storage_put(&StorageEntry { key: Self::used_storage_path(name, entry.step), value: bytes }).await
     }
 }
 

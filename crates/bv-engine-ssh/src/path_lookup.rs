@@ -44,24 +44,13 @@ impl SshBackend {
 
 #[maybe_async::maybe_async]
 impl SshBackendInner {
-    pub async fn handle_lookup(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
-        let ip_str = req
-            .get_data("ip")?
-            .as_str()
-            .ok_or_else(|| RvError::ErrString("ip is required".into()))?
-            .to_string();
-        let ip: std::net::IpAddr = ip_str.parse().map_err(|e| {
-            RvError::ErrString(format!("ip `{ip_str}` is not a valid IP address: {e}"))
-        })?;
-        let username_in = req
-            .get_data("username")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_default();
+    pub async fn handle_lookup(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let ip_str =
+            req.get_data("ip")?.as_str().ok_or_else(|| RvError::ErrString("ip is required".into()))?.to_string();
+        let ip: std::net::IpAddr =
+            ip_str.parse().map_err(|e| RvError::ErrString(format!("ip `{ip_str}` is not a valid IP address: {e}")))?;
+        let username_in =
+            req.get_data("username").ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
 
         // List all role names, then load each and filter to OTP-mode
         // matches. The role catalog is small (operator-scaled, not
@@ -96,10 +85,7 @@ impl SshBackendInner {
         matches.dedup();
 
         let mut data = Map::new();
-        data.insert(
-            "roles".into(),
-            Value::Array(matches.into_iter().map(Value::String).collect()),
-        );
+        data.insert("roles".into(), Value::Array(matches.into_iter().map(Value::String).collect()));
         Ok(Some(Response::data_response(Some(data))))
     }
 }

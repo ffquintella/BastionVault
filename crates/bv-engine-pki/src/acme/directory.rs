@@ -13,13 +13,13 @@ use super::{
     new_nonce,
     storage::{AcmeConfig, NonceRing, NONCE_KEY},
 };
-use bv_storage::StorageEntry;
 use crate::{
     context::Context,
     errors::RvError,
     logical::{Backend, Operation, Path, PathOperation, Request, Response},
     new_path, new_path_internal,
 };
+use bv_storage::StorageEntry;
 
 use super::super::{PkiBackend, PkiBackendInner};
 
@@ -74,10 +74,7 @@ impl PkiBackendInner {
             // forward-compatible client doesn't trip on its absence.
             Value::Bool(false),
         );
-        meta.insert(
-            "termsOfService".into(),
-            Value::String(format!("{base}/acme/terms")),
-        );
+        meta.insert("termsOfService".into(), Value::String(format!("{base}/acme/terms")));
         data.insert("meta".into(), Value::Object(meta));
 
         // Replay-Nonce on the directory response too — RFC 8555 §6.5
@@ -87,11 +84,7 @@ impl PkiBackendInner {
         let mut headers = HashMap::new();
         headers.insert("Replay-Nonce".to_string(), nonce);
         headers.insert("Cache-Control".to_string(), "no-store".to_string());
-        Ok(Some(Response {
-            data: Some(data),
-            headers: Some(headers),
-            ..Default::default()
-        }))
+        Ok(Some(Response { data: Some(data), headers: Some(headers), ..Default::default() }))
     }
 
     pub async fn handle_acme_new_nonce(
@@ -107,10 +100,7 @@ impl PkiBackendInner {
         let mut headers = HashMap::new();
         headers.insert("Replay-Nonce".to_string(), nonce);
         headers.insert("Cache-Control".to_string(), "no-store".to_string());
-        Ok(Some(Response {
-            headers: Some(headers),
-            ..Default::default()
-        }))
+        Ok(Some(Response { headers: Some(headers), ..Default::default() }))
     }
 
     /// Mint a fresh nonce, push it onto the ring buffer, persist the
@@ -147,11 +137,7 @@ impl PkiBackendInner {
 
     pub async fn save_nonce_ring(&self, req: &mut Request, ring: &NonceRing) -> Result<(), RvError> {
         let bytes = serde_json::to_vec(ring)?;
-        req.storage_put(&StorageEntry {
-            key: NONCE_KEY.to_string(),
-            value: bytes,
-        })
-        .await
+        req.storage_put(&StorageEntry { key: NONCE_KEY.to_string(), value: bytes }).await
     }
 }
 

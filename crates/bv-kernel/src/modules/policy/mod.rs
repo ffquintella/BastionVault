@@ -8,11 +8,11 @@ use serde_json::{Map, Value};
 use super::{resource_group::ResourceGroupModule, Module};
 use crate::kernel_api::VaultCtx;
 use crate::{
+    bv_error_response_status,
     core::Core,
     errors::RvError,
     handler::{AuthHandler, Handler},
     logical::{Backend, Request, Response},
-    bv_error_response_status,
 };
 
 #[allow(clippy::module_inception)]
@@ -21,8 +21,8 @@ pub use policy::{Permissions, Policy, PolicyPathRules, PolicyType};
 
 pub mod policy_store;
 // `<module>-full|read|connect|shared` baselines (features/module-policies.md).
-pub(crate) mod module_policies;
 pub mod kernel_service;
+pub(crate) mod module_policies;
 pub use policy_store::{PolicyHistoryEntry, PolicyStore};
 
 pub mod acl;
@@ -111,9 +111,7 @@ impl PolicyModule {
     ) -> Result<Option<Response>, RvError> {
         let name = req.get_data_as_str("name")?;
         let ns = crate::modules::namespace::policy_scope::writer_namespace_path(req.headers.as_ref());
-        if let Some(policy) =
-            self.policy_store.load().get_policy_ns(&name, PolicyType::Acl, &ns).await?
-        {
+        if let Some(policy) = self.policy_store.load().get_policy_ns(&name, PolicyType::Acl, &ns).await? {
             let mut resp_data = Map::new();
             resp_data.insert("name".into(), Value::String(name));
 
@@ -154,23 +152,16 @@ impl PolicyModule {
         // reference paths that belong to that namespace. Refused at write time
         // for non-root writers; a no-op for root-scoped writes. The same
         // namespace scopes where the policy document is *stored* below.
-        let writer_ns =
-            crate::modules::namespace::policy_scope::writer_namespace_path(req.headers.as_ref());
+        let writer_ns = crate::modules::namespace::policy_scope::writer_namespace_path(req.headers.as_ref());
         {
             let paths: Vec<String> = policy.paths.iter().map(|r| r.path.clone()).collect();
-            crate::modules::namespace::policy_scope::refuse_cross_namespace_paths(
-                &self.core,
-                &writer_ns,
-                &paths,
-            )
-            .await?;
+            crate::modules::namespace::policy_scope::refuse_cross_namespace_paths(&self.core, &writer_ns, &paths)
+                .await?;
         }
 
         // Sentinel (RGP/EGP) policies are deployment-global; they cannot be
         // authored inside a tenant namespace.
-        if !writer_ns.is_empty()
-            && (policy.policy_type == PolicyType::Egp || policy.policy_type == PolicyType::Rgp)
-        {
+        if !writer_ns.is_empty() && (policy.policy_type == PolicyType::Egp || policy.policy_type == PolicyType::Rgp) {
             return Err(bv_error_response_status!(
                 400,
                 "sentinel (RGP/EGP) policies cannot be created inside a namespace"
@@ -187,10 +178,7 @@ impl PolicyModule {
         // this handler too but do not yet emit history entries.
         let store = self.policy_store.load();
         let previous_raw = if policy.policy_type == PolicyType::Acl {
-            store
-                .get_policy_ns(&name, PolicyType::Acl, &writer_ns)
-                .await?
-                .map(|p| p.raw.clone())
+            store.get_policy_ns(&name, PolicyType::Acl, &writer_ns).await?.map(|p| p.raw.clone())
         } else {
             None
         };
@@ -209,10 +197,8 @@ impl PolicyModule {
             let referenced = collect_referenced_groups(&policy);
             if !referenced.is_empty() {
                 if let Some(known) = self.known_asset_groups().await {
-                    let unknown: Vec<String> = referenced
-                        .into_iter()
-                        .filter(|g| !known.iter().any(|k| k == g))
-                        .collect();
+                    let unknown: Vec<String> =
+                        referenced.into_iter().filter(|g| !known.iter().any(|k| k == g)).collect();
                     if !unknown.is_empty() {
                         warnings.push(format!(
                             "policy references unknown asset group(s): {}. \
@@ -227,9 +213,7 @@ impl PolicyModule {
 
         store.set_policy_ns(policy, &writer_ns).await?;
 
-        if matches!(op, "create" | "update")
-            && previous_raw.as_deref() != Some(new_raw.as_str())
-        {
+        if matches!(op, "create" | "update") && previous_raw.as_deref() != Some(new_raw.as_str()) {
             let entry = PolicyHistoryEntry {
                 ts: now_iso(),
                 user: caller_username(req),
@@ -252,10 +236,7 @@ impl PolicyModule {
     /// subsystem isn't loaded — caller treats that as "can't validate,
     /// don't warn".
     async fn known_asset_groups(&self) -> Option<Vec<String>> {
-        let module = self
-            .core
-            .module_manager()
-            .get_module::<ResourceGroupModule>("resource-group")?;
+        let module = self.core.module_manager().get_module::<ResourceGroupModule>("resource-group")?;
         let store = module.store()?;
         store.list_groups().await.ok()
     }
@@ -271,11 +252,8 @@ impl PolicyModule {
         // Capture the current raw HCL *before* deletion so the audit
         // entry retains the full final state of the policy.
         let store = self.policy_store.load();
-        let previous_raw = store
-            .get_policy_ns(&name, PolicyType::Acl, &ns)
-            .await?
-            .map(|p| p.raw.clone())
-            .unwrap_or_default();
+        let previous_raw =
+            store.get_policy_ns(&name, PolicyType::Acl, &ns).await?.map(|p| p.raw.clone()).unwrap_or_default();
 
         store.delete_policy_ns(&name, PolicyType::Acl, &ns).await?;
 
@@ -379,11 +357,8 @@ impl PolicyModule {
         // draft's own rules, and it is how an attached policy that *is* the
         // draft is recognized and skipped (an operator editing `default`
         // must not have the stored `default` merged back in underneath).
-        let supplied_name = req
-            .get_data("name")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.trim().to_string()))
-            .filter(|s| !s.is_empty());
+        let supplied_name =
+            req.get_data("name").ok().and_then(|v| v.as_str().map(|s| s.trim().to_string())).filter(|s| !s.is_empty());
 
         let ns = crate::modules::namespace::policy_scope::writer_namespace_path(req.headers.as_ref());
 
@@ -492,10 +467,7 @@ impl PolicyModule {
             let caller_acl = store.new_acl_for_request(&auth.policies, None, &auth, request_ns).await?;
             for name in attached_named.iter() {
                 let probe = format!("sys/policies/acl/{name}");
-                if !caller_acl
-                    .explain_capability(&probe, crate::modules::policy::policy::Capability::Read)
-                    .allowed
-                {
+                if !caller_acl.explain_capability(&probe, crate::modules::policy::policy::Capability::Read).allowed {
                     return Err(bv_error_response_status!(
                         403,
                         &format!(
@@ -569,8 +541,7 @@ impl PolicyModule {
                     // templating. Resolving attached policies here by hand is
                     // what let the dry-run model a policy set no real token
                     // could ever carry.
-                    let attached: Vec<String> =
-                        case.attached.iter().filter(|n| **n != draft_name).cloned().collect();
+                    let attached: Vec<String> = case.attached.iter().filter(|n| **n != draft_name).cloned().collect();
                     // Bound in `ns`, the draft rides along as an additional
                     // policy, as before. Bound above it, it is a policy
                     // stored in `ns` and must take the cross-namespace step.
@@ -647,8 +618,7 @@ impl PolicyModule {
             // one verdict — previously they produced two, and the prefixed one
             // (which is what the GUI's POLICY PATH field hands the operator)
             // reported `allowed` for requests the pipeline refused.
-            let resolved_path =
-                crate::modules::namespace::router::qualify_path_for_namespace(&ns_prefix, &case.path);
+            let resolved_path = crate::modules::namespace::router::qualify_path_for_namespace(&ns_prefix, &case.path);
 
             let mut row = Map::new();
             row.insert("path".into(), Value::String(case.path.clone()));
@@ -714,10 +684,7 @@ impl PolicyModule {
                     row.insert("allowed".into(), Value::Bool(ex.allowed));
                     row.insert("denied_by_deny".into(), Value::Bool(ex.denied_by_deny));
                     row.insert("match_kind".into(), Value::String(ex.match_kind.as_str().into()));
-                    row.insert(
-                        "matched_path".into(),
-                        ex.matched_path.map(Value::String).unwrap_or(Value::Null),
-                    );
+                    row.insert("matched_path".into(), ex.matched_path.map(Value::String).unwrap_or(Value::Null));
                     row.insert("granting_policies".into(), string_array(&ex.granting_policies));
                     row.insert("draft_only_allowed".into(), Value::Bool(draft_only.allowed));
                 }
@@ -826,16 +793,7 @@ impl PolicyModule {
                         ),
                         _ => None,
                     };
-                    Some(PolicyTestCase {
-                        path,
-                        capability,
-                        expect,
-                        note,
-                        env,
-                        expect_key,
-                        expect_value,
-                        policies,
-                    })
+                    Some(PolicyTestCase { path, capability, expect, note, env, expect_key, expect_value, policies })
                 })
                 .collect(),
             _ => Vec::new(),
@@ -1194,10 +1152,7 @@ mod mod_policy_tests {
         let ret = test_http_server.read("sys/policy", None);
         assert!(ret.is_ok());
         let seeded = seeded_policy_names(None);
-        assert_eq!(
-            ret.unwrap().1,
-            json!({ "keys": seeded.clone(), "policies": seeded })
-        );
+        assert_eq!(ret.unwrap().1, json!({ "keys": seeded.clone(), "policies": seeded }));
 
         // Read default policy
         let ret = test_http_server.read("sys/policy/default", None);
@@ -1227,10 +1182,7 @@ mod mod_policy_tests {
         let ret = test_http_server.read("sys/policy", None);
         assert!(ret.is_ok());
         let with_policy1 = seeded_policy_names(Some("policy1"));
-        assert_eq!(
-            ret.unwrap().1,
-            json!({ "keys": with_policy1.clone(), "policies": with_policy1 })
-        );
+        assert_eq!(ret.unwrap().1, json!({ "keys": with_policy1.clone(), "policies": with_policy1 }));
 
         // Delete policy1
         let ret = test_http_server.delete("sys/policy/policy1", None, None);
@@ -1240,10 +1192,7 @@ mod mod_policy_tests {
         let ret = test_http_server.read("sys/policy", None);
         assert!(ret.is_ok());
         let baseline = seeded_policy_names(None);
-        assert_eq!(
-            ret.unwrap().1,
-            json!({ "keys": baseline.clone(), "policies": baseline })
-        );
+        assert_eq!(ret.unwrap().1, json!({ "keys": baseline.clone(), "policies": baseline }));
     }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
@@ -1621,9 +1570,7 @@ path "dti/esi/secret/data/docker/hub/*" { capabilities = ["create","read","updat
             .unwrap();
         assert!((200..300).contains(&s), "policy write: {s} {r:?}");
 
-        server
-            .write("v1/sys/auth/userpass", json!({ "type": "userpass" }).as_object().cloned(), Some(&root))
-            .unwrap();
+        server.write("v1/sys/auth/userpass", json!({ "type": "userpass" }).as_object().cloned(), Some(&root)).unwrap();
         let (s, r) = server
             .write(
                 "v1/auth/userpass/users/svc",

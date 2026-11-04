@@ -6,10 +6,7 @@ use derive_more::{Deref, DerefMut};
 use serde::{Deserialize, Serialize};
 
 use super::rp::Passkey;
-use crate::utils::{
-    deserialize_duration, serialize_duration,
-    token_util::TokenParams,
-};
+use crate::utils::{deserialize_duration, serialize_duration, token_util::TokenParams};
 
 /// FIDO2 relying party configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

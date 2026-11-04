@@ -34,9 +34,7 @@ use super::{SamlBackend, SamlBackendInner};
 use crate::{
     context::Context,
     errors::RvError,
-    logical::{
-        Auth, Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response,
-    },
+    logical::{Auth, Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
     new_fields, new_fields_internal, new_path, new_path_internal,
 };
 
@@ -68,9 +66,7 @@ impl SamlBackend {
         // Exists so `new_backend`'s renew-handler macro can bind a
         // named handle the way the OIDC backend does. Not a clone
         // of the trait object — callers use `self.inner.clone()`.
-        SamlBackendInner {
-            core: self.inner.core.clone(),
-        }
+        SamlBackendInner { core: self.inner.core.clone() }
     }
 }
 
@@ -83,15 +79,10 @@ impl SamlBackendInner {
     /// principal is the assertion's `NameID` (the `Auth` display name) on
     /// success and `(unknown)` on a rejected attempt. The audit write is
     /// best-effort and never alters the login result.
-    pub async fn handle_callback(
-        &self,
-        backend: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_callback(&self, backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let remote_addr = req.connection.as_ref().map(|c| c.peer_addr.clone()).unwrap_or_default();
         let result = self.handle_callback_inner(backend, req).await;
-        let (success, details) =
-            bv_auth_audit::login_outcome(&result);
+        let (success, details) = bv_auth_audit::login_outcome(&result);
         let username = match &result {
             Ok(Some(resp)) => resp
                 .auth
@@ -101,15 +92,7 @@ impl SamlBackendInner {
                 .unwrap_or_else(|| "(unknown)".to_string()),
             _ => "(unknown)".to_string(),
         };
-        bv_auth_audit::record_login(
-            &self.core,
-            "saml/",
-            &username,
-            success,
-            &remote_addr,
-            &details,
-        )
-        .await;
+        bv_auth_audit::record_login(&self.core, "saml/", &username, success, &remote_addr, &details).await;
         result
     }
 
@@ -118,41 +101,28 @@ impl SamlBackendInner {
         _backend: &dyn Backend,
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        let cfg = SamlConfig::load(req)
-            .await?
-            .ok_or_else(|| RvError::ErrString("saml: mount is not configured".into()))?;
+        let cfg =
+            SamlConfig::load(req).await?.ok_or_else(|| RvError::ErrString("saml: mount is not configured".into()))?;
 
-        let saml_response_b64 = req
-            .get_data_as_str("saml_response")
-            .unwrap_or_default();
+        let saml_response_b64 = req.get_data_as_str("saml_response").unwrap_or_default();
         let relay_state = req.get_data_as_str("relay_state").unwrap_or_default();
         if saml_response_b64.trim().is_empty() || relay_state.trim().is_empty() {
-            return Err(RvError::ErrString(
-                "saml: both `saml_response` and `relay_state` are required".into(),
-            ));
+            return Err(RvError::ErrString("saml: both `saml_response` and `relay_state` are required".into()));
         }
 
         // Load-and-delete the state record (single-use).
         let state = load_and_delete_state(req, &relay_state)
             .await?
-            .ok_or_else(|| {
-                RvError::ErrString(
-                    "saml: relay_state is unknown, expired, or already redeemed".into(),
-                )
-            })?;
+            .ok_or_else(|| RvError::ErrString("saml: relay_state is unknown, expired, or already redeemed".into()))?;
         if now_unix().saturating_sub(state.created_at) > STATE_TTL_SECS {
-            return Err(RvError::ErrString(
-                "saml: relay_state expired — start a new login".into(),
-            ));
+            return Err(RvError::ErrString("saml: relay_state expired — start a new login".into()));
         }
 
         // Decode the Response XML. Accept with and without whitespace
         // padding since operators sometimes paste the value manually.
         let xml = general_purpose::STANDARD
             .decode(saml_response_b64.replace(char::is_whitespace, ""))
-            .map_err(|e| {
-                RvError::ErrString(format!("saml: saml_response is not valid base64: {e}"))
-            })?;
+            .map_err(|e| RvError::ErrString(format!("saml: saml_response is not valid base64: {e}")))?;
 
         let parsed = parse_response(&xml)?;
 
@@ -178,14 +148,9 @@ impl SamlBackendInner {
         verify_signed_assertion(&parsed, &pubkey)?;
 
         // Load the role so we know which policies to attach.
-        let role = SamlRoleEntry::load(req, &state.role_name)
-            .await?
-            .ok_or_else(|| {
-                RvError::ErrString(format!(
-                    "saml: role `{}` was deleted between login and callback",
-                    state.role_name
-                ))
-            })?;
+        let role = SamlRoleEntry::load(req, &state.role_name).await?.ok_or_else(|| {
+            RvError::ErrString(format!("saml: role `{}` was deleted between login and callback", state.role_name))
+        })?;
 
         let assertion = parsed.assertion.as_ref().unwrap(); // validate() already ensured Some
 
@@ -194,12 +159,7 @@ impl SamlBackendInner {
         // configured. Everything else stays in the IdP's response
         // and is not exposed to vault policies.
         let mut metadata: HashMap<String, String> = HashMap::new();
-        project_attribute_mappings(
-            &state.role_name,
-            &role.attribute_mappings,
-            &assertion.attributes,
-            &mut metadata,
-        );
+        project_attribute_mappings(&state.role_name, &role.attribute_mappings, &assertion.attributes, &mut metadata);
         if !role.groups_attribute.is_empty() {
             if let Some(groups) = assertion.attributes.get(&role.groups_attribute) {
                 metadata.insert("groups".into(), groups.join(","));
@@ -217,25 +177,15 @@ impl SamlBackendInner {
         // operator-authored mapping wins, since that is the name they will have
         // written the assignment against.
         metadata.insert("mount_path".into(), "saml/".into());
-        let principal = metadata
-            .entry("username".into())
-            .or_insert_with(|| assertion.name_id.clone())
-            .clone();
+        let principal = metadata.entry("username".into()).or_insert_with(|| assertion.name_id.clone()).clone();
 
         // Role-level bound attributes + bound subjects were populated
         // by the admin; enforce them.
         let mut attributes_as_values: Map<String, Value> = Map::new();
         for (k, vs) in &assertion.attributes {
-            attributes_as_values.insert(
-                k.clone(),
-                Value::Array(vs.iter().cloned().map(Value::String).collect()),
-            );
+            attributes_as_values.insert(k.clone(), Value::Array(vs.iter().cloned().map(Value::String).collect()));
         }
-        role.validate_assertion(
-            &assertion.name_id,
-            &assertion.name_id_format,
-            &attributes_as_values,
-        )?;
+        role.validate_assertion(&assertion.name_id, &assertion.name_id_format, &attributes_as_values)?;
 
         // Multi-tenancy: bind the session to a namespace, exactly as `userpass/`
         // does. The IdP's POST to the ACS URL carries no
@@ -244,23 +194,12 @@ impl SamlBackendInner {
         // Without a binding the issued token read back as root-bound and
         // non-child-visible, so an SSO principal granted several namespaces could
         // reach none of them.
-        let (ns_path, ns_uuid) = crate::kernel_api::namespace::login_namespace_for_principal(
-            &self.core,
-            req,
-            "saml/",
-            &principal,
-        )
-        .await?;
+        let (ns_path, ns_uuid) =
+            crate::kernel_api::namespace::login_namespace_for_principal(&self.core, req, "saml/", &principal).await?;
 
         // Refuse the login if the principal's assignment excludes that namespace.
         // No record ⇒ unrestricted; fails closed otherwise.
-        crate::kernel_api::namespace::enforce_login_assignment(
-            &self.core,
-            "saml/",
-            &principal,
-            &ns_path,
-        )
-        .await?;
+        crate::kernel_api::namespace::enforce_login_assignment(&self.core, "saml/", &principal, &ns_path).await?;
 
         // Build the Auth response. TTL handling mirrors OIDC: 0
         // means "use the token store's default."
@@ -270,14 +209,8 @@ impl SamlBackendInner {
         auth.display_name = assertion.name_id.clone();
         // `child_visible` follows the namespace's `child_visible_default` and
         // fails safe to false.
-        let child_visible =
-            crate::kernel_api::namespace::login_child_visible(&self.core, &ns_path).await;
-        crate::kernel_api::namespace::stamp_binding(
-            &mut auth.metadata,
-            &ns_path,
-            &ns_uuid,
-            child_visible,
-        );
+        let child_visible = crate::kernel_api::namespace::login_child_visible(&self.core, &ns_path).await;
+        crate::kernel_api::namespace::stamp_binding(&mut auth.metadata, &ns_path, &ns_uuid, child_visible);
         auth.ttl = std::time::Duration::from_secs(role.token_ttl_secs);
         auth.period = std::time::Duration::from_secs(role.token_max_ttl_secs);
 
@@ -286,11 +219,7 @@ impl SamlBackendInner {
         Ok(Some(resp))
     }
 
-    pub async fn login_renew(
-        &self,
-        _backend: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn login_renew(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         // Re-load the role that minted the original token and reject
         // renewal if it disappeared or its policies drifted — same
         // semantics as the OIDC `login_renew` handler.
@@ -298,28 +227,16 @@ impl SamlBackendInner {
             .auth
             .as_ref()
             .and_then(|a| a.metadata.get("role").cloned())
-            .ok_or_else(|| {
-                RvError::ErrString("saml: renew has no role on the auth metadata".into())
-            })?;
-        let role = SamlRoleEntry::load(req, &role_name)
-            .await?
-            .ok_or_else(|| {
-                RvError::ErrString(format!(
-                    "saml: role `{role_name}` no longer exists, rejecting renewal"
-                ))
-            })?;
+            .ok_or_else(|| RvError::ErrString("saml: renew has no role on the auth metadata".into()))?;
+        let role = SamlRoleEntry::load(req, &role_name).await?.ok_or_else(|| {
+            RvError::ErrString(format!("saml: role `{role_name}` no longer exists, rejecting renewal"))
+        })?;
 
-        let want_policies: std::collections::BTreeSet<&str> =
-            role.policies.iter().map(|s| s.as_str()).collect();
-        let have_policies: std::collections::BTreeSet<&str> = req
-            .auth
-            .as_ref()
-            .map(|a| a.policies.iter().map(|s| s.as_str()).collect())
-            .unwrap_or_default();
+        let want_policies: std::collections::BTreeSet<&str> = role.policies.iter().map(|s| s.as_str()).collect();
+        let have_policies: std::collections::BTreeSet<&str> =
+            req.auth.as_ref().map(|a| a.policies.iter().map(|s| s.as_str()).collect()).unwrap_or_default();
         if want_policies != have_policies {
-            return Err(RvError::ErrString(
-                "saml: role policies changed since token mint, refusing renewal".into(),
-            ));
+            return Err(RvError::ErrString("saml: role policies changed since token mint, refusing renewal".into()));
         }
 
         let mut resp = Response::default();
@@ -399,10 +316,7 @@ mod projection_tests {
     }
 
     fn attributes(pairs: &[(&str, &str)]) -> HashMap<String, Vec<String>> {
-        pairs
-            .iter()
-            .map(|(k, v)| (k.to_string(), vec![v.to_string()]))
-            .collect()
+        pairs.iter().map(|(k, v)| (k.to_string(), vec![v.to_string()])).collect()
     }
 
     #[test]
@@ -428,11 +342,7 @@ mod projection_tests {
                 "policies":["default"]}"#,
         )
         .unwrap();
-        assert_eq!(
-            role.attribute_mappings.len(),
-            2,
-            "the old record still carries the reserved target"
-        );
+        assert_eq!(role.attribute_mappings.len(), 2, "the old record still carries the reserved target");
 
         let mut metadata = HashMap::new();
         project_attribute_mappings(
@@ -481,12 +391,7 @@ mod projection_tests {
     #[test]
     fn a_missing_attribute_projects_nothing() {
         let mut metadata = HashMap::new();
-        project_attribute_mappings(
-            "user",
-            &mappings(&[("email", "email")]),
-            &attributes(&[]),
-            &mut metadata,
-        );
+        project_attribute_mappings("user", &mappings(&[("email", "email")]), &attributes(&[]), &mut metadata);
         assert!(metadata.is_empty());
     }
 }

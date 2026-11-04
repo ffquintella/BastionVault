@@ -104,14 +104,7 @@ pub fn expected_attested_key(
         asymmetric::Algorithm::Ed25519 => AttestedKeyAlgorithm::Ed25519,
         _ => AttestedKeyAlgorithm::Other,
     };
-    Ok(ExpectedKey {
-        serial,
-        object_id,
-        label,
-        capabilities: capabilities.bits(),
-        domains: domains.bits(),
-        algorithm,
-    })
+    Ok(ExpectedKey { serial, object_id, label, capabilities: capabilities.bits(), domains: domains.bits(), algorithm })
 }
 
 fn exportable(attested: &YubiHsmAttestation) -> bool {
@@ -571,7 +564,14 @@ impl HsmAdminSession for YubiHsm2AdminSession {
     async fn generate_wrap_key(&self, id: HsmObjectId, label_text: &str) -> Result<(), RvError> {
         let wrap = Capability::WRAP_DATA | Capability::UNWRAP_DATA;
         self.client()?
-            .generate_wrap_key(id, label(label_text)?, Domain::DOM1, wrap, Capability::empty(), wrap::Algorithm::Aes256Ccm)
+            .generate_wrap_key(
+                id,
+                label(label_text)?,
+                Domain::DOM1,
+                wrap,
+                Capability::empty(),
+                wrap::Algorithm::Aes256Ccm,
+            )
             .map_err(map_yubi)?;
         Ok(())
     }

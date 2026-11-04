@@ -176,7 +176,10 @@ async fn mcp_dispatch(
         return Ok(refusal);
     }
     if body.len() > max_request_bytes(&mcp_config) {
-        return Ok(response_error(actix_web::http::StatusCode::PAYLOAD_TOO_LARGE, "request body exceeds mcp.max_request_bytes"));
+        return Ok(response_error(
+            actix_web::http::StatusCode::PAYLOAD_TOO_LARGE,
+            "request body exceeds mcp.max_request_bytes",
+        ));
     }
 
     // Origin: absent, or must be in the allow-list (exact match).

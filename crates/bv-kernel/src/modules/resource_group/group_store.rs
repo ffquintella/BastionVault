@@ -23,7 +23,7 @@
 //! Authorization integration (the `groups` ACL qualifier) is a separate
 //! concern — this store only maintains the data and the reverse indexes.
 
-use std::{sync::Arc, collections::BTreeSet};
+use std::{collections::BTreeSet, sync::Arc};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::Utc;
@@ -32,8 +32,8 @@ use serde_json::{Map, Value};
 
 use crate::kernel_api::VaultCtx;
 use crate::{
-    errors::RvError,
     bv_error_string,
+    errors::RvError,
     storage::{barrier_view::BarrierView, Storage, StorageEntry},
 };
 
@@ -123,13 +123,7 @@ impl ResourceGroupStore {
         let file_index_view = Arc::new(system_view.new_sub_view(FILE_INDEX_SUB_PATH));
         let history_view = Arc::new(system_view.new_sub_view(HISTORY_SUB_PATH));
 
-        Ok(Arc::new(Self {
-            group_view,
-            index_view,
-            secret_index_view,
-            file_index_view,
-            history_view,
-        }))
+        Ok(Arc::new(Self { group_view, index_view, secret_index_view, file_index_view, history_view }))
     }
 
     pub(crate) fn sanitize_name(name: &str) -> Result<String, RvError> {
@@ -212,10 +206,7 @@ impl ResourceGroupStore {
     /// indexes (resources + secrets) in sync with the diff between old
     /// and new membership. Reverse-index failures surface as errors —
     /// callers should treat a failed write as a failed set.
-    pub async fn set_group(
-        &self,
-        mut entry: ResourceGroupEntry,
-    ) -> Result<ResourceGroupEntry, RvError> {
+    pub async fn set_group(&self, mut entry: ResourceGroupEntry) -> Result<ResourceGroupEntry, RvError> {
         let name = Self::sanitize_name(&entry.name)?;
         entry.name = name.clone();
 
@@ -379,11 +370,7 @@ impl ResourceGroupStore {
     ///
     /// A resource that belongs to no group is a no-op (empty vec). A
     /// `new_name` that canonicalizes to `old_name` is also a no-op.
-    pub async fn rename_resource(
-        &self,
-        old_name: &str,
-        new_name: &str,
-    ) -> Result<Vec<String>, RvError> {
+    pub async fn rename_resource(&self, old_name: &str, new_name: &str) -> Result<Vec<String>, RvError> {
         let Some(new_member) = Self::sanitize_member(new_name) else {
             return Err(bv_error_string!("invalid new resource name"));
         };
@@ -593,11 +580,7 @@ impl ResourceGroupStore {
     /// Append an audit entry for a group change. History keys are
     /// `{name}/{20-digit-nanos}` so `list_history` returns them in
     /// chronological order.
-    pub async fn append_history(
-        &self,
-        name: &str,
-        entry: ResourceGroupHistoryEntry,
-    ) -> Result<(), RvError> {
+    pub async fn append_history(&self, name: &str, entry: ResourceGroupHistoryEntry) -> Result<(), RvError> {
         let name = Self::sanitize_name(name)?;
         let key = format!("{name}/{}", hist_seq());
         let value = serde_json::to_vec(&entry)?;
@@ -607,10 +590,7 @@ impl ResourceGroupStore {
     /// Return the full history for a single group, newest entry first.
     /// History persists after the group itself is deleted so audit
     /// records remain available until explicitly purged.
-    pub async fn list_history(
-        &self,
-        name: &str,
-    ) -> Result<Vec<ResourceGroupHistoryEntry>, RvError> {
+    pub async fn list_history(&self, name: &str) -> Result<Vec<ResourceGroupHistoryEntry>, RvError> {
         let name = Self::sanitize_name(name)?;
         let prefix = format!("{name}/");
         let mut keys = self.history_view.list(&prefix).await?;
@@ -636,9 +616,7 @@ impl ResourceGroupStore {
     /// round-trip per history row, so aggregating across all groups with it
     /// scales with total history. The caller filters by name and timestamp
     /// in memory. Order is unspecified; undecodable rows are skipped.
-    pub async fn list_history_all(
-        &self,
-    ) -> Result<Vec<(String, ResourceGroupHistoryEntry)>, RvError> {
+    pub async fn list_history_all(&self) -> Result<Vec<(String, ResourceGroupHistoryEntry)>, RvError> {
         let entries = self.history_view.get_entries("").await?;
         Ok(entries
             .into_iter()
@@ -715,8 +693,6 @@ fn now_iso() -> String {
 
 /// Monotonic-ish 20-digit zero-padded nanoseconds since UNIX epoch.
 fn hist_seq() -> String {
-    let n = Utc::now()
-        .timestamp_nanos_opt()
-        .unwrap_or_else(|| Utc::now().timestamp_millis() * 1_000_000);
+    let n = Utc::now().timestamp_nanos_opt().unwrap_or_else(|| Utc::now().timestamp_millis() * 1_000_000);
     format!("{:020}", n.max(0) as u128)
 }

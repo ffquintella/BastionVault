@@ -77,10 +77,7 @@ fn default_max_concurrent() -> u32 {
 
 impl Default for FilesSyncConfig {
     fn default() -> Self {
-        Self {
-            enabled: true,
-            max_concurrent_pushes: default_max_concurrent(),
-        }
+        Self { enabled: true, max_concurrent_pushes: default_max_concurrent() }
     }
 }
 
@@ -89,10 +86,7 @@ impl Default for FilesSyncConfig {
 pub fn start_files_sync_scheduler(core: Arc<dyn VaultCtx>) -> tokio::task::JoinHandle<()> {
     tokio::task::spawn(async move {
         let last_fired: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
-        log::info!(
-            "files/sync: scheduler started (tick every {}s)",
-            TICK_INTERVAL.as_secs()
-        );
+        log::info!("files/sync: scheduler started (tick every {}s)", TICK_INTERVAL.as_secs());
 
         let mut interval = tokio::time::interval(TICK_INTERVAL);
         loop {
@@ -109,10 +103,7 @@ pub fn start_files_sync_scheduler(core: Arc<dyn VaultCtx>) -> tokio::task::JoinH
             if let Err(e) = run_tick(core.clone()).await {
                 log::warn!("files/sync: tick failed: {e}");
             } else {
-                log::debug!(
-                    "files/sync: tick completed in {} ms",
-                    started.elapsed().as_millis()
-                );
+                log::debug!("files/sync: tick completed in {} ms", started.elapsed().as_millis());
             }
         }
     })
@@ -147,11 +138,7 @@ pub async fn run_tick(core: Arc<dyn VaultCtx>) -> Result<(), RvError> {
 }
 
 #[maybe_async::maybe_async]
-async fn run_one_mount(
-    core: Arc<dyn VaultCtx>,
-    _uuid: &str,
-    mount_path: &str,
-) -> Result<(), RvError> {
+async fn run_one_mount(core: Arc<dyn VaultCtx>, _uuid: &str, mount_path: &str) -> Result<(), RvError> {
     let view = match core.router().matching_view(mount_path)? {
         Some(v) => v,
         None => return Ok(()),
@@ -182,12 +169,14 @@ async fn run_one_mount(
     if report.attempted > 0 || report.failed > 0 {
         log::info!(
             "files/sync: mount {mount_path}: attempted={} succeeded={} failed={} skipped={}",
-            report.attempted, report.succeeded, report.failed, report.skipped,
+            report.attempted,
+            report.succeeded,
+            report.failed,
+            report.skipped,
         );
     }
     Ok(())
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -204,39 +193,25 @@ mod tests {
 
     #[test]
     fn target_due_when_window_elapsed() {
-        let s = fixed(FileSyncState {
-            last_attempt_at_unix: 940,
-            ..Default::default()
-        });
+        let s = fixed(FileSyncState { last_attempt_at_unix: 940, ..Default::default() });
         assert!(sync_target_due(1000, 60, &s));
     }
 
     #[test]
     fn target_not_due_when_inside_window() {
-        let s = fixed(FileSyncState {
-            last_attempt_at_unix: 970,
-            ..Default::default()
-        });
+        let s = fixed(FileSyncState { last_attempt_at_unix: 970, ..Default::default() });
         assert!(!sync_target_due(1000, 60, &s));
     }
 
     #[test]
     fn target_not_due_when_in_backoff() {
-        let s = fixed(FileSyncState {
-            last_attempt_at_unix: 940,
-            next_retry_at_unix: 1010,
-            ..Default::default()
-        });
+        let s = fixed(FileSyncState { last_attempt_at_unix: 940, next_retry_at_unix: 1010, ..Default::default() });
         assert!(!sync_target_due(1000, 60, &s));
     }
 
     #[test]
     fn target_due_after_backoff_clears() {
-        let s = fixed(FileSyncState {
-            last_attempt_at_unix: 940,
-            next_retry_at_unix: 990,
-            ..Default::default()
-        });
+        let s = fixed(FileSyncState { last_attempt_at_unix: 940, next_retry_at_unix: 990, ..Default::default() });
         assert!(sync_target_due(1000, 60, &s));
     }
 
@@ -246,5 +221,4 @@ mod tests {
         assert!(c.enabled);
         assert!(c.max_concurrent_pushes >= 1);
     }
-
 }

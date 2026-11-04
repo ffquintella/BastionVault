@@ -189,7 +189,9 @@ fn plugin_refusal(provider: &str, code: i32) -> RvError {
                  a TOTP the account does not hold)"
             ),
         ),
-        other => refusal(500, reason::PROVIDER_ERROR, format!("credential provider `{provider}` failed (status {other})")),
+        other => {
+            refusal(500, reason::PROVIDER_ERROR, format!("credential provider `{provider}` failed (status {other})"))
+        }
     }
 }
 
@@ -197,7 +199,11 @@ fn plugin_refusal(provider: &str, code: i32) -> RvError {
 /// and the client gets a fixed message.
 fn invoke_failure(provider: &str, op: &str, cause: &RvError) -> RvError {
     log::warn!("credential provider `{provider}`: {op} invocation failed: {cause}");
-    refusal(500, reason::PROVIDER_ERROR, format!("credential provider `{provider}` could not be invoked; the server log has the cause"))
+    refusal(
+        500,
+        reason::PROVIDER_ERROR,
+        format!("credential provider `{provider}` could not be invoked; the server log has the cause"),
+    )
 }
 
 fn bad_output(provider: &str, what: impl std::fmt::Display) -> RvError {
@@ -676,7 +682,9 @@ mod tests {
 
     #[test]
     fn an_invocation_failure_does_not_reach_the_client() {
-        let cause = RvError::ErrOther(::anyhow::anyhow!("plugin self-accounts (wasm) invoke failed: Trap(wasm backtrace: S3CRET)"));
+        let cause = RvError::ErrOther(::anyhow::anyhow!(
+            "plugin self-accounts (wasm) invoke failed: Trap(wasm backtrace: S3CRET)"
+        ));
         let e = invoke_failure("self-accounts", "provider.release", &cause);
         let m = format!("{e}");
         assert_eq!(refusal_reason(&e), reason::PROVIDER_ERROR);

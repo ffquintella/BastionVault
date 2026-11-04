@@ -11,10 +11,7 @@ use serde_json::{json, Map, Value};
 use super::{
     barcode::render_png_b64,
     crypto::otpauth::{build_url, encode_secret, parse_url, ParsedOtpAuth},
-    policy::{
-        Algorithm, KeyPolicy, DEFAULT_DIGITS, DEFAULT_KEY_SIZE, DEFAULT_PERIOD, DEFAULT_QR_SIZE,
-        DEFAULT_SKEW,
-    },
+    policy::{Algorithm, KeyPolicy, DEFAULT_DIGITS, DEFAULT_KEY_SIZE, DEFAULT_PERIOD, DEFAULT_QR_SIZE, DEFAULT_SKEW},
     TotpBackend, TotpBackendInner,
 };
 use crate::{
@@ -80,16 +77,8 @@ impl TotpBackend {
 
 #[maybe_async::maybe_async]
 impl TotpBackendInner {
-    pub async fn handle_key_read(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
-        let name = req
-            .get_data("name")?
-            .as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?
-            .to_string();
+    pub async fn handle_key_read(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let name = req.get_data("name")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
         match self.get_key(req, &name).await? {
             Some(p) => {
                 // Metadata only — seed never reappears here.
@@ -108,22 +97,10 @@ impl TotpBackendInner {
         }
     }
 
-    pub async fn handle_key_write(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
-        let name = req
-            .get_data("name")?
-            .as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?
-            .to_string();
+    pub async fn handle_key_write(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let name = req.get_data("name")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
 
-        let generate = req
-            .get_data("generate")
-            .ok()
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let generate = req.get_data("generate").ok().and_then(|v| v.as_bool()).unwrap_or(false);
 
         let issuer = take_str(req, "issuer");
         let account_name = take_str(req, "account_name");
@@ -138,16 +115,8 @@ impl TotpBackendInner {
         let period = take_int(req, "period", DEFAULT_PERIOD as i64) as u64;
         let skew = take_int(req, "skew", DEFAULT_SKEW as i64) as u32;
         let qr_size = take_int(req, "qr_size", DEFAULT_QR_SIZE as i64) as u32;
-        let exported = req
-            .get_data("exported")
-            .ok()
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-        let replay_check = req
-            .get_data("replay_check")
-            .ok()
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
+        let exported = req.get_data("exported").ok().and_then(|v| v.as_bool()).unwrap_or(true);
+        let replay_check = req.get_data("replay_check").ok().and_then(|v| v.as_bool()).unwrap_or(true);
 
         let key_in = take_str(req, "key");
         let url_in = take_str(req, "url");
@@ -156,9 +125,7 @@ impl TotpBackendInner {
         // both would force a precedence rule that surprises operators
         // when the URL's parameters disagree with the discrete fields.
         if !key_in.is_empty() && !url_in.is_empty() {
-            return Err(RvError::ErrString(
-                "`key` and `url` are mutually exclusive; supply one or the other".into(),
-            ));
+            return Err(RvError::ErrString("`key` and `url` are mutually exclusive; supply one or the other".into()));
         }
 
         let policy = if generate {
@@ -169,14 +136,10 @@ impl TotpBackendInner {
             }
             let key_size = take_int(req, "key_size", DEFAULT_KEY_SIZE as i64) as usize;
             if !(10..=128).contains(&key_size) {
-                return Err(RvError::ErrString(format!(
-                    "key_size must be in 10..=128 bytes, got {key_size}"
-                )));
+                return Err(RvError::ErrString(format!("key_size must be in 10..=128 bytes, got {key_size}")));
             }
             if account_name.is_empty() {
-                return Err(RvError::ErrString(
-                    "account_name is required when generate=true".into(),
-                ));
+                return Err(RvError::ErrString("account_name is required when generate=true".into()));
             }
             let mut bytes = vec![0u8; key_size];
             use rand::RngExt;
@@ -203,26 +166,10 @@ impl TotpBackendInner {
                     // Discrete fields override URL fields when the
                     // operator supplied both — they're explicit input.
                     issuer: if !issuer.is_empty() { issuer } else { parsed.issuer },
-                    account_name: if !account_name.is_empty() {
-                        account_name
-                    } else {
-                        parsed.account_name
-                    },
-                    algorithm: if algorithm_str.is_empty() {
-                        parsed.algorithm
-                    } else {
-                        algorithm
-                    },
-                    digits: if take_int(req, "digits", -1) >= 0 {
-                        digits
-                    } else {
-                        parsed.digits
-                    },
-                    period: if take_int(req, "period", -1) >= 0 {
-                        period
-                    } else {
-                        parsed.period
-                    },
+                    account_name: if !account_name.is_empty() { account_name } else { parsed.account_name },
+                    algorithm: if algorithm_str.is_empty() { parsed.algorithm } else { algorithm },
+                    digits: if take_int(req, "digits", -1) >= 0 { digits } else { parsed.digits },
+                    period: if take_int(req, "period", -1) >= 0 { period } else { parsed.period },
                     skew,
                     replay_check,
                     // Provider-mode keys never re-export the seed —
@@ -231,8 +178,7 @@ impl TotpBackendInner {
                     exported: false,
                 }
             } else if !key_in.is_empty() {
-                let key_bytes = super::crypto::otpauth::decode_secret(&key_in)
-                    .map_err(RvError::ErrString)?;
+                let key_bytes = super::crypto::otpauth::decode_secret(&key_in).map_err(RvError::ErrString)?;
                 KeyPolicy {
                     generate: false,
                     key: key_bytes,
@@ -246,9 +192,7 @@ impl TotpBackendInner {
                     exported: false,
                 }
             } else {
-                return Err(RvError::ErrString(
-                    "provider mode requires `key` or `url`".into(),
-                ));
+                return Err(RvError::ErrString("provider mode requires `key` or `url`".into()));
             };
             // Account name is what authenticator apps display; refuse
             // an empty one rather than write a key the user can't tell
@@ -268,11 +212,8 @@ impl TotpBackendInner {
         // persisting so a render failure aborts the create cleanly
         // rather than leaving a key the GUI can't enroll.
         let url = build_url(&policy);
-        let barcode = if policy.generate && policy.exported && qr_size > 0 {
-            Some(render_png_b64(&url, qr_size)?)
-        } else {
-            None
-        };
+        let barcode =
+            if policy.generate && policy.exported && qr_size > 0 { Some(render_png_b64(&url, qr_size)?) } else { None };
 
         self.put_key(req, &name, &policy).await?;
 
@@ -291,40 +232,22 @@ impl TotpBackendInner {
         Ok(Some(Response::data_response(Some(data))))
     }
 
-    pub async fn handle_key_delete(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
-        let name = req
-            .get_data("name")?
-            .as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?
-            .to_string();
+    pub async fn handle_key_delete(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let name = req.get_data("name")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
         self.delete_key(req, &name).await?;
         Ok(None)
     }
 
-    pub async fn handle_keys_list(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_keys_list(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let keys = self.list_keys(req).await?;
         Ok(Some(Response::list_response(&keys)))
     }
 }
 
 fn take_str(req: &Request, key: &str) -> String {
-    req.get_data(key)
-        .ok()
-        .and_then(|v| v.as_str().map(|s| s.to_string()))
-        .unwrap_or_default()
+    req.get_data(key).ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default()
 }
 
 fn take_int(req: &Request, key: &str, default: i64) -> i64 {
-    req.get_data(key)
-        .ok()
-        .and_then(|v| v.as_i64())
-        .unwrap_or(default)
+    req.get_data(key).ok().and_then(|v| v.as_i64()).unwrap_or(default)
 }

@@ -2,17 +2,16 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use super::rp::{
-    AuthenticationState, PublicKeyCredentialAssertion, RelyingParty,
-};
+use super::rp::{AuthenticationState, PublicKeyCredentialAssertion, RelyingParty};
 use super::{Fido2Backend, Fido2BackendInner};
 use crate::kernel_api::VaultCtx;
 use crate::{
+    bv_error_string,
     context::Context,
     errors::RvError,
-    logical::{Auth, Backend, Field, FieldType, Lease, Operation, Path, PathOperation, Request, Response},
     kernel_api::identity::GroupKind,
-    new_fields, new_fields_internal, new_path, new_path_internal, bv_error_string,
+    logical::{Auth, Backend, Field, FieldType, Lease, Operation, Path, PathOperation, Request, Response},
+    new_fields, new_fields_internal, new_path, new_path_internal,
     storage::StorageEntry,
     utils::policy::equivalent_policies,
 };
@@ -76,11 +75,7 @@ impl Fido2BackendInner {
     /// FIDO2 and UserPass share the same username namespace, so we expand
     /// against `GroupKind::User` — the same group membership applies to both
     /// password and passkey logins for a given user.
-    pub(crate) async fn expand_identity_group_policies(
-        &self,
-        member: &str,
-        direct: &[String],
-    ) -> Vec<String> {
+    pub(crate) async fn expand_identity_group_policies(&self, member: &str, direct: &[String]) -> Vec<String> {
         let Some(identity) = self.core.identity() else {
             return direct.to_vec();
         };
@@ -102,11 +97,7 @@ impl Fido2BackendInner {
     /// previously left no audit trace. Successful begins are not
     /// recorded (a begin is only a challenge; `login_complete` records
     /// the actual outcome). Best-effort, never alters the result.
-    pub async fn login_begin(
-        &self,
-        backend: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn login_begin(&self, backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let username = req
             .get_data("username")
             .ok()
@@ -129,57 +120,37 @@ impl Fido2BackendInner {
         result
     }
 
-    async fn login_begin_inner(
-        &self,
-        _backend: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
-        let config = self.get_config(req).await?
-            .ok_or(RvError::ErrFido2NotConfigured)?;
+    async fn login_begin_inner(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let config = self.get_config(req).await?.ok_or(RvError::ErrFido2NotConfigured)?;
 
         let username = req.get_data("username")?.as_str().unwrap().to_lowercase();
 
-        let user_entry = self.get_user_credentials(req, &username).await?
-            .ok_or(RvError::ErrFido2CredentialNotFound)?;
+        let user_entry = self.get_user_credentials(req, &username).await?.ok_or(RvError::ErrFido2CredentialNotFound)?;
 
-        let passkeys = user_entry.get_passkeys()
-            .map_err(|e| RvError::ErrFido2AuthFailed(e.to_string()))?;
+        let passkeys = user_entry.get_passkeys().map_err(|e| RvError::ErrFido2AuthFailed(e.to_string()))?;
 
         if passkeys.is_empty() {
             return Err(RvError::ErrFido2CredentialNotFound);
         }
 
-        let rp = RelyingParty {
-            rp_id: &config.rp_id,
-            rp_origin: &config.rp_origin,
-            rp_name: &config.rp_name,
-        };
+        let rp = RelyingParty { rp_id: &config.rp_id, rp_origin: &config.rp_origin, rp_name: &config.rp_name };
 
-        let (challenge, auth_state) = rp
-            .begin_authentication(&passkeys)
-            .map_err(|e| RvError::ErrFido2AuthFailed(e.to_string()))?;
+        let (challenge, auth_state) =
+            rp.begin_authentication(&passkeys).map_err(|e| RvError::ErrFido2AuthFailed(e.to_string()))?;
 
-        let state_json = serde_json::to_string(&auth_state)
-            .map_err(|e| RvError::ErrFido2AuthFailed(e.to_string()))?;
-        let state_entry = StorageEntry::new(
-            &format!("challenge/auth/{username}"),
-            &state_json,
-        )?;
+        let state_json = serde_json::to_string(&auth_state).map_err(|e| RvError::ErrFido2AuthFailed(e.to_string()))?;
+        let state_entry = StorageEntry::new(&format!("challenge/auth/{username}"), &state_json)?;
         req.storage_put(&state_entry).await?;
 
-        let challenge_json = serde_json::to_value(&challenge)
-            .map_err(|e| RvError::ErrFido2AuthFailed(e.to_string()))?;
+        let challenge_json =
+            serde_json::to_value(&challenge).map_err(|e| RvError::ErrFido2AuthFailed(e.to_string()))?;
         Ok(Some(Response::data_response(challenge_json.as_object().cloned())))
     }
 
     /// Public entry point: runs `login_complete_inner` and records the
     /// outcome to the login-audit trail under the `fido2/` mount. The
     /// audit write is best-effort and never alters the login result.
-    pub async fn login_complete(
-        &self,
-        backend: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn login_complete(&self, backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let username = req
             .get_data("username")
             .ok()
@@ -188,17 +159,8 @@ impl Fido2BackendInner {
         let remote_addr = req.connection.as_ref().map(|c| c.peer_addr.clone()).unwrap_or_default();
 
         let result = self.login_complete_inner(backend, req).await;
-        let (success, details) =
-            bv_auth_audit::login_outcome(&result);
-        bv_auth_audit::record_login(
-            &self.core,
-            "fido2/",
-            &username,
-            success,
-            &remote_addr,
-            &details,
-        )
-        .await;
+        let (success, details) = bv_auth_audit::login_outcome(&result);
+        bv_auth_audit::record_login(&self.core, "fido2/", &username, success, &remote_addr, &details).await;
         result
     }
 
@@ -207,38 +169,30 @@ impl Fido2BackendInner {
         _backend: &dyn Backend,
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        let config = self.get_config(req).await?
-            .ok_or(RvError::ErrFido2NotConfigured)?;
+        let config = self.get_config(req).await?.ok_or(RvError::ErrFido2NotConfigured)?;
 
         let username = req.get_data("username")?.as_str().unwrap().to_lowercase();
         let credential_json = req.get_data("credential")?.as_str().unwrap().to_string();
 
         // Load authentication state.
-        let state_entry = req.storage_get(&format!("challenge/auth/{username}")).await?
-            .ok_or(RvError::ErrFido2ChallengeExpired)?;
+        let state_entry =
+            req.storage_get(&format!("challenge/auth/{username}")).await?.ok_or(RvError::ErrFido2ChallengeExpired)?;
         let state_str: String = serde_json::from_slice(&state_entry.value)?;
-        let auth_state: AuthenticationState = serde_json::from_str(&state_str)
-            .map_err(|e| RvError::ErrFido2AuthFailed(format!("invalid state: {e}")))?;
+        let auth_state: AuthenticationState =
+            serde_json::from_str(&state_str).map_err(|e| RvError::ErrFido2AuthFailed(format!("invalid state: {e}")))?;
 
         // Single-use: drop the challenge regardless of outcome below.
         req.storage_delete(&format!("challenge/auth/{username}")).await?;
 
-        let rp = RelyingParty {
-            rp_id: &config.rp_id,
-            rp_origin: &config.rp_origin,
-            rp_name: &config.rp_name,
-        };
+        let rp = RelyingParty { rp_id: &config.rp_id, rp_origin: &config.rp_origin, rp_name: &config.rp_name };
 
-        let assertion: PublicKeyCredentialAssertion =
-            serde_json::from_str(&credential_json).map_err(|e| {
-                RvError::ErrFido2AuthFailed(format!("invalid credential: {e}"))
-            })?;
+        let assertion: PublicKeyCredentialAssertion = serde_json::from_str(&credential_json)
+            .map_err(|e| RvError::ErrFido2AuthFailed(format!("invalid credential: {e}")))?;
 
-        let mut user_entry = self.get_user_credentials(req, &username).await?
-            .ok_or(RvError::ErrFido2CredentialNotFound)?;
+        let mut user_entry =
+            self.get_user_credentials(req, &username).await?.ok_or(RvError::ErrFido2CredentialNotFound)?;
 
-        let mut passkeys = user_entry.get_passkeys()
-            .map_err(|e| RvError::ErrFido2AuthFailed(e.to_string()))?;
+        let mut passkeys = user_entry.get_passkeys().map_err(|e| RvError::ErrFido2AuthFailed(e.to_string()))?;
 
         let auth_result = rp
             .finish_authentication(&assertion, &auth_state, &passkeys)
@@ -252,8 +206,7 @@ impl Fido2BackendInner {
                 }
             }
         }
-        user_entry.set_passkeys(&passkeys)
-            .map_err(|e| RvError::ErrFido2AuthFailed(e.to_string()))?;
+        user_entry.set_passkeys(&passkeys).map_err(|e| RvError::ErrFido2AuthFailed(e.to_string()))?;
         self.set_user_credentials(req, &username, &user_entry).await?;
 
         // Multi-tenancy: bind the session to the namespace named by the request
@@ -264,30 +217,17 @@ impl Fido2BackendInner {
         // them: the namespace header was ignored at login, and
         // `token_operable_resolved` could not widen the token either because the
         // `mount_path` stamped below was missing.
-        let (ns_path, ns_uuid) = crate::kernel_api::namespace::login_namespace_for_principal(
-            &self.core,
-            req,
-            "fido2/",
-            &username,
-        )
-        .await?;
+        let (ns_path, ns_uuid) =
+            crate::kernel_api::namespace::login_namespace_for_principal(&self.core, req, "fido2/", &username).await?;
 
         // Refuse the login if this principal's namespace assignment excludes the
         // login namespace. No record ⇒ unrestricted; fails closed otherwise.
-        crate::kernel_api::namespace::enforce_login_assignment(
-            &self.core,
-            "fido2/",
-            &username,
-            &ns_path,
-        )
-        .await?;
+        crate::kernel_api::namespace::enforce_login_assignment(&self.core, "fido2/", &username, &ns_path).await?;
 
         // Union FIDO2 user's direct policies with any policies attached
         // through identity user-groups. FIDO2 shares the UserPass username
         // namespace, so the same group membership applies.
-        let effective_policies = self
-            .expand_identity_group_policies(&username, &user_entry.policies)
-            .await;
+        let effective_policies = self.expand_identity_group_policies(&username, &user_entry.policies).await;
 
         let mut auth = Auth {
             lease: Lease {
@@ -309,14 +249,8 @@ impl Fido2BackendInner {
         // Stamp the namespace binding so the issued token may operate in its
         // login namespace. `child_visible` follows the namespace's
         // `child_visible_default`; it fails safe to false.
-        let child_visible =
-            crate::kernel_api::namespace::login_child_visible(&self.core, &ns_path).await;
-        crate::kernel_api::namespace::stamp_binding(
-            &mut auth.metadata,
-            &ns_path,
-            &ns_uuid,
-            child_visible,
-        );
+        let child_visible = crate::kernel_api::namespace::login_child_visible(&self.core, &ns_path).await;
+        crate::kernel_api::namespace::stamp_binding(&mut auth.metadata, &ns_path, &ns_uuid, child_visible);
 
         // Ensure token_policies mirrors effective policies before
         // populate_token_auth (which overwrites auth.policies with
@@ -340,18 +274,13 @@ impl Fido2BackendInner {
         Ok(Some(Response { auth: Some(auth), ..Response::default() }))
     }
 
-    pub async fn login_renew(
-        &self,
-        _backend: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn login_renew(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         if req.auth.is_none() {
             return Err(bv_error_string!("invalid request"));
         }
         let mut auth = req.auth.clone().unwrap();
-        let username = auth.metadata.get("username")
-            .ok_or_else(|| bv_error_string!("missing username in metadata"))?
-            .clone();
+        let username =
+            auth.metadata.get("username").ok_or_else(|| bv_error_string!("missing username in metadata"))?.clone();
 
         let user_entry = self.get_user_credentials(req, &username).await?;
         if user_entry.is_none() {
@@ -359,9 +288,7 @@ impl Fido2BackendInner {
         }
         let user_entry = user_entry.unwrap();
 
-        let effective = self
-            .expand_identity_group_policies(&username, &user_entry.policies)
-            .await;
+        let effective = self.expand_identity_group_policies(&username, &user_entry.policies).await;
         if !equivalent_policies(&effective, &auth.policies) {
             return Err(bv_error_string!("policies have changed, not renewing"));
         }

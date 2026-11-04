@@ -50,9 +50,9 @@ impl GroupKind {
         match s {
             "user" => Ok(GroupKind::User),
             "app" => Ok(GroupKind::App),
-            other => Err(bv_errors::bv_error_string!(&format!(
-                "unknown group kind {other:?}: expected \"user\" or \"app\""
-            ))),
+            other => {
+                Err(bv_errors::bv_error_string!(&format!("unknown group kind {other:?}: expected \"user\" or \"app\"")))
+            }
         }
     }
 }
@@ -133,23 +133,13 @@ pub struct UserAuditRecord {
 #[maybe_async::maybe_async]
 pub trait IdentityService: Send + Sync {
     /// Entity id for an existing alias, or `None` when the alias is unknown.
-    async fn entity_id_for_alias(
-        &self,
-        mount: &str,
-        name: &str,
-        ns_path: &str,
-    ) -> Result<Option<String>, RvError>;
+    async fn entity_id_for_alias(&self, mount: &str, name: &str, ns_path: &str) -> Result<Option<String>, RvError>;
 
     /// Entity id for a login, creating the entity on first sight.
     ///
     /// This is the login path: an auth backend calls it after a successful
     /// credential check so the issued token carries an `entity_id`.
-    async fn ensure_entity_id(
-        &self,
-        mount: &str,
-        name: &str,
-        ns_path: &str,
-    ) -> Result<String, RvError>;
+    async fn ensure_entity_id(&self, mount: &str, name: &str, ns_path: &str) -> Result<String, RvError>;
 
     /// Drop the `(mount, name)` → entity lookup index for a deleted principal.
     ///
@@ -176,12 +166,7 @@ pub trait IdentityService: Send + Sync {
 
     /// Members of an identity group, or an empty vector when the group does
     /// not exist. Members are alias names, not entity ids.
-    async fn group_members(
-        &self,
-        kind: GroupKind,
-        name: &str,
-        ns_path: &str,
-    ) -> Result<Vec<String>, RvError>;
+    async fn group_members(&self, kind: GroupKind, name: &str, ns_path: &str) -> Result<Vec<String>, RvError>;
 
     /// Every entity id in `ns_path`.
     async fn list_entity_ids(&self, ns_path: &str) -> Result<Vec<String>, RvError>;
@@ -204,14 +189,7 @@ pub trait IdentityService: Send + Sync {
     /// Best-effort by contract: a failure here leaves the rename done and the
     /// bookkeeping stale, which is recoverable, whereas failing the rename
     /// after the data has moved is not. Implementations log and continue.
-    async fn rename_object(
-        &self,
-        kind: ObjectKind,
-        old_name: &str,
-        new_name: &str,
-        ns_path: Option<&str>,
-        actor: &str,
-    );
+    async fn rename_object(&self, kind: ObjectKind, old_name: &str, new_name: &str, ns_path: Option<&str>, actor: &str);
 }
 
 /// Best-effort caller identity for audit rows.

@@ -197,10 +197,7 @@ pub struct NotificationConfig {
 
 impl Default for NotificationConfig {
     fn default() -> Self {
-        Self {
-            inbox_cap: default_inbox_cap(),
-            plugin_rate_per_min: default_plugin_rate(),
-        }
+        Self { inbox_cap: default_inbox_cap(), plugin_rate_per_min: default_plugin_rate() }
     }
 }
 

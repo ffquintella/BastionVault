@@ -76,10 +76,7 @@ pub fn parse_rsa_public_key_from_pem(pem: &str) -> Result<RsaPublicKey, RvError>
 }
 
 fn pem_decode_cert(pem: &str) -> Result<Vec<u8>, RvError> {
-    let body = pem
-        .lines()
-        .filter(|l| !l.starts_with("-----"))
-        .collect::<String>();
+    let body = pem.lines().filter(|l| !l.starts_with("-----")).collect::<String>();
     general_purpose::STANDARD
         .decode(body.trim().replace(char::is_whitespace, ""))
         .or_else(|_| general_purpose::STANDARD.decode(pem.trim()))
@@ -94,14 +91,9 @@ fn pem_decode_cert(pem: &str) -> Result<Vec<u8>, RvError> {
 /// region, tighter security property), falling back to
 /// response-level signature if no assertion-level one is present.
 /// Returns an error if no signature covers the assertion at all.
-pub fn verify_signed_assertion(
-    parsed: &ParsedResponse,
-    idp_public_key: &RsaPublicKey,
-) -> Result<(), RvError> {
-    let assertion = parsed
-        .assertion
-        .as_ref()
-        .ok_or_else(|| RvError::ErrString("saml: no Assertion to verify".into()))?;
+pub fn verify_signed_assertion(parsed: &ParsedResponse, idp_public_key: &RsaPublicKey) -> Result<(), RvError> {
+    let assertion =
+        parsed.assertion.as_ref().ok_or_else(|| RvError::ErrString("saml: no Assertion to verify".into()))?;
 
     // Try assertion-level first.
     if let Some((start, end)) = assertion.xml_span {
@@ -155,23 +147,15 @@ fn locate_signature_inside(xml: &[u8]) -> Option<LocatedSignature> {
     let signed_info_range = find_element_span_rel(inner, b"SignedInfo")?;
     let signed_info_xml = inner[signed_info_range.0..signed_info_range.1].to_vec();
 
-    let signature_value_b64 = extract_element_text(inner, b"SignatureValue")?
-        .split_whitespace()
-        .collect::<String>();
+    let signature_value_b64 = extract_element_text(inner, b"SignatureValue")?.split_whitespace().collect::<String>();
 
-    let signature_method = attribute_on_element(inner, b"SignatureMethod", b"Algorithm")
-        .unwrap_or_default();
+    let signature_method = attribute_on_element(inner, b"SignatureMethod", b"Algorithm").unwrap_or_default();
     let canonicalization_method =
-        attribute_on_element(inner, b"CanonicalizationMethod", b"Algorithm")
-            .unwrap_or_default();
-    let digest_method =
-        attribute_on_element(inner, b"DigestMethod", b"Algorithm").unwrap_or_default();
-    let digest_value_b64 = extract_element_text(inner, b"DigestValue")
-        .unwrap_or_default()
-        .split_whitespace()
-        .collect::<String>();
-    let reference_uri =
-        attribute_on_element(inner, b"Reference", b"URI").unwrap_or_default();
+        attribute_on_element(inner, b"CanonicalizationMethod", b"Algorithm").unwrap_or_default();
+    let digest_method = attribute_on_element(inner, b"DigestMethod", b"Algorithm").unwrap_or_default();
+    let digest_value_b64 =
+        extract_element_text(inner, b"DigestValue").unwrap_or_default().split_whitespace().collect::<String>();
+    let reference_uri = attribute_on_element(inner, b"Reference", b"URI").unwrap_or_default();
 
     let mut transforms = Vec::new();
     let mut search = inner;
@@ -219,14 +203,10 @@ fn verify_one(
     //    (in either order; the spec doesn't mandate an ordering but
     //    in practice enveloped comes first).
     if !sig.transforms.iter().any(|t| t == ENVELOPED_SIG) {
-        return Err(RvError::ErrString(
-            "saml: signature missing enveloped-signature transform".into(),
-        ));
+        return Err(RvError::ErrString("saml: signature missing enveloped-signature transform".into()));
     }
     if !sig.transforms.iter().any(|t| t == EXC_C14N) {
-        return Err(RvError::ErrString(
-            "saml: signature missing exclusive-c14n transform".into(),
-        ));
+        return Err(RvError::ErrString("saml: signature missing exclusive-c14n transform".into()));
     }
     if sig.canonicalization_method != EXC_C14N {
         return Err(RvError::ErrString(format!(
@@ -275,17 +255,17 @@ fn verify_one(
             let verifier = VerifyingKey::<Sha256>::new(key.clone());
             let signature = Signature::try_from(sig_bytes.as_slice())
                 .map_err(|e| RvError::ErrString(format!("saml: invalid RSA signature: {e}")))?;
-            verifier.verify(&canon_signed_info, &signature).map_err(|e| {
-                RvError::ErrString(format!("saml: signature verification failed: {e}"))
-            })?;
+            verifier
+                .verify(&canon_signed_info, &signature)
+                .map_err(|e| RvError::ErrString(format!("saml: signature verification failed: {e}")))?;
         }
         RSA_SHA1 => {
             let verifier = VerifyingKey::<Sha1>::new(key.clone());
             let signature = Signature::try_from(sig_bytes.as_slice())
                 .map_err(|e| RvError::ErrString(format!("saml: invalid RSA signature: {e}")))?;
-            verifier.verify(&canon_signed_info, &signature).map_err(|e| {
-                RvError::ErrString(format!("saml: signature verification failed: {e}"))
-            })?;
+            verifier
+                .verify(&canon_signed_info, &signature)
+                .map_err(|e| RvError::ErrString(format!("saml: signature verification failed: {e}")))?;
         }
         other => {
             return Err(RvError::ErrString(format!(
@@ -325,10 +305,7 @@ fn find_tag(xml: &[u8], local: &[u8]) -> Option<usize> {
             let after_prefix = match xml[start_name..].iter().position(|&b| b == b':') {
                 Some(p) => {
                     // Ensure we're not stepping out of this tag.
-                    if xml[start_name..start_name + p]
-                        .iter()
-                        .any(|b| needle_suffixes.contains(b) || *b == b'/')
-                    {
+                    if xml[start_name..start_name + p].iter().any(|b| needle_suffixes.contains(b) || *b == b'/') {
                         start_name
                     } else {
                         start_name + p + 1
@@ -336,9 +313,7 @@ fn find_tag(xml: &[u8], local: &[u8]) -> Option<usize> {
                 }
                 None => start_name,
             };
-            if xml.len() >= after_prefix + local.len()
-                && &xml[after_prefix..after_prefix + local.len()] == local
-            {
+            if xml.len() >= after_prefix + local.len() && &xml[after_prefix..after_prefix + local.len()] == local {
                 let next = after_prefix + local.len();
                 if next < xml.len() && needle_suffixes.contains(&xml[next]) {
                     return Some(i);
@@ -390,18 +365,12 @@ fn find_matching_close(xml: &[u8], start: usize, local: &[u8]) -> Option<usize> 
                     Some(p) if p < 32 => after_slash + p + 1,
                     _ => after_slash,
                 };
-                if xml.len() >= name_start + local.len()
-                    && &xml[name_start..name_start + local.len()] == local
-                {
+                if xml.len() >= name_start + local.len() && &xml[name_start..name_start + local.len()] == local {
                     // Require a proper close-tag terminator right
                     // after the local name so `</ds:SignatureValue>`
                     // doesn't prefix-match as a close for `Signature`.
                     let next = name_start + local.len();
-                    let term_ok = next < xml.len()
-                        && matches!(
-                            xml[next],
-                            b'>' | b' ' | b'\t' | b'\n' | b'\r'
-                        );
+                    let term_ok = next < xml.len() && matches!(xml[next], b'>' | b' ' | b'\t' | b'\n' | b'\r');
                     if term_ok {
                         depth -= 1;
                         if depth == 0 {
@@ -434,9 +403,7 @@ fn find_tag_at(xml: &[u8], pos: usize, local: &[u8]) -> Option<usize> {
         Some(p) if p < 32 => start_name + p + 1,
         _ => start_name,
     };
-    if xml.len() >= after_prefix + local.len()
-        && &xml[after_prefix..after_prefix + local.len()] == local
-    {
+    if xml.len() >= after_prefix + local.len() && &xml[after_prefix..after_prefix + local.len()] == local {
         let next = after_prefix + local.len();
         if next < xml.len()
             && (xml[next] == b' '
@@ -459,9 +426,7 @@ fn extract_element_text(xml: &[u8], local: &[u8]) -> Option<String> {
     // last `<`.
     let first_gt = inner.iter().position(|&b| b == b'>')? + 1;
     let last_lt = inner.iter().rposition(|&b| b == b'<')?;
-    std::str::from_utf8(&inner[first_gt..last_lt])
-        .ok()
-        .map(|s| s.to_string())
+    std::str::from_utf8(&inner[first_gt..last_lt]).ok().map(|s| s.to_string())
 }
 
 fn attribute_on_element(xml: &[u8], local: &[u8], attr: &[u8]) -> Option<String> {
@@ -525,9 +490,7 @@ fn canonicalise_exclusive(xml: &[u8]) -> Result<Vec<u8>, RvError> {
 
     loop {
         match reader.read_event() {
-            Err(e) => {
-                return Err(RvError::ErrString(format!("saml: c14n parse error: {e}")))
-            }
+            Err(e) => return Err(RvError::ErrString(format!("saml: c14n parse error: {e}"))),
             Ok(Event::Eof) => break,
             Ok(Event::Decl(_)) => {
                 // XML declaration is NOT part of the canonical form.
@@ -548,15 +511,11 @@ fn canonicalise_exclusive(xml: &[u8]) -> Result<Vec<u8>, RvError> {
                 let mut attrs: Vec<(String, String)> = Vec::new();
                 for attr in e.attributes().flatten() {
                     let key = std::str::from_utf8(attr.key.as_ref())
-                        .map_err(|err| {
-                            RvError::ErrString(format!("saml: c14n attr utf-8: {err}"))
-                        })?
+                        .map_err(|err| RvError::ErrString(format!("saml: c14n attr utf-8: {err}")))?
                         .to_string();
                     let val = attr
                         .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
-                        .map_err(|err| {
-                            RvError::ErrString(format!("saml: c14n attr decode: {err}"))
-                        })?
+                        .map_err(|err| RvError::ErrString(format!("saml: c14n attr decode: {err}")))?
                         .into_owned();
                     if key == "xmlns" {
                         ns_decls.push((String::new(), val));
@@ -569,8 +528,7 @@ fn canonicalise_exclusive(xml: &[u8]) -> Result<Vec<u8>, RvError> {
 
                 // Compute the in-scope namespace visible *before* this
                 // element, so we can decide what needs (re)rendering.
-                let mut in_scope: std::collections::HashMap<String, String> =
-                    std::collections::HashMap::new();
+                let mut in_scope: std::collections::HashMap<String, String> = std::collections::HashMap::new();
                 for frame in &ns_rendered_stack {
                     for (p, u) in frame {
                         in_scope.insert(p.clone(), u.clone());
@@ -580,8 +538,7 @@ fn canonicalise_exclusive(xml: &[u8]) -> Result<Vec<u8>, RvError> {
                 // Identify prefixes that the element / its attributes
                 // actually use — that's the "visibly utilised" set in
                 // the exclusive-c14n spec.
-                let mut used_prefixes: std::collections::BTreeSet<String> =
-                    std::collections::BTreeSet::new();
+                let mut used_prefixes: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
                 used_prefixes.insert(elem_prefix.clone());
                 for (k, _) in &attrs {
                     let (p, _) = split_qname(k);
@@ -682,9 +639,7 @@ fn canonicalise_exclusive(xml: &[u8]) -> Result<Vec<u8>, RvError> {
                 // spec-mandated EOL normalization) is all that's
                 // left. The canonical output then re-escapes per
                 // c14n rules.
-                let s = t
-                    .xml10_content()
-                    .map_err(|e| RvError::ErrString(format!("saml: c14n text decode: {e}")))?;
+                let s = t.xml10_content().map_err(|e| RvError::ErrString(format!("saml: c14n text decode: {e}")))?;
                 write_text(&mut out, &s);
             }
             Ok(Event::GeneralRef(r)) => {
@@ -753,14 +708,8 @@ mod tests {
     fn parse_attr_handles_double_and_single_quotes() {
         // `r##"..."##` (double hashes) so the `#` inside `#id-1`
         // doesn't prematurely terminate the raw string literal.
-        assert_eq!(
-            parse_attr(r##"<Reference URI="#id-1" Foo="bar""##, "URI"),
-            Some("#id-1".to_string())
-        );
-        assert_eq!(
-            parse_attr(r##"<Reference URI='#id-2'"##, "URI"),
-            Some("#id-2".to_string())
-        );
+        assert_eq!(parse_attr(r##"<Reference URI="#id-1" Foo="bar""##, "URI"), Some("#id-1".to_string()));
+        assert_eq!(parse_attr(r##"<Reference URI='#id-2'"##, "URI"), Some("#id-2".to_string()));
         assert_eq!(parse_attr(r#"<Reference"#, "URI"), None);
     }
 
@@ -768,10 +717,7 @@ mod tests {
     fn canonicalise_sorts_attributes() {
         let input = br#"<foo b="2" a="1"/>"#;
         let got = canonicalise_exclusive(input).unwrap();
-        assert_eq!(
-            std::str::from_utf8(&got).unwrap(),
-            r#"<foo a="1" b="2"></foo>"#
-        );
+        assert_eq!(std::str::from_utf8(&got).unwrap(), r#"<foo a="1" b="2"></foo>"#);
     }
 
     #[test]
@@ -779,10 +725,7 @@ mod tests {
         let input = br#"<foo a="&quot;&amp;">a&amp;b</foo>"#;
         let got = canonicalise_exclusive(input).unwrap();
         // Text `&` must become `&amp;`, attr `"` must become `&quot;`.
-        assert_eq!(
-            std::str::from_utf8(&got).unwrap(),
-            r#"<foo a="&quot;&amp;">a&amp;b</foo>"#
-        );
+        assert_eq!(std::str::from_utf8(&got).unwrap(), r#"<foo a="&quot;&amp;">a&amp;b</foo>"#);
     }
 
     #[test]
@@ -803,16 +746,30 @@ mod tests {
         // mistaken for the r"..." terminator.
         let xml: Vec<u8> = [
             r#"<saml:Assertion xmlns:saml="x" ID="a1">"#,
-            r#"<ds:Signature xmlns:ds=""#, XML_DSIG_NS, r#"">"#,
+            r#"<ds:Signature xmlns:ds=""#,
+            XML_DSIG_NS,
+            r#"">"#,
             r#"<ds:SignedInfo>"#,
-            r#"<ds:CanonicalizationMethod Algorithm=""#, EXC_C14N, r#""/>"#,
-            r#"<ds:SignatureMethod Algorithm=""#, RSA_SHA256, r#""/>"#,
-            r#"<ds:Reference URI="#, "\"#a1\"",  r#">"#,
+            r#"<ds:CanonicalizationMethod Algorithm=""#,
+            EXC_C14N,
+            r#""/>"#,
+            r#"<ds:SignatureMethod Algorithm=""#,
+            RSA_SHA256,
+            r#""/>"#,
+            r#"<ds:Reference URI="#,
+            "\"#a1\"",
+            r#">"#,
             r#"<ds:Transforms>"#,
-            r#"<ds:Transform Algorithm=""#, ENVELOPED_SIG, r#""/>"#,
-            r#"<ds:Transform Algorithm=""#, EXC_C14N, r#""/>"#,
+            r#"<ds:Transform Algorithm=""#,
+            ENVELOPED_SIG,
+            r#""/>"#,
+            r#"<ds:Transform Algorithm=""#,
+            EXC_C14N,
+            r#""/>"#,
             r#"</ds:Transforms>"#,
-            r#"<ds:DigestMethod Algorithm=""#, SHA256_DIGEST, r#""/>"#,
+            r#"<ds:DigestMethod Algorithm=""#,
+            SHA256_DIGEST,
+            r#""/>"#,
             r#"<ds:DigestValue>ZmFrZQ==</ds:DigestValue>"#,
             r#"</ds:Reference></ds:SignedInfo>"#,
             r#"<ds:SignatureValue>AAAA</ds:SignatureValue>"#,
@@ -856,9 +813,7 @@ mod tests {
     /// would fail.
     #[test]
     fn roundtrip_signed_assertion_verifies() {
-        use crate::response::{
-            ParsedAssertion, ParsedResponse,
-        };
+        use crate::response::{ParsedAssertion, ParsedResponse};
         use rsa::pkcs1v15::SigningKey;
         use rsa::signature::{Keypair, RandomizedSigner, SignatureEncoding};
         use rsa::RsaPrivateKey;
@@ -906,8 +861,7 @@ mod tests {
         );
         let canon_signed_info = canonicalise_exclusive(signed_info.as_bytes()).unwrap();
         let signature = signing_key.sign_with_rng(&mut rng, &canon_signed_info);
-        let signature_b64 =
-            general_purpose::STANDARD.encode(signature.to_bytes());
+        let signature_b64 = general_purpose::STANDARD.encode(signature.to_bytes());
 
         // 5. Splice SignedInfo + SignatureValue into the assertion
         //    just before `</saml:Assertion>`.
@@ -917,10 +871,7 @@ mod tests {
             si = signed_info,
             sv = signature_b64,
         );
-        let signed_assertion = assertion_body.replace(
-            "</saml:Assertion>",
-            &format!("{sig_block}</saml:Assertion>"),
-        );
+        let signed_assertion = assertion_body.replace("</saml:Assertion>", &format!("{sig_block}</saml:Assertion>"));
 
         // 6. Build a ParsedResponse that points at this assertion's
         //    byte span. `parse_response` would do this for us in
@@ -949,10 +900,7 @@ mod tests {
         //    confirm verification fails with a digest mismatch.
         let mut tampered = parsed.clone();
         let bytes = tampered.raw_xml.as_mut_slice();
-        let idx = bytes
-            .windows(5)
-            .position(|w| w == b"alice")
-            .expect("find alice");
+        let idx = bytes.windows(5).position(|w| w == b"alice").expect("find alice");
         bytes[idx] = b'A';
         let err = verify_signed_assertion(&tampered, &pub_key).unwrap_err();
         assert!(

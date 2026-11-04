@@ -46,10 +46,7 @@ pub use bv_logical::{CHILD_VISIBLE_META, NS_ID_META, NS_PATH_META};
 /// The namespace header value on a request, if present. Case-insensitive.
 pub fn namespace_header_from_map(headers: Option<&HashMap<String, String>>) -> Option<String> {
     let headers = headers?;
-    headers
-        .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case(NAMESPACE_HEADER))
-        .map(|(_, v)| v.clone())
+    headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(NAMESPACE_HEADER)).map(|(_, v)| v.clone())
 }
 
 /// Barrier-storage prefix for a namespace's logical mounts.
@@ -74,12 +71,7 @@ pub fn bound_namespace(meta: &HashMap<String, String>) -> Result<String, RvError
 }
 
 /// Stamp a namespace binding into a token metadata map at create time.
-pub fn stamp_binding(
-    meta: &mut HashMap<String, String>,
-    ns_path: &str,
-    ns_uuid: &str,
-    child_visible: bool,
-) {
+pub fn stamp_binding(meta: &mut HashMap<String, String>, ns_path: &str, ns_uuid: &str, child_visible: bool) {
     meta.insert(NS_PATH_META.to_string(), ns_path.to_string());
     meta.insert(NS_ID_META.to_string(), ns_uuid.to_string());
     meta.insert(CHILD_VISIBLE_META.to_string(), child_visible.to_string());
@@ -194,20 +186,10 @@ pub trait NamespaceRegistry: Send + Sync {
     ) -> Result<(String, String), RvError>;
 
     /// Refuse a login whose principal is not assigned to `ns_path`.
-    async fn enforce_login_assignment(
-        &self,
-        mount: &str,
-        name: &str,
-        ns_path: &str,
-    ) -> Result<(), RvError>;
+    async fn enforce_login_assignment(&self, mount: &str, name: &str, ns_path: &str) -> Result<(), RvError>;
 
     /// Refuse an entity creation that would exceed the namespace's quota.
-    async fn check_entity_create(
-        &self,
-        mount: &str,
-        name: &str,
-        ns_path: &str,
-    ) -> Result<(), RvError>;
+    async fn check_entity_create(&self, mount: &str, name: &str, ns_path: &str) -> Result<(), RvError>;
 
     /// Whether tokens bound to `ns_path` may see into child namespaces.
     async fn login_child_visible(&self, ns_path: &str) -> bool;
@@ -222,10 +204,7 @@ pub trait NamespaceRegistry: Send + Sync {
     /// manager is the one asking, and it holds only a `Weak<dyn VaultCtx>`:
     /// giving it the namespace store would hand the lease subsystem the whole
     /// tenancy registry to satisfy one integer.
-    async fn lease_quota_for_path(
-        &self,
-        req_path: &str,
-    ) -> Result<Option<(String, u64)>, RvError>;
+    async fn lease_quota_for_path(&self, req_path: &str) -> Result<Option<(String, u64)>, RvError>;
 }
 
 // ── Login-path helpers ─────────────────────────────────────────────────
@@ -254,9 +233,7 @@ pub async fn login_namespace_for_principal(
             .map(|s| s.trim().to_string())
             .is_some_and(|s| !s.is_empty());
         if named {
-            return Err(bv_errors::bv_error_string!(
-                "namespace header set but the namespace module is unavailable"
-            ));
+            return Err(bv_errors::bv_error_string!("namespace header set but the namespace module is unavailable"));
         }
         return Ok((String::new(), String::new()));
     };
@@ -284,12 +261,7 @@ pub async fn enforce_login_assignment(
 ///
 /// No namespace module means no quotas; passes.
 #[maybe_async::maybe_async]
-pub async fn check_entity_create(
-    ctx: &dyn VaultCtx,
-    mount: &str,
-    name: &str,
-    ns_path: &str,
-) -> Result<(), RvError> {
+pub async fn check_entity_create(ctx: &dyn VaultCtx, mount: &str, name: &str, ns_path: &str) -> Result<(), RvError> {
     let Some(registry) = ctx.namespaces() else {
         return Ok(());
     };
@@ -350,12 +322,7 @@ pub async fn caller_namespace_prefix(ctx: &dyn VaultCtx, req: &Request) -> Resul
 /// are keyed `<ns path>/<mount>` there, so a bare `totp/` only ever reaches
 /// the root namespace's mount.
 #[maybe_async::maybe_async]
-pub async fn scoped_mount(
-    ctx: &dyn VaultCtx,
-    ns_path: &str,
-    ns_uuid: &str,
-    mount: &str,
-) -> Result<String, RvError> {
+pub async fn scoped_mount(ctx: &dyn VaultCtx, ns_path: &str, ns_uuid: &str, mount: &str) -> Result<String, RvError> {
     let ns_path = ns_path.trim_matches('/');
     if ns_path.is_empty() {
         return Ok(mount.to_string());
@@ -370,15 +337,9 @@ pub async fn scoped_mount(
 /// Shared front half: header → resolved namespace. `None` when the request
 /// names no namespace, names an unknown one, or names root.
 #[maybe_async::maybe_async]
-async fn resolve_caller_namespace(
-    ctx: &dyn VaultCtx,
-    req: &Request,
-) -> Result<Option<NamespaceRef>, RvError> {
-    let raw = req
-        .namespace_path
-        .clone()
-        .or_else(|| namespace_header_from_map(req.headers.as_ref()))
-        .unwrap_or_default();
+async fn resolve_caller_namespace(ctx: &dyn VaultCtx, req: &Request) -> Result<Option<NamespaceRef>, RvError> {
+    let raw =
+        req.namespace_path.clone().or_else(|| namespace_header_from_map(req.headers.as_ref())).unwrap_or_default();
     let raw = raw.trim().to_string();
     if raw.is_empty() {
         return Ok(None);

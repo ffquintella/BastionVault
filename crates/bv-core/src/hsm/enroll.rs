@@ -100,12 +100,7 @@ pub async fn create_custody_root(
 /// (Pinning that identity key out-of-band is the operator's root of trust.)
 pub fn verify_custody_root(signed: &SignedCustodyRoot) -> Result<(), RvError> {
     let ctx = custody_root_ctx(&signed.record.cluster_uuid);
-    verify_identity_signature(
-        &signed.record.bootstrap_identity_pub,
-        &ctx,
-        &signed.record.tbs(),
-        &signed.signature,
-    )
+    verify_identity_signature(&signed.record.bootstrap_identity_pub, &ctx, &signed.record.tbs(), &signed.signature)
 }
 
 /// A node's attestation bundles for its two attestable keys.

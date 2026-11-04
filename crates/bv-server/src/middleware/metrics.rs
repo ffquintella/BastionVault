@@ -19,14 +19,14 @@ use std::{
 use actix_web::{
     body::MessageBody,
     dev::{ServiceRequest, ServiceResponse},
+    http::Method,
     middleware::Next,
     web::Data,
     Error,
-    http::{Method},
 };
 
-use bv_metrics::{http_metrics::MetricsMethod, manager::MetricsManager};
 use bv_metrics::http_metrics::HttpLabel;
+use bv_metrics::{http_metrics::MetricsMethod, manager::MetricsManager};
 
 pub async fn metrics_midleware(
     req: ServiceRequest,

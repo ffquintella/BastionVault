@@ -17,9 +17,8 @@
 //! independently with the same fixtures once that crate is in tree.
 
 use bv_crypto::{
-    bvrg_build, bvrg_fresh_nonce, bvrg_unix_now, bvrg_verify, BvrgCredential, BvrgError,
-    BvrgMasterPublicKey, BvrgMasterSigningKey, BvrgOperator, BvrgPayload, BvrgSession, BvrgTarget,
-    MlKem768Provider, BVRG_MAGIC,
+    bvrg_build, bvrg_fresh_nonce, bvrg_unix_now, bvrg_verify, BvrgCredential, BvrgError, BvrgMasterPublicKey,
+    BvrgMasterSigningKey, BvrgOperator, BvrgPayload, BvrgSession, BvrgTarget, MlKem768Provider, BVRG_MAGIC,
 };
 
 fn sample_payload(op: &str) -> BvrgPayload {
@@ -41,11 +40,7 @@ fn sample_payload(op: &str) -> BvrgPayload {
             material: b"hunter2".to_vec(),
             extra: None,
         }),
-        session: Some(BvrgSession {
-            ttl_secs: 3600,
-            max_renewals: 3,
-            recording: "always".into(),
-        }),
+        session: Some(BvrgSession { ttl_secs: 3600, max_renewals: 3, recording: "always".into() }),
         operator: BvrgOperator {
             vault_user_id: "uuid-operator".into(),
             vault_user_name: "alice".into(),
@@ -59,9 +54,7 @@ fn sample_payload(op: &str) -> BvrgPayload {
 
 fn rustion_keypair() -> (Vec<u8>, Vec<u8>) {
     use bv_crypto::KemProvider;
-    let keypair = MlKem768Provider
-        .generate_keypair()
-        .expect("ml-kem keypair");
+    let keypair = MlKem768Provider.generate_keypair().expect("ml-kem keypair");
     (keypair.public_key().to_vec(), keypair.secret_key().to_vec())
 }
 
@@ -95,10 +88,7 @@ fn magic_mismatch_rejects() {
     let mut envelope = bvrg_build(&sample_payload("open"), &master, &rustion_pub).unwrap();
     envelope[0] = b'X';
     let err = bvrg_verify(&envelope, &master_pub, &rustion_sec).expect_err("magic tamper");
-    assert!(
-        matches!(err, BvrgError::MagicMismatch),
-        "expected MagicMismatch, got {err:?}"
-    );
+    assert!(matches!(err, BvrgError::MagicMismatch), "expected MagicMismatch, got {err:?}");
 }
 
 #[test]
@@ -110,10 +100,7 @@ fn truncation_rejects() {
     let envelope = bvrg_build(&sample_payload("open"), &master, &rustion_pub).unwrap();
     let truncated = &envelope[..4]; // less than even the magic header
     let err = bvrg_verify(truncated, &master_pub, &rustion_sec).expect_err("truncated");
-    assert!(
-        matches!(err, BvrgError::EnvelopeTooShort),
-        "expected EnvelopeTooShort, got {err:?}"
-    );
+    assert!(matches!(err, BvrgError::EnvelopeTooShort), "expected EnvelopeTooShort, got {err:?}");
 }
 
 #[test]
@@ -130,10 +117,7 @@ fn ed25519_signature_tamper_rejects() {
     let offset = BVRG_MAGIC.len() + 2 + 2 + 16;
     envelope[offset] ^= 0xFF;
     let err = bvrg_verify(&envelope, &master_pub, &rustion_sec).expect_err("ed sig tamper");
-    assert!(
-        matches!(err, BvrgError::Ed25519SignatureInvalid),
-        "expected Ed25519SignatureInvalid, got {err:?}"
-    );
+    assert!(matches!(err, BvrgError::Ed25519SignatureInvalid), "expected Ed25519SignatureInvalid, got {err:?}");
 }
 
 #[test]
@@ -149,10 +133,7 @@ fn mldsa65_signature_tamper_rejects() {
     let offset = BVRG_MAGIC.len() + 2 + 2 + 64 + 2 + 32;
     envelope[offset] ^= 0xFF;
     let err = bvrg_verify(&envelope, &master_pub, &rustion_sec).expect_err("ml sig tamper");
-    assert!(
-        matches!(err, BvrgError::MlDsa65SignatureInvalid),
-        "expected MlDsa65SignatureInvalid, got {err:?}"
-    );
+    assert!(matches!(err, BvrgError::MlDsa65SignatureInvalid), "expected MlDsa65SignatureInvalid, got {err:?}");
 }
 
 #[test]
@@ -171,10 +152,7 @@ fn hybrid_downgrade_drops_mldsa_half_and_rejects() {
     // Carve out the sig section, replace the mldsa half with zero
     // length + zero bytes.
     let sig_start = BVRG_MAGIC.len() + 2;
-    let original_sig_len = u16::from_be_bytes([
-        envelope[BVRG_MAGIC.len()],
-        envelope[BVRG_MAGIC.len() + 1],
-    ]) as usize;
+    let original_sig_len = u16::from_be_bytes([envelope[BVRG_MAGIC.len()], envelope[BVRG_MAGIC.len() + 1]]) as usize;
     let ct_start = sig_start + original_sig_len;
     let new_sig_len = 2 + 64 + 2; // ed25519 only, zero-length mldsa
     let mut forged = Vec::with_capacity(envelope.len());
@@ -185,10 +163,7 @@ fn hybrid_downgrade_drops_mldsa_half_and_rejects() {
     forged.extend_from_slice(&envelope[ct_start..]); // ct_len + ct unchanged
 
     let err = bvrg_verify(&forged, &master_pub, &rustion_sec).expect_err("downgrade");
-    assert!(
-        matches!(err, BvrgError::HybridSignatureMalformed),
-        "expected HybridSignatureMalformed, got {err:?}"
-    );
+    assert!(matches!(err, BvrgError::HybridSignatureMalformed), "expected HybridSignatureMalformed, got {err:?}");
 }
 
 #[test]
@@ -206,10 +181,7 @@ fn ciphertext_tamper_rejects() {
     envelope[last_offset] ^= 0xFF;
     let err = bvrg_verify(&envelope, &master_pub, &rustion_sec).expect_err("ct tamper");
     assert!(
-        matches!(
-            err,
-            BvrgError::Ed25519SignatureInvalid | BvrgError::MlDsa65SignatureInvalid
-        ),
+        matches!(err, BvrgError::Ed25519SignatureInvalid | BvrgError::MlDsa65SignatureInvalid),
         "expected signature failure (sig covers ct), got {err:?}"
     );
 }
@@ -223,10 +195,7 @@ fn wrong_recipient_kem_key_rejects() {
 
     let envelope = bvrg_build(&sample_payload("open"), &master, &rustion_pub).unwrap();
     let err = bvrg_verify(&envelope, &master_pub, &other_secret).expect_err("wrong kem secret");
-    assert!(
-        matches!(err, BvrgError::CiphertextInvalid),
-        "expected CiphertextInvalid, got {err:?}"
-    );
+    assert!(matches!(err, BvrgError::CiphertextInvalid), "expected CiphertextInvalid, got {err:?}");
 }
 
 #[test]
@@ -252,10 +221,7 @@ fn payload_public_key_construction_rejects_classical_only() {
     // Hand-roll a half-only public key — Ed25519 ok, ML-DSA-65 empty.
     // Construction must refuse the downgrade.
     let err = BvrgMasterPublicKey::from_bytes(pk.ed25519.as_bytes(), &[]).expect_err("empty mldsa");
-    assert!(
-        matches!(err, BvrgError::PublicKeyLength),
-        "expected PublicKeyLength, got {err:?}"
-    );
+    assert!(matches!(err, BvrgError::PublicKeyLength), "expected PublicKeyLength, got {err:?}");
 }
 
 #[test]

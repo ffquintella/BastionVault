@@ -130,18 +130,12 @@ impl BvrgMasterPublicKey {
     /// classical-only is refused as a downgrade attack at construction
     /// time so the rest of the module can treat the key as trusted.
     pub fn from_bytes(ed25519: &[u8], mldsa65: &[u8]) -> Result<Self, BvrgError> {
-        let ed_arr: [u8; 32] = ed25519
-            .try_into()
-            .map_err(|_| BvrgError::PublicKeyLength)?;
-        let ed25519 = VerifyingKey::from_bytes(&ed_arr)
-            .map_err(|_| BvrgError::PublicKeyLength)?;
+        let ed_arr: [u8; 32] = ed25519.try_into().map_err(|_| BvrgError::PublicKeyLength)?;
+        let ed25519 = VerifyingKey::from_bytes(&ed_arr).map_err(|_| BvrgError::PublicKeyLength)?;
         if mldsa65.len() != ml_dsa_65::PK_LEN {
             return Err(BvrgError::PublicKeyLength);
         }
-        Ok(Self {
-            ed25519,
-            mldsa65: mldsa65.to_vec(),
-        })
+        Ok(Self { ed25519, mldsa65: mldsa65.to_vec() })
     }
 }
 
@@ -236,8 +230,7 @@ pub fn build(
 ) -> Result<Vec<u8>, BvrgError> {
     // 1. CBOR-encode the payload.
     let mut cbor_buf = Vec::with_capacity(512);
-    ciborium::ser::into_writer(payload, &mut cbor_buf)
-        .map_err(|_| BvrgError::PayloadDecode)?;
+    ciborium::ser::into_writer(payload, &mut cbor_buf).map_err(|_| BvrgError::PayloadDecode)?;
     if cbor_buf.len() > MAX_PAYLOAD_BYTES {
         return Err(BvrgError::PayloadTooLong);
     }
@@ -313,11 +306,8 @@ pub fn verify(
     let mut cursor = BVRG_MAGIC.len();
 
     // sig_len
-    let sig_len = u16::from_be_bytes(
-        envelope[cursor..cursor + 2]
-            .try_into()
-            .map_err(|_| BvrgError::EnvelopeTooShort)?,
-    ) as usize;
+    let sig_len =
+        u16::from_be_bytes(envelope[cursor..cursor + 2].try_into().map_err(|_| BvrgError::EnvelopeTooShort)?) as usize;
     cursor += 2;
     if cursor + sig_len + 4 > envelope.len() {
         return Err(BvrgError::LengthMismatch);
@@ -326,11 +316,7 @@ pub fn verify(
     cursor += sig_len;
 
     // ct_len
-    let ct_len = u32::from_be_bytes(
-        envelope[cursor..cursor + 4]
-            .try_into()
-            .map_err(|_| BvrgError::LengthMismatch)?,
-    );
+    let ct_len = u32::from_be_bytes(envelope[cursor..cursor + 4].try_into().map_err(|_| BvrgError::LengthMismatch)?);
     cursor += 4;
     if cursor + ct_len as usize != envelope.len() {
         return Err(BvrgError::LengthMismatch);
@@ -352,16 +338,12 @@ pub fn verify(
     if plaintext.len() > MAX_PAYLOAD_BYTES {
         return Err(BvrgError::PayloadTooLong);
     }
-    let payload: BvrgPayload =
-        ciborium::de::from_reader(plaintext.as_slice()).map_err(|_| BvrgError::PayloadDecode)?;
+    let payload: BvrgPayload = ciborium::de::from_reader(plaintext.as_slice()).map_err(|_| BvrgError::PayloadDecode)?;
     if payload.v != 1 {
         return Err(BvrgError::PayloadVersionUnsupported);
     }
 
-    Ok(VerifiedEnvelope {
-        payload,
-        envelope_fingerprint: tbs,
-    })
+    Ok(VerifiedEnvelope { payload, envelope_fingerprint: tbs })
 }
 
 // ─── Detached hybrid signature ─────────────────────────────────────
@@ -377,10 +359,7 @@ pub fn verify(
 /// pre-hash here. The BVRG-v1 envelope passes its `tbs_hash`; Rustion's
 /// signed health probe passes the raw `nonce || authority_name` bytes.
 /// ML-DSA-65 is FIPS 204 pure mode with an empty context.
-pub fn sign_detached_hybrid(
-    master: &BvrgMasterSigningKey,
-    message: &[u8],
-) -> Result<Vec<u8>, BvrgError> {
+pub fn sign_detached_hybrid(master: &BvrgMasterSigningKey, message: &[u8]) -> Result<Vec<u8>, BvrgError> {
     // Ed25519 first, ML-DSA-65 second — the wire order is fixed.
     let ed_sig = master.ed25519.sign(message);
     let mldsa_sig = sign_mldsa65(master.mldsa65_seed.as_ref(), message)?;
@@ -408,12 +387,8 @@ pub fn verify_detached_hybrid(
 ) -> Result<(), BvrgError> {
     let (ed_sig_bytes, mldsa_sig_bytes) = split_hybrid_sig(sig_blob)?;
 
-    let ed_sig =
-        Ed25519Signature::from_slice(ed_sig_bytes).map_err(|_| BvrgError::Ed25519SignatureInvalid)?;
-    master_pub
-        .ed25519
-        .verify(message, &ed_sig)
-        .map_err(|_| BvrgError::Ed25519SignatureInvalid)?;
+    let ed_sig = Ed25519Signature::from_slice(ed_sig_bytes).map_err(|_| BvrgError::Ed25519SignatureInvalid)?;
+    master_pub.ed25519.verify(message, &ed_sig).map_err(|_| BvrgError::Ed25519SignatureInvalid)?;
 
     verify_mldsa65(&master_pub.mldsa65, message, mldsa_sig_bytes)
 }
@@ -448,25 +423,17 @@ fn split_hybrid_sig(sig: &[u8]) -> Result<(&[u8], &[u8]), BvrgError> {
 }
 
 fn sign_mldsa65(seed: &[u8], message: &[u8]) -> Result<Vec<u8>, BvrgError> {
-    let seed_arr: [u8; crate::signature::ML_DSA_65_SEED_LEN] = seed
-        .try_into()
-        .map_err(|_| BvrgError::PublicKeyLength)?;
+    let seed_arr: [u8; crate::signature::ML_DSA_65_SEED_LEN] =
+        seed.try_into().map_err(|_| BvrgError::PublicKeyLength)?;
     let (_pk, sk) = ml_dsa_65::KG::keygen_from_seed(&seed_arr);
-    let sig = sk
-        .try_sign(message, &[])
-        .map_err(|_| BvrgError::MlDsa65SignatureInvalid)?;
+    let sig = sk.try_sign(message, &[]).map_err(|_| BvrgError::MlDsa65SignatureInvalid)?;
     Ok(sig.to_vec())
 }
 
 fn verify_mldsa65(pubkey: &[u8], message: &[u8], sig: &[u8]) -> Result<(), BvrgError> {
-    let pk_arr: [u8; ml_dsa_65::PK_LEN] = pubkey
-        .try_into()
-        .map_err(|_| BvrgError::PublicKeyLength)?;
-    let sig_arr: [u8; MLDSA65_SIG_LEN] = sig
-        .try_into()
-        .map_err(|_| BvrgError::HybridSignatureMalformed)?;
-    let pk = ml_dsa_65::PublicKey::try_from_bytes(pk_arr)
-        .map_err(|_| BvrgError::PublicKeyLength)?;
+    let pk_arr: [u8; ml_dsa_65::PK_LEN] = pubkey.try_into().map_err(|_| BvrgError::PublicKeyLength)?;
+    let sig_arr: [u8; MLDSA65_SIG_LEN] = sig.try_into().map_err(|_| BvrgError::HybridSignatureMalformed)?;
+    let pk = ml_dsa_65::PublicKey::try_from_bytes(pk_arr).map_err(|_| BvrgError::PublicKeyLength)?;
     if pk.verify(message, &sig_arr, &[]) {
         Ok(())
     } else {
@@ -500,10 +467,7 @@ pub fn fresh_nonce() -> Vec<u8> {
 /// Unix-seconds shim. Surfaced so tests + integration paths can build
 /// payloads without re-importing `SystemTime`.
 pub fn unix_now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
 // CBOR's serde implementation doesn't auto-bytefy `Vec<u8>`, so a
@@ -560,10 +524,7 @@ mod serde_bytes_wrapper {
                     fn visit_byte_buf<E: serde::de::Error>(self, v: Vec<u8>) -> Result<ByteBuf, E> {
                         Ok(ByteBuf(v))
                     }
-                    fn visit_seq<A: serde::de::SeqAccess<'de>>(
-                        self,
-                        mut seq: A,
-                    ) -> Result<ByteBuf, A::Error> {
+                    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<ByteBuf, A::Error> {
                         let mut v: Vec<u8> = Vec::new();
                         while let Some(b) = seq.next_element::<u8>()? {
                             v.push(b);
@@ -593,10 +554,7 @@ impl BvrgMasterSigningKey {
         let mut ml_seed = Zeroizing::new([0u8; crate::signature::ML_DSA_65_SEED_LEN]);
         rand::rng().fill_bytes(ml_seed.as_mut());
 
-        Ok(Self {
-            ed25519,
-            mldsa65_seed: ml_seed,
-        })
+        Ok(Self { ed25519, mldsa65_seed: ml_seed })
     }
 
     /// Project the public half. Cheap — derives the Ed25519 verifying
@@ -604,9 +562,6 @@ impl BvrgMasterSigningKey {
     /// seed (FIPS 204 rederives the expanded pubkey deterministically).
     pub fn public_key(&self) -> BvrgMasterPublicKey {
         let (ml_pk, _ml_sk) = ml_dsa_65::KG::keygen_from_seed(&self.mldsa65_seed);
-        BvrgMasterPublicKey {
-            ed25519: self.ed25519.verifying_key(),
-            mldsa65: ml_pk.into_bytes().to_vec(),
-        }
+        BvrgMasterPublicKey { ed25519: self.ed25519.verifying_key(), mldsa65: ml_pk.into_bytes().to_vec() }
     }
 }

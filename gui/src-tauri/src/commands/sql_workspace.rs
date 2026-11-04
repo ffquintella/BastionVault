@@ -425,8 +425,9 @@ pub async fn sql_step_up_begin(
 ) -> CmdResult<super::connect_mfa::ConnectMfaChallenge> {
     let s = session_for(&state, &webview, &request.token).await?;
     let body = step_up_target(&s, &request.action)?;
-    let data = call(&state, s.namespace.as_deref(), Operation::Write, "resources/v2/connect/mfa/begin".into(), Some(body))
-        .await?;
+    let data =
+        call(&state, s.namespace.as_deref(), Operation::Write, "resources/v2/connect/mfa/begin".into(), Some(body))
+            .await?;
     Ok(super::connect_mfa::challenge_from(&data))
 }
 
@@ -471,15 +472,17 @@ pub async fn sql_step_up_verify(
             body.insert("totp_code".into(), Value::String(code.to_string()));
         }
         "fido2" => {
-            let challenge = request.challenge.as_ref().ok_or_else(|| CommandError::from("no FIDO2 challenge".to_string()))?;
+            let challenge =
+                request.challenge.as_ref().ok_or_else(|| CommandError::from("no FIDO2 challenge".to_string()))?;
             let credential = super::fido2_native::assert_webauthn(&state, &app, challenge).await?;
             body.insert("method".into(), Value::String("fido2".into()));
             body.insert("credential".into(), Value::String(credential));
         }
         _ => return Err(CommandError::from("`method` is totp or fido2".to_string())),
     }
-    let data = call(&state, s.namespace.as_deref(), Operation::Write, "resources/v2/connect/mfa/verify".into(), Some(body))
-        .await?;
+    let data =
+        call(&state, s.namespace.as_deref(), Operation::Write, "resources/v2/connect/mfa/verify".into(), Some(body))
+            .await?;
     let text = |k: &str| data.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
     let ticket = text("connect_ticket");
     if ticket.is_empty() || text("action").is_empty() {
@@ -603,9 +606,9 @@ pub async fn sql_export_to_file(
                     .unwrap_or_default();
                 return Err(CommandError::from(format!("the export ended {state_name}{why}; no file was kept")));
             }
-            tokio::fs::rename(&part, &target).await.map_err(|e| {
-                CommandError::from(format!("could not move the export into place: {}", e.kind()))
-            })?;
+            tokio::fs::rename(&part, &target)
+                .await
+                .map_err(|e| CommandError::from(format!("could not move the export into place: {}", e.kind())))?;
             let file = target.file_name().map(|n| n.to_string_lossy().to_string());
             log::info!(
                 target: "audit",
@@ -663,8 +666,9 @@ async fn pull_to_file(
         if s.shared.export_cancel.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(CommandError::from("the export was cancelled".to_string()));
         }
-        let reply = call(state, s.namespace.as_deref(), Operation::Read, s.path(&format!("exports/{job}/{offset}")), None)
-            .await?;
+        let reply =
+            call(state, s.namespace.as_deref(), Operation::Read, s.path(&format!("exports/{job}/{offset}")), None)
+                .await?;
         let (mut bytes, next, eof) = sqls::decode_chunk(&reply, offset).map_err(CommandError::from)?;
         hasher.update(&bytes);
         file.write_all(&bytes)
@@ -673,7 +677,9 @@ async fn pull_to_file(
         zeroize::Zeroize::zeroize(&mut bytes);
         offset = next;
         if eof {
-            file.flush().await.map_err(|e| CommandError::from(format!("could not write the export file: {}", e.kind())))?;
+            file.flush()
+                .await
+                .map_err(|e| CommandError::from(format!("could not write the export file: {}", e.kind())))?;
             let ok = matches!(reply.get("state").and_then(Value::as_str), Some("done" | "limit_reached"));
             let want = reply.get("sha256").and_then(Value::as_str).unwrap_or_default();
             let got = hex::encode(hasher.finalize());

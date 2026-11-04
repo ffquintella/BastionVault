@@ -325,15 +325,9 @@ impl NodeRole {
 }
 /// Generated client implementations.
 pub mod machine_identity_client {
-    #![allow(
-        unused_variables,
-        dead_code,
-        missing_docs,
-        clippy::wildcard_imports,
-        clippy::let_unit_value,
-    )]
-    use tonic::codegen::*;
+    #![allow(unused_variables, dead_code, missing_docs, clippy::wildcard_imports, clippy::let_unit_value)]
     use tonic::codegen::http::Uri;
+    use tonic::codegen::*;
     #[derive(Debug, Clone)]
     pub struct MachineIdentityClient<T> {
         inner: tonic::client::Grpc<T>,
@@ -353,22 +347,16 @@ pub mod machine_identity_client {
             let inner = tonic::client::Grpc::with_origin(inner, origin);
             Self { inner }
         }
-        pub fn with_interceptor<F>(
-            inner: T,
-            interceptor: F,
-        ) -> MachineIdentityClient<InterceptedService<T, F>>
+        pub fn with_interceptor<F>(inner: T, interceptor: F) -> MachineIdentityClient<InterceptedService<T, F>>
         where
             F: tonic::service::Interceptor,
             T::ResponseBody: Default,
             T: tonic::codegen::Service<
                 http::Request<tonic::body::Body>,
-                Response = http::Response<
-                    <T as tonic::client::GrpcService<tonic::body::Body>>::ResponseBody,
-                >,
+                Response = http::Response<<T as tonic::client::GrpcService<tonic::body::Body>>::ResponseBody>,
             >,
-            <T as tonic::codegen::Service<
-                http::Request<tonic::body::Body>,
-            >>::Error: Into<StdError> + std::marker::Send + std::marker::Sync,
+            <T as tonic::codegen::Service<http::Request<tonic::body::Body>>>::Error:
+                Into<StdError> + std::marker::Send + std::marker::Sync,
         {
             MachineIdentityClient::new(InterceptedService::new(inner, interceptor))
         }
@@ -408,25 +396,16 @@ pub mod machine_identity_client {
         pub async fn attest(
             &mut self,
             request: impl tonic::IntoStreamingRequest<Message = super::AttestRequest>,
-        ) -> std::result::Result<
-            tonic::Response<tonic::codec::Streaming<super::AttestResponse>>,
-            tonic::Status,
-        > {
+        ) -> std::result::Result<tonic::Response<tonic::codec::Streaming<super::AttestResponse>>, tonic::Status>
+        {
             self.inner
                 .ready()
                 .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
+                .map_err(|e| tonic::Status::unknown(format!("Service was not ready: {}", e.into())))?;
             let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/ferrogate.v1.MachineIdentity/Attest",
-            );
+            let path = http::uri::PathAndQuery::from_static("/ferrogate.v1.MachineIdentity/Attest");
             let mut req = request.into_streaming_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("ferrogate.v1.MachineIdentity", "Attest"));
+            req.extensions_mut().insert(GrpcMethod::new("ferrogate.v1.MachineIdentity", "Attest"));
             self.inner.streaming(req, path, codec).await
         }
         /// Fetch the most recently issued SVID for a SPIFFE id (debug / cache miss).
@@ -437,18 +416,11 @@ pub mod machine_identity_client {
             self.inner
                 .ready()
                 .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
+                .map_err(|e| tonic::Status::unknown(format!("Service was not ready: {}", e.into())))?;
             let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/ferrogate.v1.MachineIdentity/FetchSVID",
-            );
+            let path = http::uri::PathAndQuery::from_static("/ferrogate.v1.MachineIdentity/FetchSVID");
             let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("ferrogate.v1.MachineIdentity", "FetchSVID"));
+            req.extensions_mut().insert(GrpcMethod::new("ferrogate.v1.MachineIdentity", "FetchSVID"));
             self.inner.unary(req, path, codec).await
         }
         /// In-window renewal. No TPM interaction when PCRs and policy epoch are
@@ -461,18 +433,11 @@ pub mod machine_identity_client {
             self.inner
                 .ready()
                 .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
+                .map_err(|e| tonic::Status::unknown(format!("Service was not ready: {}", e.into())))?;
             let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/ferrogate.v1.MachineIdentity/Rotate",
-            );
+            let path = http::uri::PathAndQuery::from_static("/ferrogate.v1.MachineIdentity/Rotate");
             let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("ferrogate.v1.MachineIdentity", "Rotate"));
+            req.extensions_mut().insert(GrpcMethod::new("ferrogate.v1.MachineIdentity", "Rotate"));
             self.inner.unary(req, path, codec).await
         }
         /// Composite verification key set used to validate SVID signatures. Also
@@ -485,18 +450,11 @@ pub mod machine_identity_client {
             self.inner
                 .ready()
                 .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
+                .map_err(|e| tonic::Status::unknown(format!("Service was not ready: {}", e.into())))?;
             let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/ferrogate.v1.MachineIdentity/JWKS",
-            );
+            let path = http::uri::PathAndQuery::from_static("/ferrogate.v1.MachineIdentity/JWKS");
             let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("ferrogate.v1.MachineIdentity", "JWKS"));
+            req.extensions_mut().insert(GrpcMethod::new("ferrogate.v1.MachineIdentity", "JWKS"));
             self.inner.unary(req, path, codec).await
         }
         /// Admin RPC: revoke a single SVID by the lowercase-hex SHA-384 of its compact
@@ -509,18 +467,11 @@ pub mod machine_identity_client {
             self.inner
                 .ready()
                 .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
+                .map_err(|e| tonic::Status::unknown(format!("Service was not ready: {}", e.into())))?;
             let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/ferrogate.v1.MachineIdentity/RevokeSvid",
-            );
+            let path = http::uri::PathAndQuery::from_static("/ferrogate.v1.MachineIdentity/RevokeSvid");
             let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("ferrogate.v1.MachineIdentity", "RevokeSvid"));
+            req.extensions_mut().insert(GrpcMethod::new("ferrogate.v1.MachineIdentity", "RevokeSvid"));
             self.inner.unary(req, path, codec).await
         }
         /// Admin RPC: revoke every SVID and child token for a host SPIFFE ID.
@@ -531,18 +482,11 @@ pub mod machine_identity_client {
             self.inner
                 .ready()
                 .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
+                .map_err(|e| tonic::Status::unknown(format!("Service was not ready: {}", e.into())))?;
             let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/ferrogate.v1.MachineIdentity/RevokeHost",
-            );
+            let path = http::uri::PathAndQuery::from_static("/ferrogate.v1.MachineIdentity/RevokeHost");
             let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("ferrogate.v1.MachineIdentity", "RevokeHost"));
+            req.extensions_mut().insert(GrpcMethod::new("ferrogate.v1.MachineIdentity", "RevokeHost"));
             self.inner.unary(req, path, codec).await
         }
         /// Admin RPC: bump the live RIM policy epoch (feature F10). Every host whose
@@ -552,25 +496,15 @@ pub mod machine_identity_client {
         pub async fn bump_epoch(
             &mut self,
             request: impl tonic::IntoRequest<super::BumpEpochRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::BumpEpochResponse>,
-            tonic::Status,
-        > {
+        ) -> std::result::Result<tonic::Response<super::BumpEpochResponse>, tonic::Status> {
             self.inner
                 .ready()
                 .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
+                .map_err(|e| tonic::Status::unknown(format!("Service was not ready: {}", e.into())))?;
             let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/ferrogate.v1.MachineIdentity/BumpEpoch",
-            );
+            let path = http::uri::PathAndQuery::from_static("/ferrogate.v1.MachineIdentity/BumpEpoch");
             let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("ferrogate.v1.MachineIdentity", "BumpEpoch"));
+            req.extensions_mut().insert(GrpcMethod::new("ferrogate.v1.MachineIdentity", "BumpEpoch"));
             self.inner.unary(req, path, codec).await
         }
         /// Admin RPC: enumerate the issued SVIDs this node knows about — the local
@@ -581,25 +515,15 @@ pub mod machine_identity_client {
         pub async fn list_svids(
             &mut self,
             request: impl tonic::IntoRequest<super::ListSvidsRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ListSvidsResponse>,
-            tonic::Status,
-        > {
+        ) -> std::result::Result<tonic::Response<super::ListSvidsResponse>, tonic::Status> {
             self.inner
                 .ready()
                 .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
+                .map_err(|e| tonic::Status::unknown(format!("Service was not ready: {}", e.into())))?;
             let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/ferrogate.v1.MachineIdentity/ListSvids",
-            );
+            let path = http::uri::PathAndQuery::from_static("/ferrogate.v1.MachineIdentity/ListSvids");
             let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("ferrogate.v1.MachineIdentity", "ListSvids"));
+            req.extensions_mut().insert(GrpcMethod::new("ferrogate.v1.MachineIdentity", "ListSvids"));
             self.inner.unary(req, path, codec).await
         }
         /// Latest Signed Tree Head. Verifiers re-anchor incremental consistency
@@ -607,25 +531,15 @@ pub mod machine_identity_client {
         pub async fn latest_sth(
             &mut self,
             request: impl tonic::IntoRequest<super::LatestSthRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::LatestSthResponse>,
-            tonic::Status,
-        > {
+        ) -> std::result::Result<tonic::Response<super::LatestSthResponse>, tonic::Status> {
             self.inner
                 .ready()
                 .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
+                .map_err(|e| tonic::Status::unknown(format!("Service was not ready: {}", e.into())))?;
             let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/ferrogate.v1.MachineIdentity/LatestSth",
-            );
+            let path = http::uri::PathAndQuery::from_static("/ferrogate.v1.MachineIdentity/LatestSth");
             let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("ferrogate.v1.MachineIdentity", "LatestSth"));
+            req.extensions_mut().insert(GrpcMethod::new("ferrogate.v1.MachineIdentity", "LatestSth"));
             self.inner.unary(req, path, codec).await
         }
         /// RFC 6962 inclusion proof for the leaf at `leaf_index` against the
@@ -633,54 +547,30 @@ pub mod machine_identity_client {
         pub async fn inclusion_proof(
             &mut self,
             request: impl tonic::IntoRequest<super::InclusionProofRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::InclusionProofResponse>,
-            tonic::Status,
-        > {
+        ) -> std::result::Result<tonic::Response<super::InclusionProofResponse>, tonic::Status> {
             self.inner
                 .ready()
                 .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
+                .map_err(|e| tonic::Status::unknown(format!("Service was not ready: {}", e.into())))?;
             let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/ferrogate.v1.MachineIdentity/InclusionProof",
-            );
+            let path = http::uri::PathAndQuery::from_static("/ferrogate.v1.MachineIdentity/InclusionProof");
             let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(
-                    GrpcMethod::new("ferrogate.v1.MachineIdentity", "InclusionProof"),
-                );
+            req.extensions_mut().insert(GrpcMethod::new("ferrogate.v1.MachineIdentity", "InclusionProof"));
             self.inner.unary(req, path, codec).await
         }
         /// RFC 6962 consistency proof from `old_size` to the current tree size.
         pub async fn consistency_proof(
             &mut self,
             request: impl tonic::IntoRequest<super::ConsistencyProofRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ConsistencyProofResponse>,
-            tonic::Status,
-        > {
+        ) -> std::result::Result<tonic::Response<super::ConsistencyProofResponse>, tonic::Status> {
             self.inner
                 .ready()
                 .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
+                .map_err(|e| tonic::Status::unknown(format!("Service was not ready: {}", e.into())))?;
             let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/ferrogate.v1.MachineIdentity/ConsistencyProof",
-            );
+            let path = http::uri::PathAndQuery::from_static("/ferrogate.v1.MachineIdentity/ConsistencyProof");
             let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(
-                    GrpcMethod::new("ferrogate.v1.MachineIdentity", "ConsistencyProof"),
-                );
+            req.extensions_mut().insert(GrpcMethod::new("ferrogate.v1.MachineIdentity", "ConsistencyProof"));
             self.inner.unary(req, path, codec).await
         }
         /// MIA-originated event forwarder. The body is canonical CBOR of a
@@ -689,27 +579,15 @@ pub mod machine_identity_client {
         pub async fn append_audit_event(
             &mut self,
             request: impl tonic::IntoRequest<super::AppendAuditRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::AppendAuditResponse>,
-            tonic::Status,
-        > {
+        ) -> std::result::Result<tonic::Response<super::AppendAuditResponse>, tonic::Status> {
             self.inner
                 .ready()
                 .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
+                .map_err(|e| tonic::Status::unknown(format!("Service was not ready: {}", e.into())))?;
             let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/ferrogate.v1.MachineIdentity/AppendAuditEvent",
-            );
+            let path = http::uri::PathAndQuery::from_static("/ferrogate.v1.MachineIdentity/AppendAuditEvent");
             let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(
-                    GrpcMethod::new("ferrogate.v1.MachineIdentity", "AppendAuditEvent"),
-                );
+            req.extensions_mut().insert(GrpcMethod::new("ferrogate.v1.MachineIdentity", "AppendAuditEvent"));
             self.inner.unary(req, path, codec).await
         }
         /// Coarse readiness probe for L4/L7 load balancers. Reports the local node's
@@ -722,18 +600,11 @@ pub mod machine_identity_client {
             self.inner
                 .ready()
                 .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
+                .map_err(|e| tonic::Status::unknown(format!("Service was not ready: {}", e.into())))?;
             let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/ferrogate.v1.MachineIdentity/Health",
-            );
+            let path = http::uri::PathAndQuery::from_static("/ferrogate.v1.MachineIdentity/Health");
             let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("ferrogate.v1.MachineIdentity", "Health"));
+            req.extensions_mut().insert(GrpcMethod::new("ferrogate.v1.MachineIdentity", "Health"));
             self.inner.unary(req, path, codec).await
         }
     }

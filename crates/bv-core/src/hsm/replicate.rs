@@ -186,7 +186,8 @@ pub fn verify_signed_transcript(
 /// (mock) encoded.
 fn verify_ecdsa(public_key: &[u8], msg: &[u8], sig: &[u8]) -> Result<(), RvError> {
     use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
-    let vk = VerifyingKey::from_sec1_bytes(public_key).map_err(|_| RvError::ErrHsmTranscriptInvalid("bad key".into()))?;
+    let vk =
+        VerifyingKey::from_sec1_bytes(public_key).map_err(|_| RvError::ErrHsmTranscriptInvalid("bad key".into()))?;
     let signature = Signature::from_der(sig).or_else(|_| Signature::from_slice(sig));
     let signature = signature.map_err(|_| RvError::ErrHsmTranscriptInvalid("bad signature".into()))?;
     vk.verify(msg, &signature).map_err(|_| RvError::ErrHsmTranscriptInvalid("verify failed".into()))
@@ -293,16 +294,27 @@ mod tests {
             joiner_authz_fp: joiner.authz_fingerprint().unwrap(),
             logical_ts: 1,
         };
-        let sponsor_sig = sign_transcript(sponsor.as_ref(), HsmObjectIds::default().identity, &transcript).await.unwrap();
+        let sponsor_sig =
+            sign_transcript(sponsor.as_ref(), HsmObjectIds::default().identity, &transcript).await.unwrap();
         let joiner_sig = sign_transcript(joiner.as_ref(), HsmObjectIds::default().identity, &transcript).await.unwrap();
         let signed = SignedTranscript { transcript: transcript.clone(), sponsor_sig, joiner_sig };
-        verify_signed_transcript(&signed, &sponsor.identity_public_key().unwrap(), &joiner.identity_public_key().unwrap())
-            .unwrap();
+        verify_signed_transcript(
+            &signed,
+            &sponsor.identity_public_key().unwrap(),
+            &joiner.identity_public_key().unwrap(),
+        )
+        .unwrap();
 
         // Establish the channel key on both sides (ECDH inside each HSM).
         let th = transcript.hash();
-        let sp_ecdh = sponsor.derive_ecdh(HsmObjectIds::default().identity, &joiner.identity_public_key().unwrap()).await.unwrap();
-        let jo_ecdh = joiner.derive_ecdh(HsmObjectIds::default().identity, &sponsor.identity_public_key().unwrap()).await.unwrap();
+        let sp_ecdh = sponsor
+            .derive_ecdh(HsmObjectIds::default().identity, &joiner.identity_public_key().unwrap())
+            .await
+            .unwrap();
+        let jo_ecdh = joiner
+            .derive_ecdh(HsmObjectIds::default().identity, &sponsor.identity_public_key().unwrap())
+            .await
+            .unwrap();
         let sp_key = channel_key(&sp_ecdh, cluster, epoch, &th).unwrap();
         let jo_key = channel_key(&jo_ecdh, cluster, epoch, &th).unwrap();
 
@@ -318,13 +330,19 @@ mod tests {
         .await
         .unwrap();
         let joiner_ctx = barrier_context(cluster, epoch, "joiner");
-        let joiner_blob =
-            import_secret_from_channel(joiner.as_ref(), HsmObjectIds::default().wrap_barrier, &joiner_ctx, &jo_key, &payload)
-                .await
-                .unwrap();
+        let joiner_blob = import_secret_from_channel(
+            joiner.as_ref(),
+            HsmObjectIds::default().wrap_barrier,
+            &joiner_ctx,
+            &jo_key,
+            &payload,
+        )
+        .await
+        .unwrap();
 
         // The joiner can now recover the same KEK from its own blob.
-        let recovered = joiner.unwrap_data(HsmObjectIds::default().wrap_barrier, &joiner_ctx, &joiner_blob).await.unwrap();
+        let recovered =
+            joiner.unwrap_data(HsmObjectIds::default().wrap_barrier, &joiner_ctx, &joiner_blob).await.unwrap();
         assert_eq!(recovered.as_slice(), kek);
     }
 
@@ -346,7 +364,8 @@ mod tests {
             joiner_authz_fp: joiner.authz_fingerprint().unwrap(),
             logical_ts: 1,
         };
-        let sponsor_sig = sign_transcript(sponsor.as_ref(), HsmObjectIds::default().identity, &transcript).await.unwrap();
+        let sponsor_sig =
+            sign_transcript(sponsor.as_ref(), HsmObjectIds::default().identity, &transcript).await.unwrap();
         let joiner_sig = sign_transcript(joiner.as_ref(), HsmObjectIds::default().identity, &transcript).await.unwrap();
         // Tamper after signing.
         transcript.blob_digests = vec!["0000".into()];

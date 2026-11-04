@@ -38,8 +38,8 @@ use crate::kernel_api::VaultCtx;
 use crate::{
     context::Context,
     errors::RvError,
-    logical::{Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
     kernel_api::identity::caller_audit_actor,
+    logical::{Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
     new_fields, new_fields_internal, new_path, new_path_internal,
     storage::StorageEntry,
 };
@@ -156,11 +156,7 @@ impl SshBackendInner {
         }
     }
 
-    pub async fn handle_public_key(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_public_key(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         match self.load_ca(req).await? {
             Some(ca) => {
                 let mut data = Map::new();
@@ -177,25 +173,17 @@ impl SshBackendInner {
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         // Caller-supplied private key takes precedence over auto-gen.
-        let provided = req
-            .get_data("private_key")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_default();
-        let req_algorithm = req
-            .get_data("algorithm")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_default();
+        let provided =
+            req.get_data("private_key").ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
+        let req_algorithm =
+            req.get_data("algorithm").ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
 
         // PQC CA generation (feature-gated). The shape `mldsa65` (no
         // `ssh-` prefix) is what operators type on the CLI; the
         // canonical wire-format string is `ssh-mldsa65@openssh.com`,
         // which the engine persists in `algorithm`.
         #[cfg(feature = "ssh_pqc")]
-        if provided.trim().is_empty()
-            && (req_algorithm == "mldsa65" || req_algorithm == super::pqc::MLDSA65_ALGO)
-        {
+        if provided.trim().is_empty() && (req_algorithm == "mldsa65" || req_algorithm == super::pqc::MLDSA65_ALGO) {
             return self.write_pqc_ca(req).await;
         }
         // Without the feature flag, surface a clear error rather than
@@ -257,11 +245,7 @@ impl SshBackendInner {
             pqc_public_key_hex: String::new(),
         };
         let bytes = serde_json::to_vec(&cfg)?;
-        req.storage_put(&StorageEntry {
-            key: super::policy::CA_CONFIG_KEY.to_string(),
-            value: bytes,
-        })
-        .await?;
+        req.storage_put(&StorageEntry { key: super::policy::CA_CONFIG_KEY.to_string(), value: bytes }).await?;
 
         record_ssh_ca_audit(&self.core, &caller_audit_actor(req), "create", &cfg.algorithm).await;
 
@@ -276,10 +260,7 @@ impl SshBackendInner {
     /// stays a single-line branch and the PQC path is easy to disable
     /// at the feature-flag level.
     #[cfg(feature = "ssh_pqc")]
-    pub async fn write_pqc_ca(
-        &self,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn write_pqc_ca(&self, req: &mut Request) -> Result<Option<Response>, RvError> {
         use super::pqc::{CaKeypair, MLDSA65_ALGO};
 
         let ca = CaKeypair::generate()?;
@@ -294,11 +275,7 @@ impl SshBackendInner {
             pqc_public_key_hex: hex::encode(&ca.public_key),
         };
         let bytes = serde_json::to_vec(&cfg)?;
-        req.storage_put(&StorageEntry {
-            key: super::policy::CA_CONFIG_KEY.to_string(),
-            value: bytes,
-        })
-        .await?;
+        req.storage_put(&StorageEntry { key: super::policy::CA_CONFIG_KEY.to_string(), value: bytes }).await?;
 
         record_ssh_ca_audit(&self.core, &caller_audit_actor(req), "create", &cfg.algorithm).await;
 

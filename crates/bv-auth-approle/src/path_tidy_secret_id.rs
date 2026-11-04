@@ -405,4 +405,3 @@ impl AppRoleBackendInner {
         self.tidy_secret_id(backend, req)
     }
 }
-

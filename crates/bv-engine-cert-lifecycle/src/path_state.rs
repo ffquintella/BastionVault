@@ -37,14 +37,8 @@ impl CertLifecycleBackend {
 #[maybe_async::maybe_async]
 impl CertLifecycleBackendInner {
     pub async fn read_state(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
-        let name = req
-            .get_data("name")?
-            .as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?
-            .to_string();
-        let state: TargetState = storage::get_json(req, &storage::state_storage_key(&name))
-            .await?
-            .unwrap_or_default();
+        let name = req.get_data("name")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
+        let state: TargetState = storage::get_json(req, &storage::state_storage_key(&name)).await?.unwrap_or_default();
         let mut data: Map<String, Value> = Map::new();
         data.insert("name".into(), json!(name));
         data.insert("current_serial".into(), json!(state.current_serial));

@@ -24,7 +24,6 @@
 //! namespace — is a larger, separately-reviewed change tracked in the feature
 //! file.)
 
-
 use crate::{bv_error_response_status, errors::RvError};
 
 use super::{NamespaceModule, NAMESPACE_MODULE_NAME};
@@ -60,8 +59,7 @@ pub async fn refuse_cross_namespace_paths(
         return Ok(());
     }
 
-    let Some(module) = core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
-    else {
+    let Some(module) = core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME) else {
         return Ok(());
     };
     let Some(store) = module.store() else {
@@ -69,13 +67,8 @@ pub async fn refuse_cross_namespace_paths(
     };
 
     // Every existing namespace path (excluding root) is a potential owner.
-    let namespaces: Vec<String> = store
-        .list_all()
-        .await?
-        .into_iter()
-        .map(|ns| ns.path)
-        .filter(|p| !p.is_empty())
-        .collect();
+    let namespaces: Vec<String> =
+        store.list_all().await?.into_iter().map(|ns| ns.path).filter(|p| !p.is_empty()).collect();
 
     for path in paths {
         let owner = namespace_owner_of_path(path, &namespaces);
@@ -104,11 +97,7 @@ mod tests {
 
     #[test]
     fn test_namespace_owner_of_path() {
-        let nss = vec![
-            "engineering".to_string(),
-            "engineering/platform".to_string(),
-            "marketing".to_string(),
-        ];
+        let nss = vec!["engineering".to_string(), "engineering/platform".to_string(), "marketing".to_string()];
         // Longest match wins.
         assert_eq!(namespace_owner_of_path("engineering/platform/secret/*", &nss), "engineering/platform");
         assert_eq!(namespace_owner_of_path("engineering/secret/*", &nss), "engineering");

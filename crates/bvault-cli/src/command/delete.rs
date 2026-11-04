@@ -4,8 +4,8 @@ use derive_more::Deref;
 use crate::{
     bv_error_string,
     command::{self, CommandExecutor},
-        kv_util,
     errors::RvError,
+    kv_util,
 };
 
 #[derive(Parser, Deref)]

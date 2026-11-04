@@ -31,26 +31,21 @@ pub const CHACHA_NONCE_LEN: usize = 12;
 /// caller commits to a separation domain on every operation.
 pub fn subkey(parent: &[u8], context: &[u8]) -> Result<Vec<u8>, RvError> {
     if context.is_empty() {
-        return Err(RvError::ErrString(
-            "derived keys require a non-empty `context` on every encrypt / decrypt".into(),
-        ));
+        return Err(RvError::ErrString("derived keys require a non-empty `context` on every encrypt / decrypt".into()));
     }
     let hk = Hkdf::<Sha256>::new(None, parent);
     let mut info = Vec::with_capacity(SUBKEY_DOMAIN.len() + context.len());
     info.extend_from_slice(SUBKEY_DOMAIN);
     info.extend_from_slice(context);
     let mut out = vec![0u8; SUBKEY_LEN];
-    hk.expand(&info, &mut out)
-        .map_err(|e| RvError::ErrString(format!("hkdf expand: {e}")))?;
+    hk.expand(&info, &mut out).map_err(|e| RvError::ErrString(format!("hkdf expand: {e}")))?;
     Ok(out)
 }
 
 /// Deterministic 12-byte AEAD nonce for convergent mode.
 pub fn convergent_nonce(parent: &[u8], context: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, RvError> {
     if context.is_empty() {
-        return Err(RvError::ErrString(
-            "convergent encryption requires a non-empty `context`".into(),
-        ));
+        return Err(RvError::ErrString("convergent encryption requires a non-empty `context`".into()));
     }
     // Bind the HMAC key to a domain that no other Transit primitive
     // uses, so a caller who finds an HMAC oracle on this key cannot
@@ -58,8 +53,7 @@ pub fn convergent_nonce(parent: &[u8], context: &[u8], plaintext: &[u8]) -> Resu
     let mut domain_keyed = Vec::with_capacity(parent.len() + NONCE_KEY_DOMAIN.len());
     domain_keyed.extend_from_slice(parent);
     domain_keyed.extend_from_slice(NONCE_KEY_DOMAIN);
-    let mut mac = <hmac::Hmac<Sha256> as KeyInit>::new_from_slice(&domain_keyed)
-        .expect("hmac accepts any key length");
+    let mut mac = <hmac::Hmac<Sha256> as KeyInit>::new_from_slice(&domain_keyed).expect("hmac accepts any key length");
 
     // Length-prefix `context` to make the HMAC injection-safe: an
     // attacker who controls part of `plaintext` can't shift the

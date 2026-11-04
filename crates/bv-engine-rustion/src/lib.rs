@@ -27,11 +27,11 @@ use bv_storage as storage;
 // which places them at *that* crate's root; the call sites import them as
 // `crate::new_path` and friends. The `_internal` halves are the recursive arms
 // the public macros expand into, so they must travel with them.
-pub use bv_logical::{
-    new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path,
-    new_path_internal, new_secret, new_secret_internal,
-};
 pub use bv_errors::{bv_error_response, bv_error_response_status, bv_error_string};
+pub use bv_logical::{
+    new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path, new_path_internal,
+    new_secret, new_secret_internal,
+};
 
 use std::{any::Any, collections::HashMap, sync::Arc, time::Duration};
 
@@ -39,7 +39,6 @@ use arc_swap::ArcSwap;
 use derive_more::Deref;
 use serde_json::{Map, Value};
 
-use bv_kernel_api::{Module, VaultCtx};
 use crate::{
     context::Context,
     errors::RvError,
@@ -47,6 +46,7 @@ use crate::{
         secret::Secret, Backend, Field, FieldType, LogicalBackend, Operation, Path, PathOperation, Request, Response,
     },
 };
+use bv_kernel_api::{Module, VaultCtx};
 
 pub mod attest_timer;
 pub mod audit;
@@ -1151,18 +1151,12 @@ impl RustionBackendInner {
         }
     }
 
-    fn resolve_keystroke_store(
-        &self,
-    ) -> Result<Arc<keystroke_index::KeystrokeIndexStore>, RvError> {
-        self.stores
-            .keystrokes()
-            .ok_or_else(|| bv_error_string!("rustion keystroke index not initialized"))
+    fn resolve_keystroke_store(&self) -> Result<Arc<keystroke_index::KeystrokeIndexStore>, RvError> {
+        self.stores.keystrokes().ok_or_else(|| bv_error_string!("rustion keystroke index not initialized"))
     }
 
     fn resolve_recordings_store(&self) -> Result<Arc<recordings::RecordingsStore>, RvError> {
-        self.stores
-            .recordings()
-            .ok_or_else(|| bv_error_string!("rustion recordings store not initialized"))
+        self.stores.recordings().ok_or_else(|| bv_error_string!("rustion recordings store not initialized"))
     }
 
     fn resolve_policy_store(&self) -> Result<Arc<policy::PolicyStore>, RvError> {
@@ -1604,19 +1598,11 @@ impl RustionBackendInner {
     ///    pushed them onto the direct dial.
     ///
     /// Fails closed on a missing `auth` or an unbuildable ACL.
-    async fn may_connect_resource(
-        &self,
-        req: &Request,
-        ns_prefix: &str,
-        resource_name: &str,
-    ) -> Result<bool, RvError> {
+    async fn may_connect_resource(&self, req: &Request, ns_prefix: &str, resource_name: &str) -> Result<bool, RvError> {
         if req.auth.is_none() {
             return Err(bv_error_response_status!(401, "no authenticated caller"));
         }
-        let policy = self
-            .core
-            .policy()
-            .ok_or_else(|| bv_error_string!("policy module not registered"))?;
+        let policy = self.core.policy().ok_or_else(|| bv_error_string!("policy module not registered"))?;
 
         // Namespace-qualified: policies inside a namespace are authored with
         // `<ns>/`-prefixed paths (`refuse_cross_namespace_paths` enforces
@@ -1671,16 +1657,8 @@ impl RustionBackendInner {
     ///
     /// The `may_connect_resource` arm is the converse case: a connect-only
     /// caller whose grant is scoped to the secret path.
-    async fn may_view_resource(
-        &self,
-        req: &Request,
-        ns_prefix: &str,
-        resource_name: &str,
-    ) -> Result<bool, RvError> {
-        let policy = self
-            .core
-            .policy()
-            .ok_or_else(|| bv_error_string!("policy module not registered"))?;
+    async fn may_view_resource(&self, req: &Request, ns_prefix: &str, resource_name: &str) -> Result<bool, RvError> {
+        let policy = self.core.policy().ok_or_else(|| bv_error_string!("policy module not registered"))?;
 
         let record = format!("{ns_prefix}resources/resources/{resource_name}");
         let mut probe = Request::new(&record);
@@ -1726,10 +1704,7 @@ impl RustionBackendInner {
         if req.auth.is_none() {
             return Err(bv_error_response_status!(401, "no authenticated caller"));
         }
-        let policy = self
-            .core
-            .policy()
-            .ok_or_else(|| bv_error_string!("policy module not registered"))?;
+        let policy = self.core.policy().ok_or_else(|| bv_error_string!("policy module not registered"))?;
         policy.caller_has_sudo(req, path).await
     }
 
@@ -2451,7 +2426,9 @@ impl RustionBackendInner {
             let password = resolved.password.as_ref().ok_or_else(|| {
                 bv_error_response_status!(
                     422,
-                    &format!("secret `{secret_id}` carries no `password` field; RDP can only be brokered with a password")
+                    &format!(
+                        "secret `{secret_id}` carries no `password` field; RDP can only be brokered with a password"
+                    )
                 )
             })?;
             let kind = if is_rdp { "rdp-password" } else { "ssh-password" };
@@ -2930,8 +2907,7 @@ impl RustionBackendInner {
         // Both routes go through `fetch_blob_cached`, which refuses
         // (409) an artifact whose bytes do not hash to the digest on
         // record for that recording.
-        let artifact =
-            recordings::fetch_blob_cached(&store, &recordings, &self.stores.blobs, &rid).await?;
+        let artifact = recordings::fetch_blob_cached(&store, &recordings, &self.stores.blobs, &rid).await?;
         let mut data = Map::new();
         data.insert("recording_id".into(), Value::String(rid));
         data.insert("format".into(), Value::String(artifact.format.clone()));
@@ -2972,8 +2948,8 @@ impl RustionBackendInner {
         _b: &dyn Backend,
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        use base64::{engine::general_purpose::STANDARD, Engine as _};
         use crate::blob_cache::{chunk_count, chunk_range, CHUNK_BYTES};
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
 
         let store = self.resolve_store()?;
         let recordings = self.resolve_recordings_store()?;
@@ -2992,8 +2968,7 @@ impl RustionBackendInner {
             return Err(bv_error_response_status!(400, "recording_id is required"));
         }
 
-        let artifact =
-            recordings::fetch_blob_cached(&store, &recordings, &self.stores.blobs, &rid).await?;
+        let artifact = recordings::fetch_blob_cached(&store, &recordings, &self.stores.blobs, &rid).await?;
         let total = artifact.bytes.len();
         let count = chunk_count(total);
         let Some((start, end)) = chunk_range(total, index) else {
@@ -3048,20 +3023,13 @@ impl RustionBackendInner {
     ) -> Result<Option<Response>, RvError> {
         let recordings = self.resolve_recordings_store()?;
         let keystrokes = self.resolve_keystroke_store()?;
-        let rid = req
-            .path
-            .strip_prefix("recordings/")
-            .and_then(|s| s.strip_suffix("/keystrokes"))
-            .unwrap_or("")
-            .to_string();
+        let rid =
+            req.path.strip_prefix("recordings/").and_then(|s| s.strip_suffix("/keystrokes")).unwrap_or("").to_string();
         if rid.is_empty() {
             return Err(bv_error_response_status!(400, "recording_id is required"));
         }
         let Some(entry) = recordings.get(&rid).await? else {
-            return Err(bv_error_response_status!(
-                404,
-                &format!("recording `{rid}` not found")
-            ));
+            return Err(bv_error_response_status!(404, &format!("recording `{rid}` not found")));
         };
 
         let mut data = Map::new();
@@ -3079,17 +3047,13 @@ impl RustionBackendInner {
                 entry.keystroke_state.clone()
             }),
         );
-        data.insert(
-            "keystroke_metadata".into(),
-            Value::Bool(entry.keystroke_metadata),
-        );
+        data.insert("keystroke_metadata".into(), Value::Bool(entry.keystroke_metadata));
 
         let stored = keystrokes.get(&rid).await?;
         match &stored {
             Some(index) => {
-                let json = serde_json::to_value(index).map_err(|e| {
-                    bv_error_string!(&format!("encode keystroke transcript: {e}"))
-                })?;
+                let json = serde_json::to_value(index)
+                    .map_err(|e| bv_error_string!(&format!("encode keystroke transcript: {e}")))?;
                 if let Some(obj) = json.as_object() {
                     for (k, v) in obj {
                         data.insert(k.clone(), v.clone());
@@ -3124,21 +3088,11 @@ impl RustionBackendInner {
              redacted_runs={} chars={} text_decoding={} rebuilt={} source={}",
             audit::RECORDING_TRANSCRIPT_ACCESSED,
             entry.session_id,
-            if entry.keystroke_state.is_empty() {
-                "not-indexed"
-            } else {
-                entry.keystroke_state.as_str()
-            },
+            if entry.keystroke_state.is_empty() { "not-indexed" } else { entry.keystroke_state.as_str() },
             stored.as_ref().map(|i| i.runs.len()).unwrap_or(0),
-            stored
-                .as_ref()
-                .map(|i| i.runs.iter().filter(|r| r.redacted).count())
-                .unwrap_or(0),
+            stored.as_ref().map(|i| i.runs.iter().filter(|r| r.redacted).count()).unwrap_or(0),
             stored.as_ref().map(|i| i.chars_indexed).unwrap_or(0),
-            stored
-                .as_ref()
-                .map(|i| i.text_decoding.as_str())
-                .unwrap_or(""),
+            stored.as_ref().map(|i| i.text_decoding.as_str()).unwrap_or(""),
             stored.as_ref().map(|i| i.rebuilt).unwrap_or(false),
             stored.as_ref().map(|i| i.source.as_str()).unwrap_or(""),
         );
@@ -3167,39 +3121,24 @@ impl RustionBackendInner {
             .ok()
             .and_then(|v| v.as_str().map(|s| s.trim().to_string()))
             .unwrap_or_default();
-        let force = req
-            .get_data("force")
-            .ok()
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let force = req.get_data("force").ok().and_then(|v| v.as_bool()).unwrap_or(false);
 
         let mut data = Map::new();
         if recording_id.is_empty() {
-            let report = keystroke_index::index_sweep(
-                &store,
-                &recordings,
-                &keystrokes,
-                keystroke_index::SWEEP_BATCH,
-            )
-            .await?;
-            let json = serde_json::to_value(&report)
-                .map_err(|e| bv_error_string!(&format!("encode sweep report: {e}")))?;
+            let report =
+                keystroke_index::index_sweep(&store, &recordings, &keystrokes, keystroke_index::SWEEP_BATCH).await?;
+            let json =
+                serde_json::to_value(&report).map_err(|e| bv_error_string!(&format!("encode sweep report: {e}")))?;
             if let Some(obj) = json.as_object() {
                 for (k, v) in obj {
                     data.insert(k.clone(), v.clone());
                 }
             }
         } else {
-            let report = keystroke_index::index_recording(
-                &store,
-                &recordings,
-                &keystrokes,
-                &recording_id,
-                force,
-            )
-            .await?;
-            let json = serde_json::to_value(&report)
-                .map_err(|e| bv_error_string!(&format!("encode index report: {e}")))?;
+            let report =
+                keystroke_index::index_recording(&store, &recordings, &keystrokes, &recording_id, force).await?;
+            let json =
+                serde_json::to_value(&report).map_err(|e| bv_error_string!(&format!("encode index report: {e}")))?;
             if let Some(obj) = json.as_object() {
                 for (k, v) in obj {
                     data.insert(k.clone(), v.clone());
@@ -3228,11 +3167,7 @@ impl RustionBackendInner {
     ) -> Result<Option<Response>, RvError> {
         let recordings = self.resolve_recordings_store()?;
         let keystrokes = self.resolve_keystroke_store()?;
-        let query = req
-            .get_data("query")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_default();
+        let query = req.get_data("query").ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
         if query.trim().is_empty() {
             return Err(bv_error_response_status!(400, "query is required"));
         }
@@ -3267,14 +3202,8 @@ impl RustionBackendInner {
             }
         };
 
-        let report = keystroke_index::search_transcripts(
-            &recordings,
-            &keystrokes,
-            &query,
-            limit,
-            candidates.as_ref(),
-        )
-        .await?;
+        let report =
+            keystroke_index::search_transcripts(&recordings, &keystrokes, &query, limit, candidates.as_ref()).await?;
 
         let actor = req
             .auth
@@ -3296,8 +3225,8 @@ impl RustionBackendInner {
             report.truncated,
         );
 
-        let json = serde_json::to_value(&report)
-            .map_err(|e| bv_error_string!(&format!("encode search report: {e}")))?;
+        let json =
+            serde_json::to_value(&report).map_err(|e| bv_error_string!(&format!("encode search report: {e}")))?;
         let mut data = json.as_object().cloned().unwrap_or_default();
         data.insert(
             "redaction_disclaimer".into(),
@@ -3990,10 +3919,7 @@ impl RustionBackendInner {
         _b: &dyn Backend,
         _req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        let cache = self
-            .stores
-            .telemetry()
-            .ok_or_else(|| bv_error_string!("telemetry cache not initialized"))?;
+        let cache = self.stores.telemetry().ok_or_else(|| bv_error_string!("telemetry cache not initialized"))?;
         let snaps = cache.list_snapshots().await;
         let mut data = Map::new();
         let json = serde_json::to_value(&snaps).map_err(|e| bv_error_string!(&format!("encode telemetry: {e}")))?;
@@ -4249,8 +4175,7 @@ impl Module for RustionModule {
         let core_for_backend = self.core.clone();
         let stores = self.stores.clone();
         let backend_new_func = move |_c: Arc<dyn VaultCtx>| -> Result<Arc<dyn Backend>, RvError> {
-            let mut b =
-                RustionBackend::new(core_for_backend.clone(), stores.clone()).new_backend();
+            let mut b = RustionBackend::new(core_for_backend.clone(), stores.clone()).new_backend();
             b.init()?;
             Ok(Arc::new(b))
         };

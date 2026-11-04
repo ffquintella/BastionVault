@@ -14,8 +14,7 @@
 //! and to centralise the FIPS 204 dependency in one place.
 
 use bv_crypto::{
-    MlDsa44Provider, MlDsa65Provider, MlDsa87Provider,
-    ML_DSA_44_SEED_LEN, ML_DSA_65_SEED_LEN, ML_DSA_87_SEED_LEN,
+    MlDsa44Provider, MlDsa65Provider, MlDsa87Provider, ML_DSA_44_SEED_LEN, ML_DSA_65_SEED_LEN, ML_DSA_87_SEED_LEN,
 };
 
 use super::super::keytype::KeyType;
@@ -57,37 +56,26 @@ pub fn generate_keypair(kt: KeyType) -> Result<(Vec<u8>, Vec<u8>), RvError> {
                 .map_err(|e| RvError::ErrString(format!("ml-dsa-87 keygen: {e:?}")))?;
             Ok((kp.secret_seed().to_vec(), kp.public_key().to_vec()))
         }
-        other => Err(RvError::ErrString(format!(
-            "{} is not an ml-dsa key type",
-            other.as_str()
-        ))),
+        other => Err(RvError::ErrString(format!("{} is not an ml-dsa key type", other.as_str()))),
     }
 }
 
 pub fn sign(kt: KeyType, seed: &[u8], message: &[u8]) -> Result<Vec<u8>, RvError> {
     match kt {
-        KeyType::MlDsa44 => MlDsa44Provider
-            .sign(seed, message, &[])
-            .map_err(|e| RvError::ErrString(format!("ml-dsa-44 sign: {e:?}"))),
-        KeyType::MlDsa65 => MlDsa65Provider
-            .sign(seed, message, &[])
-            .map_err(|e| RvError::ErrString(format!("ml-dsa-65 sign: {e:?}"))),
-        KeyType::MlDsa87 => MlDsa87Provider
-            .sign(seed, message, &[])
-            .map_err(|e| RvError::ErrString(format!("ml-dsa-87 sign: {e:?}"))),
-        other => Err(RvError::ErrString(format!(
-            "{} is not an ml-dsa key type",
-            other.as_str()
-        ))),
+        KeyType::MlDsa44 => {
+            MlDsa44Provider.sign(seed, message, &[]).map_err(|e| RvError::ErrString(format!("ml-dsa-44 sign: {e:?}")))
+        }
+        KeyType::MlDsa65 => {
+            MlDsa65Provider.sign(seed, message, &[]).map_err(|e| RvError::ErrString(format!("ml-dsa-65 sign: {e:?}")))
+        }
+        KeyType::MlDsa87 => {
+            MlDsa87Provider.sign(seed, message, &[]).map_err(|e| RvError::ErrString(format!("ml-dsa-87 sign: {e:?}")))
+        }
+        other => Err(RvError::ErrString(format!("{} is not an ml-dsa key type", other.as_str()))),
     }
 }
 
-pub fn verify(
-    kt: KeyType,
-    seed: &[u8],
-    message: &[u8],
-    signature: &[u8],
-) -> Result<bool, RvError> {
+pub fn verify(kt: KeyType, seed: &[u8], message: &[u8], signature: &[u8]) -> Result<bool, RvError> {
     match kt {
         KeyType::MlDsa44 => MlDsa44Provider
             .verify(seed, message, signature, &[])
@@ -98,10 +86,7 @@ pub fn verify(
         KeyType::MlDsa87 => MlDsa87Provider
             .verify(seed, message, signature, &[])
             .map_err(|e| RvError::ErrString(format!("ml-dsa-87 verify: {e:?}"))),
-        other => Err(RvError::ErrString(format!(
-            "{} is not an ml-dsa key type",
-            other.as_str()
-        ))),
+        other => Err(RvError::ErrString(format!("{} is not an ml-dsa key type", other.as_str()))),
     }
 }
 

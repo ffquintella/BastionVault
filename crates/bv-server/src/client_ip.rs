@@ -118,20 +118,14 @@ impl ClientIp {
 /// caller will fall back to the socket peer). Otherwise we walk the
 /// header values right-to-left, stopping at the first untrusted hop
 /// or returning the leftmost hop if every recorded hop is trusted.
-fn derive_from_xff(
-    req: &HttpRequest,
-    trusted: &TrustedProxies,
-    socket_ip: IpAddr,
-) -> Option<IpAddr> {
+fn derive_from_xff(req: &HttpRequest, trusted: &TrustedProxies, socket_ip: IpAddr) -> Option<IpAddr> {
     if !trusted.contains(socket_ip) {
         return None;
     }
 
     // X-Forwarded-For may appear multiple times; flatten in order.
     let mut chain: Vec<IpAddr> = Vec::new();
-    for hv in req.headers().get_all(actix_web::http::header::HeaderName::from_static(
-        "x-forwarded-for",
-    )) {
+    for hv in req.headers().get_all(actix_web::http::header::HeaderName::from_static("x-forwarded-for")) {
         let Ok(s) = hv.to_str() else { continue };
         for raw in s.split(',') {
             if let Ok(ip) = parse_ip_token(raw.trim()) {
@@ -159,19 +153,12 @@ fn derive_from_xff(
 /// RFC 7239 `Forwarded:` header. The "for=" parameter is what we want;
 /// values are quoted-pair-tolerant strings that may include port and
 /// brackets for IPv6.
-fn derive_from_forwarded(
-    req: &HttpRequest,
-    trusted: &TrustedProxies,
-    socket_ip: IpAddr,
-) -> Option<IpAddr> {
+fn derive_from_forwarded(req: &HttpRequest, trusted: &TrustedProxies, socket_ip: IpAddr) -> Option<IpAddr> {
     if !trusted.contains(socket_ip) {
         return None;
     }
     let mut chain: Vec<IpAddr> = Vec::new();
-    for hv in req
-        .headers()
-        .get_all(actix_web::http::header::HeaderName::from_static("forwarded"))
-    {
+    for hv in req.headers().get_all(actix_web::http::header::HeaderName::from_static("forwarded")) {
         let Ok(s) = hv.to_str() else { continue };
         for elem in s.split(',') {
             for kv in elem.split(';') {
@@ -237,9 +224,7 @@ mod tests {
     #[test]
     fn empty_trusted_returns_socket_peer() {
         let trusted = TrustedProxies::default();
-        let req = TestRequest::default()
-            .insert_header(("x-forwarded-for", "203.0.113.7"))
-            .to_http_request();
+        let req = TestRequest::default().insert_header(("x-forwarded-for", "203.0.113.7")).to_http_request();
         let cip = ClientIp::resolve(sock("10.0.0.1:443"), &req, &trusted);
         assert_eq!(cip.derived, ip("10.0.0.1"));
     }
@@ -247,9 +232,7 @@ mod tests {
     #[test]
     fn xff_promoted_when_socket_is_trusted() {
         let (trusted, _) = TrustedProxies::parse("10.0.0.0/8");
-        let req = TestRequest::default()
-            .insert_header(("x-forwarded-for", "203.0.113.7"))
-            .to_http_request();
+        let req = TestRequest::default().insert_header(("x-forwarded-for", "203.0.113.7")).to_http_request();
         let cip = ClientIp::resolve(sock("10.0.0.1:443"), &req, &trusted);
         assert_eq!(cip.derived, ip("203.0.113.7"));
     }
@@ -260,9 +243,7 @@ mod tests {
         // The socket peer is NOT in the trusted set, so the header
         // is ignored entirely.
         let (trusted, _) = TrustedProxies::parse("10.0.0.0/8");
-        let req = TestRequest::default()
-            .insert_header(("x-forwarded-for", "10.0.0.99"))
-            .to_http_request();
+        let req = TestRequest::default().insert_header(("x-forwarded-for", "10.0.0.99")).to_http_request();
         let cip = ClientIp::resolve(sock("198.51.100.7:443"), &req, &trusted);
         assert_eq!(cip.derived, ip("198.51.100.7"));
     }
@@ -272,9 +253,7 @@ mod tests {
         // 203.0.113.7 (real client) → 10.0.0.5 (edge) → 10.0.0.1 (us).
         // We trust 10/8; the rightmost untrusted hop is 203.0.113.7.
         let (trusted, _) = TrustedProxies::parse("10.0.0.0/8");
-        let req = TestRequest::default()
-            .insert_header(("x-forwarded-for", "203.0.113.7, 10.0.0.5"))
-            .to_http_request();
+        let req = TestRequest::default().insert_header(("x-forwarded-for", "203.0.113.7, 10.0.0.5")).to_http_request();
         let cip = ClientIp::resolve(sock("10.0.0.1:443"), &req, &trusted);
         assert_eq!(cip.derived, ip("203.0.113.7"));
     }
@@ -290,10 +269,7 @@ mod tests {
         // "192.0.2.1" prefix.
         let (trusted, _) = TrustedProxies::parse("10.0.0.0/8");
         let req = TestRequest::default()
-            .insert_header((
-                "x-forwarded-for",
-                "192.0.2.1, 10.0.0.99, 198.51.100.7",
-            ))
+            .insert_header(("x-forwarded-for", "192.0.2.1, 10.0.0.99, 198.51.100.7"))
             .to_http_request();
         let cip = ClientIp::resolve(sock("10.0.0.5:443"), &req, &trusted);
         assert_eq!(cip.derived, ip("198.51.100.7"));
@@ -313,9 +289,7 @@ mod tests {
     #[test]
     fn rfc7239_handles_ipv6_brackets() {
         let (trusted, _) = TrustedProxies::parse("fc00::/7");
-        let req = TestRequest::default()
-            .insert_header(("forwarded", "for=\"[2001:db8::1]:443\""))
-            .to_http_request();
+        let req = TestRequest::default().insert_header(("forwarded", "for=\"[2001:db8::1]:443\"")).to_http_request();
         let cip = ClientIp::resolve(sock("[fd00::1]:443"), &req, &trusted);
         assert_eq!(cip.derived, ip("2001:db8::1"));
     }

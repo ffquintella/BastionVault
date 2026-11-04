@@ -31,9 +31,9 @@ use bv_errors::RvError;
 
 pub mod auth;
 pub mod backend;
-pub mod handler;
 pub mod connection;
 pub mod field;
+pub mod handler;
 pub mod lease;
 pub mod page;
 pub mod path;
@@ -44,8 +44,9 @@ pub mod util;
 
 pub use auth::{
     is_open_world_mcp_tool, is_reserved_token_meta_key, split_principal, Auth, McpBinding, McpBindingKind,
-    McpOperatorRef, McpPolicyNamespace, CHILD_VISIBLE_META, MCP_OPEN_WORLD_TOOLS, MCP_POLICY_NAMESPACES_MAX, ENTITY_ID_META, NS_ID_META, NS_PATH_META, RESERVED_TOKEN_META_KEYS,
-    RESERVED_TOKEN_META_PREFIXES, SPIFFE_ID_META, USERNAME_META,
+    McpOperatorRef, McpPolicyNamespace, CHILD_VISIBLE_META, ENTITY_ID_META, MCP_OPEN_WORLD_TOOLS,
+    MCP_POLICY_NAMESPACES_MAX, NS_ID_META, NS_PATH_META, RESERVED_TOKEN_META_KEYS, RESERVED_TOKEN_META_PREFIXES,
+    SPIFFE_ID_META, USERNAME_META,
 };
 pub use backend::{LogicalBackend, CTX_KEY_BACKEND_PATH};
 pub use connection::Connection;

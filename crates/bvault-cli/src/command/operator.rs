@@ -1,13 +1,11 @@
 use clap::{Parser, Subcommand};
 use sysexits::ExitCode;
 
-use super::{
-    operator_cloud_target_connect, operator_export, operator_ferrogate, operator_hsm,
-    operator_import, operator_init, operator_seal, operator_unseal,
-};
 #[cfg(not(feature = "sync_handler"))]
+use super::{operator_backup, operator_cloud_target_rekey, operator_migrate, operator_restore};
 use super::{
-    operator_backup, operator_cloud_target_rekey, operator_migrate, operator_restore,
+    operator_cloud_target_connect, operator_export, operator_ferrogate, operator_hsm, operator_import, operator_init,
+    operator_seal, operator_unseal,
 };
 use crate::{command::CommandExecutor, EXIT_CODE_INSUFFICIENT_PARAMS};
 

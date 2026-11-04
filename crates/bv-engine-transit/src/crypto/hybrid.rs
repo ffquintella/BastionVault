@@ -42,8 +42,8 @@ use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use hkdf::Hkdf;
 use rand::RngExt;
 use sha2::Sha256;
-use zeroize::Zeroizing;
 use x25519_dalek::{PublicKey as XPublicKey, StaticSecret as XStaticSecret};
+use zeroize::Zeroizing;
 
 use super::{ed25519, ml_dsa, ml_kem};
 use crate::errors::RvError;
@@ -113,18 +113,10 @@ pub fn verify_composite(pk: &[u8], message: &[u8], signature: &[u8]) -> Result<b
     use fips204::traits::{SerDes, Verifier as _};
 
     let ml_pk_arr: [u8; ml_dsa_65::PK_LEN] = ml_pk_unused_today.try_into().map_err(|_| {
-        RvError::ErrString(format!(
-            "ml-dsa-65 pubkey must be {} bytes, got {}",
-            ml_dsa_65::PK_LEN,
-            pk.len()
-        ))
+        RvError::ErrString(format!("ml-dsa-65 pubkey must be {} bytes, got {}", ml_dsa_65::PK_LEN, pk.len()))
     })?;
     let ml_sig_arr: [u8; ml_dsa_65::SIG_LEN] = ml_sig.try_into().map_err(|_| {
-        RvError::ErrString(format!(
-            "ml-dsa-65 signature must be {} bytes, got {}",
-            ml_dsa_65::SIG_LEN,
-            ml_sig.len()
-        ))
+        RvError::ErrString(format!("ml-dsa-65 signature must be {} bytes, got {}", ml_dsa_65::SIG_LEN, ml_sig.len()))
     })?;
     let ml_pk_obj = ml_dsa_65::PublicKey::try_from_bytes(ml_pk_arr)
         .map_err(|e| RvError::ErrString(format!("ml-dsa-65 pubkey parse: {e}")))?;
@@ -167,17 +159,16 @@ pub fn encapsulate_hybrid_datakey(pk: &[u8]) -> Result<(Vec<u8>, Vec<u8>), RvErr
     let eph_secret = XStaticSecret::from(eph_secret_bytes);
     let eph_public = XPublicKey::from(&eph_secret).to_bytes();
 
-    let x_pk_arr: [u8; X25519_KEY_LEN] = x_pk_bytes.try_into().map_err(|_| {
-        RvError::ErrString(format!("x25519 pubkey must be {X25519_KEY_LEN} bytes"))
-    })?;
+    let x_pk_arr: [u8; X25519_KEY_LEN] = x_pk_bytes
+        .try_into()
+        .map_err(|_| RvError::ErrString(format!("x25519 pubkey must be {X25519_KEY_LEN} bytes")))?;
     let x_recipient_pk = XPublicKey::from(x_pk_arr);
     let x_ss = eph_secret.diffie_hellman(&x_recipient_pk);
 
     // ML-KEM encapsulation against the recipient's PQ public.
     let provider = MlKem768Provider;
-    let (ml_ct, ml_ss) = provider
-        .encapsulate(ml_pk)
-        .map_err(|e| RvError::ErrString(format!("ml-kem-768 encapsulate: {e:?}")))?;
+    let (ml_ct, ml_ss) =
+        provider.encapsulate(ml_pk).map_err(|e| RvError::ErrString(format!("ml-kem-768 encapsulate: {e:?}")))?;
 
     let dk = combine_secrets(x_ss.as_bytes(), ml_ss.as_bytes())?;
     let wrapped = pack_two(&eph_public, ml_ct.as_bytes());
@@ -188,12 +179,12 @@ pub fn decapsulate_hybrid_datakey(material: &[u8], kem_blob: &[u8]) -> Result<Ve
     let (x_secret_bytes, ml_secret) = unpack_two(material)?;
     let (x_eph_pub_bytes, ml_ct) = unpack_two(kem_blob)?;
 
-    let x_sk_arr: [u8; X25519_KEY_LEN] = x_secret_bytes.try_into().map_err(|_| {
-        RvError::ErrString(format!("x25519 secret must be {X25519_KEY_LEN} bytes"))
-    })?;
-    let x_eph_pk_arr: [u8; X25519_KEY_LEN] = x_eph_pub_bytes.try_into().map_err(|_| {
-        RvError::ErrString(format!("x25519 ephemeral pubkey must be {X25519_KEY_LEN} bytes"))
-    })?;
+    let x_sk_arr: [u8; X25519_KEY_LEN] = x_secret_bytes
+        .try_into()
+        .map_err(|_| RvError::ErrString(format!("x25519 secret must be {X25519_KEY_LEN} bytes")))?;
+    let x_eph_pk_arr: [u8; X25519_KEY_LEN] = x_eph_pub_bytes
+        .try_into()
+        .map_err(|_| RvError::ErrString(format!("x25519 ephemeral pubkey must be {X25519_KEY_LEN} bytes")))?;
 
     let x_secret = XStaticSecret::from(x_sk_arr);
     let x_eph_pub = XPublicKey::from(x_eph_pk_arr);
@@ -218,8 +209,7 @@ fn combine_secrets(classical_ss: &[u8], pqc_ss: &[u8]) -> Result<Vec<u8>, RvErro
     ikm.extend_from_slice(pqc_ss);
     let hk = Hkdf::<Sha256>::new(None, &ikm);
     let mut out = vec![0u8; HYBRID_DATAKEY_LEN];
-    hk.expand(HYBRID_KEM_INFO, &mut out)
-        .map_err(|e| RvError::ErrString(format!("hkdf expand: {e}")))?;
+    hk.expand(HYBRID_KEM_INFO, &mut out).map_err(|e| RvError::ErrString(format!("hkdf expand: {e}")))?;
     Ok(out)
 }
 
@@ -237,9 +227,7 @@ fn pack_two(first: &[u8], second: &[u8]) -> Vec<u8> {
 
 fn unpack_two(buf: &[u8]) -> Result<(&[u8], &[u8]), RvError> {
     if buf.len() < 2 {
-        return Err(RvError::ErrString(
-            "hybrid blob too short to contain a length prefix".into(),
-        ));
+        return Err(RvError::ErrString("hybrid blob too short to contain a length prefix".into()));
     }
     let n = u16::from_be_bytes([buf[0], buf[1]]) as usize;
     if buf.len() < 2 + n {
@@ -315,8 +303,7 @@ fn _unused_sigs() {
     let _ = SigningKey::from_bytes(&[0u8; 32]);
     let _ = VerifyingKey::from_bytes(&[0u8; 32]);
     let _ = MlDsa65Provider;
-    let _: fn(&[u8], &[u8]) -> Result<Vec<u8>, _> =
-        |seed: &[u8], msg: &[u8]| MlDsa65Provider.sign(seed, msg, &[]);
+    let _: fn(&[u8], &[u8]) -> Result<Vec<u8>, _> = |seed: &[u8], msg: &[u8]| MlDsa65Provider.sign(seed, msg, &[]);
     fn _siggy<S: Signer<ed25519_dalek::Signature>>(_s: &S) {}
     fn _verify<V: Verifier<ed25519_dalek::Signature>>(_v: &V) {}
 }

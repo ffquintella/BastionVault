@@ -200,14 +200,9 @@ pub fn validate_authority_name(name: &str) -> Result<(), RvError> {
         )));
     }
     if name.starts_with('.') {
-        return Err(bv_error_string!(
-            "rustion master authority_name: must not start with `.`"
-        ));
+        return Err(bv_error_string!("rustion master authority_name: must not start with `.`"));
     }
-    if let Some(bad) = name
-        .chars()
-        .find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')))
-    {
+    if let Some(bad) = name.chars().find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))) {
         return Err(bv_error_string!(&format!(
             "rustion master authority_name: character {bad:?} is not allowed \
              (permitted: ASCII letters, digits, `.`, `_`, `-`)"
@@ -326,11 +321,7 @@ pub struct MasterPubKeyExport {
 ///
 /// Returns `None` when `detail` is not a signature refusal, so callers can
 /// append unconditionally.
-pub fn signature_rejection_hint(
-    detail: &str,
-    cfg: &MasterConfig,
-    export: &MasterPubKeyExport,
-) -> Option<String> {
+pub fn signature_rejection_hint(detail: &str, cfg: &MasterConfig, export: &MasterPubKeyExport) -> Option<String> {
     if !detail.contains("signature_invalid") && !detail.contains("signature half failed verification") {
         return None;
     }
@@ -514,23 +505,16 @@ async fn pki_issue_one(
     let mount = pki_mount.trim_end_matches('/');
     let path = format!("{}/issue/{}", mount, pki_role);
     let mut body = serde_json::Map::new();
-    body.insert(
-        "common_name".into(),
-        serde_json::Value::String(common_name.to_string()),
-    );
-    body.insert(
-        "ttl".into(),
-        serde_json::Value::String(format!("{}s", ttl_secs)),
-    );
+    body.insert("common_name".into(), serde_json::Value::String(common_name.to_string()));
+    body.insert("ttl".into(), serde_json::Value::String(format!("{}s", ttl_secs)));
     let mut req = Request::new(path.clone());
     req.operation = Operation::Write;
     req.client_token = client_token.to_string();
     req.body = Some(body);
-    let resp = core.handle_request(&mut req).await.map_err(|e| {
-        bv_error_string!(&format!(
-            "rustion master: PKI engine call {path} failed: {e:?}"
-        ))
-    })?;
+    let resp = core
+        .handle_request(&mut req)
+        .await
+        .map_err(|e| bv_error_string!(&format!("rustion master: PKI engine call {path} failed: {e:?}")))?;
     let data = resp
         .and_then(|r| r.data)
         .ok_or_else(|| bv_error_string!(&format!("rustion master: PKI engine {path} returned no data")))?;
@@ -584,16 +568,12 @@ fn extract_ed25519_seed_from_pkcs8(pem: &str) -> Result<[u8; 32], RvError> {
         der::{asn1::OctetString, Decode},
         PrivateKeyInfo,
     };
-    const OID_ED25519: pkcs8::ObjectIdentifier =
-        pkcs8::ObjectIdentifier::new_unwrap("1.3.101.112");
+    const OID_ED25519: pkcs8::ObjectIdentifier = pkcs8::ObjectIdentifier::new_unwrap("1.3.101.112");
     let der_bytes = pem_decode_block(pem, "PRIVATE KEY")?;
-    let info = PrivateKeyInfo::from_der(&der_bytes)
-        .map_err(|e| bv_error_string!(&format!("ed25519 pkcs8 decode: {e}")))?;
+    let info =
+        PrivateKeyInfo::from_der(&der_bytes).map_err(|e| bv_error_string!(&format!("ed25519 pkcs8 decode: {e}")))?;
     if info.algorithm.oid != OID_ED25519 {
-        return Err(bv_error_string!(&format!(
-            "expected Ed25519 PKCS#8 OID 1.3.101.112, got {}",
-            info.algorithm.oid
-        )));
+        return Err(bv_error_string!(&format!("expected Ed25519 PKCS#8 OID 1.3.101.112, got {}", info.algorithm.oid)));
     }
     // RFC 8410 wraps the 32-byte seed in an inner OCTET STRING inside
     // the outer PKCS#8 privateKey field.
@@ -601,10 +581,7 @@ fn extract_ed25519_seed_from_pkcs8(pem: &str) -> Result<[u8; 32], RvError> {
         .map_err(|e| bv_error_string!(&format!("ed25519 pkcs8 inner OCTET STRING decode: {e}")))?;
     let bytes = inner.as_bytes();
     if bytes.len() != 32 {
-        return Err(bv_error_string!(&format!(
-            "ed25519 seed has unexpected length {}",
-            bytes.len()
-        )));
+        return Err(bv_error_string!(&format!("ed25519 seed has unexpected length {}", bytes.len())));
     }
     let mut seed = [0u8; 32];
     seed.copy_from_slice(bytes);
@@ -620,11 +597,10 @@ fn extract_mldsa65_seed_from_pkcs8(pem: &str) -> Result<[u8; 32], RvError> {
         PrivateKeyInfo,
     };
     // ML-DSA-65 (IETF lamps draft).
-    const OID_ML_DSA_65: pkcs8::ObjectIdentifier =
-        pkcs8::ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.3.18");
+    const OID_ML_DSA_65: pkcs8::ObjectIdentifier = pkcs8::ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.3.18");
     let der_bytes = pem_decode_block(pem, "PRIVATE KEY")?;
-    let info = PrivateKeyInfo::from_der(&der_bytes)
-        .map_err(|e| bv_error_string!(&format!("ml-dsa-65 pkcs8 decode: {e}")))?;
+    let info =
+        PrivateKeyInfo::from_der(&der_bytes).map_err(|e| bv_error_string!(&format!("ml-dsa-65 pkcs8 decode: {e}")))?;
     if info.algorithm.oid != OID_ML_DSA_65 {
         return Err(bv_error_string!(&format!(
             "expected ML-DSA-65 PKCS#8 OID {}, got {}",
@@ -635,10 +611,7 @@ fn extract_mldsa65_seed_from_pkcs8(pem: &str) -> Result<[u8; 32], RvError> {
         .map_err(|e| bv_error_string!(&format!("ml-dsa-65 pkcs8 inner OCTET STRING decode: {e}")))?;
     let bytes = inner.as_bytes();
     if bytes.len() != 32 {
-        return Err(bv_error_string!(&format!(
-            "ml-dsa-65 seed has unexpected length {}",
-            bytes.len()
-        )));
+        return Err(bv_error_string!(&format!("ml-dsa-65 seed has unexpected length {}", bytes.len())));
     }
     let mut seed = [0u8; 32];
     seed.copy_from_slice(bytes);
@@ -648,20 +621,11 @@ fn extract_mldsa65_seed_from_pkcs8(pem: &str) -> Result<[u8; 32], RvError> {
 fn pem_decode_block(pem: &str, label: &str) -> Result<Vec<u8>, RvError> {
     let begin = format!("-----BEGIN {label}-----");
     let end = format!("-----END {label}-----");
-    let s = pem
-        .find(&begin)
-        .ok_or_else(|| bv_error_string!(&format!("missing {begin} header")))?;
+    let s = pem.find(&begin).ok_or_else(|| bv_error_string!(&format!("missing {begin} header")))?;
     let body_start = s + begin.len();
-    let e = pem[body_start..]
-        .find(&end)
-        .ok_or_else(|| bv_error_string!(&format!("missing {end} footer")))?;
-    let body: String = pem[body_start..body_start + e]
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .collect();
-    STANDARD
-        .decode(body.as_bytes())
-        .map_err(|e| bv_error_string!(&format!("pem base64 decode: {e}")))
+    let e = pem[body_start..].find(&end).ok_or_else(|| bv_error_string!(&format!("missing {end} footer")))?;
+    let body: String = pem[body_start..body_start + e].chars().filter(|c| !c.is_whitespace()).collect();
+    STANDARD.decode(body.as_bytes()).map_err(|e| bv_error_string!(&format!("pem base64 decode: {e}")))
 }
 
 pub struct MasterStore {
@@ -688,14 +652,9 @@ impl MasterStore {
     }
 
     pub async fn put(&self, cfg: &MasterConfig) -> Result<(), RvError> {
-        let value = serde_json::to_vec(cfg)
-            .map_err(|e| bv_error_string!(&format!("encode rustion master config: {e}")))?;
-        self.view
-            .put(&StorageEntry {
-                key: CONFIG_KEY.to_string(),
-                value,
-            })
-            .await
+        let value =
+            serde_json::to_vec(cfg).map_err(|e| bv_error_string!(&format!("encode rustion master config: {e}")))?;
+        self.view.put(&StorageEntry { key: CONFIG_KEY.to_string(), value }).await
     }
 
     pub async fn get_or_default(&self) -> Result<MasterConfig, RvError> {
@@ -749,11 +708,7 @@ impl MasterStore {
             now + chrono::Duration::seconds(default_ttl_secs() as i64),
             now,
         )?;
-        Ok(Some(MasterSigningRecord {
-            current: Some(half),
-            previous: None,
-            previous_grace_until: None,
-        }))
+        Ok(Some(MasterSigningRecord { current: Some(half), previous: None, previous_grace_until: None }))
     }
 
     /// The current signing key, or `Ok(None)` when no master keypair
@@ -761,9 +716,7 @@ impl MasterStore {
     /// `get_or_init_signing_key` it never mints a keypair and never
     /// persists the legacy-record migration, so a background caller
     /// (the health pinger) cannot create a master key as a side effect.
-    pub async fn read_current_signing_key(
-        &self,
-    ) -> Result<Option<bv_crypto::BvrgMasterSigningKey>, RvError> {
+    pub async fn read_current_signing_key(&self) -> Result<Option<bv_crypto::BvrgMasterSigningKey>, RvError> {
         let Some(rec) = self.read_signing_record().await? else {
             return Ok(None);
         };
@@ -776,36 +729,22 @@ impl MasterStore {
     async fn write_signing_record(&self, rec: &MasterSigningRecord) -> Result<(), RvError> {
         let value = serde_json::to_vec(rec)
             .map_err(|e| bv_error_string!(&format!("encode rustion master signing-key: {e}")))?;
-        self.view
-            .put(&StorageEntry {
-                key: SIGNING_KEY.to_string(),
-                value,
-            })
-            .await
+        self.view.put(&StorageEntry { key: SIGNING_KEY.to_string(), value }).await
     }
 
     /// Load the current signing key. Used by envelope-build paths
     /// (open / renew / kill / attest / deenrol). If the on-disk
     /// record is the Phase 1 legacy stub, migrate it and persist the
     /// new shape so subsequent reads are cheaper.
-    pub async fn get_or_init_signing_key(
-        &self,
-    ) -> Result<bv_crypto::BvrgMasterSigningKey, RvError> {
+    pub async fn get_or_init_signing_key(&self) -> Result<bv_crypto::BvrgMasterSigningKey, RvError> {
         if let Some(mut rec) = self.read_signing_record().await? {
             if rec.current.is_none() {
-                return Err(bv_error_string!(
-                    "rustion master not initialised — run `bvault rustion master issue`"
-                ));
+                return Err(bv_error_string!("rustion master not initialised — run `bvault rustion master issue`"));
             }
             // Persist any in-memory legacy migration. Detect by
             // round-tripping the record through serde and comparing
             // to the on-disk bytes.
-            let on_disk = self
-                .view
-                .get(SIGNING_KEY)
-                .await?
-                .map(|e| e.value)
-                .unwrap_or_default();
+            let on_disk = self.view.get(SIGNING_KEY).await?.map(|e| e.value).unwrap_or_default();
             let normalised = serde_json::to_vec(&rec).unwrap_or_default();
             if normalised != on_disk {
                 // Refresh the grace timestamp from the config in case
@@ -837,11 +776,7 @@ impl MasterStore {
             now + chrono::Duration::seconds(default_ttl_secs() as i64),
             now,
         )?;
-        let rec = MasterSigningRecord {
-            current: Some(half.clone()),
-            previous: None,
-            previous_grace_until: None,
-        };
+        let rec = MasterSigningRecord { current: Some(half.clone()), previous: None, previous_grace_until: None };
         self.write_signing_record(&rec).await?;
         log::warn!(
             "rustion master signing-key minted on-the-fly without explicit issue; \
@@ -854,10 +789,7 @@ impl MasterStore {
     /// `pki_mount` / `pki_role` / `pki_role_pqc` is empty (operator
     /// must configure the binding first) or if a current keypair is
     /// already on disk (operator must `rotate` to cut over).
-    pub async fn issue(
-        &self,
-        issuer: &dyn MasterCertIssuer,
-    ) -> Result<IssueOutcome, RvError> {
+    pub async fn issue(&self, issuer: &dyn MasterCertIssuer) -> Result<IssueOutcome, RvError> {
         let mut cfg = self.get_or_default().await?;
         let (pki_mount, pki_role, pki_role_pqc) = require_pki_binding(&cfg, "issue")?;
         if !cfg.current_serial.is_empty() {
@@ -868,15 +800,8 @@ impl MasterStore {
             )));
         }
         let now = Utc::now();
-        let hybrid = issuer
-            .issue_hybrid(
-                &pki_mount,
-                &pki_role,
-                &pki_role_pqc,
-                cfg.default_ttl_secs,
-                "rustion-master",
-            )
-            .await?;
+        let hybrid =
+            issuer.issue_hybrid(&pki_mount, &pki_role, &pki_role_pqc, cfg.default_ttl_secs, "rustion-master").await?;
         let half = half_from_issued(&hybrid, cfg.default_ttl_secs, now)?;
         let outcome = IssueOutcome {
             serial: half.serial.clone(),
@@ -885,11 +810,7 @@ impl MasterStore {
             rotated: false,
             previous_grace_until: None,
         };
-        let rec = MasterSigningRecord {
-            current: Some(half.clone()),
-            previous: None,
-            previous_grace_until: None,
-        };
+        let rec = MasterSigningRecord { current: Some(half.clone()), previous: None, previous_grace_until: None };
         self.write_signing_record(&rec).await?;
         cfg.current_serial = half.serial.clone();
         cfg.current_not_after = Some(half.not_after);
@@ -906,32 +827,18 @@ impl MasterStore {
     /// PKI engine. Fails when no current keypair is present (the
     /// operator must `issue` first) or when the PKI binding is
     /// incomplete.
-    pub async fn rotate(
-        &self,
-        issuer: &dyn MasterCertIssuer,
-    ) -> Result<IssueOutcome, RvError> {
+    pub async fn rotate(&self, issuer: &dyn MasterCertIssuer) -> Result<IssueOutcome, RvError> {
         let mut cfg = self.get_or_default().await?;
         let (pki_mount, pki_role, pki_role_pqc) = require_pki_binding(&cfg, "rotate")?;
         let existing = self
             .read_signing_record()
             .await?
             .and_then(|r| r.current)
-            .ok_or_else(|| {
-                bv_error_string!(
-                    "rustion master rotate: nothing to rotate — run issue first"
-                )
-            })?;
+            .ok_or_else(|| bv_error_string!("rustion master rotate: nothing to rotate — run issue first"))?;
         let now = Utc::now();
         let grace_until = now + chrono::Duration::seconds(cfg.rotate_grace_secs as i64);
-        let hybrid = issuer
-            .issue_hybrid(
-                &pki_mount,
-                &pki_role,
-                &pki_role_pqc,
-                cfg.default_ttl_secs,
-                "rustion-master",
-            )
-            .await?;
+        let hybrid =
+            issuer.issue_hybrid(&pki_mount, &pki_role, &pki_role_pqc, cfg.default_ttl_secs, "rustion-master").await?;
         let fresh = half_from_issued(&hybrid, cfg.default_ttl_secs, now)?;
         let outcome = IssueOutcome {
             serial: fresh.serial.clone(),
@@ -999,11 +906,7 @@ impl MasterStore {
         let authority_name = cfg.authority().to_string();
         // Update the issued flag from the persisted serial rather
         // than the config field; storage is the source of truth.
-        let current_serial = if cfg.current_serial.is_empty() {
-            half.serial.clone()
-        } else {
-            cfg.current_serial
-        };
+        let current_serial = if cfg.current_serial.is_empty() { half.serial.clone() } else { cfg.current_serial };
         Ok(MasterPubKeyExport {
             authority_name,
             algorithm: cfg.algorithm,
@@ -1020,9 +923,7 @@ impl MasterStore {
     /// one always, plus the previous one when `now < previous_grace_until`.
     /// Verify-side callers iterate in order; envelope-build callers
     /// pick the first entry.
-    pub async fn load_active_keys(
-        &self,
-    ) -> Result<Vec<(ActiveMasterKey, bv_crypto::BvrgMasterPublicKey)>, RvError> {
+    pub async fn load_active_keys(&self) -> Result<Vec<(ActiveMasterKey, bv_crypto::BvrgMasterPublicKey)>, RvError> {
         let mut out = Vec::new();
         let Some(rec) = self.read_signing_record().await? else {
             return Ok(out);
@@ -1049,12 +950,7 @@ impl MasterStore {
             return Ok(s);
         }
         let id = uuid::Uuid::new_v4().to_string();
-        self.view
-            .put(&StorageEntry {
-                key: DEPLOYMENT_ID.to_string(),
-                value: id.as_bytes().to_vec(),
-            })
-            .await?;
+        self.view.put(&StorageEntry { key: DEPLOYMENT_ID.to_string(), value: id.as_bytes().to_vec() }).await?;
         log::info!("rustion: minted fresh deployment_id={}", id);
         Ok(id)
     }
@@ -1064,10 +960,7 @@ impl MasterStore {
 
 /// Validate that `pki_mount`, `pki_role`, and `pki_role_pqc` are all
 /// set on the master config. Returns the trimmed values.
-fn require_pki_binding(
-    cfg: &MasterConfig,
-    op: &str,
-) -> Result<(String, String, String), RvError> {
+fn require_pki_binding(cfg: &MasterConfig, op: &str) -> Result<(String, String, String), RvError> {
     if cfg.pki_mount.trim().is_empty() || cfg.pki_role.trim().is_empty() {
         return Err(bv_error_string!(&format!(
             "rustion master {op}: pki_mount and pki_role must be configured first \
@@ -1081,31 +974,17 @@ fn require_pki_binding(
              before {op} will succeed — set it via POST rustion/master/config"
         )));
     }
-    Ok((
-        cfg.pki_mount.trim().to_string(),
-        cfg.pki_role.trim().to_string(),
-        pqc,
-    ))
+    Ok((cfg.pki_mount.trim().to_string(), cfg.pki_role.trim().to_string(), pqc))
 }
 
 /// Build a `SigningKeyHalf` from a freshly-engine-issued hybrid pair.
 /// Seeds are dropped into the on-disk b64 fields; cert + serial come
 /// straight from the engine; `not_after` is derived from `now + ttl`.
-fn half_from_issued(
-    hybrid: &IssuedHybrid,
-    ttl_secs: u64,
-    now: DateTime<Utc>,
-) -> Result<SigningKeyHalf, RvError> {
+fn half_from_issued(hybrid: &IssuedHybrid, ttl_secs: u64, now: DateTime<Utc>) -> Result<SigningKeyHalf, RvError> {
     let not_after = now + chrono::Duration::seconds(ttl_secs as i64);
     let ed_seed_b64 = STANDARD.encode(hybrid.ed25519.seed);
     let ml_seed_b64 = STANDARD.encode(hybrid.mldsa65.seed);
-    let mut half = derive_half_from_seeds(
-        &ed_seed_b64,
-        &ml_seed_b64,
-        hybrid.ed25519.serial.clone(),
-        not_after,
-        now,
-    )?;
+    let mut half = derive_half_from_seeds(&ed_seed_b64, &ml_seed_b64, hybrid.ed25519.serial.clone(), not_after, now)?;
     half.mldsa65_serial = hybrid.mldsa65.serial.clone();
     half.ed25519_cert_pem = hybrid.ed25519.certificate_pem.clone();
     half.mldsa65_cert_pem = hybrid.mldsa65.certificate_pem.clone();
@@ -1132,10 +1011,7 @@ fn derive_half_from_seeds(
     let ed_signing = ed25519_dalek::SigningKey::from_bytes(&ed_seed_bytes);
     let ed_pub = ed_signing.verifying_key().to_bytes();
     let ml_seed_z = zeroize::Zeroizing::new(ml_seed_bytes);
-    let master = bv_crypto::BvrgMasterSigningKey {
-        ed25519: ed_signing,
-        mldsa65_seed: ml_seed_z,
-    };
+    let master = bv_crypto::BvrgMasterSigningKey { ed25519: ed_signing, mldsa65_seed: ml_seed_z };
     let pubs = master.public_key();
     let ml_pub = pubs.mldsa65;
     Ok(SigningKeyHalf {
@@ -1152,9 +1028,7 @@ fn derive_half_from_seeds(
     })
 }
 
-fn signing_key_from_half(
-    half: &SigningKeyHalf,
-) -> Result<bv_crypto::BvrgMasterSigningKey, RvError> {
+fn signing_key_from_half(half: &SigningKeyHalf) -> Result<bv_crypto::BvrgMasterSigningKey, RvError> {
     let ed_seed: [u8; 32] = STANDARD
         .decode(half.ed25519_seed_b64.as_bytes())
         .map_err(|e| bv_error_string!(&format!("decode ed25519 seed: {e}")))?
@@ -1171,9 +1045,7 @@ fn signing_key_from_half(
     })
 }
 
-fn half_to_active(
-    half: &SigningKeyHalf,
-) -> Result<(ActiveMasterKey, bv_crypto::BvrgMasterPublicKey), RvError> {
+fn half_to_active(half: &SigningKeyHalf) -> Result<(ActiveMasterKey, bv_crypto::BvrgMasterPublicKey), RvError> {
     let ed_bytes = STANDARD
         .decode(half.ed25519_pub_b64.as_bytes())
         .map_err(|e| bv_error_string!(&format!("decode ed25519 pub: {e}")))?;
@@ -1182,14 +1054,7 @@ fn half_to_active(
         .map_err(|e| bv_error_string!(&format!("decode mldsa65 pub: {e}")))?;
     let pubkey = bv_crypto::BvrgMasterPublicKey::from_bytes(&ed_bytes, &ml_bytes)
         .map_err(|e| bv_error_string!(&format!("reconstruct master pubkey: {e:?}")))?;
-    Ok((
-        ActiveMasterKey {
-            serial: half.serial.clone(),
-            ed25519_pub: ed_bytes,
-            mldsa65_pub: ml_bytes,
-        },
-        pubkey,
-    ))
+    Ok((ActiveMasterKey { serial: half.serial.clone(), ed25519_pub: ed_bytes, mldsa65_pub: ml_bytes }, pubkey))
 }
 
 fn legacy_serial(now: &DateTime<Utc>) -> String {
@@ -1234,10 +1099,7 @@ mod tests {
         rand::rng().fill_bytes(key.as_mut_slice());
         let barrier = barrier_aes_gcm::AESGCMBarrier::new(backend);
         barrier.init(key.as_slice()).await.expect("barrier init");
-        barrier
-            .unseal(key.as_slice())
-            .await
-            .expect("barrier unseal");
+        barrier.unseal(key.as_slice()).await.expect("barrier unseal");
         let root_view = BarrierView::new(Arc::new(barrier), "sys/");
         let sub = root_view.new_sub_view(MASTER_SUB_PATH);
         MasterStore::from_view(Arc::new(sub))
@@ -1305,10 +1167,7 @@ mod tests {
         }
     }
 
-    #[maybe_async::test(
-        feature = "sync_handler",
-        async(all(not(feature = "sync_handler")), tokio::test)
-    )]
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn issue_then_export_returns_pubkey_pems() {
         let store = fresh_store_named("issue_then_export").await;
         configure(&store, 60).await;
@@ -1332,10 +1191,7 @@ mod tests {
         assert_eq!(export.current_serial, outcome.serial);
     }
 
-    #[maybe_async::test(
-        feature = "sync_handler",
-        async(all(not(feature = "sync_handler")), tokio::test)
-    )]
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn issue_without_pki_config_errors() {
         let store = fresh_store_named("issue_without_pki_config").await;
         let issuer = FakeIssuer::new();
@@ -1344,10 +1200,7 @@ mod tests {
         assert!(msg.contains("pki_mount"), "got: {msg}");
     }
 
-    #[maybe_async::test(
-        feature = "sync_handler",
-        async(all(not(feature = "sync_handler")), tokio::test)
-    )]
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn issue_without_pqc_role_errors() {
         let store = fresh_store_named("issue_without_pqc_role").await;
         // Configure mount + ed25519 role, but leave pki_role_pqc unset.
@@ -1363,10 +1216,7 @@ mod tests {
         assert!(msg.contains("pki_role_pqc"), "got: {msg}");
     }
 
-    #[maybe_async::test(
-        feature = "sync_handler",
-        async(all(not(feature = "sync_handler")), tokio::test)
-    )]
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn issue_twice_without_rotate_errors() {
         let store = fresh_store_named("issue_twice").await;
         configure(&store, 60).await;
@@ -1377,10 +1227,7 @@ mod tests {
         assert!(msg.contains("already issued"), "got: {msg}");
     }
 
-    #[maybe_async::test(
-        feature = "sync_handler",
-        async(all(not(feature = "sync_handler")), tokio::test)
-    )]
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn rotate_shifts_current_to_previous() {
         let store = fresh_store_named("rotate_shifts").await;
         configure(&store, 600).await;
@@ -1402,10 +1249,7 @@ mod tests {
         assert_eq!(active.len(), 2, "current + previous in grace");
     }
 
-    #[maybe_async::test(
-        feature = "sync_handler",
-        async(all(not(feature = "sync_handler")), tokio::test)
-    )]
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn previous_drops_after_grace() {
         let store = fresh_store_named("previous_drops_after_grace").await;
         configure(&store, 1).await;
@@ -1414,21 +1258,14 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(2)).await;
         store.rotate(&issuer).await.expect("rotate");
         // Force the grace window into the past.
-        let mut rec = store
-            .read_signing_record()
-            .await
-            .unwrap()
-            .expect("record");
+        let mut rec = store.read_signing_record().await.unwrap().expect("record");
         rec.previous_grace_until = Some(Utc::now() - chrono::Duration::seconds(60));
         store.write_signing_record(&rec).await.unwrap();
         let active = store.load_active_keys().await.unwrap();
         assert_eq!(active.len(), 1, "previous dropped after grace");
     }
 
-    #[maybe_async::test(
-        feature = "sync_handler",
-        async(all(not(feature = "sync_handler")), tokio::test)
-    )]
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn rotate_without_issue_errors() {
         let store = fresh_store_named("rotate_without_issue").await;
         configure(&store, 60).await;
@@ -1501,8 +1338,7 @@ mod tests {
         // so the envelope is signed by a key no bastion ever approved. That is
         // the whole diagnosis and must be stated, not buried.
         let export = MasterPubKeyExport { algorithm: default_algorithm(), ..Default::default() };
-        let hint = signature_rejection_hint("http 401: signature_invalid", &empty_cfg(), &export)
-            .expect("hint");
+        let hint = signature_rejection_hint("http 401: signature_invalid", &empty_cfg(), &export).expect("hint");
         assert!(hint.contains("NO master keypair"), "got: {hint}");
         assert!(hint.contains("rustion/master/issue"), "got: {hint}");
     }
@@ -1524,11 +1360,8 @@ mod tests {
         // key, so there is no in-band way to refresh a bastion's pin. A
         // populated `previous_serial` is the strongest available signal that
         // this is what happened.
-        let cfg = MasterConfig {
-            previous_serial: Some("41:99:00".into()),
-            updated_at: Utc::now(),
-            ..Default::default()
-        };
+        let cfg =
+            MasterConfig { previous_serial: Some("41:99:00".into()), updated_at: Utc::now(), ..Default::default() };
         let hint =
             signature_rejection_hint("http 401: signature_invalid", &cfg, &issued_export("42:aa:bb")).expect("hint");
         assert!(hint.contains("rotated"), "got: {hint}");
@@ -1555,8 +1388,7 @@ mod tests {
         let cfg: MasterConfig = serde_json::from_str(legacy).expect("decode legacy config");
         assert_eq!(cfg.authority(), "bastion-vault");
         // …and re-encoding it now carries the field explicitly.
-        let round: MasterConfig =
-            serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+        let round: MasterConfig = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
         assert_eq!(round.authority(), "bastion-vault");
     }
 
@@ -1605,12 +1437,8 @@ mod tests {
         // Naming `bastion-vault` on a deployment that signs as
         // `bastion-vault-dev` would point them at the wrong one.
         let cfg = MasterConfig { authority_name: "bastion-vault-dev".into(), ..empty_cfg() };
-        let hint = signature_rejection_hint(
-            "http 401: signature_invalid",
-            &cfg,
-            &issued_export("42:aa:bb"),
-        )
-        .expect("hint");
+        let hint =
+            signature_rejection_hint("http 401: signature_invalid", &cfg, &issued_export("42:aa:bb")).expect("hint");
         assert!(hint.contains("`bastion-vault-dev` authority"), "got: {hint}");
         assert!(
             hint.contains("exactly one record"),

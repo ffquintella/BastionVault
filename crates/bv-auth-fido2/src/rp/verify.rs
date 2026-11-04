@@ -27,19 +27,13 @@ pub fn verify_assertion(
 
     match key {
         PublicKey::Es256 { verifying_key } => {
-            let sig = p256::ecdsa::Signature::from_der(signature)
-                .map_err(|_| RpError::BadSignature)?;
-            verifying_key
-                .verify(&signed, &sig)
-                .map_err(|_| RpError::BadSignature)
+            let sig = p256::ecdsa::Signature::from_der(signature).map_err(|_| RpError::BadSignature)?;
+            verifying_key.verify(&signed, &sig).map_err(|_| RpError::BadSignature)
         }
         PublicKey::Ed25519 { verifying_key } => {
-            let bytes: [u8; 64] = signature
-                .try_into()
-                .map_err(|_| RpError::BadSignature)?;
+            let bytes: [u8; 64] = signature.try_into().map_err(|_| RpError::BadSignature)?;
             let sig = ed25519_dalek::Signature::from_bytes(&bytes);
-            ed25519_dalek::Verifier::verify(verifying_key, &signed, &sig)
-                .map_err(|_| RpError::BadSignature)
+            ed25519_dalek::Verifier::verify(verifying_key, &signed, &sig).map_err(|_| RpError::BadSignature)
         }
     }
 }

@@ -58,12 +58,12 @@ fn err(code: &str, detail: impl std::fmt::Display) -> String {
 
 // ── the resource-engine seam ────────────────────────────────────────────
 
-/// A database endpoint, `host:port`. The resource engine's parser: the
-/// profile's endpoint and the secret's binding are read by the same code.
-pub use crate::modules::resource::sql_profile::SqlEndpoint;
 /// The step-up action's canonical form and its redemption: the resource
 /// engine owns the ticket store, so the action binding is decided there.
 use crate::modules::resource::connect_mfa::{canonical_sql_action, redeem_sql_action_ticket};
+/// A database endpoint, `host:port`. The resource engine's parser: the
+/// profile's endpoint and the secret's binding are read by the same code.
+pub use crate::modules::resource::sql_profile::SqlEndpoint;
 
 /// What the host needs to decide one release (§5.4), read by the resource
 /// engine. Zeroized on drop.
@@ -338,7 +338,8 @@ fn kernel_error(method: &str, e: RvError) -> String {
 /// The namespace the caller's request addresses (`""` = root). A named
 /// namespace that does not resolve is an error, never root.
 async fn caller_namespace(core: &dyn VaultCtx, req: &Request) -> Result<String, String> {
-    let raw = req.namespace_path.clone().or_else(|| namespace_header_from_map(req.headers.as_ref())).unwrap_or_default();
+    let raw =
+        req.namespace_path.clone().or_else(|| namespace_header_from_map(req.headers.as_ref())).unwrap_or_default();
     let raw = raw.trim().trim_matches('/');
     if raw.is_empty() {
         return Ok(String::new());
@@ -366,7 +367,8 @@ async fn require_any_sql_privilege(
     let checks: Vec<SqlCheck> =
         SqlCapability::ALL.iter().map(|c| SqlCheck { capability: *c, target: SqlTarget::Server }).collect();
     let held = |vs: &[SqlVerdict]| vs.iter().filter(|v| v.allowed).map(|v| v.capability.as_str()).collect::<Vec<_>>();
-    let shown = gate.sql_privileges(req, SqlPurpose::Display, resource, &checks).await.map_err(|e| kernel_error(method, e))?;
+    let shown =
+        gate.sql_privileges(req, SqlPurpose::Display, resource, &checks).await.map_err(|e| kernel_error(method, e))?;
     if !held(&shown).is_empty() {
         return Ok(held(&shown));
     }
@@ -557,10 +559,9 @@ async fn ticket_redeem(
     if let Some(action) = action {
         // Always burns a ticket bound to this exact action. It records no
         // MFA redemption, so it can never unlock a `require_mfa` release.
-        let record =
-            redeem_sql_action_ticket(core.as_ref(), req, &resource, &p.profile, p.ticket.as_str(), &action)
-                .await
-                .map_err(|e| kernel_error("connect_ticket_redeem", e))?;
+        let record = redeem_sql_action_ticket(core.as_ref(), req, &resource, &p.profile, p.ticket.as_str(), &action)
+            .await
+            .map_err(|e| kernel_error("connect_ticket_redeem", e))?;
         return Ok(json!({ "redeemed": true, "method": record.method, "action": action }));
     }
     let mfa = core.connect_mfa().ok_or_else(|| err(codes::NOT_AVAILABLE, "no connect-MFA gate"))?;
@@ -604,7 +605,11 @@ struct ReleaseAudit {
 impl ReleaseAudit {
     fn new(manifest: &PluginManifest, params: &Value) -> Self {
         let s = |k: &str| {
-            params.get(k).and_then(Value::as_str).map(|v| v.chars().take(MAX_SESSION_REF_LEN).collect()).unwrap_or_default()
+            params
+                .get(k)
+                .and_then(Value::as_str)
+                .map(|v| v.chars().take(MAX_SESSION_REF_LEN).collect())
+                .unwrap_or_default()
         };
         Self {
             plugin: manifest.name.clone(),

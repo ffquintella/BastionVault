@@ -93,11 +93,7 @@ pub trait TokenService: Send + Sync {
 #[maybe_async::maybe_async]
 pub trait AuthMountRegistry: Send + Sync {
     /// Register a credential backend factory under an auth mount type.
-    fn add_auth_backend(
-        &self,
-        logical_type: &str,
-        backend: Arc<LogicalBackendNewFunc>,
-    ) -> Result<(), RvError>;
+    fn add_auth_backend(&self, logical_type: &str, backend: Arc<LogicalBackendNewFunc>) -> Result<(), RvError>;
 
     fn delete_auth_backend(&self, logical_type: &str) -> Result<(), RvError>;
 

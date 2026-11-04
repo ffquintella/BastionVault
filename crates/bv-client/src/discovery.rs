@@ -73,11 +73,7 @@ pub struct DiscoveryConfig {
 
 impl Default for DiscoveryConfig {
     fn default() -> Self {
-        Self {
-            srv_service: "_bvault._tcp".to_string(),
-            default_scheme: "https".to_string(),
-            default_port: 8200,
-        }
+        Self { srv_service: "_bvault._tcp".to_string(), default_scheme: "https".to_string(), default_port: 8200 }
     }
 }
 
@@ -116,12 +112,9 @@ impl SystemResolver {
     pub fn new() -> Self {
         let (cfg, opts) = hickory_resolver::system_conf::read_system_conf()
             .unwrap_or_else(|_| (ResolverConfig::default(), ResolverOpts::default()));
-        let mut builder =
-            TokioResolver::builder_with_config(cfg, TokioRuntimeProvider::default());
+        let mut builder = TokioResolver::builder_with_config(cfg, TokioRuntimeProvider::default());
         *builder.options_mut() = opts;
-        let resolver = builder
-            .build()
-            .expect("TokioRuntimeProvider build is infallible");
+        let resolver = builder.build().expect("TokioRuntimeProvider build is infallible");
         Self { inner: Arc::new(resolver) }
     }
 }
@@ -210,15 +203,9 @@ fn parse_input(input: &str, cfg: &DiscoveryConfig) -> Result<ParsedInput, Client
     };
 
     // Drop any path/query/fragment so we operate on `host[:port]`.
-    let host_port = rest
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or(rest)
-        .trim_end_matches('/');
+    let host_port = rest.split(['/', '?', '#']).next().unwrap_or(rest).trim_end_matches('/');
     if host_port.is_empty() {
-        return Err(ClientError::backend(format!(
-            "discovery: address `{input}` has no host"
-        )));
+        return Err(ClientError::backend(format!("discovery: address `{input}` has no host")));
     }
 
     // IPv6 literal `[::1]:8200` or `[::1]`.
@@ -229,8 +216,7 @@ fn parse_input(input: &str, cfg: &DiscoveryConfig) -> Result<ParsedInput, Client
         let host = &after_bracket[..close];
         let tail = &after_bracket[close + 1..];
         let port = if let Some(p) = tail.strip_prefix(':') {
-            p.parse::<u16>()
-                .map_err(|_| ClientError::backend(format!("discovery: bad port in `{input}`")))?
+            p.parse::<u16>().map_err(|_| ClientError::backend(format!("discovery: bad port in `{input}`")))?
         } else {
             cfg.default_port
         };
@@ -249,9 +235,7 @@ fn parse_input(input: &str, cfg: &DiscoveryConfig) -> Result<ParsedInput, Client
         None => (host_port, None),
     };
     if host.contains(':') {
-        return Err(ClientError::backend(format!(
-            "discovery: ambiguous IPv6 in `{input}` — wrap in brackets",
-        )));
+        return Err(ClientError::backend(format!("discovery: ambiguous IPv6 in `{input}` — wrap in brackets",)));
     }
 
     // Force literal mode if the input was URL-shaped (scheme prefix,
@@ -260,9 +244,9 @@ fn parse_input(input: &str, cfg: &DiscoveryConfig) -> Result<ParsedInput, Client
     let is_literal = scheme_hint.is_some() || port_opt.is_some() || is_ip_literal(host);
     if is_literal {
         let port = match port_opt {
-            Some(p) => p
-                .parse::<u16>()
-                .map_err(|_| ClientError::backend(format!("discovery: bad port in `{input}`")))?,
+            Some(p) => {
+                p.parse::<u16>().map_err(|_| ClientError::backend(format!("discovery: bad port in `{input}`")))?
+            }
             None => cfg.default_port,
         };
         Ok(ParsedInput::Literal(SrvCandidate {
@@ -307,11 +291,7 @@ pub async fn resolve(
             // nonsense double-prefixed label like
             // `_bvault._tcp._cofre-html._tcp.esi.fgv.br`.
             let is_srv_shaped = name.starts_with('_');
-            let label = if is_srv_shaped {
-                name.clone()
-            } else {
-                format!("{}.{}", cfg.srv_service, name)
-            };
+            let label = if is_srv_shaped { name.clone() } else { format!("{}.{}", cfg.srv_service, name) };
             let records = resolver.lookup_srv(&label).await.unwrap_or_default();
 
             if records.is_empty() {
@@ -323,10 +303,7 @@ pub async fn resolve(
                 // hostnames for `getaddrinfo`), so surface an empty
                 // candidate list and let the caller report it.
                 if is_srv_shaped {
-                    return Ok(ResolvedAddress::Cluster {
-                        name,
-                        candidates: Vec::new(),
-                    });
+                    return Ok(ResolvedAddress::Cluster { name, candidates: Vec::new() });
                 }
                 return Ok(ResolvedAddress::Cluster {
                     name: name.clone(),
@@ -380,9 +357,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl<F: Fn(&str) -> Result<Vec<SrvRecord>, ClientError> + Send + Sync> SrvLookup
-        for FakeResolver<F>
-    {
+    impl<F: Fn(&str) -> Result<Vec<SrvRecord>, ClientError> + Send + Sync> SrvLookup for FakeResolver<F> {
         async fn lookup_srv(&self, label: &str) -> Result<Vec<SrvRecord>, ClientError> {
             (self.f)(label)
         }
@@ -394,9 +369,7 @@ mod tests {
 
     #[tokio::test]
     async fn literal_url_with_scheme_skips_srv() {
-        let resolver = FakeResolver {
-            f: |_| panic!("SRV lookup should not be invoked for URL inputs"),
-        };
+        let resolver = FakeResolver { f: |_| panic!("SRV lookup should not be invoked for URL inputs") };
         let r = resolve("https://vault.example:9000", &cfg(), &resolver).await.unwrap();
         let cands = r.candidates();
         assert_eq!(cands.len(), 1);
@@ -407,18 +380,14 @@ mod tests {
 
     #[tokio::test]
     async fn literal_url_with_explicit_port_skips_srv() {
-        let resolver = FakeResolver {
-            f: |_| panic!("SRV lookup should not be invoked"),
-        };
+        let resolver = FakeResolver { f: |_| panic!("SRV lookup should not be invoked") };
         let r = resolve("vault.example:9000", &cfg(), &resolver).await.unwrap();
         assert!(matches!(r, ResolvedAddress::Literal(_)));
     }
 
     #[tokio::test]
     async fn ip_literal_is_treated_as_literal() {
-        let resolver = FakeResolver {
-            f: |_| panic!("SRV lookup should not be invoked for IPs"),
-        };
+        let resolver = FakeResolver { f: |_| panic!("SRV lookup should not be invoked for IPs") };
         let r = resolve("10.0.0.5", &cfg(), &resolver).await.unwrap();
         let cands = r.into_candidates();
         assert_eq!(cands[0].target, "10.0.0.5");
@@ -474,9 +443,7 @@ mod tests {
     async fn resolver_error_falls_back_to_literal() {
         // SRV lookup errors are not propagated — a broken DNS path
         // shouldn't lock the operator out of literal-address mode.
-        let resolver = FakeResolver {
-            f: |_| Err(ClientError::backend("simulated resolver outage")),
-        };
+        let resolver = FakeResolver { f: |_| Err(ClientError::backend("simulated resolver outage")) };
         let r = resolve("vault.corp.example", &cfg(), &resolver).await.unwrap();
         assert_eq!(r.candidates().len(), 1);
     }
@@ -488,12 +455,7 @@ mod tests {
         let resolver = FakeResolver {
             f: |label| {
                 assert_eq!(label, "_cofre-html._tcp.esi.fgv.br");
-                Ok(vec![SrvRecord {
-                    target: "node1.fgv.br.".into(),
-                    port: 5200,
-                    priority: 10,
-                    weight: 50,
-                }])
+                Ok(vec![SrvRecord { target: "node1.fgv.br.".into(), port: 5200, priority: 10, weight: 50 }])
             },
         };
         let r = resolve("_cofre-html._tcp.esi.fgv.br", &cfg(), &resolver).await.unwrap();
@@ -534,13 +496,8 @@ mod tests {
 
     #[test]
     fn srv_candidate_url_includes_port() {
-        let c = SrvCandidate {
-            target: "node-1.corp".into(),
-            port: 8200,
-            scheme: "https".into(),
-            priority: 10,
-            weight: 50,
-        };
+        let c =
+            SrvCandidate { target: "node-1.corp".into(), port: 8200, scheme: "https".into(), priority: 10, weight: 50 };
         assert_eq!(c.url(), "https://node-1.corp:8200");
     }
 }

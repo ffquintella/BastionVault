@@ -20,8 +20,8 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use wasmtime::{
-    AsContext, AsContextMut, Caller, Config, Engine, Instance, Linker, Module, Store, StoreLimits,
-    StoreLimitsBuilder, TypedFunc,
+    AsContext, AsContextMut, Caller, Config, Engine, Instance, Linker, Module, Store, StoreLimits, StoreLimitsBuilder,
+    TypedFunc,
 };
 
 use crate::{TestkitError, DEFAULT_FUEL, DEFAULT_MEMORY_BYTES};
@@ -56,10 +56,8 @@ pub const BVX_IMPORTS: &[(&str, &str, &str)] = &[
 /// by the parity test to prove the real linker satisfies exactly this
 /// surface.
 pub fn bvx_conformance_wat() -> String {
-    let imports: String = BVX_IMPORTS
-        .iter()
-        .map(|(m, n, sig)| format!("  (import \"{m}\" \"{n}\" (func {sig}))\n"))
-        .collect();
+    let imports: String =
+        BVX_IMPORTS.iter().map(|(m, n, sig)| format!("  (import \"{m}\" \"{n}\" (func {sig}))\n")).collect();
     format!(
         "(module\n{imports}  (memory (export \"memory\") 1)\n  (func (export \"bv_alloc\") (param i32) (result i32) i32.const 1024)\n  (func (export \"bvx_init\") (param i32 i32) (result i32) i32.const 0))\n"
     )
@@ -226,16 +224,20 @@ fn register_bvx_imports(linker: &mut Linker<AppCtx>) -> Result<(), TestkitError>
         })
         .map_err(e)?;
     linker
-        .func_wrap("bvx", "api_request", |mut caller: Caller<'_, AppCtx>, _rp: i32, _rl: i32, op: i32, om: i32| -> i32 {
-            if !caller.data().api_declared {
-                return RC_FORBIDDEN;
-            }
-            let scripted = caller.data().shared.lock().unwrap().api_script.pop_front();
-            match scripted {
-                Some(body) => write_out(&mut caller, &body, op, om),
-                None => RC_FORBIDDEN,
-            }
-        })
+        .func_wrap(
+            "bvx",
+            "api_request",
+            |mut caller: Caller<'_, AppCtx>, _rp: i32, _rl: i32, op: i32, om: i32| -> i32 {
+                if !caller.data().api_declared {
+                    return RC_FORBIDDEN;
+                }
+                let scripted = caller.data().shared.lock().unwrap().api_script.pop_front();
+                match scripted {
+                    Some(body) => write_out(&mut caller, &body, op, om),
+                    None => RC_FORBIDDEN,
+                }
+            },
+        )
         .map_err(e)?;
     linker
         .func_wrap("bvx", "net_http", |mut caller: Caller<'_, AppCtx>, _rp: i32, _rl: i32, op: i32, om: i32| -> i32 {
@@ -347,9 +349,7 @@ impl AppTestHostBuilder {
 
         let mut linker: Linker<AppCtx> = Linker::new(&engine);
         register_bvx_imports(&mut linker)?;
-        let instance = linker
-            .instantiate(&mut store, &module)
-            .map_err(|e| TestkitError::Instantiate(e.to_string()))?;
+        let instance = linker.instantiate(&mut store, &module).map_err(|e| TestkitError::Instantiate(e.to_string()))?;
         instance.get_memory(&mut store, "memory").ok_or(TestkitError::MissingExport("memory"))?;
         instance
             .get_typed_func::<i32, i32>(&mut store, "bv_alloc")
@@ -403,9 +403,7 @@ impl AppTestHost {
             return Ok(None);
         };
         self.refuel()?;
-        f.call(&mut self.store, now_ms)
-            .map(Some)
-            .map_err(|e| TestkitError::Invoke(e.to_string()))
+        f.call(&mut self.store, now_ms).map(Some).map_err(|e| TestkitError::Invoke(e.to_string()))
     }
 
     /// Menus the module currently has upserted, `(id, json)`.
@@ -430,16 +428,13 @@ impl AppTestHost {
     }
 
     fn refuel(&mut self) -> Result<(), TestkitError> {
-        self.store
-            .set_fuel(self.fuel_budget)
-            .map_err(|e| TestkitError::Invoke(e.to_string()))?;
+        self.store.set_fuel(self.fuel_budget).map_err(|e| TestkitError::Invoke(e.to_string()))?;
         self.store.data_mut().response_window = None;
         Ok(())
     }
 
     fn call_ptr_len(&mut self, export: &str, input: &[u8]) -> Result<Option<i32>, TestkitError> {
-        let Ok(func) = self.instance.get_typed_func::<(i32, i32), i32>(&mut self.store, export)
-        else {
+        let Ok(func) = self.instance.get_typed_func::<(i32, i32), i32>(&mut self.store, export) else {
             return Ok(None);
         };
         self.refuel()?;
@@ -448,18 +443,10 @@ impl AppTestHost {
             .get_typed_func(&mut self.store, "bv_alloc")
             .map_err(|_| TestkitError::MissingExport("bv_alloc"))?;
         let len = input.len() as i32;
-        let ptr = alloc
-            .call(&mut self.store, len)
-            .map_err(|e| TestkitError::Invoke(e.to_string()))?;
-        let mem = self
-            .instance
-            .get_memory(&mut self.store, "memory")
-            .ok_or(TestkitError::MissingExport("memory"))?;
-        mem.write(&mut self.store, ptr as usize, input)
-            .map_err(|e| TestkitError::Memory(e.to_string()))?;
-        func.call(&mut self.store, (ptr, len))
-            .map(Some)
-            .map_err(|e| TestkitError::Invoke(e.to_string()))
+        let ptr = alloc.call(&mut self.store, len).map_err(|e| TestkitError::Invoke(e.to_string()))?;
+        let mem = self.instance.get_memory(&mut self.store, "memory").ok_or(TestkitError::MissingExport("memory"))?;
+        mem.write(&mut self.store, ptr as usize, input).map_err(|e| TestkitError::Memory(e.to_string()))?;
+        func.call(&mut self.store, (ptr, len)).map(Some).map_err(|e| TestkitError::Invoke(e.to_string()))
     }
 }
 
@@ -500,11 +487,7 @@ mod tests {
     #[test]
     fn init_upserts_menu_click_opens_window() {
         let wasm = demo_wasm();
-        let mut host = AppTestHost::builder("demo")
-            .dynamic_menus(true)
-            .max_windows(2)
-            .build(&wasm)
-            .unwrap();
+        let mut host = AppTestHost::builder("demo").dynamic_menus(true).max_windows(2).build(&wasm).unwrap();
         assert_eq!(host.init(&serde_json::json!({})).unwrap(), Some(0));
         let menus = host.menus();
         assert_eq!(menus.len(), 1);

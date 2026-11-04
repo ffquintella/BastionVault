@@ -3,17 +3,15 @@
 use std::{collections::HashMap, sync::Arc};
 
 use super::{UserPassBackend, UserPassBackendInner};
-use bv_auth_fido2::rp::{
-    AuthenticationState, PublicKeyCredentialAssertion, RelyingParty,
-};
 use crate::{
     context::Context,
     errors::RvError,
-    logical::{Auth, Backend, Field, FieldType, Lease, Operation, Path, PathOperation, Request, Response},
     kernel_api::identity::GroupKind,
+    logical::{Auth, Backend, Field, FieldType, Lease, Operation, Path, PathOperation, Request, Response},
     new_fields, new_fields_internal, new_path, new_path_internal,
     storage::StorageEntry,
 };
+use bv_auth_fido2::rp::{AuthenticationState, PublicKeyCredentialAssertion, RelyingParty};
 
 impl UserPassBackend {
     pub fn fido2_login_begin_path(&self) -> Path {
@@ -107,37 +105,27 @@ impl UserPassBackendInner {
         _backend: &dyn Backend,
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        let config = self.get_fido2_config(req).await?
-            .ok_or(RvError::ErrFido2NotConfigured)?;
+        let config = self.get_fido2_config(req).await?.ok_or(RvError::ErrFido2NotConfigured)?;
 
         let username = req.get_data("username")?.as_str().unwrap().to_lowercase();
 
-        let user_entry = self.get_user(req, &username).await?
-            .ok_or(RvError::ErrFido2CredentialNotFound)?;
+        let user_entry = self.get_user(req, &username).await?.ok_or(RvError::ErrFido2CredentialNotFound)?;
 
-        let passkeys = user_entry.get_passkeys()
-            .map_err(|e: serde_json::Error| RvError::ErrFido2AuthFailed(e.to_string()))?;
+        let passkeys =
+            user_entry.get_passkeys().map_err(|e: serde_json::Error| RvError::ErrFido2AuthFailed(e.to_string()))?;
 
         if passkeys.is_empty() {
             return Err(RvError::ErrFido2CredentialNotFound);
         }
 
-        let rp = RelyingParty {
-            rp_id: &config.rp_id,
-            rp_origin: &config.rp_origin,
-            rp_name: &config.rp_name,
-        };
+        let rp = RelyingParty { rp_id: &config.rp_id, rp_origin: &config.rp_origin, rp_name: &config.rp_name };
 
-        let (challenge, auth_state) = rp
-            .begin_authentication(&passkeys)
-            .map_err(|e| RvError::ErrFido2AuthFailed(e.to_string()))?;
+        let (challenge, auth_state) =
+            rp.begin_authentication(&passkeys).map_err(|e| RvError::ErrFido2AuthFailed(e.to_string()))?;
 
         let state_json = serde_json::to_string(&auth_state)
             .map_err(|e: serde_json::Error| RvError::ErrFido2AuthFailed(e.to_string()))?;
-        let state_entry = StorageEntry::new(
-            &format!("challenge/auth/{username}"),
-            &state_json,
-        )?;
+        let state_entry = StorageEntry::new(&format!("challenge/auth/{username}"), &state_json)?;
         req.storage_put(&state_entry).await?;
 
         let challenge_json = serde_json::to_value(&challenge)
@@ -165,24 +153,11 @@ impl UserPassBackendInner {
         let remote_addr = req.connection.as_ref().map(|c| c.peer_addr.clone()).unwrap_or_default();
 
         let result = self.fido2_login_complete_inner(backend, req).await;
-        let (success, base) =
-            bv_auth_audit::login_outcome(&result);
+        let (success, base) = bv_auth_audit::login_outcome(&result);
         // Tag the method so a security-key login is distinguishable from
         // a password login on the same `userpass/` mount.
-        let details = if base.is_empty() {
-            "method=fido2".to_string()
-        } else {
-            format!("method=fido2 {base}")
-        };
-        bv_auth_audit::record_login(
-            &self.core,
-            "userpass/",
-            &username,
-            success,
-            &remote_addr,
-            &details,
-        )
-        .await;
+        let details = if base.is_empty() { "method=fido2".to_string() } else { format!("method=fido2 {base}") };
+        bv_auth_audit::record_login(&self.core, "userpass/", &username, success, &remote_addr, &details).await;
         result
     }
 
@@ -191,14 +166,13 @@ impl UserPassBackendInner {
         _backend: &dyn Backend,
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        let config = self.get_fido2_config(req).await?
-            .ok_or(RvError::ErrFido2NotConfigured)?;
+        let config = self.get_fido2_config(req).await?.ok_or(RvError::ErrFido2NotConfigured)?;
 
         let username = req.get_data("username")?.as_str().unwrap().to_lowercase();
         let credential_json = req.get_data("credential")?.as_str().unwrap().to_string();
 
-        let state_entry = req.storage_get(&format!("challenge/auth/{username}")).await?
-            .ok_or(RvError::ErrFido2ChallengeExpired)?;
+        let state_entry =
+            req.storage_get(&format!("challenge/auth/{username}")).await?.ok_or(RvError::ErrFido2ChallengeExpired)?;
         let state_str: String = serde_json::from_slice(&state_entry.value)?;
         let auth_state: AuthenticationState = serde_json::from_str(&state_str)
             .map_err(|e: serde_json::Error| RvError::ErrFido2AuthFailed(format!("invalid state: {e}")))?;
@@ -206,20 +180,15 @@ impl UserPassBackendInner {
         // Single-use challenge.
         req.storage_delete(&format!("challenge/auth/{username}")).await?;
 
-        let rp = RelyingParty {
-            rp_id: &config.rp_id,
-            rp_origin: &config.rp_origin,
-            rp_name: &config.rp_name,
-        };
+        let rp = RelyingParty { rp_id: &config.rp_id, rp_origin: &config.rp_origin, rp_name: &config.rp_name };
 
         let assertion: PublicKeyCredentialAssertion = serde_json::from_str(&credential_json)
             .map_err(|e: serde_json::Error| RvError::ErrFido2AuthFailed(format!("invalid credential: {e}")))?;
 
-        let mut user_entry = self.get_user(req, &username).await?
-            .ok_or(RvError::ErrFido2CredentialNotFound)?;
+        let mut user_entry = self.get_user(req, &username).await?.ok_or(RvError::ErrFido2CredentialNotFound)?;
 
-        let mut passkeys = user_entry.get_passkeys()
-            .map_err(|e: serde_json::Error| RvError::ErrFido2AuthFailed(e.to_string()))?;
+        let mut passkeys =
+            user_entry.get_passkeys().map_err(|e: serde_json::Error| RvError::ErrFido2AuthFailed(e.to_string()))?;
 
         let auth_result = rp
             .finish_authentication(&assertion, &auth_state, &passkeys)
@@ -232,7 +201,8 @@ impl UserPassBackendInner {
                 }
             }
         }
-        user_entry.set_passkeys(&passkeys)
+        user_entry
+            .set_passkeys(&passkeys)
             .map_err(|e: serde_json::Error| RvError::ErrFido2AuthFailed(e.to_string()))?;
         self.set_user(req, &username, &user_entry).await?;
 
@@ -240,31 +210,19 @@ impl UserPassBackendInner {
         // request header — or, unscoped, to the principal's first assigned
         // namespace — exactly as the password-login path does.
         let (ns_path, ns_uuid) =
-            crate::kernel_api::namespace::login_namespace_for_principal(
-                &self.core,
-                req,
-                "userpass/",
-                &username,
-            )
-            .await?;
+            crate::kernel_api::namespace::login_namespace_for_principal(&self.core, req, "userpass/", &username)
+                .await?;
 
         // Multi-tenancy: refuse the login if this principal's namespace
         // assignment does not include the login namespace (no record ⇒
         // unrestricted; fails closed on a non-matching record).
-        crate::kernel_api::namespace::enforce_login_assignment(
-            &self.core,
-            "userpass/",
-            &username,
-            &ns_path,
-        )
-        .await?;
+        crate::kernel_api::namespace::enforce_login_assignment(&self.core, "userpass/", &username, &ns_path).await?;
 
         // Union direct policies with any attached through identity user-groups
         // (of the login namespace) so FIDO2 logins receive the same
         // group-derived policies as password logins for the same username.
-        let effective_policies = self
-            .expand_identity_group_policies(GroupKind::User, &username, &user_entry.policies, &ns_path)
-            .await;
+        let effective_policies =
+            self.expand_identity_group_policies(GroupKind::User, &username, &user_entry.policies, &ns_path).await;
 
         if user_entry.token_policies.is_empty() && !effective_policies.is_empty() {
             user_entry.token_policies = effective_policies.clone();
@@ -296,15 +254,8 @@ impl UserPassBackendInner {
         }
         // child_visible follows the login namespace's `child_visible_default`
         // flag (see `path_login` for the rationale); default false.
-        let child_visible =
-            crate::kernel_api::namespace::login_child_visible(&self.core, &ns_path)
-                .await;
-        crate::kernel_api::namespace::stamp_binding(
-            &mut auth.metadata,
-            &ns_path,
-            &ns_uuid,
-            child_visible,
-        );
+        let child_visible = crate::kernel_api::namespace::login_child_visible(&self.core, &ns_path).await;
+        crate::kernel_api::namespace::stamp_binding(&mut auth.metadata, &ns_path, &ns_uuid, child_visible);
         user_entry.populate_token_auth(&mut auth);
 
         if auth.policies.is_empty() && !effective_policies.is_empty() {

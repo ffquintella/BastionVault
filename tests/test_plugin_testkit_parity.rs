@@ -97,7 +97,9 @@ const SQL_METHODS: [&str; 4] =
 
 fn sql_params(method: &str) -> Value {
     match method {
-        "resource_sql_authorize" => json!({"resource": "db", "checks": [{"capability": "sql_select", "target": "server"}]}),
+        "resource_sql_authorize" => {
+            json!({"resource": "db", "checks": [{"capability": "sql_select", "target": "server"}]})
+        }
         "resource_sql_credential" => json!({"resource": "db", "profile": "ro", "session_ref": "s-1"}),
         "connect_ticket_redeem" => json!({"resource": "db", "profile": "ro", "ticket": "t-1"}),
         _ => json!({"resource": "db"}),
@@ -267,7 +269,8 @@ async fn dynamic_capability_gate_matches_between_runtimes() {
 
     manifest.capabilities.dynamic_lease_register = true;
     let real = WasmRuntime::new().unwrap().invoke(&manifest, &wasm, b"{}", None).await.unwrap();
-    let mock = TestHost::builder("parity-dynamic").dynamic_lease_register(true).build().invoke_raw(&wasm, b"{}").unwrap();
+    let mock =
+        TestHost::builder("parity-dynamic").dynamic_lease_register(true).build().invoke_raw(&wasm, b"{}").unwrap();
     assert_eq!(code(&real.response), bastion_plugin_testkit::DYNAMIC_NO_SESSION);
     assert_eq!(real.response, mock.response);
 }

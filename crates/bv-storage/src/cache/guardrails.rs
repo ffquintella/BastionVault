@@ -53,8 +53,7 @@ pub fn protections_status(cache_config: &CacheConfig) -> ProtectionsStatus {
     ProtectionsStatus {
         memlock_requested: cache_config.memlock,
         core_dumps_allowed: cache_config.allow_core_dumps,
-        any_cache_enabled: cache_config.token_cache_ttl_secs > 0
-            || cache_config.secret_cache_ttl_secs > 0,
+        any_cache_enabled: cache_config.token_cache_ttl_secs > 0 || cache_config.secret_cache_ttl_secs > 0,
     }
 }
 

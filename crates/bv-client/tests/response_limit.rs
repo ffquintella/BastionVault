@@ -122,10 +122,7 @@ async fn read_larger_than_ureq_default_limit_succeeds() {
         .expect("an 11 MiB body must be readable")
         .expect("body carries a data payload");
     let data = resp.data.expect("data");
-    assert_eq!(
-        data.get("bytes_b64").and_then(|v| v.as_str()).map(str::len),
-        Some(11 * 1024 * 1024)
-    );
+    assert_eq!(data.get("bytes_b64").and_then(|v| v.as_str()).map(str::len), Some(11 * 1024 * 1024));
 }
 
 /// Over the configured limit: a named, non-retryable error. The point
@@ -190,9 +187,5 @@ async fn oversized_body_does_not_fail_over() {
         .expect_err("a body over the limit must error");
     assert!(err.is_response_too_large(), "expected ResponseTooLarge, got {err}");
     assert_eq!(be.address(), big_url, "the session must stay pinned to the node it asked");
-    assert_eq!(
-        big.payload_requests.load(Ordering::SeqCst),
-        1,
-        "the oversized read must be attempted exactly once"
-    );
+    assert_eq!(big.payload_requests.load(Ordering::SeqCst), 1, "the oversized read must be attempted exactly once");
 }

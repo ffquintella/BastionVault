@@ -35,9 +35,9 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::kernel_api::VaultCtx;
 use crate::bv_error_string;
 use crate::errors::RvError;
+use crate::kernel_api::VaultCtx;
 use crate::storage::{barrier_view::BarrierView, Storage, StorageEntry};
 
 const GLOBAL_POLICY_KEY: &str = "ssh-broker/policy/global";
@@ -180,11 +180,7 @@ pub fn resolve(
     resource: Option<&ResourcePolicy>,
 ) -> EffectiveLoginClass {
     let mut ag: Vec<&AssetGroupPolicy> = asset_groups.iter().collect();
-    ag.sort_by(|a, b| {
-        a.priority
-            .cmp(&b.priority)
-            .then_with(|| a.asset_group_id.cmp(&b.asset_group_id))
-    });
+    ag.sort_by(|a, b| a.priority.cmp(&b.priority).then_with(|| a.asset_group_id.cmp(&b.asset_group_id)));
 
     let mut class_opt: Option<(LoginClass, &'static str)> = None;
     let mut locked_by: Vec<&'static str> = Vec::new();
@@ -244,8 +240,7 @@ pub fn resolve(
         }
     }
 
-    let (login_class, login_class_source) =
-        class_opt.unwrap_or((LoginClass::SharedCredential, "default"));
+    let (login_class, login_class_source) = class_opt.unwrap_or((LoginClass::SharedCredential, "default"));
 
     EffectiveLoginClass {
         login_class,
@@ -275,12 +270,7 @@ impl PolicyStore {
         let type_view = Arc::new(system_view.new_sub_view(TYPE_POLICY_SUB_PATH));
         let asset_group_view = Arc::new(system_view.new_sub_view(ASSET_GROUP_POLICY_SUB_PATH));
         let resource_view = Arc::new(system_view.new_sub_view(RESOURCE_POLICY_SUB_PATH));
-        Ok(Arc::new(Self {
-            type_view,
-            asset_group_view,
-            resource_view,
-            system_view,
-        }))
+        Ok(Arc::new(Self { type_view, asset_group_view, resource_view, system_view }))
     }
 
     // ─── Global policy ──────────────────────────────────────────
@@ -294,14 +284,9 @@ impl PolicyStore {
     }
 
     pub async fn put_global(&self, p: &GlobalPolicy) -> Result<(), RvError> {
-        let value = serde_json::to_vec(p)
-            .map_err(|e| bv_error_string!(&format!("encode ssh-broker global policy: {e}")))?;
-        self.system_view
-            .put(&StorageEntry {
-                key: GLOBAL_POLICY_KEY.to_string(),
-                value,
-            })
-            .await
+        let value =
+            serde_json::to_vec(p).map_err(|e| bv_error_string!(&format!("encode ssh-broker global policy: {e}")))?;
+        self.system_view.put(&StorageEntry { key: GLOBAL_POLICY_KEY.to_string(), value }).await
     }
 
     // ─── Type policy ────────────────────────────────────────────
@@ -318,8 +303,8 @@ impl PolicyStore {
 
     pub async fn put_type(&self, p: &TypePolicy) -> Result<(), RvError> {
         let name = sanitize(&p.type_name)?;
-        let value = serde_json::to_vec(p)
-            .map_err(|e| bv_error_string!(&format!("encode ssh-broker type policy: {e}")))?;
+        let value =
+            serde_json::to_vec(p).map_err(|e| bv_error_string!(&format!("encode ssh-broker type policy: {e}")))?;
         self.type_view.put(&StorageEntry { key: name, value }).await
     }
 
@@ -330,10 +315,7 @@ impl PolicyStore {
 
     // ─── Asset-group policy ─────────────────────────────────────
 
-    pub async fn get_asset_group(
-        &self,
-        asset_group_id: &str,
-    ) -> Result<Option<AssetGroupPolicy>, RvError> {
+    pub async fn get_asset_group(&self, asset_group_id: &str) -> Result<Option<AssetGroupPolicy>, RvError> {
         let id = sanitize(asset_group_id)?;
         let Some(entry) = self.asset_group_view.get(&id).await? else {
             return Ok(None);
@@ -347,9 +329,7 @@ impl PolicyStore {
         let id = sanitize(&p.asset_group_id)?;
         let value = serde_json::to_vec(p)
             .map_err(|e| bv_error_string!(&format!("encode ssh-broker asset-group policy: {e}")))?;
-        self.asset_group_view
-            .put(&StorageEntry { key: id, value })
-            .await
+        self.asset_group_view.put(&StorageEntry { key: id, value }).await
     }
 
     pub async fn delete_asset_group(&self, asset_group_id: &str) -> Result<(), RvError> {
@@ -371,11 +351,9 @@ impl PolicyStore {
 
     pub async fn put_resource(&self, p: &ResourcePolicy) -> Result<(), RvError> {
         let id = sanitize(&p.resource_id)?;
-        let value = serde_json::to_vec(p)
-            .map_err(|e| bv_error_string!(&format!("encode ssh-broker resource policy: {e}")))?;
-        self.resource_view
-            .put(&StorageEntry { key: id, value })
-            .await
+        let value =
+            serde_json::to_vec(p).map_err(|e| bv_error_string!(&format!("encode ssh-broker resource policy: {e}")))?;
+        self.resource_view.put(&StorageEntry { key: id, value }).await
     }
 
     pub async fn delete_resource(&self, resource_id: &str) -> Result<(), RvError> {
@@ -413,22 +391,14 @@ impl PolicyStore {
         resource_id: &str,
     ) -> Result<EffectiveLoginClass, RvError> {
         let global = self.get_global().await?;
-        let type_ = if type_name.trim().is_empty() {
-            None
-        } else {
-            self.get_type(type_name).await?
-        };
+        let type_ = if type_name.trim().is_empty() { None } else { self.get_type(type_name).await? };
         let mut ags: Vec<AssetGroupPolicy> = Vec::new();
         for id in asset_group_ids {
             if let Some(p) = self.get_asset_group(id).await? {
                 ags.push(p);
             }
         }
-        let resource = if resource_id.trim().is_empty() {
-            None
-        } else {
-            self.get_resource(resource_id).await?
-        };
+        let resource = if resource_id.trim().is_empty() { None } else { self.get_resource(resource_id).await? };
         Ok(resolve(&global, type_.as_ref(), &ags, resource.as_ref()))
     }
 }
@@ -453,22 +423,13 @@ mod tests {
     fn res(class: LoginClass) -> ResourcePolicy {
         ResourcePolicy {
             resource_id: "r".into(),
-            tier: LoginClassTier {
-                login_class: Some(class),
-                lock: false,
-            },
+            tier: LoginClassTier { login_class: Some(class), lock: false },
             updated_at: Utc::now(),
         }
     }
 
     fn global(class: Option<LoginClass>, lock: bool) -> GlobalPolicy {
-        GlobalPolicy {
-            tier: LoginClassTier {
-                login_class: class,
-                lock,
-            },
-            updated_at: None,
-        }
+        GlobalPolicy { tier: LoginClassTier { login_class: class, lock }, updated_at: None }
     }
 
     #[test]
@@ -482,12 +443,8 @@ mod tests {
     #[test]
     fn most_restrictive_wins_brokered() {
         // global brokered, resource tries shared-credential → brokered wins.
-        let p = resolve(
-            &global(Some(LoginClass::Brokered), false),
-            None,
-            &[],
-            Some(&res(LoginClass::SharedCredential)),
-        );
+        let p =
+            resolve(&global(Some(LoginClass::Brokered), false), None, &[], Some(&res(LoginClass::SharedCredential)));
         assert_eq!(p.login_class, LoginClass::Brokered);
         assert_eq!(p.login_class_source, "global");
         // No lock set, so weakening attempt is not a violation — it's
@@ -497,24 +454,15 @@ mod tests {
 
     #[test]
     fn resource_can_raise_to_brokered() {
-        let p = resolve(
-            &global(Some(LoginClass::SharedCredential), false),
-            None,
-            &[],
-            Some(&res(LoginClass::Brokered)),
-        );
+        let p =
+            resolve(&global(Some(LoginClass::SharedCredential), false), None, &[], Some(&res(LoginClass::Brokered)));
         assert_eq!(p.login_class, LoginClass::Brokered);
         assert_eq!(p.login_class_source, "resource");
     }
 
     #[test]
     fn lock_prevents_weakening() {
-        let p = resolve(
-            &global(Some(LoginClass::Brokered), true),
-            None,
-            &[],
-            Some(&res(LoginClass::SharedCredential)),
-        );
+        let p = resolve(&global(Some(LoginClass::Brokered), true), None, &[], Some(&res(LoginClass::SharedCredential)));
         assert_eq!(p.login_class, LoginClass::Brokered);
         let lv = p.lock_violation.as_ref().expect("lock violation");
         assert_eq!(lv.locking_tier, "global");
@@ -526,24 +474,13 @@ mod tests {
     fn type_tier_locks_brokered_against_resource() {
         let type_ = TypePolicy {
             type_name: "database".into(),
-            tier: LoginClassTier {
-                login_class: Some(LoginClass::Brokered),
-                lock: true,
-            },
+            tier: LoginClassTier { login_class: Some(LoginClass::Brokered), lock: true },
             updated_at: Utc::now(),
         };
-        let p = resolve(
-            &GlobalPolicy::default(),
-            Some(&type_),
-            &[],
-            Some(&res(LoginClass::SharedCredential)),
-        );
+        let p = resolve(&GlobalPolicy::default(), Some(&type_), &[], Some(&res(LoginClass::SharedCredential)));
         assert_eq!(p.login_class, LoginClass::Brokered);
         assert_eq!(p.locked_at_tier, Some("type"));
-        assert_eq!(
-            p.chain,
-            vec!["type=brokered".to_string(), "resource=shared-credential".to_string()]
-        );
+        assert_eq!(p.chain, vec!["type=brokered".to_string(), "resource=shared-credential".to_string()]);
     }
 
     #[test]
@@ -551,19 +488,13 @@ mod tests {
         let high = AssetGroupPolicy {
             asset_group_id: "high".into(),
             priority: 10,
-            tier: LoginClassTier {
-                login_class: Some(LoginClass::Brokered),
-                lock: false,
-            },
+            tier: LoginClassTier { login_class: Some(LoginClass::Brokered), lock: false },
             updated_at: Utc::now(),
         };
         let low = AssetGroupPolicy {
             asset_group_id: "low".into(),
             priority: 5,
-            tier: LoginClassTier {
-                login_class: Some(LoginClass::SharedCredential),
-                lock: false,
-            },
+            tier: LoginClassTier { login_class: Some(LoginClass::SharedCredential), lock: false },
             updated_at: Utc::now(),
         };
         // Most-restrictive still wins overall (brokered), regardless of

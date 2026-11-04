@@ -13,7 +13,7 @@ use std::{any::Any, sync::Arc};
 
 use bv_errors::RvError;
 
-use crate::{services::KernelServices, ctx::VaultCtx};
+use crate::{ctx::VaultCtx, services::KernelServices};
 
 #[maybe_async::maybe_async]
 pub trait Module: Any + Send + Sync {

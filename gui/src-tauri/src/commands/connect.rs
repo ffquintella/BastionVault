@@ -385,8 +385,16 @@ pub async fn session_open_ssh(
     let username = username_for_dial;
     let credential = credential_for_dial;
     let ssh_target = host_candidates.first().cloned().unwrap_or_default();
-    record_session_open(&state, &request.resource_name, &request.profile_id, "ssh", route_transport(&route), &ssh_target, port)
-        .await?;
+    record_session_open(
+        &state,
+        &request.resource_name,
+        &request.profile_id,
+        "ssh",
+        route_transport(&route),
+        &ssh_target,
+        port,
+    )
+    .await?;
     let (chosen_host, outcome): (String, SshOpenOutcome) =
         connect_provider::dial_in_order("ssh", &host_candidates, port, |host| {
             let app = app.clone();
@@ -996,8 +1004,16 @@ pub async fn session_open_rdp(
     // hostname as fallback. Only network-layer failures fall through
     // to the next candidate; a pinned plan has exactly one.
     let rdp_target = host_candidates.first().cloned().unwrap_or_default();
-    record_session_open(&state, &request.resource_name, &request.profile_id, "rdp", route_transport(&route), &rdp_target, port)
-        .await?;
+    record_session_open(
+        &state,
+        &request.resource_name,
+        &request.profile_id,
+        "rdp",
+        route_transport(&route),
+        &rdp_target,
+        port,
+    )
+    .await?;
     let (host, outcome): (String, session::rdp::RdpOpenOutcome) =
         connect_provider::dial_in_order("rdp", &host_candidates, port, |host| {
             let app = app.clone();

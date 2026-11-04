@@ -31,10 +31,7 @@ impl NamespaceRegistry for NamespaceModule {
         let Some(store) = self.store() else {
             return Ok(None);
         };
-        Ok(store
-            .get_by_path(raw)
-            .await?
-            .map(|ns| NamespaceRef { uuid: ns.uuid, path: ns.path }))
+        Ok(store.get_by_path(raw).await?.map(|ns| NamespaceRef { uuid: ns.uuid, path: ns.path }))
     }
 
     async fn ensure_router(&self, uuid: &str, path: &str) -> Result<Arc<MountsRouter>, RvError> {
@@ -50,21 +47,11 @@ impl NamespaceRegistry for NamespaceModule {
         token_binding::resolve_login_namespace_for_principal(&self.core, req, mount, name).await
     }
 
-    async fn enforce_login_assignment(
-        &self,
-        mount: &str,
-        name: &str,
-        ns_path: &str,
-    ) -> Result<(), RvError> {
+    async fn enforce_login_assignment(&self, mount: &str, name: &str, ns_path: &str) -> Result<(), RvError> {
         ns_assignment::enforce_login_assignment(&self.core, mount, name, ns_path).await
     }
 
-    async fn check_entity_create(
-        &self,
-        mount: &str,
-        name: &str,
-        ns_path: &str,
-    ) -> Result<(), RvError> {
+    async fn check_entity_create(&self, mount: &str, name: &str, ns_path: &str) -> Result<(), RvError> {
         quota::check_entity_create(&self.core, mount, name, ns_path).await
     }
 
@@ -72,10 +59,7 @@ impl NamespaceRegistry for NamespaceModule {
         token_binding::login_child_visible(&self.core, ns_path).await
     }
 
-    async fn lease_quota_for_path(
-        &self,
-        req_path: &str,
-    ) -> Result<Option<(String, u64)>, RvError> {
+    async fn lease_quota_for_path(&self, req_path: &str) -> Result<Option<(String, u64)>, RvError> {
         let Some(store) = self.store() else {
             return Ok(None);
         };

@@ -62,8 +62,8 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use sha2::{Digest, Sha256};
 use wasmtime::{
-    AsContextMut, Caller, Config, Engine, Linker, Memory, Module, Store, StoreLimits,
-    StoreLimitsBuilder, Trap, TypedFunc,
+    AsContextMut, Caller, Config, Engine, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder, Trap,
+    TypedFunc,
 };
 
 pub mod app;
@@ -290,10 +290,7 @@ impl Ctx {
         let prefix = self.storage_prefix.as_deref()?;
         let prefix_norm = prefix.trim_end_matches('/');
         let req_norm = requested.trim_start_matches('/');
-        if !prefix_norm.is_empty()
-            && req_norm != prefix_norm
-            && !req_norm.starts_with(&format!("{prefix_norm}/"))
-        {
+        if !prefix_norm.is_empty() && req_norm != prefix_norm && !req_norm.starts_with(&format!("{prefix_norm}/")) {
             return None;
         }
         if req_norm.contains("..") {
@@ -311,8 +308,7 @@ fn data_key(name: &str, rel: &str) -> String {
 /// one entity for a plugin declaring `storage_scope = "entity"`. `None` for an
 /// id that could carry a path separator or `..`.
 pub fn entity_data_root(name: &str, entity_id: &str) -> Option<String> {
-    let ok = !entity_id.is_empty()
-        && entity_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    let ok = !entity_id.is_empty() && entity_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
     ok.then(|| format!("core/plugins/{name}/data/entity/{entity_id}/"))
 }
 
@@ -481,11 +477,8 @@ impl TestHostBuilder {
         config.consume_fuel(true);
         config.max_wasm_stack(1024 * 1024);
         let engine = Engine::new(&config).expect("wasmtime engine");
-        let storage = self
-            .storage_seed
-            .into_iter()
-            .map(|(k, v)| (data_key(&self.name, k.trim_start_matches('/')), v))
-            .collect();
+        let storage =
+            self.storage_seed.into_iter().map(|(k, v)| (data_key(&self.name, k.trim_start_matches('/')), v)).collect();
         TestHost {
             engine,
             name: self.name,
@@ -607,11 +600,10 @@ impl TestHost {
         path: &str,
         data: serde_json::Value,
     ) -> Result<TestInvocation, TestkitError> {
-        let root = entity_data_root(&self.name, &caller.entity_id).ok_or_else(|| {
-            TestkitError::Invoke("entity-scoped plugin invoked without a valid caller entity".into())
-        })?;
-        let mut env: serde_json::Value = serde_json::from_slice(&envelope(op, path, data))
-            .expect("envelope is valid JSON");
+        let root = entity_data_root(&self.name, &caller.entity_id)
+            .ok_or_else(|| TestkitError::Invoke("entity-scoped plugin invoked without a valid caller entity".into()))?;
+        let mut env: serde_json::Value =
+            serde_json::from_slice(&envelope(op, path, data)).expect("envelope is valid JSON");
         env["caller"] = caller.json();
         self.invoke_raw_in(wasm, &serde_json::to_vec(&env).expect("envelope serialise"), root)
     }
@@ -630,14 +622,8 @@ impl TestHost {
             .collect()
     }
 
-    fn invoke_raw_in(
-        &self,
-        wasm: &[u8],
-        input: &[u8],
-        data_root: String,
-    ) -> Result<TestInvocation, TestkitError> {
-        let module =
-            Module::new(&self.engine, wasm).map_err(|e| TestkitError::Compile(e.to_string()))?;
+    fn invoke_raw_in(&self, wasm: &[u8], input: &[u8], data_root: String) -> Result<TestInvocation, TestkitError> {
+        let module = Module::new(&self.engine, wasm).map_err(|e| TestkitError::Compile(e.to_string()))?;
 
         let marks = self.state.lock().unwrap().marks();
 
@@ -656,40 +642,26 @@ impl TestHost {
 
         let mut store: Store<Ctx> = Store::new(&self.engine, ctx);
         store.limiter(|c| &mut c.limits);
-        store
-            .set_fuel(self.fuel_budget)
-            .map_err(|e| TestkitError::Invoke(e.to_string()))?;
+        store.set_fuel(self.fuel_budget).map_err(|e| TestkitError::Invoke(e.to_string()))?;
 
         let mut linker: Linker<Ctx> = Linker::new(&self.engine);
         register_test_imports(&mut linker)?;
 
-        let instance = linker
-            .instantiate(&mut store, &module)
-            .map_err(|e| TestkitError::Instantiate(e.to_string()))?;
+        let instance = linker.instantiate(&mut store, &module).map_err(|e| TestkitError::Instantiate(e.to_string()))?;
 
-        let memory = instance
-            .get_memory(&mut store, "memory")
-            .ok_or(TestkitError::MissingExport("memory"))?;
-        let alloc: TypedFunc<i32, i32> = instance
-            .get_typed_func(&mut store, "bv_alloc")
-            .map_err(|_| TestkitError::MissingExport("bv_alloc"))?;
-        let run: TypedFunc<(i32, i32), i32> = instance
-            .get_typed_func(&mut store, "bv_run")
-            .map_err(|_| TestkitError::MissingExport("bv_run"))?;
+        let memory = instance.get_memory(&mut store, "memory").ok_or(TestkitError::MissingExport("memory"))?;
+        let alloc: TypedFunc<i32, i32> =
+            instance.get_typed_func(&mut store, "bv_alloc").map_err(|_| TestkitError::MissingExport("bv_alloc"))?;
+        let run: TypedFunc<(i32, i32), i32> =
+            instance.get_typed_func(&mut store, "bv_run").map_err(|_| TestkitError::MissingExport("bv_run"))?;
 
-        let input_len: i32 = input
-            .len()
-            .try_into()
-            .map_err(|_| TestkitError::PayloadTooLarge("input exceeds i32".into()))?;
-        let input_ptr = alloc
-            .call(&mut store, input_len)
-            .map_err(map_call_err)?;
+        let input_len: i32 =
+            input.len().try_into().map_err(|_| TestkitError::PayloadTooLarge("input exceeds i32".into()))?;
+        let input_ptr = alloc.call(&mut store, input_len).map_err(map_call_err)?;
         if input_ptr < 0 {
             return Err(TestkitError::Invoke("bv_alloc returned negative pointer".into()));
         }
-        memory
-            .write(&mut store, input_ptr as usize, input)
-            .map_err(|e| TestkitError::Memory(e.to_string()))?;
+        memory.write(&mut store, input_ptr as usize, input).map_err(|e| TestkitError::Memory(e.to_string()))?;
 
         let status = run.call(&mut store, (input_ptr, input_len)).map_err(map_call_err)?;
 
@@ -701,11 +673,7 @@ impl TestHost {
         let fuel_remaining = store.get_fuel().unwrap_or(0);
         let fuel_consumed = self.fuel_budget.saturating_sub(fuel_remaining);
 
-        let outcome = if status == 0 {
-            InvokeOutcome::Success
-        } else {
-            InvokeOutcome::PluginError(status)
-        };
+        let outcome = if status == 0 { InvokeOutcome::Success } else { InvokeOutcome::PluginError(status) };
 
         let st = self.state.lock().unwrap();
         Ok(st.invocation(marks, outcome, response, fuel_consumed))
@@ -748,8 +716,7 @@ pub fn envelope(op: &str, path: &str, data: serde_json::Value) -> Vec<u8> {
         serde_json::Value::Null => serde_json::Value::Object(Default::default()),
         other => other,
     };
-    serde_json::to_vec(&serde_json::json!({ "op": op, "path": path, "data": data }))
-        .expect("envelope serialise")
+    serde_json::to_vec(&serde_json::json!({ "op": op, "path": path, "data": data })).expect("envelope serialise")
 }
 
 pub(crate) fn map_call_err(e: wasmtime::Error) -> TestkitError {
@@ -816,10 +783,7 @@ fn register_test_imports(linker: &mut Linker<Ctx>) -> Result<(), TestkitError> {
                 TestClock::Fixed(ms) => ms,
                 TestClock::System => {
                     use std::time::{SystemTime, UNIX_EPOCH};
-                    SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .map(|d| d.as_millis() as i64)
-                        .unwrap_or(0)
+                    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
                 }
             }
         })
@@ -874,22 +838,18 @@ fn register_test_imports(linker: &mut Linker<Ctx>) -> Result<(), TestkitError> {
 
     // bv.storage_delete — idempotent.
     linker
-        .func_wrap(
-            "bv",
-            "storage_delete",
-            |mut caller: Caller<'_, Ctx>, key_ptr: i32, key_len: i32| -> i32 {
-                let key = match read_string(&mut caller, key_ptr, key_len) {
-                    Some(s) => s,
-                    None => return STORAGE_INTERNAL_ERROR,
-                };
-                let full = match caller.data().rebase_key(&key) {
-                    Some(f) => f,
-                    None => return STORAGE_FORBIDDEN,
-                };
-                caller.data().shared.lock().unwrap().storage.remove(&full);
-                0
-            },
-        )
+        .func_wrap("bv", "storage_delete", |mut caller: Caller<'_, Ctx>, key_ptr: i32, key_len: i32| -> i32 {
+            let key = match read_string(&mut caller, key_ptr, key_len) {
+                Some(s) => s,
+                None => return STORAGE_INTERNAL_ERROR,
+            };
+            let full = match caller.data().rebase_key(&key) {
+                Some(f) => f,
+                None => return STORAGE_FORBIDDEN,
+            };
+            caller.data().shared.lock().unwrap().storage.remove(&full);
+            0
+        })
         .map_err(eng)?;
 
     // bv.storage_list — newline-separated immediate children; nested
@@ -910,13 +870,8 @@ fn register_test_imports(linker: &mut Linker<Ctx>) -> Result<(), TestkitError> {
                     if prefix.contains("..") {
                         return STORAGE_FORBIDDEN;
                     }
-                    let prefix_norm = caller
-                        .data()
-                        .storage_prefix
-                        .as_deref()
-                        .unwrap_or("")
-                        .trim_end_matches('/')
-                        .to_string();
+                    let prefix_norm =
+                        caller.data().storage_prefix.as_deref().unwrap_or("").trim_end_matches('/').to_string();
                     let req_norm = prefix.trim_start_matches('/').trim_end_matches('/').to_string();
                     if !prefix_norm.is_empty()
                         && req_norm != prefix_norm
@@ -1159,16 +1114,9 @@ fn write_to_buffer(caller: &mut Caller<'_, Ctx>, src: &[u8], out_ptr: i32, out_m
     src.len() as i32
 }
 
-fn read_memory_slice(
-    memory: &Memory,
-    store: &mut Store<Ctx>,
-    ptr: u32,
-    len: u32,
-) -> Result<Vec<u8>, TestkitError> {
+fn read_memory_slice(memory: &Memory, store: &mut Store<Ctx>, ptr: u32, len: u32) -> Result<Vec<u8>, TestkitError> {
     let start = ptr as usize;
-    let end = start
-        .checked_add(len as usize)
-        .ok_or(TestkitError::ResponseOutOfBounds)?;
+    let end = start.checked_add(len as usize).ok_or(TestkitError::ResponseOutOfBounds)?;
     let mem_data = memory.data(&*store);
     if end > mem_data.len() {
         return Err(TestkitError::ResponseOutOfBounds);
@@ -1211,9 +1159,7 @@ pub const HOST_IMPORTS: &[(&str, &str, &str)] = &[
 pub fn conformance_wat() -> String {
     let imports: String = HOST_IMPORTS
         .iter()
-        .map(|(name, params, results)| {
-            format!("  (import \"bv\" \"{name}\" (func ${name} {params} {results}))\n")
-        })
+        .map(|(name, params, results)| format!("  (import \"bv\" \"{name}\" (func ${name} {params} {results}))\n"))
         .collect();
     format!(
         r#"(module

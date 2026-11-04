@@ -642,8 +642,9 @@ async fn test_resource_group_history() {
 async fn list_kv_under_policy(name: &str, hcl: &str) -> Vec<String> {
     let (_bvault, core, root_token) = new_unseal_test_bastion_vault(name).await;
 
-    let _ = test_write_api(&core, &root_token, "sys/policy/p-list", true, json!({ "policy": hcl }).as_object().cloned())
-        .await;
+    let _ =
+        test_write_api(&core, &root_token, "sys/policy/p-list", true, json!({ "policy": hcl }).as_object().cloned())
+            .await;
 
     // KV-v1 mount with three secrets; two join the crew, one stays out.
     let _ =
@@ -890,9 +891,15 @@ async fn test_asset_group_member_redaction_honors_namespace_prefix() {
     .await
     .unwrap();
     test_mount_auth_api(&core, &root, "userpass", "userpass").await;
-    test_write_api(&core, &root, "auth/userpass/users/dave", true, json!({ "password": "pw-123456" }).as_object().cloned())
-        .await
-        .unwrap();
+    test_write_api(
+        &core,
+        &root,
+        "auth/userpass/users/dave",
+        true,
+        json!({ "password": "pw-123456" }).as_object().cloned(),
+    )
+    .await
+    .unwrap();
     ns_req(
         &core,
         &root,
@@ -953,9 +960,15 @@ async fn test_asset_group_member_redaction_honors_namespace_prefix() {
     )
     .await
     .unwrap();
-    test_write_api(&core, &root, "auth/userpass/users/eve", true, json!({ "password": "pw-123456" }).as_object().cloned())
-        .await
-        .unwrap();
+    test_write_api(
+        &core,
+        &root,
+        "auth/userpass/users/eve",
+        true,
+        json!({ "password": "pw-123456" }).as_object().cloned(),
+    )
+    .await
+    .unwrap();
     ns_req(
         &core,
         &root,

@@ -89,10 +89,9 @@ impl KeyAlgorithm {
             #[cfg(feature = "pki_pqc_composite")]
             ("ecdsa-p384+ml-dsa-87", 0) => Ok(Self::CompositeEcdsaP384MlDsa87),
             #[cfg(feature = "pki_pqc_composite")]
-            (
-                "ecdsa-p256+ml-dsa-44" | "ecdsa-p256+ml-dsa-65" | "ecdsa-p384+ml-dsa-87",
-                _,
-            ) => Err(RvError::ErrPkiKeyBitsInvalid),
+            ("ecdsa-p256+ml-dsa-44" | "ecdsa-p256+ml-dsa-65" | "ecdsa-p384+ml-dsa-87", _) => {
+                Err(RvError::ErrPkiKeyBitsInvalid)
+            }
             ("rsa", _) => Err(RvError::ErrPkiKeyBitsInvalid),
             ("ec", _) => Err(RvError::ErrPkiKeyBitsInvalid),
             _ => Err(RvError::ErrPkiKeyTypeInvalid),
@@ -103,9 +102,9 @@ impl KeyAlgorithm {
         match self {
             Self::MlDsa44 | Self::MlDsa65 | Self::MlDsa87 => AlgorithmClass::Pqc,
             #[cfg(feature = "pki_pqc_composite")]
-            Self::CompositeEcdsaP256MlDsa44
-            | Self::CompositeEcdsaP256MlDsa65
-            | Self::CompositeEcdsaP384MlDsa87 => AlgorithmClass::Composite,
+            Self::CompositeEcdsaP256MlDsa44 | Self::CompositeEcdsaP256MlDsa65 | Self::CompositeEcdsaP384MlDsa87 => {
+                AlgorithmClass::Composite
+            }
             _ => AlgorithmClass::Classical,
         }
     }
@@ -145,9 +144,7 @@ impl KeyAlgorithm {
             Self::EcdsaP384 => 384,
             Self::Ed25519 | Self::MlDsa44 | Self::MlDsa65 | Self::MlDsa87 => 0,
             #[cfg(feature = "pki_pqc_composite")]
-            Self::CompositeEcdsaP256MlDsa44
-            | Self::CompositeEcdsaP256MlDsa65
-            | Self::CompositeEcdsaP384MlDsa87 => 0,
+            Self::CompositeEcdsaP256MlDsa44 | Self::CompositeEcdsaP256MlDsa65 | Self::CompositeEcdsaP384MlDsa87 => 0,
         }
     }
 
@@ -164,9 +161,9 @@ impl KeyAlgorithm {
             // PQC algorithms are not driven through rcgen — see [`super::x509_pqc`].
             Self::MlDsa44 | Self::MlDsa65 | Self::MlDsa87 => return Err(RvError::ErrPkiKeyTypeInvalid),
             #[cfg(feature = "pki_pqc_composite")]
-            Self::CompositeEcdsaP256MlDsa44
-            | Self::CompositeEcdsaP256MlDsa65
-            | Self::CompositeEcdsaP384MlDsa87 => return Err(RvError::ErrPkiKeyTypeInvalid),
+            Self::CompositeEcdsaP256MlDsa44 | Self::CompositeEcdsaP256MlDsa65 | Self::CompositeEcdsaP384MlDsa87 => {
+                return Err(RvError::ErrPkiKeyTypeInvalid)
+            }
         })
     }
 }
@@ -318,10 +315,7 @@ fn normalise_to_pkcs8_pem(pem: &str) -> String {
 
     let trimmed = pem.trim();
 
-    let pem_label = pem::parse(trimmed)
-        .ok()
-        .map(|p| p.tag().to_string())
-        .unwrap_or_default();
+    let pem_label = pem::parse(trimmed).ok().map(|p| p.tag().to_string()).unwrap_or_default();
 
     // RSA path: rsa-0.9 is permissive — any of the three shapes
     // succeeding means the input *is* RSA and the canonical re-emit
@@ -347,12 +341,7 @@ fn normalise_to_pkcs8_pem(pem: &str) -> String {
         } else {
             format!("{}-byte big-int", e_bytes.len())
         };
-        log::info!(
-            "pki: normalising RSA key — pem_label={:?} modulus_bits={} e={}",
-            pem_label,
-            bits,
-            e_display
-        );
+        log::info!("pki: normalising RSA key — pem_label={:?} modulus_bits={} e={}", pem_label, bits, e_display);
         return match priv_key.to_pkcs8_pem(LineEnding::LF) {
             Ok(p) => p.to_string(),
             Err(e) => {
@@ -372,10 +361,7 @@ fn normalise_to_pkcs8_pem(pem: &str) -> String {
     // [0] curve OID, [1] BIT STRING pub }`) and re-wrap.
     if let Ok(parsed) = pem::parse(trimmed) {
         if let Some(wrapped) = wrap_sec1_ec_as_pkcs8(parsed.contents()) {
-            log::info!(
-                "pki: normalising EC key — pem_label={:?} sec1 → PKCS#8 wrap",
-                pem_label
-            );
+            log::info!("pki: normalising EC key — pem_label={:?} sec1 → PKCS#8 wrap", pem_label);
             return pem::encode(&pem::Pem::new("PRIVATE KEY", wrapped));
         }
     }
@@ -396,10 +382,7 @@ fn normalise_to_pkcs8_pem(pem: &str) -> String {
             sketch
         );
     } else {
-        log::info!(
-            "pki: normalise_to_pkcs8_pem — pem parse failed (pem_label={:?})",
-            pem_label
-        );
+        log::info!("pki: normalise_to_pkcs8_pem — pem parse failed (pem_label={:?})", pem_label);
     }
     pem.to_string()
 }
@@ -678,10 +661,7 @@ fn sniff_pkcs8_algorithm_oid(pem: &str) -> Option<String> {
     // are base-128 with continuation bit.
     let mut out = String::new();
     let first = *oid_bytes.first()?;
-    let _ = std::fmt::Write::write_fmt(
-        &mut out,
-        format_args!("{}.{}", first / 40, first % 40),
-    );
+    let _ = std::fmt::Write::write_fmt(&mut out, format_args!("{}.{}", first / 40, first % 40));
     let mut acc: u64 = 0;
     for &b in &oid_bytes[1..] {
         acc = (acc << 7) | (b & 0x7f) as u64;
@@ -711,9 +691,7 @@ pub(crate) fn rcgen_err(e: rcgen::Error) -> RvError {
 /// `(KeyAlgorithm, &'static SignatureAlgorithm)` based on the RSA modulus
 /// size. Returns `Ok(None)` when the PEM is not RSA — caller falls
 /// through to the rcgen path.
-fn sniff_rsa_size(
-    pem: &str,
-) -> Result<Option<(KeyAlgorithm, &'static rcgen::SignatureAlgorithm)>, RvError> {
+fn sniff_rsa_size(pem: &str) -> Result<Option<(KeyAlgorithm, &'static rcgen::SignatureAlgorithm)>, RvError> {
     use rsa::pkcs8::DecodePrivateKey;
     use rsa::traits::PublicKeyParts;
     use rsa::RsaPrivateKey;
@@ -831,9 +809,7 @@ impl Signer {
                 // toast needs the diagnosis self-contained.
                 let oid = sniff_pkcs8_algorithm_oid(&normalised).unwrap_or_default();
                 let key_shape = sniff_rsa_shape(&normalised);
-                log::warn!(
-                    "pki: from_storage_pem rejected — algorithm OID {oid:?}, shape {key_shape:?}: {e}"
-                );
+                log::warn!("pki: from_storage_pem rejected — algorithm OID {oid:?}, shape {key_shape:?}: {e}");
                 // Specific OID-driven errors first (most actionable).
                 if oid == "1.2.840.113549.1.1.10" {
                     return Err(RvError::ErrString(
@@ -907,9 +883,7 @@ impl Signer {
                         " (key payload is not a recognised private-key format)".to_string()
                     }
                 };
-                Err(RvError::ErrString(format!(
-                    "could not import key{detail}; underlying parser error: {e}"
-                )))
+                Err(RvError::ErrString(format!("could not import key{detail}; underlying parser error: {e}")))
             }
         }
     }

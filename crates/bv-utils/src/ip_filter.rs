@@ -198,10 +198,10 @@ mod test {
             "not-an-ip",
             "10.0.0.999",
             "10.0.0.0/33",
-            "10.0.0.50-10.0.0.5",     // inverted
-            "10.0.0.1-2001:db8::1",   // mixed family
-            "10.0.0.1-",              // missing end
-            "10.0.0.0/24/8",          // two slashes
+            "10.0.0.50-10.0.0.5",   // inverted
+            "10.0.0.1-2001:db8::1", // mixed family
+            "10.0.0.1-",            // missing end
+            "10.0.0.0/24/8",        // two slashes
         ] {
             assert!(SourceIpRule::parse(bad).is_err(), "entry {bad:?} must be rejected");
         }
@@ -209,8 +209,7 @@ mod test {
 
     #[test]
     fn test_ip_matches_any_mixed_list() {
-        let entries =
-            vec!["10.0.0.5".to_string(), "192.168.1.0/24".to_string(), "172.16.4.10-172.16.4.20".to_string()];
+        let entries = vec!["10.0.0.5".to_string(), "192.168.1.0/24".to_string(), "172.16.4.10-172.16.4.20".to_string()];
 
         assert!(ip_matches_any("10.0.0.5", &entries).unwrap());
         assert!(ip_matches_any("192.168.1.77", &entries).unwrap());

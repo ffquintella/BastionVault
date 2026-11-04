@@ -111,9 +111,8 @@ impl CaKeypair {
 
     /// Load from on-disk seed + pubkey hex (the `CaConfig` shape).
     pub fn from_hex(seed_hex: &str, pubkey_hex: &str) -> Result<Self, RvError> {
-        let seed_bytes = Zeroizing::new(
-            hex::decode(seed_hex).map_err(|e| RvError::ErrString(format!("CA seed hex decode: {e}")))?,
-        );
+        let seed_bytes =
+            Zeroizing::new(hex::decode(seed_hex).map_err(|e| RvError::ErrString(format!("CA seed hex decode: {e}")))?);
         if seed_bytes.len() != ML_DSA_65_SEED_LEN {
             return Err(RvError::ErrString(format!(
                 "CA seed length: got {}, want {}",
@@ -121,8 +120,8 @@ impl CaKeypair {
                 ML_DSA_65_SEED_LEN
             )));
         }
-        let public_key = hex::decode(pubkey_hex)
-            .map_err(|e| RvError::ErrString(format!("CA public-key hex decode: {e}")))?;
+        let public_key =
+            hex::decode(pubkey_hex).map_err(|e| RvError::ErrString(format!("CA public-key hex decode: {e}")))?;
         if public_key.len() != ML_DSA_65_PUBLIC_KEY_LEN {
             return Err(RvError::ErrString(format!(
                 "CA public-key length: got {}, want {}",
@@ -141,13 +140,8 @@ impl CaKeypair {
     /// emit for a classical key.
     pub fn public_key_openssh(&self) -> Result<String, RvError> {
         let mut blob = Vec::new();
-        MLDSA65_ALGO
-            .encode(&mut blob)
-            .map_err(|e| RvError::ErrString(format!("encode algo: {e}")))?;
-        self.public_key
-            .as_slice()
-            .encode(&mut blob)
-            .map_err(|e| RvError::ErrString(format!("encode pk: {e}")))?;
+        MLDSA65_ALGO.encode(&mut blob).map_err(|e| RvError::ErrString(format!("encode algo: {e}")))?;
+        self.public_key.as_slice().encode(&mut blob).map_err(|e| RvError::ErrString(format!("encode pk: {e}")))?;
         Ok(format!("{MLDSA65_ALGO} {} ca@bvault", B64.encode(&blob)))
     }
 
@@ -188,17 +182,10 @@ fn encode_options(map: &BTreeMap<String, String>) -> Result<Vec<u8>, RvError> {
         // a length-prefixed string body, even when empty (the OpenSSH
         // spec is explicit: `permit-pty` carries an empty `string`,
         // not a zero-length blob, in its `data` field).
-        k.as_str()
-            .encode(&mut out)
-            .map_err(|e| RvError::ErrString(format!("encode option name: {e}")))?;
+        k.as_str().encode(&mut out).map_err(|e| RvError::ErrString(format!("encode option name: {e}")))?;
         let mut inner = Vec::new();
-        v.as_str()
-            .encode(&mut inner)
-            .map_err(|e| RvError::ErrString(format!("encode option data: {e}")))?;
-        inner
-            .as_slice()
-            .encode(&mut out)
-            .map_err(|e| RvError::ErrString(format!("encode option wrap: {e}")))?;
+        v.as_str().encode(&mut inner).map_err(|e| RvError::ErrString(format!("encode option data: {e}")))?;
+        inner.as_slice().encode(&mut out).map_err(|e| RvError::ErrString(format!("encode option wrap: {e}")))?;
     }
     Ok(out)
 }
@@ -208,12 +195,8 @@ fn encode_options(map: &BTreeMap<String, String>) -> Result<Vec<u8>, RvError> {
 /// `signature_key` field). Same shape: `string algo || string pk_bytes`.
 fn encode_ca_pubkey_blob(public_key: &[u8]) -> Result<Vec<u8>, RvError> {
     let mut out = Vec::new();
-    MLDSA65_ALGO
-        .encode(&mut out)
-        .map_err(|e| RvError::ErrString(format!("encode ca algo: {e}")))?;
-    public_key
-        .encode(&mut out)
-        .map_err(|e| RvError::ErrString(format!("encode ca pk: {e}")))?;
+    MLDSA65_ALGO.encode(&mut out).map_err(|e| RvError::ErrString(format!("encode ca algo: {e}")))?;
+    public_key.encode(&mut out).map_err(|e| RvError::ErrString(format!("encode ca pk: {e}")))?;
     Ok(out)
 }
 
@@ -223,61 +206,35 @@ fn encode_ca_pubkey_blob(public_key: &[u8]) -> Result<Vec<u8>, RvError> {
 fn build_tbs(spec: &CertSpec, ca_pubkey: &[u8]) -> Result<Vec<u8>, RvError> {
     let mut tbs = Vec::new();
 
-    MLDSA65_CERT_ALGO
-        .encode(&mut tbs)
-        .map_err(|e| RvError::ErrString(format!("encode cert algo: {e}")))?;
-    spec.nonce
-        .encode(&mut tbs)
-        .map_err(|e| RvError::ErrString(format!("encode nonce: {e}")))?;
-    spec.client_pubkey
-        .encode(&mut tbs)
-        .map_err(|e| RvError::ErrString(format!("encode client pk: {e}")))?;
-    spec.serial
-        .encode(&mut tbs)
-        .map_err(|e| RvError::ErrString(format!("encode serial: {e}")))?;
-    spec.cert_type
-        .encode(&mut tbs)
-        .map_err(|e| RvError::ErrString(format!("encode cert_type: {e}")))?;
-    spec.key_id
-        .encode(&mut tbs)
-        .map_err(|e| RvError::ErrString(format!("encode key_id: {e}")))?;
+    MLDSA65_CERT_ALGO.encode(&mut tbs).map_err(|e| RvError::ErrString(format!("encode cert algo: {e}")))?;
+    spec.nonce.encode(&mut tbs).map_err(|e| RvError::ErrString(format!("encode nonce: {e}")))?;
+    spec.client_pubkey.encode(&mut tbs).map_err(|e| RvError::ErrString(format!("encode client pk: {e}")))?;
+    spec.serial.encode(&mut tbs).map_err(|e| RvError::ErrString(format!("encode serial: {e}")))?;
+    spec.cert_type.encode(&mut tbs).map_err(|e| RvError::ErrString(format!("encode cert_type: {e}")))?;
+    spec.key_id.encode(&mut tbs).map_err(|e| RvError::ErrString(format!("encode key_id: {e}")))?;
     // valid_principals: SSH-encoded string-list (`Vec<String>`).
     spec.valid_principals
         .to_vec()
         .encode(&mut tbs)
         .map_err(|e| RvError::ErrString(format!("encode principals: {e}")))?;
-    spec.valid_after
-        .encode(&mut tbs)
-        .map_err(|e| RvError::ErrString(format!("encode valid_after: {e}")))?;
-    spec.valid_before
-        .encode(&mut tbs)
-        .map_err(|e| RvError::ErrString(format!("encode valid_before: {e}")))?;
+    spec.valid_after.encode(&mut tbs).map_err(|e| RvError::ErrString(format!("encode valid_after: {e}")))?;
+    spec.valid_before.encode(&mut tbs).map_err(|e| RvError::ErrString(format!("encode valid_before: {e}")))?;
 
     // critical_options + extensions: each is a *string* whose body
     // is the encoded options blob.
     let crits = encode_options(spec.critical_options)?;
-    crits
-        .as_slice()
-        .encode(&mut tbs)
-        .map_err(|e| RvError::ErrString(format!("encode critical_options: {e}")))?;
+    crits.as_slice().encode(&mut tbs).map_err(|e| RvError::ErrString(format!("encode critical_options: {e}")))?;
     let exts = encode_options(spec.extensions)?;
-    exts.as_slice()
-        .encode(&mut tbs)
-        .map_err(|e| RvError::ErrString(format!("encode extensions: {e}")))?;
+    exts.as_slice().encode(&mut tbs).map_err(|e| RvError::ErrString(format!("encode extensions: {e}")))?;
 
     // reserved: always empty.
     let empty: &[u8] = &[];
-    empty
-        .encode(&mut tbs)
-        .map_err(|e| RvError::ErrString(format!("encode reserved: {e}")))?;
+    empty.encode(&mut tbs).map_err(|e| RvError::ErrString(format!("encode reserved: {e}")))?;
 
     // signature_key: CA pubkey blob, length-prefixed (the outer
     // `string` framing).
     let ca_blob = encode_ca_pubkey_blob(ca_pubkey)?;
-    ca_blob
-        .as_slice()
-        .encode(&mut tbs)
-        .map_err(|e| RvError::ErrString(format!("encode signature_key: {e}")))?;
+    ca_blob.as_slice().encode(&mut tbs).map_err(|e| RvError::ErrString(format!("encode signature_key: {e}")))?;
 
     Ok(tbs)
 }
@@ -286,10 +243,7 @@ fn build_tbs(spec: &CertSpec, ca_pubkey: &[u8]) -> Result<Vec<u8>, RvError> {
 /// single-line cert `ssh-mldsa65-cert-v01@openssh.com <base64> <comment>`.
 pub fn sign_cert(ca: &CaKeypair, spec: &CertSpec) -> Result<String, RvError> {
     if spec.nonce.len() < 16 {
-        return Err(RvError::ErrString(format!(
-            "nonce must be at least 16 bytes; got {}",
-            spec.nonce.len()
-        )));
+        return Err(RvError::ErrString(format!("nonce must be at least 16 bytes; got {}", spec.nonce.len())));
     }
     if spec.client_pubkey.len() != ML_DSA_65_PUBLIC_KEY_LEN {
         return Err(RvError::ErrString(format!(
@@ -303,20 +257,12 @@ pub fn sign_cert(ca: &CaKeypair, spec: &CertSpec) -> Result<String, RvError> {
 
     // Signature wire envelope: `string algo || string sig_bytes`.
     let mut sig_blob = Vec::new();
-    MLDSA65_ALGO
-        .encode(&mut sig_blob)
-        .map_err(|e| RvError::ErrString(format!("encode sig algo: {e}")))?;
-    sig_raw
-        .as_slice()
-        .encode(&mut sig_blob)
-        .map_err(|e| RvError::ErrString(format!("encode sig bytes: {e}")))?;
+    MLDSA65_ALGO.encode(&mut sig_blob).map_err(|e| RvError::ErrString(format!("encode sig algo: {e}")))?;
+    sig_raw.as_slice().encode(&mut sig_blob).map_err(|e| RvError::ErrString(format!("encode sig bytes: {e}")))?;
 
     // Full cert blob = TBS || string(sig_blob).
     let mut full = tbs;
-    sig_blob
-        .as_slice()
-        .encode(&mut full)
-        .map_err(|e| RvError::ErrString(format!("encode sig wrap: {e}")))?;
+    sig_blob.as_slice().encode(&mut full).map_err(|e| RvError::ErrString(format!("encode sig wrap: {e}")))?;
 
     Ok(format!("{MLDSA65_CERT_ALGO} {}", B64.encode(&full)))
 }

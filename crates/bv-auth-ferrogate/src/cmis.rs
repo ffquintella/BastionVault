@@ -73,9 +73,7 @@ fn explain<E: std::error::Error>(err: &E) -> String {
 /// tried, exactly as the MIA fails over.
 pub async fn fetch_jwks_json(config: &FerroGateConfig, kid_hint: &str) -> Result<String, String> {
     if config.cmis_endpoint.trim().is_empty() && config.cmis_srv.trim().is_empty() {
-        return Err(
-            "cmis_grpc source selected but neither cmis_endpoint nor cmis_srv is set".to_string(),
-        );
+        return Err("cmis_grpc source selected but neither cmis_endpoint nor cmis_srv is set".to_string());
     }
 
     let mut errors = Vec::new();
@@ -169,8 +167,7 @@ async fn resolve_srv_candidates(name: &str) -> Result<Vec<String>, String> {
     *builder.options_mut() = opts;
     let resolver = builder.build().map_err(|e| format!("DNS resolver init failed: {e}"))?;
 
-    let resp =
-        resolver.srv_lookup(name).await.map_err(|e| format!("CMIS SRV lookup for {name:?} failed: {e}"))?;
+    let resp = resolver.srv_lookup(name).await.map_err(|e| format!("CMIS SRV lookup for {name:?} failed: {e}"))?;
 
     // (priority, weight, port, target); a "." target means "not available
     // here" (RFC 2782) and is dropped.
@@ -262,35 +259,28 @@ mod tests {
     use super::*;
 
     fn cfg(endpoint: &str, same_host: bool) -> FerroGateConfig {
-        FerroGateConfig {
-            cmis_endpoint: endpoint.to_string(),
-            cmis_same_host: same_host,
-            ..FerroGateConfig::default()
-        }
+        FerroGateConfig { cmis_endpoint: endpoint.to_string(), cmis_same_host: same_host, ..FerroGateConfig::default() }
     }
 
     #[test]
     fn same_host_off_uses_only_the_configured_endpoint() {
-        assert_eq!(host_local_candidates(&cfg("cmis.example.com:8443", false)), vec![
-            "cmis.example.com:8443"
-        ]);
+        assert_eq!(host_local_candidates(&cfg("cmis.example.com:8443", false)), vec!["cmis.example.com:8443"]);
     }
 
     #[test]
     fn same_host_tries_local_aliases_first_then_configured() {
-        assert_eq!(host_local_candidates(&cfg("segdc1vds0005.fgv.br:8443", true)), vec![
-            "host.containers.internal:8443",
-            "127.0.0.1:8443",
-            "segdc1vds0005.fgv.br:8443",
-        ]);
+        assert_eq!(
+            host_local_candidates(&cfg("segdc1vds0005.fgv.br:8443", true)),
+            vec!["host.containers.internal:8443", "127.0.0.1:8443", "segdc1vds0005.fgv.br:8443",]
+        );
     }
 
     #[test]
     fn same_host_does_not_duplicate_a_loopback_endpoint() {
-        assert_eq!(host_local_candidates(&cfg("127.0.0.1:9000", true)), vec![
-            "host.containers.internal:9000",
-            "127.0.0.1:9000",
-        ]);
+        assert_eq!(
+            host_local_candidates(&cfg("127.0.0.1:9000", true)),
+            vec!["host.containers.internal:9000", "127.0.0.1:9000",]
+        );
     }
 
     #[test]
@@ -309,12 +299,15 @@ mod tests {
             (10, 50, 8443, "node-a.example.com".to_string()),
             (10, 50, 9443, "aaa.example.com".to_string()),
         ];
-        assert_eq!(rank_srv_records(records), vec![
-            "aaa.example.com:9443",   // pri 10, weight 50, name sorts first
-            "node-a.example.com:8443", // pri 10, weight 50
-            "node-b.example.com:8443", // pri 10, weight 5
-            "backup.example.com:8443", // pri 20 (hard floor, last)
-        ]);
+        assert_eq!(
+            rank_srv_records(records),
+            vec![
+                "aaa.example.com:9443",    // pri 10, weight 50, name sorts first
+                "node-a.example.com:8443", // pri 10, weight 50
+                "node-b.example.com:8443", // pri 10, weight 5
+                "backup.example.com:8443", // pri 20 (hard floor, last)
+            ]
+        );
     }
 
     #[test]

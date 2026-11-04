@@ -3,9 +3,9 @@ use derive_more::Deref;
 
 use crate::{
     command::{self, CommandExecutor},
-        util,
     errors::RvError,
     modules::auth::AUTH_ROUTER_PREFIX,
+    util,
 };
 
 #[derive(Parser, Deref)]

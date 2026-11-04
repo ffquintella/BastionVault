@@ -162,7 +162,7 @@ mod mod_lease_tests {
                 "valid request, good bounds, increment is preferred",
                 Duration::from_secs(30 * 60 * 60), // 30h
                 Duration::from_secs(5 * 60 * 60),  // 5h
-                Duration::from_secs(60 * 60),  // 1h
+                Duration::from_secs(60 * 60),      // 1h
                 Duration::ZERO,
                 Duration::from_secs(30 * 60 * 60), // 30h
                 Duration::ZERO,

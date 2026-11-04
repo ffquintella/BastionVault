@@ -48,22 +48,10 @@ pub fn stamped_entry(plugin: &str, caller: &Request, payload: Value, hmac_key: &
 /// Emit one plugin event: actor-stamped when the invocation has a caller and
 /// the plugin is ABI 1.4 with `caller_identity`, otherwise as before (no
 /// actor, root chain).
-pub async fn emit(
-    core: &dyn VaultCtx,
-    manifest: &PluginManifest,
-    caller: Option<&InvocationCaller>,
-    payload: Value,
-) {
+pub async fn emit(core: &dyn VaultCtx, manifest: &PluginManifest, caller: Option<&InvocationCaller>, payload: Value) {
     let Some(caller) = caller.filter(|_| stamps_actor(manifest)) else {
-        audit::emit_sys_audit(
-            core,
-            "",
-            &event_path(&manifest.name),
-            Operation::Write,
-            Some(event_body(payload)),
-            None,
-        )
-        .await;
+        audit::emit_sys_audit(core, "", &event_path(&manifest.name), Operation::Write, Some(event_body(payload)), None)
+            .await;
         return;
     };
     let Some(broker) = core.audit_broker() else {

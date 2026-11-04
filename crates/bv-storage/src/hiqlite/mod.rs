@@ -1,6 +1,6 @@
 use std::{any::Any, borrow::Cow, collections::HashMap, net::ToSocketAddrs, path::Path};
 
-use hiqlite::{Client, Node, NodeConfig, Param, tls::ServerTlsConfig};
+use hiqlite::{tls::ServerTlsConfig, Client, Node, NodeConfig, Param};
 use serde_json::Value;
 use tokio::net::TcpListener;
 
@@ -127,10 +127,7 @@ struct VaultRow {
 
 impl<'a, 'r> From<&'a mut hiqlite::Row<'r>> for VaultRow {
     fn from(row: &'a mut hiqlite::Row<'r>) -> Self {
-        Self {
-            vault_key: row.get("vault_key"),
-            vault_value: row.get("vault_value"),
-        }
+        Self { vault_key: row.get("vault_key"), vault_value: row.get("vault_value") }
     }
 }
 
@@ -181,10 +178,7 @@ impl Backend for HiqliteBackend {
             .next();
 
         match result {
-            Some(row) => Ok(Some(BackendEntry {
-                key: row.vault_key,
-                value: row.vault_value,
-            })),
+            Some(row) => Ok(Some(BackendEntry { key: row.vault_key, value: row.vault_value })),
             None => Ok(None),
         }
     }
@@ -221,10 +215,7 @@ impl Backend for HiqliteBackend {
         }
 
         self.client
-            .execute(
-                sql!("DELETE FROM {} WHERE vault_key = ?", &self.table).into_cow(),
-                vec![Param::from(key)],
-            )
+            .execute(sql!("DELETE FROM {} WHERE vault_key = ?", &self.table).into_cow(), vec![Param::from(key)])
             .await
             .map_err(map_hiqlite_error)?;
 
@@ -232,11 +223,7 @@ impl Backend for HiqliteBackend {
     }
 
     async fn lock(&self, lock_name: &str) -> Result<Box<dyn Any + Send>, RvError> {
-        let lock = self
-            .client
-            .lock(Cow::Owned(lock_name.to_string()))
-            .await
-            .map_err(map_hiqlite_error)?;
+        let lock = self.client.lock(Cow::Owned(lock_name.to_string())).await.map_err(map_hiqlite_error)?;
         Ok(Box::new(lock))
     }
 }
@@ -445,11 +432,7 @@ fn parse_nodes(nodes_val: &Value) -> Result<Vec<Node>, RvError> {
         let id: u64 = parts[0].parse().map_err(|_| RvError::ErrPhysicalConfigItemMissing)?;
         let addr_raft = format!("{}:{}", parts[1], parts[2]);
         let addr_api = format!("{}:{}", parts[3], parts[4]);
-        nodes.push(Node {
-            id,
-            addr_raft,
-            addr_api,
-        });
+        nodes.push(Node { id, addr_raft, addr_api });
     }
     Ok(nodes)
 }
@@ -467,9 +450,7 @@ async fn preflight_bind(label: &str, host: &str, port: u16) -> Result<(), RvErro
     let socket_addrs: Vec<_> = (host, port)
         .to_socket_addrs()
         .map_err(|e| {
-            RvError::ErrCluster(format!(
-                "hiqlite {label} listener: cannot resolve listen address '{host}:{port}': {e}"
-            ))
+            RvError::ErrCluster(format!("hiqlite {label} listener: cannot resolve listen address '{host}:{port}': {e}"))
         })?
         .collect();
     if socket_addrs.is_empty() {
@@ -493,56 +474,32 @@ async fn preflight_bind(label: &str, host: &str, port: u16) -> Result<(), RvErro
 
 impl HiqliteBackend {
     async fn new_backend(conf: &HashMap<String, Value>) -> Result<Self, RvError> {
-        let data_dir = conf
-            .get("data_dir")
-            .and_then(|v| v.as_str())
-            .ok_or(RvError::ErrPhysicalConfigItemMissing)?;
+        let data_dir = conf.get("data_dir").and_then(|v| v.as_str()).ok_or(RvError::ErrPhysicalConfigItemMissing)?;
 
-        let node_id = conf
-            .get("node_id")
-            .and_then(|v| v.as_u64())
-            .ok_or(RvError::ErrPhysicalConfigItemMissing)?;
+        let node_id = conf.get("node_id").and_then(|v| v.as_u64()).ok_or(RvError::ErrPhysicalConfigItemMissing)?;
 
-        let secret_raft = conf
-            .get("secret_raft")
-            .and_then(|v| v.as_str())
-            .ok_or(RvError::ErrPhysicalConfigItemMissing)?;
+        let secret_raft =
+            conf.get("secret_raft").and_then(|v| v.as_str()).ok_or(RvError::ErrPhysicalConfigItemMissing)?;
 
-        let secret_api = conf
-            .get("secret_api")
-            .and_then(|v| v.as_str())
-            .ok_or(RvError::ErrPhysicalConfigItemMissing)?;
+        let secret_api =
+            conf.get("secret_api").and_then(|v| v.as_str()).ok_or(RvError::ErrPhysicalConfigItemMissing)?;
 
         // Validated once, at the boundary: an invalid `table` is a startup
         // error, never a statement fragment. `client.batch(..)` executes
         // `;`-separated statements, so this value must not be able to
         // terminate one.
         let table = SqlIdent::new(conf.get("table").and_then(|v| v.as_str()).unwrap_or("vault"))
-            .map_err(|e| {
-                RvError::ErrString(format!("hiqlite storage: `table` is not a valid SQL identifier: {e}"))
-            })?;
+            .map_err(|e| RvError::ErrString(format!("hiqlite storage: `table` is not a valid SQL identifier: {e}")))?;
 
         // hiqlite expects listen_addr to be host-only (e.g. "0.0.0.0");
         // it appends the port from the node's addr_raft/addr_api fields via build_listen_addr().
-        let listen_addr_api = conf
-            .get("listen_addr_api")
-            .and_then(|v| v.as_str())
-            .unwrap_or("0.0.0.0");
+        let listen_addr_api = conf.get("listen_addr_api").and_then(|v| v.as_str()).unwrap_or("0.0.0.0");
 
-        let listen_addr_raft = conf
-            .get("listen_addr_raft")
-            .and_then(|v| v.as_str())
-            .unwrap_or("0.0.0.0");
+        let listen_addr_raft = conf.get("listen_addr_raft").and_then(|v| v.as_str()).unwrap_or("0.0.0.0");
 
-        let port_raft: u16 = conf
-            .get("port_raft")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(8210) as u16;
+        let port_raft: u16 = conf.get("port_raft").and_then(|v| v.as_u64()).unwrap_or(8210) as u16;
 
-        let port_api: u16 = conf
-            .get("port_api")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(8220) as u16;
+        let port_api: u16 = conf.get("port_api").and_then(|v| v.as_u64()).unwrap_or(8220) as u16;
 
         let nodes = if let Some(nodes_val) = conf.get("nodes") {
             parse_nodes(nodes_val)?
@@ -558,15 +515,9 @@ impl HiqliteBackend {
         // By default, TLS is enabled with auto-generated self-signed certificates
         // (ServerTlsConfig::TlsAutoCertificates). Peer authentication is handled by
         // secret_raft/secret_api; TLS provides PQC-protected confidentiality.
-        let tls_raft_disable = conf
-            .get("tls_raft_disable")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let tls_raft_disable = conf.get("tls_raft_disable").and_then(|v| v.as_bool()).unwrap_or(false);
 
-        let tls_api_disable = conf
-            .get("tls_api_disable")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let tls_api_disable = conf.get("tls_api_disable").and_then(|v| v.as_bool()).unwrap_or(false);
 
         // NOTE: hiqlite 0.13.1's `ServerTlsConfigCerts::new(key, cert)` takes the
         // private key first and the certificate second — an unusual ordering that
@@ -584,22 +535,15 @@ impl HiqliteBackend {
         // skip chain verification while keeping TLS for confidentiality. The
         // server side still presents its configured cert; only the client-side
         // verification of the peer's cert is relaxed.
-        let tls_raft_no_verify = conf
-            .get("tls_raft_no_verify")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let tls_raft_no_verify = conf.get("tls_raft_no_verify").and_then(|v| v.as_bool()).unwrap_or(false);
 
-        let tls_api_no_verify = conf
-            .get("tls_api_no_verify")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let tls_api_no_verify = conf.get("tls_api_no_verify").and_then(|v| v.as_bool()).unwrap_or(false);
 
         let tls_raft = if tls_raft_disable {
             None
-        } else if let (Some(cert), Some(key)) = (
-            conf.get("tls_raft_cert").and_then(|v| v.as_str()),
-            conf.get("tls_raft_key").and_then(|v| v.as_str()),
-        ) {
+        } else if let (Some(cert), Some(key)) =
+            (conf.get("tls_raft_cert").and_then(|v| v.as_str()), conf.get("tls_raft_key").and_then(|v| v.as_str()))
+        {
             Some(ServerTlsConfig::Specific(hiqlite::tls::ServerTlsConfigCerts {
                 key: key.to_string().into(),
                 cert: cert.to_string().into(),
@@ -611,10 +555,9 @@ impl HiqliteBackend {
 
         let tls_api = if tls_api_disable {
             None
-        } else if let (Some(cert), Some(key)) = (
-            conf.get("tls_api_cert").and_then(|v| v.as_str()),
-            conf.get("tls_api_key").and_then(|v| v.as_str()),
-        ) {
+        } else if let (Some(cert), Some(key)) =
+            (conf.get("tls_api_cert").and_then(|v| v.as_str()), conf.get("tls_api_key").and_then(|v| v.as_str()))
+        {
             Some(ServerTlsConfig::Specific(hiqlite::tls::ServerTlsConfigCerts {
                 key: key.to_string().into(),
                 cert: cert.to_string().into(),
@@ -642,8 +585,7 @@ impl HiqliteBackend {
         //   - the API channel uses hiqlite's auto-generated self-signed certs, or
         //   - the operator opted into tls_api_no_verify (e.g. private CA not in trust store).
         // Peer authenticity is enforced by the X-API-SECRET challenge-response either way.
-        let tls_api_auto_certs =
-            matches!(tls_api, Some(ServerTlsConfig::TlsAutoCertificates)) || tls_api_no_verify;
+        let tls_api_auto_certs = matches!(tls_api, Some(ServerTlsConfig::TlsAutoCertificates)) || tls_api_no_verify;
 
         // `NodeConfig::enc_keys` only exists under hiqlite's `s3`/`dashboard`
         // features, which we build without — the ephemeral key we used to
@@ -651,10 +593,7 @@ impl HiqliteBackend {
         // dashboard cookies, neither of which BastionVault uses.
 
         // Snapshot the peer endpoints before `nodes` is moved into NodeConfig.
-        let peer_addrs: Vec<String> = nodes
-            .iter()
-            .flat_map(|n| [n.addr_raft.clone(), n.addr_api.clone()])
-            .collect();
+        let peer_addrs: Vec<String> = nodes.iter().flat_map(|n| [n.addr_raft.clone(), n.addr_api.clone()]).collect();
 
         let node_config = NodeConfig {
             node_id,
@@ -698,10 +637,7 @@ impl HiqliteBackend {
         // raft-internal log lines.
         let wal_meta = Path::new(data_dir).join("logs").join("meta.hql");
         if wal_meta.exists() {
-            log::info!(
-                "hiqlite: resuming from existing WAL at {} (node_id={node_id})",
-                wal_meta.display()
-            );
+            log::info!("hiqlite: resuming from existing WAL at {} (node_id={node_id})", wal_meta.display());
         } else {
             log::warn!(
                 "hiqlite: no WAL found at {} — starting node_id={node_id} with PRISTINE state. \
@@ -710,9 +646,7 @@ impl HiqliteBackend {
             );
         }
 
-        let client = hiqlite::start_node(node_config)
-            .await
-            .map_err(map_hiqlite_error)?;
+        let client = hiqlite::start_node(node_config).await.map_err(map_hiqlite_error)?;
 
         // Create the vault table if it doesn't exist. NB: `batch` executes
         // multiple `;`-separated statements — the identifier must stay a
@@ -819,11 +753,8 @@ impl HiqliteBackend {
         if self.tls_api_auto_certs {
             // Auto-generated self-signed certs require skipping certificate verification.
             // Peer authentication is handled by the X-API-SECRET challenge-response.
-            agent_builder = agent_builder.tls_config(
-                ureq::tls::TlsConfig::builder()
-                    .disable_verification(true)
-                    .build(),
-            );
+            agent_builder =
+                agent_builder.tls_config(ureq::tls::TlsConfig::builder().disable_verification(true).build());
         }
         let agent = agent_builder.build().new_agent();
         let req = http::Request::builder()
@@ -859,9 +790,7 @@ impl HiqliteBackend {
     /// voter from the current membership and POST there.
     pub async fn trigger_failover(&self) -> Result<(), RvError> {
         let metrics = self.client.metrics_db().await.map_err(map_hiqlite_error)?;
-        let leader_id = metrics
-            .current_leader
-            .ok_or(RvError::ErrClusterNoLeader)?;
+        let leader_id = metrics.current_leader.ok_or(RvError::ErrClusterNoLeader)?;
         if leader_id != self.node_id {
             return Err(RvError::ErrCluster(format!(
                 "this node ({}) is not the leader ({leader_id}); run failover against the leader",
@@ -874,27 +803,17 @@ impl HiqliteBackend {
             .voter_ids()
             .filter(|id| *id != leader_id)
             .find_map(|id| metrics.membership_config.membership().get_node(&id))
-            .ok_or_else(|| {
-                RvError::ErrCluster(
-                    "no follower voter available to take over leadership".to_string(),
-                )
-            })?;
+            .ok_or_else(|| RvError::ErrCluster("no follower voter available to take over leadership".to_string()))?;
 
-        let scheme = self
-            .api_addr
-            .split_once("://")
-            .map_or("http", |(scheme, _)| scheme);
+        let scheme = self.api_addr.split_once("://").map_or("http", |(scheme, _)| scheme);
         // "sqlite", not "db" — see the raft_type note in remove_node().
         let url = format!("{scheme}://{}/cluster/step_down/sqlite", follower.addr_api);
 
         // As in remove_node: keep 4xx/5xx as responses so the error carries the body.
         let mut agent_builder = ureq::Agent::config_builder().http_status_as_error(false);
         if self.tls_api_auto_certs {
-            agent_builder = agent_builder.tls_config(
-                ureq::tls::TlsConfig::builder()
-                    .disable_verification(true)
-                    .build(),
-            );
+            agent_builder =
+                agent_builder.tls_config(ureq::tls::TlsConfig::builder().disable_verification(true).build());
         }
         let agent = agent_builder.build().new_agent();
         let req = http::Request::builder()
@@ -945,17 +864,12 @@ impl HiqliteBackend {
             std::thread::scope(|s| {
                 s.spawn(move || -> Result<Self, RvError> {
                     let rt = tokio::runtime::Runtime::new()?;
-                    let mut backend =
-                        rt.block_on(async { Self::new_backend(&conf).await })?;
+                    let mut backend = rt.block_on(async { Self::new_backend(&conf).await })?;
                     backend._runtime = Some(rt);
                     Ok(backend)
                 })
                 .join()
-                .map_err(|_| {
-                    RvError::ErrCluster(
-                        "HiqliteBackend init thread panicked".to_string(),
-                    )
-                })?
+                .map_err(|_| RvError::ErrCluster("HiqliteBackend init thread panicked".to_string()))?
             })
         } else {
             let rt = tokio::runtime::Runtime::new()?;
@@ -1006,13 +920,11 @@ mod test {
         like_prefix_pattern, prefix_upper_bound, HiqliteBackend, PageLimits, ScanPager, VaultRow,
         PAGE_ROW_OVERHEAD_BYTES,
     };
+    use crate::test::{test_backend_curd, test_backend_list_prefix, test_backend_list_prefix_is_literal};
+    use crate::test_support::TEST_DIR;
+    use crate::{Backend, BackendEntry};
     use bv_sql_guard::sql;
     use hiqlite::Param;
-    use crate::test::{
-        test_backend_curd, test_backend_list_prefix, test_backend_list_prefix_is_literal,
-    };
-    use crate::{Backend, BackendEntry};
-    use crate::test_support::TEST_DIR;
 
     /// Returns true if hiqlite integration tests should run.
     /// Set CARGO_TEST_HIQLITE=1 to enable (requires free ports from 18100/18200 up).
@@ -1024,8 +936,7 @@ mod test {
     /// listeners asynchronously (detached graceful shutdown), so consecutive
     /// tests reusing fixed ports race it and fail with "Address already in use"
     /// even under `#[serial]`.
-    static NEXT_PORT_OFFSET: std::sync::atomic::AtomicU16 =
-        std::sync::atomic::AtomicU16::new(0);
+    static NEXT_PORT_OFFSET: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
 
     fn make_test_conf(test_name: &str) -> HashMap<String, Value> {
         let dir = env::temp_dir().join(TEST_DIR).join(test_name);
@@ -1060,18 +971,12 @@ mod test {
         let backend = backend.unwrap();
 
         // Clear the test table
-        let _ = backend
-            .client()
-            .batch(sql!("DELETE FROM vault_test").into_cow())
-            .await;
+        let _ = backend.client().batch(sql!("DELETE FROM vault_test").into_cow()).await;
 
         test_backend_curd(&backend).await;
 
         // Clear again before prefix test
-        let _ = backend
-            .client()
-            .batch(sql!("DELETE FROM vault_test").into_cow())
-            .await;
+        let _ = backend.client().batch(sql!("DELETE FROM vault_test").into_cow()).await;
 
         test_backend_list_prefix(&backend).await;
     }
@@ -1093,10 +998,7 @@ mod test {
         }
         let conf = make_test_conf("test_hiqlite_like_wildcard");
         let backend = HiqliteBackend::new(&conf).expect("backend creation failed");
-        let _ = backend
-            .client()
-            .batch(sql!("DELETE FROM vault_test").into_cow())
-            .await;
+        let _ = backend.client().batch(sql!("DELETE FROM vault_test").into_cow()).await;
 
         for key in [
             "secret/my_app/db",
@@ -1107,10 +1009,7 @@ mod test {
             // `%` is a wildcard too.
             "secret/my%app/db",
         ] {
-            backend
-                .put(&BackendEntry { key: key.to_string(), value: b"v".to_vec() })
-                .await
-                .unwrap();
+            backend.put(&BackendEntry { key: key.to_string(), value: b"v".to_vec() }).await.unwrap();
         }
 
         // Cross-backend contract check on a clean table.
@@ -1120,21 +1019,10 @@ mod test {
         keys.sort();
         assert_eq!(keys, vec!["db".to_string(), "nested/".to_string()]);
 
-        let mut scanned: Vec<String> = backend
-            .scan("secret/my_app/", None)
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|e| e.key)
-            .collect();
+        let mut scanned: Vec<String> =
+            backend.scan("secret/my_app/", None).await.unwrap().into_iter().map(|e| e.key).collect();
         scanned.sort();
-        assert_eq!(
-            scanned,
-            vec![
-                "secret/my_app/db".to_string(),
-                "secret/my_app/nested/token".to_string()
-            ]
-        );
+        assert_eq!(scanned, vec!["secret/my_app/db".to_string(), "secret/my_app/nested/token".to_string()]);
 
         // The `%`-bearing prefix is likewise treated literally, not as
         // "every key under secret/my".
@@ -1253,7 +1141,19 @@ mod test {
             PageLimits::DEFAULT,
         ];
 
-        for prefix in ["", "audit/", "kv/", "kv/dir1/", "kv/dir0/sub/", "w/", "w/my_app/", "w/my%app/", r"w/my\app/", "u/", "none/"] {
+        for prefix in [
+            "",
+            "audit/",
+            "kv/",
+            "kv/dir1/",
+            "kv/dir0/sub/",
+            "w/",
+            "w/my_app/",
+            "w/my%app/",
+            r"w/my\app/",
+            "u/",
+            "none/",
+        ] {
             let expected = legacy_list(&backend, prefix).await;
             assert_eq!(backend.list(prefix).await.unwrap(), expected, "list {prefix:?}");
             for limits in limit_sets {
@@ -1267,8 +1167,8 @@ mod test {
             ("audit/", None),
             ("audit/", Some("audit/00000000000000001050")),
             ("audit/", Some("audit/000000000000000010505")), // between two keys
-            ("audit/", Some("a")),                              // below the prefix
-            ("audit/", Some("audit0")),                         // above the range
+            ("audit/", Some("a")),                           // below the prefix
+            ("audit/", Some("audit0")),                      // above the range
             ("kv/", None),
             ("kv/", Some("kv/dir2/")),
             ("w/my_app/", None),
@@ -1301,8 +1201,7 @@ mod test {
             let rows = backend.query_scan_page(&like, &start, upper.as_deref(), limits).await.unwrap();
             markers += rows.iter().filter(|r| r.is_none()).count();
             let data: Vec<&BackendEntry> = rows.iter().flatten().collect();
-            let bytes: i64 =
-                data.iter().map(|e| (e.key.len() + e.value.len()) as i64 + PAGE_ROW_OVERHEAD_BYTES).sum();
+            let bytes: i64 = data.iter().map(|e| (e.key.len() + e.value.len()) as i64 + PAGE_ROW_OVERHEAD_BYTES).sum();
             assert!(data.len() == 1 || bytes <= limits.max_bytes, "page of {} rows carries {bytes} bytes", data.len());
             pager.accept(rows).unwrap();
             pages += 1;
@@ -1396,8 +1295,8 @@ mod test {
             eprintln!("Skipping hiqlite test (set CARGO_TEST_HIQLITE=1 to enable)");
             return;
         }
-        
-        use crate::{new_backend, migrate::migrate_backend, BackendEntry};
+
+        use crate::{migrate::migrate_backend, new_backend, BackendEntry};
 
         // Create source file backend with test data
         let source_dir = env::temp_dir().join(TEST_DIR).join("test_migrate_source");
@@ -1459,10 +1358,7 @@ mod test {
 
         let conf = make_test_conf("test_hiqlite_backend_drop_inside_runtime");
         let backend = HiqliteBackend::new(&conf).expect("backend creation failed");
-        assert!(
-            backend._runtime.is_some(),
-            "backend should own a runtime when constructed inside an outer runtime",
-        );
+        assert!(backend._runtime.is_some(), "backend should own a runtime when constructed inside an outer runtime",);
 
         // Drop here, inside the outer runtime. Must not panic.
         drop(backend);

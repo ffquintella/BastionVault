@@ -41,14 +41,26 @@ pub const KEY_TIDY_STATUS: &str = "tidy/status";
 pub const KEY_ISSUERS_INDEX: &str = "issuers/index";
 pub const KEY_CONFIG_ISSUERS: &str = "config/issuers";
 
-pub fn issuer_cert_key(id: &str) -> String { format!("issuers/{id}/cert") }
-pub fn issuer_key_key(id: &str) -> String { format!("issuers/{id}/key") }
-pub fn issuer_meta_key(id: &str) -> String { format!("issuers/{id}/meta") }
-pub fn issuer_crl_state_key(id: &str) -> String { format!("crl/issuer/{id}/state") }
-pub fn issuer_crl_cached_key(id: &str) -> String { format!("crl/issuer/{id}/cached") }
+pub fn issuer_cert_key(id: &str) -> String {
+    format!("issuers/{id}/cert")
+}
+pub fn issuer_key_key(id: &str) -> String {
+    format!("issuers/{id}/key")
+}
+pub fn issuer_meta_key(id: &str) -> String {
+    format!("issuers/{id}/meta")
+}
+pub fn issuer_crl_state_key(id: &str) -> String {
+    format!("crl/issuer/{id}/state")
+}
+pub fn issuer_crl_cached_key(id: &str) -> String {
+    format!("crl/issuer/{id}/cached")
+}
 /// Certificates an issuer held before `issuer/<ref>/renew` replaced them.
 /// Absent until the first renewal.
-pub fn issuer_history_key(id: &str) -> String { format!("issuers/{id}/history") }
+pub fn issuer_history_key(id: &str) -> String {
+    format!("issuers/{id}/history")
+}
 
 /// Persisted-format version for [`IssuerCertHistory`]. Bump alongside a
 /// read-old/write-new migration; a record carrying a *newer* version is
@@ -468,10 +480,7 @@ pub async fn put_json<T: Serialize>(req: &Request, key: &str, value: &T) -> Resu
 }
 
 #[maybe_async::maybe_async]
-pub async fn get_json<T: for<'de> Deserialize<'de>>(
-    req: &Request,
-    key: &str,
-) -> Result<Option<T>, RvError> {
+pub async fn get_json<T: for<'de> Deserialize<'de>>(req: &Request, key: &str) -> Result<Option<T>, RvError> {
     match req.storage_get(key).await? {
         Some(e) => Ok(Some(serde_json::from_slice(&e.value)?)),
         None => Ok(None),

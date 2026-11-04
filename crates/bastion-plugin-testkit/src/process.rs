@@ -35,7 +35,9 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use serde_json::{json, Value};
 
-use crate::{data_key, envelope, InvokeOutcome, LogLine, TestCaller, TestClock, TestHost, TestInvocation, TestkitError};
+use crate::{
+    data_key, envelope, InvokeOutcome, LogLine, TestCaller, TestClock, TestHost, TestInvocation, TestkitError,
+};
 
 /// Same default as `process_runtime::DEFAULT_INVOKE_TIMEOUT`.
 pub const DEFAULT_PROCESS_TIMEOUT: Duration = Duration::from_secs(30);
@@ -96,7 +98,12 @@ impl TestHost {
     /// Answer one host call as the server would, inside an invocation by
     /// `caller` (`None`: outside any invocation). Drives the mock without a
     /// plugin executable.
-    pub fn process_host_call(&self, caller: Option<&TestCaller>, method: &str, params: &Value) -> Result<Value, String> {
+    pub fn process_host_call(
+        &self,
+        caller: Option<&TestCaller>,
+        method: &str,
+        params: &Value,
+    ) -> Result<Value, String> {
         self.state.lock().unwrap().invocation_caller = caller.cloned();
         let out = self.handle_process_call(method, params);
         self.state.lock().unwrap().invocation_caller = None;

@@ -9,8 +9,8 @@ use crate::{
     context::Context,
     errors::RvError,
     logical::{
-        field::FieldTrait, page_response, paginate, Backend, Field, FieldType, Operation,
-        PageLimits, Path, PathOperation, Request, Response,
+        field::FieldTrait, page_response, paginate, Backend, Field, FieldType, Operation, PageLimits, Path,
+        PathOperation, Request, Response,
     },
     new_fields, new_fields_internal, new_path, new_path_internal,
     storage::StorageEntry,
@@ -473,9 +473,7 @@ impl UserPassBackendInner {
         // failing closed at every login: if MFA is on for this user, a key
         // name must be bound.
         if user_entry.totp_mfa_enabled && user_entry.totp_key.trim().is_empty() {
-            return Err(RvError::ErrResponse(
-                "totp_key is required when totp_mfa_enabled is true".to_string(),
-            ));
+            return Err(RvError::ErrResponse("totp_key is required when totp_mfa_enabled is true".to_string()));
         }
 
         let old_token_policies = user_entry.token_policies.clone();
@@ -540,14 +538,7 @@ impl UserPassBackendInner {
         // thing an admin wants to see in the diff on update, so stash
         // them in `details`. Silent on subsystem absence.
         let details = format!("policies={}", user_entry.policies.join(","));
-        record_user_audit(
-            &self.core,
-            req,
-            if is_create { "create" } else { "update" },
-            &username,
-            &details,
-        )
-        .await;
+        record_user_audit(&self.core, req, if is_create { "create" } else { "update" }, &username, &details).await;
 
         Ok(None)
     }
@@ -618,11 +609,7 @@ impl UserPassBackendInner {
 
     /// Clear a temporary lockout for a user and reset the failed-attempt
     /// counter. Idempotent: unlocking a not-locked user is a no-op success.
-    pub async fn unlock_user(
-        &self,
-        _backend: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn unlock_user(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let username_value = req.get_data("username")?;
         let username = username_value.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_lowercase();
 
@@ -668,13 +655,7 @@ pub fn now_secs() -> i64 {
 /// module reference around directly. Silent on any failure; this is
 /// a convenience log for the Admin → Audit GUI, not a block on the
 /// underlying operation.
-async fn record_user_audit(
-    core: &dyn VaultCtx,
-    req: &crate::logical::Request,
-    op: &str,
-    target: &str,
-    details: &str,
-) {
+async fn record_user_audit(core: &dyn VaultCtx, req: &crate::logical::Request, op: &str, target: &str, details: &str) {
     use crate::kernel_api::identity::{caller_audit_actor, UserAuditRecord};
 
     let Some(identity) = core.identity() else {
@@ -707,10 +688,7 @@ pub fn is_plausible_email(s: &str) -> bool {
     let mut parts = s.split('@');
     match (parts.next(), parts.next(), parts.next()) {
         (Some(local), Some(domain), None) => {
-            !local.is_empty()
-                && domain.contains('.')
-                && !domain.starts_with('.')
-                && !domain.ends_with('.')
+            !local.is_empty() && domain.contains('.') && !domain.starts_with('.') && !domain.ends_with('.')
         }
         _ => false,
     }
@@ -722,28 +700,16 @@ mod tests {
 
     #[test]
     fn plausible_emails_accepted() {
-        for e in [
-            "felipe.quintella@fgv.br",
-            "a@b.co",
-            "user+tag@sub.example.com",
-            "USER@EXAMPLE.ORG",
-        ] {
+        for e in ["felipe.quintella@fgv.br", "a@b.co", "user+tag@sub.example.com", "USER@EXAMPLE.ORG"] {
             assert!(is_plausible_email(e), "expected {e} to be accepted");
         }
     }
 
     #[test]
     fn implausible_emails_rejected() {
-        for e in [
-            "",
-            "plainaddress",
-            "@example.com",
-            "user@",
-            "user@localhost",
-            "user@.com",
-            "user@example.",
-            "a@b@c.com",
-        ] {
+        for e in
+            ["", "plainaddress", "@example.com", "user@", "user@localhost", "user@.com", "user@example.", "a@b@c.com"]
+        {
             assert!(!is_plausible_email(e), "expected {e} to be rejected");
         }
     }

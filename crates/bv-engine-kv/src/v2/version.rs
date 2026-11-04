@@ -74,10 +74,7 @@ mod tests {
 
     #[test]
     fn base_only_versiondata_omits_envs_when_serialized() {
-        let vd = VersionData {
-            data: json!({"k": "v"}).as_object().unwrap().clone(),
-            ..Default::default()
-        };
+        let vd = VersionData { data: json!({"k": "v"}).as_object().unwrap().clone(), ..Default::default() };
         // `skip_serializing_if` keeps legacy base-only blobs byte-stable.
         assert!(!serde_json::to_string(&vd).unwrap().contains("envs"));
     }

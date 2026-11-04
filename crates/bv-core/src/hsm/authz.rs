@@ -57,7 +57,14 @@ pub struct UnwrapRequest {
 }
 
 impl UnwrapRequest {
-    pub fn new(context: impl Into<String>, blob_bytes: &[u8], node_id: impl Into<String>, epoch: u64, counter: u64, purpose: Purpose) -> Self {
+    pub fn new(
+        context: impl Into<String>,
+        blob_bytes: &[u8],
+        node_id: impl Into<String>,
+        epoch: u64,
+        counter: u64,
+        purpose: Purpose,
+    ) -> Self {
         let mut hasher = Sha256::new();
         hasher.update(blob_bytes);
         Self {

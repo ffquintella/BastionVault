@@ -22,10 +22,10 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::kernel_api::VaultCtx;
-use crate::errors::RvError;
-use crate::storage::{barrier_view::BarrierView, Storage, StorageEntry};
 use crate::bv_error_string;
+use crate::errors::RvError;
+use crate::kernel_api::VaultCtx;
+use crate::storage::{barrier_view::BarrierView, Storage, StorageEntry};
 
 const RECORDINGS_SUB_PATH: &str = "rustion/recordings/";
 /// Sub-view for the 24h fallback poller's "pending recordings"
@@ -171,8 +171,7 @@ impl RecordingsStore {
 
     pub async fn pending_insert(&self, pr: &PendingRecording) -> Result<(), RvError> {
         let id = sanitize(&pr.session_id)?;
-        let value = serde_json::to_vec(pr)
-            .map_err(|e| bv_error_string!(&format!("encode pending recording: {e}")))?;
+        let value = serde_json::to_vec(pr).map_err(|e| bv_error_string!(&format!("encode pending recording: {e}")))?;
         self.pending_view.put(&StorageEntry { key: id, value }).await
     }
 
@@ -199,8 +198,7 @@ impl RecordingsStore {
 
     pub async fn put(&self, rec: &RecordingEntry) -> Result<(), RvError> {
         let id = sanitize(&rec.recording_id)?;
-        let value = serde_json::to_vec(rec)
-            .map_err(|e| bv_error_string!(&format!("encode recording: {e}")))?;
+        let value = serde_json::to_vec(rec).map_err(|e| bv_error_string!(&format!("encode recording: {e}")))?;
         self.view.put(&StorageEntry { key: id, value }).await
     }
 }
@@ -237,17 +235,9 @@ pub async fn pull_recording(
         .await?
         .ok_or_else(|| bv_error_string!(&format!("bastion `{bastion_id}` not enrolled")))?;
 
-    let url = format!(
-        "https://{}/v1/sessions/{}/recording",
-        target.endpoint.trim_end_matches('/'),
-        session_id
-    );
+    let url = format!("https://{}/v1/sessions/{}/recording", target.endpoint.trim_end_matches('/'), session_id);
     let client = super::http::build_client_for(&target, std::time::Duration::from_secs(10))?;
-    let resp = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| bv_error_string!(&format!("transport: {e}")))?;
+    let resp = client.get(&url).send().await.map_err(|e| bv_error_string!(&format!("transport: {e}")))?;
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
@@ -255,36 +245,19 @@ pub async fn pull_recording(
         // recording on the bastion is a 404, any other upstream failure is
         // a 502 (the bastion is an upstream gateway from our perspective).
         // Without this, every upstream error collapsed into a generic 500.
-        let mapped = if status == reqwest::StatusCode::NOT_FOUND {
-            404
-        } else {
-            502
-        };
-        return Err(crate::bv_error_response_status!(
-            mapped,
-            &format!("bastion returned HTTP {status}: {body}")
-        ));
+        let mapped = if status == reqwest::StatusCode::NOT_FOUND { 404 } else { 502 };
+        return Err(crate::bv_error_response_status!(mapped, &format!("bastion returned HTTP {status}: {body}")));
     }
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| bv_error_string!(&format!("read body: {e}")))?;
+    let bytes = resp.bytes().await.map_err(|e| bv_error_string!(&format!("read body: {e}")))?;
 
     // Pull-fallback skips the signature check — the sidecar comes
     // over the bastion's TLS-pinned channel, not a third-party hop.
     // The webhook path retains hybrid-sig verification because
     // there's no transport-level guarantee about who sent the POST.
-    let sidecar: serde_json::Value = serde_json::from_slice(&bytes)
-        .map_err(|e| bv_error_string!(&format!("sidecar parse: {e}")))?;
-    let sd = sidecar.as_object().ok_or_else(|| {
-        bv_error_string!("pull sidecar must be a JSON object")
-    })?;
-    let s = |k: &str| -> String {
-        sd.get(k)
-            .and_then(|v| v.as_str())
-            .map(String::from)
-            .unwrap_or_default()
-    };
+    let sidecar: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|e| bv_error_string!(&format!("sidecar parse: {e}")))?;
+    let sd = sidecar.as_object().ok_or_else(|| bv_error_string!("pull sidecar must be a JSON object"))?;
+    let s = |k: &str| -> String { sd.get(k).and_then(|v| v.as_str()).map(String::from).unwrap_or_default() };
     let u = |k: &str| -> u64 { sd.get(k).and_then(|v| v.as_u64()).unwrap_or(0) };
     let parse_iso = |k: &str| -> chrono::DateTime<chrono::Utc> {
         sd.get(k)
@@ -365,10 +338,7 @@ pub async fn reconcile_from_bastion(
         .await?
         .ok_or_else(|| bv_error_string!(&format!("bastion `{bastion_id}` not enrolled")))?;
 
-    let url = format!(
-        "https://{}/v1/recordings",
-        target.endpoint.trim_end_matches('/')
-    );
+    let url = format!("https://{}/v1/recordings", target.endpoint.trim_end_matches('/'));
     let client = super::http::build_client_for(&target, std::time::Duration::from_secs(15))?;
     let resp = client
         .get(&url)
@@ -379,40 +349,21 @@ pub async fn reconcile_from_bastion(
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
-        let mapped = if status == reqwest::StatusCode::NOT_FOUND {
-            404
-        } else {
-            502
-        };
-        return Err(crate::bv_error_response_status!(
-            mapped,
-            &format!("bastion returned HTTP {status}: {body}")
-        ));
+        let mapped = if status == reqwest::StatusCode::NOT_FOUND { 404 } else { 502 };
+        return Err(crate::bv_error_response_status!(mapped, &format!("bastion returned HTTP {status}: {body}")));
     }
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| bv_error_string!(&format!("read body: {e}")))?;
-    let parsed: serde_json::Value = serde_json::from_slice(&bytes)
-        .map_err(|e| bv_error_string!(&format!("recordings list parse: {e}")))?;
-    let list = parsed
-        .get("recordings")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
+    let bytes = resp.bytes().await.map_err(|e| bv_error_string!(&format!("read body: {e}")))?;
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|e| bv_error_string!(&format!("recordings list parse: {e}")))?;
+    let list = parsed.get("recordings").and_then(|v| v.as_array()).cloned().unwrap_or_default();
 
-    let mut report = ReconcileReport {
-        bastion_id: bastion_id.to_string(),
-        ..Default::default()
-    };
+    let mut report = ReconcileReport { bastion_id: bastion_id.to_string(), ..Default::default() };
     for item in &list {
         let Some(sd) = item.as_object() else {
             continue;
         };
         report.found += 1;
-        let s = |k: &str| -> String {
-            sd.get(k).and_then(|v| v.as_str()).map(String::from).unwrap_or_default()
-        };
+        let s = |k: &str| -> String { sd.get(k).and_then(|v| v.as_str()).map(String::from).unwrap_or_default() };
         let u = |k: &str| -> u64 { sd.get(k).and_then(|v| v.as_u64()).unwrap_or(0) };
         let parse_iso = |k: &str| -> DateTime<Utc> {
             sd.get(k)
@@ -479,21 +430,11 @@ pub async fn fetch_blob(
     let target = targets
         .get_target(&entry.bastion_id)
         .await?
-        .ok_or_else(|| {
-            bv_error_string!(&format!("bastion `{}` not enrolled", entry.bastion_id))
-        })?;
+        .ok_or_else(|| bv_error_string!(&format!("bastion `{}` not enrolled", entry.bastion_id)))?;
 
-    let url = format!(
-        "https://{}/v1/recordings/{}/blob",
-        target.endpoint.trim_end_matches('/'),
-        recording_id
-    );
+    let url = format!("https://{}/v1/recordings/{}/blob", target.endpoint.trim_end_matches('/'), recording_id);
     let client = super::http::build_client_for(&target, std::time::Duration::from_secs(30))?;
-    let resp = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| bv_error_string!(&format!("transport: {e}")))?;
+    let resp = client.get(&url).send().await.map_err(|e| bv_error_string!(&format!("transport: {e}")))?;
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
@@ -501,32 +442,14 @@ pub async fn fetch_blob(
         // recording on the bastion is a 404, any other upstream failure is
         // a 502 (the bastion is an upstream gateway from our perspective).
         // Without this, every upstream error collapsed into a generic 500.
-        let mapped = if status == reqwest::StatusCode::NOT_FOUND {
-            404
-        } else {
-            502
-        };
-        return Err(crate::bv_error_response_status!(
-            mapped,
-            &format!("bastion returned HTTP {status}: {body}")
-        ));
+        let mapped = if status == reqwest::StatusCode::NOT_FOUND { 404 } else { 502 };
+        return Err(crate::bv_error_response_status!(mapped, &format!("bastion returned HTTP {status}: {body}")));
     }
-    let format = resp
-        .headers()
-        .get("x-recording-format")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or(&entry.format)
-        .to_string();
-    let sha256 = resp
-        .headers()
-        .get("x-recording-sha256")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or(&entry.sha256)
-        .to_string();
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| bv_error_string!(&format!("read body: {e}")))?;
+    let format =
+        resp.headers().get("x-recording-format").and_then(|v| v.to_str().ok()).unwrap_or(&entry.format).to_string();
+    let sha256 =
+        resp.headers().get("x-recording-sha256").and_then(|v| v.to_str().ok()).unwrap_or(&entry.sha256).to_string();
+    let bytes = resp.bytes().await.map_err(|e| bv_error_string!(&format!("read body: {e}")))?;
     Ok((bytes.to_vec(), format, sha256))
 }
 
@@ -654,10 +577,7 @@ pub async fn fetch_blob_cached(
     recording_id: &str,
 ) -> Result<crate::blob_cache::Artifact, RvError> {
     if let Some(hit) = cache.get(recording_id) {
-        log::debug!(
-            "rustion: recording `{recording_id}` served from the blob cache ({} bytes)",
-            hit.bytes.len()
-        );
+        log::debug!("rustion: recording `{recording_id}` served from the blob cache ({} bytes)", hit.bytes.len());
         return Ok(hit);
     }
     // The sidecar digest, read before the fetch so the check below is
@@ -666,17 +586,12 @@ pub async fn fetch_blob_cached(
     // extra decrypted read of a small record, once per cache miss, is
     // the price of not widening `fetch_blob`'s return type for the one
     // caller that needs both digests separately.
-    let sidecar_sha256 = recordings
-        .get(recording_id)
-        .await?
-        .map(|e| e.sha256)
-        .unwrap_or_default();
+    let sidecar_sha256 = recordings.get(recording_id).await?.map(|e| e.sha256).unwrap_or_default();
     let (bytes, format, response_sha256) = fetch_blob(targets, recordings, recording_id).await?;
     // Into `Zeroizing` before the gate, so bytes that fail it are wiped
     // on the way out rather than left in the allocator.
     let bytes: crate::blob_cache::ArtifactBytes = Arc::new(zeroize::Zeroizing::new(bytes));
-    let verified =
-        verify_artifact_digest(recording_id, bytes.as_slice(), &sidecar_sha256, &response_sha256)?;
+    let verified = verify_artifact_digest(recording_id, bytes.as_slice(), &sidecar_sha256, &response_sha256)?;
     let artifact = crate::blob_cache::Artifact {
         bytes,
         format,
@@ -703,15 +618,14 @@ mod tests {
     fn matching_bytes_verify_and_report_the_computed_digest() {
         let bytes = b"rdp-rec artifact";
         let digest = sha256_hex(bytes);
-        let verified = verify_artifact_digest("rec_1", bytes, &digest, "")
-            .expect("matching bytes verify");
+        let verified = verify_artifact_digest("rec_1", bytes, &digest, "").expect("matching bytes verify");
         assert_eq!(verified.as_deref(), Some(digest.as_str()));
 
         // Sidecars have been seen carrying upper-case hex and stray
         // whitespace; neither is a mismatch.
         let shouty = format!("  {}  ", digest.to_uppercase());
-        let verified = verify_artifact_digest("rec_1", bytes, &shouty, "")
-            .expect("case and padding are not a mismatch");
+        let verified =
+            verify_artifact_digest("rec_1", bytes, &shouty, "").expect("case and padding are not a mismatch");
         assert_eq!(
             verified.as_deref(),
             Some(digest.as_str()),
@@ -731,14 +645,8 @@ mod tests {
         let RvError::ErrResponseStatus(status, msg) = &err else {
             panic!("a digest mismatch must carry an HTTP status, got: {err:?}");
         };
-        assert_eq!(
-            *status, 409,
-            "a digest mismatch must be distinguishable from an upstream fetch failure"
-        );
-        assert!(
-            msg.contains("does not match the recorded"),
-            "the message must name the failure, got: {msg}"
-        );
+        assert_eq!(*status, 409, "a digest mismatch must be distinguishable from an upstream fetch failure");
+        assert!(msg.contains("does not match the recorded"), "the message must name the failure, got: {msg}");
         assert!(msg.contains("rec_1"), "the message must name the recording, got: {msg}");
     }
 
@@ -748,13 +656,12 @@ mod tests {
     /// rather than implying they were.
     #[test]
     fn an_artifact_with_no_digest_on_record_is_served_unverified() {
-        let verified = verify_artifact_digest("rec_1", b"anything", "", "")
-            .expect("nothing to check against is not a failure");
+        let verified =
+            verify_artifact_digest("rec_1", b"anything", "", "").expect("nothing to check against is not a failure");
         assert!(verified.is_none(), "an unverifiable artifact reports no verified digest");
 
         // Whitespace-only is "no digest", not a digest that never matches.
-        let verified = verify_artifact_digest("rec_1", b"anything", "   ", "  ")
-            .expect("a blank digest is no digest");
+        let verified = verify_artifact_digest("rec_1", b"anything", "   ", "  ").expect("a blank digest is no digest");
         assert!(verified.is_none());
     }
 
@@ -765,10 +672,7 @@ mod tests {
     fn the_response_digest_is_enforced_when_the_sidecar_has_none() {
         let bytes = b"rdp-rec artifact";
         let digest = sha256_hex(bytes);
-        assert_eq!(
-            verify_artifact_digest("rec_1", bytes, "", &digest).unwrap().as_deref(),
-            Some(digest.as_str())
-        );
+        assert_eq!(verify_artifact_digest("rec_1", bytes, "", &digest).unwrap().as_deref(), Some(digest.as_str()));
         verify_artifact_digest("rec_1", bytes, "", &"cd".repeat(32))
             .expect_err("a response digest that the body contradicts is still a mismatch");
     }

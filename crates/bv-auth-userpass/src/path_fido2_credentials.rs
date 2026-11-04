@@ -42,8 +42,7 @@ impl UserPassBackendInner {
         _backend: &dyn Backend,
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        let username = req.get_data("username")?.as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?.to_lowercase();
+        let username = req.get_data("username")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_lowercase();
 
         let user_entry = self.get_user(req, &username).await?;
         match user_entry {
@@ -64,8 +63,7 @@ impl UserPassBackendInner {
         _backend: &dyn Backend,
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        let username = req.get_data("username")?.as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?.to_lowercase();
+        let username = req.get_data("username")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_lowercase();
 
         let mut user_entry = match self.get_user(req, &username).await? {
             Some(entry) => entry,

@@ -93,11 +93,7 @@ impl UserPassBackendInner {
     ) -> Result<Option<Response>, RvError> {
         let rp_id = req.get_data("rp_id")?.as_str().unwrap().to_string();
         let rp_origin = req.get_data("rp_origin")?.as_str().unwrap().to_string();
-        let rp_name = req
-            .get_data_or_default("rp_name")?
-            .as_str()
-            .unwrap_or("BastionVault")
-            .to_string();
+        let rp_name = req.get_data_or_default("rp_name")?.as_str().unwrap_or("BastionVault").to_string();
 
         let config = Fido2Config { rp_id, rp_origin, rp_name };
         let entry = StorageEntry::new(FIDO2_CONFIG_KEY, &config)?;

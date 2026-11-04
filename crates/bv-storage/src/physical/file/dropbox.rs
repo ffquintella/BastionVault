@@ -111,14 +111,8 @@ impl DropboxTarget {
         // credentials file) work without one, so we accept a missing
         // value here and defer enforcement to `ensure_access_token`
         // when it actually tries to refresh.
-        let client_id = conf
-            .get("client_id")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let client_secret = conf
-            .get("client_secret")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+        let client_id = conf.get("client_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let client_secret = conf.get("client_secret").and_then(|v| v.as_str()).map(|s| s.to_string());
         let credentials_ref = conf
             .get("credentials_ref")
             .and_then(|v| v.as_str())
@@ -137,11 +131,8 @@ impl DropboxTarget {
             .map(Duration::from_secs)
             .unwrap_or(DEFAULT_HTTP_TIMEOUT);
 
-        let agent: Agent = UreqConfig::builder()
-            .timeout_global(Some(http_timeout))
-            .http_status_as_error(false)
-            .build()
-            .into();
+        let agent: Agent =
+            UreqConfig::builder().timeout_global(Some(http_timeout)).http_status_as_error(false).build().into();
 
         let _ = creds::resolve(&credentials_ref)?;
 
@@ -162,9 +153,10 @@ impl DropboxTarget {
 impl Inner {
     fn ensure_access_token(&self) -> Result<String, RvError> {
         {
-            let cache = self.cached_access_token.lock().map_err(|e| {
-                RvError::ErrString(format!("dropbox: token cache poisoned: {e}"))
-            })?;
+            let cache = self
+                .cached_access_token
+                .lock()
+                .map_err(|e| RvError::ErrString(format!("dropbox: token cache poisoned: {e}")))?;
             if let Some(entry) = cache.as_ref() {
                 if entry.expires_at > Instant::now() + TOKEN_EXPIRY_SKEW {
                     return Ok(entry.token.clone());
@@ -200,9 +192,10 @@ impl Inner {
             // we don't re-read the file on every call. If Dropbox ever
             // revokes such a token, operations will fail at call time
             // with 401 and the user re-pastes.
-            let mut cache = self.cached_access_token.lock().map_err(|e| {
-                RvError::ErrString(format!("dropbox: token cache poisoned: {e}"))
-            })?;
+            let mut cache = self
+                .cached_access_token
+                .lock()
+                .map_err(|e| RvError::ErrString(format!("dropbox: token cache poisoned: {e}")))?;
             *cache = Some(CachedAccessToken {
                 token: token.clone(),
                 expires_at: Instant::now() + Duration::from_secs(365 * 24 * 3600),
@@ -224,17 +217,15 @@ impl Inner {
             ));
         };
         let provider = oauth::well_known_provider("dropbox")?;
-        let creds_obj = oauth::OAuthCredentials {
-            client_id,
-            client_secret: self.client_secret.clone(),
-        };
+        let creds_obj = oauth::OAuthCredentials { client_id, client_secret: self.client_secret.clone() };
         let resp = oauth::refresh_access_token(&provider, &creds_obj, &raw)?;
         let new_token = resp.access_token.clone();
         let expires_in = resp.expires_in.unwrap_or(3600);
         {
-            let mut cache = self.cached_access_token.lock().map_err(|e| {
-                RvError::ErrString(format!("dropbox: token cache poisoned: {e}"))
-            })?;
+            let mut cache = self
+                .cached_access_token
+                .lock()
+                .map_err(|e| RvError::ErrString(format!("dropbox: token cache poisoned: {e}")))?;
             *cache = Some(CachedAccessToken {
                 token: new_token.clone(),
                 expires_at: Instant::now() + Duration::from_secs(expires_in),
@@ -251,11 +242,7 @@ impl Inner {
     /// Compose the Dropbox path for a vault key, prepending any
     /// configured prefix.
     fn object_path(&self, key: &str) -> String {
-        let normalized = if key.starts_with('/') {
-            key.to_string()
-        } else {
-            format!("/{key}")
-        };
+        let normalized = if key.starts_with('/') { key.to_string() } else { format!("/{key}") };
         if self.prefix.is_empty() {
             normalized
         } else {
@@ -281,9 +268,7 @@ impl Inner {
             if is_not_found(&text) {
                 return Ok(None);
             }
-            return Err(RvError::ErrString(format!(
-                "dropbox: GET {key}: 409: {text}"
-            )));
+            return Err(RvError::ErrString(format!("dropbox: GET {key}: 409: {text}")));
         }
         if !(200..300).contains(&status) {
             // Capture Dropbox's error body so users see what Dropbox
@@ -291,14 +276,10 @@ impl Inner {
             // revoked token etc.), not just the HTTP status. The
             // download endpoint returns JSON or plain text here.
             let body = resp.into_body().read_to_string().unwrap_or_default();
-            return Err(RvError::ErrString(format!(
-                "dropbox: GET {key}: http status {status}: {body}"
-            )));
+            return Err(RvError::ErrString(format!("dropbox: GET {key}: http status {status}: {body}")));
         }
         Ok(Some(
-            resp.into_body()
-                .read_to_vec()
-                .map_err(|e| RvError::ErrString(format!("dropbox: GET {key}: body: {e}")))?,
+            resp.into_body().read_to_vec().map_err(|e| RvError::ErrString(format!("dropbox: GET {key}: body: {e}")))?,
         ))
     }
 
@@ -332,9 +313,7 @@ impl Inner {
         let status = resp.status().as_u16();
         if !(200..300).contains(&status) {
             let detail = resp.into_body().read_to_string().unwrap_or_default();
-            return Err(RvError::ErrString(format!(
-                "dropbox: PUT {key}: http status {status}: {detail}"
-            )));
+            return Err(RvError::ErrString(format!("dropbox: PUT {key}: http status {status}: {detail}")));
         }
         // Drain the metadata response so the connection is clean
         // for the pool's next borrower.
@@ -359,15 +338,11 @@ impl Inner {
             if is_not_found(&text) {
                 return Ok(());
             }
-            return Err(RvError::ErrString(format!(
-                "dropbox: DELETE {key}: 409: {text}"
-            )));
+            return Err(RvError::ErrString(format!("dropbox: DELETE {key}: 409: {text}")));
         }
         if !(200..300).contains(&status) {
             let body = resp.into_body().read_to_string().unwrap_or_default();
-            return Err(RvError::ErrString(format!(
-                "dropbox: DELETE {key}: http status {status}: {body}"
-            )));
+            return Err(RvError::ErrString(format!("dropbox: DELETE {key}: http status {status}: {body}")));
         }
         let _ = resp.into_body().read_to_string();
         Ok(())
@@ -408,22 +383,18 @@ impl Inner {
                 if is_not_found(&text) {
                     return Ok(Vec::new());
                 }
-                return Err(RvError::ErrString(format!(
-                    "dropbox: LIST: 409: {text}"
-                )));
+                return Err(RvError::ErrString(format!("dropbox: LIST: 409: {text}")));
             }
             if !(200..300).contains(&status) {
                 let body = resp.into_body().read_to_string().unwrap_or_default();
-                return Err(RvError::ErrString(format!(
-                    "dropbox: LIST: http status {status}: {body}"
-                )));
+                return Err(RvError::ErrString(format!("dropbox: LIST: http status {status}: {body}")));
             }
             let text = resp
                 .into_body()
                 .read_to_string()
                 .map_err(|e| RvError::ErrString(format!("dropbox: LIST body: {e}")))?;
-            let parsed: ListResponse = serde_json::from_str(&text)
-                .map_err(|e| RvError::ErrString(format!("dropbox: LIST parse: {e}")))?;
+            let parsed: ListResponse =
+                serde_json::from_str(&text).map_err(|e| RvError::ErrString(format!("dropbox: LIST parse: {e}")))?;
             entries.extend(parsed.entries);
             if parsed.has_more {
                 let cursor = parsed.cursor.unwrap_or_default();
@@ -507,9 +478,7 @@ where
 {
     match tokio::task::spawn_blocking(f).await {
         Ok(r) => r,
-        Err(e) => Err(RvError::ErrString(format!(
-            "dropbox: worker panic/cancel: {e}"
-        ))),
+        Err(e) => Err(RvError::ErrString(format!("dropbox: worker panic/cancel: {e}"))),
     }
 }
 
@@ -603,8 +572,7 @@ mod tests {
     fn long_lived_token_envelope_parses() {
         // The JSON envelope `{"access_token":"..."}` is what
         // `save_pasted_token` writes for long-lived tokens.
-        let parsed: LongLivedToken =
-            serde_json::from_str(r#"{"access_token":"sl.ABC123"}"#).unwrap();
+        let parsed: LongLivedToken = serde_json::from_str(r#"{"access_token":"sl.ABC123"}"#).unwrap();
         assert_eq!(parsed.access_token, "sl.ABC123");
     }
 
@@ -713,14 +681,9 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn dropbox_target_live_roundtrip() {
-        let client_id =
-            std::env::var("BVAULT_TEST_DROPBOX_CLIENT_ID").expect("BVAULT_TEST_DROPBOX_CLIENT_ID");
-        let creds_file = std::env::var("BVAULT_TEST_DROPBOX_CREDS_FILE")
-            .expect("BVAULT_TEST_DROPBOX_CREDS_FILE");
-        let prefix = format!(
-            "bvault-test-{}",
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
-        );
+        let client_id = std::env::var("BVAULT_TEST_DROPBOX_CLIENT_ID").expect("BVAULT_TEST_DROPBOX_CLIENT_ID");
+        let creds_file = std::env::var("BVAULT_TEST_DROPBOX_CREDS_FILE").expect("BVAULT_TEST_DROPBOX_CREDS_FILE");
+        let prefix = format!("bvault-test-{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0));
 
         let target = DropboxTarget::from_config(&cfg(json!({
             "client_id": client_id,

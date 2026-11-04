@@ -114,11 +114,7 @@ impl DefaultResourceAccount {
 /// can escape the key segment. The `.` separator is outside the base64url
 /// alphabet, so the split is unambiguous.
 fn account_key(mount: &str, name: &str) -> String {
-    format!(
-        "{}.{}",
-        URL_SAFE_NO_PAD.encode(mount.as_bytes()),
-        URL_SAFE_NO_PAD.encode(name.as_bytes())
-    )
+    format!("{}.{}", URL_SAFE_NO_PAD.encode(mount.as_bytes()), URL_SAFE_NO_PAD.encode(name.as_bytes()))
 }
 
 pub struct DefaultResourceAccountStore {
@@ -133,11 +129,7 @@ impl DefaultResourceAccountStore {
     }
 
     /// Read the default accounts for a principal. `None` ⇒ unconfigured.
-    pub async fn get(
-        &self,
-        mount: &str,
-        name: &str,
-    ) -> Result<Option<DefaultResourceAccount>, RvError> {
+    pub async fn get(&self, mount: &str, name: &str) -> Result<Option<DefaultResourceAccount>, RvError> {
         match self.view.get(&account_key(mount, name)).await? {
             Some(e) => Ok(Some(serde_json::from_slice(&e.value)?)),
             None => Ok(None),
@@ -180,9 +172,7 @@ impl DefaultResourceAccountStore {
         }
 
         let value = serde_json::to_vec(&record)?;
-        self.view
-            .put(&StorageEntry { key: account_key(mount, name), value })
-            .await?;
+        self.view.put(&StorageEntry { key: account_key(mount, name), value }).await?;
         Ok(Some(record))
     }
 
@@ -240,19 +230,14 @@ mod tests {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_default_account_store_roundtrip() {
-        let (_bvault, core, _root) =
-            new_unseal_test_bastion_vault("test_default_account_store").await;
+        let (_bvault, core, _root) = new_unseal_test_bastion_vault("test_default_account_store").await;
         let store = DefaultResourceAccountStore::new(&core).unwrap();
 
         // No record ⇒ unconfigured.
         assert!(store.get("userpass/", "alice").await.unwrap().is_none());
 
         // Set linux + windows (+ a Windows password); macos left empty.
-        let rec = store
-            .set("userpass/", "alice", "alice-svc", "", "CORP\\alice", "s3cret")
-            .await
-            .unwrap()
-            .unwrap();
+        let rec = store.set("userpass/", "alice", "alice-svc", "", "CORP\\alice", "s3cret").await.unwrap().unwrap();
         assert_eq!(rec.linux, "alice-svc");
         assert_eq!(rec.macos, "");
         assert_eq!(rec.windows, "CORP\\alice");
@@ -266,20 +251,12 @@ mod tests {
         assert_eq!(got.for_os_type("macos"), ""); // unset
 
         // Login names are trimmed on write; the password is stored verbatim.
-        let trimmed = store
-            .set("userpass/", "bob", "  bob  ", "", "", "  pw ")
-            .await
-            .unwrap()
-            .unwrap();
+        let trimmed = store.set("userpass/", "bob", "  bob  ", "", "", "  pw ").await.unwrap().unwrap();
         assert_eq!(trimmed.linux, "bob");
         assert_eq!(trimmed.windows_password, "  pw "); // not trimmed
 
         // A record with only a password (no login names) still persists.
-        let pw_only = store
-            .set("userpass/", "carol", "", "", "", "only-pw")
-            .await
-            .unwrap()
-            .unwrap();
+        let pw_only = store.set("userpass/", "carol", "", "", "", "only-pw").await.unwrap().unwrap();
         assert!(pw_only.has_windows_password());
 
         // Listing surfaces all three records.
@@ -291,11 +268,7 @@ mod tests {
         assert_eq!(all[2].name, "carol");
 
         // An all-empty set (names blank, password empty) clears the record.
-        assert!(store
-            .set("userpass/", "alice", "", "  ", "", "")
-            .await
-            .unwrap()
-            .is_none());
+        assert!(store.set("userpass/", "alice", "", "  ", "", "").await.unwrap().is_none());
         assert!(store.get("userpass/", "alice").await.unwrap().is_none());
 
         // A blank principal name is rejected.

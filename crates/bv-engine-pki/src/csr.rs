@@ -20,9 +20,14 @@
 use std::net::IpAddr;
 
 use base64::{engine::general_purpose::STANDARD, Engine};
-use bv_crypto::{ML_DSA_44_PUBLIC_KEY_LEN, ML_DSA_44_SIGNATURE_LEN, ML_DSA_65_PUBLIC_KEY_LEN,
-                ML_DSA_65_SIGNATURE_LEN, ML_DSA_87_PUBLIC_KEY_LEN, ML_DSA_87_SIGNATURE_LEN};
-use fips204::{ml_dsa_44, ml_dsa_65, ml_dsa_87, traits::{SerDes, Verifier}};
+use bv_crypto::{
+    ML_DSA_44_PUBLIC_KEY_LEN, ML_DSA_44_SIGNATURE_LEN, ML_DSA_65_PUBLIC_KEY_LEN, ML_DSA_65_SIGNATURE_LEN,
+    ML_DSA_87_PUBLIC_KEY_LEN, ML_DSA_87_SIGNATURE_LEN,
+};
+use fips204::{
+    ml_dsa_44, ml_dsa_65, ml_dsa_87,
+    traits::{SerDes, Verifier},
+};
 use x509_parser::{
     der_parser::asn1_rs::oid,
     extensions::{GeneralName, ParsedExtension},
@@ -209,11 +214,7 @@ where
 }
 
 fn extract_common_name(subject: &x509_parser::x509::X509Name<'_>) -> Option<String> {
-    subject
-        .iter_common_name()
-        .next()
-        .and_then(|cn| cn.as_str().ok())
-        .map(|s| s.to_string())
+    subject.iter_common_name().next().and_then(|cn| cn.as_str().ok()).map(|s| s.to_string())
 }
 
 /// Walk the CSR's `extensionRequest` attribute looking for SubjectAltName.

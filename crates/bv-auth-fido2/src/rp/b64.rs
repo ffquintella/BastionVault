@@ -4,8 +4,8 @@
 //! the browser and our stored JSON follow that convention. Keep these
 //! helpers in one place so we don't get padding/charset drift.
 
-use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 
 pub fn encode(bytes: &[u8]) -> String {
     URL_SAFE_NO_PAD.encode(bytes)

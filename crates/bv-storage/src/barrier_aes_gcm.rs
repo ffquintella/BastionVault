@@ -277,8 +277,7 @@ impl AESGCMBarrier {
 
         // XXX: the cloned variable 'key' will be zeroized automatically on drop
         let key = Zeroizing::new(barrier_info.key.clone().unwrap());
-        let cipher =
-            Aes256Gcm::new_from_slice(key.deref().as_slice()).map_err(|_| RvError::ErrBarrierKeyInvalid)?;
+        let cipher = Aes256Gcm::new_from_slice(key.deref().as_slice()).map_err(|_| RvError::ErrBarrierKeyInvalid)?;
 
         let size: usize = EPOCH_SIZE + 1 + AES_GCM_NONCE_SIZE + plaintext.len() + AES_GCM_TAG_SIZE;
         let mut out = vec![0u8; size];
@@ -290,11 +289,7 @@ impl AESGCMBarrier {
         rand::rng().fill_bytes(nonce.deref_mut().as_mut_slice());
         out[5..5 + AES_GCM_NONCE_SIZE].copy_from_slice(nonce.deref().as_slice());
 
-        let aad = if barrier_info.aes_gcm_version_byte == AES_GCM_VERSION2 {
-            path.as_bytes()
-        } else {
-            &[]
-        };
+        let aad = if barrier_info.aes_gcm_version_byte == AES_GCM_VERSION2 { path.as_bytes() } else { &[] };
 
         let ciphertext_start = EPOCH_SIZE + 1 + AES_GCM_NONCE_SIZE;
         let tag_start = ciphertext_start + plaintext.len();
@@ -328,13 +323,11 @@ impl AESGCMBarrier {
         }
 
         let key = Zeroizing::new(barrier_info.key.clone().unwrap());
-        let cipher =
-            Aes256Gcm::new_from_slice(key.deref().as_slice()).map_err(|_| RvError::ErrBarrierKeyInvalid)?;
+        let cipher = Aes256Gcm::new_from_slice(key.deref().as_slice()).map_err(|_| RvError::ErrBarrierKeyInvalid)?;
 
         match ciphertext[4] {
             AES_GCM_VERSION1 => {}
-            AES_GCM_VERSION2 => {
-            }
+            AES_GCM_VERSION2 => {}
             _ => {
                 return Err(RvError::ErrBarrierVersionMismatch);
             }
@@ -346,9 +339,7 @@ impl AESGCMBarrier {
         let tag = Tag::from_slice(&ciphertext[ciphertext.len() - AES_GCM_TAG_SIZE..]);
         let mut out = raw.to_vec();
 
-        cipher
-            .decrypt_in_place_detached(nonce, aad, &mut out, tag)
-            .map_err(|_| RvError::ErrBarrierUnsealFailed)?;
+        cipher.decrypt_in_place_detached(nonce, aad, &mut out, tag).map_err(|_| RvError::ErrBarrierUnsealFailed)?;
 
         Ok(out)
     }

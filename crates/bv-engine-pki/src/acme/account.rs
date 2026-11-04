@@ -16,17 +16,18 @@ use super::{
     new_object_id,
     storage::{AcmeAccount, ACCOUNT_PREFIX},
 };
-use bv_storage::StorageEntry;
 use crate::{
     context::Context,
     errors::RvError,
     logical::{Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
     new_fields, new_fields_internal, new_path, new_path_internal,
 };
+use bv_storage::StorageEntry;
 
 use super::super::{PkiBackend, PkiBackendInner};
 
-const NEW_ACCOUNT_HELP: &str = "RFC 8555 §7.3 — register a new ACME account or fetch the existing one keyed by the JWS account key.";
+const NEW_ACCOUNT_HELP: &str =
+    "RFC 8555 §7.3 — register a new ACME account or fetch the existing one keyed by the JWS account key.";
 const ACCOUNT_HELP: &str = "RFC 8555 §7.3.2 — read or update an account by id.";
 
 impl PkiBackend {
@@ -101,9 +102,7 @@ impl PkiBackendInner {
         // Look up by thumbprint — RFC 8555 §7.3 says repeated
         // new-account with the same key returns the existing record.
         if let Some(existing) = self.load_account(req, &verified.thumbprint).await? {
-            return self
-                .respond_account(req, &verified.thumbprint, &existing, false)
-                .await;
+            return self.respond_account(req, &verified.thumbprint, &existing, false).await;
         }
 
         // Parse the (optional) account-creation payload. The body
@@ -117,16 +116,11 @@ impl PkiBackendInner {
                 .map_err(|e| RvError::ErrString(format!("acme: payload not JSON: {e}")))?
         };
 
-        let only_existing = payload
-            .get("onlyReturnExisting")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let only_existing = payload.get("onlyReturnExisting").and_then(|v| v.as_bool()).unwrap_or(false);
         if only_existing {
             // RFC 8555 §7.3.1 — when this flag is set and no account
             // matches, return `accountDoesNotExist`.
-            return Err(RvError::ErrString(
-                "acme: accountDoesNotExist (onlyReturnExisting)".into(),
-            ));
+            return Err(RvError::ErrString("acme: accountDoesNotExist (onlyReturnExisting)".into()));
         }
 
         // EAB (RFC 8555 §7.3.4). When `eab_required = true` the
@@ -139,9 +133,7 @@ impl PkiBackendInner {
         let mut consumed_eab_id: Option<String> = None;
         let eab_present = payload.get("externalAccountBinding").is_some();
         if cfg.eab_required && !eab_present {
-            return Err(RvError::ErrString(
-                "acme: externalAccountBindingRequired".into(),
-            ));
+            return Err(RvError::ErrString("acme: externalAccountBindingRequired".into()));
         }
         if eab_present {
             let eab_value = payload.get("externalAccountBinding").unwrap().clone();
@@ -155,27 +147,16 @@ impl PkiBackendInner {
                     use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64, Engine as _};
                     let bytes = B64.decode(p.as_bytes()).ok()?;
                     let v: Value = serde_json::from_slice(&bytes).ok()?;
-                    v.get("kid")
-                        .and_then(|k| k.as_str())
-                        .map(|s| s.to_string())
+                    v.get("kid").and_then(|k| k.as_str()).map(|s| s.to_string())
                 })
-                .ok_or_else(|| {
-                    RvError::ErrString("acme: eab inner protected.kid missing".into())
-                })?;
+                .ok_or_else(|| RvError::ErrString("acme: eab inner protected.kid missing".into()))?;
             let key_record = self
                 .load_eab(req, &inner_kid)
                 .await?
-                .ok_or_else(|| {
-                    RvError::ErrString(format!("acme: eab unknown kid `{inner_kid}`"))
-                })?;
+                .ok_or_else(|| RvError::ErrString(format!("acme: eab unknown kid `{inner_kid}`")))?;
             let key_for_lookup = key_record.clone();
-            super::eab::verify_eab(
-                &eab_value,
-                &verified.jwk,
-                "new-account",
-                move |_k| Some(key_for_lookup),
-            )
-            .map_err(RvError::ErrString)?;
+            super::eab::verify_eab(&eab_value, &verified.jwk, "new-account", move |_k| Some(key_for_lookup))
+                .map_err(RvError::ErrString)?;
             consumed_eab_id = Some(key_record.key_id);
         }
 
@@ -184,10 +165,7 @@ impl PkiBackendInner {
             .and_then(|v| v.as_array())
             .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
             .unwrap_or_default();
-        let terms_agreed = payload
-            .get("termsOfServiceAgreed")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let terms_agreed = payload.get("termsOfServiceAgreed").and_then(|v| v.as_bool()).unwrap_or(false);
 
         let account = AcmeAccount {
             status: "valid".to_string(),
@@ -209,21 +187,13 @@ impl PkiBackendInner {
         self.respond_account(req, &verified.thumbprint, &account, true).await
     }
 
-    pub async fn handle_acme_account(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_acme_account(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let cfg = self.load_acme_config(req).await?.unwrap_or_default();
         if !cfg.enabled {
             return Err(RvError::ErrString("acme: not enabled on this mount".into()));
         }
 
-        let id = req
-            .get_data("id")
-            .ok()
-            .and_then(|v| v.as_str().map(String::from))
-            .unwrap_or_default();
+        let id = req.get_data("id").ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
 
         let envelope = parse_envelope(req)?;
         // For the account endpoint the JWS uses `kid`; the verifier
@@ -272,10 +242,7 @@ impl PkiBackendInner {
             let update: Value = serde_json::from_slice(&verified.payload)
                 .map_err(|e| RvError::ErrString(format!("acme: update payload not JSON: {e}")))?;
             if let Some(contact) = update.get("contact").and_then(|v| v.as_array()) {
-                updated.contact = contact
-                    .iter()
-                    .filter_map(|c| c.as_str().map(String::from))
-                    .collect();
+                updated.contact = contact.iter().filter_map(|c| c.as_str().map(String::from)).collect();
             }
             if let Some(status) = update.get("status").and_then(|v| v.as_str()) {
                 if status == "deactivated" {
@@ -307,18 +274,9 @@ impl PkiBackendInner {
 
         let mut data = Map::new();
         data.insert("status".into(), Value::String(account.status.clone()));
-        data.insert(
-            "contact".into(),
-            Value::Array(account.contact.iter().map(|c| Value::String(c.clone())).collect()),
-        );
-        data.insert(
-            "termsOfServiceAgreed".into(),
-            Value::Bool(account.terms_of_service_agreed),
-        );
-        data.insert(
-            "orders".into(),
-            Value::String(format!("{base}/acme/account/{id}/orders")),
-        );
+        data.insert("contact".into(), Value::Array(account.contact.iter().map(|c| Value::String(c.clone())).collect()));
+        data.insert("termsOfServiceAgreed".into(), Value::Bool(account.terms_of_service_agreed));
+        data.insert("orders".into(), Value::String(format!("{base}/acme/account/{id}/orders")));
 
         let nonce = self.mint_nonce(req).await?;
         let mut headers = HashMap::new();
@@ -327,24 +285,13 @@ impl PkiBackendInner {
         headers.insert("Location".to_string(), location);
         // RFC 8555 §6.5: the directory link is included on every
         // protocol response.
-        headers.insert(
-            "Link".to_string(),
-            format!(r#"<{base}/acme/directory>;rel="index""#),
-        );
+        headers.insert("Link".to_string(), format!(r#"<{base}/acme/directory>;rel="index""#));
 
         let _ = created;
-        Ok(Some(Response {
-            data: Some(data),
-            headers: Some(headers),
-            ..Default::default()
-        }))
+        Ok(Some(Response { data: Some(data), headers: Some(headers), ..Default::default() }))
     }
 
-    pub async fn load_account(
-        &self,
-        req: &Request,
-        id: &str,
-    ) -> Result<Option<AcmeAccount>, RvError> {
+    pub async fn load_account(&self, req: &Request, id: &str) -> Result<Option<AcmeAccount>, RvError> {
         let key = format!("{ACCOUNT_PREFIX}{id}");
         match req.storage_get(&key).await? {
             Some(e) => Ok(Some(serde_json::from_slice(&e.value)?)),
@@ -352,18 +299,9 @@ impl PkiBackendInner {
         }
     }
 
-    pub async fn save_account(
-        &self,
-        req: &mut Request,
-        id: &str,
-        account: &AcmeAccount,
-    ) -> Result<(), RvError> {
+    pub async fn save_account(&self, req: &mut Request, id: &str, account: &AcmeAccount) -> Result<(), RvError> {
         let bytes = serde_json::to_vec(account)?;
-        req.storage_put(&StorageEntry {
-            key: format!("{ACCOUNT_PREFIX}{id}"),
-            value: bytes,
-        })
-        .await
+        req.storage_put(&StorageEntry { key: format!("{ACCOUNT_PREFIX}{id}"), value: bytes }).await
     }
 
     /// Validate the supplied nonce; returns a clear ACME-shaped
@@ -372,14 +310,10 @@ impl PkiBackendInner {
     /// — surfaced here as the error message body.
     async fn check_nonce(&self, req: &mut Request, nonce: &str) -> Result<(), RvError> {
         if nonce.is_empty() {
-            return Err(RvError::ErrString(
-                "acme: badNonce (missing protected.nonce)".into(),
-            ));
+            return Err(RvError::ErrString("acme: badNonce (missing protected.nonce)".into()));
         }
         if !self.consume_nonce(req, nonce).await? {
-            return Err(RvError::ErrString(
-                "acme: badNonce (unknown / already consumed nonce)".into(),
-            ));
+            return Err(RvError::ErrString("acme: badNonce (unknown / already consumed nonce)".into()));
         }
         Ok(())
     }
@@ -388,31 +322,13 @@ impl PkiBackendInner {
 /// Pull the JWS envelope fields out of the request body. Same
 /// shape regardless of which protocol endpoint we're handling.
 fn parse_envelope(req: &Request) -> Result<JwsEnvelope, RvError> {
-    let protected = req
-        .get_data("protected")
-        .ok()
-        .and_then(|v| v.as_str().map(String::from))
-        .unwrap_or_default();
-    let payload = req
-        .get_data("payload")
-        .ok()
-        .and_then(|v| v.as_str().map(String::from))
-        .unwrap_or_default();
-    let signature = req
-        .get_data("signature")
-        .ok()
-        .and_then(|v| v.as_str().map(String::from))
-        .unwrap_or_default();
+    let protected = req.get_data("protected").ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
+    let payload = req.get_data("payload").ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
+    let signature = req.get_data("signature").ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
     if protected.is_empty() || signature.is_empty() {
-        return Err(RvError::ErrString(
-            "acme: malformed JWS envelope (missing protected or signature)".into(),
-        ));
+        return Err(RvError::ErrString("acme: malformed JWS envelope (missing protected or signature)".into()));
     }
-    Ok(JwsEnvelope {
-        protected,
-        payload,
-        signature,
-    })
+    Ok(JwsEnvelope { protected, payload, signature })
 }
 
 /// Reused from `directory.rs` — the directory's URL builder. Kept
@@ -438,10 +354,7 @@ fn directory_base(cfg: &super::storage::AcmeConfig, req: &Request) -> String {
 }
 
 fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
 // Suppress unused-import warnings under feature combos that don't

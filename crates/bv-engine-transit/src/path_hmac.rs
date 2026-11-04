@@ -17,7 +17,8 @@ use crate::{
     new_fields, new_fields_internal, new_path, new_path_internal,
 };
 
-const HMAC_HELP: &str = "Compute HMAC-SHA-{256,384,512} over a base64 message under the latest version of the named key.";
+const HMAC_HELP: &str =
+    "Compute HMAC-SHA-{256,384,512} over a base64 message under the latest version of the named key.";
 const HMAC_VERIFY_HELP: &str = "Verify a `bvault:vN:<base64>` HMAC against a message. Constant-time comparison.";
 
 impl TransitBackend {
@@ -53,27 +54,17 @@ impl TransitBackend {
 
 #[maybe_async::maybe_async]
 impl TransitBackendInner {
-    pub async fn handle_hmac(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_hmac(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let name = take_str(req, "name");
         let input_b64 = take_str(req, "input");
         let algo = HashAlgo::parse(&take_str(req, "algorithm")).map_err(RvError::ErrString)?;
-        let input = B64
-            .decode(input_b64.as_bytes())
-            .map_err(|e| RvError::ErrString(format!("input: not base64 ({e})")))?;
+        let input =
+            B64.decode(input_b64.as_bytes()).map_err(|e| RvError::ErrString(format!("input: not base64 ({e})")))?;
 
-        let p = self
-            .get_policy(req, &name)
-            .await?
-            .ok_or_else(|| RvError::ErrString(format!("unknown key `{name}`")))?;
+        let p =
+            self.get_policy(req, &name).await?.ok_or_else(|| RvError::ErrString(format!("unknown key `{name}`")))?;
         if !p.key_type.supports_hmac() {
-            return Err(RvError::ErrString(format!(
-                "{} keys do not support /hmac",
-                p.key_type.as_str()
-            )));
+            return Err(RvError::ErrString(format!("{} keys do not support /hmac", p.key_type.as_str())));
         }
         let v = p.latest().ok_or_else(|| RvError::ErrString("key has no versions".into()))?;
         let mac = hmac(algo, &v.material, &input);
@@ -84,32 +75,21 @@ impl TransitBackendInner {
         Ok(Some(Response::data_response(Some(data))))
     }
 
-    pub async fn handle_hmac_verify(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_hmac_verify(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let name = take_str(req, "name");
         let input_b64 = take_str(req, "input");
         let mac_str = take_str(req, "hmac");
         let algo = HashAlgo::parse(&take_str(req, "algorithm")).map_err(RvError::ErrString)?;
-        let input = B64
-            .decode(input_b64.as_bytes())
-            .map_err(|e| RvError::ErrString(format!("input: not base64 ({e})")))?;
+        let input =
+            B64.decode(input_b64.as_bytes()).map_err(|e| RvError::ErrString(format!("input: not base64 ({e})")))?;
 
         let framed = ciphertext::parse(&mac_str)?;
         if framed.pqc_algo.is_some() {
-            return Err(RvError::ErrString(
-                "HMAC framing must not carry a pqc tag".into(),
-            ));
+            return Err(RvError::ErrString("HMAC framing must not carry a pqc tag".into()));
         }
-        let p = self
-            .get_policy(req, &name)
-            .await?
-            .ok_or_else(|| RvError::ErrString(format!("unknown key `{name}`")))?;
-        let v = p
-            .version_for_decrypt(framed.version)
-            .map_err(RvError::ErrString)?;
+        let p =
+            self.get_policy(req, &name).await?.ok_or_else(|| RvError::ErrString(format!("unknown key `{name}`")))?;
+        let v = p.version_for_decrypt(framed.version).map_err(RvError::ErrString)?;
         let expected = hmac(algo, &v.material, &input);
         let mut data = Map::new();
         data.insert("valid".into(), Value::Bool(ct_eq(&expected, &framed.bytes)));
@@ -118,8 +98,5 @@ impl TransitBackendInner {
 }
 
 fn take_str(req: &Request, key: &str) -> String {
-    req.get_data(key)
-        .ok()
-        .and_then(|v| v.as_str().map(|s| s.to_string()))
-        .unwrap_or_default()
+    req.get_data(key).ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default()
 }

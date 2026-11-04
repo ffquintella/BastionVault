@@ -218,8 +218,7 @@ pub async fn generate_managed_key(
         ensure_name_free(req, name).await?;
     }
     let signer = Signer::generate(alg)?;
-    let entry =
-        persist_new_key(req, &signer, name, exported, exportable, KeySource::Generated).await?;
+    let entry = persist_new_key(req, &signer, name, exported, exportable, KeySource::Generated).await?;
     Ok((entry, signer))
 }
 
@@ -265,8 +264,7 @@ pub async fn import_managed_key(
         }
     })?;
 
-    let entry =
-        persist_new_key(req, &signer, name, false, exportable, KeySource::Imported).await?;
+    let entry = persist_new_key(req, &signer, name, false, exportable, KeySource::Imported).await?;
     Ok((entry, signer))
 }
 
@@ -299,8 +297,7 @@ pub async fn load_key(req: &Request, reference: &str) -> Result<Option<KeyEntry>
 /// hasn't been bound to an issuer or used to issue any cert.
 #[maybe_async::maybe_async]
 pub async fn load_refs(req: &Request, id: &str) -> Result<KeyRefs, RvError> {
-    let refs: Option<KeyRefs> =
-        super::storage::get_json(req, &refs_storage_key(id)).await?;
+    let refs: Option<KeyRefs> = super::storage::get_json(req, &refs_storage_key(id)).await?;
     Ok(refs.unwrap_or_default())
 }
 
@@ -346,9 +343,8 @@ pub async fn add_issuer_ref(req: &Request, key_id: &str, issuer_id: &str) -> Res
 /// SubjectPublicKeyInfo DER. Used by `pki/sign/:role` to assert that a
 /// CSR's SPKI matches the pinned managed key.
 pub fn entry_spki_der(entry: &KeyEntry) -> Result<Vec<u8>, RvError> {
-    let parsed = pem::parse(entry.public_key_pem.as_bytes()).map_err(|_| {
-        RvError::ErrString("managed-key entry has malformed public_key_pem".into())
-    })?;
+    let parsed = pem::parse(entry.public_key_pem.as_bytes())
+        .map_err(|_| RvError::ErrString("managed-key entry has malformed public_key_pem".into()))?;
     if parsed.tag() != "PUBLIC KEY" {
         return Err(RvError::ErrString(format!(
             "managed-key entry: expected `PUBLIC KEY` PEM block, got `{}`",
@@ -388,9 +384,9 @@ pub async fn force_delete_key(req: &Request, reference: &str) -> Result<(), RvEr
 
 #[maybe_async::maybe_async]
 async fn delete_key_inner(req: &Request, reference: &str, force: bool) -> Result<(), RvError> {
-    let entry = load_key(req, reference).await?.ok_or_else(|| {
-        RvError::ErrString(format!("delete_key: no managed key found for `{reference}`"))
-    })?;
+    let entry = load_key(req, reference)
+        .await?
+        .ok_or_else(|| RvError::ErrString(format!("delete_key: no managed key found for `{reference}`")))?;
     let refs = load_refs(req, &entry.id).await?;
     // Issuer bindings always block: the managed-key entry is the live
     // signing material for the bound issuer(s) once the legacy
@@ -500,8 +496,7 @@ fn ml_dsa_public_pem(signer: &MlDsaSigner) -> Result<String, RvError> {
     let alg_id = AlgorithmIdentifierOwned { oid: signer.level().oid(), parameters: None };
     let spki = SubjectPublicKeyInfoOwned {
         algorithm: alg_id,
-        subject_public_key: BitString::from_bytes(signer.public_key())
-            .map_err(|_| RvError::ErrPkiInternal)?,
+        subject_public_key: BitString::from_bytes(signer.public_key()).map_err(|_| RvError::ErrPkiInternal)?,
     };
     let der = spki.to_der().map_err(|_| RvError::ErrPkiInternal)?;
     Ok(pem::encode(&pem::Pem::new("PUBLIC KEY", der)))
@@ -536,16 +531,11 @@ fn reject_weak_rsa(pem: &str) -> Result<(), RvError> {
     };
     let bits = priv_key.size() * 8;
     if bits < 2048 {
-        return Err(RvError::ErrString(format!(
-            "import_key: RSA modulus is {bits} bits; minimum accepted is 2048"
-        )));
+        return Err(RvError::ErrString(format!("import_key: RSA modulus is {bits} bits; minimum accepted is 2048")));
     }
     Ok(())
 }
 
 fn now_unix() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }

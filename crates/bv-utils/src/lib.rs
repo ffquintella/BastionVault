@@ -380,8 +380,7 @@ pub fn hmac_sha256_hex(key: &[u8], data: &[u8]) -> Result<String, RvError> {
 }
 
 pub fn verify_hmac_sha256_hex(key: &[u8], data: &[u8], expected_hex: &str) -> Result<bool, RvError> {
-    let expected =
-        hex::decode(expected_hex).map_err(|_| RvError::ErrResponse("invalid hmac hex".to_string()))?;
+    let expected = hex::decode(expected_hex).map_err(|_| RvError::ErrResponse("invalid hmac hex".to_string()))?;
     let mut mac =
         Hmac::<Sha256>::new_from_slice(key).map_err(|_| RvError::ErrResponse("invalid hmac key".to_string()))?;
     mac.update(data);

@@ -32,9 +32,9 @@ use super::{
     Permissions, Policy, PolicyPathRules, PolicyType,
 };
 use crate::{
+    bv_error_string,
     errors::RvError,
     logical::{auth::PolicyInfo, Operation, Request},
-    bv_error_string,
     utils::string::ensure_no_leading_slash,
 };
 
@@ -298,8 +298,10 @@ impl ACL {
                 }
 
                 if let Some(mut existing_perms) = acl.get_permissions(pr)? {
-                    if bv_policy_core::merge_caps(existing_perms.capabilities_bitmap, pr.permissions.capabilities_bitmap)
-                        == Merge::KeepExisting
+                    if bv_policy_core::merge_caps(
+                        existing_perms.capabilities_bitmap,
+                        pr.permissions.capabilities_bitmap,
+                    ) == Merge::KeepExisting
                     {
                         // If we are explicitly denied in the existing capability set, don't save anything else
                         continue;
@@ -500,7 +502,8 @@ impl ACL {
                 // token holding `path "*"` to read on `rustion/targets/`, so
                 // LIST 403'd for administrators as well as the share-grantees
                 // it was written to withhold it from.
-                if let Some(wildcards) = bv_policy_core::segments_match(&split_curr_wc_path, pd.is_prefix, &path_parts) {
+                if let Some(wildcards) = bv_policy_core::segments_match(&split_curr_wc_path, pd.is_prefix, &path_parts)
+                {
                     pd.wildcards = wildcards;
                     pd.perms = Some(permissions.clone());
                     best.offer(pd);
@@ -684,11 +687,7 @@ impl ACL {
     /// `Operation` maps to — `connect` is the one that exists today, and
     /// without the override a `scopes = ["shared"]` rule would consult the
     /// share's `read` grant, since the probe rides on a Read op.
-    pub fn explain_capability_for_request(
-        &self,
-        req: &Request,
-        capability: Capability,
-    ) -> CapabilityExplain {
+    pub fn explain_capability_for_request(&self, req: &Request, capability: Capability) -> CapabilityExplain {
         let path = ensure_no_leading_slash(&req.path);
 
         let result = self.allow_operation(req, true).unwrap_or_default();
@@ -756,12 +755,7 @@ impl ACL {
         };
 
         let path = ensure_no_leading_slash(path);
-        let req = Request {
-            operation: op,
-            path: path.clone(),
-            data: Some(params.clone()),
-            ..Default::default()
-        };
+        let req = Request { operation: op, path: path.clone(), data: Some(params.clone()), ..Default::default() };
 
         let result = self.allow_operation(&req, false).unwrap_or_default();
 
@@ -1475,7 +1469,6 @@ path "kv/deny" {
             assert_eq!(case.3, result.root_privs);
         }
     }
-
 
     /// Rule shape × request shape, against the canonical (namespace-prefixed)
     /// path space.
@@ -2394,8 +2387,7 @@ path "secret/data/docker/hub/*" { capabilities = ["read"] }
         let acl = ACL::new(&[Arc::new(policy)]).unwrap();
 
         let mut auth = Auth::default();
-        auth.metadata
-            .insert("entity_id".to_string(), "entity-felipe2".to_string());
+        auth.metadata.insert("entity_id".to_string(), "entity-felipe2".to_string());
 
         // No share → no access (scope_passes sees empty target_shared_caps).
         let req_no_share = Request {
@@ -2433,10 +2425,7 @@ path "secret/data/docker/hub/*" { capabilities = ["read"] }
             ..Default::default()
         };
         let res = acl.allow_operation(&req_list_only, false).unwrap();
-        assert!(
-            !res.allowed,
-            "a list-only share must not grant Read (level of the share is honored)",
-        );
+        assert!(!res.allowed, "a list-only share must not grant Read (level of the share is honored)",);
     }
 
     #[test]
@@ -2456,8 +2445,7 @@ path "secret/data/docker/hub/*" { capabilities = ["read"] }
         let acl = ACL::new(&[Arc::new(policy)]).unwrap();
 
         let mut auth = Auth::default();
-        auth.metadata
-            .insert("entity_id".to_string(), "entity-felipe2".to_string());
+        auth.metadata.insert("entity_id".to_string(), "entity-felipe2".to_string());
 
         let probe = |shared: Vec<String>| Request {
             operation: Operation::Read,
@@ -2470,28 +2458,15 @@ path "secret/data/docker/hub/*" { capabilities = ["read"] }
 
         // Read-only share: the rule lists `connect`, but the gate demands it
         // on the share and does not find it.
-        let read_only = acl.explain_capability_for_request(
-            &probe(vec!["read".to_string()]),
-            Capability::Connect,
-        );
-        assert!(
-            !read_only.allowed,
-            "a read-only share must NOT convey connect",
-        );
+        let read_only = acl.explain_capability_for_request(&probe(vec!["read".to_string()]), Capability::Connect);
+        assert!(!read_only.allowed, "a read-only share must NOT convey connect",);
 
         // Share carrying connect: allowed.
-        let with_connect = acl.explain_capability_for_request(
-            &probe(vec!["connect".to_string()]),
-            Capability::Connect,
-        );
-        assert!(
-            with_connect.allowed,
-            "a share carrying `connect` must convey connect",
-        );
+        let with_connect = acl.explain_capability_for_request(&probe(vec!["connect".to_string()]), Capability::Connect);
+        assert!(with_connect.allowed, "a share carrying `connect` must convey connect",);
 
         // No share at all: denied.
-        let none =
-            acl.explain_capability_for_request(&probe(Vec::new()), Capability::Connect);
+        let none = acl.explain_capability_for_request(&probe(Vec::new()), Capability::Connect);
         assert!(!none.allowed, "no share must convey nothing");
     }
 
@@ -2511,8 +2486,7 @@ path "secret/data/docker/hub/*" { capabilities = ["read"] }
         let acl = ACL::new(&[Arc::new(policy)]).unwrap();
 
         let mut auth = Auth::default();
-        auth.metadata
-            .insert("entity_id".to_string(), "entity-felipe2".to_string());
+        auth.metadata.insert("entity_id".to_string(), "entity-felipe2".to_string());
 
         let req = Request {
             operation: Operation::Read,
@@ -2542,8 +2516,7 @@ path "secret/data/docker/hub/*" { capabilities = ["read"] }
         let acl = ACL::new(&[Arc::new(policy)]).unwrap();
 
         let mut auth = Auth::default();
-        auth.metadata
-            .insert("entity_id".to_string(), "entity-owner".to_string());
+        auth.metadata.insert("entity_id".to_string(), "entity-owner".to_string());
 
         let req = Request {
             operation: Operation::Read,
@@ -2573,13 +2546,8 @@ path "secret/data/docker/hub/*" { capabilities = ["read"] }
         );
         let acl = ACL::new(&[Arc::new(policy)]).unwrap();
 
-        assert!(
-            !acl.explain_capability("resources/secrets/segdc1vhm0004/", Capability::Connect)
-                .allowed,
-        );
-        assert!(
-            !acl.explain_capability("resources/secrets/segdc1vhm0004/", Capability::Read).allowed,
-        );
+        assert!(!acl.explain_capability("resources/secrets/segdc1vhm0004/", Capability::Connect).allowed,);
+        assert!(!acl.explain_capability("resources/secrets/segdc1vhm0004/", Capability::Read).allowed,);
     }
 
     #[test]
@@ -2871,12 +2839,12 @@ path "secret/data/docker/hub/*" { capabilities = ["read"] }
                 "#,
             );
 
-            let req = Request {
-                operation: Operation::List,
-                path: "rustion/targets/".to_string(),
-                ..Default::default()
-            };
-            assert!(acl.allow_operation(&req, false).unwrap().allowed, "LIST rustion/targets/ must fall through to `path \"*\"`");
+            let req =
+                Request { operation: Operation::List, path: "rustion/targets/".to_string(), ..Default::default() };
+            assert!(
+                acl.allow_operation(&req, false).unwrap().allowed,
+                "LIST rustion/targets/ must fall through to `path \"*\"`"
+            );
 
             assert!(caps(&acl, "rustion/targets/").contains(&Capability::List.to_string()));
         }
@@ -2887,19 +2855,16 @@ path "secret/data/docker/hub/*" { capabilities = ["read"] }
         fn the_narrow_rule_alone_still_withholds_list_on_the_collection() {
             let acl = acl_of(r#"path "rustion/targets/+" { capabilities = ["read"] }"#);
 
-            let req = Request {
-                operation: Operation::List,
-                path: "rustion/targets/".to_string(),
-                ..Default::default()
-            };
+            let req =
+                Request { operation: Operation::List, path: "rustion/targets/".to_string(), ..Default::default() };
             assert!(!acl.allow_operation(&req, false).unwrap().allowed);
 
-            let req = Request {
-                operation: Operation::Read,
-                path: "rustion/targets/".to_string(),
-                ..Default::default()
-            };
-            assert!(!acl.allow_operation(&req, false).unwrap().allowed, "the collection path is not a target named \"\"");
+            let req =
+                Request { operation: Operation::Read, path: "rustion/targets/".to_string(), ..Default::default() };
+            assert!(
+                !acl.allow_operation(&req, false).unwrap().allowed,
+                "the collection path is not a target named \"\""
+            );
         }
 
         /// What `+` is actually for keeps working.

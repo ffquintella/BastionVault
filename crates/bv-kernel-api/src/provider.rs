@@ -568,13 +568,8 @@ pub struct ProviderReleaseRequest {
 /// The secret half of a released credential. Held in `Zeroizing` buffers and
 /// without a `Debug` that prints them.
 pub enum ReleasedSecret {
-    Password {
-        password: Zeroizing<String>,
-        totp_seed: Option<Zeroizing<String>>,
-    },
-    SshKey {
-        private_key: Zeroizing<String>,
-    },
+    Password { password: Zeroizing<String>, totp_seed: Option<Zeroizing<String>> },
+    SshKey { private_key: Zeroizing<String> },
 }
 
 impl ReleasedSecret {
@@ -617,11 +612,7 @@ impl ReleasedCredential {
     /// (spec §4.4): the secret kind is one the provider declared and is
     /// compatible with the protocol, the username is non-empty, and every
     /// field is within the size limits. Fails closed.
-    pub fn validate(
-        &self,
-        protocol: &str,
-        declared_kinds: &[String],
-    ) -> Result<(), ProviderOutputError> {
+    pub fn validate(&self, protocol: &str, declared_kinds: &[String]) -> Result<(), ProviderOutputError> {
         let bad = |m: &str| Err(ProviderOutputError(m.to_string()));
         let kind = self.secret.kind();
         if !declared_kinds.iter().any(|k| k == kind) {
@@ -639,9 +630,7 @@ impl ReleasedCredential {
         if self.username.trim().is_empty() {
             return bad("provider returned an empty username");
         }
-        if self.username.len() > MAX_TEXT_LEN
-            || self.domain.as_ref().is_some_and(|d| d.len() > MAX_TEXT_LEN)
-        {
+        if self.username.len() > MAX_TEXT_LEN || self.domain.as_ref().is_some_and(|d| d.len() > MAX_TEXT_LEN) {
             return bad("provider returned an oversize username or domain");
         }
         match &self.secret {
@@ -649,9 +638,7 @@ impl ReleasedCredential {
                 if password.is_empty() {
                     return bad("provider returned an empty password");
                 }
-                if password.len() > MAX_PASSWORD_LEN
-                    || totp_seed.as_ref().is_some_and(|t| t.len() > MAX_PASSWORD_LEN)
-                {
+                if password.len() > MAX_PASSWORD_LEN || totp_seed.as_ref().is_some_and(|t| t.len() > MAX_PASSWORD_LEN) {
                     return bad("provider returned an oversize secret");
                 }
             }
@@ -676,10 +663,7 @@ mod tests {
         ReleasedCredential {
             username: user.into(),
             domain: None,
-            secret: ReleasedSecret::Password {
-                password: Zeroizing::new(password.into()),
-                totp_seed: None,
-            },
+            secret: ReleasedSecret::Password { password: Zeroizing::new(password.into()), totp_seed: None },
         }
     }
 
@@ -795,7 +779,10 @@ mod tests {
             t(serde_json::json!({ "target_host": "jump.corp", "target_port": 2222 }), "ssh").unwrap(),
             ProviderTarget::Host { host: "jump.corp".into(), port: 2222 }
         );
-        assert_eq!(t(serde_json::json!({}), "rdp").unwrap(), ProviderTarget::Host { host: "10.0.0.5".into(), port: 3389 });
+        assert_eq!(
+            t(serde_json::json!({}), "rdp").unwrap(),
+            ProviderTarget::Host { host: "10.0.0.5".into(), port: 3389 }
+        );
         assert_eq!(
             t(serde_json::json!({ "target_host": "" }), "ssh").unwrap(),
             ProviderTarget::Host { host: "10.0.0.5".into(), port: 22 }
@@ -874,7 +861,10 @@ mod tests {
     #[test]
     fn a_provider_source_is_read_strictly() {
         let p = |cs: Value| profile_provider(&serde_json::json!({ "credential_source": cs }));
-        assert_eq!(p(serde_json::json!({ "kind": "provider", "provider": "self-accounts" })).unwrap().as_deref(), Some("self-accounts"));
+        assert_eq!(
+            p(serde_json::json!({ "kind": "provider", "provider": "self-accounts" })).unwrap().as_deref(),
+            Some("self-accounts")
+        );
         assert_eq!(p(serde_json::json!({ "kind": "secret", "secret_id": "x" })).unwrap(), None);
         assert_eq!(profile_provider(&serde_json::json!({})).unwrap(), None);
         for bad in [

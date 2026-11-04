@@ -31,6 +31,7 @@ use super::{
 };
 use crate::kernel_api::VaultCtx;
 use crate::{
+    bv_error_response, bv_error_string,
     cache::TokenCache,
     context::Context,
     errors::RvError,
@@ -42,7 +43,6 @@ use crate::{
     modules::policy::policy_store::NON_ASSIGNABLE_POLICIES,
     new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path, new_path_internal,
     router::Router,
-    bv_error_response, bv_error_string,
     storage::{barrier_view::BarrierView, Storage, StorageEntry},
     utils::{
         cidr, default_system_time, deserialize_duration, deserialize_system_time, generate_uuid, is_str_subset,
@@ -160,11 +160,8 @@ fn inherit_restriction_meta(parent_meta: &HashMap<String, String>, child_meta: &
 /// values are not logged: a caller controls them, and these keys name
 /// principals.
 fn reject_reserved_meta(meta: &HashMap<String, String>, display_name: &str) -> Result<(), RvError> {
-    let mut offenders: Vec<&str> = meta
-        .keys()
-        .map(String::as_str)
-        .filter(|key| is_reserved_token_meta_key(key))
-        .collect();
+    let mut offenders: Vec<&str> =
+        meta.keys().map(String::as_str).filter(|key| is_reserved_token_meta_key(key)).collect();
     if offenders.is_empty() {
         return Ok(());
     }
@@ -450,11 +447,9 @@ impl TokenStore {
         let view = system_view.new_sub_view(TOKEN_SUB_PATH);
         let salt = view.get(TOKEN_SALT_LOCATION).await?;
 
-        let token_cache = TokenCache::new(
-            core.cache_config().token_cache_size,
-            core.cache_config().token_cache_ttl_secs,
-        )?
-        .map(Arc::new);
+        let token_cache =
+            TokenCache::new(core.cache_config().token_cache_size, core.cache_config().token_cache_ttl_secs)?
+                .map(Arc::new);
 
         let mut token_store = TokenStore {
             self_ptr: Weak::new(),
@@ -1113,8 +1108,7 @@ impl TokenStore {
             }
 
             te.meta.insert(token_binding::NS_PATH_META.to_string(), ns_path);
-            te.meta
-                .insert(token_binding::CHILD_VISIBLE_META.to_string(), data.child_visible.to_string());
+            te.meta.insert(token_binding::CHILD_VISIBLE_META.to_string(), data.child_visible.to_string());
         }
 
         let mut renewable = data.renewable;
@@ -1355,18 +1349,13 @@ impl TokenStore {
         // logout row, just with generic identity.
         let (username, mount, is_root) = match self.lookup(&id).await {
             Ok(Some(te)) => {
-                let username = te
-                    .meta
-                    .get("username")
-                    .cloned()
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| {
-                        if te.display_name.is_empty() {
-                            "(token)".to_string()
-                        } else {
-                            te.display_name.clone()
-                        }
-                    });
+                let username = te.meta.get("username").cloned().filter(|s| !s.is_empty()).unwrap_or_else(|| {
+                    if te.display_name.is_empty() {
+                        "(token)".to_string()
+                    } else {
+                        te.display_name.clone()
+                    }
+                });
                 let mount = te.meta.get("mount_path").cloned().unwrap_or_default();
                 let is_root = te.policies.iter().any(|p| p == "root");
                 (username, mount, is_root)
@@ -1382,13 +1371,8 @@ impl TokenStore {
         }
 
         if let Some(system_view) = self.system_view.as_ref() {
-            crate::modules::credential::login_audit_store::record_logout(
-                system_view,
-                &mount,
-                &username,
-                &remote_addr,
-            )
-            .await;
+            crate::modules::credential::login_audit_store::record_logout(system_view, &mount, &username, &remote_addr)
+                .await;
         }
 
         Ok(None)
@@ -1423,11 +1407,7 @@ impl TokenStore {
             .or_else(|| auth.map(|a| a.display_name.clone()).filter(|s| !s.is_empty()))
             .unwrap_or_else(|| "(token)".to_string());
         let policies = auth.map(|a| a.policies.join(",")).unwrap_or_default();
-        let details = if policies.is_empty() {
-            String::new()
-        } else {
-            format!("policies={policies}")
-        };
+        let details = if policies.is_empty() { String::new() } else { format!("policies={policies}") };
         let remote_addr = req.connection.as_ref().map(|c| c.peer_addr.clone()).unwrap_or_default();
 
         if let Some(system_view) = self.system_view.as_ref() {
@@ -1870,10 +1850,7 @@ mod mod_token_store_tests {
     async fn test_token_cache_is_enabled_by_default() {
         // With default CacheConfig, token cache is enabled (TTL = 30s).
         let token_store = mock_token_store!();
-        assert!(
-            token_store.token_cache.is_some(),
-            "default CacheConfig must enable the token cache"
-        );
+        assert!(token_store.token_cache.is_some(), "default CacheConfig must enable the token cache");
 
         let mut entry = TokenEntry {
             policies: vec!["default".to_string()],
@@ -2001,10 +1978,7 @@ mod mod_token_store_tests {
         // Denied: unknown client address. An address we cannot determine
         // cannot be shown to satisfy the rule, so it fails closed.
         let err = token_store.check_token("kv/data/x", &entry.id, "", false).await.unwrap_err();
-        assert!(
-            matches!(err, RvError::ErrPermissionDenied),
-            "an unknown client address must be denied, got: {err}"
-        );
+        assert!(matches!(err, RvError::ErrPermissionDenied), "an unknown client address must be denied, got: {err}");
 
         // Denied: the raw `ip:port` socket address is not silently trusted as
         // a different host — the network still decides, so this one is inside.
@@ -2152,9 +2126,7 @@ mod mod_token_store_tests {
         for key in &forgeries {
             let mut req = Request::new("auth/token/create");
             req.client_token = parent.id.clone();
-            req.body = json!({ "policies": ["default"], "meta": { key.as_str(): "forged" } })
-                .as_object()
-                .cloned();
+            req.body = json!({ "policies": ["default"], "meta": { key.as_str(): "forged" } }).as_object().cloned();
 
             let err = token_store
                 .handle_create(&mock_backend, &mut req)
@@ -2213,9 +2185,7 @@ mod mod_token_store_tests {
         let create_child = |parent_id: &str| {
             let mut req = Request::new("auth/token/create");
             req.client_token = parent_id.to_string();
-            req.body = json!({ "policies": ["default"], "meta": { "ticket": "CHG-4417" } })
-                .as_object()
-                .cloned();
+            req.body = json!({ "policies": ["default"], "meta": { "ticket": "CHG-4417" } }).as_object().cloned();
             req
         };
 
@@ -2709,8 +2679,7 @@ mod mod_token_store_tests {
             req.client_token = parent_id.to_string();
             req.body = json!({ "policies": ["default"], "child_visible": child_visible }).as_object().cloned();
             if let Some(ns) = ns_header {
-                req.headers =
-                    Some(HashMap::from([("X-BastionVault-Namespace".to_string(), ns.to_string())]));
+                req.headers = Some(HashMap::from([("X-BastionVault-Namespace".to_string(), ns.to_string())]));
             }
             req
         };
@@ -2782,9 +2751,10 @@ mod mod_token_store_tests {
 
         // `child_visible` cannot be acquired by a parent that lacks it.
         let mut req = create(&parent.id, Some("tenant-a"), true);
-        let err = token_store.handle_create(&mock_backend, &mut req).await.expect_err(
-            "a parent that is not child-visible must not mint a child-visible child",
-        );
+        let err = token_store
+            .handle_create(&mock_backend, &mut req)
+            .await
+            .expect_err("a parent that is not child-visible must not mint a child-visible child");
         match err {
             RvError::ErrResponse(msg) => {
                 assert!(msg.contains("child_visible"), "expected a child_visible refusal, got: {msg}")

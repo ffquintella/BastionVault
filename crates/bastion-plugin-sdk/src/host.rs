@@ -290,66 +290,35 @@ mod bindings {
     }
 
     pub fn notify_send(req: &[u8], out: &mut [u8]) -> i32 {
-        unsafe {
-            raw::notify_send(
-                req.as_ptr() as i32,
-                req.len() as i32,
-                out.as_mut_ptr() as i32,
-                out.len() as i32,
-            )
-        }
+        unsafe { raw::notify_send(req.as_ptr() as i32, req.len() as i32, out.as_mut_ptr() as i32, out.len() as i32) }
     }
 
     pub fn notify_list(req: &[u8], out: &mut [u8]) -> i32 {
-        unsafe {
-            raw::notify_list(
-                req.as_ptr() as i32,
-                req.len() as i32,
-                out.as_mut_ptr() as i32,
-                out.len() as i32,
-            )
-        }
+        unsafe { raw::notify_list(req.as_ptr() as i32, req.len() as i32, out.as_mut_ptr() as i32, out.len() as i32) }
     }
 
     pub fn notify_get(req: &[u8], out: &mut [u8]) -> i32 {
-        unsafe {
-            raw::notify_get(
-                req.as_ptr() as i32,
-                req.len() as i32,
-                out.as_mut_ptr() as i32,
-                out.len() as i32,
-            )
-        }
+        unsafe { raw::notify_get(req.as_ptr() as i32, req.len() as i32, out.as_mut_ptr() as i32, out.len() as i32) }
     }
 
     pub fn log(level: i32, msg: &[u8]) {
-        unsafe { raw::log(level, msg.as_ptr() as i32, msg.len() as i32); }
+        unsafe {
+            raw::log(level, msg.as_ptr() as i32, msg.len() as i32);
+        }
     }
 
     pub fn set_response(bytes: &[u8]) {
-        unsafe { raw::set_response(bytes.as_ptr() as i32, bytes.len() as i32); }
+        unsafe {
+            raw::set_response(bytes.as_ptr() as i32, bytes.len() as i32);
+        }
     }
 
     pub fn storage_get(key: &[u8], out: &mut [u8]) -> i32 {
-        unsafe {
-            raw::storage_get(
-                key.as_ptr() as i32,
-                key.len() as i32,
-                out.as_mut_ptr() as i32,
-                out.len() as i32,
-            )
-        }
+        unsafe { raw::storage_get(key.as_ptr() as i32, key.len() as i32, out.as_mut_ptr() as i32, out.len() as i32) }
     }
 
     pub fn storage_put(key: &[u8], val: &[u8]) -> i32 {
-        unsafe {
-            raw::storage_put(
-                key.as_ptr() as i32,
-                key.len() as i32,
-                val.as_ptr() as i32,
-                val.len() as i32,
-            )
-        }
+        unsafe { raw::storage_put(key.as_ptr() as i32, key.len() as i32, val.as_ptr() as i32, val.len() as i32) }
     }
 
     pub fn storage_delete(key: &[u8]) -> i32 {
@@ -358,12 +327,7 @@ mod bindings {
 
     pub fn storage_list(prefix: &[u8], out: &mut [u8]) -> i32 {
         unsafe {
-            raw::storage_list(
-                prefix.as_ptr() as i32,
-                prefix.len() as i32,
-                out.as_mut_ptr() as i32,
-                out.len() as i32,
-            )
+            raw::storage_list(prefix.as_ptr() as i32, prefix.len() as i32, out.as_mut_ptr() as i32, out.len() as i32)
         }
     }
 
@@ -380,16 +344,8 @@ mod bindings {
     }
 
     pub fn config_get(key: &[u8], out: &mut [u8]) -> i32 {
-        unsafe {
-            raw::config_get(
-                key.as_ptr() as i32,
-                key.len() as i32,
-                out.as_mut_ptr() as i32,
-                out.len() as i32,
-            )
-        }
+        unsafe { raw::config_get(key.as_ptr() as i32, key.len() as i32, out.as_mut_ptr() as i32, out.len() as i32) }
     }
-
 }
 
 #[cfg(any(not(target_arch = "wasm32"), feature = "host_test"))]
@@ -548,10 +504,7 @@ mod bindings {
         }
         drop(s);
         // Fall through to the real wall-clock if no mock is set.
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0)
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
     }
 
     pub fn config_get(key: &[u8], out: &mut [u8]) -> i32 {
@@ -636,9 +589,7 @@ mod bindings {
         /// `Host::config_get`.
         pub fn set_config(key: &str, value: &str) {
             let mut s = STATE.lock().unwrap();
-            s.config
-                .get_or_insert_with(alloc::collections::BTreeMap::new)
-                .insert(key.to_string(), value.to_string());
+            s.config.get_or_insert_with(alloc::collections::BTreeMap::new).insert(key.to_string(), value.to_string());
         }
 
         /// Pin `Host::now_unix_ms()` to a fixed value for the duration of

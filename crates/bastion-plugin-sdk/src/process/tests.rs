@@ -145,9 +145,8 @@ fn multiplexed_protocol_end_to_end() {
     let plugin = Arc::new(TestPlugin::default());
     let reader: Reader = Box::new(BufReader::new(ChannelReader { rx: in_rx, buf: Cursor::new(vec![]) }));
     let p = plugin.clone();
-    let runner = std::thread::spawn(move || {
-        serve(p, reader, Box::new(LineWriter { tx: out_tx, pending: vec![] }), true, "tok")
-    });
+    let runner =
+        std::thread::spawn(move || serve(p, reader, Box::new(LineWriter { tx: out_tx, pending: vec![] }), true, "tok"));
     let send = |v: Value| in_tx.send(line(v)).unwrap();
 
     send(json!({"type": "init", "plugin_name": "p", "protocol": "multiplexed", "max_concurrent": 4}));
@@ -185,8 +184,14 @@ fn host_errors_keep_their_code_and_detail() {
     input.extend(line(json!({"type": "host_reply_error", "id": 1,
         "error": "refused: endpoint_mismatch: the profile's endpoint is not bound"})));
     let (tx, rx) = channel();
-    serve(Arc::new(TestPlugin::default()), Box::new(Cursor::new(input)), Box::new(LineWriter { tx, pending: vec![] }), false, "t")
-        .unwrap();
+    serve(
+        Arc::new(TestPlugin::default()),
+        Box::new(Cursor::new(input)),
+        Box::new(LineWriter { tx, pending: vec![] }),
+        false,
+        "t",
+    )
+    .unwrap();
     let _call = recv(&rx);
     let set = recv(&rx);
     let body = String::from_utf8(B64.decode(set["data_b64"].as_str().unwrap()).unwrap()).unwrap();

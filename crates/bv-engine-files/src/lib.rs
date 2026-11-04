@@ -48,11 +48,11 @@ use bv_utils as utils;
 // which places them at *that* crate's root; the call sites import them as
 // `crate::new_path` and friends. The `_internal` halves are the recursive arms
 // the public macros expand into, so they must travel with them.
-pub use bv_logical::{
-    new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path,
-    new_path_internal, new_secret, new_secret_internal,
-};
 pub use bv_errors::{bv_error_response, bv_error_response_status, bv_error_string};
+pub use bv_logical::{
+    new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path, new_path_internal,
+    new_secret, new_secret_internal,
+};
 
 use std::{any::Any, collections::HashMap, sync::Arc, time::Duration};
 
@@ -63,18 +63,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
-use bv_kernel_api::Module;
 use crate::kernel_api::{identity::ObjectKind, VaultCtx};
 use crate::{
     context::Context,
     errors::RvError,
     logical::{
-        secret::Secret, Backend, Field, FieldType, LogicalBackend, Operation, Path, PathOperation,
-        Request, Response,
+        secret::Secret, Backend, Field, FieldType, LogicalBackend, Operation, Path, PathOperation, Request, Response,
     },
     storage::StorageEntry,
     utils::generate_uuid,
 };
+use bv_kernel_api::Module;
 
 pub mod files_audit_store;
 pub mod scheduler;
@@ -123,8 +122,7 @@ pub const MAX_FILE_BYTES: usize = 32 * 1024 * 1024;
 
 /// Fields in `FileEntry` that are noisy in a change-log diff (timestamps
 /// always move; `id` and `sha256` are derived from content and identity).
-const HIST_IGNORED_FIELDS: &[&str] =
-    &["created_at", "updated_at", "id", "sha256", "size_bytes"];
+const HIST_IGNORED_FIELDS: &[&str] = &["created_at", "updated_at", "id", "sha256", "size_bytes"];
 
 // ── Data types ─────────────────────────────────────────────────────
 
@@ -723,9 +721,7 @@ fn now_rfc3339() -> String {
 }
 
 fn hist_seq() -> String {
-    let n = Utc::now()
-        .timestamp_nanos_opt()
-        .unwrap_or_else(|| Utc::now().timestamp_millis() * 1_000_000);
+    let n = Utc::now().timestamp_nanos_opt().unwrap_or_else(|| Utc::now().timestamp_millis() * 1_000_000);
     format!("{:020}", n.max(0) as u128)
 }
 
@@ -737,14 +733,7 @@ fn hist_seq() -> String {
 /// inside the mount still captures the event for the operator-facing
 /// timeline. Matches the fail-soft pattern used for `UserAuditStore`
 /// writes in `path_users.rs` / `path_role.rs`.
-async fn record_file_audit(
-    core: &dyn VaultCtx,
-    actor: &str,
-    op: &str,
-    file_id: &str,
-    name: &str,
-    details: &str,
-) {
+async fn record_file_audit(core: &dyn VaultCtx, actor: &str, op: &str, file_id: &str, name: &str, details: &str) {
     let store = match FileAuditStore::from_core(core) {
         Ok(s) => s,
         Err(e) => {
@@ -819,9 +808,7 @@ fn diff_field_names(old: Option<&FileEntry>, new: &FileEntry) -> Vec<String> {
 /// with a clear message on malformed base64 or size overrun.
 fn decode_content(content_b64: &str) -> Result<Vec<u8>, RvError> {
     if content_b64.is_empty() {
-        return Err(RvError::ErrString(
-            "content_base64 is required and must not be empty".into(),
-        ));
+        return Err(RvError::ErrString("content_base64 is required and must not be empty".into()));
     }
     let bytes = STANDARD
         .decode(content_b64.as_bytes())
@@ -837,10 +824,7 @@ fn decode_content(content_b64: &str) -> Result<Vec<u8>, RvError> {
 }
 
 fn get_str(req: &Request, key: &str) -> String {
-    req.get_data(key)
-        .ok()
-        .and_then(|v| v.as_str().map(|s| s.to_string()))
-        .unwrap_or_default()
+    req.get_data(key).ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default()
 }
 
 /// Write `bytes` to `target.target_path` on the local filesystem,
@@ -955,9 +939,7 @@ fn dispatch_push(target: &FileSyncTarget, bytes: &[u8]) -> Result<(), RvError> {
             }
             #[cfg(not(feature = "files_smb"))]
             {
-                Err(RvError::ErrString(
-                    "sync target kind `smb` requires building with --features files_smb".into(),
-                ))
+                Err(RvError::ErrString("sync target kind `smb` requires building with --features files_smb".into()))
             }
         }
         "sftp" => {
@@ -968,8 +950,7 @@ fn dispatch_push(target: &FileSyncTarget, bytes: &[u8]) -> Result<(), RvError> {
             #[cfg(not(feature = "files_ssh_sync"))]
             {
                 Err(RvError::ErrString(
-                    "sync target kind `sftp` requires building with --features files_ssh_sync"
-                        .into(),
+                    "sync target kind `sftp` requires building with --features files_ssh_sync".into(),
                 ))
             }
         }
@@ -981,14 +962,11 @@ fn dispatch_push(target: &FileSyncTarget, bytes: &[u8]) -> Result<(), RvError> {
             #[cfg(not(feature = "files_ssh_sync"))]
             {
                 Err(RvError::ErrString(
-                    "sync target kind `scp` requires building with --features files_ssh_sync"
-                        .into(),
+                    "sync target kind `scp` requires building with --features files_ssh_sync".into(),
                 ))
             }
         }
-        other => Err(RvError::ErrString(format!(
-            "sync target kind `{other}` is not supported yet"
-        ))),
+        other => Err(RvError::ErrString(format!("sync target kind `{other}` is not supported yet"))),
     }
 }
 
@@ -1006,17 +984,12 @@ pub fn backoff_secs(consecutive_failures: u32) -> u64 {
         return 0;
     }
     let shift = consecutive_failures.min(20); // u64 wraparound guard
-    let candidate = 1u64
-        .checked_shl(shift)
-        .unwrap_or(MAX_BACKOFF_SECS);
+    let candidate = 1u64.checked_shl(shift).unwrap_or(MAX_BACKOFF_SECS);
     candidate.min(MAX_BACKOFF_SECS)
 }
 
 fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
 /// `<path>.<pid>.tmp` + rename so a concurrent reader of the target
@@ -1035,10 +1008,9 @@ fn push_local_fs(target: &FileSyncTarget, bytes: &[u8]) -> Result<(), RvError> {
     }
     let tmp = dest.with_extension(format!("bvsync.{}.tmp", std::process::id()));
     {
-        let mut f = fs::File::create(&tmp)
-            .map_err(|e| RvError::ErrString(format!("create({}): {e}", tmp.display())))?;
-        f.write_all(bytes)
-            .map_err(|e| RvError::ErrString(format!("write({}): {e}", tmp.display())))?;
+        let mut f =
+            fs::File::create(&tmp).map_err(|e| RvError::ErrString(format!("create({}): {e}", tmp.display())))?;
+        f.write_all(bytes).map_err(|e| RvError::ErrString(format!("write({}): {e}", tmp.display())))?;
         f.sync_all().ok();
     }
     fs::rename(&tmp, &dest)
@@ -1057,12 +1029,10 @@ fn apply_unix_mode(path: &std::path::Path, mode: &str) -> Result<(), RvError> {
     let m = if trimmed.is_empty() {
         0
     } else {
-        u32::from_str_radix(trimmed, 8)
-            .map_err(|e| RvError::ErrString(format!("invalid mode `{mode}`: {e}")))?
+        u32::from_str_radix(trimmed, 8).map_err(|e| RvError::ErrString(format!("invalid mode `{mode}`: {e}")))?
     };
     let perms = fs::Permissions::from_mode(m);
-    fs::set_permissions(path, perms)
-        .map_err(|e| RvError::ErrString(format!("chmod({}): {e}", path.display())))
+    fs::set_permissions(path, perms).map_err(|e| RvError::ErrString(format!("chmod({}): {e}", path.display())))
 }
 
 #[cfg(not(unix))]
@@ -1077,16 +1047,10 @@ fn get_tags(req: &Request) -> Vec<String> {
     // field layer, but callers can also pass a plain comma string; be
     // lenient in both directions.
     match req.get_data("tags") {
-        Ok(Value::Array(a)) => a
-            .into_iter()
-            .filter_map(|v| v.as_str().map(|s| s.trim().to_string()))
-            .filter(|s| !s.is_empty())
-            .collect(),
-        Ok(Value::String(s)) => s
-            .split(',')
-            .map(|p| p.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect(),
+        Ok(Value::Array(a)) => {
+            a.into_iter().filter_map(|v| v.as_str().map(|s| s.trim().to_string())).filter(|s| !s.is_empty()).collect()
+        }
+        Ok(Value::String(s)) => s.split(',').map(|p| p.trim().to_string()).filter(|s| !s.is_empty()).collect(),
         _ => Vec::new(),
     }
 }
@@ -1095,11 +1059,7 @@ fn get_tags(req: &Request) -> Vec<String> {
 
 #[maybe_async::maybe_async]
 impl FilesBackendInner {
-    pub async fn handle_list(
-        &self,
-        _backend: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_list(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let keys = req.storage_list(META_PREFIX).await?;
         Ok(Some(Response::list_response(&keys)))
     }
@@ -1144,11 +1104,7 @@ impl FilesBackendInner {
                 entry.resource = new_resource.clone();
                 entry.updated_at = now_rfc3339();
                 let meta_key = format!("{META_PREFIX}{id}");
-                req.storage_put(&StorageEntry {
-                    key: meta_key,
-                    value: serde_json::to_vec(&entry)?,
-                })
-                .await?;
+                req.storage_put(&StorageEntry { key: meta_key, value: serde_json::to_vec(&entry)? }).await?;
 
                 // Operator-facing per-file timeline.
                 let hist = FileHistoryEntry {
@@ -1158,11 +1114,7 @@ impl FilesBackendInner {
                     changed_fields: vec!["resource".to_string()],
                 };
                 let hist_key = format!("{HIST_PREFIX}{id}/{}", hist_seq());
-                req.storage_put(&StorageEntry {
-                    key: hist_key,
-                    value: serde_json::to_vec(&hist)?,
-                })
-                .await?;
+                req.storage_put(&StorageEntry { key: hist_key, value: serde_json::to_vec(&hist)? }).await?;
 
                 // Admin audit log — who moved the file, when, and the
                 // old → new resource it moved between.
@@ -1186,11 +1138,7 @@ impl FilesBackendInner {
         Ok(Some(Response::data_response(Some(data))))
     }
 
-    pub async fn handle_create(
-        &self,
-        _backend: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_create(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let content_b64 = get_str(req, "content_base64");
         let bytes = decode_content(&content_b64)?;
 
@@ -1223,12 +1171,7 @@ impl FilesBackendInner {
         let audit_actor = crate::kernel_api::identity::caller_audit_actor(req);
         if let Some(identity) = self.core.identity() {
             let _ = identity
-                .record_owner_if_absent(
-                    ObjectKind::File,
-                    &id,
-                    req.namespace_path.as_deref(),
-                    &audit_actor,
-                )
+                .record_owner_if_absent(ObjectKind::File, &id, req.namespace_path.as_deref(), &audit_actor)
                 .await;
         }
 
@@ -1246,18 +1189,11 @@ impl FilesBackendInner {
         Ok(Some(Response::data_response(Some(data))))
     }
 
-    pub async fn handle_read(
-        &self,
-        _backend: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_read(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let id = get_str(req, "id");
         match self.load_entry(req, &id).await? {
             Some(entry) => {
-                let data = serde_json::to_value(&entry)?
-                    .as_object()
-                    .cloned()
-                    .unwrap_or_default();
+                let data = serde_json::to_value(&entry)?.as_object().cloned().unwrap_or_default();
                 Ok(Some(Response::data_response(Some(data))))
             }
             None => Ok(None),
@@ -1277,9 +1213,7 @@ impl FilesBackendInner {
         let blob = req
             .storage_get(&blob_key)
             .await?
-            .ok_or(RvError::ErrResponse(
-                "file content missing from storage".into(),
-            ))?;
+            .ok_or(RvError::ErrResponse("file content missing from storage".into()))?;
 
         // Integrity check: the metadata's SHA-256 must match the blob
         // we just read. A mismatch here means either storage corruption
@@ -1297,18 +1231,11 @@ impl FilesBackendInner {
         data.insert("id".into(), Value::String(id));
         data.insert("mime_type".into(), Value::String(entry.mime_type));
         data.insert("size_bytes".into(), Value::from(entry.size_bytes));
-        data.insert(
-            "content_base64".into(),
-            Value::String(STANDARD.encode(&blob.value)),
-        );
+        data.insert("content_base64".into(), Value::String(STANDARD.encode(&blob.value)));
         Ok(Some(Response::data_response(Some(data))))
     }
 
-    pub async fn handle_write(
-        &self,
-        _backend: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_write(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let id = get_str(req, "id");
         let content_b64 = get_str(req, "content_base64");
         let bytes = decode_content(&content_b64)?;
@@ -1316,10 +1243,7 @@ impl FilesBackendInner {
         let previous = self.load_entry(req, &id).await?;
 
         let now = now_rfc3339();
-        let created_at = previous
-            .as_ref()
-            .map(|e| e.created_at.clone())
-            .unwrap_or_else(|| now.clone());
+        let created_at = previous.as_ref().map(|e| e.created_at.clone()).unwrap_or_else(|| now.clone());
 
         // For a metadata field that the caller omitted, fall back to
         // the previous value so `PUT` with only `content_base64` works
@@ -1341,39 +1265,19 @@ impl FilesBackendInner {
 
         let entry = FileEntry {
             id: id.clone(),
-            name: merge_str(
-                &get_str(req, "name"),
-                previous.as_ref().map(|e| e.name.as_str()),
-            ),
-            resource: merge_str(
-                &get_str(req, "resource"),
-                previous.as_ref().map(|e| e.resource.as_str()),
-            ),
-            mime_type: merge_str(
-                &get_str(req, "mime_type"),
-                previous.as_ref().map(|e| e.mime_type.as_str()),
-            ),
+            name: merge_str(&get_str(req, "name"), previous.as_ref().map(|e| e.name.as_str())),
+            resource: merge_str(&get_str(req, "resource"), previous.as_ref().map(|e| e.resource.as_str())),
+            mime_type: merge_str(&get_str(req, "mime_type"), previous.as_ref().map(|e| e.mime_type.as_str())),
             size_bytes: bytes.len() as u64,
             sha256: sha256_hex(&bytes),
             tags,
-            notes: merge_str(
-                &get_str(req, "notes"),
-                previous.as_ref().map(|e| e.notes.as_str()),
-            ),
+            notes: merge_str(&get_str(req, "notes"), previous.as_ref().map(|e| e.notes.as_str())),
             created_at,
             updated_at: now,
         };
         let op_label = if previous.is_some() { "update" } else { "create" };
 
-        self.write_entry_and_blob(
-            req,
-            &id,
-            &entry,
-            &bytes,
-            previous.as_ref(),
-            op_label,
-        )
-        .await?;
+        self.write_entry_and_blob(req, &id, &entry, &bytes, previous.as_ref(), op_label).await?;
 
         // Admin audit log. Summarize the change set the same way the
         // per-file history does: metadata field names + "content" when
@@ -1382,21 +1286,14 @@ impl FilesBackendInner {
         if let Some(core) = Some(self.core.clone()) {
             let actor = crate::kernel_api::identity::caller_audit_actor(req);
             let mut changed = diff_field_names(previous.as_ref(), &entry);
-            let content_changed = previous
-                .as_ref()
-                .map(|p| p.sha256 != entry.sha256)
-                .unwrap_or(false);
+            let content_changed = previous.as_ref().map(|p| p.sha256 != entry.sha256).unwrap_or(false);
             if content_changed {
                 changed.push("content".to_string());
                 changed.sort();
                 changed.dedup();
             }
             if op_label == "create" || !changed.is_empty() {
-                let details = if changed.is_empty() {
-                    String::new()
-                } else {
-                    format!("fields={}", changed.join(","))
-                };
+                let details = if changed.is_empty() { String::new() } else { format!("fields={}", changed.join(",")) };
                 record_file_audit(&core, &actor, op_label, &id, &entry.name, &details).await;
             }
         }
@@ -1442,11 +1339,7 @@ impl FilesBackendInner {
     /// caller carries the report into the response so the operator
     /// sees per-target outcomes, but no individual transport failure
     /// rolls back the file write that just happened.
-    pub async fn run_sync_on_write(
-        &self,
-        req: &mut Request,
-        id: &str,
-    ) -> Vec<(String, bool, Option<String>)> {
+    pub async fn run_sync_on_write(&self, req: &mut Request, id: &str) -> Vec<(String, bool, Option<String>)> {
         let mut out: Vec<(String, bool, Option<String>)> = Vec::new();
         let prefix = format!("{SYNC_PREFIX}{id}/");
         let names = match req.storage_list(&prefix).await {
@@ -1473,22 +1366,12 @@ impl FilesBackendInner {
         out
     }
 
-    pub async fn handle_delete(
-        &self,
-        _backend: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_delete(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let id = get_str(req, "id");
 
         // Snapshot the name before wiping metadata so the admin
         // audit entry still has a usable label after the delete.
-        let name_snapshot = self
-            .load_entry(req, &id)
-            .await
-            .ok()
-            .flatten()
-            .map(|e| e.name)
-            .unwrap_or_default();
+        let name_snapshot = self.load_entry(req, &id).await.ok().flatten().map(|e| e.name).unwrap_or_default();
 
         // Record the delete in the history log *before* wiping the
         // metadata — consistent with the resource module. The entry
@@ -1500,10 +1383,7 @@ impl FilesBackendInner {
             changed_fields: Vec::new(),
         };
         let hist_key = format!("{HIST_PREFIX}{id}/{}", hist_seq());
-        let hist_entry = StorageEntry {
-            key: hist_key,
-            value: serde_json::to_string(&hist)?.into_bytes(),
-        };
+        let hist_entry = StorageEntry { key: hist_key, value: serde_json::to_string(&hist)?.into_bytes() };
         req.storage_put(&hist_entry).await?;
 
         let meta_key = format!("{META_PREFIX}{id}");
@@ -1553,11 +1433,7 @@ impl FilesBackendInner {
         Ok(None)
     }
 
-    pub async fn handle_history(
-        &self,
-        _backend: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_history(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let id = get_str(req, "id");
         let prefix = format!("{HIST_PREFIX}{id}/");
         let keys = req.storage_list(&prefix).await?;
@@ -1594,8 +1470,7 @@ impl FilesBackendInner {
             let key = format!("{prefix}{n}");
             if let Some(se) = req.storage_get(&key).await? {
                 if let Ok(t) = serde_json::from_slice::<FileSyncTarget>(&se.value) {
-                    let mut entry =
-                        serde_json::to_value(&t)?.as_object().cloned().unwrap_or_default();
+                    let mut entry = serde_json::to_value(&t)?.as_object().cloned().unwrap_or_default();
                     // Never re-disclose secret-shaped fields; surface
                     // booleans so the GUI can show "set / not set"
                     // without round-tripping the secret.
@@ -1610,20 +1485,14 @@ impl FilesBackendInner {
                     entry.insert("smb_password_set".into(), Value::Bool(smb_pw_set));
                     entry.insert("ssh_password_set".into(), Value::Bool(ssh_pw_set));
                     entry.insert("ssh_private_key_set".into(), Value::Bool(ssh_key_set));
-                    entry.insert(
-                        "ssh_passphrase_set".into(),
-                        Value::Bool(ssh_passphrase_set),
-                    );
+                    entry.insert("ssh_passphrase_set".into(), Value::Bool(ssh_passphrase_set));
                     // Attach state so the GUI doesn't need a second call.
                     let state_key = format!("{SYNC_STATE_PREFIX}{id}/{n}");
                     let state: FileSyncState = match req.storage_get(&state_key).await? {
                         Some(ss) => serde_json::from_slice(&ss.value).unwrap_or_default(),
                         None => FileSyncState::default(),
                     };
-                    entry.insert(
-                        "state".into(),
-                        serde_json::to_value(&state).unwrap_or(Value::Null),
-                    );
+                    entry.insert("state".into(), serde_json::to_value(&state).unwrap_or(Value::Null));
                     targets.push(entry);
                 }
             }
@@ -1631,10 +1500,7 @@ impl FilesBackendInner {
 
         let mut data = Map::new();
         data.insert("id".into(), Value::String(id));
-        data.insert(
-            "targets".into(),
-            Value::Array(targets.into_iter().map(Value::Object).collect()),
-        );
+        data.insert("targets".into(), Value::Array(targets.into_iter().map(Value::Object).collect()));
         Ok(Some(Response::data_response(Some(data))))
     }
 
@@ -1651,16 +1517,9 @@ impl FilesBackendInner {
         let kind = get_str(req, "kind");
         let target_path = get_str(req, "target_path");
         let mode = get_str(req, "mode");
-        let sync_on_write = req
-            .get_data("sync_on_write")
-            .ok()
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let auto_sync_interval_seconds = req
-            .get_data("auto_sync_interval_seconds")
-            .ok()
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
+        let sync_on_write = req.get_data("sync_on_write").ok().and_then(|v| v.as_bool()).unwrap_or(false);
+        let auto_sync_interval_seconds =
+            req.get_data("auto_sync_interval_seconds").ok().and_then(|v| v.as_u64()).unwrap_or(0);
         let smb_username = get_str(req, "smb_username");
         let smb_password = get_str(req, "smb_password");
         let smb_domain = get_str(req, "smb_domain");
@@ -1671,9 +1530,7 @@ impl FilesBackendInner {
         let ssh_host_key_fingerprint = get_str(req, "ssh_host_key_fingerprint");
 
         if kind.is_empty() || target_path.is_empty() {
-            return Err(RvError::ErrString(
-                "kind and target_path are required".into(),
-            ));
+            return Err(RvError::ErrString("kind and target_path are required".into()));
         }
         // Validate kind up front so operators don't save configs that
         // fail later. `local-fs` and `smb` are supported; SCP / SFTP
@@ -1682,14 +1539,10 @@ impl FilesBackendInner {
             "local-fs" => {}
             "smb" => {
                 if smb_username.trim().is_empty() {
-                    return Err(RvError::ErrString(
-                        "smb: smb_username is required when kind = smb".into(),
-                    ));
+                    return Err(RvError::ErrString("smb: smb_username is required when kind = smb".into()));
                 }
                 if smb_password.is_empty() {
-                    return Err(RvError::ErrString(
-                        "smb: smb_password is required when kind = smb".into(),
-                    ));
+                    return Err(RvError::ErrString("smb: smb_password is required when kind = smb".into()));
                 }
                 // Validate the URL shape now so the operator gets an
                 // immediate config error instead of a push-time
@@ -1705,9 +1558,7 @@ impl FilesBackendInner {
             }
             "sftp" | "scp" => {
                 if ssh_username.trim().is_empty() && !target_path.contains('@') {
-                    return Err(RvError::ErrString(format!(
-                        "{kind}: ssh_username (or user@ in URL) is required"
-                    )));
+                    return Err(RvError::ErrString(format!("{kind}: ssh_username (or user@ in URL) is required")));
                 }
                 if ssh_password.is_empty() && ssh_private_key.is_empty() {
                     return Err(RvError::ErrString(format!(
@@ -1758,34 +1609,22 @@ impl FilesBackendInner {
             .await?
             .and_then(|se| serde_json::from_slice::<FileSyncTarget>(&se.value).ok());
         let smb_password = if smb_password.is_empty() {
-            existing_target
-                .as_ref()
-                .map(|t| t.smb_password.clone())
-                .unwrap_or_default()
+            existing_target.as_ref().map(|t| t.smb_password.clone()).unwrap_or_default()
         } else {
             smb_password
         };
         let ssh_password = if ssh_password.is_empty() {
-            existing_target
-                .as_ref()
-                .map(|t| t.ssh_password.clone())
-                .unwrap_or_default()
+            existing_target.as_ref().map(|t| t.ssh_password.clone()).unwrap_or_default()
         } else {
             ssh_password
         };
         let ssh_private_key = if ssh_private_key.is_empty() {
-            existing_target
-                .as_ref()
-                .map(|t| t.ssh_private_key.clone())
-                .unwrap_or_default()
+            existing_target.as_ref().map(|t| t.ssh_private_key.clone()).unwrap_or_default()
         } else {
             ssh_private_key
         };
         let ssh_passphrase = if ssh_passphrase.is_empty() {
-            existing_target
-                .as_ref()
-                .map(|t| t.ssh_passphrase.clone())
-                .unwrap_or_default()
+            existing_target.as_ref().map(|t| t.ssh_passphrase.clone()).unwrap_or_default()
         } else {
             ssh_passphrase
         };
@@ -1808,10 +1647,7 @@ impl FilesBackendInner {
             created_at,
             updated_at: now,
         };
-        let entry = StorageEntry {
-            key: existing_key,
-            value: serde_json::to_vec(&target)?,
-        };
+        let entry = StorageEntry { key: existing_key, value: serde_json::to_vec(&target)? };
         req.storage_put(&entry).await?;
         Ok(None)
     }
@@ -1880,16 +1716,12 @@ impl FilesBackendInner {
     ) -> Result<SyncPushOutcome, RvError> {
         let cfg_key = format!("{SYNC_PREFIX}{id}/{name}");
         let Some(cfg_raw) = req.storage_get(&cfg_key).await? else {
-            return Err(RvError::ErrString(format!(
-                "sync target `{name}` not configured for file {id}"
-            )));
+            return Err(RvError::ErrString(format!("sync target `{name}` not configured for file {id}")));
         };
         let target: FileSyncTarget = serde_json::from_slice(&cfg_raw.value)?;
 
-        let entry = self
-            .load_entry(req, id)
-            .await?
-            .ok_or_else(|| RvError::ErrString(format!("file {id} not found")))?;
+        let entry =
+            self.load_entry(req, id).await?.ok_or_else(|| RvError::ErrString(format!("file {id} not found")))?;
         let blob = req
             .storage_get(&format!("{BLOB_PREFIX}{id}"))
             .await?
@@ -1914,25 +1746,16 @@ impl FilesBackendInner {
                 state.last_failure_at.clear();
                 state.consecutive_failures = 0;
                 state.next_retry_at_unix = 0;
-                let ss = StorageEntry {
-                    key: state_key,
-                    value: serde_json::to_vec(&state)?,
-                };
+                let ss = StorageEntry { key: state_key, value: serde_json::to_vec(&state)? };
                 req.storage_put(&ss).await?;
-                Ok(SyncPushOutcome {
-                    sha256: entry.sha256,
-                })
+                Ok(SyncPushOutcome { sha256: entry.sha256 })
             }
             Err(e) => {
                 state.last_failure_at = now_rfc;
                 state.last_error = e.to_string();
                 state.consecutive_failures = state.consecutive_failures.saturating_add(1);
-                state.next_retry_at_unix =
-                    now_unix.saturating_add(backoff_secs(state.consecutive_failures));
-                let ss = StorageEntry {
-                    key: state_key,
-                    value: serde_json::to_vec(&state)?,
-                };
+                state.next_retry_at_unix = now_unix.saturating_add(backoff_secs(state.consecutive_failures));
+                let ss = StorageEntry { key: state_key, value: serde_json::to_vec(&state)? };
                 // Record failure state before surfacing the error so
                 // the GUI's Sync tab + the scheduler's next decision
                 // both see the latest attempt outcome.
@@ -1969,10 +1792,7 @@ impl FilesBackendInner {
         let Some(v) = vmeta.versions.iter().find(|v| v.version == version) else {
             return Ok(None);
         };
-        let data = serde_json::to_value(v)?
-            .as_object()
-            .cloned()
-            .unwrap_or_default();
+        let data = serde_json::to_value(v)?.as_object().cloned().unwrap_or_default();
         Ok(Some(Response::data_response(Some(data))))
     }
 
@@ -1986,17 +1806,14 @@ impl FilesBackendInner {
             .parse()
             .map_err(|_| RvError::ErrString("version must be a positive integer".into()))?;
         let vmeta = self.load_version_meta(req, &id).await?;
-        let Some(info) = vmeta.versions.iter().find(|v| v.version == version).cloned()
-        else {
+        let Some(info) = vmeta.versions.iter().find(|v| v.version == version).cloned() else {
             return Ok(None);
         };
         let blob_key = format!("{VBLOB_PREFIX}{id}/{version:020}");
         let blob = req
             .storage_get(&blob_key)
             .await?
-            .ok_or(RvError::ErrString(
-                "historical content missing from storage".into(),
-            ))?;
+            .ok_or(RvError::ErrString("historical content missing from storage".into()))?;
         // Integrity: recompute and compare against the recorded hash.
         let computed = sha256_hex(&blob.value);
         if computed != info.sha256 {
@@ -2010,10 +1827,7 @@ impl FilesBackendInner {
         data.insert("version".into(), Value::from(version));
         data.insert("mime_type".into(), Value::String(info.mime_type));
         data.insert("size_bytes".into(), Value::from(info.size_bytes));
-        data.insert(
-            "content_base64".into(),
-            Value::String(STANDARD.encode(&blob.value)),
-        );
+        data.insert("content_base64".into(), Value::String(STANDARD.encode(&blob.value)));
         Ok(Some(Response::data_response(Some(data))))
     }
 
@@ -2028,19 +1842,14 @@ impl FilesBackendInner {
             .map_err(|_| RvError::ErrString("version must be a positive integer".into()))?;
 
         let vmeta = self.load_version_meta(req, &id).await?;
-        let Some(info) = vmeta.versions.iter().find(|v| v.version == version).cloned()
-        else {
-            return Err(RvError::ErrString(format!(
-                "no version {version} retained for file {id}"
-            )));
+        let Some(info) = vmeta.versions.iter().find(|v| v.version == version).cloned() else {
+            return Err(RvError::ErrString(format!("no version {version} retained for file {id}")));
         };
         let blob_key = format!("{VBLOB_PREFIX}{id}/{version:020}");
         let blob = req
             .storage_get(&blob_key)
             .await?
-            .ok_or(RvError::ErrString(
-                "historical content missing from storage".into(),
-            ))?;
+            .ok_or(RvError::ErrString("historical content missing from storage".into()))?;
 
         // Build the restored FileEntry by combining the current
         // metadata (to preserve tags / notes / resource / name as they
@@ -2048,19 +1857,14 @@ impl FilesBackendInner {
         // / mime_type. Name from the snapshot is informational only —
         // we keep the current name to avoid surprise renames on
         // restore. Operators who want the old name can rename after.
-        let previous = self.load_entry(req, &id).await?.ok_or_else(|| {
-            RvError::ErrString(format!("file {id} not found"))
-        })?;
+        let previous =
+            self.load_entry(req, &id).await?.ok_or_else(|| RvError::ErrString(format!("file {id} not found")))?;
         let now = now_rfc3339();
         let restored = FileEntry {
             id: previous.id.clone(),
             name: previous.name.clone(),
             resource: previous.resource.clone(),
-            mime_type: if !info.mime_type.is_empty() {
-                info.mime_type.clone()
-            } else {
-                previous.mime_type.clone()
-            },
+            mime_type: if !info.mime_type.is_empty() { info.mime_type.clone() } else { previous.mime_type.clone() },
             size_bytes: info.size_bytes,
             sha256: info.sha256.clone(),
             tags: previous.tags.clone(),
@@ -2070,8 +1874,7 @@ impl FilesBackendInner {
         };
         // Piggyback on the regular write path so the displaced
         // content is itself snapshotted (restore is reversible).
-        self.write_entry_and_blob(req, &id, &restored, &blob.value, Some(&previous), "restore")
-            .await?;
+        self.write_entry_and_blob(req, &id, &restored, &blob.value, Some(&previous), "restore").await?;
 
         // Admin audit — include the version number so the operator
         // can see which snapshot was promoted.
@@ -2088,21 +1891,13 @@ impl FilesBackendInner {
         Ok(Some(Response::data_response(Some(data))))
     }
 
-    pub async fn handle_noop(
-        &self,
-        _backend: &dyn Backend,
-        _req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_noop(&self, _backend: &dyn Backend, _req: &mut Request) -> Result<Option<Response>, RvError> {
         Ok(None)
     }
 
     // ── Internal helpers on the backend (not route handlers) ──────
 
-    async fn load_entry(
-        &self,
-        req: &mut Request,
-        id: &str,
-    ) -> Result<Option<FileEntry>, RvError> {
+    async fn load_entry(&self, req: &mut Request, id: &str) -> Result<Option<FileEntry>, RvError> {
         let meta_key = format!("{META_PREFIX}{id}");
         match req.storage_get(&meta_key).await? {
             Some(se) => Ok(Some(serde_json::from_slice(&se.value)?)),
@@ -2110,11 +1905,7 @@ impl FilesBackendInner {
         }
     }
 
-    async fn load_version_meta(
-        &self,
-        req: &mut Request,
-        id: &str,
-    ) -> Result<FileVersionMeta, RvError> {
+    async fn load_version_meta(&self, req: &mut Request, id: &str) -> Result<FileVersionMeta, RvError> {
         let key = format!("{VMETA_PREFIX}{id}");
         match req.storage_get(&key).await? {
             Some(se) => Ok(serde_json::from_slice(&se.value).unwrap_or_default()),
@@ -2122,16 +1913,8 @@ impl FilesBackendInner {
         }
     }
 
-    async fn save_version_meta(
-        &self,
-        req: &mut Request,
-        id: &str,
-        meta: &FileVersionMeta,
-    ) -> Result<(), RvError> {
-        let entry = StorageEntry {
-            key: format!("{VMETA_PREFIX}{id}"),
-            value: serde_json::to_vec(meta)?,
-        };
+    async fn save_version_meta(&self, req: &mut Request, id: &str, meta: &FileVersionMeta) -> Result<(), RvError> {
+        let entry = StorageEntry { key: format!("{VMETA_PREFIX}{id}"), value: serde_json::to_vec(meta)? };
         req.storage_put(&entry).await
     }
 
@@ -2180,12 +1963,7 @@ impl FilesBackendInner {
         // the front. Keep the newest `DEFAULT_VERSION_RETENTION`.
         while vmeta.versions.len() > DEFAULT_VERSION_RETENTION {
             let dropped = vmeta.versions.remove(0);
-            let _ = req
-                .storage_delete(&format!(
-                    "{VBLOB_PREFIX}{id}/{:020}",
-                    dropped.version
-                ))
-                .await;
+            let _ = req.storage_delete(&format!("{VBLOB_PREFIX}{id}/{:020}", dropped.version)).await;
         }
 
         self.save_version_meta(req, id, &vmeta).await
@@ -2213,28 +1991,15 @@ impl FilesBackendInner {
             let content_changed = prev.sha256 != entry.sha256;
             if content_changed && DEFAULT_VERSION_RETENTION > 0 {
                 if let Some(old_blob) = req.storage_get(&blob_key).await? {
-                    self.snapshot_current_as_version(
-                        req,
-                        id,
-                        prev,
-                        &old_blob.value,
-                        caller_username(req),
-                    )
-                    .await?;
+                    self.snapshot_current_as_version(req, id, prev, &old_blob.value, caller_username(req)).await?;
                 }
             }
         }
 
-        let meta_entry = StorageEntry {
-            key: meta_key,
-            value: serde_json::to_vec(entry)?,
-        };
+        let meta_entry = StorageEntry { key: meta_key, value: serde_json::to_vec(entry)? };
         req.storage_put(&meta_entry).await?;
 
-        let blob_entry = StorageEntry {
-            key: blob_key,
-            value: bytes.to_vec(),
-        };
+        let blob_entry = StorageEntry { key: blob_key, value: bytes.to_vec() };
         req.storage_put(&blob_entry).await?;
 
         // History: always record on create; on update only when
@@ -2242,9 +2007,7 @@ impl FilesBackendInner {
         // surfaces as "content" in `changed_fields` so the timeline
         // reflects that even when no metadata edit happened.
         let mut changed = diff_field_names(previous, entry);
-        let content_changed = previous
-            .map(|p| p.sha256 != entry.sha256)
-            .unwrap_or(false);
+        let content_changed = previous.map(|p| p.sha256 != entry.sha256).unwrap_or(false);
         if content_changed {
             changed.push("content".to_string());
             changed.sort();
@@ -2259,10 +2022,7 @@ impl FilesBackendInner {
                 changed_fields: changed,
             };
             let hist_key = format!("{HIST_PREFIX}{id}/{}", hist_seq());
-            let hist_entry = StorageEntry {
-                key: hist_key,
-                value: serde_json::to_vec(&hist)?,
-            };
+            let hist_entry = StorageEntry { key: hist_key, value: serde_json::to_vec(&hist)? };
             req.storage_put(&hist_entry).await?;
         }
 
@@ -2320,10 +2080,7 @@ mod tests {
     fn sha256_hex_is_deterministic_and_lowercase() {
         let a = sha256_hex(b"");
         // Known SHA-256 of the empty string.
-        assert_eq!(
-            a,
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        );
+        assert_eq!(a, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
         assert_eq!(a.len(), 64);
         assert!(a.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
     }
@@ -2368,20 +2125,12 @@ mod tests {
             ..Default::default()
         };
         let changed = diff_field_names(Some(&old), &new);
-        assert!(
-            changed.is_empty(),
-            "only noisy fields moved; field diff must be empty, got: {changed:?}"
-        );
+        assert!(changed.is_empty(), "only noisy fields moved; field diff must be empty, got: {changed:?}");
     }
 
     #[test]
     fn diff_field_names_flags_real_changes() {
-        let old = FileEntry {
-            name: "a".into(),
-            notes: "old".into(),
-            tags: vec!["x".into()],
-            ..Default::default()
-        };
+        let old = FileEntry { name: "a".into(), notes: "old".into(), tags: vec!["x".into()], ..Default::default() };
         let new = FileEntry {
             name: "a-renamed".into(),
             notes: "new".into(),
@@ -2401,11 +2150,7 @@ mod tests {
         let mut meta = HashMap::new();
         meta.insert("username".to_string(), "alice".to_string());
         let mut req = Request::default();
-        req.auth = Some(Auth {
-            display_name: "fallback".into(),
-            metadata: meta,
-            ..Auth::default()
-        });
+        req.auth = Some(Auth { display_name: "fallback".into(), metadata: meta, ..Auth::default() });
         assert_eq!(caller_username(&req), "alice");
     }
 
@@ -2413,10 +2158,7 @@ mod tests {
     fn caller_username_falls_back_to_display_name() {
         use crate::logical::Auth;
         let mut req = Request::default();
-        req.auth = Some(Auth {
-            display_name: "root".into(),
-            ..Auth::default()
-        });
+        req.auth = Some(Auth { display_name: "root".into(), ..Auth::default() });
         assert_eq!(caller_username(&req), "root");
     }
 

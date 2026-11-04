@@ -109,16 +109,10 @@ impl SshSecurityKey {
             return Err("public_key is required".to_string());
         }
         if !key.starts_with(&self.algorithm) {
-            return Err(format!(
-                "public_key does not start with its declared algorithm `{}`",
-                self.algorithm
-            ));
+            return Err(format!("public_key does not start with its declared algorithm `{}`", self.algorithm));
         }
         if key.split_whitespace().count() < 2 {
-            return Err(
-                "public_key must be a full authorized_keys line (`<algorithm> <base64>`)"
-                    .to_string(),
-            );
+            return Err("public_key must be a full authorized_keys line (`<algorithm> <base64>`)".to_string());
         }
         if self.credential_id.trim().is_empty() {
             return Err("credential_id is required (v1 enrols non-discoverable keys)".to_string());
@@ -131,10 +125,7 @@ impl SshSecurityKey {
         // unusable, because the target hashes the application into the
         // signature check.
         if !self.application.starts_with("ssh:") {
-            return Err(format!(
-                "application must start with `ssh:` (got `{}`)",
-                self.application
-            ));
+            return Err(format!("application must start with `ssh:` (got `{}`)", self.application));
         }
         Ok(())
     }
@@ -151,11 +142,7 @@ impl SshSecurityKey {
 /// neither the `/` in `userpass/` nor an arbitrary principal name can escape
 /// its key segment; `.` is outside the alphabet, so the split is unambiguous.
 fn key_for(mount: &str, name: &str) -> String {
-    format!(
-        "{}.{}",
-        URL_SAFE_NO_PAD.encode(mount.as_bytes()),
-        URL_SAFE_NO_PAD.encode(name.as_bytes())
-    )
+    format!("{}.{}", URL_SAFE_NO_PAD.encode(mount.as_bytes()), URL_SAFE_NO_PAD.encode(name.as_bytes()))
 }
 
 pub struct SshSecurityKeyStore {
@@ -165,9 +152,7 @@ pub struct SshSecurityKeyStore {
 #[maybe_async::maybe_async]
 impl SshSecurityKeyStore {
     pub fn new(core: &dyn VaultCtx) -> Result<Self, RvError> {
-        Ok(Self {
-            view: Arc::new(BarrierView::new(core.barrier().clone(), SSH_SECURITY_KEY_PREFIX)),
-        })
+        Ok(Self { view: Arc::new(BarrierView::new(core.barrier().clone(), SSH_SECURITY_KEY_PREFIX)) })
     }
 
     /// Read a principal's enrolled key. `None` ⇒ not enrolled.
@@ -335,15 +320,7 @@ mod tests {
 
         let rec = ed25519_record();
         let saved = store
-            .set(
-                "userpass/",
-                "alice",
-                &rec.algorithm,
-                &rec.public_key,
-                &rec.credential_id,
-                "",
-                "yubikey 5c",
-            )
+            .set("userpass/", "alice", &rec.algorithm, &rec.public_key, &rec.credential_id, "", "yubikey 5c")
             .await
             .unwrap();
         // An empty application falls back to the OpenSSH default.
@@ -371,10 +348,7 @@ mod tests {
         assert_eq!(store.list().await.unwrap().len(), 1);
 
         // A malformed record never lands.
-        assert!(store
-            .set("userpass/", "bob", "ssh-rsa", "ssh-rsa AAAA", "abcd", "", "")
-            .await
-            .is_err());
+        assert!(store.set("userpass/", "bob", "ssh-rsa", "ssh-rsa AAAA", "abcd", "", "").await.is_err());
         assert!(store.get("userpass/", "bob").await.unwrap().is_none());
 
         // A blank principal is rejected.

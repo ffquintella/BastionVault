@@ -27,9 +27,7 @@ pub const DERIVED_DATAKEY_LEN: usize = 32;
 /// Generate a fresh ML-KEM-768 keypair. Returns `(secret_key_bytes, public_key_bytes)`.
 pub fn generate_keypair() -> Result<(Vec<u8>, Vec<u8>), RvError> {
     let provider = MlKem768Provider;
-    let kp = provider
-        .generate_keypair()
-        .map_err(|e| RvError::ErrString(format!("ml-kem-768 keygen: {e:?}")))?;
+    let kp = provider.generate_keypair().map_err(|e| RvError::ErrString(format!("ml-kem-768 keygen: {e:?}")))?;
     Ok((kp.secret_key().to_vec(), kp.public_key().to_vec()))
 }
 
@@ -37,9 +35,8 @@ pub fn generate_keypair() -> Result<(Vec<u8>, Vec<u8>), RvError> {
 /// `(datakey_plaintext, kem_ciphertext)`.
 pub fn encapsulate_datakey(public_key: &[u8]) -> Result<(Vec<u8>, Vec<u8>), RvError> {
     let provider = MlKem768Provider;
-    let (kem_ct, ss) = provider
-        .encapsulate(public_key)
-        .map_err(|e| RvError::ErrString(format!("ml-kem-768 encapsulate: {e:?}")))?;
+    let (kem_ct, ss) =
+        provider.encapsulate(public_key).map_err(|e| RvError::ErrString(format!("ml-kem-768 encapsulate: {e:?}")))?;
     let dk = derive_datakey(ss.as_bytes())?;
     Ok((dk, kem_ct.as_bytes().to_vec()))
 }
@@ -57,8 +54,7 @@ pub fn decapsulate_datakey(secret_key: &[u8], kem_ct: &[u8]) -> Result<Vec<u8>, 
 fn derive_datakey(ss: &[u8]) -> Result<Vec<u8>, RvError> {
     let hk = Hkdf::<Sha256>::new(None, ss);
     let mut out = vec![0u8; DERIVED_DATAKEY_LEN];
-    hk.expand(HKDF_INFO, &mut out)
-        .map_err(|e| RvError::ErrString(format!("hkdf expand: {e}")))?;
+    hk.expand(HKDF_INFO, &mut out).map_err(|e| RvError::ErrString(format!("hkdf expand: {e}")))?;
     Ok(out)
 }
 

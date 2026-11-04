@@ -88,11 +88,7 @@ impl Server {
             .unwrap_or_else(|| panic!("no bound address in startup line: {line:?}"))
             .to_string();
 
-        Server {
-            child,
-            addr,
-            stdout: Some(drain),
-        }
+        Server { child, addr, stdout: Some(drain) }
     }
 
     fn get(&self, path: &str) -> HttpResponse {
@@ -101,12 +97,8 @@ impl Server {
 
     fn request(&self, method: &str, path: &str) -> HttpResponse {
         let mut stream = TcpStream::connect(&self.addr).expect("connect");
-        write!(
-            stream,
-            "{method} {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
-            self.addr
-        )
-        .expect("write request");
+        write!(stream, "{method} {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n", self.addr)
+            .expect("write request");
         stream.flush().expect("flush");
 
         let mut raw = Vec::new();
@@ -123,10 +115,7 @@ struct HttpResponse {
 
 impl HttpResponse {
     fn parse(raw: &[u8]) -> HttpResponse {
-        let split = raw
-            .windows(4)
-            .position(|w| w == b"\r\n\r\n")
-            .expect("headers terminator");
+        let split = raw.windows(4).position(|w| w == b"\r\n\r\n").expect("headers terminator");
         let head = std::str::from_utf8(&raw[..split]).expect("ascii headers");
         let body = raw[split + 4..].to_vec();
 
@@ -143,11 +132,7 @@ impl HttpResponse {
             .map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim().to_string()))
             .collect();
 
-        HttpResponse {
-            status,
-            headers,
-            body,
-        }
+        HttpResponse { status, headers, body }
     }
 
     fn header(&self, name: &str) -> Option<&str> {
@@ -176,12 +161,8 @@ fn fixture_entries() -> Vec<Entry> {
     let mut out = Vec::new();
     for chunk in raw.split("\"name\": \"").skip(1) {
         let name = chunk.split('"').next().expect("name").to_string();
-        let sha256 = chunk
-            .split("\"sha256\": \"")
-            .nth(1)
-            .and_then(|s| s.split('"').next())
-            .expect("sha256")
-            .to_string();
+        let sha256 =
+            chunk.split("\"sha256\": \"").nth(1).and_then(|s| s.split('"').next()).expect("sha256").to_string();
         let signature = chunk
             .split("\"cosign_signature\": \"")
             .nth(1)
@@ -201,13 +182,7 @@ fn fixture_entries() -> Vec<Entry> {
             Some("msi") => "application/x-msi",
             other => panic!("unexpected fixture extension {other:?}"),
         };
-        out.push(Entry {
-            name,
-            sha256,
-            signature,
-            certificate,
-            mime,
-        });
+        out.push(Entry { name, sha256, signature, certificate, mime });
     }
     assert_eq!(out.len(), 8, "fixture should cover all eight artefact kinds");
     out
@@ -226,10 +201,7 @@ fn index_lists_every_fixture_file_with_its_hash_and_signature_link() {
     let server = Server::start(&["--verify-hashes"]);
     let response = server.get("/");
     assert_eq!(response.status, 200);
-    assert_eq!(
-        response.header("content-type"),
-        Some("text/html; charset=utf-8")
-    );
+    assert_eq!(response.header("content-type"), Some("text/html; charset=utf-8"));
     assert_eq!(response.header("x-content-type-options"), Some("nosniff"));
 
     let csp = response.header("content-security-policy").expect("csp");
@@ -238,26 +210,10 @@ fn index_lists_every_fixture_file_with_its_hash_and_signature_link() {
 
     let html = response.text();
     for entry in fixture_entries() {
-        assert!(
-            html.contains(&format!("href=\"/v0.4.0/{}\"", entry.name)),
-            "no download link for {}",
-            entry.name
-        );
-        assert!(
-            html.contains(&entry.sha256),
-            "no sha256 for {} on the page",
-            entry.name
-        );
-        assert!(
-            html.contains(&format!("href=\"/{}\"", entry.signature)),
-            "no signature link for {}",
-            entry.name
-        );
-        assert!(
-            html.contains(&format!("href=\"/{}\"", entry.certificate)),
-            "no certificate link for {}",
-            entry.name
-        );
+        assert!(html.contains(&format!("href=\"/v0.4.0/{}\"", entry.name)), "no download link for {}", entry.name);
+        assert!(html.contains(&entry.sha256), "no sha256 for {} on the page", entry.name);
+        assert!(html.contains(&format!("href=\"/{}\"", entry.signature)), "no signature link for {}", entry.name);
+        assert!(html.contains(&format!("href=\"/{}\"", entry.certificate)), "no certificate link for {}", entry.name);
     }
 }
 
@@ -278,8 +234,7 @@ fn every_artefact_signature_and_certificate_is_downloadable() {
         let artefact = server.get(&format!("/v0.4.0/{}", entry.name));
         assert_eq!(artefact.status, 200, "{}", entry.name);
         assert_eq!(artefact.header("content-type"), Some(entry.mime), "{}", entry.name);
-        let on_disk =
-            std::fs::read(fixture_root().join("v0.4.0").join(&entry.name)).expect("read artefact");
+        let on_disk = std::fs::read(fixture_root().join("v0.4.0").join(&entry.name)).expect("read artefact");
         assert_eq!(artefact.body, on_disk, "{}", entry.name);
         assert_eq!(
             artefact.header("content-length").map(str::to_string),
@@ -288,10 +243,9 @@ fn every_artefact_signature_and_certificate_is_downloadable() {
             entry.name
         );
 
-        for (path, mime) in [
-            (&entry.signature, "application/octet-stream"),
-            (&entry.certificate, "application/x-pem-file"),
-        ] {
+        for (path, mime) in
+            [(&entry.signature, "application/octet-stream"), (&entry.certificate, "application/x-pem-file")]
+        {
             let response = server.get(&format!("/{path}"));
             assert_eq!(response.status, 200, "{path}");
             assert_eq!(response.header("content-type"), Some(mime), "{path}");
@@ -315,10 +269,7 @@ fn undocumented_paths_and_traversals_are_404() {
     ] {
         let response = server.get(path);
         assert_eq!(response.status, 404, "{path} must not be served");
-        assert!(
-            !response.text().contains("root:"),
-            "{path} leaked file contents"
-        );
+        assert!(!response.text().contains("root:"), "{path} leaked file contents");
     }
 }
 

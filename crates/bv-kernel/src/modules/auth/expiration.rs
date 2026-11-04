@@ -516,10 +516,7 @@ impl ExpirationManager {
             return 0;
         }
         let prefix = format!("{ns_path}/");
-        self.queue
-            .read()
-            .map(|q| q.iter().filter(|(le, _)| le.path.starts_with(&prefix)).count())
-            .unwrap_or(0)
+        self.queue.read().map(|q| q.iter().filter(|(le, _)| le.path.starts_with(&prefix)).count()).unwrap_or(0)
     }
 
     /// Enforce the target namespace's `max_leases` quota before a new secret

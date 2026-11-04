@@ -142,11 +142,7 @@ pub struct RoleEntry {
     pub default_critical_options: BTreeMap<String, String>,
 
     /// Default validity. `effective_ttl` clamps to `max_ttl`.
-    #[serde(
-        default = "default_ttl",
-        serialize_with = "serialize_duration",
-        deserialize_with = "deserialize_duration"
-    )]
+    #[serde(default = "default_ttl", serialize_with = "serialize_duration", deserialize_with = "deserialize_duration")]
     pub ttl: Duration,
 
     /// Hard cap. Per-call `ttl` requests above this are clamped down.
@@ -340,11 +336,7 @@ fn default_port() -> u16 {
 }
 
 fn comma_split(s: &str) -> Vec<String> {
-    let mut out: Vec<String> = s
-        .split(',')
-        .map(|p| p.trim().to_string())
-        .filter(|p| !p.is_empty())
-        .collect();
+    let mut out: Vec<String> = s.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect();
     out.sort();
     out.dedup();
     out
@@ -386,23 +378,15 @@ mod tests {
 
     #[test]
     fn comma_split_normalises() {
-        let r = RoleEntry {
-            allowed_users: "alice, bob, ,alice ,carol".to_string(),
-            ..Default::default()
-        };
-        assert_eq!(
-            r.allowed_users_list(),
-            vec!["alice".to_string(), "bob".to_string(), "carol".to_string()]
-        );
+        let r = RoleEntry { allowed_users: "alice, bob, ,alice ,carol".to_string(), ..Default::default() };
+        assert_eq!(r.allowed_users_list(), vec!["alice".to_string(), "bob".to_string(), "carol".to_string()]);
     }
 
     #[test]
     fn role_serde_round_trip_keeps_fields() {
         let mut original = RoleEntry::default();
         original.allowed_users = "alice".to_string();
-        original
-            .default_extensions
-            .insert("permit-pty".into(), "".into());
+        original.default_extensions.insert("permit-pty".into(), "".into());
         let bytes = serde_json::to_vec(&original).unwrap();
         let back: RoleEntry = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(back.allowed_users, "alice");

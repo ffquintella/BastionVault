@@ -344,7 +344,11 @@ impl ProcessHost {
 
     /// The caller's verdict per check (`sql_gate`); refusals reach the
     /// host's denial store.
-    pub fn resource_sql_authorize(&self, resource: &str, checks: &[SqlCheck]) -> Result<Vec<SqlVerdict>, HostCallError> {
+    pub fn resource_sql_authorize(
+        &self,
+        resource: &str,
+        checks: &[SqlCheck],
+    ) -> Result<Vec<SqlVerdict>, HostCallError> {
         let v = self.call("resource_sql_authorize", json!({"resource": resource, "checks": checks}))?;
         serde_json::from_value(v.get("verdicts").cloned().unwrap_or(Value::Null))
             .map_err(|_| HostCallError::local("bad_reply", "malformed verdicts"))
@@ -385,7 +389,8 @@ impl ProcessHost {
     /// Burn a connect-MFA ticket for `(resource, profile)` (`sql_gate`).
     /// `Ok(false)` when the profile is not gated (nothing is consumed).
     pub fn connect_ticket_redeem(&self, resource: &str, profile: &str, ticket: &str) -> Result<bool, HostCallError> {
-        let v = self.call("connect_ticket_redeem", json!({"resource": resource, "profile": profile, "ticket": ticket}))?;
+        let v =
+            self.call("connect_ticket_redeem", json!({"resource": resource, "profile": profile, "ticket": ticket}))?;
         Ok(v.get("redeemed").and_then(Value::as_bool).unwrap_or(false))
     }
 
@@ -453,8 +458,14 @@ pub fn serve<P: ProcessPlugin>(
     serialized(plugin, shared)
 }
 
-fn single_shot<P: ProcessPlugin>(plugin: Arc<P>, input: Reader, output: Writer, init: &Value) -> Result<(), RunnerError> {
-    let data = B64.decode(init["input"].as_str().unwrap_or("")).map_err(|_| RunnerError::Protocol("input not base64"))?;
+fn single_shot<P: ProcessPlugin>(
+    plugin: Arc<P>,
+    input: Reader,
+    output: Writer,
+    init: &Value,
+) -> Result<(), RunnerError> {
+    let data =
+        B64.decode(init["input"].as_str().unwrap_or("")).map_err(|_| RunnerError::Protocol("input not base64"))?;
     let shared = Shared::new(output, Mode::Direct(Mutex::new(input)));
     let host = ProcessHost { shared: shared.clone(), invocation: 0 };
     let resp = plugin.handle(&Invocation { id: 0, cancelled: Arc::default(), host }, &data);

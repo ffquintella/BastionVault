@@ -99,8 +99,7 @@ pub async fn verify_code(
         .map_err(TotpMfaError::Storage)?
         .ok_or_else(|| TotpMfaError::NoKey { mount: mount.clone(), key: key_name.to_string() })?;
 
-    let policy: KeyPolicy =
-        serde_json::from_slice(&entry.value).map_err(|e| TotpMfaError::Storage(e.into()))?;
+    let policy: KeyPolicy = serde_json::from_slice(&entry.value).map_err(|e| TotpMfaError::Storage(e.into()))?;
 
     Ok(code_matches(&policy, code, now_secs))
 }
@@ -192,10 +191,12 @@ mod tests {
         let now = 1_700_000_000u64;
         assert!(!code_matches(&p, "", now));
         assert!(!code_matches(&p, "   ", now));
-        assert!(!code_matches(&p, "000000", now) || {
-            // Vanishingly unlikely, but do not let a genuine collision fail CI.
-            totp(&p.key, now, p.algorithm, p.digits, p.period) == "000000"
-        });
+        assert!(
+            !code_matches(&p, "000000", now) || {
+                // Vanishingly unlikely, but do not let a genuine collision fail CI.
+                totp(&p.key, now, p.algorithm, p.digits, p.period) == "000000"
+            }
+        );
     }
 
     #[test]

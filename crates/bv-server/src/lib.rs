@@ -26,12 +26,9 @@ use actix_tls::accept::rustls_0_23::TlsStream as RustlsTlsStream;
 use actix_web::{
     cookie::Cookie,
     dev::Extensions,
+    http::{header, StatusCode},
     rt::net::TcpStream,
-    web,
-    HttpRequest,
-    HttpResponse,
-    ResponseError,
-    http::{StatusCode, header},
+    web, HttpRequest, HttpResponse, ResponseError,
 };
 use rustls::pki_types::CertificateDer;
 use serde::Serialize;
@@ -47,8 +44,8 @@ use serde_json::{json, Map, Value};
 // collision with `storage` in Phase 3 and resolved it the other way; either
 // works, and the collision is a compile error, never a silent shadow.
 use bastion_vault::{
-    audit, backup, config, core, errors, exchange, handler, kernel_api, logical, metrics, modules,
-    plugins, scheduled_exports, server_info, storage,
+    audit, backup, config, core, errors, exchange, handler, kernel_api, logical, metrics, modules, plugins,
+    scheduled_exports, server_info, storage,
 };
 
 // `bv_error_response_status!` and friends are `#[macro_export]`ed by
@@ -241,8 +238,7 @@ impl ResponseError for HttpError {
         // `StatusCode` is this layer's job. `from_u16` only rejects codes outside
         // 100..600, which the table cannot produce, so the fallback is unreachable
         // -- it is there so a future bad entry degrades to a 500 instead of panicking.
-        let mut status =
-            StatusCode::from_u16(self.0.response_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        let mut status = StatusCode::from_u16(self.0.response_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
         let text: String;
         if let RvError::ErrResponse(resp_text) = &self.0 {
             status = StatusCode::from_u16(400).unwrap();

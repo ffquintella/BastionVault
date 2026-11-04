@@ -65,10 +65,7 @@ pub struct ParsedAssertion {
 /// projection plus the raw bytes so later verification steps can
 /// walk back into the tree.
 pub fn parse_response(xml: &[u8]) -> Result<ParsedResponse, RvError> {
-    let mut out = ParsedResponse {
-        raw_xml: xml.to_vec(),
-        ..Default::default()
-    };
+    let mut out = ParsedResponse { raw_xml: xml.to_vec(), ..Default::default() };
 
     let mut reader = Reader::from_reader(xml);
     reader.config_mut().trim_text(false);
@@ -158,9 +155,7 @@ pub fn parse_response(xml: &[u8]) -> Result<ParsedResponse, RvError> {
                             assertion.id = val;
                         }
                     }
-                } else if local == "Conditions"
-                    && in_assertion_depth.is_some()
-                {
+                } else if local == "Conditions" && in_assertion_depth.is_some() {
                     for attr in e.attributes().flatten() {
                         let key = local_name(attr.key);
                         let val = attr_value(&attr, &reader);
@@ -210,9 +205,8 @@ pub fn parse_response(xml: &[u8]) -> Result<ParsedResponse, RvError> {
 
             Ok(Event::Text(t)) => {
                 if capture_text_into.is_some() {
-                    let s = t.xml10_content().map_err(|e| {
-                        RvError::ErrString(format!("saml: invalid text node: {e}"))
-                    })?;
+                    let s =
+                        t.xml10_content().map_err(|e| RvError::ErrString(format!("saml: invalid text node: {e}")))?;
                     text_buf.push_str(&s);
                 }
             }
@@ -228,11 +222,7 @@ pub fn parse_response(xml: &[u8]) -> Result<ParsedResponse, RvError> {
                 if local == "Attribute" {
                     if let Some((name, values)) = current_attribute.take() {
                         if !name.is_empty() {
-                            assertion
-                                .attributes
-                                .entry(name)
-                                .or_default()
-                                .extend(values);
+                            assertion.attributes.entry(name).or_default().extend(values);
                         }
                     }
                 }
@@ -246,14 +236,7 @@ pub fn parse_response(xml: &[u8]) -> Result<ParsedResponse, RvError> {
                     }
                     in_assertion_depth = None;
                 }
-                if matches!(
-                    local.as_str(),
-                    "NameID"
-                        | "Issuer"
-                        | "Audience"
-                        | "StatusMessage"
-                        | "AttributeValue"
-                ) {
+                if matches!(local.as_str(), "NameID" | "Issuer" | "Audience" | "StatusMessage" | "AttributeValue") {
                     if let Some(target) = capture_text_into.take() {
                         let trimmed = text_buf.trim();
                         if !trimmed.is_empty() {
@@ -268,9 +251,7 @@ pub fn parse_response(xml: &[u8]) -> Result<ParsedResponse, RvError> {
                                     out.issuer = trimmed.to_string();
                                 }
                                 TextTarget::Audience => {
-                                    assertion
-                                        .audience_restrictions
-                                        .push(trimmed.to_string());
+                                    assertion.audience_restrictions.push(trimmed.to_string());
                                 }
                                 TextTarget::StatusMessage => {
                                     out.status_message = trimmed.to_string();
@@ -293,9 +274,7 @@ pub fn parse_response(xml: &[u8]) -> Result<ParsedResponse, RvError> {
     }
 
     if out.response_id.is_empty() {
-        return Err(RvError::ErrString(
-            "saml: Response has no ID attribute".into(),
-        ));
+        return Err(RvError::ErrString("saml: Response has no ID attribute".into()));
     }
     if !assertion.id.is_empty() {
         out.assertion = Some(assertion);
@@ -328,10 +307,7 @@ fn local_name(q: QName<'_>) -> String {
 }
 
 /// Resolve an attribute's unescaped string value.
-fn attr_value(
-    attr: &quick_xml::events::attributes::Attribute<'_>,
-    reader: &Reader<&[u8]>,
-) -> String {
+fn attr_value(attr: &quick_xml::events::attributes::Attribute<'_>, reader: &Reader<&[u8]>) -> String {
     attr.decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
         .map(|c| c.into_owned())
         .unwrap_or_default()
@@ -342,19 +318,15 @@ fn attr_value(
 /// XML-predefined ones — SAML responses carry no DTD, so a custom
 /// entity is malformed input (and a classic entity-expansion vector).
 pub(crate) fn resolve_entity_ref(r: &BytesRef<'_>) -> Result<String, RvError> {
-    if let Some(ch) = r.resolve_char_ref().map_err(|e| {
-        RvError::ErrString(format!("saml: invalid character reference: {e}"))
-    })? {
+    if let Some(ch) =
+        r.resolve_char_ref().map_err(|e| RvError::ErrString(format!("saml: invalid character reference: {e}")))?
+    {
         return Ok(ch.to_string());
     }
-    let name = r
-        .decode()
-        .map_err(|e| RvError::ErrString(format!("saml: entity reference decode: {e}")))?;
+    let name = r.decode().map_err(|e| RvError::ErrString(format!("saml: entity reference decode: {e}")))?;
     quick_xml::escape::resolve_predefined_entity(&name)
         .map(str::to_string)
-        .ok_or_else(|| {
-            RvError::ErrString(format!("saml: unsupported entity reference '&{name};'"))
-        })
+        .ok_or_else(|| RvError::ErrString(format!("saml: unsupported entity reference '&{name};'")))
 }
 
 /// Given the byte offset just before a parsed start-tag (the
@@ -417,10 +389,7 @@ mod tests {
         assert_eq!(parsed.destination, "https://sp.example.com/acs");
         assert_eq!(parsed.in_response_to, "id-abc");
         assert_eq!(parsed.issuer, "https://idp.example.com/saml");
-        assert_eq!(
-            parsed.status_code,
-            "urn:oasis:names:tc:SAML:2.0:status:Success"
-        );
+        assert_eq!(parsed.status_code, "urn:oasis:names:tc:SAML:2.0:status:Success");
 
         let a = parsed.assertion.unwrap();
         assert_eq!(a.id, "assert-1");
@@ -429,18 +398,9 @@ mod tests {
         assert!(a.name_id_format.ends_with("emailAddress"));
         assert_eq!(a.not_before, "2026-04-24T12:00:00Z");
         assert_eq!(a.not_on_or_after, "2026-04-24T13:00:00Z");
-        assert_eq!(
-            a.audience_restrictions,
-            vec!["https://sp.example.com/saml".to_string()]
-        );
-        assert_eq!(
-            a.attributes.get("email"),
-            Some(&vec!["alice@example.com".to_string()])
-        );
-        assert_eq!(
-            a.attributes.get("groups"),
-            Some(&vec!["engineering".to_string(), "admins".to_string()])
-        );
+        assert_eq!(a.audience_restrictions, vec!["https://sp.example.com/saml".to_string()]);
+        assert_eq!(a.attributes.get("email"), Some(&vec!["alice@example.com".to_string()]));
+        assert_eq!(a.attributes.get("groups"), Some(&vec!["engineering".to_string(), "admins".to_string()]));
     }
 
     #[test]
@@ -459,10 +419,7 @@ mod tests {
 </samlp:Response>"#;
         let parsed = parse_response(xml.as_bytes()).unwrap();
         let a = parsed.assertion.unwrap();
-        assert_eq!(
-            a.attributes.get("org"),
-            Some(&vec!["Acme & Co AB".to_string()])
-        );
+        assert_eq!(a.attributes.get("org"), Some(&vec!["Acme & Co AB".to_string()]));
     }
 
     #[test]

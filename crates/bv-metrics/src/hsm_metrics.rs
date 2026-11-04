@@ -232,7 +232,9 @@ impl HsmMetrics {
             let delta = if total >= *seen { total - *seen } else { total };
             *seen = total;
             if delta > 0 {
-                self.link_requests.get_or_create(&LinkLabels { member: member.into(), code: code.into() }).inc_by(delta);
+                self.link_requests
+                    .get_or_create(&LinkLabels { member: member.into(), code: code.into() })
+                    .inc_by(delta);
             }
         }
     }

@@ -159,11 +159,7 @@ impl ChangeEpochs {
             let epoch = map.as_ref().and_then(|m| m.get(&key).copied()).unwrap_or(0);
             topics.insert(mount.clone(), epoch);
         }
-        EpochSnapshot {
-            version: self.version(),
-            topics,
-            coarse: self.coarse.load(Ordering::Relaxed),
-        }
+        EpochSnapshot { version: self.version(), topics, coarse: self.coarse.load(Ordering::Relaxed) }
     }
 
     /// Wait until the aggregate version differs from `since`, or `timeout`
@@ -224,10 +220,7 @@ mod tests {
             Some(&0),
             "root's `pki/` must not move because `acme/pki/` did"
         );
-        assert_eq!(
-            e.snapshot_for("acme", &["pki/".to_string()]).topics.get("pki/"),
-            Some(&1)
-        );
+        assert_eq!(e.snapshot_for("acme", &["pki/".to_string()]).topics.get("pki/"), Some(&1));
     }
 
     #[test]

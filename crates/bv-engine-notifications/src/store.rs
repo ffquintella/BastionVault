@@ -57,24 +57,15 @@ impl NotificationStore {
             return self.messages_view.clone();
         }
         let b64 = URL_SAFE_NO_PAD.encode(ns_path.as_bytes());
-        Arc::new(
-            self.system_view
-                .new_sub_view(&format!("{NS_SUB_PATH}{b64}/messages/")),
-        )
+        Arc::new(self.system_view.new_sub_view(&format!("{NS_SUB_PATH}{b64}/messages/")))
     }
 
     fn inbox_view_for(&self, ns_path: &str, entity_id: &str) -> Arc<BarrierView> {
         if ns_path.is_empty() {
-            return Arc::new(
-                self.system_view
-                    .new_sub_view(&format!("{INBOX_SUB_PATH}{entity_id}/")),
-            );
+            return Arc::new(self.system_view.new_sub_view(&format!("{INBOX_SUB_PATH}{entity_id}/")));
         }
         let b64 = URL_SAFE_NO_PAD.encode(ns_path.as_bytes());
-        Arc::new(
-            self.system_view
-                .new_sub_view(&format!("{NS_SUB_PATH}{b64}/inbox/{entity_id}/")),
-        )
+        Arc::new(self.system_view.new_sub_view(&format!("{NS_SUB_PATH}{b64}/inbox/{entity_id}/")))
     }
 
     fn config_key(ns_path: &str) -> String {
@@ -107,11 +98,7 @@ impl NotificationStore {
         self.messages_view_for(ns_path).put(&entry).await
     }
 
-    pub async fn get_message(
-        &self,
-        ns_path: &str,
-        id: &str,
-    ) -> Result<Option<Notification>, RvError> {
+    pub async fn get_message(&self, ns_path: &str, id: &str) -> Result<Option<Notification>, RvError> {
         let id = Self::sanitize_id(id)?;
         match self.messages_view_for(ns_path).get(id).await? {
             Some(e) => Ok(Some(serde_json::from_slice(&e.value)?)),
@@ -138,12 +125,7 @@ impl NotificationStore {
 
     // ---- per-user inbox -----------------------------------------------------
 
-    pub async fn put_inbox(
-        &self,
-        ns_path: &str,
-        entity_id: &str,
-        entry: &InboxEntry,
-    ) -> Result<(), RvError> {
+    pub async fn put_inbox(&self, ns_path: &str, entity_id: &str, entry: &InboxEntry) -> Result<(), RvError> {
         let entity_id = Self::sanitize_entity(entity_id)?;
         let id = Self::sanitize_id(&entry.notif_id)?;
         let se = StorageEntry::new(id, entry)?;
@@ -164,11 +146,7 @@ impl NotificationStore {
         }
     }
 
-    pub async fn list_inbox_entries(
-        &self,
-        ns_path: &str,
-        entity_id: &str,
-    ) -> Result<Vec<InboxEntry>, RvError> {
+    pub async fn list_inbox_entries(&self, ns_path: &str, entity_id: &str) -> Result<Vec<InboxEntry>, RvError> {
         let entity_id = Self::sanitize_entity(entity_id)?;
         let view = self.inbox_view_for(ns_path, entity_id);
         let keys = view.get_keys().await?;
@@ -183,12 +161,7 @@ impl NotificationStore {
         Ok(out)
     }
 
-    pub async fn delete_inbox_entry(
-        &self,
-        ns_path: &str,
-        entity_id: &str,
-        id: &str,
-    ) -> Result<(), RvError> {
+    pub async fn delete_inbox_entry(&self, ns_path: &str, entity_id: &str, id: &str) -> Result<(), RvError> {
         let entity_id = Self::sanitize_entity(entity_id)?;
         let id = Self::sanitize_id(id)?;
         self.inbox_view_for(ns_path, entity_id).delete(id).await
@@ -198,28 +171,16 @@ impl NotificationStore {
     /// entries first (by `delivered_at`), then the oldest unread if still
     /// over cap. Keeps inboxes bounded without silently dropping unread
     /// mail unless the cap is genuinely exceeded.
-    pub async fn prune_inbox(
-        &self,
-        ns_path: &str,
-        entity_id: &str,
-        cap: usize,
-    ) -> Result<(), RvError> {
+    pub async fn prune_inbox(&self, ns_path: &str, entity_id: &str, cap: usize) -> Result<(), RvError> {
         let mut entries = self.list_inbox_entries(ns_path, entity_id).await?;
         if entries.len() <= cap {
             return Ok(());
         }
         // Oldest-first; read entries considered more disposable than unread.
-        entries.sort_by(|a, b| {
-            a.is_read()
-                .cmp(&b.is_read())
-                .reverse()
-                .then(a.delivered_at.cmp(&b.delivered_at))
-        });
+        entries.sort_by(|a, b| a.is_read().cmp(&b.is_read()).reverse().then(a.delivered_at.cmp(&b.delivered_at)));
         let to_remove = entries.len() - cap;
         for entry in entries.into_iter().take(to_remove) {
-            let _ = self
-                .delete_inbox_entry(ns_path, entity_id, &entry.notif_id)
-                .await;
+            let _ = self.delete_inbox_entry(ns_path, entity_id, &entry.notif_id).await;
         }
         Ok(())
     }
@@ -233,11 +194,7 @@ impl NotificationStore {
         }
     }
 
-    pub async fn put_config(
-        &self,
-        ns_path: &str,
-        cfg: &NotificationConfig,
-    ) -> Result<(), RvError> {
+    pub async fn put_config(&self, ns_path: &str, cfg: &NotificationConfig) -> Result<(), RvError> {
         let entry = StorageEntry::new(Self::config_key(ns_path).as_str(), cfg)?;
         self.system_view.put(&entry).await
     }

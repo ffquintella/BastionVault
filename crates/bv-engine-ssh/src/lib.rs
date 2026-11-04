@@ -31,21 +31,21 @@ use bv_utils as utils;
 // which places them at *that* crate's root; the call sites import them as
 // `crate::new_path` and friends. The `_internal` halves are the recursive arms
 // the public macros expand into, so they must travel with them.
-pub use bv_logical::{
-    new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path,
-    new_path_internal, new_secret, new_secret_internal,
-};
 pub use bv_errors::{bv_error_response, bv_error_response_status, bv_error_string};
+pub use bv_logical::{
+    new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path, new_path_internal,
+    new_secret, new_secret_internal,
+};
 
 use std::{any::Any, sync::Arc};
 
 use derive_more::Deref;
 
-use bv_kernel_api::{Module, VaultCtx};
 use crate::{
     errors::RvError,
     logical::{Backend, LogicalBackend, Path},
 };
+use bv_kernel_api::{Module, VaultCtx};
 
 pub mod otp;
 pub mod path_config_ca;
@@ -54,10 +54,10 @@ pub mod path_lookup;
 pub mod path_roles;
 pub mod path_sign;
 pub mod policy;
-pub mod ssh_ca_audit_store;
-pub mod ssh_sign_audit_store;
 #[cfg(feature = "ssh_pqc")]
 pub mod pqc;
+pub mod ssh_ca_audit_store;
+pub mod ssh_sign_audit_store;
 
 const SSH_BACKEND_HELP: &str = r#"
 The SSH engine issues short-lived SSH credentials in two modes:
@@ -85,9 +85,7 @@ pub struct SshBackend {
 
 impl SshBackend {
     pub fn new(core: Arc<dyn VaultCtx>) -> Self {
-        Self {
-            inner: Arc::new(SshBackendInner { core }),
-        }
+        Self { inner: Arc::new(SshBackendInner { core }) }
     }
 
     pub fn new_backend(&self) -> LogicalBackend {
@@ -118,10 +116,7 @@ pub struct SshModule {
 
 impl SshModule {
     pub fn new(core: Arc<dyn VaultCtx>) -> Self {
-        Self {
-            name: "ssh".to_string(),
-            backend: Arc::new(SshBackend::new(core)),
-        }
+        Self { name: "ssh".to_string(), backend: Arc::new(SshBackend::new(core)) }
     }
 }
 

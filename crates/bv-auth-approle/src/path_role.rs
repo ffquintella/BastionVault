@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::{
-    validation::{create_hmac, reject_reserved_secret_id_meta, verify_cidr_role_secret_id_subset, SecretIdStorageEntry},
+    validation::{
+        create_hmac, reject_reserved_secret_id_meta, verify_cidr_role_secret_id_subset, SecretIdStorageEntry,
+    },
     AppRoleBackend, AppRoleBackendInner, HMAC_INPUT_LEN_MAX, SECRET_ID_LOCAL_PREFIX, SECRET_ID_PREFIX,
 };
 use crate::kernel_api::VaultCtx;
@@ -1546,8 +1548,7 @@ impl AppRoleBackendInner {
     }
 
     pub async fn read_config(&self, _backend: &dyn Backend, _req: &mut Request) -> Result<Option<Response>, RvError> {
-        let require_machine =
-            self.core.approle_require_machine().load(std::sync::atomic::Ordering::Relaxed);
+        let require_machine = self.core.approle_require_machine().load(std::sync::atomic::Ordering::Relaxed);
         let data = json!({ "require_machine": require_machine });
         Ok(Some(Response::data_response(data.as_object().cloned())))
     }
@@ -1613,11 +1614,8 @@ impl AppRoleBackendInner {
             return Err(RvError::ErrResponse("either machine_id or spiffe_id is required".to_string()));
         }
 
-        let environments = req
-            .get_data("environments")
-            .ok()
-            .and_then(|v| v.as_comma_string_slice())
-            .unwrap_or_default();
+        let environments =
+            req.get_data("environments").ok().and_then(|v| v.as_comma_string_slice()).unwrap_or_default();
 
         // Resolve spiffe_id for display: prefer the supplied value, else read it
         // back from the FerroGate machine record when available.
@@ -2805,4 +2803,3 @@ async fn record_approle_audit(
         })
         .await;
 }
-

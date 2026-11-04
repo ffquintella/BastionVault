@@ -14,7 +14,6 @@ use chrono::Utc;
 use derive_more::Deref;
 use serde_json::{json, Map, Value};
 
-use bv_kernel_api::{Module, VaultCtx};
 use crate::{
     context::Context,
     errors::RvError,
@@ -25,6 +24,7 @@ use crate::{
     new_secret, new_secret_internal,
     storage::StorageEntry,
 };
+use bv_kernel_api::{Module, VaultCtx};
 
 use self::metadata::{EngineConfig, SecretMetadata, VersionMetadata};
 use self::version::{merge_env, VersionData};
@@ -564,16 +564,9 @@ impl KvV2BackendInner {
                 Some(Value::Object(d)) => d.clone(),
                 _ => return Err(RvError::ErrModuleKvV2DataFieldMissing),
             };
-            let env_target = body
-                .get("env")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string());
+            let env_target = body.get("env").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string());
             let envs_payload = body.get("envs").and_then(|v| v.as_object()).cloned();
-            let cas_value = body
-                .get("options")
-                .and_then(|o| o.get("cas"))
-                .and_then(|c| c.as_u64());
+            let cas_value = body.get("options").and_then(|o| o.get("cas")).and_then(|c| c.as_u64());
             (secret_data, env_target, envs_payload, cas_value)
         };
 
@@ -646,10 +639,7 @@ impl KvV2BackendInner {
             // Legacy base-only write: replace base, but carry existing envs
             // forward so a plain write doesn't silently wipe per-env values.
             let envs = if meta.current_version > 0 {
-                self.read_version(req, &name, meta.current_version)
-                    .await?
-                    .map(|p| p.envs)
-                    .unwrap_or_default()
+                self.read_version(req, &name, meta.current_version).await?.map(|p| p.envs).unwrap_or_default()
             } else {
                 Map::new()
             };
@@ -811,11 +801,7 @@ impl KvV2BackendInner {
         _backend: &dyn Backend,
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        let prefix = req
-            .get_data("prefix")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_default();
+        let prefix = req.get_data("prefix").ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
         // Defence-in-depth — keep the listing scoped to the
         // backend's `metadata/` namespace and refuse anything that
         // tries to climb out via `..`.
@@ -834,11 +820,7 @@ impl KvV2BackendInner {
         Ok(Some(resp))
     }
 
-    pub async fn handle_destroy(
-        &self,
-        _backend: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_destroy(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let name = get_name_from_request(req)?;
 
         let versions_to_destroy = get_versions_from_body(req);
@@ -902,21 +884,14 @@ impl KvV2BackendInner {
         Ok(None)
     }
 
-    pub async fn handle_noop(
-        &self,
-        _backend: &dyn Backend,
-        _req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_noop(&self, _backend: &dyn Backend, _req: &mut Request) -> Result<Option<Response>, RvError> {
         Ok(None)
     }
 }
 
 impl KvV2Module {
     pub fn new(core: Arc<dyn VaultCtx>) -> Self {
-        Self {
-            name: "kv-v2".to_string(),
-            backend: Arc::new(KvV2Backend::new(core)),
-        }
+        Self { name: "kv-v2".to_string(), backend: Arc::new(KvV2Backend::new(core)) }
     }
 }
 

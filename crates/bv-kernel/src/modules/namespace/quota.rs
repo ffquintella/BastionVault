@@ -29,29 +29,17 @@
 //! All accounting quotas apply to *non-root* namespaces only: the root
 //! namespace is the deployment owner and is never self-limited.
 
-use std::{
-    collections::HashMap,
-    sync::Mutex,
-    time::Instant,
-};
+use std::{collections::HashMap, sync::Mutex, time::Instant};
 
 use crate::kernel_api::VaultCtx;
-use crate::{
-    bv_error_response_status,
-    errors::RvError,
-    logical::Operation,
-    storage::Storage,
-};
+use crate::{bv_error_response_status, errors::RvError, logical::Operation, storage::Storage};
 
 use super::router::namespace_logical_prefix;
 
 /// Error returned when a capacity quota (mounts, children) is exceeded.
 pub fn capacity_exceeded(what: &str, limit: u64) -> RvError {
     // 507 Insufficient Storage mirrors the spec's capacity-quota status.
-    bv_error_response_status!(
-        507,
-        &format!("namespace quota exceeded: {what} limit of {limit} reached")
-    )
+    bv_error_response_status!(507, &format!("namespace quota exceeded: {what} limit of {limit} reached"))
 }
 
 /// Check an additive capacity quota: refuse when `current >= limit` (and the
@@ -131,16 +119,12 @@ impl RateLimiter {
 /// admits it against that namespace's `request_rate`. A no-op for root/unlimited
 /// namespaces and when the namespace module is unavailable.
 #[maybe_async::maybe_async]
-pub async fn enforce_request_rate(
-    core: &crate::core::Core,
-    req: &crate::logical::Request,
-) -> Result<(), RvError> {
+pub async fn enforce_request_rate(core: &crate::core::Core, req: &crate::logical::Request) -> Result<(), RvError> {
     use super::{NamespaceModule, NAMESPACE_MODULE_NAME};
 
     // sys/auth/identity are header-scoped, not path-rewritten; rate-limit them
     // under the root bucket along with every other root request.
-    let Some(module) = core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
-    else {
+    let Some(module) = core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME) else {
         return Ok(());
     };
     let Some(store) = module.store() else {
@@ -158,10 +142,7 @@ pub async fn enforce_request_rate(
 /// Error returned when an accounting capacity quota (storage, leases,
 /// entities) is exceeded. Mirrors the spec's `507 Insufficient Storage`.
 fn accounting_exceeded(what: &str, current: u64, limit: u64) -> RvError {
-    bv_error_response_status!(
-        507,
-        &format!("namespace quota exceeded: {what} {current}/{limit}")
-    )
+    bv_error_response_status!(507, &format!("namespace quota exceeded: {what} {current}/{limit}"))
 }
 
 /// Sum the barrier-encrypted value bytes stored under a namespace's logical
@@ -169,10 +150,7 @@ fn accounting_exceeded(what: &str, current: u64, limit: u64) -> RvError {
 /// value's length. O(n) in the namespace's key count — only invoked when a
 /// storage cap is set on the namespace.
 #[maybe_async::maybe_async]
-async fn namespace_storage_bytes(
-    barrier: &dyn Storage,
-    ns_uuid: &str,
-) -> Result<u64, RvError> {
+async fn namespace_storage_bytes(barrier: &dyn Storage, ns_uuid: &str) -> Result<u64, RvError> {
     let prefix = namespace_logical_prefix(ns_uuid);
     let mut pending = vec![prefix];
     let mut total: u64 = 0;
@@ -203,8 +181,7 @@ pub async fn check_entity_create(
     if ns_path.is_empty() {
         return Ok(());
     }
-    let Some(ns_module) = core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
-    else {
+    let Some(ns_module) = core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME) else {
         return Ok(());
     };
     let Some(store) = ns_module.store() else {
@@ -217,8 +194,7 @@ pub async fn check_entity_create(
     if limit == 0 {
         return Ok(());
     }
-    let Some(id_module) =
-        core.module_manager().get_module::<crate::modules::identity::IdentityModule>("identity")
+    let Some(id_module) = core.module_manager().get_module::<crate::modules::identity::IdentityModule>("identity")
     else {
         return Ok(());
     };
@@ -249,8 +225,7 @@ pub async fn enforce_write_storage_quota(
     if req.operation != Operation::Write {
         return Ok(());
     }
-    let Some(ns_module) = core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
-    else {
+    let Some(ns_module) = core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME) else {
         return Ok(());
     };
     let Some(store) = ns_module.store() else {
@@ -264,12 +239,7 @@ pub async fn enforce_write_storage_quota(
     if limit == 0 {
         return Ok(());
     }
-    let incoming = req
-        .body
-        .as_ref()
-        .and_then(|b| serde_json::to_vec(b).ok())
-        .map(|v| v.len() as u64)
-        .unwrap_or(0);
+    let incoming = req.body.as_ref().and_then(|b| serde_json::to_vec(b).ok()).map(|v| v.len() as u64).unwrap_or(0);
     let current = namespace_storage_bytes(core.barrier().as_storage(), &resolved.namespace.uuid).await?;
     if current.saturating_add(incoming) > limit {
         return Err(accounting_exceeded("storage bytes", current, limit));

@@ -280,7 +280,6 @@ async fn audit_events_filters_apply_before_the_row_cap() {
     let none = events_at(&server, "sys/audit/events?category=user&op=grant");
     assert!(none.is_empty(), "op must narrow within the category: {none:?}");
 
-    let (status, got) =
-        server.request("GET", "sys/audit/events", obj(json!({"category": 5})), None, None).unwrap();
+    let (status, got) = server.request("GET", "sys/audit/events", obj(json!({"category": 5})), None, None).unwrap();
     assert_eq!(status, 400, "a non-string filter must be refused, not ignored: {got}");
 }

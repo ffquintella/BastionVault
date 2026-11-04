@@ -5,9 +5,6 @@ use std::{collections::HashMap, sync::Arc};
 use uuid::Uuid;
 
 use super::{UserPassBackend, UserPassBackendInner};
-use bv_auth_fido2::rp::{
-    PublicKeyCredentialAttestation, RegistrationState, RelyingParty,
-};
 use crate::{
     context::Context,
     errors::RvError,
@@ -15,6 +12,7 @@ use crate::{
     new_fields, new_fields_internal, new_path, new_path_internal,
     storage::StorageEntry,
 };
+use bv_auth_fido2::rp::{PublicKeyCredentialAttestation, RegistrationState, RelyingParty};
 
 impl UserPassBackend {
     pub fn fido2_register_begin_path(&self) -> Path {
@@ -72,27 +70,20 @@ impl UserPassBackendInner {
         _backend: &dyn Backend,
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        let config = self.get_fido2_config(req).await?
-            .ok_or(RvError::ErrFido2NotConfigured)?;
+        let config = self.get_fido2_config(req).await?.ok_or(RvError::ErrFido2NotConfigured)?;
 
         let username = req.get_data("username")?.as_str().unwrap().to_lowercase();
 
         // User must already exist in userpass.
-        let user_entry = self.get_user(req, &username).await?
+        let user_entry = self
+            .get_user(req, &username)
+            .await?
             .ok_or_else(|| RvError::ErrResponse("User not found. Create a userpass user first.".into()))?;
 
-        let rp = RelyingParty {
-            rp_id: &config.rp_id,
-            rp_origin: &config.rp_origin,
-            rp_name: &config.rp_name,
-        };
+        let rp = RelyingParty { rp_id: &config.rp_id, rp_origin: &config.rp_origin, rp_name: &config.rp_name };
 
-        let exclude_credentials: Vec<Vec<u8>> = user_entry
-            .get_passkeys()
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|pk| pk.cred_id_bytes().ok())
-            .collect();
+        let exclude_credentials: Vec<Vec<u8>> =
+            user_entry.get_passkeys().unwrap_or_default().iter().filter_map(|pk| pk.cred_id_bytes().ok()).collect();
 
         let user_unique_id = *Uuid::new_v4().as_bytes();
         let (challenge, reg_state) = rp
@@ -101,10 +92,7 @@ impl UserPassBackendInner {
 
         let state_json = serde_json::to_string(&reg_state)
             .map_err(|e: serde_json::Error| RvError::ErrFido2RegistrationFailed(e.to_string()))?;
-        let state_entry = StorageEntry::new(
-            &format!("challenge/reg/{username}"),
-            &state_json,
-        )?;
+        let state_entry = StorageEntry::new(&format!("challenge/reg/{username}"), &state_json)?;
         req.storage_put(&state_entry).await?;
 
         let challenge_json = serde_json::to_value(&challenge)
@@ -117,14 +105,13 @@ impl UserPassBackendInner {
         _backend: &dyn Backend,
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        let config = self.get_fido2_config(req).await?
-            .ok_or(RvError::ErrFido2NotConfigured)?;
+        let config = self.get_fido2_config(req).await?.ok_or(RvError::ErrFido2NotConfigured)?;
 
         let username = req.get_data("username")?.as_str().unwrap().to_lowercase();
         let credential_json = req.get_data("credential")?.as_str().unwrap().to_string();
 
-        let state_entry = req.storage_get(&format!("challenge/reg/{username}")).await?
-            .ok_or(RvError::ErrFido2ChallengeExpired)?;
+        let state_entry =
+            req.storage_get(&format!("challenge/reg/{username}")).await?.ok_or(RvError::ErrFido2ChallengeExpired)?;
         let state_str: String = serde_json::from_slice(&state_entry.value)?;
         let reg_state: RegistrationState = serde_json::from_str(&state_str)
             .map_err(|e: serde_json::Error| RvError::ErrFido2RegistrationFailed(format!("invalid state: {e}")))?;
@@ -132,11 +119,7 @@ impl UserPassBackendInner {
         // Single-use challenge.
         req.storage_delete(&format!("challenge/reg/{username}")).await?;
 
-        let rp = RelyingParty {
-            rp_id: &config.rp_id,
-            rp_origin: &config.rp_origin,
-            rp_name: &config.rp_name,
-        };
+        let rp = RelyingParty { rp_id: &config.rp_id, rp_origin: &config.rp_origin, rp_name: &config.rp_name };
 
         let attestation: PublicKeyCredentialAttestation = serde_json::from_str(&credential_json)
             .map_err(|e: serde_json::Error| RvError::ErrFido2RegistrationFailed(format!("invalid credential: {e}")))?;
@@ -145,12 +128,13 @@ impl UserPassBackendInner {
             .finish_registration(&attestation, &reg_state)
             .map_err(|e| RvError::ErrFido2RegistrationFailed(e.to_string()))?;
 
-        let mut user_entry = self.get_user(req, &username).await?
-            .ok_or_else(|| RvError::ErrResponse("User not found".into()))?;
+        let mut user_entry =
+            self.get_user(req, &username).await?.ok_or_else(|| RvError::ErrResponse("User not found".into()))?;
 
         let mut passkeys = user_entry.get_passkeys().unwrap_or_default();
         passkeys.push(passkey);
-        user_entry.set_passkeys(&passkeys)
+        user_entry
+            .set_passkeys(&passkeys)
             .map_err(|e: serde_json::Error| RvError::ErrFido2RegistrationFailed(e.to_string()))?;
         user_entry.fido2_enabled = true;
 

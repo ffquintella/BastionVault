@@ -387,7 +387,9 @@ impl MockHsmDevice {
         if state.serial.is_empty() && state.objects.is_empty() && state.auth_keys.is_empty() {
             state.serial = serial.to_string();
             let key = mock_password_key(crate::hsm::admin::FACTORY_PASSWORD);
-            state.auth_keys.insert(FACTORY_AUTH_KEY_ID, MockAuthKey { label: "factory".into(), role: AuthKeyRole::Factory, key });
+            state
+                .auth_keys
+                .insert(FACTORY_AUTH_KEY_ID, MockAuthKey { label: "factory".into(), role: AuthKeyRole::Factory, key });
             persist_state(state_path, &state)?;
         }
         Ok(Self::from_state(state_path, state, clock))
@@ -427,7 +429,9 @@ impl MockHsmDevice {
                     return Err(auth_failed(FACTORY_AUTH_KEY_ID, &state.serial));
                 }
                 let key = mock_password_key(admin_password);
-                state.auth_keys.insert(ADMIN_AUTH_KEY_ID, MockAuthKey { label: "bv-admin".into(), role: AuthKeyRole::Admin, key });
+                state
+                    .auth_keys
+                    .insert(ADMIN_AUTH_KEY_ID, MockAuthKey { label: "bv-admin".into(), role: AuthKeyRole::Admin, key });
                 ensure_all(&mut state, objects);
                 ensure_object(&mut state, objects.seed_ecdh, MockKind::SeedEcdh);
                 state.auth_keys.remove(&FACTORY_AUTH_KEY_ID);
@@ -855,7 +859,12 @@ impl HsmBackend for MockHsmBackend {
         })
     }
 
-    async fn unwrap_data(&self, key: HsmObjectId, ctx: &Context, wrapped: &[u8]) -> Result<Zeroizing<Vec<u8>>, RvError> {
+    async fn unwrap_data(
+        &self,
+        key: HsmObjectId,
+        ctx: &Context,
+        wrapped: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>, RvError> {
         self.command(cmd::UNWRAP_DATA, key, || {
             let material = self.wrap_material(key)?;
             let device = self.device_binding()?;
@@ -864,7 +873,8 @@ impl HsmBackend for MockHsmBackend {
     }
 
     async fn sign(&self, key: HsmObjectId, ctx: &str, msg: &[u8]) -> Result<Vec<u8>, RvError> {
-        let kind = self.device.state.read().map_err(|_| RvError::ErrRwLockReadPoison)?.objects.get(&key).map(|o| o.kind);
+        let kind =
+            self.device.state.read().map_err(|_| RvError::ErrRwLockReadPoison)?.objects.get(&key).map(|o| o.kind);
         let command = if kind == Some(MockKind::Authz) { cmd::SIGN_EDDSA } else { cmd::SIGN_ECDSA };
         self.command(command, key, || {
             let state = self.device.state.read().map_err(|_| RvError::ErrRwLockReadPoison)?;
@@ -1068,7 +1078,8 @@ fn persist_state(path: &str, state: &MockState) -> Result<(), RvError> {
     if path.is_empty() {
         return Ok(());
     }
-    let bytes = serde_json::to_vec_pretty(state).map_err(|e| RvError::ErrHsm(format!("encoding mock HSM state: {e}")))?;
+    let bytes =
+        serde_json::to_vec_pretty(state).map_err(|e| RvError::ErrHsm(format!("encoding mock HSM state: {e}")))?;
     if let Some(dir) = std::path::Path::new(path).parent() {
         if !dir.as_os_str().is_empty() {
             std::fs::create_dir_all(dir).map_err(|e| RvError::ErrHsm(format!("creating mock HSM state dir: {e}")))?;
@@ -1298,10 +1309,7 @@ mod tests {
         // Mismatch between authorization and the expected request (replay of an
         // authz for a different counter against a fresh expected request).
         let expected_next = UnwrapRequest::new(ctx, blob, "n1", 0, 2, Purpose::BarrierKek);
-        assert_eq!(
-            authz::verify_authorization(&auth, &vk, &expected_next).unwrap_err(),
-            RvError::ErrHsmAuthzInvalid
-        );
+        assert_eq!(authz::verify_authorization(&auth, &vk, &expected_next).unwrap_err(), RvError::ErrHsmAuthzInvalid);
     }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
@@ -1427,7 +1435,8 @@ mod tests {
 
         let node = crate::hsm::admin::NodeCredential::generate(0x100).unwrap();
         admin.put_node_auth_key("bv-node-n1", &node).await.unwrap();
-        let client = MockHsmBackend::connect_with_credential(device.clone(), "n1", HsmObjectIds::default(), node).unwrap();
+        let client =
+            MockHsmBackend::connect_with_credential(device.clone(), "n1", HsmObjectIds::default(), node).unwrap();
         client.get_random(8).await.unwrap();
         let log = audit.get_log_entries().await.unwrap();
         let (verified, last) = verify_log(None, &log).unwrap();
@@ -1435,7 +1444,10 @@ mod tests {
         let newest = log.entries.last().unwrap();
         assert_eq!((newest.command, newest.session_key), (cmd::GET_PSEUDO_RANDOM, 0x100), "logged under the node key");
         assert!(log.entries.iter().any(|e| e.command == cmd::PUT_AUTHENTICATION_KEY && e.session_key == 2));
-        assert!(log.entries.iter().all(|e| e.session_key != AUDITOR_AUTH_KEY_ID), "the drain's own reads are not logged");
+        assert!(
+            log.entries.iter().all(|e| e.session_key != AUDITOR_AUTH_KEY_ID),
+            "the drain's own reads are not logged"
+        );
         assert_eq!(last.unwrap().0, newest.index);
         assert!(audit.set_log_index(newest.index.wrapping_add(1)).await.is_err(), "never past the newest entry");
 
@@ -1450,7 +1462,8 @@ mod tests {
         let audit = device.auditor_session(&credential).unwrap();
         let node = crate::hsm::admin::NodeCredential::generate(0x100).unwrap();
         admin.put_node_auth_key("bv-node-n1", &node).await.unwrap();
-        let client = MockHsmBackend::connect_with_credential(device.clone(), "n1", HsmObjectIds::default(), node).unwrap();
+        let client =
+            MockHsmBackend::connect_with_credential(device.clone(), "n1", HsmObjectIds::default(), node).unwrap();
 
         // Off: the buffer wraps, holding the newest entries only.
         for _ in 0..(DEVICE_LOG_CAPACITY + 5) {

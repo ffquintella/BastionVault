@@ -86,58 +86,30 @@ impl PkiBackend {
 
 #[maybe_async::maybe_async]
 impl PkiBackendInner {
-    pub async fn list_keys(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn list_keys(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let ids = keys::list_keys(req).await?;
         Ok(Some(Response::list_response(&ids)))
     }
 
-    pub async fn generate_key(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
-        let exported = req
-            .get_data("exported")?
-            .as_str()
-            .unwrap_or("")
-            .to_string();
+    pub async fn generate_key(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let exported = req.get_data("exported")?.as_str().unwrap_or("").to_string();
         let exported_flag = match exported.as_str() {
             "exported" => true,
             "internal" => false,
             _ => return Err(RvError::ErrRequestFieldInvalid),
         };
 
-        let key_type = req
-            .get_data_or_default("key_type")?
-            .as_str()
-            .unwrap_or("ec")
-            .to_string();
-        let key_bits = req
-            .get_data_or_default("key_bits")?
-            .as_u64()
-            .unwrap_or(0) as u32;
+        let key_type = req.get_data_or_default("key_type")?.as_str().unwrap_or("ec").to_string();
+        let key_bits = req.get_data_or_default("key_bits")?.as_u64().unwrap_or(0) as u32;
         let alg = KeyAlgorithm::from_role(&key_type, key_bits)?;
-        let name = req
-            .get_data_or_default("name")?
-            .as_str()
-            .unwrap_or("")
-            .trim()
-            .to_string();
+        let name = req.get_data_or_default("name")?.as_str().unwrap_or("").trim().to_string();
 
         // `exportable` is pinned at create time. Default `false` —
         // direct `pki/keys/generate` is a deliberate "I might want
         // this key extractable later" call; operator opts in
         // explicitly. Once persisted the flag is read-only.
-        let exportable = req
-            .get_data_or_default("exportable")?
-            .as_bool()
-            .unwrap_or(false);
-        let (entry, signer) =
-            keys::generate_managed_key(req, alg, &name, exported_flag, exportable).await?;
+        let exportable = req.get_data_or_default("exportable")?.as_bool().unwrap_or(false);
+        let (entry, signer) = keys::generate_managed_key(req, alg, &name, exported_flag, exportable).await?;
 
         let mut data = entry_to_data(&entry);
         if exported_flag {
@@ -150,48 +122,22 @@ impl PkiBackendInner {
         Ok(Some(Response::data_response(Some(data))))
     }
 
-    pub async fn import_key(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
-        let pem = req
-            .get_data("private_key")?
-            .as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?
-            .trim()
-            .to_string();
+    pub async fn import_key(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let pem = req.get_data("private_key")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.trim().to_string();
         if pem.is_empty() {
             return Err(RvError::ErrRequestFieldInvalid);
         }
-        let name = req
-            .get_data_or_default("name")?
-            .as_str()
-            .unwrap_or("")
-            .trim()
-            .to_string();
+        let name = req.get_data_or_default("name")?.as_str().unwrap_or("").trim().to_string();
 
         // Same default as `generate_key` — opt-in `exportable=true`
         // and stuck at create time.
-        let exportable = req
-            .get_data_or_default("exportable")?
-            .as_bool()
-            .unwrap_or(false);
-        let (entry, _signer) =
-            keys::import_managed_key(req, &pem, &name, exportable).await?;
+        let exportable = req.get_data_or_default("exportable")?.as_bool().unwrap_or(false);
+        let (entry, _signer) = keys::import_managed_key(req, &pem, &name, exportable).await?;
         Ok(Some(Response::data_response(Some(entry_to_data(&entry)))))
     }
 
-    pub async fn read_key(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
-        let key_ref = req
-            .get_data("key_ref")?
-            .as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?
-            .to_string();
+    pub async fn read_key(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let key_ref = req.get_data("key_ref")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
         let entry = match keys::load_key(req, &key_ref).await? {
             Some(e) => e,
             None => return Ok(None),
@@ -207,24 +153,12 @@ impl PkiBackendInner {
         Ok(Some(Response::data_response(Some(data))))
     }
 
-    pub async fn delete_key(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
-        let key_ref = req
-            .get_data("key_ref")?
-            .as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?
-            .to_string();
+    pub async fn delete_key(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let key_ref = req.get_data("key_ref")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
         // `force` is optional and Delete callers may omit a body entirely;
         // treat "no body / no field" as `force = false` instead of bubbling
         // ErrRequestNoData up to the operator.
-        let force = req
-            .get_data_or_default("force")
-            .ok()
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let force = req.get_data_or_default("force").ok().and_then(|v| v.as_bool()).unwrap_or(false);
         if force {
             keys::force_delete_key(req, &key_ref).await?;
         } else {

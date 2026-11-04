@@ -280,14 +280,7 @@ fn le_i32(bytes: &[u8]) -> i32 {
 #[test]
 fn echo_round_trips_envelope() {
     let host = TestHost::builder("echo").build();
-    let out = host
-        .invoke(
-            echo_wat().as_bytes(),
-            "write",
-            "codes/gh",
-            serde_json::json!({"secret": "JBSW"}),
-        )
-        .unwrap();
+    let out = host.invoke(echo_wat().as_bytes(), "write", "codes/gh", serde_json::json!({"secret": "JBSW"})).unwrap();
     assert!(out.is_success());
     assert!(out.fuel_consumed > 0);
     let v = out.response_json().unwrap();
@@ -341,10 +334,7 @@ fn storage_forbidden_outside_declared_prefix() {
 
 #[test]
 fn storage_persists_across_invocations_and_can_be_seeded() {
-    let host = TestHost::builder("kv")
-        .storage_prefix("")
-        .storage("k", b"seeded".to_vec())
-        .build();
+    let host = TestHost::builder("kv").storage_prefix("").storage("k", b"seeded".to_vec()).build();
     // First invoke overwrites the seed and reads it back.
     let out = host.invoke_raw(storage_round_trip_wat().as_bytes(), b"second").unwrap();
     assert_eq!(out.response, b"second");
@@ -381,9 +371,7 @@ fn missing_config_returns_not_found() {
 #[test]
 fn logs_and_audit_are_captured_when_granted() {
     let host = TestHost::builder("obs").audit_emit(true).build();
-    let out = host
-        .invoke_raw(log_audit_wat().as_bytes(), br#"{"event":"rotated"}"#)
-        .unwrap();
+    let out = host.invoke_raw(log_audit_wat().as_bytes(), br#"{"event":"rotated"}"#).unwrap();
     assert_eq!(le_i32(&out.response), 0);
     assert_eq!(out.logs.len(), 1);
     assert_eq!(out.logs[0].level, 3);
@@ -477,8 +465,7 @@ fn form_hook_echo_round_trips() {
 
 #[test]
 fn form_hook_missing_export_is_a_clear_error() {
-    let err =
-        hooks::run_form_hook(hook_echo_wat().as_bytes(), "nope", &serde_json::json!({})).unwrap_err();
+    let err = hooks::run_form_hook(hook_echo_wat().as_bytes(), "nope", &serde_json::json!({})).unwrap_err();
     assert!(matches!(err, TestkitError::Invoke(_)), "got: {err:?}");
 }
 
@@ -487,9 +474,7 @@ fn data_helper_mirrors_translate_response() {
     let host = TestHost::builder("echo").build();
     // The echo plugin returns the envelope itself, which has no "data"
     // object member at the top level... craft one via invoke_raw.
-    let out = host
-        .invoke_raw(echo_wat().as_bytes(), br#"{"data": {"code": "123456"}}"#)
-        .unwrap();
+    let out = host.invoke_raw(echo_wat().as_bytes(), br#"{"data": {"code": "123456"}}"#).unwrap();
     assert_eq!(out.data().unwrap()["code"], "123456");
     let none = host.invoke_raw(echo_wat().as_bytes(), br#"{"data": null}"#).unwrap();
     assert!(none.data().is_none());

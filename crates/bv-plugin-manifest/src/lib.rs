@@ -623,15 +623,9 @@ pub const HOST_ABI_MINOR: u32 = 5;
 /// `Err(_)` for any non-numeric or missing component so a typo'd
 /// version field never silently coerces to `(0, 0)`.
 pub fn parse_abi(s: &str) -> Result<(u32, u32), String> {
-    let (major, minor) = s
-        .split_once('.')
-        .ok_or_else(|| format!("abi_version `{s}` is not in `MAJOR.MINOR` form"))?;
-    let major: u32 = major
-        .parse()
-        .map_err(|e| format!("abi_version major `{major}` is not a u32 ({e})"))?;
-    let minor: u32 = minor
-        .parse()
-        .map_err(|e| format!("abi_version minor `{minor}` is not a u32 ({e})"))?;
+    let (major, minor) = s.split_once('.').ok_or_else(|| format!("abi_version `{s}` is not in `MAJOR.MINOR` form"))?;
+    let major: u32 = major.parse().map_err(|e| format!("abi_version major `{major}` is not a u32 ({e})"))?;
+    let minor: u32 = minor.parse().map_err(|e| format!("abi_version minor `{minor}` is not a u32 ({e})"))?;
     Ok((major, minor))
 }
 
@@ -863,26 +857,18 @@ impl PluginManifest {
     /// plugin cleanly. Channel ids must be unique valid identifiers.
     fn validate_notify_capabilities(&self) -> Result<(), &'static str> {
         let caps = &self.capabilities;
-        let declared = caps.notify_emit
-            || caps.notify_read
-            || !caps.notification_channels.is_empty()
-            || caps.app.notify.is_some();
+        let declared =
+            caps.notify_emit || caps.notify_read || !caps.notification_channels.is_empty() || caps.app.notify.is_some();
         if !declared {
             return Ok(());
         }
-        let (_maj, min) =
-            parse_abi(&self.abi_version).map_err(|_| "abi_version must be MAJOR.MINOR")?;
+        let (_maj, min) = parse_abi(&self.abi_version).map_err(|_| "abi_version must be MAJOR.MINOR")?;
         if min < 2 {
-            return Err(
-                "notification capabilities require abi_version minor >= 2 (\"1.2\")",
-            );
+            return Err("notification capabilities require abi_version minor >= 2 (\"1.2\")");
         }
         let mut ids = std::collections::BTreeSet::new();
         for c in &caps.notification_channels {
-            if c.id.trim().is_empty()
-                || c.id.contains(char::is_whitespace)
-                || c.id.contains('/')
-                || c.id.contains("..")
+            if c.id.trim().is_empty() || c.id.contains(char::is_whitespace) || c.id.contains('/') || c.id.contains("..")
             {
                 return Err("notification_channels entry has invalid id");
             }
@@ -909,7 +895,7 @@ impl PluginManifest {
         let (_maj, min) = parse_abi(&self.abi_version).map_err(|_| "abi_version must be MAJOR.MINOR")?;
         if min < 3 {
             return Err(
-                "caller_identity / storage_scope / credential_provider require abi_version minor >= 3 (\"1.3\")"
+                "caller_identity / storage_scope / credential_provider require abi_version minor >= 3 (\"1.3\")",
             );
         }
         if caps.storage_scope == StorageScope::Entity && !caps.caller_identity {
@@ -953,8 +939,7 @@ impl PluginManifest {
             return Ok(());
         }
         // A declared app block requires the v2 ABI minor.
-        let (_maj, min) = parse_abi(&self.abi_version)
-            .map_err(|_| "abi_version must be MAJOR.MINOR")?;
+        let (_maj, min) = parse_abi(&self.abi_version).map_err(|_| "abi_version must be MAJOR.MINOR")?;
         if min < 1 {
             return Err("capabilities.app requires abi_version minor >= 1 (\"1.1\")");
         }
@@ -962,11 +947,7 @@ impl PluginManifest {
             return Err("capabilities.app.windows.max_open exceeds the host cap (4)");
         }
         for p in &app.api_paths {
-            if p.is_empty()
-                || !p.starts_with("{mount}")
-                || p.contains("..")
-                || p.starts_with('/')
-            {
+            if p.is_empty() || !p.starts_with("{mount}") || p.contains("..") || p.starts_with('/') {
                 return Err(
                     "capabilities.app.api_paths entry must start with {mount}, be relative, and not contain ..",
                 );
@@ -1332,8 +1313,10 @@ mod tests {
                 "0".repeat(64)
             )
         };
-        let good = base(r#"{"long_lived":true,"concurrent":true,"max_concurrent":8,"caller_identity":true,
-            "sql_gate":true,"resource_credentials":["sql"],"sql_console":true}"#);
+        let good = base(
+            r#"{"long_lived":true,"concurrent":true,"max_concurrent":8,"caller_identity":true,
+            "sql_gate":true,"resource_credentials":["sql"],"sql_console":true}"#,
+        );
         let m: PluginManifest = serde_json::from_str(&good).unwrap();
         m.validate().unwrap();
         assert_eq!(m.capabilities.resource_credentials, vec![ResourceCredentialKind::Sql]);
@@ -1705,45 +1688,31 @@ mod tests {
             required: false,
             default: None,
             options: vec![],
-            required_if: Some(ConfigCondition {
-                field: "mode".to_string(),
-                equals: vec!["smtp".to_string()],
-            }),
+            required_if: Some(ConfigCondition { field: "mode".to_string(), equals: vec!["smtp".to_string()] }),
         });
         assert!(m.validate().is_ok(), "condition on a declared field is valid");
 
         let last = m.config_schema.len() - 1;
 
         // Unknown target field.
-        m.config_schema[last].required_if = Some(ConfigCondition {
-            field: "nope".to_string(),
-            equals: vec!["smtp".to_string()],
-        });
+        m.config_schema[last].required_if =
+            Some(ConfigCondition { field: "nope".to_string(), equals: vec!["smtp".to_string()] });
         assert!(m.validate().is_err());
 
         // Self-reference.
-        m.config_schema[last].required_if = Some(ConfigCondition {
-            field: "from_address".to_string(),
-            equals: vec!["smtp".to_string()],
-        });
+        m.config_schema[last].required_if =
+            Some(ConfigCondition { field: "from_address".to_string(), equals: vec!["smtp".to_string()] });
         assert!(m.validate().is_err());
 
         // Empty `equals` can never match.
-        m.config_schema[last].required_if = Some(ConfigCondition {
-            field: "mode".to_string(),
-            equals: vec![],
-        });
+        m.config_schema[last].required_if = Some(ConfigCondition { field: "mode".to_string(), equals: vec![] });
         assert!(m.validate().is_err());
     }
 
     #[test]
     fn accepts_manifest_with_surface() {
         let mut m = fixture();
-        m.surface = Some(SurfaceRef {
-            schema_version: 1,
-            sha256: "0".repeat(64),
-            size: 256,
-        });
+        m.surface = Some(SurfaceRef { schema_version: 1, sha256: "0".repeat(64), size: 256 });
         m.client_assets.push(ClientAssetRef {
             name: "form-hooks.wasm".to_string(),
             kind: "form-hook".to_string(),
@@ -1756,22 +1725,14 @@ mod tests {
     #[test]
     fn rejects_bad_surface_sha256() {
         let mut m = fixture();
-        m.surface = Some(SurfaceRef {
-            schema_version: 1,
-            sha256: "deadbeef".to_string(),
-            size: 0,
-        });
+        m.surface = Some(SurfaceRef { schema_version: 1, sha256: "deadbeef".to_string(), size: 0 });
         assert!(m.validate().is_err());
     }
 
     #[test]
     fn rejects_too_new_surface_schema_version() {
         let mut m = fixture();
-        m.surface = Some(SurfaceRef {
-            schema_version: 999,
-            sha256: "0".repeat(64),
-            size: 0,
-        });
+        m.surface = Some(SurfaceRef { schema_version: 999, sha256: "0".repeat(64), size: 0 });
         assert!(m.validate().is_err());
     }
 

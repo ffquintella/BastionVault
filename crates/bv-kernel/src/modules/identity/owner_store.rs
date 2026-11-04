@@ -151,7 +151,11 @@ impl OwnerStore {
         } else {
             trimmed.to_string()
         };
-        if canonical.is_empty() { None } else { Some(canonical) }
+        if canonical.is_empty() {
+            None
+        } else {
+            Some(canonical)
+        }
     }
 
     /// Namespace-scoped canonical KV owner key: `<ns>/<mount>/<key>`.
@@ -181,9 +185,7 @@ impl OwnerStore {
         let trimmed = raw.trim().trim_matches('/');
         let ns = ns_path.map(|n| n.trim().trim_matches('/')).filter(|n| !n.is_empty());
         let rel = match ns {
-            Some(n) => trimmed
-                .strip_prefix(&format!("{n}/"))
-                .unwrap_or(trimmed),
+            Some(n) => trimmed.strip_prefix(&format!("{n}/")).unwrap_or(trimmed),
             None => trimmed,
         };
         let rel_canon = Self::canonicalize_kv_path(rel)?;
@@ -209,7 +211,11 @@ impl OwnerStore {
             return Ok(None);
         };
         let rec: OwnerRecord = serde_json::from_slice(&raw.value).unwrap_or_default();
-        if rec.entity_id.is_empty() { Ok(None) } else { Ok(Some(rec)) }
+        if rec.entity_id.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(rec))
+        }
     }
 
     /// Whether `entity_id` owns any KV secret under `prefix` — a
@@ -218,11 +224,7 @@ impl OwnerStore {
     /// LIST pass. Keys in the KV owner view are base64url of the
     /// canonical path, so the prefix test needs no read: only the
     /// candidates that decode under `prefix` are fetched.
-    pub async fn has_owned_kv_under(
-        &self,
-        prefix: &str,
-        entity_id: &str,
-    ) -> Result<bool, RvError> {
+    pub async fn has_owned_kv_under(&self, prefix: &str, entity_id: &str) -> Result<bool, RvError> {
         if prefix.is_empty() || entity_id.trim().is_empty() {
             return Ok(false);
         }
@@ -252,11 +254,7 @@ impl OwnerStore {
     /// Silent on empty `entity_id` (root-token writes, or any path
     /// where the caller lacks entity metadata) so existing tests don't
     /// start stamping unknown owners.
-    pub async fn record_kv_owner_if_absent(
-        &self,
-        path: &str,
-        entity_id: &str,
-    ) -> Result<(), RvError> {
+    pub async fn record_kv_owner_if_absent(&self, path: &str, entity_id: &str) -> Result<(), RvError> {
         if entity_id.is_empty() {
             return Ok(());
         }
@@ -276,10 +274,7 @@ impl OwnerStore {
                 return Ok(());
             }
         }
-        let rec = OwnerRecord {
-            entity_id: entity_id.to_string(),
-            created_at: Utc::now().to_rfc3339(),
-        };
+        let rec = OwnerRecord { entity_id: entity_id.to_string(), created_at: Utc::now().to_rfc3339() };
         let value = serde_json::to_vec(&rec)?;
         self.kv_view.put(&StorageEntry { key, value }).await
     }
@@ -291,11 +286,7 @@ impl OwnerStore {
     /// existing owner record. Used by the admin ownership-transfer
     /// endpoint — callers who want "first write wins" semantics must
     /// use `record_kv_owner_if_absent` instead.
-    pub async fn set_kv_owner(
-        &self,
-        path: &str,
-        entity_id: &str,
-    ) -> Result<(), RvError> {
+    pub async fn set_kv_owner(&self, path: &str, entity_id: &str) -> Result<(), RvError> {
         let Some(canonical) = Self::canonicalize_kv_path(path) else {
             return Err(crate::bv_error_string!("invalid KV path"));
         };
@@ -304,10 +295,7 @@ impl OwnerStore {
             return Err(crate::bv_error_string!("entity_id is required"));
         }
         let key = Self::kv_key(&canonical);
-        let rec = OwnerRecord {
-            entity_id: entity_id.to_string(),
-            created_at: Utc::now().to_rfc3339(),
-        };
+        let rec = OwnerRecord { entity_id: entity_id.to_string(), created_at: Utc::now().to_rfc3339() };
         let value = serde_json::to_vec(&rec)?;
         self.kv_view.put(&StorageEntry { key, value }).await
     }
@@ -345,10 +333,7 @@ impl OwnerStore {
         Self::target_slot(&self.resource_view, &self.ns_resource_view, resource)
     }
 
-    pub async fn get_resource_owner(
-        &self,
-        resource: &str,
-    ) -> Result<Option<OwnerRecord>, RvError> {
+    pub async fn get_resource_owner(&self, resource: &str) -> Result<Option<OwnerRecord>, RvError> {
         let Some((view, key)) = self.resource_slot(resource) else {
             return Ok(None);
         };
@@ -356,14 +341,14 @@ impl OwnerStore {
             return Ok(None);
         };
         let rec: OwnerRecord = serde_json::from_slice(&raw.value).unwrap_or_default();
-        if rec.entity_id.is_empty() { Ok(None) } else { Ok(Some(rec)) }
+        if rec.entity_id.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(rec))
+        }
     }
 
-    pub async fn record_resource_owner_if_absent(
-        &self,
-        resource: &str,
-        entity_id: &str,
-    ) -> Result<(), RvError> {
+    pub async fn record_resource_owner_if_absent(&self, resource: &str, entity_id: &str) -> Result<(), RvError> {
         if entity_id.is_empty() {
             return Ok(());
         }
@@ -376,21 +361,14 @@ impl OwnerStore {
                 return Ok(());
             }
         }
-        let rec = OwnerRecord {
-            entity_id: entity_id.to_string(),
-            created_at: Utc::now().to_rfc3339(),
-        };
+        let rec = OwnerRecord { entity_id: entity_id.to_string(), created_at: Utc::now().to_rfc3339() };
         let value = serde_json::to_vec(&rec)?;
         view.put(&StorageEntry { key, value }).await
     }
 
     /// Unconditional overwrite of a resource owner record. Mirror of
     /// `set_kv_owner`.
-    pub async fn set_resource_owner(
-        &self,
-        resource: &str,
-        entity_id: &str,
-    ) -> Result<(), RvError> {
+    pub async fn set_resource_owner(&self, resource: &str, entity_id: &str) -> Result<(), RvError> {
         let Some((view, key)) = self.resource_slot(resource) else {
             return Err(crate::bv_error_string!("invalid resource name"));
         };
@@ -398,10 +376,7 @@ impl OwnerStore {
         if entity_id.is_empty() {
             return Err(crate::bv_error_string!("entity_id is required"));
         }
-        let rec = OwnerRecord {
-            entity_id: entity_id.to_string(),
-            created_at: Utc::now().to_rfc3339(),
-        };
+        let rec = OwnerRecord { entity_id: entity_id.to_string(), created_at: Utc::now().to_rfc3339() };
         let value = serde_json::to_vec(&rec)?;
         view.put(&StorageEntry { key, value }).await
     }
@@ -435,14 +410,14 @@ impl OwnerStore {
             return Ok(None);
         };
         let rec: OwnerRecord = serde_json::from_slice(&raw.value).unwrap_or_default();
-        if rec.entity_id.is_empty() { Ok(None) } else { Ok(Some(rec)) }
+        if rec.entity_id.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(rec))
+        }
     }
 
-    pub async fn record_file_owner_if_absent(
-        &self,
-        id: &str,
-        entity_id: &str,
-    ) -> Result<(), RvError> {
+    pub async fn record_file_owner_if_absent(&self, id: &str, entity_id: &str) -> Result<(), RvError> {
         if entity_id.is_empty() {
             return Ok(());
         }
@@ -455,10 +430,7 @@ impl OwnerStore {
                 return Ok(());
             }
         }
-        let rec = OwnerRecord {
-            entity_id: entity_id.to_string(),
-            created_at: Utc::now().to_rfc3339(),
-        };
+        let rec = OwnerRecord { entity_id: entity_id.to_string(), created_at: Utc::now().to_rfc3339() };
         let value = serde_json::to_vec(&rec)?;
         view.put(&StorageEntry { key, value }).await
     }
@@ -471,10 +443,7 @@ impl OwnerStore {
         if entity_id.is_empty() {
             return Err(crate::bv_error_string!("entity_id is required"));
         }
-        let rec = OwnerRecord {
-            entity_id: entity_id.to_string(),
-            created_at: Utc::now().to_rfc3339(),
-        };
+        let rec = OwnerRecord { entity_id: entity_id.to_string(), created_at: Utc::now().to_rfc3339() };
         let value = serde_json::to_vec(&rec)?;
         view.put(&StorageEntry { key, value }).await
     }
@@ -557,10 +526,7 @@ mod scoped_key_tests {
             Some("a/b/c/secret/k".to_string()),
         );
         // And the mount-relative read form lands on the same key.
-        assert_eq!(
-            OwnerStore::canonicalize_kv_path_scoped("secret/k", ns),
-            Some("a/b/c/secret/k".to_string()),
-        );
+        assert_eq!(OwnerStore::canonicalize_kv_path_scoped("secret/k", ns), Some("a/b/c/secret/k".to_string()),);
     }
 
     // Two distinct namespaces holding the same mount-relative secret get
@@ -582,10 +548,7 @@ mod scoped_key_tests {
         let once = OwnerStore::canonicalize_kv_path_scoped("dti/esi/secret/data/github", ns).unwrap();
         // Re-scoping the canonical form, and running the plain canonicalizer
         // that the store methods apply internally, both leave it unchanged.
-        assert_eq!(
-            OwnerStore::canonicalize_kv_path_scoped(&once, ns),
-            Some(once.clone()),
-        );
+        assert_eq!(OwnerStore::canonicalize_kv_path_scoped(&once, ns), Some(once.clone()),);
         assert_eq!(OwnerStore::canonicalize_kv_path(&once), Some(once));
     }
 }

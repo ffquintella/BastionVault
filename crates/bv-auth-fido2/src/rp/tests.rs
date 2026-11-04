@@ -15,28 +15,16 @@ fn challenge_is_32_bytes_b64() {
 
 #[test]
 fn rp_validates_origin_host_against_rp_id() {
-    let rp = RelyingParty {
-        rp_id: "example.com",
-        rp_origin: "https://app.example.com",
-        rp_name: "Example",
-    };
+    let rp = RelyingParty { rp_id: "example.com", rp_origin: "https://app.example.com", rp_name: "Example" };
     rp.validate().expect("subdomain origin is allowed");
 
-    let bad = RelyingParty {
-        rp_id: "example.com",
-        rp_origin: "https://other.org",
-        rp_name: "Example",
-    };
+    let bad = RelyingParty { rp_id: "example.com", rp_origin: "https://other.org", rp_name: "Example" };
     assert!(bad.validate().is_err());
 }
 
 #[test]
 fn rp_validates_exact_host_match() {
-    let rp = RelyingParty {
-        rp_id: "example.com",
-        rp_origin: "https://example.com",
-        rp_name: "Example",
-    };
+    let rp = RelyingParty { rp_id: "example.com", rp_origin: "https://example.com", rp_name: "Example" };
     rp.validate().unwrap();
 }
 
@@ -49,8 +37,7 @@ fn client_data_rejects_wrong_type() {
         "origin": "https://example.com",
     });
     let raw = serde_json::to_vec(&cd).unwrap();
-    let err = client_data::verify(&raw, "webauthn.create", "https://example.com", &challenge)
-        .unwrap_err();
+    let err = client_data::verify(&raw, "webauthn.create", "https://example.com", &challenge).unwrap_err();
     matches!(err, RpError::ClientDataType { .. });
 }
 
@@ -63,8 +50,7 @@ fn client_data_rejects_wrong_origin() {
         "origin": "https://evil.example",
     });
     let raw = serde_json::to_vec(&cd).unwrap();
-    let err = client_data::verify(&raw, "webauthn.create", "https://example.com", &challenge)
-        .unwrap_err();
+    let err = client_data::verify(&raw, "webauthn.create", "https://example.com", &challenge).unwrap_err();
     matches!(err, RpError::OriginMismatch { .. });
 }
 
@@ -78,8 +64,7 @@ fn client_data_rejects_wrong_challenge() {
         "origin": "https://example.com",
     });
     let raw = serde_json::to_vec(&cd).unwrap();
-    let err = client_data::verify(&raw, "webauthn.create", "https://example.com", &issued)
-        .unwrap_err();
+    let err = client_data::verify(&raw, "webauthn.create", "https://example.com", &issued).unwrap_err();
     matches!(err, RpError::ChallengeMismatch);
 }
 

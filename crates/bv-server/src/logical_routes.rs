@@ -2,10 +2,8 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use actix_web::{
     cookie::{time::OffsetDateTime, Cookie},
-    web,
-    HttpRequest,
-    HttpResponse,
     http::{Method, StatusCode},
+    web, HttpRequest, HttpResponse,
 };
 use humantime::parse_duration;
 use serde::{Deserialize, Serialize};
@@ -14,12 +12,11 @@ use serde_json::Value;
 use super::AUTH_COOKIE_NAME;
 use crate::routes::{route, BodyLimit, CatchAllSpec};
 use crate::{
+    client_ip::{ClientIp, TrustedProxies},
     core::Core,
     errors::RvError,
-    HttpError,
-        client_ip::{ClientIp, TrustedProxies},
-        request_auth, response_error, response_json_ok, response_ok, Connection,
     logical::{Connection as ReqConnection, Operation, Response},
+    request_auth, response_error, response_json_ok, response_ok, Connection, HttpError,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,7 +71,9 @@ async fn logical_request_handler_inner(
     let Some(conn) = req.conn_data::<Connection>() else {
         return Err(RvError::ErrRequestInvalid.into());
     };
-    log::debug!("logical request, connection info: {conn:?}, method: {method:?}, path: {path:?}, api_version: {api_version}");
+    log::debug!(
+        "logical request, connection info: {conn:?}, method: {method:?}, path: {path:?}, api_version: {api_version}"
+    );
 
     let mut req_conn = ReqConnection::default();
     req_conn.peer_addr = conn.peer.to_string();
@@ -103,14 +102,8 @@ async fn logical_request_handler_inner(
     // Multi-tenancy namespace selector. Backends and the core router resolve
     // the target namespace from this header (the equivalent path-prefix form
     // needs no header). Stored under the canonical lower-case key.
-    if let Some(ns) = req
-        .headers()
-        .get("x-bastionvault-namespace")
-        .and_then(|v| v.to_str().ok())
-    {
-        r.headers
-            .get_or_insert_with(Default::default)
-            .insert("x-bastionvault-namespace".to_string(), ns.to_string());
+    if let Some(ns) = req.headers().get("x-bastionvault-namespace").and_then(|v| v.to_str().ok()) {
+        r.headers.get_or_insert_with(Default::default).insert("x-bastionvault-namespace".to_string(), ns.to_string());
     }
 
     match method {

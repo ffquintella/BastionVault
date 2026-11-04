@@ -70,14 +70,9 @@ impl SamlBackend {
 
 #[maybe_async::maybe_async]
 impl SamlBackendInner {
-    pub async fn handle_login(
-        &self,
-        _backend: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
-        let cfg = SamlConfig::load(req)
-            .await?
-            .ok_or_else(|| RvError::ErrString("saml: mount is not configured".into()))?;
+    pub async fn handle_login(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let cfg =
+            SamlConfig::load(req).await?.ok_or_else(|| RvError::ErrString("saml: mount is not configured".into()))?;
 
         let role_name = req
             .get_data("role")
@@ -86,9 +81,7 @@ impl SamlBackendInner {
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| cfg.default_role.clone());
         if role_name.trim().is_empty() {
-            return Err(RvError::ErrString(
-                "saml: no role supplied and no default_role configured".into(),
-            ));
+            return Err(RvError::ErrString("saml: no role supplied and no default_role configured".into()));
         }
 
         // Load the role so we fail fast if it doesn't exist. Role
@@ -96,22 +89,15 @@ impl SamlBackendInner {
         // handler; we just need to prove the role is present.
         let _role = SamlRoleEntry::load(req, &role_name)
             .await?
-            .ok_or_else(|| {
-                RvError::ErrString(format!("saml: role `{role_name}` not found"))
-            })?;
+            .ok_or_else(|| RvError::ErrString(format!("saml: role `{role_name}` not found")))?;
 
-        let redirect_uri = req
-            .get_data("redirect_uri")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_default();
+        let redirect_uri =
+            req.get_data("redirect_uri").ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
         if !cfg.allowed_redirect_uris.is_empty()
             && !redirect_uri.is_empty()
             && !cfg.allowed_redirect_uris.iter().any(|u| u == &redirect_uri)
         {
-            return Err(RvError::ErrString(format!(
-                "saml: redirect_uri `{redirect_uri}` is not on the allow-list"
-            )));
+            return Err(RvError::ErrString(format!("saml: redirect_uri `{redirect_uri}` is not on the allow-list")));
         }
 
         let sso_url = resolve_sso_url(&cfg)?;
@@ -126,9 +112,9 @@ impl SamlBackendInner {
             assertion_consumer_service_url: &cfg.acs_url,
             issuer: &cfg.entity_id,
         };
-        let encoded = builder.encode_redirect().map_err(|e| {
-            RvError::ErrString(format!("saml: failed to DEFLATE AuthnRequest: {e}"))
-        })?;
+        let encoded = builder
+            .encode_redirect()
+            .map_err(|e| RvError::ErrString(format!("saml: failed to DEFLATE AuthnRequest: {e}")))?;
 
         // Persist the auth state keyed by relay_state. Callback
         // single-uses it — load-and-delete.
@@ -181,9 +167,7 @@ fn resolve_sso_url(cfg: &SamlConfig) -> Result<String, RvError> {
             return Ok(url);
         }
     }
-    Err(RvError::ErrString(
-        "saml: no idp_sso_url configured and unable to discover one from metadata".into(),
-    ))
+    Err(RvError::ErrString("saml: no idp_sso_url configured and unable to discover one from metadata".into()))
 }
 
 /// Minimal metadata SSO-URL extractor. Looks for a
@@ -237,10 +221,7 @@ fn hex_digit(nibble: u8) -> char {
 /// Helper used by `path_callback.rs` to load and immediately delete
 /// a state record (single-use semantics).
 #[allow(dead_code)]
-pub async fn load_and_delete_state(
-    req: &mut Request,
-    relay_state: &str,
-) -> Result<Option<SamlAuthState>, RvError> {
+pub async fn load_and_delete_state(req: &mut Request, relay_state: &str) -> Result<Option<SamlAuthState>, RvError> {
     let key = format!("{STATE_PREFIX}{relay_state}");
     let entry = match req.storage_get(&key).await? {
         Some(e) => e,
@@ -273,10 +254,7 @@ mod tests {
               <SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect" Location="https://idp.example.com/sso" />
             </IDPSSODescriptor>
           </EntityDescriptor>"#;
-        assert_eq!(
-            extract_sso_url_from_metadata(meta),
-            Some("https://idp.example.com/sso".into())
-        );
+        assert_eq!(extract_sso_url_from_metadata(meta), Some("https://idp.example.com/sso".into()));
     }
 
     #[test]
@@ -293,10 +271,7 @@ mod tests {
         };
         let raw = req.encode_redirect().unwrap();
         let encoded = url_encode(&raw);
-        assert!(
-            !encoded.contains('='),
-            "= must be percent-encoded, got `{encoded}`"
-        );
+        assert!(!encoded.contains('='), "= must be percent-encoded, got `{encoded}`");
     }
 
     // (unused-base64 helper removed after the unused import cleanup)

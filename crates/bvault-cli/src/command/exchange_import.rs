@@ -63,13 +63,10 @@ fn read_password_for_import(format: &str) -> Result<Option<String>, RvError> {
     }
     use std::io::IsTerminal;
     let pw = if std::io::stdin().is_terminal() {
-        rpassword::prompt_password("Import password (will not echo): ")
-            .map_err(|_| RvError::ErrRequestInvalid)?
+        rpassword::prompt_password("Import password (will not echo): ").map_err(|_| RvError::ErrRequestInvalid)?
     } else {
         let mut buf = String::new();
-        std::io::stdin()
-            .read_line(&mut buf)
-            .map_err(|_| RvError::ErrRequestInvalid)?;
+        std::io::stdin().read_line(&mut buf).map_err(|_| RvError::ErrRequestInvalid)?;
         buf.trim_end_matches(['\r', '\n']).to_string()
     };
     Ok(Some(pw))
@@ -95,12 +92,7 @@ impl CommandExecutor for ExchangeImport {
         let client = self.client()?;
         let sys = client.sys();
 
-        let ret = if self.preview {
-            sys.exchange_preview(body)
-        } else {
-            sys.exchange_import(body)
-        }
-        .map_err(|e| {
+        let ret = if self.preview { sys.exchange_preview(body) } else { sys.exchange_import(body) }.map_err(|e| {
             eprintln!("{e}");
             RvError::ErrRequestInvalid
         })?;

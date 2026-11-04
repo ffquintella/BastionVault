@@ -9,11 +9,12 @@ use crate::kernel_api::VaultCtx;
 use bv_auth_ferrogate::{machine_id as ferrogate_machine_id, status as ferrogate_status};
 
 use crate::{
+    bv_error_response, bv_error_string,
     context::Context,
     errors::RvError,
-    logical::{Auth, Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
     kernel_api::identity::GroupKind,
-    new_fields, new_fields_internal, new_path, new_path_internal, bv_error_response, bv_error_string,
+    logical::{Auth, Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
+    new_fields, new_fields_internal, new_path, new_path_internal,
     storage::StorageEntry,
     utils::{cidr, ip_filter},
 };
@@ -23,11 +24,7 @@ use crate::{
 /// still succeeds (with no `entity_id` metadata, which means any
 /// `scopes = ["owner"]` policy will not match — correct fail-closed
 /// behavior).
-pub(crate) async fn resolve_approle_entity_id(
-    core: &dyn VaultCtx,
-    role_name: &str,
-    ns_path: &str,
-) -> Option<String> {
+pub(crate) async fn resolve_approle_entity_id(core: &dyn VaultCtx, role_name: &str, ns_path: &str) -> Option<String> {
     let identity = core.identity()?;
     match identity.ensure_entity_id("approle/", role_name, ns_path).await {
         Ok(id) => Some(id),
@@ -118,8 +115,7 @@ impl AppRoleBackendInner {
         let remote_addr = req.connection.as_ref().map(|c| c.peer_addr.clone()).unwrap_or_default();
 
         let result = self.login_inner(backend, req).await;
-        let (success, details) =
-            bv_auth_audit::login_outcome(&result);
+        let (success, details) = bv_auth_audit::login_outcome(&result);
         let role_name = match &result {
             Ok(Some(resp)) => resp
                 .auth
@@ -129,15 +125,7 @@ impl AppRoleBackendInner {
                 .unwrap_or_else(|| "(unknown)".to_string()),
             _ => "(unknown)".to_string(),
         };
-        bv_auth_audit::record_login(
-            &self.core,
-            "approle/",
-            &role_name,
-            success,
-            &remote_addr,
-            &details,
-        )
-        .await;
+        bv_auth_audit::record_login(&self.core, "approle/", &role_name, success, &remote_addr, &details).await;
         result
     }
 
@@ -392,10 +380,8 @@ impl AppRoleBackendInner {
                     )
                 })?;
 
-            let tokens = self
-                .core
-                .tokens()
-                .ok_or_else(|| RvError::ErrResponse("auth module not loaded".to_string()))?;
+            let tokens =
+                self.core.tokens().ok_or_else(|| RvError::ErrResponse("auth module not loaded".to_string()))?;
 
             let te = match tokens.lookup(&machine_token).await {
                 Ok(Some(te)) => te,
@@ -415,14 +401,9 @@ impl AppRoleBackendInner {
                 .ok_or_else(|| RvError::ErrResponse("machine_token lacks a machine identity".to_string()))?;
             let mid = ferrogate_machine_id(&spiffe_id);
 
-            let binding = role_entry
-                .bound_machines
-                .iter()
-                .find(|m| m.machine_id == mid)
-                .cloned()
-                .ok_or_else(|| {
-                    RvError::ErrResponse(format!("machine {spiffe_id} is not bound to role {}", role_entry.name))
-                })?;
+            let binding = role_entry.bound_machines.iter().find(|m| m.machine_id == mid).cloned().ok_or_else(|| {
+                RvError::ErrResponse(format!("machine {spiffe_id} is not bound to role {}", role_entry.name))
+            })?;
 
             // Reject a machine that has since been revoked/rejected. Best-effort:
             // when the FerroGate mount is not readable at the expected path we fall
@@ -460,40 +441,22 @@ impl AppRoleBackendInner {
         // header, or — unscoped — to this role's first assigned namespace. Fails
         // closed on an unknown namespace.
         let (ns_path, ns_uuid) =
-            crate::kernel_api::namespace::login_namespace_for_principal(
-                &self.core,
-                req,
-                "approle/",
-                &role_entry.name,
-            )
-            .await?;
+            crate::kernel_api::namespace::login_namespace_for_principal(&self.core, req, "approle/", &role_entry.name)
+                .await?;
 
         // Multi-tenancy: refuse the login if this role's namespace assignment
         // does not include the login namespace (no record ⇒ unrestricted; fails
         // closed on a non-matching record).
-        crate::kernel_api::namespace::enforce_login_assignment(
-            &self.core,
-            "approle/",
-            &role_entry.name,
-            &ns_path,
-        )
-        .await?;
+        crate::kernel_api::namespace::enforce_login_assignment(&self.core, "approle/", &role_entry.name, &ns_path)
+            .await?;
 
         // AppRole sits in its own entity namespace (mount-qualified), further
         // partitioned by the login namespace. An `approle:payments-api` entity
         // in tenant-a is distinct from the same role in tenant-b.
         // Quota: refuse a login that would create a *new* entity beyond the
         // namespace's max_entities cap (existing roles are unaffected).
-        crate::kernel_api::namespace::check_entity_create(
-            &self.core,
-            "approle/",
-            &role_entry.name,
-            &ns_path,
-        )
-        .await?;
-        if let Some(entity_id) =
-            resolve_approle_entity_id(&self.core, &role_entry.name, &ns_path).await
-        {
+        crate::kernel_api::namespace::check_entity_create(&self.core, "approle/", &role_entry.name, &ns_path).await?;
+        if let Some(entity_id) = resolve_approle_entity_id(&self.core, &role_entry.name, &ns_path).await {
             metadata.insert("entity_id".to_string(), entity_id);
         }
 
@@ -520,26 +483,14 @@ impl AppRoleBackendInner {
         auth.internal_data.insert("role_name".to_string(), role_entry.name.clone());
         // child_visible follows the login namespace's `child_visible_default`
         // flag (see the userpass login for the rationale); default false.
-        let child_visible =
-            crate::kernel_api::namespace::login_child_visible(&self.core, &ns_path)
-                .await;
-        crate::kernel_api::namespace::stamp_binding(
-            &mut auth.metadata,
-            &ns_path,
-            &ns_uuid,
-            child_visible,
-        );
+        let child_visible = crate::kernel_api::namespace::login_child_visible(&self.core, &ns_path).await;
+        crate::kernel_api::namespace::stamp_binding(&mut auth.metadata, &ns_path, &ns_uuid, child_visible);
 
         // Union token_policies with policies attached through identity
         // app-groups (of the login namespace) that list this role as a member.
         let mut effective_role = role_entry.clone();
         effective_role.token_policies = self
-            .expand_identity_group_policies(
-                GroupKind::App,
-                &role_entry.name,
-                &role_entry.token_policies,
-                &ns_path,
-            )
+            .expand_identity_group_policies(GroupKind::App, &role_entry.name, &role_entry.token_policies, &ns_path)
             .await;
         effective_role.populate_token_auth(&mut auth);
 

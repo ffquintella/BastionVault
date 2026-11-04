@@ -33,14 +33,14 @@ pub mod barrier_aes_gcm;
 pub mod barrier_chacha20_poly1305;
 pub mod barrier_chacha20_poly1305_init;
 pub mod barrier_view;
-#[cfg(feature = "storage_mysql")]
-pub mod mysql;
-pub mod physical;
-pub mod pq_key_envelope;
 #[cfg(all(not(feature = "sync_handler"), feature = "storage_hiqlite"))]
 pub mod hiqlite;
 #[cfg(not(feature = "sync_handler"))]
 pub mod migrate;
+#[cfg(feature = "storage_mysql")]
+pub mod mysql;
+pub mod physical;
+pub mod pq_key_envelope;
 
 /// The feature-independent cluster view of the physical backend. Always
 /// compiled: a caller must not need `storage_hiqlite` of its own to ask
@@ -229,10 +229,7 @@ pub fn new_backend(t: &str, conf: &HashMap<String, Value>) -> Result<Arc<dyn Bac
 /// the salt bootstrap for `obfuscate_keys = true` runs before the
 /// backend is handed back. Other backends use the sync constructor
 /// unchanged — they don't have an obfuscation layer.
-pub async fn new_backend_async(
-    t: &str,
-    conf: &HashMap<String, Value>,
-) -> Result<Arc<dyn Backend>, RvError> {
+pub async fn new_backend_async(t: &str, conf: &HashMap<String, Value>) -> Result<Arc<dyn Backend>, RvError> {
     match t {
         "file" => {
             let backend = physical::file::FileBackend::new_maybe_obfuscated(conf).await?;
@@ -300,11 +297,8 @@ pub fn wrap_with_cache(
     if cache_config.secret_cache_ttl_secs == 0 {
         return Ok(backend);
     }
-    let decorator = crate::cache::CachingBackend::new(
-        backend,
-        cache_config.secret_cache_size,
-        cache_config.secret_cache_ttl_secs,
-    )?;
+    let decorator =
+        crate::cache::CachingBackend::new(backend, cache_config.secret_cache_size, cache_config.secret_cache_ttl_secs)?;
     Ok(Arc::new(decorator))
 }
 
@@ -448,19 +442,13 @@ pub mod test {
 
         let mut keys = backend.list("pfx/").await.unwrap();
         keys.sort();
-        assert_eq!(
-            keys,
-            vec!["my%app/".to_string(), "myXapp/".to_string(), "my_app/".to_string()]
-        );
+        assert_eq!(keys, vec!["my%app/".to_string(), "myXapp/".to_string(), "my_app/".to_string()]);
 
         // `scan` walks the same prefix and must agree with `list`.
         let mut scanned: Vec<String> =
             backend.scan("pfx/my_app/", None).await.unwrap().into_iter().map(|e| e.key).collect();
         scanned.sort();
-        assert_eq!(
-            scanned,
-            vec!["pfx/my_app/db".to_string(), "pfx/my_app/nested/token".to_string()]
-        );
+        assert_eq!(scanned, vec!["pfx/my_app/db".to_string(), "pfx/my_app/nested/token".to_string()]);
     }
 }
 

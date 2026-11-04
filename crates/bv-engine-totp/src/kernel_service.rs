@@ -24,13 +24,7 @@ impl TotpMfa for TotpModule {
         mfa::normalize_mount(mount)
     }
 
-    async fn verify_code(
-        &self,
-        mount: &str,
-        key_name: &str,
-        code: &str,
-        now_secs: u64,
-    ) -> Result<bool, RvError> {
+    async fn verify_code(&self, mount: &str, key_name: &str, code: &str, now_secs: u64) -> Result<bool, RvError> {
         mfa::verify_code(self.backend.core.as_ref(), mount, key_name, code, now_secs)
             .await
             .map_err(|e| crate::bv_error_string!(&e.to_string()))

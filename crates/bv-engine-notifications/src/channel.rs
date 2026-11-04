@@ -92,8 +92,7 @@ pub async fn deliver_to_channel(
     match host.invoke(plugin_name, &input).await {
         Ok(output) => {
             if let Some(code) = output.error_status {
-                let msg = parse_error(&output.response)
-                    .unwrap_or_else(|| format!("plugin returned status {code}"));
+                let msg = parse_error(&output.response).unwrap_or_else(|| format!("plugin returned status {code}"));
                 return err_result(channel_id, total, msg);
             }
             parse_delivery(channel_id, total, &output.response)
@@ -114,8 +113,7 @@ pub async fn test_channel(
     let notif = Notification {
         id: format!("test-{}", now_iso),
         title: "BastionVault test notification".to_string(),
-        body: "This is a test notification confirming the channel is configured correctly."
-            .to_string(),
+        body: "This is a test notification confirming the channel is configured correctly.".to_string(),
         severity: super::types::Severity::Info,
         source: "system".to_string(),
         target: super::types::NotificationTarget::AllUsers,
@@ -136,12 +134,7 @@ pub async fn test_channel(
 }
 
 fn err_result(channel_id: &str, total: u64, msg: String) -> ChannelDeliveryResult {
-    ChannelDeliveryResult {
-        channel: channel_id.to_string(),
-        delivered: 0,
-        failed: total,
-        error: Some(msg),
-    }
+    ChannelDeliveryResult { channel: channel_id.to_string(), delivered: 0, failed: total, error: Some(msg) }
 }
 
 fn parse_error(bytes: &[u8]) -> Option<String> {
@@ -157,12 +150,7 @@ fn parse_error(bytes: &[u8]) -> Option<String> {
 fn parse_delivery(channel_id: &str, total: u64, bytes: &[u8]) -> ChannelDeliveryResult {
     let Ok(v) = serde_json::from_slice::<Value>(bytes) else {
         // Non-JSON success response: assume delivered.
-        return ChannelDeliveryResult {
-            channel: channel_id.to_string(),
-            delivered: total,
-            failed: 0,
-            error: None,
-        };
+        return ChannelDeliveryResult { channel: channel_id.to_string(), delivered: total, failed: 0, error: None };
     };
 
     let delivered = count_field(v.get("delivered"));
@@ -186,12 +174,7 @@ fn parse_delivery(channel_id: &str, total: u64, bytes: &[u8]) -> ChannelDelivery
         .map(|s| s.to_string())
         .or_else(|| aggregate_failure_reasons(v.get("failed")));
 
-    ChannelDeliveryResult {
-        channel: channel_id.to_string(),
-        delivered,
-        failed,
-        error,
-    }
+    ChannelDeliveryResult { channel: channel_id.to_string(), delivered, failed, error }
 }
 
 fn count_field(v: Option<&Value>) -> Option<u64> {

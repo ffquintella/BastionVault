@@ -143,7 +143,7 @@ use crate::{
 #[cfg(test)]
 mod builder_tests {
     use super::*;
-    use crate::discovery::{SrvRecord};
+    use crate::discovery::SrvRecord;
     use async_trait::async_trait;
 
     struct FixedResolver(Vec<SrvRecord>);
@@ -162,12 +162,8 @@ mod builder_tests {
     /// runs, and the right error variant comes out.
     #[tokio::test]
     async fn build_with_discovery_emits_no_healthy_node_when_all_probes_fail() {
-        let resolver = FixedResolver(vec![SrvRecord {
-            target: "127.0.0.1.".into(),
-            port: 1,
-            priority: 10,
-            weight: 50,
-        }]);
+        let resolver =
+            FixedResolver(vec![SrvRecord { target: "127.0.0.1.".into(), port: 1, priority: 10, weight: 50 }]);
         let res = RemoteBackend::builder()
             .with_address("test.invalid")
             .with_health_config(HealthConfig {
@@ -404,14 +400,8 @@ impl RemoteBackendBuilder {
 
     /// Variant of [`Self::build_with_discovery`] that takes an
     /// explicit resolver. Used by tests to inject a fake.
-    pub async fn build_with_discovery_using(
-        self,
-        resolver: &dyn SrvLookup,
-    ) -> Result<RemoteBackend, ClientError> {
-        let input = self
-            .address
-            .clone()
-            .unwrap_or_else(|| "https://127.0.0.1:8200".to_string());
+    pub async fn build_with_discovery_using(self, resolver: &dyn SrvLookup) -> Result<RemoteBackend, ClientError> {
+        let input = self.address.clone().unwrap_or_else(|| "https://127.0.0.1:8200".to_string());
         let discovery_enabled = self.cluster_discovery.unwrap_or(true);
         let discovery_cfg = self.discovery_config.clone().unwrap_or_default();
         let health_cfg = self.health_config.clone().unwrap_or_default();
@@ -423,9 +413,7 @@ impl RemoteBackendBuilder {
             let mut be = self.with_address(input.clone()).build();
             // Even in opt-out mode we record the input label for
             // NodeUnavailable surfacing.
-            Arc::get_mut(&mut be.inner)
-                .expect("freshly built RemoteBackend has unique Arc")
-                .input_label = input;
+            Arc::get_mut(&mut be.inner).expect("freshly built RemoteBackend has unique Arc").input_label = input;
             return Ok(be);
         }
 
@@ -439,29 +427,18 @@ impl RemoteBackendBuilder {
         let selected = health::pick(&probes).ok_or_else(|| {
             // Collect a compact diagnostic of what each probe found
             // so the operator's error toast isn't just "none."
-            let reasons: Vec<String> = probes
-                .iter()
-                .map(|p| format!("{}={:?}", p.candidate.target, p.state))
-                .collect();
+            let reasons: Vec<String> = probes.iter().map(|p| format!("{}={:?}", p.candidate.target, p.state)).collect();
             ClientError::no_healthy_node(&input, reasons.join(", "))
         })?;
 
         let address = selected.candidate.url();
         // Hand the full candidate set to the backend so it can fail
         // read-only requests over to another node in-session.
-        let mut be = self
-            .with_failover_candidates(candidates)
-            .with_address(address)
-            .build();
+        let mut be = self.with_failover_candidates(candidates).with_address(address).build();
         // Stash the discovery/selection metadata after the fact
         // (the synchronous build path doesn't know about it).
-        let inner = Arc::get_mut(&mut be.inner)
-            .expect("freshly built RemoteBackend has unique Arc");
-        inner
-            .active
-            .get_mut()
-            .expect("freshly built RemoteBackend has un-poisoned lock")
-            .selected = Some(selected);
+        let inner = Arc::get_mut(&mut be.inner).expect("freshly built RemoteBackend has unique Arc");
+        inner.active.get_mut().expect("freshly built RemoteBackend has un-poisoned lock").selected = Some(selected);
         inner.input_label = input;
         Ok(be)
     }
@@ -532,18 +509,13 @@ impl RemoteBackendBuilder {
         });
         RemoteBackend {
             inner: Arc::new(RemoteInner {
-                active: RwLock::new(ActiveNode {
-                    address,
-                    selected: None,
-                }),
+                active: RwLock::new(ActiveNode { address, selected: None }),
                 headers: self.headers,
                 api_version: self.api_version.unwrap_or(1),
                 agent,
                 input_label,
                 failover,
-                max_response_bytes: self
-                    .max_response_bytes
-                    .unwrap_or(DEFAULT_MAX_RESPONSE_BYTES),
+                max_response_bytes: self.max_response_bytes.unwrap_or(DEFAULT_MAX_RESPONSE_BYTES),
             }),
         }
     }
@@ -558,12 +530,7 @@ impl RemoteBackend {
     /// `String` (rather than a borrow) because the active node can be
     /// swapped at runtime by the read-failover path.
     pub fn address(&self) -> String {
-        self.inner
-            .active
-            .read()
-            .expect("active-node lock poisoned")
-            .address
-            .clone()
+        self.inner.active.read().expect("active-node lock poisoned").address.clone()
     }
 
     /// The discovery result the *currently active* node was selected
@@ -574,12 +541,7 @@ impl RemoteBackend {
     /// chosen node + state + RTT for log/UI surfacing. Tracks failover:
     /// after a re-pick it reflects the node now in use.
     pub fn selected(&self) -> Option<Selected> {
-        self.inner
-            .active
-            .read()
-            .expect("active-node lock poisoned")
-            .selected
-            .clone()
+        self.inner.active.read().expect("active-node lock poisoned").selected.clone()
     }
 
     /// Original input the operator typed (cluster name or literal
@@ -620,12 +582,7 @@ impl RemoteBackend {
         let url = if raw_path.starts_with('/') {
             format!("{}{}", address, encoded)
         } else {
-            format!(
-                "{}/{}/{}",
-                address,
-                self.api_prefix().trim_start_matches('/'),
-                encoded
-            )
+            format!("{}/{}/{}", address, self.api_prefix().trim_start_matches('/'), encoded)
         };
         match query.filter(|q| !q.is_empty()) {
             Some(q) => format!("{url}?{}", encode_query(q)),
@@ -649,9 +606,7 @@ impl RemoteBackend {
         token: &str,
         namespace: Option<&str>,
     ) -> Result<Option<JsonResponse>, ClientError> {
-        let namespace = namespace
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
+        let namespace = namespace.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
         let method = match operation {
             Operation::Read => "GET",
             Operation::Write => "POST",
@@ -668,10 +623,7 @@ impl RemoteBackend {
         // don't hold the executor while the network round-trips.
         let host_for_err = inner.input_label.clone();
         let response_result = tokio::task::spawn_blocking(move || {
-            let mut builder = Request::builder()
-                .method(method)
-                .uri(&url)
-                .header("Accept", "application/json");
+            let mut builder = Request::builder().method(method).uri(&url).header("Accept", "application/json");
 
             if !path_owned.ends_with("/login") && !token.is_empty() {
                 builder = builder.header("X-BastionVault-Token", &token);
@@ -685,10 +637,7 @@ impl RemoteBackend {
 
             let result = if let Some(payload) = body {
                 let bytes = serde_json::to_vec(&payload).map_err(ClientError::from)?;
-                let req = builder
-                    .header("Content-Type", "application/json")
-                    .body(bytes)
-                    .map_err(ClientError::from)?;
+                let req = builder.header("Content-Type", "application/json").body(bytes).map_err(ClientError::from)?;
                 inner.agent.run(req).map_err(ClientError::from)
             } else {
                 let req = builder.body(()).map_err(ClientError::from)?;
@@ -769,12 +718,9 @@ impl RemoteBackend {
                 Value::Object(obj) => obj
                     .get("errors")
                     .and_then(|v| match v {
-                        Value::Array(arr) => Some(
-                            arr.iter()
-                                .filter_map(|x| x.as_str().map(String::from))
-                                .collect::<Vec<_>>()
-                                .join("; "),
-                        ),
+                        Value::Array(arr) => {
+                            Some(arr.iter().filter_map(|x| x.as_str().map(String::from)).collect::<Vec<_>>().join("; "))
+                        }
                         _ => None,
                     })
                     .or_else(|| obj.get("error").and_then(|v| v.as_str().map(String::from)))
@@ -788,10 +734,7 @@ impl RemoteBackend {
                 Some(secs) if status == 429 => format!("{message} (retry after {secs}s)"),
                 _ => message,
             };
-            Err(classify_node_failure(
-                &host_for_err,
-                ClientError::server(status, message),
-            ))
+            Err(classify_node_failure(&host_for_err, ClientError::server(status, message)))
         }
     }
 
@@ -825,9 +768,7 @@ impl RemoteBackend {
         // `body` is consumed by `attempt`; clone for the first try so
         // the original survives for a potential retry. The clone is a
         // small JSON map — negligible next to a network round-trip.
-        let first = self
-            .attempt(&address, operation, path, body.clone(), token, namespace)
-            .await;
+        let first = self.attempt(&address, operation, path, body.clone(), token, namespace).await;
 
         let node_failed = matches!(&first, Err(e) if e.is_node_unavailable());
         if !node_failed || !Self::is_idempotent(operation) || self.inner.failover.is_none() {
@@ -840,8 +781,7 @@ impl RemoteBackend {
                     "bv-client: node `{address}` unavailable on {operation:?} `{path}`; \
                      failing over to `{new_address}` and retrying once"
                 );
-                self.attempt(&new_address, operation, path, body, token, namespace)
-                    .await
+                self.attempt(&new_address, operation, path, body, token, namespace).await
             }
             // No distinct healthy node — surface the original failure
             // so the caller's reconnect UX still lights up.
@@ -875,24 +815,15 @@ impl RemoteBackend {
         }
 
         let probes = health::probe_all(&fo.candidates, &fo.health_cfg, fo.tls.as_ref()).await;
-        let alternates: Vec<_> = probes
-            .into_iter()
-            .filter(|p| p.candidate.url() != failed_address)
-            .collect();
+        let alternates: Vec<_> = probes.into_iter().filter(|p| p.candidate.url() != failed_address).collect();
         let selected = health::pick(&alternates)?;
         let new_address = selected.candidate.url();
         if new_address == failed_address {
             return None;
         }
 
-        *self
-            .inner
-            .active
-            .write()
-            .expect("active-node lock poisoned") = ActiveNode {
-            address: new_address.clone(),
-            selected: Some(selected),
-        };
+        *self.inner.active.write().expect("active-node lock poisoned") =
+            ActiveNode { address: new_address.clone(), selected: Some(selected) };
         Some(new_address)
     }
 }
@@ -985,10 +916,7 @@ impl RemoteBackend {
         let namespace = namespace.map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
 
         let (status, body, etag_header) = tokio::task::spawn_blocking(move || {
-            let mut builder = Request::builder()
-                .method("GET")
-                .uri(&url)
-                .header("Accept", "application/json");
+            let mut builder = Request::builder().method("GET").uri(&url).header("Accept", "application/json");
             if !token.is_empty() {
                 builder = builder.header("X-BastionVault-Token", &token);
             }
@@ -1004,18 +932,11 @@ impl RemoteBackend {
             let req = builder.body(()).map_err(ClientError::from)?;
             let mut resp = inner.agent.run(req).map_err(ClientError::from)?;
             let status = resp.status().as_u16();
-            let etag_hdr = resp
-                .headers()
-                .get("ETag")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.trim_matches('"').to_string());
+            let etag_hdr =
+                resp.headers().get("ETag").and_then(|v| v.to_str().ok()).map(|s| s.trim_matches('"').to_string());
             let limit = inner.max_response_bytes;
-            let bytes = resp
-                .body_mut()
-                .with_config()
-                .limit(limit)
-                .read_to_vec()
-                .map_err(|e| map_body_read(e, limit))?;
+            let bytes =
+                resp.body_mut().with_config().limit(limit).read_to_vec().map_err(|e| map_body_read(e, limit))?;
             Ok::<_, ClientError>((status, bytes, etag_hdr))
         })
         .await
@@ -1029,11 +950,8 @@ impl RemoteBackend {
         }
         // Server wraps the bundle in `{"data": ActiveSurfaceBundle}`
         // to keep the response shape consistent with `response_json_ok`.
-        let v: Value = if body.is_empty() {
-            Value::Null
-        } else {
-            serde_json::from_slice(&body).map_err(ClientError::from)?
-        };
+        let v: Value =
+            if body.is_empty() { Value::Null } else { serde_json::from_slice(&body).map_err(ClientError::from)? };
         let mut bundle: bv_plugin_surface::ActiveSurfaceBundle = match v {
             Value::Object(mut o) => match o.remove("data") {
                 Some(d) => serde_json::from_value(d).map_err(ClientError::from)?,
@@ -1060,22 +978,15 @@ impl RemoteBackend {
         token: &str,
     ) -> Result<Option<Vec<u8>>, ClientError> {
         if sha256.len() != 64 || !sha256.chars().all(|c| c.is_ascii_hexdigit()) {
-            return Err(ClientError::backend(format!(
-                "fetch_asset: sha256 `{sha256}` is not 64 hex chars"
-            )));
+            return Err(ClientError::backend(format!("fetch_asset: sha256 `{sha256}` is not 64 hex chars")));
         }
-        let url = self.build_url(&format!(
-            "sys/plugins/{plugin}/versions/{version}/asset/{sha256}"
-        ));
+        let url = self.build_url(&format!("sys/plugins/{plugin}/versions/{version}/asset/{sha256}"));
         let inner = Arc::clone(&self.inner);
         let token = token.to_string();
         let sha = sha256.to_string();
 
         let (status, body) = tokio::task::spawn_blocking(move || {
-            let mut builder = Request::builder()
-                .method("GET")
-                .uri(&url)
-                .header("Accept", "application/octet-stream");
+            let mut builder = Request::builder().method("GET").uri(&url).header("Accept", "application/octet-stream");
             if !token.is_empty() {
                 builder = builder.header("X-BastionVault-Token", &token);
             }
@@ -1087,12 +998,8 @@ impl RemoteBackend {
             let status = resp.status().as_u16();
             // Plugin assets are binaries; the same explicit cap applies.
             let limit = inner.max_response_bytes;
-            let bytes = resp
-                .body_mut()
-                .with_config()
-                .limit(limit)
-                .read_to_vec()
-                .map_err(|e| map_body_read(e, limit))?;
+            let bytes =
+                resp.body_mut().with_config().limit(limit).read_to_vec().map_err(|e| map_body_read(e, limit))?;
             Ok::<_, ClientError>((status, bytes))
         })
         .await
@@ -1128,13 +1035,7 @@ mod failover_tests {
     use crate::health::NodeState;
 
     fn cand(target: &str) -> SrvCandidate {
-        SrvCandidate {
-            target: target.to_string(),
-            port: 5200,
-            scheme: "https".to_string(),
-            priority: 10,
-            weight: 50,
-        }
+        SrvCandidate { target: target.to_string(), port: 5200, scheme: "https".to_string(), priority: 10, weight: 50 }
     }
 
     #[test]
@@ -1152,25 +1053,17 @@ mod failover_tests {
             .with_address("https://a.example:5200")
             .with_failover_candidates(vec![cand("a.example"), cand("b.example")])
             .build();
-        assert!(
-            be.inner.failover.is_some(),
-            "two candidates should arm failover"
-        );
+        assert!(be.inner.failover.is_some(), "two candidates should arm failover");
 
         // One candidate → nothing to fail over to.
         let be = RemoteBackend::builder()
             .with_address("https://a.example:5200")
             .with_failover_candidates(vec![cand("a.example")])
             .build();
-        assert!(
-            be.inner.failover.is_none(),
-            "single candidate must not arm failover"
-        );
+        assert!(be.inner.failover.is_none(), "single candidate must not arm failover");
 
         // No candidates supplied (literal-URL / discovery-off path).
-        let be = RemoteBackend::builder()
-            .with_address("https://a.example:5200")
-            .build();
+        let be = RemoteBackend::builder().with_address("https://a.example:5200").build();
         assert!(be.inner.failover.is_none());
     }
 
@@ -1192,46 +1085,29 @@ mod failover_tests {
             cluster_id: Some("cid".into()),
             version: None,
         };
-        *be.inner.active.write().unwrap() = ActiveNode {
-            address: "https://b.example:5200".to_string(),
-            selected: Some(new),
-        };
+        *be.inner.active.write().unwrap() =
+            ActiveNode { address: "https://b.example:5200".to_string(), selected: Some(new) };
 
         assert_eq!(be.address().as_str(), "https://b.example:5200");
         let sel = be.selected().expect("selected should follow the swap");
         assert_eq!(sel.candidate.target, "b.example");
         assert_eq!(sel.state, NodeState::ActiveLeader);
         // Request URLs now target the failed-over node.
-        assert_eq!(
-            be.build_url("sys/internal/ui/mounts"),
-            "https://b.example:5200/v1/sys/internal/ui/mounts"
-        );
+        assert_eq!(be.build_url("sys/internal/ui/mounts"), "https://b.example:5200/v1/sys/internal/ui/mounts");
     }
 
     #[test]
     fn build_url_with_honors_leading_slash_and_api_prefix() {
-        let be = RemoteBackend::builder()
-            .with_address("https://a.example:5200")
-            .with_api_version(2)
-            .build();
+        let be = RemoteBackend::builder().with_address("https://a.example:5200").with_api_version(2).build();
         // Relative path picks up the versioned prefix.
-        assert_eq!(
-            be.build_url_with("https://node:5200", "sys/health"),
-            "https://node:5200/v2/sys/health"
-        );
+        assert_eq!(be.build_url_with("https://node:5200", "sys/health"), "https://node:5200/v2/sys/health");
         // Absolute (leading-slash) path is used verbatim.
-        assert_eq!(
-            be.build_url_with("https://node:5200", "/v1/sys/health"),
-            "https://node:5200/v1/sys/health"
-        );
+        assert_eq!(be.build_url_with("https://node:5200", "/v1/sys/health"), "https://node:5200/v1/sys/health");
     }
 
     #[test]
     fn build_url_percent_encodes_name_segments() {
-        let be = RemoteBackend::builder()
-            .with_address("https://a.example:5200")
-            .with_api_version(1)
-            .build();
+        let be = RemoteBackend::builder().with_address("https://a.example:5200").with_api_version(1).build();
         // A resource name with a space (as produced by clone's
         // "<name> copy") must be encoded, not passed raw — a raw space
         // makes `http::Uri` reject the request ("invalid uri character").
@@ -1247,18 +1123,12 @@ mod failover_tests {
             "https://node:5200/v1/resources/secrets/db%2001/api%23key"
         );
         // Trailing slash (list-style paths) survives unchanged.
-        assert_eq!(
-            be.build_url_with("https://node:5200", "resources/"),
-            "https://node:5200/v1/resources/"
-        );
+        assert_eq!(be.build_url_with("https://node:5200", "resources/"), "https://node:5200/v1/resources/");
     }
 
     #[test]
     fn build_url_keeps_a_glued_query_as_a_query() {
-        let be = RemoteBackend::builder()
-            .with_address("https://a.example:5200")
-            .with_api_version(1)
-            .build();
+        let be = RemoteBackend::builder().with_address("https://a.example:5200").with_api_version(1).build();
         // The KV-v2 environment selector arrives glued onto the logical path.
         // It must stay a query string: percent-encoding the `?` folds it into
         // the secret's name and the read 404s.
@@ -1273,10 +1143,7 @@ mod failover_tests {
             "https://node:5200/v1/secret/data/db%2001?env=us%20west&version=2"
         );
         // An empty query is dropped rather than emitting a bare `?`.
-        assert_eq!(
-            be.build_url_with("https://node:5200", "secret/data/app?"),
-            "https://node:5200/v1/secret/data/app"
-        );
+        assert_eq!(be.build_url_with("https://node:5200", "secret/data/app?"), "https://node:5200/v1/secret/data/app");
         // A value that would otherwise inject structure is encoded.
         assert_eq!(
             be.build_url_with("https://node:5200", "secret/data/app?env=a&b=c#x"),

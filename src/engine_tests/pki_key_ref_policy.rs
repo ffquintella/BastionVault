@@ -27,9 +27,8 @@ async fn pki_issue_key_ref_refusals_are_actionable_400s() {
             None,
         )
         .unwrap();
-    let (status, key) = server
-        .write("pki/keys/generate/internal", obj(json!({"key_type": "ec", "name": "pinned-key"})), None)
-        .unwrap();
+    let (status, key) =
+        server.write("pki/keys/generate/internal", obj(json!({"key_type": "ec", "name": "pinned-key"})), None).unwrap();
     assert_eq!(status, 200, "key generate failed: {key}");
 
     let base_role = json!({"ttl": "24h", "key_type": "ec", "allow_any_name": true, "server_flag": true});
@@ -54,8 +53,9 @@ async fn pki_issue_key_ref_refusals_are_actionable_400s() {
     let mut open = base_role.clone();
     open["allow_key_reuse"] = json!(true);
     server.write("pki/roles/open", obj(open), None).unwrap();
-    let (status, body) =
-        server.write("pki/issue/open", obj(json!({"common_name": "leaf.example.com", "key_ref": "nope"})), None).unwrap();
+    let (status, body) = server
+        .write("pki/issue/open", obj(json!({"common_name": "leaf.example.com", "key_ref": "nope"})), None)
+        .unwrap();
     assert_eq!(status, 400, "unknown key_ref must refuse with 400: {body}");
     assert!(body.to_string().contains("does not resolve"), "error must say the key is unknown: {body}");
 

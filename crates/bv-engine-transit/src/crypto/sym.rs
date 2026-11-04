@@ -23,21 +23,13 @@ pub fn generate_aead_key(kt: KeyType) -> Result<Vec<u8>, RvError> {
             rand::rng().fill(&mut bytes[..]);
             Ok(bytes)
         }
-        other => Err(RvError::ErrString(format!(
-            "{} is not a symmetric AEAD key type",
-            other.as_str()
-        ))),
+        other => Err(RvError::ErrString(format!("{} is not a symmetric AEAD key type", other.as_str()))),
     }
 }
 
 /// Encrypt under a symmetric AEAD key. Returns `nonce || ciphertext_with_tag`
 /// (the `Vec<u8>` the framer base64-encodes into the wire format).
-pub fn aead_encrypt(
-    kt: KeyType,
-    key_bytes: &[u8],
-    plaintext: &[u8],
-    aad: &[u8],
-) -> Result<Vec<u8>, RvError> {
+pub fn aead_encrypt(kt: KeyType, key_bytes: &[u8], plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>, RvError> {
     match kt {
         KeyType::Chacha20Poly1305 => {
             if key_bytes.len() != CHACHA_KEY_LEN {
@@ -50,8 +42,7 @@ pub fn aead_encrypt(
                 .map_err(|e| RvError::ErrString(format!("symmetric key: {e:?}")))?;
             let mut nonce_bytes = [0u8; CHACHA_NONCE_LEN];
             rand::rng().fill(&mut nonce_bytes[..]);
-            let nonce = Nonce::try_from_slice(&nonce_bytes)
-                .map_err(|e| RvError::ErrString(format!("nonce: {e:?}")))?;
+            let nonce = Nonce::try_from_slice(&nonce_bytes).map_err(|e| RvError::ErrString(format!("nonce: {e:?}")))?;
             let cipher = Chacha20Poly1305Cipher;
             let ct = cipher
                 .encrypt(&key, &nonce, aad, plaintext)
@@ -61,10 +52,7 @@ pub fn aead_encrypt(
             out.extend_from_slice(&ct);
             Ok(out)
         }
-        other => Err(RvError::ErrString(format!(
-            "{} is not a symmetric AEAD key type",
-            other.as_str()
-        ))),
+        other => Err(RvError::ErrString(format!("{} is not a symmetric AEAD key type", other.as_str()))),
     }
 }
 
@@ -96,8 +84,7 @@ pub fn aead_encrypt_with_nonce(
             }
             let key = SymmetricKey::try_from_slice(key_bytes)
                 .map_err(|e| RvError::ErrString(format!("symmetric key: {e:?}")))?;
-            let nonce = Nonce::try_from_slice(nonce_bytes)
-                .map_err(|e| RvError::ErrString(format!("nonce: {e:?}")))?;
+            let nonce = Nonce::try_from_slice(nonce_bytes).map_err(|e| RvError::ErrString(format!("nonce: {e:?}")))?;
             let cipher = Chacha20Poly1305Cipher;
             let ct = cipher
                 .encrypt(&key, &nonce, aad, plaintext)
@@ -107,41 +94,25 @@ pub fn aead_encrypt_with_nonce(
             out.extend_from_slice(&ct);
             Ok(out)
         }
-        other => Err(RvError::ErrString(format!(
-            "{} is not a symmetric AEAD key type",
-            other.as_str()
-        ))),
+        other => Err(RvError::ErrString(format!("{} is not a symmetric AEAD key type", other.as_str()))),
     }
 }
 
 /// Inverse of `aead_encrypt`. Expects `nonce || ciphertext_with_tag`.
-pub fn aead_decrypt(
-    kt: KeyType,
-    key_bytes: &[u8],
-    blob: &[u8],
-    aad: &[u8],
-) -> Result<Vec<u8>, RvError> {
+pub fn aead_decrypt(kt: KeyType, key_bytes: &[u8], blob: &[u8], aad: &[u8]) -> Result<Vec<u8>, RvError> {
     match kt {
         KeyType::Chacha20Poly1305 => {
             if blob.len() < CHACHA_NONCE_LEN + 16 {
-                return Err(RvError::ErrString(
-                    "aead ciphertext too short to contain nonce + tag".into(),
-                ));
+                return Err(RvError::ErrString("aead ciphertext too short to contain nonce + tag".into()));
             }
             let (nonce_bytes, ct) = blob.split_at(CHACHA_NONCE_LEN);
             let key = SymmetricKey::try_from_slice(key_bytes)
                 .map_err(|e| RvError::ErrString(format!("symmetric key: {e:?}")))?;
-            let nonce = Nonce::try_from_slice(nonce_bytes)
-                .map_err(|e| RvError::ErrString(format!("nonce: {e:?}")))?;
+            let nonce = Nonce::try_from_slice(nonce_bytes).map_err(|e| RvError::ErrString(format!("nonce: {e:?}")))?;
             let cipher = Chacha20Poly1305Cipher;
-            cipher
-                .decrypt(&key, &nonce, aad, ct)
-                .map_err(|e| RvError::ErrString(format!("aead decrypt: {e:?}")))
+            cipher.decrypt(&key, &nonce, aad, ct).map_err(|e| RvError::ErrString(format!("aead decrypt: {e:?}")))
         }
-        other => Err(RvError::ErrString(format!(
-            "{} is not a symmetric AEAD key type",
-            other.as_str()
-        ))),
+        other => Err(RvError::ErrString(format!("{} is not a symmetric AEAD key type", other.as_str()))),
     }
 }
 

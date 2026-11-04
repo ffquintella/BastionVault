@@ -854,7 +854,8 @@ async fn policy_read_result(
         match read {
             Ok(Some(resp)) => {
                 if let Some(data) = resp.data {
-                    matches.push(json!({ "namespace": ns, "policy": data.get("policy").cloned().unwrap_or(Value::Null) }));
+                    matches
+                        .push(json!({ "namespace": ns, "policy": data.get("policy").cloned().unwrap_or(Value::Null) }));
                 }
             }
             Ok(None) => {}
@@ -980,10 +981,10 @@ fn build_tool_request(tool: &str, args: &Map<String, Value>) -> Result<ToolReque
                 if let Some(v) = args.get(key) {
                     let raw = v
                         .as_str()
-                        .filter(|s| !s.is_empty() && s.len() <= MAX_AUDIT_BOUND_BYTES && !s.chars().any(char::is_control))
-                        .ok_or_else(|| {
-                            McpError::InvalidArgument(format!("`{key}` must be an RFC3339 timestamp"))
-                        })?;
+                        .filter(|s| {
+                            !s.is_empty() && s.len() <= MAX_AUDIT_BOUND_BYTES && !s.chars().any(char::is_control)
+                        })
+                        .ok_or_else(|| McpError::InvalidArgument(format!("`{key}` must be an RFC3339 timestamp")))?;
                     body.insert(key.into(), Value::String(raw.to_string()));
                 }
             }

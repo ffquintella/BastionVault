@@ -36,11 +36,11 @@ use bv_storage as storage;
 // which places them at *that* crate's root; the call sites import them as
 // `crate::new_path` and friends. The `_internal` halves are the recursive arms
 // the public macros expand into, so they must travel with them.
-pub use bv_logical::{
-    new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path,
-    new_path_internal, new_secret, new_secret_internal,
-};
 pub use bv_errors::{bv_error_response, bv_error_response_status, bv_error_string};
+pub use bv_logical::{
+    new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path, new_path_internal,
+    new_secret, new_secret_internal,
+};
 
 use std::{any::Any, sync::Arc, time::SystemTime};
 
@@ -48,11 +48,11 @@ use arc_swap::ArcSwapOption;
 use derive_more::Deref;
 use serde::{Deserialize, Serialize};
 
-use bv_kernel_api::{Module, VaultCtx};
 use crate::{
     errors::RvError,
     logical::{Backend, LogicalBackend},
 };
+use bv_kernel_api::{Module, VaultCtx};
 
 pub mod cmis;
 /// Client side of the FerroGate MIA helper socket, plus DPoP proof
@@ -358,10 +358,7 @@ pub fn machine_id(spiffe_id: &str) -> String {
 
 /// Current wall-clock as Unix seconds (best-effort; pre-epoch clocks yield 0).
 fn now_unix() -> i64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
 pub struct FerroGateBackendInner {
@@ -461,4 +458,3 @@ impl Module for FerroGateModule {
         Ok(())
     }
 }
-

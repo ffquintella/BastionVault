@@ -19,8 +19,8 @@ use crate::{
     context::Context,
     errors::RvError,
     logical::{
-        page_response, paginate, Backend, Field, FieldType, Operation, PageLimits, Path,
-        PathOperation, Request, Response,
+        page_response, paginate, Backend, Field, FieldType, Operation, PageLimits, Path, PathOperation, Request,
+        Response,
     },
     new_fields, new_fields_internal, new_path, new_path_internal,
     storage::StorageEntry,
@@ -118,11 +118,7 @@ impl SshBackend {
 
 #[maybe_async::maybe_async]
 impl SshBackendInner {
-    pub async fn get_role(
-        &self,
-        req: &Request,
-        name: &str,
-    ) -> Result<Option<RoleEntry>, RvError> {
+    pub async fn get_role(&self, req: &Request, name: &str) -> Result<Option<RoleEntry>, RvError> {
         let key = format!("{ROLE_PREFIX}{name}");
         match req.storage_get(&key).await? {
             Some(e) => Ok(Some(serde_json::from_slice(&e.value)?)),
@@ -130,22 +126,11 @@ impl SshBackendInner {
         }
     }
 
-    pub async fn handle_role_read(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
-        let name = req
-            .get_data("name")?
-            .as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?
-            .to_string();
+    pub async fn handle_role_read(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let name = req.get_data("name")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
         match self.get_role(req, &name).await? {
             Some(role) => {
-                let data = serde_json::to_value(&role)?
-                    .as_object()
-                    .cloned()
-                    .unwrap_or_default();
+                let data = serde_json::to_value(&role)?.as_object().cloned().unwrap_or_default();
                 Ok(Some(Response::data_response(Some(data))))
             }
             None => Ok(None),
@@ -168,10 +153,7 @@ impl SshBackendInner {
             let role = self.get_role(req, name).await.ok().flatten();
             records.push(match role {
                 Some(role) => {
-                    let mut obj = serde_json::to_value(&role)?
-                        .as_object()
-                        .cloned()
-                        .unwrap_or_default();
+                    let mut obj = serde_json::to_value(&role)?.as_object().cloned().unwrap_or_default();
                     // The stored entry does not carry its own key, and the
                     // client correlates rows by name.
                     obj.insert("name".into(), json!(name));
@@ -183,16 +165,8 @@ impl SshBackendInner {
         Ok(Some(page_response(&page, records)))
     }
 
-    pub async fn handle_role_write(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
-        let name = req
-            .get_data("name")?
-            .as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?
-            .to_string();
+    pub async fn handle_role_write(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let name = req.get_data("name")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
 
         // Start from the existing role on update, defaults on create.
         // This preserves fields the caller didn't supply on a partial
@@ -210,10 +184,7 @@ impl SshBackendInner {
         // typo-or-future and gets rejected at write time so a typoed
         // `key_type` doesn't silently behave like "ca".
         if role.key_type != "ca" && role.key_type != "otp" {
-            return Err(RvError::ErrString(format!(
-                "key_type must be `ca` or `otp`, got `{}`",
-                role.key_type
-            )));
+            return Err(RvError::ErrString(format!("key_type must be `ca` or `otp`, got `{}`", role.key_type)));
         }
 
         if let Ok(v) = req.get_data("algorithm_signer") {
@@ -231,10 +202,7 @@ impl SshBackendInner {
             }
         }
         if role.cert_type != "user" && role.cert_type != "host" {
-            return Err(RvError::ErrString(format!(
-                "cert_type must be `user` or `host`, got `{}`",
-                role.cert_type
-            )));
+            return Err(RvError::ErrString(format!("cert_type must be `user` or `host`, got `{}`", role.cert_type)));
         }
 
         for (key, target) in [
@@ -286,15 +254,14 @@ impl SshBackendInner {
         // OTP-mode fields. `cidr_list` / `exclude_cidr_list` get
         // validated here so an operator who mistypes a CIDR finds out
         // at role-create time, not at the first `creds` call.
-        for (key, target) in [
-            ("cidr_list", &mut role.cidr_list),
-            ("exclude_cidr_list", &mut role.exclude_cidr_list),
-        ] {
+        for (key, target) in [("cidr_list", &mut role.cidr_list), ("exclude_cidr_list", &mut role.exclude_cidr_list)] {
             if let Ok(v) = req.get_data(key) {
                 if let Some(s) = v.as_str() {
                     for piece in s.split(',') {
                         let p = piece.trim();
-                        if p.is_empty() { continue; }
+                        if p.is_empty() {
+                            continue;
+                        }
                         if p.parse::<ipnetwork::IpNetwork>().is_err() {
                             return Err(RvError::ErrString(format!(
                                 "{key}: `{p}` is not a valid CIDR (e.g. `10.0.0.0/24`)"
@@ -308,9 +275,7 @@ impl SshBackendInner {
         if let Ok(v) = req.get_data("port") {
             if let Some(n) = v.as_i64() {
                 if !(1..=65_535).contains(&n) {
-                    return Err(RvError::ErrString(format!(
-                        "port must be 1..=65535, got {n}"
-                    )));
+                    return Err(RvError::ErrString(format!("port must be 1..=65535, got {n}")));
                 }
                 role.port = n as u16;
             }
@@ -327,40 +292,22 @@ impl SshBackendInner {
         // than rejecting every `creds` call later with a less
         // actionable "ip not allowed" error.
         if role.key_type == "otp" && role.cidr_list.trim().is_empty() {
-            return Err(RvError::ErrString(
-                "otp roles require a non-empty cidr_list".into(),
-            ));
+            return Err(RvError::ErrString("otp roles require a non-empty cidr_list".into()));
         }
 
         // Persist.
         let bytes = serde_json::to_vec(&role)?;
-        req.storage_put(&StorageEntry {
-            key: format!("{ROLE_PREFIX}{name}"),
-            value: bytes,
-        })
-        .await?;
+        req.storage_put(&StorageEntry { key: format!("{ROLE_PREFIX}{name}"), value: bytes }).await?;
         Ok(None)
     }
 
-    pub async fn handle_role_delete(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
-        let name = req
-            .get_data("name")?
-            .as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?
-            .to_string();
+    pub async fn handle_role_delete(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let name = req.get_data("name")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
         req.storage_delete(&format!("{ROLE_PREFIX}{name}")).await?;
         Ok(None)
     }
 
-    pub async fn handle_roles_list(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_roles_list(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let keys = req.storage_list(ROLE_PREFIX).await?;
         Ok(Some(Response::list_response(&keys)))
     }

@@ -47,31 +47,19 @@ pub struct ClusterDiscover {
 
 impl CommandExecutor for ClusterDiscover {
     fn main(&self) -> Result<(), RvError> {
-        let probes = self
-            .http_options
-            .probe_cluster()
-            .map_err(RvError::ErrString)?;
+        let probes = self.http_options.probe_cluster().map_err(RvError::ErrString)?;
 
         let chosen = bv_client::health::pick(&probes);
 
-        println!(
-            "Cluster: {}\n",
-            self.http_options.address_raw()
-        );
+        println!("Cluster: {}\n", self.http_options.address_raw());
 
         // Compact header — width tuned for default 80-col terminals.
         // The Target column is the bulkiest field so it gets the
         // slack; everything else is right-aligned for skimming.
-        println!(
-            "{:<40} {:>4} {:>4} {:<14} {:>8}  Cluster ID",
-            "Target", "Pri", "Wt", "State", "RTT(ms)"
-        );
+        println!("{:<40} {:>4} {:>4} {:<14} {:>8}  Cluster ID", "Target", "Pri", "Wt", "State", "RTT(ms)");
         println!("{}", "-".repeat(80));
         for p in &probes {
-            let target = format!(
-                "{}://{}:{}",
-                p.candidate.scheme, p.candidate.target, p.candidate.port
-            );
+            let target = format!("{}://{}:{}", p.candidate.scheme, p.candidate.target, p.candidate.port);
             let state = match &p.state {
                 bv_client::health::NodeState::ActiveLeader => "leader".to_string(),
                 bv_client::health::NodeState::Follower => "follower".to_string(),
@@ -93,12 +81,7 @@ impl CommandExecutor for ClusterDiscover {
         println!();
 
         match chosen {
-            Some(s) => println!(
-                "Picked: {} ({:?}, {} ms)",
-                s.candidate.url(),
-                s.state,
-                s.rtt_ms,
-            ),
+            Some(s) => println!("Picked: {} ({:?}, {} ms)", s.candidate.url(), s.state, s.rtt_ms,),
             None => println!("Picked: (none — no healthy node)"),
         }
         Ok(())

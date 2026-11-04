@@ -116,13 +116,7 @@ impl KernelServices {
 
     service_slot!(set_identity, identity, identity, IdentityService, "identity service");
     service_slot!(set_tokens, tokens, tokens, TokenService, "token service");
-    service_slot!(
-        set_auth_mounts,
-        auth_mounts,
-        auth_mounts,
-        AuthMountRegistry,
-        "auth mount registry"
-    );
+    service_slot!(set_auth_mounts, auth_mounts, auth_mounts, AuthMountRegistry, "auth mount registry");
     service_slot!(
         set_lease_revoker,
         lease_revoker,
@@ -131,41 +125,11 @@ impl KernelServices {
         "owner-initiated early lease revocation"
     );
     service_slot!(set_policy, policy, policy, PolicyGate, "policy gate");
-    service_slot!(
-        set_namespaces,
-        namespaces,
-        namespaces,
-        NamespaceRegistry,
-        "namespace registry"
-    );
-    service_slot!(
-        set_resource_groups,
-        resource_groups,
-        resource_groups,
-        ResourceGroupIndex,
-        "asset-group index"
-    );
-    service_slot!(
-        set_notifications,
-        notifications,
-        notifications,
-        NotificationSink,
-        "notification sink"
-    );
-    service_slot!(
-        set_login_class,
-        login_class,
-        login_class,
-        LoginClassPolicy,
-        "login-class policy"
-    );
-    service_slot!(
-        set_connect_mfa,
-        connect_mfa,
-        connect_mfa,
-        ConnectMfaGate,
-        "connect-MFA gate"
-    );
+    service_slot!(set_namespaces, namespaces, namespaces, NamespaceRegistry, "namespace registry");
+    service_slot!(set_resource_groups, resource_groups, resource_groups, ResourceGroupIndex, "asset-group index");
+    service_slot!(set_notifications, notifications, notifications, NotificationSink, "notification sink");
+    service_slot!(set_login_class, login_class, login_class, LoginClassPolicy, "login-class policy");
+    service_slot!(set_connect_mfa, connect_mfa, connect_mfa, ConnectMfaGate, "connect-MFA gate");
     service_slot!(set_totp_mfa, totp_mfa, totp_mfa, TotpMfa, "TOTP verifier");
     // Registered by the assembly layer, not by a `Module`: the plugin runtime
     // is not one.
@@ -189,22 +153,10 @@ impl KernelServices {
         RequestPipeline,
         "per-request multi-tenancy pipeline"
     );
-    service_slot!(
-        set_denial_audit,
-        denial_audit,
-        denial_audit,
-        DenialAudit,
-        "permission-denial audit sink"
-    );
+    service_slot!(set_denial_audit, denial_audit, denial_audit, DenialAudit, "permission-denial audit sink");
     // Registered by the assembly layer, like the plugin host: it runs before
     // any module is installed, so no module could have published it.
-    service_slot!(
-        set_reroot,
-        reroot,
-        reroot,
-        RerootActivation,
-        "namespace re-root migration"
-    );
+    service_slot!(set_reroot, reroot, reroot, RerootActivation, "namespace re-root migration");
     service_slot!(
         set_ns_scope_datafix,
         ns_scope_datafix,

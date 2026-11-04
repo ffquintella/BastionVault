@@ -3,8 +3,8 @@ use derive_more::Deref;
 
 use crate::{
     command::{self, CommandExecutor},
-        kv_util,
     errors::RvError,
+    kv_util,
 };
 
 #[derive(Parser, Deref)]

@@ -15,7 +15,10 @@ use async_trait::async_trait;
 use bv_plugin_surface::ActiveSurfaceBundle;
 use serde_json::{Map, Value};
 
-use crate::{error::ClientError, types::{JsonResponse, Operation}};
+use crate::{
+    error::ClientError,
+    types::{JsonResponse, Operation},
+};
 
 /// Dispatches a logical request and returns the engine's response.
 ///
@@ -55,15 +58,8 @@ pub trait Backend: Send + Sync {
     /// Default impl returns an empty bundle so backends that haven't
     /// wired surface support yet (older `EmbeddedBackend` builds, an
     /// in-memory test stub) keep compiling.
-    async fn active_surfaces(
-        &self,
-        _token: &str,
-        _etag: Option<&str>,
-    ) -> Result<SurfaceFetch, ClientError> {
-        Ok(SurfaceFetch::Bundle(ActiveSurfaceBundle {
-            etag: String::new(),
-            entries: Vec::new(),
-        }))
+    async fn active_surfaces(&self, _token: &str, _etag: Option<&str>) -> Result<SurfaceFetch, ClientError> {
+        Ok(SurfaceFetch::Bundle(ActiveSurfaceBundle { etag: String::new(), entries: Vec::new() }))
     }
 
     /// Namespace-scoped variant of [`Backend::active_surfaces`]. The default
@@ -86,11 +82,7 @@ pub trait Backend: Send + Sync {
     /// fall through to the default impl, which is the regular
     /// `active_surfaces` so callers degrade to short-poll behaviour
     /// rather than hanging.
-    async fn watch_active_surfaces(
-        &self,
-        token: &str,
-        etag: Option<&str>,
-    ) -> Result<SurfaceFetch, ClientError> {
+    async fn watch_active_surfaces(&self, token: &str, etag: Option<&str>) -> Result<SurfaceFetch, ClientError> {
         self.active_surfaces(token, etag).await
     }
 

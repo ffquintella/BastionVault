@@ -17,13 +17,13 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use serde_json::{json, Map, Value};
 
+#[cfg(not(feature = "sync_handler"))]
+use super::CachedJwks;
 use super::{
     jwks_source, machine_id, now_unix, status,
     verify::{self, verify_child_token},
     FerroGateBackend, FerroGateBackendInner, FerroGateConfig, MachineEntry,
 };
-#[cfg(not(feature = "sync_handler"))]
-use super::CachedJwks;
 use crate::kernel_api::VaultCtx;
 use bv_metrics::ferrogate_metrics::{ferrogate_metrics, DenyReason};
 
@@ -379,8 +379,7 @@ impl FerroGateBackendInner {
             )));
         }
 
-        let spiffe_id =
-            req.get_data("spiffe_id")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.trim().to_string();
+        let spiffe_id = req.get_data("spiffe_id")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.trim().to_string();
         if !spiffe_id.starts_with("spiffe://") {
             return Ok(Some(Response::error_response("spiffe_id must be a spiffe:// URI")));
         }
@@ -392,9 +391,7 @@ impl FerroGateBackendInner {
         if !self.enroll_rate_ok(&ip, config.self_enroll_rate_limit_per_min) {
             log::warn!(target: "security", "ferrogate self-enroll rate-limited ip={ip}");
             ferrogate_metrics().record_denied(DenyReason::RateLimited);
-            return Ok(Some(Response::error_response(
-                "rate_limited: too many enrolment requests, retry shortly",
-            )));
+            return Ok(Some(Response::error_response("rate_limited: too many enrolment requests, retry shortly")));
         }
 
         // Block-list wins over the allow-list; a non-empty allow-list then
@@ -424,8 +421,7 @@ impl FerroGateBackendInner {
             return Ok(Some(Response::data_response(Some(data))));
         }
 
-        let comment =
-            req.get_data("comment").ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+        let comment = req.get_data("comment").ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
         let m = MachineEntry {
             spiffe_id: spiffe_id.clone(),
             status: status::PENDING.to_string(),
@@ -510,8 +506,7 @@ impl FerroGateBackendInner {
             return Ok(Some(Response::error_response("unknown machine")));
         };
         m.status = status::REJECTED.to_string();
-        m.reject_reason =
-            req.get_data("reason").ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+        m.reject_reason = req.get_data("reason").ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
         self.set_machine(req, &id, &m).await?;
         Ok(None)
     }
@@ -533,13 +528,7 @@ impl FerroGateBackendInner {
     fn source_ip(req: &Request) -> String {
         req.connection
             .as_ref()
-            .map(|c| {
-                if c.peer_addr_derived.is_empty() {
-                    c.peer_addr.clone()
-                } else {
-                    c.peer_addr_derived.clone()
-                }
-            })
+            .map(|c| if c.peer_addr_derived.is_empty() { c.peer_addr.clone() } else { c.peer_addr_derived.clone() })
             .unwrap_or_default()
     }
 
@@ -582,11 +571,7 @@ impl FerroGateBackendInner {
     /// `Err(reason)` (a user-facing message) when a token was supplied but is
     /// invalid or carries `root` — never bind a root token into a machine
     /// session.
-    async fn bind_user_token(
-        &self,
-        req: &Request,
-        machine_policies: &[String],
-    ) -> Result<Option<BoundUser>, String> {
+    async fn bind_user_token(&self, req: &Request, machine_policies: &[String]) -> Result<Option<BoundUser>, String> {
         let user_token = req
             .get_data("user_token")
             .ok()
@@ -596,10 +581,8 @@ impl FerroGateBackendInner {
             return Ok(None);
         };
 
-        let tokens = self
-            .core
-            .tokens()
-            .ok_or_else(|| "user_binding_unavailable: auth module not loaded".to_string())?;
+        let tokens =
+            self.core.tokens().ok_or_else(|| "user_binding_unavailable: auth module not loaded".to_string())?;
 
         let te = match tokens.lookup(&user_token).await {
             Ok(Some(te)) => te,
@@ -888,11 +871,7 @@ impl FerroGateBackendInner {
 
                 let ttl = if m.ttl_seconds > 0 { m.ttl_seconds } else { config.default_token_ttl };
                 let mut auth = Auth {
-                    lease: Lease {
-                        ttl: Duration::from_secs(ttl),
-                        renewable: ttl > 0,
-                        ..Default::default()
-                    },
+                    lease: Lease { ttl: Duration::from_secs(ttl), renewable: ttl > 0, ..Default::default() },
                     display_name: spiffe_id.clone(),
                     policies: policies.clone(),
                     token_policies: policies,

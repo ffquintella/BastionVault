@@ -1,7 +1,10 @@
 use clap::{Parser, Subcommand};
 use sysexits::ExitCode;
 
-use super::{cluster_discover, cluster_failover, cluster_leader, cluster_leave, cluster_members, cluster_remove_node, cluster_status};
+use super::{
+    cluster_discover, cluster_failover, cluster_leader, cluster_leave, cluster_members, cluster_remove_node,
+    cluster_status,
+};
 use crate::{command::CommandExecutor, EXIT_CODE_INSUFFICIENT_PARAMS};
 
 #[derive(Parser)]

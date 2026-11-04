@@ -99,7 +99,6 @@ pub enum ShareGranteeKind {
     GroupApp,
 }
 
-
 impl ShareGranteeKind {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -119,10 +118,7 @@ impl ShareGranteeKind {
     }
 
     pub fn is_group(self) -> bool {
-        matches!(
-            self,
-            ShareGranteeKind::GroupUser | ShareGranteeKind::GroupApp
-        )
+        matches!(self, ShareGranteeKind::GroupUser | ShareGranteeKind::GroupApp)
     }
 }
 
@@ -213,11 +209,7 @@ impl ShareStore {
         let by_grantee_view = Arc::new(system_view.new_sub_view(SHARE_BY_GRANTEE_SUB_PATH));
         let history_view = Arc::new(system_view.new_sub_view(SHARE_HISTORY_SUB_PATH));
 
-        Ok(Arc::new(Self {
-            primary_view,
-            by_grantee_view,
-            history_view,
-        }))
+        Ok(Arc::new(Self { primary_view, by_grantee_view, history_view }))
     }
 
     /// Canonicalize a share target's path. Uses the same rules as
@@ -303,20 +295,14 @@ impl ShareStore {
         // Group grantees are lowercased to match `GroupStore::sanitize_name`
         // semantics so a share on "Eng" and a share on "eng" land on the
         // same group row. Entity grantees are UUIDs — leave as-is.
-        let grantee = if grantee_kind.is_group() {
-            grantee_raw.to_lowercase()
-        } else {
-            grantee_raw
-        };
+        let grantee = if grantee_kind.is_group() { grantee_raw.to_lowercase() } else { grantee_raw };
         share.target_kind = kind.as_str().to_string();
         share.target_path = canonical.clone();
         share.grantee_kind = grantee_kind.as_str().to_string();
         share.grantee_entity_id = grantee.clone();
         share.capabilities = normalize_capabilities(kind, share.capabilities)?;
         if share.capabilities.is_empty() {
-            return Err(bv_error_string!(
-                "share must grant at least one capability (read, list, update, delete)"
-            ));
+            return Err(bv_error_string!("share must grant at least one capability (read, list, update, delete)"));
         }
         if share.granted_at.is_empty() {
             share.granted_at = Utc::now().to_rfc3339();
@@ -325,9 +311,7 @@ impl ShareStore {
         let target_hash = Self::target_hash(kind, &canonical);
         let primary_key = Self::primary_key(&target_hash, &grantee);
         let value = serde_json::to_vec(&share)?;
-        self.primary_view
-            .put(&StorageEntry { key: primary_key, value })
-            .await?;
+        self.primary_view.put(&StorageEntry { key: primary_key, value }).await?;
 
         let pointer = ShareByGranteePointer {
             target_kind: share.target_kind.clone(),
@@ -336,9 +320,7 @@ impl ShareStore {
         };
         let p_key = Self::by_grantee_key(grantee_kind, &grantee, &target_hash);
         let p_value = serde_json::to_vec(&pointer)?;
-        self.by_grantee_view
-            .put(&StorageEntry { key: p_key, value: p_value })
-            .await?;
+        self.by_grantee_view.put(&StorageEntry { key: p_key, value: p_value }).await?;
 
         // Audit: append a history row for the grant. History failures
         // must not fail the write — the admin audit page is a
@@ -385,12 +367,7 @@ impl ShareStore {
     /// by-grantee pointer. Idempotent — missing records are not errors.
     /// Defaults to the legacy entity grantee semantics; use
     /// [`Self::delete_share_with_kind`] for group grantees.
-    pub async fn delete_share(
-        &self,
-        kind: ShareTargetKind,
-        target_path: &str,
-        grantee: &str,
-    ) -> Result<(), RvError> {
+    pub async fn delete_share(&self, kind: ShareTargetKind, target_path: &str, grantee: &str) -> Result<(), RvError> {
         self.delete_share_audited(kind, target_path, grantee, "", "revoke").await
     }
 
@@ -402,15 +379,7 @@ impl ShareStore {
         grantee_kind: ShareGranteeKind,
         grantee: &str,
     ) -> Result<(), RvError> {
-        self.delete_share_with_kind_audited(
-            kind,
-            target_path,
-            grantee_kind,
-            grantee,
-            "",
-            "revoke",
-        )
-        .await
+        self.delete_share_with_kind_audited(kind, target_path, grantee_kind, grantee, "", "revoke").await
     }
 
     /// Same as `delete_share` but carries an actor `entity_id` (for
@@ -426,15 +395,8 @@ impl ShareStore {
         actor_entity_id: &str,
         op: &str,
     ) -> Result<(), RvError> {
-        self.delete_share_with_kind_audited(
-            kind,
-            target_path,
-            ShareGranteeKind::Entity,
-            grantee,
-            actor_entity_id,
-            op,
-        )
-        .await
+        self.delete_share_with_kind_audited(kind, target_path, ShareGranteeKind::Entity, grantee, actor_entity_id, op)
+            .await
     }
 
     pub async fn delete_share_with_kind_audited(
@@ -538,8 +500,8 @@ impl ShareStore {
         let Some(old_canonical) = Self::canonicalize(kind, old_path) else {
             return Ok(0);
         };
-        let new_canonical = Self::canonicalize(kind, new_path)
-            .ok_or_else(|| bv_error_string!("invalid new share target_path"))?;
+        let new_canonical =
+            Self::canonicalize(kind, new_path).ok_or_else(|| bv_error_string!("invalid new share target_path"))?;
         if old_canonical == new_canonical {
             return Ok(0);
         }
@@ -550,8 +512,7 @@ impl ShareStore {
         let mut moved = 0usize;
 
         for share in shares {
-            let grantee_kind =
-                ShareGranteeKind::parse(&share.grantee_kind).unwrap_or(ShareGranteeKind::Entity);
+            let grantee_kind = ShareGranteeKind::parse(&share.grantee_kind).unwrap_or(ShareGranteeKind::Entity);
             let grantee = share.grantee_entity_id.clone();
 
             // Write the record + by-grantee pointer under the new target
@@ -561,10 +522,7 @@ impl ShareStore {
             moved_share.target_path = new_canonical.clone();
             let new_primary_key = Self::primary_key(&new_hash, &grantee);
             self.primary_view
-                .put(&StorageEntry {
-                    key: new_primary_key,
-                    value: serde_json::to_vec(&moved_share)?,
-                })
+                .put(&StorageEntry { key: new_primary_key, value: serde_json::to_vec(&moved_share)? })
                 .await?;
 
             let pointer = ShareByGranteePointer {
@@ -573,12 +531,7 @@ impl ShareStore {
                 grantee_kind: moved_share.grantee_kind.clone(),
             };
             let new_ptr_key = Self::by_grantee_key(grantee_kind, &grantee, &new_hash);
-            self.by_grantee_view
-                .put(&StorageEntry {
-                    key: new_ptr_key,
-                    value: serde_json::to_vec(&pointer)?,
-                })
-                .await?;
+            self.by_grantee_view.put(&StorageEntry { key: new_ptr_key, value: serde_json::to_vec(&pointer)? }).await?;
 
             // Remove the old primary + pointer only after the new pair is
             // durably written, so a mid-loop failure leaves a resolvable
@@ -614,10 +567,7 @@ impl ShareStore {
     /// back to `<kind>|<canonical>`, and keeps the ones matching `kind`.
     /// Undecodable or foreign-kind hashes are skipped rather than failing the
     /// walk, so one corrupt key cannot block a migration pass.
-    pub async fn list_target_canonicals(
-        &self,
-        kind: ShareTargetKind,
-    ) -> Result<Vec<String>, RvError> {
+    pub async fn list_target_canonicals(&self, kind: ShareTargetKind) -> Result<Vec<String>, RvError> {
         let want = format!("{}|", kind.as_str());
         let mut out: Vec<String> = Vec::new();
         for key in self.primary_view.list("").await? {
@@ -644,12 +594,8 @@ impl ShareStore {
     /// Return every target shared with `grantee` (entity grantee). The
     /// pointer carries the kind+path; caller can load the full record
     /// via `get_share`.
-    pub async fn list_shares_for_grantee(
-        &self,
-        grantee: &str,
-    ) -> Result<Vec<ShareByGranteePointer>, RvError> {
-        self.list_shares_for_grantee_kinded(ShareGranteeKind::Entity, grantee)
-            .await
+    pub async fn list_shares_for_grantee(&self, grantee: &str) -> Result<Vec<ShareByGranteePointer>, RvError> {
+        self.list_shares_for_grantee_kinded(ShareGranteeKind::Entity, grantee).await
     }
 
     /// Grantee-kind-aware variant. Use this when listing shares
@@ -663,19 +609,14 @@ impl ShareStore {
         if grantee.is_empty() {
             return Ok(Vec::new());
         }
-        let grantee = if grantee_kind.is_group() {
-            grantee.to_lowercase()
-        } else {
-            grantee.to_string()
-        };
+        let grantee = if grantee_kind.is_group() { grantee.to_lowercase() } else { grantee.to_string() };
         let prefix = format!("{}{grantee}/", Self::by_grantee_prefix(grantee_kind));
         let keys = self.by_grantee_view.list(&prefix).await?;
         let mut out = Vec::with_capacity(keys.len());
         for k in keys {
             let full = format!("{prefix}{k}");
             if let Some(raw) = self.by_grantee_view.get(&full).await? {
-                if let Ok(mut ptr) = serde_json::from_slice::<ShareByGranteePointer>(&raw.value)
-                {
+                if let Ok(mut ptr) = serde_json::from_slice::<ShareByGranteePointer>(&raw.value) {
                     // Older pointers (pre-group-grantee) have an empty
                     // grantee_kind. Default to the kind we just walked,
                     // which for an entity-prefix walk is "entity".
@@ -713,12 +654,7 @@ impl ShareStore {
     /// index, so the cost is their share count, not the vault's size;
     /// candidates are re-checked through `shared_capabilities` so an
     /// expired share never counts.
-    pub async fn has_share_under(
-        &self,
-        kind: ShareTargetKind,
-        prefix: &str,
-        grantee: &str,
-    ) -> Result<bool, RvError> {
+    pub async fn has_share_under(&self, kind: ShareTargetKind, prefix: &str, grantee: &str) -> Result<bool, RvError> {
         if prefix.is_empty() || grantee.trim().is_empty() {
             return Ok(false);
         }
@@ -738,11 +674,7 @@ impl ShareStore {
     /// on successful delete of a KV secret or a resource so dangling
     /// share rows do not outlive the target. Failures are logged by
     /// the caller; returning `Err` does not block the delete.
-    pub async fn cascade_delete_target(
-        &self,
-        kind: ShareTargetKind,
-        target_path: &str,
-    ) -> Result<usize, RvError> {
+    pub async fn cascade_delete_target(&self, kind: ShareTargetKind, target_path: &str) -> Result<usize, RvError> {
         self.cascade_delete_target_audited(kind, target_path, "").await
     }
 
@@ -763,8 +695,7 @@ impl ShareStore {
             // the right by-grantee pointer prefix; legacy rows with no
             // grantee_kind fall back to Entity, matching the pre-group
             // schema.
-            let gk = ShareGranteeKind::parse(&s.grantee_kind)
-                .unwrap_or(ShareGranteeKind::Entity);
+            let gk = ShareGranteeKind::parse(&s.grantee_kind).unwrap_or(ShareGranteeKind::Entity);
             self.delete_share_with_kind_audited(
                 kind,
                 &s.target_path,
@@ -798,10 +729,7 @@ impl ShareStore {
     /// Keys are the bare zero-padded nanoseconds of [`hist_seq`], so a time
     /// bound is a key bound: the scan reads only the recent tail instead of
     /// the whole trail.
-    pub async fn list_history_since(
-        &self,
-        since_key: &str,
-    ) -> Result<Vec<ShareHistoryEntry>, RvError> {
+    pub async fn list_history_since(&self, since_key: &str) -> Result<Vec<ShareHistoryEntry>, RvError> {
         Ok(Self::decode(self.history_view.get_entries_since("", since_key).await?))
     }
 
@@ -809,10 +737,7 @@ impl ShareStore {
     /// skipping rows that fail to parse.
     fn decode(mut entries: Vec<StorageEntry>) -> Vec<ShareHistoryEntry> {
         entries.sort_by(|a, b| b.key.cmp(&a.key));
-        entries
-            .into_iter()
-            .filter_map(|e| serde_json::from_slice::<ShareHistoryEntry>(&e.value).ok())
-            .collect()
+        entries.into_iter().filter_map(|e| serde_json::from_slice::<ShareHistoryEntry>(&e.value).ok()).collect()
     }
 }
 
@@ -820,9 +745,7 @@ impl ShareStore {
 /// used as history keys so `get_keys` + sort yields chronological
 /// order. Mirrors the helper in other history stores.
 fn hist_seq() -> String {
-    let n = Utc::now()
-        .timestamp_nanos_opt()
-        .unwrap_or_else(|| Utc::now().timestamp_millis() * 1_000_000);
+    let n = Utc::now().timestamp_nanos_opt().unwrap_or_else(|| Utc::now().timestamp_millis() * 1_000_000);
     format!("{:020}", n.max(0) as u128)
 }
 
@@ -946,10 +869,7 @@ mod normalize_capability_tests {
     #[test]
     fn connect_is_grantable() {
         assert_eq!(norm(&["connect"]), vec!["connect".to_string()]);
-        assert_eq!(
-            norm(&["read", "connect"]),
-            vec!["read".to_string(), "connect".to_string()]
-        );
+        assert_eq!(norm(&["read", "connect"]), vec!["read".to_string(), "connect".to_string()]);
         assert_eq!(norm(&["CONNECT", " connect "]), vec!["connect".to_string()]);
     }
 

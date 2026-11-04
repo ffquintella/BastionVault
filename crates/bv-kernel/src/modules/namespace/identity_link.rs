@@ -95,10 +95,7 @@ impl IdentityLinkStore {
         let parent = normalize_path(parent_path)?;
         // The owning namespace must exist (root always does).
         if !parent.is_empty() && ns_store.get_by_path(&parent).await?.is_none() {
-            return Err(bv_error_response_status!(
-                404,
-                &format!("no such namespace: {parent:?}")
-            ));
+            return Err(bv_error_response_status!(404, &format!("no such namespace: {parent:?}")));
         }
         if members.len() < 2 {
             return Err(bv_error_string!("an identity link needs at least two members"));
@@ -121,10 +118,7 @@ impl IdentityLinkStore {
                 // The root has no parent that could own a link reaching "up".
                 // (parent must therefore also be root, already allowed above.)
             } else if ns_store.get_by_path(&ns).await?.is_none() {
-                return Err(bv_error_response_status!(
-                    404,
-                    &format!("no such namespace: {ns:?}")
-                ));
+                return Err(bv_error_response_status!(404, &format!("no such namespace: {ns:?}")));
             }
             if m.entity_id.trim().is_empty() {
                 return Err(bv_error_string!("identity link member entity_id must not be empty"));
@@ -140,9 +134,7 @@ impl IdentityLinkStore {
             created_at: Utc::now().to_rfc3339(),
         };
         let value = serde_json::to_vec(&link)?;
-        self.view
-            .put(&StorageEntry { key: link_key(&parent, &link.id), value })
-            .await?;
+        self.view.put(&StorageEntry { key: link_key(&parent, &link.id), value }).await?;
         Ok(link)
     }
 
@@ -175,5 +167,3 @@ impl IdentityLinkStore {
         self.view.delete(&link_key(&parent, id)).await
     }
 }
-
-

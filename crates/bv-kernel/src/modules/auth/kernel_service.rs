@@ -41,18 +41,14 @@ impl TokenService for AuthModule {
     }
 
     async fn revoke(&self, token: &str) -> Result<(), RvError> {
-        let store = self
-            .token_store
-            .load_full()
-            .ok_or_else(|| crate::bv_error_string!("token store not initialised"))?;
+        let store =
+            self.token_store.load_full().ok_or_else(|| crate::bv_error_string!("token store not initialised"))?;
         store.revoke(token).await
     }
 
     async fn mint_root_token(&self) -> Result<String, RvError> {
-        let store = self
-            .token_store
-            .load_full()
-            .ok_or_else(|| crate::bv_error_string!("token store not initialised"))?;
+        let store =
+            self.token_store.load_full().ok_or_else(|| crate::bv_error_string!("token store not initialised"))?;
         Ok(store.root_token().await?.id)
     }
 

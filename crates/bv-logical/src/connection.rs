@@ -86,11 +86,7 @@ mod tests {
     use super::*;
 
     fn conn(peer: &str, derived: &str) -> Connection {
-        Connection {
-            peer_addr: peer.to_string(),
-            peer_addr_derived: derived.to_string(),
-            peer_tls_cert: None,
-        }
+        Connection { peer_addr: peer.to_string(), peer_addr_derived: derived.to_string(), peer_tls_cert: None }
     }
 
     #[test]

@@ -8,7 +8,7 @@ use prettytable::{format::FormatBuilder, Cell, Row, Table};
 use regex::Regex;
 use serde_json::{json, Map, Value};
 
-use crate::{api::secret::Secret, errors::RvError, bv_error_string};
+use crate::{api::secret::Secret, bv_error_string, errors::RvError};
 
 lazy_static! {
     static ref UNDERSCORE_REGEX: Regex = Regex::new(r"_(\w)").unwrap();

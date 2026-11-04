@@ -18,12 +18,7 @@ use serde_json::{Map, Value};
 use sysexits::ExitCode;
 
 use super::ferrogate_mia::{self, DpopKey};
-use crate::{
-    bv_error_string,
-    command, command::CommandExecutor, util,
-    errors::RvError,
-    EXIT_CODE_INSUFFICIENT_PARAMS,
-};
+use crate::{bv_error_string, command, command::CommandExecutor, errors::RvError, util, EXIT_CODE_INSUFFICIENT_PARAMS};
 
 #[derive(Parser)]
 #[command(
@@ -86,8 +81,8 @@ fn resolve_socket(socket: Option<&str>, environment: Option<&str>) -> Result<Str
 /// (`token` + `dpop` proof) for the mount's `login` / `status` endpoints.
 fn mia_login_body(socket: &str, audience: &str, ttl: u32) -> Result<Map<String, Value>, RvError> {
     let dpop = DpopKey::generate();
-    let child = ferrogate_mia::request_child_token(socket, audience, &dpop.jkt(), ttl)
-        .map_err(|e| bv_error_string!(e))?;
+    let child =
+        ferrogate_mia::request_child_token(socket, audience, &dpop.jkt(), ttl).map_err(|e| bv_error_string!(e))?;
     let proof = dpop.proof("POST", audience);
 
     let mut body = Map::new();
@@ -298,7 +293,10 @@ impl CommandExecutor for Token {
             }
         }
 
-        self.output.print_data(&Value::Object(Map::from_iter([("data".to_string(), Value::Object(out))])), self.output.field.as_deref())
+        self.output.print_data(
+            &Value::Object(Map::from_iter([("data".to_string(), Value::Object(out))])),
+            self.output.field.as_deref(),
+        )
     }
 }
 
@@ -360,9 +358,8 @@ impl CommandExecutor for Enroll {
                 // token purely to read its `iss` (SPIFFE id). No server call.
                 let socket = resolve_socket(self.socket.as_deref(), self.environment.as_deref())?;
                 let dpop = DpopKey::generate();
-                let child =
-                    ferrogate_mia::request_child_token(&socket, "urn:bvault:ferrogate:enroll", &dpop.jkt(), 60)
-                        .map_err(|e| bv_error_string!(e))?;
+                let child = ferrogate_mia::request_child_token(&socket, "urn:bvault:ferrogate:enroll", &dpop.jkt(), 60)
+                    .map_err(|e| bv_error_string!(e))?;
                 ferrogate_mia::jws_claim_str(&child.jws, "iss").ok_or_else(|| {
                     bv_error_string!("could not read SPIFFE id from the local MIA; pass --spiffe-id".to_string())
                 })?

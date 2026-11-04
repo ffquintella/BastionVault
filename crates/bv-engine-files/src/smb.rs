@@ -45,14 +45,10 @@ use crate::errors::RvError;
 /// build and `--features sync_handler`.
 pub fn push_smb(target: &FileSyncTarget, bytes: &[u8]) -> Result<(), RvError> {
     if target.smb_username.trim().is_empty() {
-        return Err(RvError::ErrString(
-            "smb: smb_username is required".into(),
-        ));
+        return Err(RvError::ErrString("smb: smb_username is required".into()));
     }
     if target.smb_password.is_empty() {
-        return Err(RvError::ErrString(
-            "smb: smb_password is required".into(),
-        ));
+        return Err(RvError::ErrString("smb: smb_password is required".into()));
     }
     let parsed = parse_smb_url(&target.target_path)?;
 
@@ -73,21 +69,15 @@ pub fn push_smb(target: &FileSyncTarget, bytes: &[u8]) -> Result<(), RvError> {
                 .build()
                 .map_err(|e| format!("smb: tokio runtime build: {e}"))?;
             rt.block_on(async move {
-                tokio::time::timeout(
-                    Duration::from_secs(30),
-                    push_smb_inner(parsed, username, password, domain, bytes),
-                )
-                .await
-                .map_err(|_| "smb: push timed out after 30s".to_string())
-                .and_then(|r| r)
+                tokio::time::timeout(Duration::from_secs(30), push_smb_inner(parsed, username, password, domain, bytes))
+                    .await
+                    .map_err(|_| "smb: push timed out after 30s".to_string())
+                    .and_then(|r| r)
             })
         })
         .map_err(|e| RvError::ErrString(format!("smb: spawn worker thread: {e}")))?;
 
-    handle
-        .join()
-        .map_err(|_| RvError::ErrString("smb: worker thread panicked".into()))?
-        .map_err(RvError::ErrString)
+    handle.join().map_err(|_| RvError::ErrString("smb: worker thread panicked".into()))?.map_err(RvError::ErrString)
 }
 
 async fn push_smb_inner(
@@ -108,10 +98,8 @@ async fn push_smb_inner(
         .build()
         .map_err(|e| format!("smb: build client: {e}"))?;
 
-    let mut share = client
-        .connect_share(&target.share)
-        .await
-        .map_err(|e| format!("smb: connect_share `{}`: {e}", target.share))?;
+    let mut share =
+        client.connect_share(&target.share).await.map_err(|e| format!("smb: connect_share `{}`: {e}", target.share))?;
 
     // Atomic-ish write: put to <basename>.bvsync.<pid>.tmp, rename to
     // basename on success. SMB rename across the same directory is
@@ -120,10 +108,7 @@ async fn push_smb_inner(
     let final_path = target.path.clone();
     let tmp_path = tmp_path_for(&final_path);
 
-    share
-        .put(&tmp_path, &bytes)
-        .await
-        .map_err(|e| format!("smb: put `{tmp_path}`: {e}"))?;
+    share.put(&tmp_path, &bytes).await.map_err(|e| format!("smb: put `{tmp_path}`: {e}"))?;
 
     // Best-effort: drop any pre-existing destination so rename
     // succeeds on servers whose SMB rename refuses to overwrite.
@@ -176,31 +161,21 @@ fn parse_smb_url(input: &str) -> Result<SmbTarget, RvError> {
         // normalisation. Tolerated for paste-from-Server-Manager.
         rest
     } else {
-        return Err(RvError::ErrString(format!(
-            "smb: target_path `{raw}` must start with `smb://` or `\\\\` (UNC)"
-        )));
+        return Err(RvError::ErrString(format!("smb: target_path `{raw}` must start with `smb://` or `\\\\` (UNC)")));
     };
 
     // Split off the host[:port] from the rest (share + path).
-    let (host_port, share_and_path) = after_scheme.split_once('/').ok_or_else(|| {
-        RvError::ErrString(format!(
-            "smb: target_path `{raw}` is missing the share component"
-        ))
-    })?;
+    let (host_port, share_and_path) = after_scheme
+        .split_once('/')
+        .ok_or_else(|| RvError::ErrString(format!("smb: target_path `{raw}` is missing the share component")))?;
     if host_port.is_empty() {
-        return Err(RvError::ErrString(format!(
-            "smb: target_path `{raw}` has empty host"
-        )));
+        return Err(RvError::ErrString(format!("smb: target_path `{raw}` has empty host")));
     }
     let (host, port) = if let Some((h, p)) = host_port.rsplit_once(':') {
         if h.is_empty() {
-            return Err(RvError::ErrString(format!(
-                "smb: target_path `{raw}` has empty host"
-            )));
+            return Err(RvError::ErrString(format!("smb: target_path `{raw}` has empty host")));
         }
-        let parsed_port = p
-            .parse::<u16>()
-            .map_err(|_| RvError::ErrString(format!("smb: invalid port `{p}`")))?;
+        let parsed_port = p.parse::<u16>().map_err(|_| RvError::ErrString(format!("smb: invalid port `{p}`")))?;
         (h.to_string(), parsed_port)
     } else {
         (host_port.to_string(), 445u16)
@@ -212,26 +187,17 @@ fn parse_smb_url(input: &str) -> Result<SmbTarget, RvError> {
         None => (share_and_path.to_string(), String::new()),
     };
     if share.is_empty() {
-        return Err(RvError::ErrString(format!(
-            "smb: target_path `{raw}` has empty share name"
-        )));
+        return Err(RvError::ErrString(format!("smb: target_path `{raw}` has empty share name")));
     }
     if path.is_empty() {
-        return Err(RvError::ErrString(format!(
-            "smb: target_path `{raw}` is missing the destination filename"
-        )));
+        return Err(RvError::ErrString(format!("smb: target_path `{raw}` is missing the destination filename")));
     }
     if path.ends_with('/') {
         return Err(RvError::ErrString(format!(
             "smb: target_path `{raw}` ends with `/` — must point at a file, not a directory"
         )));
     }
-    Ok(SmbTarget {
-        host,
-        port,
-        share,
-        path,
-    })
+    Ok(SmbTarget { host, port, share, path })
 }
 
 /// Public-facing wrapper used by the sync-write handler to validate
@@ -312,9 +278,7 @@ mod tests {
 
     #[test]
     fn tmp_path_lives_in_same_directory() {
-        assert_eq!(tmp_path_for("dir/sub/file.txt"),
-                   format!("dir/sub/file.txt.bvsync.{}.tmp", std::process::id()));
-        assert_eq!(tmp_path_for("file.txt"),
-                   format!("file.txt.bvsync.{}.tmp", std::process::id()));
+        assert_eq!(tmp_path_for("dir/sub/file.txt"), format!("dir/sub/file.txt.bvsync.{}.tmp", std::process::id()));
+        assert_eq!(tmp_path_for("file.txt"), format!("file.txt.bvsync.{}.tmp", std::process::id()));
     }
 }

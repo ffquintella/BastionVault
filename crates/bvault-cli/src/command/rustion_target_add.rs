@@ -96,35 +96,17 @@ impl CommandExecutor for RustionTargetAdd {
         let mut body = Map::new();
         body.insert("name".into(), Value::String(self.name.clone()));
         body.insert("endpoint".into(), Value::String(self.endpoint.clone()));
-        body.insert(
-            "public_key_ed25519".into(),
-            Value::String(self.ed25519.clone()),
-        );
-        body.insert(
-            "public_key_mldsa65".into(),
-            Value::String(self.mldsa65.clone()),
-        );
-        body.insert(
-            "kem_public_key".into(),
-            Value::String(self.kem_pubkey.clone()),
-        );
-        body.insert(
-            "description".into(),
-            Value::String(self.description.clone()),
-        );
+        body.insert("public_key_ed25519".into(), Value::String(self.ed25519.clone()));
+        body.insert("public_key_mldsa65".into(), Value::String(self.mldsa65.clone()));
+        body.insert("kem_public_key".into(), Value::String(self.kem_pubkey.clone()));
+        body.insert("description".into(), Value::String(self.description.clone()));
         if !self.tags.is_empty() {
             body.insert("tags".into(), Value::String(self.tags.clone()));
         }
         body.insert("enabled".into(), Value::Bool(!self.disabled));
-        body.insert(
-            "default_recording_dir".into(),
-            Value::String(self.default_recording_dir.clone()),
-        );
+        body.insert("default_recording_dir".into(), Value::String(self.default_recording_dir.clone()));
         if !self.tls_pinned_cert_pem.is_empty() {
-            body.insert(
-                "tls_pinned_cert_pem".into(),
-                Value::String(self.tls_pinned_cert_pem.clone()),
-            );
+            body.insert("tls_pinned_cert_pem".into(), Value::String(self.tls_pinned_cert_pem.clone()));
         }
 
         let resp = client.logical().write("rustion/targets", Some(body))?;

@@ -7,7 +7,6 @@ use derive_more::Deref;
 use humantime::parse_duration;
 use serde_json::{Map, Value};
 
-use bv_kernel_api::{Module, VaultCtx};
 use crate::{
     context::Context,
     errors::RvError,
@@ -18,6 +17,7 @@ use crate::{
     new_secret, new_secret_internal,
     storage::StorageEntry,
 };
+use bv_kernel_api::{Module, VaultCtx};
 
 static KV_BACKEND_HELP: &str = r#"
 The generic backend reads and writes arbitrary secrets to the backend.

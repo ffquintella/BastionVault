@@ -270,9 +270,7 @@ impl KeystrokeIndexStore {
         let Some(system_view) = core.system_view() else {
             return Err(RvError::ErrBarrierSealed);
         };
-        Ok(Arc::new(Self {
-            view: Arc::new(system_view.new_sub_view(KEYSTROKES_SUB_PATH)),
-        }))
+        Ok(Arc::new(Self { view: Arc::new(system_view.new_sub_view(KEYSTROKES_SUB_PATH)) }))
     }
 
     pub async fn list_ids(&self) -> Result<Vec<String>, RvError> {
@@ -303,8 +301,7 @@ impl KeystrokeIndexStore {
 
     pub async fn put(&self, entry: &KeystrokeIndexEntry) -> Result<(), RvError> {
         let id = sanitize(&entry.recording_id)?;
-        let value = serde_json::to_vec(entry)
-            .map_err(|e| bv_error_string!(&format!("encode keystroke index: {e}")))?;
+        let value = serde_json::to_vec(entry).map_err(|e| bv_error_string!(&format!("encode keystroke index: {e}")))?;
         self.view.put(&StorageEntry { key: id, value }).await
     }
 
@@ -345,26 +342,18 @@ pub async fn index_recording(
     force: bool,
 ) -> Result<IndexReport, RvError> {
     let Some(mut entry) = recordings.get(recording_id).await? else {
-        return Err(crate::bv_error_response_status!(
-            404,
-            &format!("recording `{recording_id}` not in index")
-        ));
+        return Err(crate::bv_error_response_status!(404, &format!("recording `{recording_id}` not in index")));
     };
     if entry.format != KEYSTROKE_FORMAT {
         return Ok(IndexReport::plain(
             recording_id,
             IndexStatus::SkippedFormat,
-            format!(
-                "format `{}` cannot carry a keystroke track; only `{KEYSTROKE_FORMAT}` can",
-                entry.format
-            ),
+            format!("format `{}` cannot carry a keystroke track; only `{KEYSTROKE_FORMAT}` can", entry.format),
         ));
     }
     if !force {
         if let Some(existing) = keystrokes.get(recording_id).await? {
-            if !existing.artifact_sha256.is_empty()
-                && existing.artifact_sha256.eq_ignore_ascii_case(&entry.sha256)
-            {
+            if !existing.artifact_sha256.is_empty() && existing.artifact_sha256.eq_ignore_ascii_case(&entry.sha256) {
                 return Ok(IndexReport {
                     recording_id: recording_id.to_string(),
                     status: IndexStatus::Unchanged,
@@ -384,9 +373,7 @@ pub async fn index_recording(
         // re-download every version-3 artifact forever.
         if entry.keystroke_state == IndexStatus::NotEnabled.as_str()
             && !entry.sha256.is_empty()
-            && entry
-                .keystroke_artifact_sha256
-                .eq_ignore_ascii_case(&entry.sha256)
+            && entry.keystroke_artifact_sha256.eq_ignore_ascii_case(&entry.sha256)
         {
             return Ok(IndexReport::plain(
                 recording_id,
@@ -396,17 +383,13 @@ pub async fn index_recording(
         }
     }
 
-    let (bytes, _format, header_sha) =
-        crate::recordings::fetch_blob(targets, recordings, recording_id).await?;
+    let (bytes, _format, header_sha) = crate::recordings::fetch_blob(targets, recordings, recording_id).await?;
 
     // The digest gate. We are about to derive durable, searchable
     // state from bastion-supplied bytes, so those bytes have to be the
     // ones the chain of custody vouches for.
-    let expected = if entry.sha256.trim().is_empty() {
-        header_sha.trim().to_string()
-    } else {
-        entry.sha256.trim().to_string()
-    };
+    let expected =
+        if entry.sha256.trim().is_empty() { header_sha.trim().to_string() } else { entry.sha256.trim().to_string() };
     let got = hex::encode(Sha256::digest(&bytes));
     if !expected.is_empty() && !got.eq_ignore_ascii_case(&expected) {
         log::warn!(
@@ -466,10 +449,7 @@ pub async fn index_recording(
         trailer_version: transcript.trailer_version,
         rebuilt: transcript.rebuilt,
         text_decoding: transcript.text_decoding.clone(),
-        keyboard_layout: transcript
-            .keyboard_layout
-            .clone()
-            .or_else(|| header.keyboard_layout.clone()),
+        keyboard_layout: transcript.keyboard_layout.clone().or_else(|| header.keyboard_layout.clone()),
         keyboard_layout_source: transcript
             .keyboard_layout_source
             .clone()
@@ -578,9 +558,7 @@ pub async fn index_sweep(
         // Up to date against the artifact digest we hold?
         let fresh = !entry.keystroke_state.is_empty()
             && !entry.sha256.is_empty()
-            && entry
-                .keystroke_artifact_sha256
-                .eq_ignore_ascii_case(&entry.sha256);
+            && entry.keystroke_artifact_sha256.eq_ignore_ascii_case(&entry.sha256);
         if fresh {
             if entry.keystroke_state == IndexStatus::NotEnabled.as_str() {
                 report.not_enabled += 1;
@@ -607,9 +585,7 @@ pub async fn index_sweep(
             }
             Err(e) => {
                 report.failed += 1;
-                report
-                    .reports
-                    .push(IndexReport::plain(&id, IndexStatus::Failed, format!("{e}")));
+                report.reports.push(IndexReport::plain(&id, IndexStatus::Failed, format!("{e}")));
             }
         }
     }
@@ -720,10 +696,7 @@ fn excerpt_around(text: &str, byte_at: usize, needle_len: usize) -> String {
     let chars: Vec<char> = text.chars().collect();
     let at = byte_at.min(text.len());
     let char_at = text[..at].chars().count();
-    let needle_chars = text[at..]
-        .get(..needle_len.min(text.len() - at))
-        .map(|s| s.chars().count())
-        .unwrap_or(0);
+    let needle_chars = text[at..].get(..needle_len.min(text.len() - at)).map(|s| s.chars().count()).unwrap_or(0);
     let start = char_at.saturating_sub(EXCERPT_CONTEXT_CHARS);
     let end = (char_at + needle_chars + EXCERPT_CONTEXT_CHARS).min(chars.len());
     let mut out = String::new();
@@ -764,11 +737,7 @@ mod tests {
         let e = excerpt_around(&long, at, 6);
         assert!(e.starts_with('…') && e.ends_with('…'));
         assert!(e.contains("needle"));
-        assert!(
-            e.chars().count() <= 2 * EXCERPT_CONTEXT_CHARS + 6 + 2,
-            "excerpt was {} chars",
-            e.chars().count()
-        );
+        assert!(e.chars().count() <= 2 * EXCERPT_CONTEXT_CHARS + 6 + 2, "excerpt was {} chars", e.chars().count());
     }
 
     #[test]
@@ -832,12 +801,7 @@ mod tests {
             keyboard_layout_source: Some("client_core".into()),
             runs: vec![run(10, Some("dir[Enter]"), false), run(50, None, true)],
             search_text: "dir[Enter]".into(),
-            census: Census {
-                keys_total: 12,
-                redacted_runs: 1,
-                redacted_chars: 8,
-                ..Census::default()
-            },
+            census: Census { keys_total: 12, redacted_runs: 1, redacted_chars: 8, ..Census::default() },
             chars_indexed: 10,
             bytes_examined: 512,
             warnings: vec!["w".into()],

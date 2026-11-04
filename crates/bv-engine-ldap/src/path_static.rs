@@ -25,7 +25,8 @@ use crate::{
 const ROLE_HELP: &str =
     "Static role: binds a single DN to a rotation policy. POST creates / updates; GET reads metadata; DELETE removes the role + cached credential.";
 const CRED_HELP: &str = "Read the current cleartext password for the static role.";
-const ROTATE_HELP: &str = "Generate a fresh password, write it to the directory, and persist as the new current credential.";
+const ROTATE_HELP: &str =
+    "Generate a fresh password, write it to the directory, and persist as the new current credential.";
 const LIST_HELP: &str = "List configured static-role names.";
 
 impl LdapBackend {
@@ -87,61 +88,31 @@ impl LdapBackend {
 
 #[maybe_async::maybe_async]
 impl LdapBackendInner {
-    pub async fn get_role(
-        &self,
-        req: &Request,
-        name: &str,
-    ) -> Result<Option<StaticRole>, RvError> {
+    pub async fn get_role(&self, req: &Request, name: &str) -> Result<Option<StaticRole>, RvError> {
         match req.storage_get(&format!("{STATIC_ROLE_PREFIX}{name}")).await? {
             Some(e) => Ok(Some(serde_json::from_slice(&e.value)?)),
             None => Ok(None),
         }
     }
 
-    pub async fn put_role(
-        &self,
-        req: &mut Request,
-        name: &str,
-        role: &StaticRole,
-    ) -> Result<(), RvError> {
+    pub async fn put_role(&self, req: &mut Request, name: &str, role: &StaticRole) -> Result<(), RvError> {
         let bytes = serde_json::to_vec(role)?;
-        req.storage_put(&StorageEntry {
-            key: format!("{STATIC_ROLE_PREFIX}{name}"),
-            value: bytes,
-        })
-        .await
+        req.storage_put(&StorageEntry { key: format!("{STATIC_ROLE_PREFIX}{name}"), value: bytes }).await
     }
 
-    pub async fn get_cred(
-        &self,
-        req: &Request,
-        name: &str,
-    ) -> Result<Option<StaticCred>, RvError> {
+    pub async fn get_cred(&self, req: &Request, name: &str) -> Result<Option<StaticCred>, RvError> {
         match req.storage_get(&format!("{STATIC_CRED_PREFIX}{name}")).await? {
             Some(e) => Ok(Some(serde_json::from_slice(&e.value)?)),
             None => Ok(None),
         }
     }
 
-    pub async fn put_cred(
-        &self,
-        req: &mut Request,
-        name: &str,
-        cred: &StaticCred,
-    ) -> Result<(), RvError> {
+    pub async fn put_cred(&self, req: &mut Request, name: &str, cred: &StaticCred) -> Result<(), RvError> {
         let bytes = serde_json::to_vec(cred)?;
-        req.storage_put(&StorageEntry {
-            key: format!("{STATIC_CRED_PREFIX}{name}"),
-            value: bytes,
-        })
-        .await
+        req.storage_put(&StorageEntry { key: format!("{STATIC_CRED_PREFIX}{name}"), value: bytes }).await
     }
 
-    pub async fn handle_role_read(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_role_read(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let name = take_str(req, "name");
         match self.get_role(req, &name).await? {
             None => Ok(None),
@@ -149,21 +120,14 @@ impl LdapBackendInner {
                 let mut data = Map::new();
                 data.insert("dn".into(), Value::String(role.dn));
                 data.insert("username".into(), Value::String(role.username));
-                data.insert(
-                    "rotation_period".into(),
-                    Value::Number(role.rotation_period.as_secs().into()),
-                );
+                data.insert("rotation_period".into(), Value::Number(role.rotation_period.as_secs().into()));
                 data.insert("password_policy".into(), Value::String(role.password_policy));
                 Ok(Some(Response::data_response(Some(data))))
             }
         }
     }
 
-    pub async fn handle_role_write(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_role_write(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let name = take_str(req, "name");
         if name.is_empty() {
             return Err(RvError::ErrString("name is required".into()));
@@ -176,11 +140,7 @@ impl LdapBackendInner {
         if username.is_empty() {
             return Err(RvError::ErrString("username is required".into()));
         }
-        let rotation_secs = req
-            .get_data("rotation_period")
-            .ok()
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
+        let rotation_secs = req.get_data("rotation_period").ok().and_then(|v| v.as_u64()).unwrap_or(0);
         let role = StaticRole {
             dn,
             username,
@@ -191,59 +151,37 @@ impl LdapBackendInner {
         Ok(None)
     }
 
-    pub async fn handle_role_delete(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_role_delete(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let name = take_str(req, "name");
         let _ = req.storage_delete(&format!("{STATIC_ROLE_PREFIX}{name}")).await;
         let _ = req.storage_delete(&format!("{STATIC_CRED_PREFIX}{name}")).await;
         Ok(None)
     }
 
-    pub async fn handle_role_list(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_role_list(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let keys = req.storage_list(STATIC_ROLE_PREFIX).await?;
         Ok(Some(Response::list_response(&keys)))
     }
 
-    pub async fn handle_cred_read(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_cred_read(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let name = take_str(req, "name");
-        let role = self
-            .get_role(req, &name)
-            .await?
-            .ok_or_else(|| RvError::ErrString(format!("unknown role `{name}`")))?;
-        let cred = self
-            .get_cred(req, &name)
-            .await?
-            .ok_or_else(|| {
-                RvError::ErrString(format!(
-                    "role `{name}` has not been rotated yet; POST /rotate-role/{name} to mint a password"
-                ))
-            })?;
+        let role =
+            self.get_role(req, &name).await?.ok_or_else(|| RvError::ErrString(format!("unknown role `{name}`")))?;
+        let cred = self.get_cred(req, &name).await?.ok_or_else(|| {
+            RvError::ErrString(format!(
+                "role `{name}` has not been rotated yet; POST /rotate-role/{name} to mint a password"
+            ))
+        })?;
 
         let mut data = Map::new();
         data.insert("username".into(), Value::String(role.username));
         data.insert("dn".into(), Value::String(role.dn));
         data.insert("password".into(), Value::String(cred.password));
-        data.insert(
-            "last_vault_rotation_unix".into(),
-            Value::Number(cred.last_vault_rotation_unix.into()),
-        );
+        data.insert("last_vault_rotation_unix".into(), Value::Number(cred.last_vault_rotation_unix.into()));
         let next = if role.rotation_period.is_zero() {
             None
         } else {
-            let next = cred
-                .last_vault_rotation_unix
-                .saturating_add(role.rotation_period.as_secs());
+            let next = cred.last_vault_rotation_unix.saturating_add(role.rotation_period.as_secs());
             let now = unix_now();
             Some(next.saturating_sub(now))
         };
@@ -253,20 +191,12 @@ impl LdapBackendInner {
         Ok(Some(Response::data_response(Some(data))))
     }
 
-    pub async fn handle_rotate_role(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_rotate_role(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let name = take_str(req, "name");
-        let role = self
-            .get_role(req, &name)
-            .await?
-            .ok_or_else(|| RvError::ErrString(format!("unknown role `{name}`")))?;
-        let cfg = self
-            .load_config(req)
-            .await?
-            .ok_or_else(|| RvError::ErrString("ldap engine not configured".into()))?;
+        let role =
+            self.get_role(req, &name).await?.ok_or_else(|| RvError::ErrString(format!("unknown role `{name}`")))?;
+        let cfg =
+            self.load_config(req).await?.ok_or_else(|| RvError::ErrString("ldap engine not configured".into()))?;
 
         let new_password = super::password::generate(super::password::DEFAULT_LENGTH);
 
@@ -274,42 +204,28 @@ impl LdapBackendInner {
         // fails after a successful LDAP modify, the next call will
         // surface the divergence on the next bind probe — see the
         // spec § "Rotation Atomicity".
-        let mut ldap = client::bind(&cfg)
-            .await
-            .map_err(|e| RvError::ErrString(format!("rotate-role: bind: {e}")))?;
+        let mut ldap = client::bind(&cfg).await.map_err(|e| RvError::ErrString(format!("rotate-role: bind: {e}")))?;
         client::set_password(&mut ldap, &cfg, &role.dn, &new_password)
             .await
             .map_err(|e| RvError::ErrString(format!("rotate-role: write: {e}")))?;
         let _ = ldap.unbind().await;
 
-        let cred = StaticCred {
-            password: new_password.clone(),
-            last_vault_rotation_unix: unix_now(),
-        };
+        let cred = StaticCred { password: new_password.clone(), last_vault_rotation_unix: unix_now() };
         self.put_cred(req, &name, &cred).await?;
 
         let mut data = Map::new();
         data.insert("username".into(), Value::String(role.username));
         data.insert("dn".into(), Value::String(role.dn));
         data.insert("password".into(), Value::String(new_password));
-        data.insert(
-            "last_vault_rotation_unix".into(),
-            Value::Number(cred.last_vault_rotation_unix.into()),
-        );
+        data.insert("last_vault_rotation_unix".into(), Value::Number(cred.last_vault_rotation_unix.into()));
         Ok(Some(Response::data_response(Some(data))))
     }
 }
 
 fn take_str(req: &Request, key: &str) -> String {
-    req.get_data(key)
-        .ok()
-        .and_then(|v| v.as_str().map(|s| s.to_string()))
-        .unwrap_or_default()
+    req.get_data(key).ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default()
 }
 
 fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }

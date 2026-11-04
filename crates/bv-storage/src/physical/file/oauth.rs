@@ -119,8 +119,7 @@ pub fn well_known_provider(name: &str) -> Result<OAuthProvider, RvError> {
             // Microsoft v2 endpoint. `common` accepts both work and
             // personal accounts; operators who want to restrict to a
             // specific tenant build their own `OAuthProvider`.
-            authorization_url:
-                "https://login.microsoftonline.com/common/oauth2/v2.0/authorize".into(),
+            authorization_url: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize".into(),
             token_url: "https://login.microsoftonline.com/common/oauth2/v2.0/token".into(),
             scopes: vec!["Files.ReadWrite.AppFolder".into(), "offline_access".into()],
             extra_auth_params: vec![],
@@ -133,10 +132,7 @@ pub fn well_known_provider(name: &str) -> Result<OAuthProvider, RvError> {
             // refresh token; `prompt=consent` forces a fresh one
             // on reconnect (otherwise Google sometimes withholds
             // it on repeat consents).
-            extra_auth_params: vec![
-                ("access_type".into(), "offline".into()),
-                ("prompt".into(), "consent".into()),
-            ],
+            extra_auth_params: vec![("access_type".into(), "offline".into()), ("prompt".into(), "consent".into())],
         }),
         "dropbox" => Ok(OAuthProvider {
             authorization_url: "https://www.dropbox.com/oauth2/authorize".into(),
@@ -273,13 +269,11 @@ pub fn begin_consent(
                  or `lsof -i :{p}` on Unix) and try again."
             ))
         })?,
-        None => TcpListener::bind((bind_host, 0))
-            .map_err(|e| RvError::ErrString(format!("oauth: bind loopback: {e}")))?,
+        None => {
+            TcpListener::bind((bind_host, 0)).map_err(|e| RvError::ErrString(format!("oauth: bind loopback: {e}")))?
+        }
     };
-    let port = listener
-        .local_addr()
-        .map_err(|e| RvError::ErrString(format!("oauth: local_addr: {e}")))?
-        .port();
+    let port = listener.local_addr().map_err(|e| RvError::ErrString(format!("oauth: local_addr: {e}")))?.port();
     let redirect_uri = format!("http://{bind_host}:{port}/callback");
 
     let verifier = pkce_verifier();
@@ -287,13 +281,7 @@ pub fn begin_consent(
     let state = random_state();
     let consent_url = build_authorization_url(provider, creds, &redirect_uri, &state, &challenge)?;
 
-    Ok(ConsentSession {
-        consent_url,
-        verifier,
-        state,
-        redirect_uri,
-        listener,
-    })
+    Ok(ConsentSession { consent_url, verifier, state, redirect_uri, listener })
 }
 
 impl ConsentSession {
@@ -307,31 +295,21 @@ impl ConsentSession {
     /// without completing consent. The default `Duration` suggested
     /// by this module is 5 minutes.
     pub fn wait_for_callback(self, timeout: Duration) -> Result<CallbackParams, RvError> {
-        self.listener
-            .set_nonblocking(false)
-            .map_err(|e| RvError::ErrString(format!("oauth: set blocking: {e}")))?;
+        self.listener.set_nonblocking(false).map_err(|e| RvError::ErrString(format!("oauth: set blocking: {e}")))?;
 
         // Poll-style accept with a small sleep so the overall
         // timeout is honoured without requiring tokio or async.
         let deadline = std::time::Instant::now() + timeout;
-        self.listener
-            .set_nonblocking(true)
-            .map_err(|e| RvError::ErrString(format!("oauth: set nonblocking: {e}")))?;
+        self.listener.set_nonblocking(true).map_err(|e| RvError::ErrString(format!("oauth: set nonblocking: {e}")))?;
 
         loop {
             if std::time::Instant::now() > deadline {
-                return Err(RvError::ErrString(
-                    "oauth: consent flow timed out waiting for browser callback".into(),
-                ));
+                return Err(RvError::ErrString("oauth: consent flow timed out waiting for browser callback".into()));
             }
             match self.listener.accept() {
                 Ok((stream, _addr)) => {
-                    stream
-                        .set_read_timeout(Some(Duration::from_secs(10)))
-                        .ok();
-                    stream
-                        .set_write_timeout(Some(Duration::from_secs(10)))
-                        .ok();
+                    stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
+                    stream.set_write_timeout(Some(Duration::from_secs(10))).ok();
                     return Self::handle_callback(stream, &self.state);
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -350,16 +328,12 @@ impl ConsentSession {
         // header block through the first blank line is enough.
         let mut reader = BufReader::new(&mut stream);
         let mut request_line = String::new();
-        reader
-            .read_line(&mut request_line)
-            .map_err(|e| RvError::ErrString(format!("oauth: read request: {e}")))?;
+        reader.read_line(&mut request_line).map_err(|e| RvError::ErrString(format!("oauth: read request: {e}")))?;
         // Drain the rest of the header block so the peer doesn't
         // get ECONNRESET when we start writing the response.
         loop {
             let mut line = String::new();
-            let n = reader
-                .read_line(&mut line)
-                .map_err(|e| RvError::ErrString(format!("oauth: read headers: {e}")))?;
+            let n = reader.read_line(&mut line).map_err(|e| RvError::ErrString(format!("oauth: read headers: {e}")))?;
             if n == 0 || line == "\r\n" || line == "\n" {
                 break;
             }
@@ -373,9 +347,7 @@ impl ConsentSession {
         let _ = respond_ok(&mut stream);
 
         if params.state != expected_state {
-            return Err(RvError::ErrString(
-                "oauth: callback state mismatch — possible CSRF, aborting".into(),
-            ));
+            return Err(RvError::ErrString("oauth: callback state mismatch — possible CSRF, aborting".into()));
         }
         Ok(params)
     }
@@ -388,22 +360,15 @@ impl ConsentSession {
 fn parse_request_line(line: &str) -> Result<CallbackParams, RvError> {
     let trimmed = line.trim_end_matches(['\r', '\n']);
     let mut it = trimmed.splitn(3, ' ');
-    let method = it
-        .next()
-        .ok_or_else(|| RvError::ErrString("oauth: empty request line".into()))?;
-    let path_and_query = it
-        .next()
-        .ok_or_else(|| RvError::ErrString("oauth: malformed request line".into()))?;
+    let method = it.next().ok_or_else(|| RvError::ErrString("oauth: empty request line".into()))?;
+    let path_and_query = it.next().ok_or_else(|| RvError::ErrString("oauth: malformed request line".into()))?;
     if method != "GET" {
-        return Err(RvError::ErrString(format!(
-            "oauth: expected GET, got {method}"
-        )));
+        return Err(RvError::ErrString(format!("oauth: expected GET, got {method}")));
     }
     // The path is relative; construct an absolute URL just to use
     // `url`'s query parser. The host part is arbitrary.
     let absolute = format!("http://loopback{path_and_query}");
-    let parsed = Url::parse(&absolute)
-        .map_err(|e| RvError::ErrString(format!("oauth: bad callback path: {e}")))?;
+    let parsed = Url::parse(&absolute).map_err(|e| RvError::ErrString(format!("oauth: bad callback path: {e}")))?;
 
     // Surface provider-sent errors rather than silently ignoring them.
     let mut code: Option<String> = None;
@@ -422,9 +387,7 @@ fn parse_request_line(line: &str) -> Result<CallbackParams, RvError> {
 
     if let Some(e) = err_param {
         let desc = err_description.unwrap_or_default();
-        return Err(RvError::ErrString(format!(
-            "oauth: provider returned error `{e}`: {desc}"
-        )));
+        return Err(RvError::ErrString(format!("oauth: provider returned error `{e}`: {desc}")));
     }
 
     let code = code.ok_or_else(|| RvError::ErrString("oauth: callback missing `code`".into()))?;
@@ -513,13 +476,10 @@ fn post_token_endpoint(url: &str, form: &[(&str, String)]) -> Result<TokenRespon
         .read_to_string()
         .map_err(|e| RvError::ErrString(format!("oauth: token endpoint body: {e}")))?;
     if !(200..300).contains(&status) {
-        return Err(RvError::ErrString(format!(
-            "oauth: token endpoint returned {status}: {body}"
-        )));
+        return Err(RvError::ErrString(format!("oauth: token endpoint returned {status}: {body}")));
     }
-    let parsed: TokenResponse = serde_json::from_str(&body).map_err(|e| {
-        RvError::ErrString(format!("oauth: token response parse: {e}; body={body}"))
-    })?;
+    let parsed: TokenResponse = serde_json::from_str(&body)
+        .map_err(|e| RvError::ErrString(format!("oauth: token response parse: {e}; body={body}")))?;
     Ok(parsed)
 }
 
@@ -546,10 +506,7 @@ mod tests {
         // must be 43..=128 chars and match [A-Z a-z 0-9 - . _ ~]).
         assert_eq!(v.len(), 96);
         for c in v.chars() {
-            assert!(
-                c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~'),
-                "bad char {c:?}"
-            );
+            assert!(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~'), "bad char {c:?}");
         }
     }
 
@@ -569,28 +526,13 @@ mod tests {
             scopes: vec!["files.read".to_string(), "files.write".to_string()],
             extra_auth_params: vec![("prompt".into(), "consent".into())],
         };
-        let creds = OAuthCredentials {
-            client_id: "my-client".into(),
-            client_secret: None,
-        };
-        let url = build_authorization_url(
-            &provider,
-            &creds,
-            "http://127.0.0.1:54231/callback",
-            "st8",
-            "cc",
-        )
-        .unwrap();
-        let q: std::collections::HashMap<String, String> = url
-            .query_pairs()
-            .map(|(k, v)| (k.into_owned(), v.into_owned()))
-            .collect();
+        let creds = OAuthCredentials { client_id: "my-client".into(), client_secret: None };
+        let url = build_authorization_url(&provider, &creds, "http://127.0.0.1:54231/callback", "st8", "cc").unwrap();
+        let q: std::collections::HashMap<String, String> =
+            url.query_pairs().map(|(k, v)| (k.into_owned(), v.into_owned())).collect();
         assert_eq!(q.get("client_id").unwrap(), "my-client");
         assert_eq!(q.get("response_type").unwrap(), "code");
-        assert_eq!(
-            q.get("redirect_uri").unwrap(),
-            "http://127.0.0.1:54231/callback"
-        );
+        assert_eq!(q.get("redirect_uri").unwrap(), "http://127.0.0.1:54231/callback");
         assert_eq!(q.get("scope").unwrap(), "files.read files.write");
         assert_eq!(q.get("state").unwrap(), "st8");
         assert_eq!(q.get("code_challenge").unwrap(), "cc");
@@ -607,20 +549,16 @@ mod tests {
 
     #[test]
     fn parse_request_line_url_decodes() {
-        let params = parse_request_line(
-            "GET /callback?code=a%2Bb%2Fc%3Dd&state=x%20y HTTP/1.1\r\n",
-        )
-        .unwrap();
+        let params = parse_request_line("GET /callback?code=a%2Bb%2Fc%3Dd&state=x%20y HTTP/1.1\r\n").unwrap();
         assert_eq!(params.code, "a+b/c=d");
         assert_eq!(params.state, "x y");
     }
 
     #[test]
     fn parse_request_line_surfaces_provider_error() {
-        let err = parse_request_line(
-            "GET /callback?error=access_denied&error_description=user%20cancelled HTTP/1.1\r\n",
-        )
-        .unwrap_err();
+        let err =
+            parse_request_line("GET /callback?error=access_denied&error_description=user%20cancelled HTTP/1.1\r\n")
+                .unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("access_denied"), "got: {msg}");
         assert!(msg.contains("user cancelled"), "got: {msg}");
@@ -684,10 +622,7 @@ mod tests {
             scopes: vec!["s".into()],
             extra_auth_params: vec![],
         };
-        let creds = OAuthCredentials {
-            client_id: "c".into(),
-            client_secret: None,
-        };
+        let creds = OAuthCredentials { client_id: "c".into(), client_secret: None };
         // Tests pass `None` so each test gets an ephemeral port
         // — the fixed `DEFAULT_LOOPBACK_PORT` would race if two
         // tests ran in parallel against the same machine.
@@ -703,21 +638,14 @@ mod tests {
             // non-blocking and is polling. Even without this, the
             // accept loop would pick up a slightly-early connect.
             std::thread::sleep(Duration::from_millis(50));
-            let url = format!(
-                "http://127.0.0.1:{port}/callback?code=the-code&state={}",
-                urlencoding(&state_for_worker)
-            );
-            let agent: ureq::Agent = ureq::config::Config::builder()
-                .http_status_as_error(false)
-                .build()
-                .into();
+            let url =
+                format!("http://127.0.0.1:{port}/callback?code=the-code&state={}", urlencoding(&state_for_worker));
+            let agent: ureq::Agent = ureq::config::Config::builder().http_status_as_error(false).build().into();
             let resp = agent.get(&url).call().expect("callback GET");
             assert_eq!(resp.status().as_u16(), 200);
         });
 
-        let params = session
-            .wait_for_callback(Duration::from_secs(5))
-            .expect("callback received");
+        let params = session.wait_for_callback(Duration::from_secs(5)).expect("callback received");
         handle.join().expect("worker");
         assert_eq!(params.code, "the-code");
         assert_eq!(params.state, state_expected);
@@ -731,10 +659,7 @@ mod tests {
             scopes: vec!["s".into()],
             extra_auth_params: vec![],
         };
-        let creds = OAuthCredentials {
-            client_id: "c".into(),
-            client_secret: None,
-        };
+        let creds = OAuthCredentials { client_id: "c".into(), client_secret: None };
         // Tests pass `None` so each test gets an ephemeral port
         // — the fixed `DEFAULT_LOOPBACK_PORT` would race if two
         // tests ran in parallel against the same machine.
@@ -744,21 +669,13 @@ mod tests {
         let handle = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(50));
             let url = format!("http://127.0.0.1:{port}/callback?code=c&state=WRONG");
-            let agent: ureq::Agent = ureq::config::Config::builder()
-                .http_status_as_error(false)
-                .build()
-                .into();
+            let agent: ureq::Agent = ureq::config::Config::builder().http_status_as_error(false).build().into();
             let _ = agent.get(&url).call();
         });
 
-        let err = session
-            .wait_for_callback(Duration::from_secs(5))
-            .unwrap_err();
+        let err = session.wait_for_callback(Duration::from_secs(5)).unwrap_err();
         handle.join().ok();
-        assert!(
-            format!("{err}").contains("state mismatch"),
-            "got: {err}"
-        );
+        assert!(format!("{err}").contains("state mismatch"), "got: {err}");
     }
 
     #[test]
@@ -777,24 +694,15 @@ mod tests {
         assert!(p.scopes.iter().any(|s| s.contains("drive.appdata")));
         // Google needs `access_type=offline` + `prompt=consent` for
         // reliable refresh-token issuance.
-        assert!(p
-            .extra_auth_params
-            .iter()
-            .any(|(k, v)| k == "access_type" && v == "offline"));
-        assert!(p
-            .extra_auth_params
-            .iter()
-            .any(|(k, v)| k == "prompt" && v == "consent"));
+        assert!(p.extra_auth_params.iter().any(|(k, v)| k == "access_type" && v == "offline"));
+        assert!(p.extra_auth_params.iter().any(|(k, v)| k == "prompt" && v == "consent"));
     }
 
     #[test]
     fn well_known_dropbox_shape() {
         let p = well_known_provider("dropbox").unwrap();
         assert!(p.authorization_url.contains("dropbox.com"));
-        assert!(p
-            .extra_auth_params
-            .iter()
-            .any(|(k, v)| k == "token_access_type" && v == "offline"));
+        assert!(p.extra_auth_params.iter().any(|(k, v)| k == "token_access_type" && v == "offline"));
     }
 
     #[test]

@@ -48,10 +48,7 @@ impl CommandExecutor for SshBrokerPolicySet {
         let client = self.client()?;
         let mut body = Map::new();
         if let Some(lc) = &self.login_class {
-            body.insert(
-                "login_class_default".into(),
-                Value::String(lc.clone()),
-            );
+            body.insert("login_class_default".into(), Value::String(lc.clone()));
         }
         // Only send the lock field when the operator was explicit, so a
         // bare `set --login-class ...` doesn't silently clear an existing
@@ -61,9 +58,7 @@ impl CommandExecutor for SshBrokerPolicySet {
         } else if self.no_lock {
             body.insert("login_class_lock".into(), Value::Bool(false));
         }
-        let resp = client
-            .logical()
-            .write("ssh-broker/policy/global", Some(body))?;
+        let resp = client.logical().write("ssh-broker/policy/global", Some(body))?;
         if resp.response_status == 200 {
             if let Some(data) = resp.response_data.as_ref() {
                 self.output.print_value(data, true)?;

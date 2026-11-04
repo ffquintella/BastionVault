@@ -293,8 +293,16 @@ pub async fn session_open_sftp(
     let dial_port = dial.port;
     let sftp_target = dial.hosts.first().cloned().unwrap_or_default();
     let sftp_transport = if dial.bastion_name.is_some() { "rustion" } else { "direct" };
-    record_session_open(&state, &request.resource_name, &request.profile_id, "sftp", sftp_transport, &sftp_target, dial_port)
-        .await?;
+    record_session_open(
+        &state,
+        &request.resource_name,
+        &request.profile_id,
+        "sftp",
+        sftp_transport,
+        &sftp_target,
+        dial_port,
+    )
+    .await?;
     let (host, outcome): (String, SftpOpenOutcome) = dial_in_order("sftp", &dial.hosts, dial_port, |host| {
         let app = app.clone();
         let state = &state;

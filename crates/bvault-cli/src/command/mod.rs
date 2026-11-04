@@ -15,6 +15,10 @@ use crate::{
 
 pub mod auth;
 pub mod auth_disable;
+pub mod auth_enable;
+pub mod auth_help;
+pub mod auth_list;
+pub mod auth_move;
 pub mod cluster;
 pub mod cluster_discover;
 pub mod cluster_failover;
@@ -23,11 +27,9 @@ pub mod cluster_leave;
 pub mod cluster_members;
 pub mod cluster_remove_node;
 pub mod cluster_status;
-pub mod auth_enable;
-pub mod auth_help;
-pub mod auth_list;
-pub mod auth_move;
 pub mod delete;
+#[cfg(unix)]
+pub mod ferrogate;
 pub mod format;
 pub mod hsm_gateway;
 pub mod list;
@@ -36,18 +38,16 @@ pub mod login_handlers;
 pub mod mcp;
 pub mod mcp_serve;
 pub mod operator;
+#[cfg(not(feature = "sync_handler"))]
+pub mod operator_backup;
 pub mod operator_cloud_target_connect;
 #[cfg(not(feature = "sync_handler"))]
 pub mod operator_cloud_target_rekey;
-pub mod operator_init;
-#[cfg(not(feature = "sync_handler"))]
-pub mod operator_backup;
 pub mod operator_export;
 pub mod operator_ferrogate;
 pub mod operator_hsm;
 pub mod operator_import;
-#[cfg(unix)]
-pub mod ferrogate;
+pub mod operator_init;
 #[cfg(unix)]
 /// The MIA helper-socket client moved to `bv-auth-ferrogate` in Phase 4 — it
 /// is not command-line code, and the Tauri host needs it too. Re-exported
@@ -84,12 +84,12 @@ pub mod rustion_target_test;
 pub mod secrets;
 pub mod secrets_disable;
 pub mod secrets_enable;
-pub mod ssh_broker;
-pub mod ssh_broker_policy_get;
-pub mod ssh_broker_policy_set;
 pub mod secrets_list;
 pub mod secrets_move;
 pub mod server;
+pub mod ssh_broker;
+pub mod ssh_broker_policy_get;
+pub mod ssh_broker_policy_set;
 pub mod status;
 pub mod write;
 
@@ -273,15 +273,11 @@ impl HttpOptions {
     /// `--no-cluster-discovery` was passed; otherwise runs SRV +
     /// `/sys/health` probing via the bv-client discovery module.
     pub fn resolved_address(&self) -> Result<String, RvError> {
-        if self.no_cluster_discovery
-            || self.address.starts_with("http://")
-            || self.address.starts_with("https://")
-        {
+        if self.no_cluster_discovery || self.address.starts_with("http://") || self.address.starts_with("https://") {
             return Ok(self.address.clone());
         }
-        let selected = self
-            .run_cluster_discovery()
-            .map_err(|e| RvError::ErrString(format!("cluster discovery failed: {e}")))?;
+        let selected =
+            self.run_cluster_discovery().map_err(|e| RvError::ErrString(format!("cluster discovery failed: {e}")))?;
         Ok(selected.candidate.url())
     }
 
@@ -343,8 +339,7 @@ impl HttpOptions {
     /// table; that subcommand calls [`Self::probe_cluster`] instead.
     pub fn run_cluster_discovery(&self) -> Result<bv_client::health::Selected, String> {
         let probes = self.probe_cluster()?;
-        bv_client::health::pick(&probes)
-            .ok_or_else(|| format!("no healthy node found for `{}`", self.address))
+        bv_client::health::pick(&probes).ok_or_else(|| format!("no healthy node found for `{}`", self.address))
     }
 
     /// Resolve the set of cluster nodes a cluster-wide operator command
@@ -429,25 +424,18 @@ impl HttpOptions {
         }
         let mut b = bv_client::tls::TLSConfigBuilder::new().with_insecure(self.tls_skip_verify);
         if let Some(ca) = self.ca_cert.as_ref().or(auto_ca.as_ref()) {
-            b = b
-                .with_server_ca_path(ca)
-                .map_err(|e| RvError::ErrString(format!("ca cert: {e}")))?;
+            b = b.with_server_ca_path(ca).map_err(|e| RvError::ErrString(format!("ca cert: {e}")))?;
         }
         if let (Some(cc), Some(ck)) = (&self.client_cert, &self.client_key) {
-            b = b
-                .with_client_cert_path(cc, ck)
-                .map_err(|e| RvError::ErrString(format!("client cert: {e}")))?;
+            b = b.with_client_cert_path(cc, ck).map_err(|e| RvError::ErrString(format!("client cert: {e}")))?;
         }
-        let cfg = b
-            .build()
-            .map_err(|e| RvError::ErrString(format!("tls build: {e}")))?;
+        let cfg = b.build().map_err(|e| RvError::ErrString(format!("tls build: {e}")))?;
         Ok(Some(cfg))
     }
 
     pub fn address_raw(&self) -> &str {
         &self.address
     }
-
 
     /// Look for a server-published serving certificate at a small set of
     /// conventional paths, used as a fallback when the user did not pass
@@ -481,9 +469,7 @@ impl HttpOptions {
             candidates.push(PathBuf::from(home).join(".bvault").join("ca.pem"));
         }
         candidates.push(PathBuf::from("/etc/bvault/ca.pem"));
-        candidates.push(PathBuf::from(
-            "/srv/application-config/bastionvault/tls/server.crt",
-        ));
+        candidates.push(PathBuf::from("/srv/application-config/bastionvault/tls/server.crt"));
         candidates.into_iter().find(|p| p.is_file())
     }
 }
@@ -494,15 +480,10 @@ impl HttpOptions {
 /// the original host couldn't be resolved — TLS will then attempt name
 /// resolution as if the flag weren't passed, which surfaces a clearer
 /// error than silently dropping the override.
-fn rewrite_url_for_sni(
-    url: &str,
-    sni_name: &str,
-) -> Result<(String, Option<std::net::SocketAddr>), RvError> {
+fn rewrite_url_for_sni(url: &str, sni_name: &str) -> Result<(String, Option<std::net::SocketAddr>), RvError> {
     use std::net::ToSocketAddrs;
 
-    let (scheme, rest) = url
-        .split_once("://")
-        .ok_or_else(|| RvError::ErrString(format!("malformed URL: {url}")))?;
+    let (scheme, rest) = url.split_once("://").ok_or_else(|| RvError::ErrString(format!("malformed URL: {url}")))?;
     let (authority, path_suffix) = match rest.find('/') {
         Some(i) => (&rest[..i], &rest[i..]),
         None => (rest, ""),
@@ -513,9 +494,8 @@ fn rewrite_url_for_sni(
 
     // Extract port if present. IPv6 literals are wrapped in [].
     let (host, port) = if let Some(stripped) = host_port.strip_prefix('[') {
-        let (h, rest) = stripped
-            .split_once(']')
-            .ok_or_else(|| RvError::ErrString(format!("malformed IPv6 host: {host_port}")))?;
+        let (h, rest) =
+            stripped.split_once(']').ok_or_else(|| RvError::ErrString(format!("malformed IPv6 host: {host_port}")))?;
         let p = rest.strip_prefix(':');
         (h.to_string(), p)
     } else if let Some((h, p)) = host_port.rsplit_once(':') {
@@ -527,9 +507,8 @@ fn rewrite_url_for_sni(
         "https" => "443".to_string(),
         _ => "80".to_string(),
     });
-    let port_num: u16 = port_str
-        .parse()
-        .map_err(|_| RvError::ErrString(format!("invalid port `{port_str}` in {url}")))?;
+    let port_num: u16 =
+        port_str.parse().map_err(|_| RvError::ErrString(format!("invalid port `{port_str}` in {url}")))?;
 
     // Resolve the original host to a SocketAddr. If it fails, fall back to
     // letting the default resolver try — the user gets a meaningful error
@@ -587,11 +566,8 @@ mod sni_rewrite_tests {
 
     #[test]
     fn returns_none_addr_for_unresolvable_host_but_still_rewrites() {
-        let (url, addr) = rewrite_url_for_sni(
-            "https://this-host-does-not-exist.invalid:8200/x",
-            "vault.example",
-        )
-        .unwrap();
+        let (url, addr) =
+            rewrite_url_for_sni("https://this-host-does-not-exist.invalid:8200/x", "vault.example").unwrap();
         assert_eq!(url, "https://vault.example:8200/x");
         assert!(addr.is_none());
     }
@@ -606,8 +582,7 @@ mod sni_rewrite_tests {
     /// `details.uri.authority().host()` for the SNI / certificate name).
     #[test]
     fn rewritten_url_parses_as_http_uri_with_dns_host() {
-        let (url, _) =
-            rewrite_url_for_sni("https://127.0.0.1:8200/v1/sys/unseal", "vault.example").unwrap();
+        let (url, _) = rewrite_url_for_sni("https://127.0.0.1:8200/v1/sys/unseal", "vault.example").unwrap();
         let uri: ureq::http::Uri = url.parse().expect("URL must parse as http::Uri");
         let authority = uri.authority().expect("authority present");
         assert_eq!(authority.host(), "vault.example");
@@ -617,7 +592,7 @@ mod sni_rewrite_tests {
 
 #[cfg(test)]
 mod test {
-    use crate::{errors::RvError, bv_error_string, test_utils::TestHttpServer};
+    use crate::{bv_error_string, errors::RvError, test_utils::TestHttpServer};
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_cli_logical() {

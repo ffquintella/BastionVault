@@ -11,24 +11,23 @@
 use std::{any::Any, collections::HashMap, sync::Arc, time::Duration};
 
 use arc_swap::ArcSwap;
+use chrono::Utc;
 use derive_more::Deref;
 use serde::Deserialize;
 use serde_json::{Map, Value};
-use chrono::Utc;
 
 use super::Module;
 use crate::kernel_api::VaultCtx;
 use crate::{
+    bv_error_response_status, bv_error_string,
     context::Context,
     core::Core,
     errors::RvError,
     logical::{
-        secret::Secret, Backend, Field, FieldType, LogicalBackend, Operation, Path, PathOperation,
-        Request, Response,
+        secret::Secret, Backend, Field, FieldType, LogicalBackend, Operation, Path, PathOperation, Request, Response,
     },
-    new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path,
-    new_path_internal, new_secret, new_secret_internal,
-    bv_error_response_status, bv_error_string,
+    new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path, new_path_internal,
+    new_secret, new_secret_internal,
 };
 
 pub mod default_account;
@@ -41,13 +40,11 @@ pub mod share_store;
 pub mod ssh_security_key;
 pub mod user_audit_store;
 pub use default_account::{DefaultResourceAccount, DefaultResourceAccountStore};
-pub use ssh_security_key::{SshSecurityKey, SshSecurityKeyStore};
 pub use entity_store::{Entity, EntityStore};
 pub use group_store::{GroupEntry, GroupHistoryEntry, GroupKind, GroupStore};
 pub use owner_store::{OwnerRecord, OwnerStore};
-pub use share_store::{
-    SecretShare, ShareByGranteePointer, ShareGranteeKind, ShareStore, ShareTargetKind,
-};
+pub use share_store::{SecretShare, ShareByGranteePointer, ShareGranteeKind, ShareStore, ShareTargetKind};
+pub use ssh_security_key::{SshSecurityKey, SshSecurityKeyStore};
 pub use user_audit_store::{UserAuditEntry, UserAuditStore};
 
 /// Best-effort caller identity for audit rows.
@@ -527,14 +524,8 @@ fn group_to_response(entry: &GroupEntry, kind: GroupKind) -> Response {
     data.insert("name".into(), Value::String(entry.name.clone()));
     data.insert("kind".into(), Value::String(kind.to_string()));
     data.insert("description".into(), Value::String(entry.description.clone()));
-    data.insert(
-        "members".into(),
-        Value::Array(entry.members.iter().cloned().map(Value::String).collect()),
-    );
-    data.insert(
-        "policies".into(),
-        Value::Array(entry.policies.iter().cloned().map(Value::String).collect()),
-    );
+    data.insert("members".into(), Value::Array(entry.members.iter().cloned().map(Value::String).collect()));
+    data.insert("policies".into(), Value::Array(entry.policies.iter().cloned().map(Value::String).collect()));
     data.insert("created_at".into(), Value::String(entry.created_at.clone()));
     data.insert("updated_at".into(), Value::String(entry.updated_at.clone()));
     Response::data_response(Some(data))
@@ -574,15 +565,12 @@ fn decode_b64url_path(segment: &str) -> Option<String> {
 /// Pull `(kind, target_path, grantee)` out of the URL fields on a
 /// share request. Fails with a 400-ish error when any segment is
 /// missing or invalid.
-fn extract_share_identifiers(
-    req: &Request,
-) -> Result<(ShareTargetKind, String, String), RvError> {
+fn extract_share_identifiers(req: &Request) -> Result<(ShareTargetKind, String, String), RvError> {
     let kind_str = req.get_data("kind")?.as_str().unwrap_or("").to_string();
     let target_b64 = req.get_data("target")?.as_str().unwrap_or("").to_string();
     let grantee = req.get_data("grantee")?.as_str().unwrap_or("").to_string();
 
-    let kind = ShareTargetKind::parse(&kind_str)
-        .ok_or_else(|| bv_error_string!("invalid share kind"))?;
+    let kind = ShareTargetKind::parse(&kind_str).ok_or_else(|| bv_error_string!("invalid share kind"))?;
     let target_path = decode_b64url_path(&target_b64)
         .ok_or_else(|| bv_error_string!("invalid target segment (expected base64url)"))?;
     let target_path = scope_share_target(kind, target_path, req);
@@ -622,26 +610,17 @@ fn extract_share_identifiers(
 /// Only a prefix matching the *active* namespace is stripped, so a record from
 /// another namespace is never silently rewritten into a local-looking name.
 fn display_share_target(target_path: &str, req: &Request) -> String {
-    let Some(ns) = req
-        .namespace_path
-        .as_deref()
-        .map(|n| n.trim().trim_matches('/'))
-        .filter(|n| !n.is_empty())
-    else {
+    let Some(ns) = req.namespace_path.as_deref().map(|n| n.trim().trim_matches('/')).filter(|n| !n.is_empty()) else {
         return target_path.to_string();
     };
-    target_path
-        .strip_prefix(&format!("{ns}/"))
-        .unwrap_or(target_path)
-        .to_string()
+    target_path.strip_prefix(&format!("{ns}/")).unwrap_or(target_path).to_string()
 }
 
 fn scope_share_target(kind: ShareTargetKind, target_path: String, req: &Request) -> String {
     let ns = req.namespace_path.as_deref();
     match kind {
         ShareTargetKind::KvSecret => {
-            owner_store::OwnerStore::canonicalize_kv_path_scoped(&target_path, ns)
-                .unwrap_or(target_path)
+            owner_store::OwnerStore::canonicalize_kv_path_scoped(&target_path, ns).unwrap_or(target_path)
         }
         ShareTargetKind::Resource | ShareTargetKind::File | ShareTargetKind::AssetGroup => {
             owner_store::OwnerStore::scope_target_name(&target_path, ns).unwrap_or(target_path)
@@ -653,11 +632,7 @@ fn scope_share_target(kind: ShareTargetKind, target_path: String, req: &Request)
 /// JSON object. When `rec` is `None` the response still carries the
 /// target identifiers with empty owner fields so the GUI can tell
 /// "not yet owned" from "lookup failed".
-fn owner_response(
-    kind: &str,
-    target: &str,
-    rec: Option<OwnerRecord>,
-) -> Map<String, Value> {
+fn owner_response(kind: &str, target: &str, rec: Option<OwnerRecord>) -> Map<String, Value> {
     let mut m = Map::new();
     m.insert("target_kind".into(), Value::String(kind.to_string()));
     m.insert("target".into(), Value::String(target.to_string()));
@@ -680,37 +655,14 @@ fn owner_response(
 fn share_to_value(share: &SecretShare, req: &Request) -> Value {
     let mut m = Map::new();
     m.insert("target_kind".into(), Value::String(share.target_kind.clone()));
-    m.insert(
-        "target_path".into(),
-        Value::String(display_share_target(&share.target_path, req)),
-    );
+    m.insert("target_path".into(), Value::String(display_share_target(&share.target_path, req)));
     m.insert(
         "grantee_kind".into(),
-        Value::String(if share.grantee_kind.is_empty() {
-            "entity".to_string()
-        } else {
-            share.grantee_kind.clone()
-        }),
+        Value::String(if share.grantee_kind.is_empty() { "entity".to_string() } else { share.grantee_kind.clone() }),
     );
-    m.insert(
-        "grantee_entity_id".into(),
-        Value::String(share.grantee_entity_id.clone()),
-    );
-    m.insert(
-        "granted_by_entity_id".into(),
-        Value::String(share.granted_by_entity_id.clone()),
-    );
-    m.insert(
-        "capabilities".into(),
-        Value::Array(
-            share
-                .capabilities
-                .iter()
-                .cloned()
-                .map(Value::String)
-                .collect(),
-        ),
-    );
+    m.insert("grantee_entity_id".into(), Value::String(share.grantee_entity_id.clone()));
+    m.insert("granted_by_entity_id".into(), Value::String(share.granted_by_entity_id.clone()));
+    m.insert("capabilities".into(), Value::Array(share.capabilities.iter().cloned().map(Value::String).collect()));
     m.insert("granted_at".into(), Value::String(share.granted_at.clone()));
     m.insert("expires_at".into(), Value::String(share.expires_at.clone()));
     m.insert("expired".into(), Value::Bool(share.is_expired()));
@@ -719,16 +671,10 @@ fn share_to_value(share: &SecretShare, req: &Request) -> Value {
 
 fn value_to_string_vec(v: &Value) -> Vec<String> {
     match v {
-        Value::Array(arr) => arr
-            .iter()
-            .filter_map(|x| x.as_str().map(|s| s.to_string()))
-            .filter(|s| !s.trim().is_empty())
-            .collect(),
-        Value::String(s) => s
-            .split(',')
-            .map(|x| x.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect(),
+        Value::Array(arr) => {
+            arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).filter(|s| !s.trim().is_empty()).collect()
+        }
+        Value::String(s) => s.split(',').map(|x| x.trim().to_string()).filter(|s| !s.is_empty()).collect(),
         _ => Vec::new(),
     }
 }
@@ -743,22 +689,14 @@ impl IdentityBackendInner {
             .ok_or_else(|| bv_error_string!("identity group store unavailable"))
     }
 
-    async fn handle_group_list(
-        &self,
-        kind: GroupKind,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    async fn handle_group_list(&self, kind: GroupKind, req: &mut Request) -> Result<Option<Response>, RvError> {
         let store = self.resolve_store()?;
         let ns = group_ns_from_req(req);
         let keys = store.list_groups_ns(kind, &ns).await?;
         Ok(Some(Response::list_response(&keys)))
     }
 
-    async fn handle_group_read(
-        &self,
-        kind: GroupKind,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    async fn handle_group_read(&self, kind: GroupKind, req: &mut Request) -> Result<Option<Response>, RvError> {
         let store = self.resolve_store()?;
         let ns = group_ns_from_req(req);
         let name = req.get_data("name")?.as_str().unwrap_or("").to_string();
@@ -768,11 +706,7 @@ impl IdentityBackendInner {
         }
     }
 
-    async fn handle_group_write(
-        &self,
-        kind: GroupKind,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    async fn handle_group_write(&self, kind: GroupKind, req: &mut Request) -> Result<Option<Response>, RvError> {
         let store = self.resolve_store()?;
         let ns = group_ns_from_req(req);
         let name = req.get_data("name")?.as_str().unwrap_or("").to_string();
@@ -806,8 +740,7 @@ impl IdentityBackendInner {
         // Compute changed fields *before* persisting, using the post-store
         // normalization rules so the diff matches what actually gets saved.
         let op = if existing.is_some() { "update" } else { "create" };
-        let (changed_fields, before, after) =
-            diff_with_values(existing.as_ref(), Some(&entry));
+        let (changed_fields, before, after) = diff_with_values(existing.as_ref(), Some(&entry));
         let record_history = op == "create" || !changed_fields.is_empty();
 
         store.set_group_ns(kind, entry, &ns).await?;
@@ -828,11 +761,7 @@ impl IdentityBackendInner {
         Ok(None)
     }
 
-    async fn handle_group_delete(
-        &self,
-        kind: GroupKind,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    async fn handle_group_delete(&self, kind: GroupKind, req: &mut Request) -> Result<Option<Response>, RvError> {
         let store = self.resolve_store()?;
         let ns = group_ns_from_req(req);
         let name = req.get_data("name")?.as_str().unwrap_or("").to_string();
@@ -856,11 +785,7 @@ impl IdentityBackendInner {
         Ok(None)
     }
 
-    async fn handle_group_history(
-        &self,
-        kind: GroupKind,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    async fn handle_group_history(&self, kind: GroupKind, req: &mut Request) -> Result<Option<Response>, RvError> {
         let store = self.resolve_store()?;
         let ns = group_ns_from_req(req);
         let name = req.get_data("name")?.as_str().unwrap_or("").to_string();
@@ -876,13 +801,7 @@ impl IdentityBackendInner {
                     m.insert("op".into(), Value::String(e.op.clone()));
                     m.insert(
                         "changed_fields".into(),
-                        Value::Array(
-                            e.changed_fields
-                                .iter()
-                                .cloned()
-                                .map(Value::String)
-                                .collect(),
-                        ),
+                        Value::Array(e.changed_fields.iter().cloned().map(Value::String).collect()),
                     );
                     m.insert("before".into(), Value::Object(e.before.clone()));
                     m.insert("after".into(), Value::Object(e.after.clone()));
@@ -1039,11 +958,7 @@ impl IdentityBackendInner {
         if grantee_kind.is_group() {
             return Ok(grantee);
         }
-        let ns = req
-            .namespace_path
-            .as_deref()
-            .map(|n| n.trim().trim_matches('/'))
-            .unwrap_or("");
+        let ns = req.namespace_path.as_deref().map(|n| n.trim().trim_matches('/')).unwrap_or("");
 
         let store = self.resolve_entity_store()?;
         let Some(entity) = store.get_entity(&grantee).await? else {
@@ -1056,9 +971,7 @@ impl IdentityBackendInner {
             return Ok(grantee);
         }
 
-        let scoped = store
-            .get_or_create_entity_ns(&entity.primary_mount, &entity.primary_name, ns)
-            .await?;
+        let scoped = store.get_or_create_entity_ns(&entity.primary_mount, &entity.primary_name, ns).await?;
         if scoped.id != grantee {
             log::info!(
                 "share grantee re-pointed from entity {} (namespace {:?}) to {} for namespace {:?}: \
@@ -1090,10 +1003,7 @@ impl IdentityBackendInner {
         kind: ShareTargetKind,
         target_path: &str,
     ) -> Result<(), RvError> {
-        let auth = req
-            .auth
-            .as_ref()
-            .ok_or_else(|| bv_error_response_status!(401, "no authenticated caller"))?;
+        let auth = req.auth.as_ref().ok_or_else(|| bv_error_response_status!(401, "no authenticated caller"))?;
 
         if auth.policies.iter().any(|p| p == "root" || p == "admin") {
             return Ok(());
@@ -1103,11 +1013,7 @@ impl IdentityBackendInner {
         // used by handle_share_for_me_list / handle_entity_self, so
         // tokens issued before login-time entity provisioning landed
         // are still recognised as owners of their pre-existing data.
-        let mut entity_id = auth
-            .metadata
-            .get("entity_id")
-            .cloned()
-            .unwrap_or_default();
+        let mut entity_id = auth.metadata.get("entity_id").cloned().unwrap_or_default();
         if entity_id.is_empty() {
             let username = auth.metadata.get("username").cloned().unwrap_or_default();
             let role_name = auth.metadata.get("role_name").cloned().unwrap_or_default();
@@ -1115,16 +1021,9 @@ impl IdentityBackendInner {
             if !mount_path.is_empty() {
                 let alias_name = if !username.is_empty() { &username } else { &role_name };
                 if !alias_name.is_empty() {
-                    if let Some(module) = self
-                        .core
-                        .module_manager()
-                        .get_module::<IdentityModule>("identity")
-                    {
+                    if let Some(module) = self.core.module_manager().get_module::<IdentityModule>("identity") {
                         if let Some(es) = module.entity_store() {
-                            if let Ok(e) = es
-                                .get_or_create_entity(mount_path.as_str(), alias_name.as_str())
-                                .await
-                            {
+                            if let Ok(e) = es.get_or_create_entity(mount_path.as_str(), alias_name.as_str()).await {
                                 entity_id = e.id;
                             }
                         }
@@ -1134,10 +1033,7 @@ impl IdentityBackendInner {
         }
 
         if entity_id.is_empty() {
-            return Err(bv_error_response_status!(
-                403,
-                "only the target's owner can manage its shares"
-            ));
+            return Err(bv_error_response_status!(403, "only the target's owner can manage its shares"));
         }
 
         let module = self
@@ -1145,9 +1041,7 @@ impl IdentityBackendInner {
             .module_manager()
             .get_module::<IdentityModule>("identity")
             .ok_or_else(|| bv_error_string!("identity module unavailable"))?;
-        let owner_store = module
-            .owner_store()
-            .ok_or_else(|| bv_error_string!("owner store unavailable"))?;
+        let owner_store = module.owner_store().ok_or_else(|| bv_error_string!("owner store unavailable"))?;
 
         let owner = match kind {
             ShareTargetKind::KvSecret => owner_store.get_kv_owner(target_path).await?,
@@ -1157,30 +1051,20 @@ impl IdentityBackendInner {
                 let rg_module = self
                     .core
                     .module_manager()
-                    .get_module::<crate::modules::resource_group::ResourceGroupModule>(
-                        "resource-group",
-                    )
+                    .get_module::<crate::modules::resource_group::ResourceGroupModule>("resource-group")
                     .ok_or_else(|| bv_error_string!("resource-group module unavailable"))?;
-                let rg_store = rg_module
-                    .store()
-                    .ok_or_else(|| bv_error_string!("resource-group store unavailable"))?;
+                let rg_store = rg_module.store().ok_or_else(|| bv_error_string!("resource-group store unavailable"))?;
                 rg_store
                     .get_group(target_path)
                     .await?
                     .filter(|entry| !entry.owner_entity_id.is_empty())
-                    .map(|entry| OwnerRecord {
-                        entity_id: entry.owner_entity_id,
-                        created_at: String::new(),
-                    })
+                    .map(|entry| OwnerRecord { entity_id: entry.owner_entity_id, created_at: String::new() })
             }
         };
 
         match owner {
             Some(rec) if rec.entity_id == entity_id => Ok(()),
-            _ => Err(bv_error_response_status!(
-                403,
-                "only the target's owner can manage its shares"
-            )),
+            _ => Err(bv_error_response_status!(403, "only the target's owner can manage its shares")),
         }
     }
 
@@ -1194,23 +1078,15 @@ impl IdentityBackendInner {
         // Optional body field: `"grantee_kind": "entity" | "group_user" | "group_app"`.
         // Defaults to entity for backward compatibility with the
         // original single-tenant by-grantee endpoint.
-        let grantee_kind_str = req
-            .get_data("grantee_kind")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_default();
-        let grantee_kind = ShareGranteeKind::parse(&grantee_kind_str)
-            .ok_or_else(|| bv_error_string!("invalid grantee_kind"))?;
-        let ptrs = store
-            .list_shares_for_grantee_kinded(grantee_kind, &grantee)
-            .await?;
+        let grantee_kind_str =
+            req.get_data("grantee_kind").ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
+        let grantee_kind =
+            ShareGranteeKind::parse(&grantee_kind_str).ok_or_else(|| bv_error_string!("invalid grantee_kind"))?;
+        let ptrs = store.list_shares_for_grantee_kinded(grantee_kind, &grantee).await?;
 
         let mut data = Map::new();
         data.insert("grantee".into(), Value::String(grantee));
-        data.insert(
-            "grantee_kind".into(),
-            Value::String(grantee_kind.as_str().to_string()),
-        );
+        data.insert("grantee_kind".into(), Value::String(grantee_kind.as_str().to_string()));
         data.insert(
             "entries".into(),
             Value::Array(
@@ -1218,10 +1094,7 @@ impl IdentityBackendInner {
                     .map(|p| {
                         let mut m = Map::new();
                         m.insert("target_kind".into(), Value::String(p.target_kind.clone()));
-                        m.insert(
-                            "target_path".into(),
-                            Value::String(display_share_target(&p.target_path, req)),
-                        );
+                        m.insert("target_path".into(), Value::String(display_share_target(&p.target_path, req)));
                         m.insert(
                             "grantee_kind".into(),
                             Value::String(if p.grantee_kind.is_empty() {
@@ -1252,39 +1125,19 @@ impl IdentityBackendInner {
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let store = self.resolve_share_store()?;
-        let auth = req
-            .auth
-            .as_ref()
-            .ok_or_else(|| bv_error_response_status!(401, "no authenticated caller"))?;
+        let auth = req.auth.as_ref().ok_or_else(|| bv_error_response_status!(401, "no authenticated caller"))?;
 
-        let mut entity_id = auth
-            .metadata
-            .get("entity_id")
-            .cloned()
-            .unwrap_or_default();
-        let username = auth
-            .metadata
-            .get("username")
-            .cloned()
-            .unwrap_or_default();
-        let role_name = auth
-            .metadata
-            .get("role_name")
-            .cloned()
-            .unwrap_or_default();
-        let mount_path = auth
-            .metadata
-            .get("mount_path")
-            .cloned()
-            .unwrap_or_default();
+        let mut entity_id = auth.metadata.get("entity_id").cloned().unwrap_or_default();
+        let username = auth.metadata.get("username").cloned().unwrap_or_default();
+        let role_name = auth.metadata.get("role_name").cloned().unwrap_or_default();
+        let mount_path = auth.metadata.get("mount_path").cloned().unwrap_or_default();
         let policies: Vec<String> = auth.policies.clone();
         // The token's policies and the identity groups it belongs to both
         // live in the namespace it is bound to (login resolves them there),
         // not in root. Reading root here made a namespace principal's
         // `group_shared_resources` policy and its groups invisible, so group
         // shares silently dropped out of the feed.
-        let (binding_ns, _) =
-            crate::modules::namespace::token_binding::binding_from_metadata(&auth.metadata);
+        let (binding_ns, _) = crate::modules::namespace::token_binding::binding_from_metadata(&auth.metadata);
 
         // Lazy entity-id resolution — matches the alias-fallback in
         // handle_entity_self so callers with pre-existing tokens still
@@ -1292,11 +1145,7 @@ impl IdentityBackendInner {
         if entity_id.is_empty() && !mount_path.is_empty() {
             let alias_name = if !username.is_empty() { &username } else { &role_name };
             if !alias_name.is_empty() {
-                if let Some(module) = self
-                    .core
-                    .module_manager()
-                    .get_module::<IdentityModule>("identity")
-                {
+                if let Some(module) = self.core.module_manager().get_module::<IdentityModule>("identity") {
                     if let Some(es) = module.entity_store() {
                         if let Ok(e) = es.get_or_create_entity(&mount_path, alias_name).await {
                             entity_id = e.id;
@@ -1311,21 +1160,13 @@ impl IdentityBackendInner {
         // *any* attached policy enables group-share visibility for
         // this caller; absence keeps the response set narrow.
         let mut group_shared_enabled = false;
-        if let Some(pmodule) = self
-            .core
-            .module_manager()
-            .get_module::<crate::modules::policy::PolicyModule>("policy")
-        {
+        if let Some(pmodule) = self.core.module_manager().get_module::<crate::modules::policy::PolicyModule>("policy") {
             let pstore = pmodule.policy_store.load();
             for name in &policies {
-                if let Ok(Some(p)) = pstore
-                    .get_policy_ns(name, crate::modules::policy::policy::PolicyType::Acl, &binding_ns)
-                    .await
+                if let Ok(Some(p)) =
+                    pstore.get_policy_ns(name, crate::modules::policy::policy::PolicyType::Acl, &binding_ns).await
                 {
-                    if p.metadata
-                        .get("group_shared_resources")
-                        .map(|v| v.eq_ignore_ascii_case("true"))
-                        .unwrap_or(false)
+                    if p.metadata.get("group_shared_resources").map(|v| v.eq_ignore_ascii_case("true")).unwrap_or(false)
                     {
                         group_shared_enabled = true;
                         break;
@@ -1336,19 +1177,11 @@ impl IdentityBackendInner {
 
         let mut ptrs: Vec<ShareByGranteePointer> = Vec::new();
         if !entity_id.is_empty() {
-            ptrs.extend(
-                store
-                    .list_shares_for_grantee_kinded(ShareGranteeKind::Entity, &entity_id)
-                    .await?,
-            );
+            ptrs.extend(store.list_shares_for_grantee_kinded(ShareGranteeKind::Entity, &entity_id).await?);
         }
 
         if group_shared_enabled {
-            if let Some(imodule) = self
-                .core
-                .module_manager()
-                .get_module::<IdentityModule>("identity")
-            {
+            if let Some(imodule) = self.core.module_manager().get_module::<IdentityModule>("identity") {
                 if let Some(gs) = imodule.group_store() {
                     // User groups keyed by username; app groups keyed
                     // by role_name. We probe both independently so a
@@ -1367,16 +1200,11 @@ impl IdentityBackendInner {
                             let Some(g) = gs.get_group_ns(kind, &g_name, &binding_ns).await? else {
                                 continue;
                             };
-                            let is_member =
-                                g.members.iter().any(|m| m.trim().to_lowercase() == m_lc);
+                            let is_member = g.members.iter().any(|m| m.trim().to_lowercase() == m_lc);
                             if !is_member {
                                 continue;
                             }
-                            ptrs.extend(
-                                store
-                                    .list_shares_for_grantee_kinded(gk, &g_name)
-                                    .await?,
-                            );
+                            ptrs.extend(store.list_shares_for_grantee_kinded(gk, &g_name).await?);
                         }
                     }
                 }
@@ -1396,9 +1224,7 @@ impl IdentityBackendInner {
             if let Some(rg_module) = self
                 .core
                 .module_manager()
-                .get_module::<crate::modules::resource_group::ResourceGroupModule>(
-                    "resource-group",
-                )
+                .get_module::<crate::modules::resource_group::ResourceGroupModule>("resource-group")
             {
                 if let Some(rg_store) = rg_module.store() {
                     let mut expanded: Vec<ShareByGranteePointer> = Vec::with_capacity(ptrs.len());
@@ -1439,10 +1265,7 @@ impl IdentityBackendInner {
 
         let mut data = Map::new();
         data.insert("entity_id".into(), Value::String(entity_id));
-        data.insert(
-            "group_shared_resources".into(),
-            Value::Bool(group_shared_enabled),
-        );
+        data.insert("group_shared_resources".into(), Value::Bool(group_shared_enabled));
         data.insert(
             "entries".into(),
             Value::Array(
@@ -1450,10 +1273,7 @@ impl IdentityBackendInner {
                     .map(|p| {
                         let mut m = Map::new();
                         m.insert("target_kind".into(), Value::String(p.target_kind.clone()));
-                        m.insert(
-                            "target_path".into(),
-                            Value::String(display_share_target(&p.target_path, req)),
-                        );
+                        m.insert("target_path".into(), Value::String(display_share_target(&p.target_path, req)));
                         m.insert(
                             "grantee_kind".into(),
                             Value::String(if p.grantee_kind.is_empty() {
@@ -1479,8 +1299,7 @@ impl IdentityBackendInner {
         let kind_str = req.get_data("kind")?.as_str().unwrap_or("").to_string();
         let target_b64 = req.get_data("target")?.as_str().unwrap_or("").to_string();
 
-        let kind = ShareTargetKind::parse(&kind_str)
-            .ok_or_else(|| bv_error_string!("invalid share kind"))?;
+        let kind = ShareTargetKind::parse(&kind_str).ok_or_else(|| bv_error_string!("invalid share kind"))?;
         let target_path = decode_b64url_path(&target_b64)
             .ok_or_else(|| bv_error_string!("invalid target segment (expected base64url)"))?;
         let target_path = scope_share_target(kind, target_path, req);
@@ -1491,14 +1310,8 @@ impl IdentityBackendInner {
 
         let mut data = Map::new();
         data.insert("target_kind".into(), Value::String(kind_str));
-        data.insert(
-            "target_path".into(),
-            Value::String(display_share_target(&target_path, req)),
-        );
-        data.insert(
-            "entries".into(),
-            Value::Array(shares.iter().map(|s| share_to_value(s, req)).collect()),
-        );
+        data.insert("target_path".into(), Value::String(display_share_target(&target_path, req)));
+        data.insert("entries".into(), Value::Array(shares.iter().map(|s| share_to_value(s, req)).collect()));
         Ok(Some(Response::data_response(Some(data))))
     }
 
@@ -1518,12 +1331,7 @@ impl IdentityBackendInner {
             )))),
             None => Err(bv_error_response_status!(
                 404,
-                &format!(
-                    "no share found for kind={}, path={}, grantee={}",
-                    kind.as_str(),
-                    target_path,
-                    grantee
-                )
+                &format!("no share found for kind={}, path={}, grantee={}", kind.as_str(), target_path, grantee)
             )),
         }
     }
@@ -1544,8 +1352,7 @@ impl IdentityBackendInner {
                 if s.is_empty() {
                     url_kind
                 } else {
-                    ShareTargetKind::parse(s)
-                        .ok_or_else(|| bv_error_string!("invalid target_kind"))?
+                    ShareTargetKind::parse(s).ok_or_else(|| bv_error_string!("invalid target_kind"))?
                 }
             } else {
                 url_kind
@@ -1565,35 +1372,25 @@ impl IdentityBackendInner {
             .map(|p| scope_share_target(kind, p, req))
             .unwrap_or(url_target_path);
 
-        let capabilities: Vec<String> = req
-            .get_data("capabilities")
-            .ok()
-            .map(|v| value_to_string_vec(&v))
-            .unwrap_or_default();
+        let capabilities: Vec<String> =
+            req.get_data("capabilities").ok().map(|v| value_to_string_vec(&v)).unwrap_or_default();
 
-        let expires_at = req
-            .get_data("expires_at")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_default();
+        let expires_at =
+            req.get_data("expires_at").ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
 
         let granted_by = caller_audit_actor(req);
 
-        let grantee_kind_str = req
-            .get_data("grantee_kind")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_default();
-        let grantee_kind = ShareGranteeKind::parse(&grantee_kind_str)
-            .ok_or_else(|| bv_error_string!("invalid grantee_kind"))?;
+        let grantee_kind_str =
+            req.get_data("grantee_kind").ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
+        let grantee_kind =
+            ShareGranteeKind::parse(&grantee_kind_str).ok_or_else(|| bv_error_string!("invalid grantee_kind"))?;
 
         self.require_share_admin(req, kind, &target_path).await?;
 
         // `sql_*` entries wait for the rolling-upgrade gate, like `sql_*` in
         // policy HCL (features/sql-browser.md §13). Checked after the admin
         // check, so a caller who may not share learns nothing about the gate.
-        let policy_module =
-            self.core.module_manager().get_module::<crate::modules::policy::PolicyModule>("policy");
+        let policy_module = self.core.module_manager().get_module::<crate::modules::policy::PolicyModule>("policy");
         let policy_store = policy_module.as_ref().map(|m| m.policy_store.load_full());
         crate::modules::policy::sql_write_gate::require_sql_share_writable(policy_store.as_deref(), &capabilities)
             .await?;
@@ -1603,9 +1400,7 @@ impl IdentityBackendInner {
         // lives. Grant-path only -- `handle_share_delete` deliberately uses
         // the literal id, so a share written before this landed (or by an
         // older peer) stays revocable by the id the GUI lists for it.
-        let grantee = self
-            .scope_grantee_to_namespace(grantee, grantee_kind, req)
-            .await?;
+        let grantee = self.scope_grantee_to_namespace(grantee, grantee_kind, req).await?;
 
         let share = SecretShare {
             target_kind: kind.as_str().to_string(),
@@ -1619,9 +1414,7 @@ impl IdentityBackendInner {
         };
 
         let stored = store.set_share(share).await?;
-        Ok(Some(Response::data_response(Some(
-            share_to_value(&stored, req).as_object().cloned().unwrap_or_default(),
-        ))))
+        Ok(Some(Response::data_response(Some(share_to_value(&stored, req).as_object().cloned().unwrap_or_default()))))
     }
 
     pub async fn handle_share_delete(
@@ -1637,23 +1430,11 @@ impl IdentityBackendInner {
         let actor = caller_audit_actor(req);
         // Optional `grantee_kind` body field tells us which by-grantee
         // pointer prefix to clear. Absent = legacy entity grantee.
-        let grantee_kind_str = req
-            .get_data("grantee_kind")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_default();
-        let grantee_kind = ShareGranteeKind::parse(&grantee_kind_str)
-            .ok_or_else(|| bv_error_string!("invalid grantee_kind"))?;
-        store
-            .delete_share_with_kind_audited(
-                kind,
-                &target_path,
-                grantee_kind,
-                &grantee,
-                &actor,
-                "revoke",
-            )
-            .await?;
+        let grantee_kind_str =
+            req.get_data("grantee_kind").ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
+        let grantee_kind =
+            ShareGranteeKind::parse(&grantee_kind_str).ok_or_else(|| bv_error_string!("invalid grantee_kind"))?;
+        store.delete_share_with_kind_audited(kind, &target_path, grantee_kind, &grantee, &actor, "revoke").await?;
         Ok(None)
     }
 
@@ -1668,9 +1449,7 @@ impl IdentityBackendInner {
         _backend: &dyn Backend,
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        let auth = req.auth.as_ref().ok_or_else(|| {
-            bv_error_response_status!(401, "no authenticated caller")
-        })?;
+        let auth = req.auth.as_ref().ok_or_else(|| bv_error_response_status!(401, "no authenticated caller"))?;
 
         let mut entity_id = auth.metadata.get("entity_id").cloned().unwrap_or_default();
         let username = auth.metadata.get("username").cloned().unwrap_or_default();
@@ -1687,15 +1466,9 @@ impl IdentityBackendInner {
         if entity_id.is_empty() && !mount_path.is_empty() {
             let alias_name = if !username.is_empty() { &username } else { &role_name };
             if !alias_name.is_empty() {
-                if let Some(module) = self
-                    .core
-                    .module_manager()
-                    .get_module::<IdentityModule>("identity")
-                {
+                if let Some(module) = self.core.module_manager().get_module::<IdentityModule>("identity") {
                     if let Some(store) = module.entity_store() {
-                        if let Ok(entity) =
-                            store.get_or_create_entity(&mount_path, alias_name).await
-                        {
+                        if let Ok(entity) = store.get_or_create_entity(&mount_path, alias_name).await {
                             entity_id = entity.id;
                         }
                     }
@@ -1712,25 +1485,12 @@ impl IdentityBackendInner {
         // Hydrate the stored Entity record when the identity module is
         // loaded so the caller sees their creation time and aliases.
         if !entity_id.is_empty() {
-            if let Some(module) = self
-                .core
-                .module_manager()
-                .get_module::<IdentityModule>("identity")
-            {
+            if let Some(module) = self.core.module_manager().get_module::<IdentityModule>("identity") {
                 if let Some(store) = module.entity_store() {
                     if let Ok(Some(entity)) = store.get_entity(&entity_id).await {
-                        data.insert(
-                            "primary_mount".into(),
-                            Value::String(entity.primary_mount),
-                        );
-                        data.insert(
-                            "primary_name".into(),
-                            Value::String(entity.primary_name),
-                        );
-                        data.insert(
-                            "created_at".into(),
-                            Value::String(entity.created_at),
-                        );
+                        data.insert("primary_mount".into(), Value::String(entity.primary_mount));
+                        data.insert("primary_name".into(), Value::String(entity.primary_name));
+                        data.insert("created_at".into(), Value::String(entity.created_at));
                         data.insert(
                             "aliases".into(),
                             Value::Array(
@@ -1739,10 +1499,7 @@ impl IdentityBackendInner {
                                     .into_iter()
                                     .map(|a| {
                                         let mut m = Map::new();
-                                        m.insert(
-                                            "mount".into(),
-                                            Value::String(a.mount),
-                                        );
+                                        m.insert("mount".into(), Value::String(a.mount));
                                         m.insert("name".into(), Value::String(a.name));
                                         Value::Object(m)
                                     })
@@ -1770,9 +1527,7 @@ impl IdentityBackendInner {
             .module_manager()
             .get_module::<IdentityModule>("identity")
             .ok_or_else(|| bv_error_string!("identity module unavailable"))?;
-        let store = module
-            .entity_store()
-            .ok_or_else(|| bv_error_string!("entity store unavailable"))?;
+        let store = module.entity_store().ok_or_else(|| bv_error_string!("entity store unavailable"))?;
 
         // A namespace's alias keyspace holds only the principals that
         // logged in *through* that namespace. Every other alias —
@@ -1828,26 +1583,17 @@ impl IdentityBackendInner {
             .module_manager()
             .get_module::<IdentityModule>("identity")
             .ok_or_else(|| bv_error_string!("identity module unavailable"))?;
-        let store = module
-            .owner_store()
-            .ok_or_else(|| bv_error_string!("owner store unavailable"))?;
+        let store = module.owner_store().ok_or_else(|| bv_error_string!("owner store unavailable"))?;
 
         // The GUI sends the mount-relative path (`secret/github`) with the
         // active namespace in the request header. Look the owner up under the
         // namespace-scoped canonical key so a child-namespace secret's owner —
         // stamped as `<ns>/<mount>/<key>` by `post_route` — is found. The
         // mount-relative `path` is still echoed for display.
-        let key = owner_store::OwnerStore::canonicalize_kv_path_scoped(
-            &path,
-            req.namespace_path.as_deref(),
-        )
-        .unwrap_or_else(|| path.clone());
+        let key = owner_store::OwnerStore::canonicalize_kv_path_scoped(&path, req.namespace_path.as_deref())
+            .unwrap_or_else(|| path.clone());
         let rec = store.get_kv_owner(&key).await?;
-        Ok(Some(Response::data_response(Some(owner_response(
-            "kv-secret",
-            &path,
-            rec,
-        )))))
+        Ok(Some(Response::data_response(Some(owner_response("kv-secret", &path, rec)))))
     }
 
     pub async fn handle_resource_owner_read(
@@ -1862,9 +1608,7 @@ impl IdentityBackendInner {
             .module_manager()
             .get_module::<IdentityModule>("identity")
             .ok_or_else(|| bv_error_string!("identity module unavailable"))?;
-        let store = module
-            .owner_store()
-            .ok_or_else(|| bv_error_string!("owner store unavailable"))?;
+        let store = module.owner_store().ok_or_else(|| bv_error_string!("owner store unavailable"))?;
 
         // Namespace-scope the lookup key for the same reason the KV read
         // above does: the record lives under `<ns>/<name>` in a namespace, and
@@ -1873,9 +1617,7 @@ impl IdentityBackendInner {
         let key = owner_store::OwnerStore::scope_target_name(&name, req.namespace_path.as_deref())
             .unwrap_or_else(|| name.clone());
         let rec = store.get_resource_owner(&key).await?;
-        Ok(Some(Response::data_response(Some(owner_response(
-            "resource", &name, rec,
-        )))))
+        Ok(Some(Response::data_response(Some(owner_response("resource", &name, rec)))))
     }
 
     pub async fn handle_file_owner_read(
@@ -1890,23 +1632,15 @@ impl IdentityBackendInner {
             .module_manager()
             .get_module::<IdentityModule>("identity")
             .ok_or_else(|| bv_error_string!("identity module unavailable"))?;
-        let store = module
-            .owner_store()
-            .ok_or_else(|| bv_error_string!("owner store unavailable"))?;
+        let store = module.owner_store().ok_or_else(|| bv_error_string!("owner store unavailable"))?;
 
         let key = owner_store::OwnerStore::scope_target_name(&id, req.namespace_path.as_deref())
             .unwrap_or_else(|| id.clone());
         let rec = store.get_file_owner(&key).await?;
-        Ok(Some(Response::data_response(Some(owner_response(
-            "file", &id, rec,
-        )))))
+        Ok(Some(Response::data_response(Some(owner_response("file", &id, rec)))))
     }
 
-    pub async fn handle_noop(
-        &self,
-        _backend: &dyn Backend,
-        _req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_noop(&self, _backend: &dyn Backend, _req: &mut Request) -> Result<Option<Response>, RvError> {
         Ok(None)
     }
 }
@@ -1999,6 +1733,3 @@ impl Module for IdentityModule {
         core.delete_logical_backend("identity")
     }
 }
-
-
-

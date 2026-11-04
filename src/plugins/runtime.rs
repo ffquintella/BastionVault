@@ -1728,7 +1728,10 @@ mod tests {
         let core = test_core("wasm-dyn-no-session").await;
         let out = WasmRuntime::new().unwrap().invoke(&manifest, &bytes, b"", Some(core.clone())).await.unwrap();
         assert_eq!(code_of(&out), super::super::dynamic::host_calls::DYNAMIC_NO_SESSION);
-        assert!(crate::plugins::quarantine::lookup(core.barrier().as_storage(), &manifest.name).await.unwrap().is_none());
+        assert!(crate::plugins::quarantine::lookup(core.barrier().as_storage(), &manifest.name)
+            .await
+            .unwrap()
+            .is_none());
     }
 
     /// T62 host connectors through `bv.dynamic_pool_checkout`: a WASM plugin

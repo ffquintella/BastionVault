@@ -50,8 +50,8 @@ use crate::{
     bv_error_response_status,
     context::Context,
     errors::RvError,
-    logical::{Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
     kernel_api::identity::caller_audit_actor,
+    logical::{Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
     new_fields, new_fields_internal, new_path, new_path_internal,
 };
 
@@ -122,17 +122,9 @@ impl SshBackend {
 
 #[maybe_async::maybe_async]
 impl SshBackendInner {
-    pub async fn handle_sign(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_sign(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         // ── Inputs ──────────────────────────────────────────────────
-        let role_name = req
-            .get_data("role")?
-            .as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?
-            .to_string();
+        let role_name = req.get_data("role")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
 
         let public_key_str = req
             .get_data("public_key")?
@@ -203,40 +195,25 @@ impl SshBackendInner {
             .map_err(|e| bv_error_response_status!(400, "public_key parse failed: {}", e))?;
 
         // ── cert_type (request override → role default) ────────────
-        let req_cert_type = req
-            .get_data("cert_type")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_default();
+        let req_cert_type =
+            req.get_data("cert_type").ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
         let cert_type_str = if req_cert_type.is_empty() { role.cert_type.clone() } else { req_cert_type };
         let cert_type = match cert_type_str.as_str() {
             "user" => CertType::User,
             "host" => CertType::Host,
-            other => {
-                return Err(RvError::ErrString(format!(
-                    "cert_type must be `user` or `host`, got `{other}`"
-                )))
-            }
+            other => return Err(RvError::ErrString(format!("cert_type must be `user` or `host`, got `{other}`"))),
         };
 
         // ── valid_principals: caller subset, or default_user ───────
-        let req_principals = req
-            .get_data("valid_principals")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_default();
-        let mut requested: Vec<String> = req_principals
-            .split(',')
-            .map(|p| p.trim().to_string())
-            .filter(|p| !p.is_empty())
-            .collect();
+        let req_principals =
+            req.get_data("valid_principals").ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
+        let mut requested: Vec<String> =
+            req_principals.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect();
         if requested.is_empty() {
             if !role.default_user.is_empty() {
                 requested.push(role.default_user.clone());
             } else {
-                return Err(RvError::ErrString(
-                    "no valid_principals supplied and role has no default_user".into(),
-                ));
+                return Err(RvError::ErrString("no valid_principals supplied and role has no default_user".into()));
             }
         }
 
@@ -250,25 +227,17 @@ impl SshBackendInner {
             // can ask for. Surface that loudly rather than letting an
             // operator-typo silently disable the role.
             if allowed.is_empty() {
-                return Err(RvError::ErrString(format!(
-                    "role `{role_name}` has empty allowed_users; sign refused"
-                )));
+                return Err(RvError::ErrString(format!("role `{role_name}` has empty allowed_users; sign refused")));
             }
             for p in &requested {
                 if !allowed.iter().any(|a| a == p) {
-                    return Err(RvError::ErrString(format!(
-                        "principal `{p}` is not in role's allowed_users"
-                    )));
+                    return Err(RvError::ErrString(format!("principal `{p}` is not in role's allowed_users")));
                 }
             }
         }
 
         // ── TTL (request → role.ttl), clamped to max_ttl ───────────
-        let req_ttl_str = req
-            .get_data("ttl")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_default();
+        let req_ttl_str = req.get_data("ttl").ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
         let req_ttl = if req_ttl_str.trim().is_empty() {
             None
         } else {
@@ -316,16 +285,10 @@ impl SshBackendInner {
         }
 
         // ── key_id ─────────────────────────────────────────────────
-        let req_key_id = req
-            .get_data("key_id")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_default();
-        let key_id = if !req_key_id.is_empty() {
-            req_key_id
-        } else {
-            render_key_id(&role.key_id_format, &role_name, req)
-        };
+        let req_key_id =
+            req.get_data("key_id").ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
+        let key_id =
+            if !req_key_id.is_empty() { req_key_id } else { render_key_id(&role.key_id_format, &role_name, req) };
 
         // ── Serial: random u64 from OS RNG ─────────────────────────
         // `rand::rng()` (rand 0.10's TLS RNG) is used elsewhere in the
@@ -335,23 +298,13 @@ impl SshBackendInner {
         let serial: u64 = rand::rng().random();
 
         // ── Build + sign ───────────────────────────────────────────
-        let mut builder = CertBuilder::new_with_random_nonce(
-            &mut OsRng,
-            client_pk.key_data().clone(),
-            valid_after,
-            valid_before,
-        )
-        .map_err(|e| RvError::ErrString(format!("cert builder init failed: {e}")))?;
+        let mut builder =
+            CertBuilder::new_with_random_nonce(&mut OsRng, client_pk.key_data().clone(), valid_after, valid_before)
+                .map_err(|e| RvError::ErrString(format!("cert builder init failed: {e}")))?;
 
-        builder
-            .serial(serial)
-            .map_err(|e| RvError::ErrString(format!("cert serial set failed: {e}")))?;
-        builder
-            .cert_type(cert_type)
-            .map_err(|e| RvError::ErrString(format!("cert type set failed: {e}")))?;
-        builder
-            .key_id(key_id)
-            .map_err(|e| RvError::ErrString(format!("cert key_id set failed: {e}")))?;
+        builder.serial(serial).map_err(|e| RvError::ErrString(format!("cert serial set failed: {e}")))?;
+        builder.cert_type(cert_type).map_err(|e| RvError::ErrString(format!("cert type set failed: {e}")))?;
+        builder.key_id(key_id).map_err(|e| RvError::ErrString(format!("cert key_id set failed: {e}")))?;
         for p in &requested {
             builder
                 .valid_principal(p.clone())
@@ -368,13 +321,9 @@ impl SshBackendInner {
                 .map_err(|e| RvError::ErrString(format!("cert extension set failed: {e}")))?;
         }
 
-        let cert = builder
-            .sign(&ca_private_key)
-            .map_err(|e| RvError::ErrString(format!("cert sign failed: {e}")))?;
+        let cert = builder.sign(&ca_private_key).map_err(|e| RvError::ErrString(format!("cert sign failed: {e}")))?;
 
-        let signed_key = cert
-            .to_openssh()
-            .map_err(|e| RvError::ErrString(format!("cert serialise failed: {e}")))?;
+        let signed_key = cert.to_openssh().map_err(|e| RvError::ErrString(format!("cert serialise failed: {e}")))?;
 
         // ── Audit ──────────────────────────────────────────────────
         record_ssh_sign_audit(
@@ -438,71 +387,49 @@ impl SshBackendInner {
         let ca = CaKeypair::from_hex(&ca_cfg.pqc_secret_seed_hex, &ca_cfg.pqc_public_key_hex)?;
 
         // ── Policy: principals (subset of allowed_users) ───────────
-        let req_principals = req
-            .get_data("valid_principals")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_default();
-        let mut requested: Vec<String> = req_principals
-            .split(',')
-            .map(|p| p.trim().to_string())
-            .filter(|p| !p.is_empty())
-            .collect();
+        let req_principals =
+            req.get_data("valid_principals").ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
+        let mut requested: Vec<String> =
+            req_principals.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect();
         if requested.is_empty() {
             if !role.default_user.is_empty() {
                 requested.push(role.default_user.clone());
             } else {
-                return Err(RvError::ErrString(
-                    "no valid_principals supplied and role has no default_user".into(),
-                ));
+                return Err(RvError::ErrString("no valid_principals supplied and role has no default_user".into()));
             }
         }
         let allowed = role.allowed_users_list();
         let allow_any = allowed.iter().any(|u| u == "*");
         if !allow_any {
             if allowed.is_empty() {
-                return Err(RvError::ErrString(
-                    "role has empty allowed_users; sign refused".into(),
-                ));
+                return Err(RvError::ErrString("role has empty allowed_users; sign refused".into()));
             }
             for p in &requested {
                 if !allowed.iter().any(|a| a == p) {
-                    return Err(RvError::ErrString(format!(
-                        "principal `{p}` is not in role's allowed_users"
-                    )));
+                    return Err(RvError::ErrString(format!("principal `{p}` is not in role's allowed_users")));
                 }
             }
         }
 
         // ── cert_type ──────────────────────────────────────────────
-        let req_cert_type = req
-            .get_data("cert_type")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_default();
+        let req_cert_type =
+            req.get_data("cert_type").ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
         let cert_type_str = if req_cert_type.is_empty() { role.cert_type.clone() } else { req_cert_type };
         let cert_type_u32: u32 = match cert_type_str.as_str() {
             "user" => 1,
             "host" => 2,
-            other => return Err(RvError::ErrString(format!(
-                "cert_type must be `user` or `host`, got `{other}`"
-            ))),
+            other => return Err(RvError::ErrString(format!("cert_type must be `user` or `host`, got `{other}`"))),
         };
 
         // ── TTL / validity window ──────────────────────────────────
-        let req_ttl_str = req
-            .get_data("ttl")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_default();
+        let req_ttl_str = req.get_data("ttl").ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
         let req_ttl = if req_ttl_str.trim().is_empty() {
             None
         } else {
-            Some(humantime::parse_duration(&req_ttl_str).map_err(|e| {
-                RvError::ErrString(format!(
-                    "ttl: '{req_ttl_str}' is not a valid duration ({e})"
-                ))
-            })?)
+            Some(
+                humantime::parse_duration(&req_ttl_str)
+                    .map_err(|e| RvError::ErrString(format!("ttl: '{req_ttl_str}' is not a valid duration ({e})")))?,
+            )
         };
         let ttl = role.effective_ttl(req_ttl);
         let now = std::time::SystemTime::now()
@@ -533,16 +460,10 @@ impl SshBackendInner {
         }
 
         // ── key_id ─────────────────────────────────────────────────
-        let req_key_id = req
-            .get_data("key_id")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_default();
-        let role_name_for_key_id = req
-            .get_data("role")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_default();
+        let req_key_id =
+            req.get_data("key_id").ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
+        let role_name_for_key_id =
+            req.get_data("role").ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
         let key_id = if !req_key_id.is_empty() {
             req_key_id
         } else {
@@ -599,16 +520,10 @@ impl SshBackendInner {
 /// and control characters are dropped because the key id lands in sshd's
 /// log. Other `{{...}}` text is left untouched.
 fn render_key_id(format: &str, role: &str, req: &Request) -> String {
-    let display_name = req
-        .auth
-        .as_ref()
-        .map(|a| a.display_name.as_str())
-        .filter(|n| !n.is_empty())
-        .unwrap_or("unknown");
+    let display_name =
+        req.auth.as_ref().map(|a| a.display_name.as_str()).filter(|n| !n.is_empty()).unwrap_or("unknown");
     let clean = |s: &str| s.chars().filter(|c| !c.is_control()).collect::<String>();
-    format
-        .replace("{{role}}", &clean(role))
-        .replace("{{token_display_name}}", &clean(display_name))
+    format.replace("{{role}}", &clean(role)).replace("{{token_display_name}}", &clean(display_name))
 }
 
 /// Pull a `Map`-typed field as `BTreeMap<String, String>`. Anything

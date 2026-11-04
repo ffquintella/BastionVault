@@ -74,15 +74,12 @@ pub async fn attest_bastion(
         .map_err(|e| EnrolmentError::Master(format!("{e}")))?
         .ok_or_else(|| EnrolmentError::TargetNotFound(bastion_id.into()))?;
 
-    let built = envelope::build_attest(master, &target, operator)
-        .map_err(|e| EnrolmentError::Envelope(format!("{e}")))?;
+    let built =
+        envelope::build_attest(master, &target, operator).map_err(|e| EnrolmentError::Envelope(format!("{e}")))?;
 
     let client = super::http::build_client_for(&target, Duration::from_secs(10))
         .map_err(|e| EnrolmentError::Transport(format!("{e}")))?;
-    let url = format!(
-        "https://{}/v1/authorities/attest",
-        target.endpoint.trim_end_matches('/')
-    );
+    let url = format!("https://{}/v1/authorities/attest", target.endpoint.trim_end_matches('/'));
     let resp = client
         .post(&url)
         .header("X-Rustion-Authority", authority)
@@ -95,10 +92,7 @@ pub async fn attest_bastion(
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
-        return Err(EnrolmentError::Http {
-            status: status.as_u16(),
-            body,
-        });
+        return Err(EnrolmentError::Http { status: status.as_u16(), body });
     }
 
     #[derive(Deserialize)]
@@ -106,10 +100,7 @@ pub async fn attest_bastion(
         attested_at: String,
         expires_at: String,
     }
-    let body: Body = resp
-        .json()
-        .await
-        .map_err(|e| EnrolmentError::Envelope(format!("body parse: {e}")))?;
+    let body: Body = resp.json().await.map_err(|e| EnrolmentError::Envelope(format!("body parse: {e}")))?;
     Ok(AttestResult {
         bastion_id: bastion_id.to_string(),
         correlation_id: built.correlation_id,
@@ -133,10 +124,7 @@ pub enum AttestOutcome {
     #[serde(rename = "ok")]
     Ok(AttestResult),
     #[serde(rename = "err")]
-    Err {
-        bastion_id: String,
-        error: String,
-    },
+    Err { bastion_id: String, error: String },
 }
 
 /// Walk every enrolled bastion and send `attest`. Failures don't
@@ -150,16 +138,8 @@ pub async fn attest_all(
     authority: &str,
     operator: &OperatorContext,
 ) -> Result<AttestAllResult, EnrolmentError> {
-    let targets = store
-        .list_targets()
-        .await
-        .map_err(|e| EnrolmentError::Master(format!("{e}")))?;
-    let mut out = AttestAllResult {
-        attempted: 0,
-        succeeded: 0,
-        failed: 0,
-        results: Vec::with_capacity(targets.len()),
-    };
+    let targets = store.list_targets().await.map_err(|e| EnrolmentError::Master(format!("{e}")))?;
+    let mut out = AttestAllResult { attempted: 0, succeeded: 0, failed: 0, results: Vec::with_capacity(targets.len()) };
     for t in targets {
         out.attempted += 1;
         match attest_bastion(store, master, authority, operator, &t.id).await {
@@ -169,10 +149,7 @@ pub async fn attest_all(
             }
             Err(e) => {
                 out.failed += 1;
-                out.results.push(AttestOutcome::Err {
-                    bastion_id: t.id,
-                    error: e.to_string(),
-                });
+                out.results.push(AttestOutcome::Err { bastion_id: t.id, error: e.to_string() });
             }
         }
     }
@@ -202,10 +179,7 @@ pub async fn deenrol_bastion(
 
     let client = super::http::build_client_for(target, Duration::from_secs(10))
         .map_err(|e| EnrolmentError::Transport(format!("{e}")))?;
-    let url = format!(
-        "https://{}/v1/authorities/deenrol",
-        target.endpoint.trim_end_matches('/')
-    );
+    let url = format!("https://{}/v1/authorities/deenrol", target.endpoint.trim_end_matches('/'));
     let resp = client
         .post(&url)
         .header("X-Rustion-Authority", authority)
@@ -219,20 +193,11 @@ pub async fn deenrol_bastion(
     // We accept 200/204; we also tolerate 404 / 410 (Rustion already
     // forgot us — fine, we're trying to delete) so the BV-side
     // deletion proceeds idempotently.
-    if !status.is_success()
-        && status != reqwest::StatusCode::NOT_FOUND
-        && status != reqwest::StatusCode::GONE
-    {
+    if !status.is_success() && status != reqwest::StatusCode::NOT_FOUND && status != reqwest::StatusCode::GONE {
         let body = resp.text().await.unwrap_or_default();
-        return Err(EnrolmentError::Http {
-            status: status.as_u16(),
-            body,
-        });
+        return Err(EnrolmentError::Http { status: status.as_u16(), body });
     }
-    Ok(DeenrolResult {
-        bastion_id: target.id.clone(),
-        correlation_id: built.correlation_id,
-    })
+    Ok(DeenrolResult { bastion_id: target.id.clone(), correlation_id: built.correlation_id })
 }
 
 // HTTP client construction moved to `super::http::build_client_for`,
@@ -256,10 +221,7 @@ mod tests {
         assert!(j.contains("\"status\":\"ok\""));
         assert!(j.contains("\"bastion_id\":\"rt_1\""));
 
-        let err = AttestOutcome::Err {
-            bastion_id: "rt_2".into(),
-            error: "transport: connection refused".into(),
-        };
+        let err = AttestOutcome::Err { bastion_id: "rt_2".into(), error: "transport: connection refused".into() };
         let j = serde_json::to_string(&err).unwrap();
         assert!(j.contains("\"status\":\"err\""));
         assert!(j.contains("connection refused"));

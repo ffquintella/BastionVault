@@ -7,9 +7,8 @@
 
 use std::{any::Any, sync::Arc};
 
-use bv_kernel_api::{Module, VaultCtx};
 use bv_errors::RvError;
-
+use bv_kernel_api::{Module, VaultCtx};
 
 pub struct CertModule {
     pub name: String,

@@ -18,8 +18,7 @@ use super::{
     sign_flow::{SignArgs, SignMode, SignPlan},
     storage::{self, CertRecord},
     x509::{self, SubjectInput},
-    x509_pqc,
-    PkiBackend, PkiBackendInner,
+    x509_pqc, PkiBackend, PkiBackendInner,
 };
 use crate::{
     context::Context,
@@ -89,16 +88,13 @@ impl PkiBackend {
 #[maybe_async::maybe_async]
 impl PkiBackendInner {
     pub async fn issue_cert(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
-        let role_name = req.get_data("role")?.as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
-        let role = self.get_role(req, &role_name).await?
-            .ok_or(RvError::ErrPkiRoleNotFound)?;
+        let role_name = req.get_data("role")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
+        let role = self.get_role(req, &role_name).await?.ok_or(RvError::ErrPkiRoleNotFound)?;
         // Fail closed before anything is signed if the stored role is
         // contradictory (write_role refuses it; this covers other routes in).
         role.check_key_management()?;
 
-        let common_name = req.get_data("common_name")?.as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
+        let common_name = req.get_data("common_name")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
         x509::validate_common_name(&role, &common_name)?;
 
         let alt_str = req.get_data_or_default("alt_names")?.as_str().unwrap_or("").to_string();
@@ -163,12 +159,7 @@ impl PkiBackendInner {
         // optional `allowed_key_refs` allow-list narrows which managed
         // keys are acceptable. Empty `key_ref` falls through to the
         // legacy "generate fresh" path.
-        let request_key_ref = req
-            .get_data_or_default("key_ref")?
-            .as_str()
-            .unwrap_or("")
-            .trim()
-            .to_string();
+        let request_key_ref = req.get_data_or_default("key_ref")?.as_str().unwrap_or("").trim().to_string();
         let pinned_key: Option<KeyEntry> = if request_key_ref.is_empty() {
             None
         } else {
@@ -185,8 +176,7 @@ impl PkiBackendInner {
         let email_raw = req.get_data_or_default("email_sans")?.as_str().unwrap_or("").to_string();
         let email_sans = super::email_san::resolve_email_sans(&role, &email_raw)?;
         let urls = load_issuance_urls(req).await?;
-        let subject =
-            SubjectInput { common_name, alt_names: alt_dns, ip_sans: alt_ips, upn_sans, email_sans, ad_sid };
+        let subject = SubjectInput { common_name, alt_names: alt_dns, ip_sans: alt_ips, upn_sans, email_sans, ad_sid };
         let (cert_pem, serial_bytes) = match (role_alg.class(), &ca_signer, &leaf_signer) {
             (AlgorithmClass::Classical, Signer::Classical(ca), Signer::Classical(leaf)) => {
                 x509::build_leaf(&role, &subject, ttl, leaf, ca, &ca_cert_pem, &urls)?
@@ -223,10 +213,8 @@ impl PkiBackendInner {
         // Persist the cert (unless the role opts out) so revoke can find it
         // and the CRL builder can include it.
         if !role.no_store {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
+            let now =
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
             // Capture NotAfter so Phase 4's tidy sweep can identify expired
             // records without re-parsing the PEM. `ttl` came from the role +
             // request body and was already used to build the cert above, so
@@ -283,8 +271,7 @@ impl PkiBackendInner {
     /// CAs reject CSR-based signing for now (the engine still generates
     /// PQC keypairs server-side via `pki/issue`).
     pub async fn sign_csr_role(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
-        let role_name = req.get_data("role")?.as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
+        let role_name = req.get_data("role")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
         let args = sign_args_from_request(req)?;
         let plan = self.plan_sign(req, &SignMode::Role(role_name), &args).await?;
         self.sign_response(req, plan).await
@@ -303,11 +290,7 @@ impl PkiBackendInner {
     /// Execute a plan and shape the `certificate` / `issuing_ca` /
     /// `ca_chain` / `serial_number` / `issuer_id` response every signing
     /// path has returned since Phase 5.
-    async fn sign_response(
-        &self,
-        req: &Request,
-        plan: SignPlan,
-    ) -> Result<Option<Response>, RvError> {
+    async fn sign_response(&self, req: &Request, plan: SignPlan) -> Result<Option<Response>, RvError> {
         for warning in &plan.warnings {
             log::debug!("pki/sign: {warning}");
         }
@@ -350,20 +333,17 @@ pub(crate) async fn resolve_pinned_key(
         ));
     }
     let entry = keys::load_key(req, key_ref).await?.ok_or_else(|| {
-        RvError::ErrResponseStatus(
-            400,
-            format!("key_ref `{key_ref}` does not resolve to a managed key on this mount"),
-        )
+        RvError::ErrResponseStatus(400, format!("key_ref `{key_ref}` does not resolve to a managed key on this mount"))
     })?;
 
     if !role.allowed_key_refs.is_empty() {
         // Match against either the resolved id or the user-supplied
         // alias; both are stable identifiers an operator might write
         // into the allow-list.
-        let allowed = role.allowed_key_refs.iter().any(|allowed_ref| {
-            allowed_ref == &entry.id
-                || (!entry.name.is_empty() && allowed_ref == &entry.name)
-        });
+        let allowed = role
+            .allowed_key_refs
+            .iter()
+            .any(|allowed_ref| allowed_ref == &entry.id || (!entry.name.is_empty() && allowed_ref == &entry.name));
         if !allowed {
             return Err(RvError::ErrResponseStatus(
                 400,
@@ -381,8 +361,7 @@ pub(crate) async fn resolve_pinned_key(
             400,
             format!(
                 "key_ref `{key_ref}` refused: the key's algorithm {:?} does not match the role's {:?}",
-                entry_alg,
-                role_alg
+                entry_alg, role_alg
             ),
         ));
     }
@@ -403,10 +382,7 @@ fn managed_leaf_key_name(role_name: &str, serial_hex: &str) -> String {
 #[maybe_async::maybe_async]
 async fn discard_unbound_leaf_key(req: &Request, entry: &KeyEntry) {
     if let Err(e) = keys::delete_key(req, &entry.id).await {
-        log::warn!(
-            "pki/issue: cert record write failed and managed key {} could not be removed: {e}",
-            entry.id
-        );
+        log::warn!("pki/issue: cert record write failed and managed key {} could not be removed: {e}", entry.id);
     }
 }
 
@@ -419,8 +395,7 @@ async fn discard_unbound_leaf_key(req: &Request, entry: &KeyEntry) {
 /// controller has a revocation source for the logon certificate.
 #[maybe_async::maybe_async]
 pub(crate) async fn load_issuance_urls(req: &Request) -> Result<x509::IssuanceUrls, RvError> {
-    let cfg: storage::UrlsConfig =
-        storage::get_json(req, storage::KEY_CONFIG_URLS).await?.unwrap_or_default();
+    let cfg: storage::UrlsConfig = storage::get_json(req, storage::KEY_CONFIG_URLS).await?.unwrap_or_default();
     Ok(x509::IssuanceUrls {
         crl_distribution_points: cfg
             .crl_distribution_points
@@ -440,10 +415,7 @@ pub(crate) async fn load_issuance_urls(req: &Request) -> Result<x509::IssuanceUr
 /// will never authenticate against AD.
 ///
 /// `ad_sid` resolution order is request body > role default > absent.
-fn resolve_ad_smartcard_input(
-    req: &Request,
-    role: &RoleEntry,
-) -> Result<(Vec<String>, Option<String>), RvError> {
+fn resolve_ad_smartcard_input(req: &Request, role: &RoleEntry) -> Result<(Vec<String>, Option<String>), RvError> {
     let upn_raw = req.get_data_or_default("upn_sans")?.as_str().unwrap_or("").to_string();
     let sid_raw = req.get_data_or_default("ad_sid")?.as_str().unwrap_or("").to_string();
     resolve_ad_smartcard(role, &upn_raw, &sid_raw)

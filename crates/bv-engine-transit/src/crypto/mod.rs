@@ -31,20 +31,20 @@ pub fn hmac(hash: HashAlgo, key: &[u8], msg: &[u8]) -> Vec<u8> {
     use hmac::{digest::KeyInit, Mac};
     match hash {
         HashAlgo::Sha256 => {
-            let mut m = <hmac::Hmac<sha2::Sha256> as KeyInit>::new_from_slice(key)
-                .expect("hmac accepts any key length");
+            let mut m =
+                <hmac::Hmac<sha2::Sha256> as KeyInit>::new_from_slice(key).expect("hmac accepts any key length");
             m.update(msg);
             m.finalize().into_bytes().to_vec()
         }
         HashAlgo::Sha384 => {
-            let mut m = <hmac::Hmac<sha2::Sha384> as KeyInit>::new_from_slice(key)
-                .expect("hmac accepts any key length");
+            let mut m =
+                <hmac::Hmac<sha2::Sha384> as KeyInit>::new_from_slice(key).expect("hmac accepts any key length");
             m.update(msg);
             m.finalize().into_bytes().to_vec()
         }
         HashAlgo::Sha512 => {
-            let mut m = <hmac::Hmac<sha2::Sha512> as KeyInit>::new_from_slice(key)
-                .expect("hmac accepts any key length");
+            let mut m =
+                <hmac::Hmac<sha2::Sha512> as KeyInit>::new_from_slice(key).expect("hmac accepts any key length");
             m.update(msg);
             m.finalize().into_bytes().to_vec()
         }
@@ -74,9 +74,7 @@ impl HashAlgo {
             "" | "sha2-256" | "sha-256" | "sha256" => Ok(Self::Sha256),
             "sha2-384" | "sha-384" | "sha384" => Ok(Self::Sha384),
             "sha2-512" | "sha-512" | "sha512" => Ok(Self::Sha512),
-            other => Err(format!(
-                "unsupported hash algo `{other}`; expected sha2-256, sha2-384, or sha2-512"
-            )),
+            other => Err(format!("unsupported hash algo `{other}`; expected sha2-256, sha2-384, or sha2-512")),
         }
     }
 }

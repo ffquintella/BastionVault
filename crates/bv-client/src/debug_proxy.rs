@@ -101,9 +101,11 @@ fn resolve() -> Option<DebugProxy> {
     let posture = match (&tls, insecure) {
         (_, true) => "TLS VERIFICATION DISABLED",
         (Some(_), _) => "trusting only the CA from $BASTION_DEBUG_PROXY_CA",
-        (None, _) => "TLS unchanged — an HTTPS target will fail the handshake \
+        (None, _) => {
+            "TLS unchanged — an HTTPS target will fail the handshake \
                       unless the proxy CA is already trusted; set \
-                      $BASTION_DEBUG_PROXY_CA or $BASTION_DEBUG_PROXY_INSECURE",
+                      $BASTION_DEBUG_PROXY_CA or $BASTION_DEBUG_PROXY_INSECURE"
+        }
     };
     log::warn!(
         "DEBUG PROXY ACTIVE: routing all outbound vault HTTP(S) through '{uri}' ({posture}). \
@@ -128,22 +130,15 @@ fn load_ca(path: &str) -> Result<TlsConfig, String> {
     if roots.is_empty() {
         return Err("no CERTIFICATE block found in the PEM".to_string());
     }
-    Ok(TlsConfig::builder()
-        .root_certs(RootCerts::Specific(Arc::new(roots)))
-        .build())
+    Ok(TlsConfig::builder().root_certs(RootCerts::Specific(Arc::new(roots))).build())
 }
 
 fn non_empty(var: &str) -> Option<String> {
-    std::env::var(var)
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
+    std::env::var(var).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
 }
 
 fn env_flag(var: &str) -> bool {
-    non_empty(var)
-        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(false)
+    non_empty(var).map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")).unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -154,8 +149,7 @@ mod tests {
     fn load_ca_rejects_a_pem_without_certificates() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("not-a-ca.pem");
-        fs::write(&path, b"-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n")
-            .unwrap();
+        fs::write(&path, b"-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n").unwrap();
         let err = load_ca(path.to_str().unwrap()).unwrap_err();
         assert!(err.contains("no CERTIFICATE block"), "{err}");
     }

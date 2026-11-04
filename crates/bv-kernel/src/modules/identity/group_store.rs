@@ -20,8 +20,8 @@ use serde_json::{Map, Value};
 
 use crate::kernel_api::VaultCtx;
 use crate::{
-    errors::RvError,
     bv_error_string,
+    errors::RvError,
     storage::{barrier_view::BarrierView, Storage, StorageEntry},
 };
 
@@ -129,13 +129,7 @@ impl GroupStore {
         let history_user_view = Arc::new(system_view.new_sub_view(HISTORY_USER_SUB_PATH));
         let history_app_view = Arc::new(system_view.new_sub_view(HISTORY_APP_SUB_PATH));
 
-        Ok(Arc::new(Self {
-            user_view,
-            app_view,
-            history_user_view,
-            history_app_view,
-            system_view,
-        }))
+        Ok(Arc::new(Self { user_view, app_view, history_user_view, history_app_view, system_view }))
     }
 
     /// Group keyspace view for `(kind, namespace)`. Root returns the legacy
@@ -148,10 +142,7 @@ impl GroupStore {
             };
         }
         let b64 = URL_SAFE_NO_PAD.encode(ns_path.as_bytes());
-        Arc::new(
-            self.system_view
-                .new_sub_view(&format!("{IDENTITY_NS_SUB_PATH}{b64}/group/{}/", kind.as_str())),
-        )
+        Arc::new(self.system_view.new_sub_view(&format!("{IDENTITY_NS_SUB_PATH}{b64}/group/{}/", kind.as_str())))
     }
 
     /// Group-history keyspace view for `(kind, namespace)`.
@@ -163,10 +154,9 @@ impl GroupStore {
             };
         }
         let b64 = URL_SAFE_NO_PAD.encode(ns_path.as_bytes());
-        Arc::new(self.system_view.new_sub_view(&format!(
-            "{IDENTITY_NS_SUB_PATH}{b64}/group-history/{}/",
-            kind.as_str()
-        )))
+        Arc::new(
+            self.system_view.new_sub_view(&format!("{IDENTITY_NS_SUB_PATH}{b64}/group-history/{}/", kind.as_str())),
+        )
     }
 
     fn sanitize_name(name: &str) -> Result<String, RvError> {
@@ -184,12 +174,7 @@ impl GroupStore {
         self.set_group_ns(kind, entry, "").await
     }
 
-    pub async fn set_group_ns(
-        &self,
-        kind: GroupKind,
-        mut entry: GroupEntry,
-        ns_path: &str,
-    ) -> Result<(), RvError> {
+    pub async fn set_group_ns(&self, kind: GroupKind, mut entry: GroupEntry, ns_path: &str) -> Result<(), RvError> {
         let name = Self::sanitize_name(&entry.name)?;
         entry.name = name.clone();
         // Normalize members + policies: trim, drop empties, dedup.
@@ -238,12 +223,7 @@ impl GroupStore {
         self.delete_group_ns(kind, name, "").await
     }
 
-    pub async fn delete_group_ns(
-        &self,
-        kind: GroupKind,
-        name: &str,
-        ns_path: &str,
-    ) -> Result<(), RvError> {
+    pub async fn delete_group_ns(&self, kind: GroupKind, name: &str, ns_path: &str) -> Result<(), RvError> {
         let name = Self::sanitize_name(name)?;
         let view = self.view_for(kind, ns_path);
         view.delete(&name).await
@@ -252,12 +232,7 @@ impl GroupStore {
     /// Append an audit entry for a group change. History keys are
     /// `{name}/{20-digit-nanos}` so `list_history` returns them in
     /// chronological order.
-    pub async fn append_history(
-        &self,
-        kind: GroupKind,
-        name: &str,
-        entry: GroupHistoryEntry,
-    ) -> Result<(), RvError> {
+    pub async fn append_history(&self, kind: GroupKind, name: &str, entry: GroupHistoryEntry) -> Result<(), RvError> {
         self.append_history_ns(kind, name, entry, "").await
     }
 
@@ -278,11 +253,7 @@ impl GroupStore {
     /// Return the full history for a single group, newest entry first.
     /// History persists after the group is deleted so audit records remain
     /// available until explicitly purged.
-    pub async fn list_history(
-        &self,
-        kind: GroupKind,
-        name: &str,
-    ) -> Result<Vec<GroupHistoryEntry>, RvError> {
+    pub async fn list_history(&self, kind: GroupKind, name: &str) -> Result<Vec<GroupHistoryEntry>, RvError> {
         self.list_history_ns(kind, name, "").await
     }
 
@@ -318,10 +289,7 @@ impl GroupStore {
     /// round-trip per history row, so aggregating across all groups with it
     /// scales with total history. The caller filters by name and timestamp
     /// in memory. Order is unspecified; undecodable rows are skipped.
-    pub async fn list_history_all(
-        &self,
-        kind: GroupKind,
-    ) -> Result<Vec<(String, GroupHistoryEntry)>, RvError> {
+    pub async fn list_history_all(&self, kind: GroupKind) -> Result<Vec<(String, GroupHistoryEntry)>, RvError> {
         let view = self.history_view_for(kind, "");
         let entries = view.get_entries("").await?;
         Ok(entries
@@ -385,9 +353,7 @@ impl GroupStore {
 /// as the suffix of history log keys so listing returns entries in
 /// chronological order.
 fn hist_seq() -> String {
-    let n = Utc::now()
-        .timestamp_nanos_opt()
-        .unwrap_or_else(|| Utc::now().timestamp_millis() * 1_000_000);
+    let n = Utc::now().timestamp_nanos_opt().unwrap_or_else(|| Utc::now().timestamp_millis() * 1_000_000);
     format!("{:020}", n.max(0) as u128)
 }
 

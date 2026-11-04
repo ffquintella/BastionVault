@@ -18,9 +18,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::kernel_api::VaultCtx;
-use crate::errors::RvError;
 use crate::enrolment;
+use crate::errors::RvError;
+use crate::kernel_api::VaultCtx;
 
 /// How often the attestation sweep runs. The spec calls for "weekly";
 /// 6 days gives a safety margin against the Rustion-side renew window
@@ -66,10 +66,7 @@ fn next_delay(sealed: bool, failed: usize) -> Duration {
 /// Spawn the background attest-timer. Same shape as
 /// `rustion::poller::start_poller` — fire-and-forget; tokio detaches
 /// when the parent terminates.
-pub fn start_attest_timer(
-    core: Arc<dyn VaultCtx>,
-    stores: Arc<super::RustionStores>,
-) -> tokio::task::JoinHandle<()> {
+pub fn start_attest_timer(core: Arc<dyn VaultCtx>, stores: Arc<super::RustionStores>) -> tokio::task::JoinHandle<()> {
     tokio::task::spawn(async move {
         log::info!(
             "rustion/attest: started (first sweep in {}s, then every {}d)",
@@ -96,38 +93,23 @@ pub fn start_attest_timer(
 
 /// Run one attestation sweep. Exposed for the manual-trigger Tauri
 /// command + tests.
-pub async fn run_attest_pass(
-    stores: &super::RustionStores,
-) -> Result<enrolment::AttestAllResult, RvError> {
+pub async fn run_attest_pass(stores: &super::RustionStores) -> Result<enrolment::AttestAllResult, RvError> {
     tick(stores).await
 }
 
 async fn tick(stores: &super::RustionStores) -> Result<enrolment::AttestAllResult, RvError> {
     let Some(store) = stores.store() else {
-        return Ok(enrolment::AttestAllResult {
-            attempted: 0,
-            succeeded: 0,
-            failed: 0,
-            results: Vec::new(),
-        });
+        return Ok(enrolment::AttestAllResult { attempted: 0, succeeded: 0, failed: 0, results: Vec::new() });
     };
     let Some(master_store) = stores.master() else {
-        return Ok(enrolment::AttestAllResult {
-            attempted: 0,
-            succeeded: 0,
-            failed: 0,
-            results: Vec::new(),
-        });
+        return Ok(enrolment::AttestAllResult { attempted: 0, succeeded: 0, failed: 0, results: Vec::new() });
     };
     let master = master_store
         .get_or_init_signing_key()
         .await
         .map_err(|e| crate::bv_error_string!(&format!("master signing key: {e}")))?;
     let authority = master_store.authority_name().await?;
-    let deployment_id = master_store
-        .get_or_init_deployment_id()
-        .await
-        .unwrap_or_default();
+    let deployment_id = master_store.get_or_init_deployment_id().await.unwrap_or_default();
     let operator = super::envelope::OperatorContext {
         vault_user_id: "system".into(),
         vault_user_name: "rustion-attest-timer".into(),
@@ -149,12 +131,7 @@ async fn tick(stores: &super::RustionStores) -> Result<enrolment::AttestAllResul
             );
         }
     }
-    log::info!(
-        "rustion/attest: pass complete ({}/{} succeeded, {} failed)",
-        r.succeeded,
-        r.attempted,
-        r.failed
-    );
+    log::info!("rustion/attest: pass complete ({}/{} succeeded, {} failed)", r.succeeded, r.attempted, r.failed);
     Ok(r)
 }
 

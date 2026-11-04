@@ -5,11 +5,7 @@ use std::io::BufWriter;
 use clap::Parser;
 use serde_json::Value;
 
-use crate::{
-    command::CommandExecutor,
-    errors::RvError,
-    storage,
-};
+use crate::{command::CommandExecutor, errors::RvError, storage};
 
 #[derive(Parser)]
 #[command(
@@ -78,8 +74,7 @@ impl CommandExecutor for Backup {
     #[inline]
     fn main(&self) -> Result<(), RvError> {
         let conf = parse_config_pairs(&self.backend_config)?;
-        let hmac_key = hex::decode(&self.hmac_key)
-            .map_err(|_| RvError::ErrBackupHmacFailed)?;
+        let hmac_key = hex::decode(&self.hmac_key).map_err(|_| RvError::ErrBackupHmacFailed)?;
 
         println!("Creating backend ({})...", self.backend_type);
         let backend = storage::new_backend(&self.backend_type, &conf)?;
@@ -97,12 +92,7 @@ impl CommandExecutor for Backup {
                 let handle = s.spawn(move || {
                     let rt = tokio::runtime::Runtime::new().unwrap();
                     rt.block_on(async {
-                        crate::backup::create::create_backup(
-                            backend.as_ref(),
-                            &hmac_key,
-                            &mut writer,
-                            compress,
-                        ).await
+                        crate::backup::create::create_backup(backend.as_ref(), &hmac_key, &mut writer, compress).await
                     })
                 });
                 handle.join().unwrap()
@@ -110,12 +100,7 @@ impl CommandExecutor for Backup {
             Err(_) => {
                 let rt = tokio::runtime::Runtime::new()?;
                 rt.block_on(async {
-                    crate::backup::create::create_backup(
-                        backend.as_ref(),
-                        &hmac_key,
-                        &mut writer,
-                        self.compress,
-                    ).await
+                    crate::backup::create::create_backup(backend.as_ref(), &hmac_key, &mut writer, self.compress).await
                 })
             }
         }?;

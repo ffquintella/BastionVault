@@ -116,11 +116,7 @@ impl BarrierView {
     /// whose key is `>= since_key` (relative to this view). For an
     /// append log keyed by zero-padded nanosecond timestamps, pass the
     /// padded nanos of the window start to scan only the recent tail.
-    pub async fn get_entries_since(
-        &self,
-        prefix: &str,
-        since_key: &str,
-    ) -> Result<Vec<StorageEntry>, RvError> {
+    pub async fn get_entries_since(&self, prefix: &str, since_key: &str) -> Result<Vec<StorageEntry>, RvError> {
         self.scan(prefix, Some(since_key)).await
     }
 

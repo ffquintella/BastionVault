@@ -473,17 +473,30 @@ mod tests {
             .unwrap();
         put_secret(&core, &root, "", "cubby/app", "v1").await;
         let sql_hcl = "path \"tenant-a/resources/resources/db/sql/*\" { capabilities = [\"sql_select\"] }";
-        ns_req(&core, &root, Operation::Write, "sys/policy/analysts", "tenant-a", json!({ "policy": sql_hcl }).as_object().cloned())
-            .await
-            .unwrap();
-        let doc =
-            export_all_namespaces(&core, ExporterInfo::default(), ScopeSpec { kind: ScopeKind::AllNamespaces, include: vec![] })
-                .await
-                .unwrap();
+        ns_req(
+            &core,
+            &root,
+            Operation::Write,
+            "sys/policy/analysts",
+            "tenant-a",
+            json!({ "policy": sql_hcl }).as_object().cloned(),
+        )
+        .await
+        .unwrap();
+        let doc = export_all_namespaces(
+            &core,
+            ExporterInfo::default(),
+            ScopeSpec { kind: ScopeKind::AllNamespaces, include: vec![] },
+        )
+        .await
+        .unwrap();
         // The stored `default` names `sql_*` once the gate is open, so every
         // export from an upgraded vault carries one.
         let named = sql_gate::sql_policies_in(&doc);
-        assert!(named.contains(&"tenant-a/analysts".to_string()) && named.contains(&"default".to_string()), "{named:?}");
+        assert!(
+            named.contains(&"tenant-a/analysts".to_string()) && named.contains(&"default".to_string()),
+            "{named:?}"
+        );
 
         // Remove what the import would restore, so a write would show.
         ns_req(&core, &root, Operation::Delete, "sys/policy/analysts", "tenant-a", None).await.unwrap();
@@ -491,7 +504,14 @@ mod tests {
         let absent = |ns: &'static str, path: &'static str| {
             let core = core.clone();
             let root = root.clone();
-            async move { ns_req(&core, &root, Operation::Read, path, ns, None).await.ok().flatten().and_then(|r| r.data).is_none() }
+            async move {
+                ns_req(&core, &root, Operation::Read, path, ns, None)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|r| r.data)
+                    .is_none()
+            }
         };
 
         let closed = SqlGate::Fixed(Err("node 2: no version record".into()));

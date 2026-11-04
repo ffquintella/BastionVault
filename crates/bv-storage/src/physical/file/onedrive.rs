@@ -108,10 +108,7 @@ impl OneDriveTarget {
             .and_then(|v| v.as_str())
             .ok_or_else(|| RvError::ErrString("onedrive target: `client_id` is required".into()))?
             .to_string();
-        let client_secret = conf
-            .get("client_secret")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+        let client_secret = conf.get("client_secret").and_then(|v| v.as_str()).map(|s| s.to_string());
         let credentials_ref = conf
             .get("credentials_ref")
             .and_then(|v| v.as_str())
@@ -130,11 +127,8 @@ impl OneDriveTarget {
             .map(Duration::from_secs)
             .unwrap_or(DEFAULT_HTTP_TIMEOUT);
 
-        let agent: Agent = UreqConfig::builder()
-            .timeout_global(Some(http_timeout))
-            .http_status_as_error(false)
-            .build()
-            .into();
+        let agent: Agent =
+            UreqConfig::builder().timeout_global(Some(http_timeout)).http_status_as_error(false).build().into();
 
         // Eagerly verify we can resolve the refresh token so a typo
         // in `credentials_ref` fails at boot rather than on the
@@ -184,9 +178,10 @@ impl OneDriveTarget {
     fn ensure_access_token(&self) -> Result<String, RvError> {
         // Fast path: cached token is still valid.
         {
-            let cache = self.cached_access_token.lock().map_err(|e| {
-                RvError::ErrString(format!("onedrive: token cache poisoned: {e}"))
-            })?;
+            let cache = self
+                .cached_access_token
+                .lock()
+                .map_err(|e| RvError::ErrString(format!("onedrive: token cache poisoned: {e}")))?;
             if let Some(entry) = cache.as_ref() {
                 if entry.expires_at > Instant::now() + TOKEN_EXPIRY_SKEW {
                     return Ok(entry.token.clone());
@@ -200,18 +195,17 @@ impl OneDriveTarget {
         let refresh_secret = creds::resolve(&self.credentials_ref)?;
         let refresh_str = refresh_secret.as_str()?.trim().to_string();
         let provider = oauth::well_known_provider("onedrive")?;
-        let creds_obj = oauth::OAuthCredentials {
-            client_id: self.client_id.clone(),
-            client_secret: self.client_secret.clone(),
-        };
+        let creds_obj =
+            oauth::OAuthCredentials { client_id: self.client_id.clone(), client_secret: self.client_secret.clone() };
         let resp = oauth::refresh_access_token(&provider, &creds_obj, &refresh_str)?;
 
         let expires_in = resp.expires_in.unwrap_or(3600);
         let new_token = resp.access_token.clone();
         {
-            let mut cache = self.cached_access_token.lock().map_err(|e| {
-                RvError::ErrString(format!("onedrive: token cache poisoned: {e}"))
-            })?;
+            let mut cache = self
+                .cached_access_token
+                .lock()
+                .map_err(|e| RvError::ErrString(format!("onedrive: token cache poisoned: {e}")))?;
             *cache = Some(CachedAccessToken {
                 token: new_token.clone(),
                 expires_at: Instant::now() + Duration::from_secs(expires_in),
@@ -326,9 +320,7 @@ where
 {
     match tokio::task::spawn_blocking(f).await {
         Ok(r) => r,
-        Err(e) => Err(RvError::ErrString(format!(
-            "onedrive: worker panic/cancel: {e}"
-        ))),
+        Err(e) => Err(RvError::ErrString(format!("onedrive: worker panic/cancel: {e}"))),
     }
 }
 
@@ -354,14 +346,10 @@ impl FileTarget for OneDriveTarget {
                 return Ok(None);
             }
             if !(200..300).contains(&status) {
-                return Err(RvError::ErrString(format!(
-                    "onedrive: GET {key_owned}: http status {status}"
-                )));
+                return Err(RvError::ErrString(format!("onedrive: GET {key_owned}: http status {status}")));
             }
-            let body = resp
-                .into_body()
-                .read_to_vec()
-                .map_err(|e| RvError::ErrString(format!("onedrive: read body: {e}")))?;
+            let body =
+                resp.into_body().read_to_vec().map_err(|e| RvError::ErrString(format!("onedrive: read body: {e}")))?;
             Ok(Some(body))
         })
         .await
@@ -394,13 +382,8 @@ impl FileTarget for OneDriveTarget {
                 // Drain the error body so the surfaced message
                 // carries Graph's explanation (helps debug 400s on
                 // name-constraint violations).
-                let detail = resp
-                    .into_body()
-                    .read_to_string()
-                    .unwrap_or_else(|_| "<no body>".into());
-                return Err(RvError::ErrString(format!(
-                    "onedrive: PUT {key_owned}: http status {status}: {detail}"
-                )));
+                let detail = resp.into_body().read_to_string().unwrap_or_else(|_| "<no body>".into());
+                return Err(RvError::ErrString(format!("onedrive: PUT {key_owned}: http status {status}: {detail}")));
             }
             Ok(())
         })
@@ -423,9 +406,7 @@ impl FileTarget for OneDriveTarget {
             if status == 204 || status == 404 || (200..300).contains(&status) {
                 Ok(())
             } else {
-                Err(RvError::ErrString(format!(
-                    "onedrive: DELETE {key_owned}: http status {status}"
-                )))
+                Err(RvError::ErrString(format!("onedrive: DELETE {key_owned}: http status {status}")))
             }
         })
         .await
@@ -441,11 +422,8 @@ impl FileTarget for OneDriveTarget {
         // `a/b`"; a non-empty non-trailing prefix is interpreted as
         // a full folder path too.
         let trimmed = prefix.trim_end_matches('/');
-        let initial_url = if trimmed.is_empty() {
-            self.root_children_url()
-        } else {
-            self.item_url(trimmed, "/children")
-        };
+        let initial_url =
+            if trimmed.is_empty() { self.root_children_url() } else { self.item_url(trimmed, "/children") };
 
         let mut url = initial_url;
         let mut out: Vec<String> = Vec::new();
@@ -464,9 +442,7 @@ impl FileTarget for OneDriveTarget {
                     return Ok::<Option<String>, RvError>(None);
                 }
                 if !(200..300).contains(&status) {
-                    return Err(RvError::ErrString(format!(
-                        "onedrive: LIST: http status {status}"
-                    )));
+                    return Err(RvError::ErrString(format!("onedrive: LIST: http status {status}")));
                 }
                 let body = resp
                     .into_body()
@@ -482,9 +458,8 @@ impl FileTarget for OneDriveTarget {
                 // target's contract.
                 None => return Ok(Vec::new()),
             };
-            let parsed: ChildrenResponse = serde_json::from_str(&body).map_err(|e| {
-                RvError::ErrString(format!("onedrive: LIST parse: {e}"))
-            })?;
+            let parsed: ChildrenResponse =
+                serde_json::from_str(&body).map_err(|e| RvError::ErrString(format!("onedrive: LIST parse: {e}")))?;
             for item in parsed.value {
                 if item.folder.is_some() {
                     out.push(format!("{}/", item.name));
@@ -617,10 +592,7 @@ mod tests {
             t.item_url("sys/foo", "/content"),
             format!("{GRAPH_BASE}/me/drive/special/approot:/bvault/sys/foo:/content")
         );
-        assert_eq!(
-            t.item_url("sys/foo", ""),
-            format!("{GRAPH_BASE}/me/drive/special/approot:/bvault/sys/foo:")
-        );
+        assert_eq!(t.item_url("sys/foo", ""), format!("{GRAPH_BASE}/me/drive/special/approot:/bvault/sys/foo:"));
         assert_eq!(
             t.item_url("sys/foo", "/children"),
             format!("{GRAPH_BASE}/me/drive/special/approot:/bvault/sys/foo:/children")
@@ -637,10 +609,7 @@ mod tests {
             "credentials_ref": reference.clone(),
         })))
         .unwrap();
-        assert_eq!(
-            t_no.root_children_url(),
-            format!("{GRAPH_BASE}/me/drive/special/approot/children")
-        );
+        assert_eq!(t_no.root_children_url(), format!("{GRAPH_BASE}/me/drive/special/approot/children"));
 
         // With prefix: colon-path into the prefix folder.
         let t_pref = OneDriveTarget::from_config(&cfg(json!({
@@ -649,10 +618,7 @@ mod tests {
             "prefix":"bvault",
         })))
         .unwrap();
-        assert_eq!(
-            t_pref.root_children_url(),
-            format!("{GRAPH_BASE}/me/drive/special/approot:/bvault:/children")
-        );
+        assert_eq!(t_pref.root_children_url(), format!("{GRAPH_BASE}/me/drive/special/approot:/bvault:/children"));
         std::fs::remove_file(&path).ok();
     }
 
@@ -700,14 +666,9 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn onedrive_target_live_roundtrip() {
-        let client_id = std::env::var("BVAULT_TEST_ONEDRIVE_CLIENT_ID")
-            .expect("BVAULT_TEST_ONEDRIVE_CLIENT_ID");
-        let creds_file = std::env::var("BVAULT_TEST_ONEDRIVE_CREDS_FILE")
-            .expect("BVAULT_TEST_ONEDRIVE_CREDS_FILE");
-        let prefix = format!(
-            "bvault-test-{}/",
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
-        );
+        let client_id = std::env::var("BVAULT_TEST_ONEDRIVE_CLIENT_ID").expect("BVAULT_TEST_ONEDRIVE_CLIENT_ID");
+        let creds_file = std::env::var("BVAULT_TEST_ONEDRIVE_CREDS_FILE").expect("BVAULT_TEST_ONEDRIVE_CREDS_FILE");
+        let prefix = format!("bvault-test-{}/", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0));
 
         let target = OneDriveTarget::from_config(&cfg(json!({
             "client_id": client_id,

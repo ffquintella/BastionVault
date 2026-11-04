@@ -65,9 +65,7 @@ pub fn parse(s: &str) -> Result<Framed, RvError> {
             .split_once(':')
             .ok_or_else(|| RvError::ErrString("malformed pqc ciphertext: missing algo separator".into()))?;
         if !is_known_pqc_algo(algo) {
-            return Err(RvError::ErrString(format!(
-                "unknown pqc algo tag `{algo}` in ciphertext"
-            )));
+            return Err(RvError::ErrString(format!("unknown pqc algo tag `{algo}` in ciphertext")));
         }
         (Some(algo.to_string()), body)
     } else {
@@ -77,11 +75,7 @@ pub fn parse(s: &str) -> Result<Framed, RvError> {
     let bytes = B64
         .decode(body_b64)
         .map_err(|e| RvError::ErrString(format!("malformed ciphertext: base64 decode failed ({e})")))?;
-    Ok(Framed {
-        version,
-        pqc_algo,
-        bytes,
-    })
+    Ok(Framed { version, pqc_algo, bytes })
 }
 
 fn is_known_pqc_algo(s: &str) -> bool {

@@ -26,11 +26,11 @@ use bv_utils as utils;
 // `crate::new_path` and friends. Same arrangement the root crate uses, and the
 // `_internal` halves are the recursive arms the public macros expand into, so
 // they must travel with them.
-pub use bv_logical::{
-    new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path,
-    new_path_internal, new_secret, new_secret_internal,
-};
 pub use bv_errors::{bv_error_response, bv_error_response_status, bv_error_string};
+pub use bv_logical::{
+    new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path, new_path_internal,
+    new_secret, new_secret_internal,
+};
 
 use std::{any::Any, sync::Arc};
 
@@ -55,22 +55,22 @@ pub mod issuer_renew;
 pub mod issuers;
 pub mod keys;
 pub mod path_config;
+pub mod path_crl;
 pub mod path_csr;
 pub mod path_export;
-pub mod path_keys;
-pub mod path_intermediate;
-pub mod path_issuers;
-pub mod path_crl;
 pub mod path_fetch;
+pub mod path_intermediate;
 pub mod path_issue;
+pub mod path_issuers;
+pub mod path_keys;
 pub mod path_revoke;
 pub mod path_roles;
-pub mod path_sign_request;
 pub mod path_root;
+pub mod path_sign_request;
 pub mod path_tidy;
+pub mod pqc;
 pub mod scheduler;
 pub mod sign_flow;
-pub mod pqc;
 pub mod storage;
 pub mod x509;
 #[cfg(feature = "pki_pqc_composite")]
@@ -186,12 +186,7 @@ impl PkiBackend {
         // layer — JWS in the request body is the auth.
         // `acme/config` stays authenticated (operator config, not
         // protocol surface).
-        backend.unauth_paths = Arc::new(
-            acme::UNAUTH_PATHS
-                .iter()
-                .map(|s| (*s).to_string())
-                .collect(),
-        );
+        backend.unauth_paths = Arc::new(acme::UNAUTH_PATHS.iter().map(|s| (*s).to_string()).collect());
         backend.help = PKI_BACKEND_HELP.to_string();
         backend
     }

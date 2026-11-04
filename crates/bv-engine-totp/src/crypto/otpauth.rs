@@ -23,15 +23,10 @@ pub fn encode_secret(key: &[u8]) -> String {
 /// Decode a base32 secret. Tolerates whitespace and lowercase, and
 /// accepts both padded and unpadded forms.
 pub fn decode_secret(s: &str) -> Result<Vec<u8>, String> {
-    let cleaned: String = s
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .map(|c| c.to_ascii_uppercase())
-        .filter(|c| *c != '=')
-        .collect();
-    base32::decode(B32, &cleaned).ok_or_else(|| {
-        "key is not valid base32 (RFC 4648 alphabet, padding optional)".to_string()
-    })
+    let cleaned: String =
+        s.chars().filter(|c| !c.is_whitespace()).map(|c| c.to_ascii_uppercase()).filter(|c| *c != '=').collect();
+    base32::decode(B32, &cleaned)
+        .ok_or_else(|| "key is not valid base32 (RFC 4648 alphabet, padding optional)".to_string())
 }
 
 pub fn build_url(p: &KeyPolicy) -> String {
@@ -53,11 +48,7 @@ pub fn build_url(p: &KeyPolicy) -> String {
     q.push(("digits".into(), p.digits.to_string()));
     q.push(("period".into(), p.period.to_string()));
 
-    let qs = q
-        .iter()
-        .map(|(k, v)| format!("{}={}", k, urlencode(v)))
-        .collect::<Vec<_>>()
-        .join("&");
+    let qs = q.iter().map(|(k, v)| format!("{}={}", k, urlencode(v))).collect::<Vec<_>>().join("&");
 
     format!("otpauth://totp/{label}?{qs}")
 }
@@ -68,16 +59,10 @@ pub fn build_url(p: &KeyPolicy) -> String {
 pub fn parse_url(input: &str) -> Result<ParsedOtpAuth, String> {
     let url = Url::parse(input).map_err(|e| format!("invalid otpauth url: {e}"))?;
     if url.scheme() != "otpauth" {
-        return Err(format!(
-            "otpauth url scheme must be `otpauth`, got `{}`",
-            url.scheme()
-        ));
+        return Err(format!("otpauth url scheme must be `otpauth`, got `{}`", url.scheme()));
     }
     if url.host_str() != Some("totp") {
-        return Err(format!(
-            "otpauth url type must be `totp`, got `{}`",
-            url.host_str().unwrap_or("<none>")
-        ));
+        return Err(format!("otpauth url type must be `totp`, got `{}`", url.host_str().unwrap_or("<none>")));
     }
 
     // Path: leading `/` then `Issuer:Account`. `url` returns it
@@ -105,14 +90,10 @@ pub fn parse_url(input: &str) -> Result<ParsedOtpAuth, String> {
             "issuer" => issuer = Some(v.into_owned()),
             "algorithm" => algorithm = Algorithm::parse(&v)?,
             "digits" => {
-                digits = v
-                    .parse::<u32>()
-                    .map_err(|e| format!("digits: {e}"))?;
+                digits = v.parse::<u32>().map_err(|e| format!("digits: {e}"))?;
             }
             "period" => {
-                period = v
-                    .parse::<u64>()
-                    .map_err(|e| format!("period: {e}"))?;
+                period = v.parse::<u64>().map_err(|e| format!("period: {e}"))?;
             }
             _ => {} // forward-compat: ignore unknown params
         }
@@ -121,14 +102,7 @@ pub fn parse_url(input: &str) -> Result<ParsedOtpAuth, String> {
     let secret = secret.ok_or_else(|| "otpauth url missing `secret` parameter".to_string())?;
     let key = decode_secret(&secret)?;
 
-    Ok(ParsedOtpAuth {
-        key,
-        issuer: issuer.unwrap_or_default(),
-        account_name: account,
-        algorithm,
-        digits,
-        period,
-    })
+    Ok(ParsedOtpAuth { key, issuer: issuer.unwrap_or_default(), account_name: account, algorithm, digits, period })
 }
 
 #[derive(Debug, Clone)]
@@ -154,12 +128,8 @@ fn pct_decode(s: &str) -> Result<String, String> {
             if i + 2 >= bytes.len() {
                 return Err("truncated percent escape".into());
             }
-            let hi = (bytes[i + 1] as char)
-                .to_digit(16)
-                .ok_or_else(|| "invalid percent escape".to_string())?;
-            let lo = (bytes[i + 2] as char)
-                .to_digit(16)
-                .ok_or_else(|| "invalid percent escape".to_string())?;
+            let hi = (bytes[i + 1] as char).to_digit(16).ok_or_else(|| "invalid percent escape".to_string())?;
+            let lo = (bytes[i + 2] as char).to_digit(16).ok_or_else(|| "invalid percent escape".to_string())?;
             out.push((hi * 16 + lo) as u8);
             i += 3;
         } else {
@@ -174,8 +144,7 @@ fn urlencode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.as_bytes() {
         let c = *b;
-        let safe = c.is_ascii_alphanumeric()
-            || matches!(c, b'-' | b'.' | b'_' | b'~');
+        let safe = c.is_ascii_alphanumeric() || matches!(c, b'-' | b'.' | b'_' | b'~');
         if safe {
             out.push(c as char);
         } else {

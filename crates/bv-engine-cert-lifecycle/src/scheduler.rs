@@ -34,11 +34,11 @@ use tokio::sync::Mutex;
 
 use super::storage::{self, SchedulerConfig, Target, TargetState, KEY_SCHEDULER_CONFIG};
 use crate::kernel_api::VaultCtx;
-use bv_storage::Storage;
 use crate::{
     errors::RvError,
     logical::{Operation, Request},
 };
+use bv_storage::Storage;
 
 const OUTER_TICK_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -47,10 +47,7 @@ const OUTER_TICK_INTERVAL: Duration = Duration::from_secs(30);
 pub fn start_cert_lifecycle_scheduler(core: Arc<dyn VaultCtx>) -> tokio::task::JoinHandle<()> {
     tokio::task::spawn(async move {
         let last_fired: Arc<Mutex<HashMap<String, Instant>>> = Arc::new(Mutex::new(HashMap::new()));
-        log::info!(
-            "cert-lifecycle: scheduler started (outer tick every {}s)",
-            OUTER_TICK_INTERVAL.as_secs(),
-        );
+        log::info!("cert-lifecycle: scheduler started (outer tick every {}s)", OUTER_TICK_INTERVAL.as_secs(),);
 
         let mut interval = tokio::time::interval(OUTER_TICK_INTERVAL);
         loop {
@@ -83,10 +80,7 @@ pub async fn run_cert_lifecycle_pass(
 }
 
 #[maybe_async::maybe_async]
-async fn tick(
-    core: &dyn VaultCtx,
-    last_fired: Arc<Mutex<HashMap<String, Instant>>>,
-) -> Result<(), RvError> {
+async fn tick(core: &dyn VaultCtx, last_fired: Arc<Mutex<HashMap<String, Instant>>>) -> Result<(), RvError> {
     let lifecycle_mounts: Vec<(String, String)> = {
         let mounts_router = core.mounts_router();
         let entries = mounts_router.entries.read()?;
@@ -135,8 +129,7 @@ async fn run_one_mount(
     storage_req.operation = Operation::Read;
     storage_req.storage = Some(storage_arc);
 
-    let cfg: SchedulerConfig =
-        storage::get_json(&storage_req, KEY_SCHEDULER_CONFIG).await?.unwrap_or_default();
+    let cfg: SchedulerConfig = storage::get_json(&storage_req, KEY_SCHEDULER_CONFIG).await?.unwrap_or_default();
     if !cfg.enabled || cfg.client_token.is_empty() {
         return Ok(());
     }
@@ -171,12 +164,8 @@ async fn run_one_mount(
 
     let now = unix_now();
     for name in names {
-        if let Err(e) =
-            consider_target(core, mount_path, &storage_req, &cfg, &name, now).await
-        {
-            log::warn!(
-                "cert-lifecycle: mount {mount_path}: target `{name}`: scheduler error: {e}"
-            );
+        if let Err(e) = consider_target(core, mount_path, &storage_req, &cfg, &name, now).await {
+            log::warn!("cert-lifecycle: mount {mount_path}: target `{name}`: scheduler error: {e}");
         }
     }
     Ok(())
@@ -191,9 +180,7 @@ async fn consider_target(
     name: &str,
     now: u64,
 ) -> Result<(), RvError> {
-    let target: Target = match storage::get_json(storage_req, &storage::target_storage_key(name))
-        .await?
-    {
+    let target: Target = match storage::get_json(storage_req, &storage::target_storage_key(name)).await? {
         Some(t) => t,
         None => return Ok(()),
     };
@@ -214,8 +201,7 @@ async fn consider_target(
     // from the mount's actual path (an operator may have mounted the
     // engine somewhere other than `cert-lifecycle/`).
     let trimmed_mount = mount_path.trim_end_matches('/');
-    let mut renew_req =
-        Request::new(format!("{trimmed_mount}/renew/{name}"));
+    let mut renew_req = Request::new(format!("{trimmed_mount}/renew/{name}"));
     renew_req.operation = Operation::Write;
     renew_req.client_token = cfg.client_token.clone();
     renew_req.body = Some(Map::new());
@@ -237,8 +223,7 @@ async fn consider_target(
             // tick interval from now.
             let renew_before = parse_duration(&target.renew_before).unwrap_or(Duration::from_secs(168 * 3600));
             updated.next_attempt_unix = if updated.current_not_after_unix > 0 {
-                let raw = updated.current_not_after_unix
-                    - renew_before.as_secs() as i64;
+                let raw = updated.current_not_after_unix - renew_before.as_secs() as i64;
                 raw.max(now as i64 + 30) as u64
             } else {
                 now + cfg.tick_interval_seconds
@@ -276,8 +261,5 @@ fn is_due(target: &Target, state: &TargetState, now: u64) -> bool {
 }
 
 fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }

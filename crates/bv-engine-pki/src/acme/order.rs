@@ -18,23 +18,21 @@ use super::{
     jws::{verify, JwsEnvelope},
     new_object_id,
     storage::{
-        AcmeAuthz, AcmeChall, AcmeIdentifier, AcmeOrder, AUTHZ_PREFIX, CHALL_PREFIX,
-        ORDER_CERT_SUFFIX, ORDER_PREFIX,
+        AcmeAuthz, AcmeChall, AcmeIdentifier, AcmeOrder, AUTHZ_PREFIX, CHALL_PREFIX, ORDER_CERT_SUFFIX, ORDER_PREFIX,
     },
 };
-use bv_storage::StorageEntry;
 use crate::{
     context::Context,
     errors::RvError,
     logical::{Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
     new_fields, new_fields_internal, new_path, new_path_internal,
 };
+use bv_storage::StorageEntry;
 
 use super::super::{
-    csr::{self, CsrAlgClass},
     crypto::Signer,
-    storage as pki_storage,
-    x509, x509_pqc, PkiBackend, PkiBackendInner,
+    csr::{self, CsrAlgClass},
+    storage as pki_storage, x509, x509_pqc, PkiBackend, PkiBackendInner,
 };
 
 const NEW_ORDER_HELP: &str = "RFC 8555 §7.4 — submit a new order for one or more identifiers.";
@@ -143,18 +141,14 @@ impl PkiBackendInner {
         // Per-account rate limit (Phase 6.3). Sliding window per
         // `acme/config`. 0 in either knob disables.
         if cfg.rate_window_secs > 0 && cfg.rate_orders_per_window > 0 {
-            self.rate_limit_record(req, &account_id, cfg.rate_window_secs, cfg.rate_orders_per_window)
-                .await?;
+            self.rate_limit_record(req, &account_id, cfg.rate_window_secs, cfg.rate_orders_per_window).await?;
         }
 
         // RFC 8555 §7.4: payload is `{ identifiers: [...], notBefore?, notAfter? }`.
         let payload_json: Value = if payload.is_empty() {
-            return Err(RvError::ErrString(
-                "acme: new-order payload must be a JSON object with identifiers".into(),
-            ));
+            return Err(RvError::ErrString("acme: new-order payload must be a JSON object with identifiers".into()));
         } else {
-            serde_json::from_slice(&payload)
-                .map_err(|e| RvError::ErrString(format!("acme: payload not JSON: {e}")))?
+            serde_json::from_slice(&payload).map_err(|e| RvError::ErrString(format!("acme: payload not JSON: {e}")))?
         };
         let identifiers = parse_identifiers(&payload_json)?;
         if identifiers.is_empty() {
@@ -221,25 +215,15 @@ impl PkiBackendInner {
         self.respond_order(req, &order_id, &order, true).await
     }
 
-    pub async fn handle_acme_order(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_acme_order(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let cfg = self.load_acme_config(req).await?.unwrap_or_default();
         if !cfg.enabled {
             return Err(RvError::ErrString("acme: not enabled on this mount".into()));
         }
-        let id = req
-            .get_data("id")
-            .ok()
-            .and_then(|v| v.as_str().map(String::from))
-            .unwrap_or_default();
+        let id = req.get_data("id").ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
 
         let envelope = parse_envelope(req)?;
-        let (account_id, _payload) = self
-            .verify_kid_jws(req, &envelope, &format!("order/{id}"))
-            .await?;
+        let (account_id, _payload) = self.verify_kid_jws(req, &envelope, &format!("order/{id}")).await?;
 
         let mut order = self
             .load_order(req, &id)
@@ -256,30 +240,18 @@ impl PkiBackendInner {
         self.respond_order(req, &id, &order, false).await
     }
 
-    pub async fn handle_acme_finalize(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_acme_finalize(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let cfg = self.load_acme_config(req).await?.unwrap_or_default();
         if !cfg.enabled {
             return Err(RvError::ErrString("acme: not enabled on this mount".into()));
         }
         if cfg.default_role.trim().is_empty() {
-            return Err(RvError::ErrString(
-                "acme: cannot finalize without acme/config.default_role".into(),
-            ));
+            return Err(RvError::ErrString("acme: cannot finalize without acme/config.default_role".into()));
         }
-        let id = req
-            .get_data("id")
-            .ok()
-            .and_then(|v| v.as_str().map(String::from))
-            .unwrap_or_default();
+        let id = req.get_data("id").ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
 
         let envelope = parse_envelope(req)?;
-        let (account_id, payload) = self
-            .verify_kid_jws(req, &envelope, &format!("order/{id}/finalize"))
-            .await?;
+        let (account_id, payload) = self.verify_kid_jws(req, &envelope, &format!("order/{id}/finalize")).await?;
 
         let mut order = self
             .load_order(req, &id)
@@ -331,34 +303,23 @@ impl PkiBackendInner {
                 csr_dns.push(cn.to_string());
             }
         }
-        let order_dns: Vec<String> = order
-            .identifiers
-            .iter()
-            .filter(|i| i.typ == "dns")
-            .map(|i| i.value.clone())
-            .collect();
+        let order_dns: Vec<String> =
+            order.identifiers.iter().filter(|i| i.typ == "dns").map(|i| i.value.clone()).collect();
         for d in &csr_dns {
             if !order_dns.contains(d) {
-                return Err(RvError::ErrString(format!(
-                    "acme: badCSR — identifier `{d}` not authorised on order"
-                )));
+                return Err(RvError::ErrString(format!("acme: badCSR — identifier `{d}` not authorised on order")));
             }
         }
         for d in &order_dns {
             if !csr_dns.contains(d) {
-                return Err(RvError::ErrString(format!(
-                    "acme: badCSR — order identifier `{d}` missing from CSR"
-                )));
+                return Err(RvError::ErrString(format!("acme: badCSR — order identifier `{d}` missing from CSR")));
             }
         }
 
         // Resolve role + issuer the same way `pki/sign/<role>` does.
-        let role = self
-            .get_role(req, &cfg.default_role)
-            .await?
-            .ok_or_else(|| RvError::ErrString(format!(
-                "acme: configured default_role `{}` not found", cfg.default_role
-            )))?;
+        let role = self.get_role(req, &cfg.default_role).await?.ok_or_else(|| {
+            RvError::ErrString(format!("acme: configured default_role `{}` not found", cfg.default_role))
+        })?;
         let issuer = if !cfg.default_issuer_ref.is_empty() {
             super::super::issuers::load_issuer(req, &cfg.default_issuer_ref).await?
         } else {
@@ -367,8 +328,7 @@ impl PkiBackendInner {
         super::super::issuers::require_issuing(&issuer)?;
         // Phase L4: clamp leaf TTL to the issuer's remaining lifetime.
         // Snapshotted here while we still own the full handle.
-        let (ttl, _was_clamped) =
-            super::super::issuers::clamp_ttl_to_issuer(&issuer, role.effective_ttl(None))?;
+        let (ttl, _was_clamped) = super::super::issuers::clamp_ttl_to_issuer(&issuer, role.effective_ttl(None))?;
         let ca_cert_pem = issuer.cert_pem.clone();
         let ca_signer = super::super::issuers::take_signer(issuer.signer, &issuer.name)?;
         let issuer_id = issuer.id.clone();
@@ -422,9 +382,9 @@ impl PkiBackendInner {
 
         // Same dispatch as `sign_csr_role`. Mixed-class chains rejected.
         let (cert_pem, serial_bytes) = match (&parsed.algorithm_class, &ca_signer) {
-            (CsrAlgClass::Classical, Signer::Classical(ca)) => x509::build_leaf_from_spki(
-                &role, &subject, ttl, &parsed.spki_der, ca, &ca_cert_pem, &urls,
-            )?,
+            (CsrAlgClass::Classical, Signer::Classical(ca)) => {
+                x509::build_leaf_from_spki(&role, &subject, ttl, &parsed.spki_der, ca, &ca_cert_pem, &urls)?
+            }
             (CsrAlgClass::MlDsa(level), Signer::MlDsa(ca_ml)) => x509_pqc::build_leaf_from_pqc_spki(
                 &role,
                 &subject,
@@ -470,25 +430,15 @@ impl PkiBackendInner {
         self.respond_order(req, &id, &order, false).await
     }
 
-    pub async fn handle_acme_cert(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_acme_cert(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let cfg = self.load_acme_config(req).await?.unwrap_or_default();
         if !cfg.enabled {
             return Err(RvError::ErrString("acme: not enabled on this mount".into()));
         }
-        let id = req
-            .get_data("id")
-            .ok()
-            .and_then(|v| v.as_str().map(String::from))
-            .unwrap_or_default();
+        let id = req.get_data("id").ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
 
         let envelope = parse_envelope(req)?;
-        let (account_id, _payload) = self
-            .verify_kid_jws(req, &envelope, &format!("cert/{id}"))
-            .await?;
+        let (account_id, _payload) = self.verify_kid_jws(req, &envelope, &format!("cert/{id}")).await?;
 
         let order = self
             .load_order(req, &id)
@@ -498,32 +448,23 @@ impl PkiBackendInner {
             return Err(RvError::ErrString("acme: order belongs to another account".into()));
         }
         if order.status != "valid" || order.cert_id.is_empty() {
-            return Err(RvError::ErrString(
-                "acme: order has no certificate yet".into(),
-            ));
+            return Err(RvError::ErrString("acme: order has no certificate yet".into()));
         }
         let chain = req
             .storage_get(&format!("{ORDER_PREFIX}{id}{ORDER_CERT_SUFFIX}"))
             .await?
             .ok_or_else(|| RvError::ErrString("acme: cert chain missing from storage".into()))?;
-        let chain_pem = String::from_utf8(chain.value)
-            .map_err(|_| RvError::ErrString("acme: stored cert is not utf-8".into()))?;
+        let chain_pem =
+            String::from_utf8(chain.value).map_err(|_| RvError::ErrString("acme: stored cert is not utf-8".into()))?;
 
         let nonce = self.mint_nonce(req).await?;
         let mut headers = HashMap::new();
         headers.insert("Replay-Nonce".to_string(), nonce);
         headers.insert("Cache-Control".to_string(), "no-store".to_string());
-        headers.insert(
-            "Content-Type".to_string(),
-            "application/pem-certificate-chain".to_string(),
-        );
+        headers.insert("Content-Type".to_string(), "application/pem-certificate-chain".to_string());
         let mut data = Map::new();
         data.insert("certificate".into(), Value::String(chain_pem));
-        Ok(Some(Response {
-            data: Some(data),
-            headers: Some(headers),
-            ..Default::default()
-        }))
+        Ok(Some(Response { data: Some(data), headers: Some(headers), ..Default::default() }))
     }
 
     /// Append `now` to the per-account rate bucket, prune entries
@@ -563,11 +504,7 @@ impl PkiBackendInner {
     /// authorisations. Pure function on stored state — no validator
     /// is run here; the chall handler is what flips an authz to
     /// `valid` after a successful HTTP-01 fetch.
-    pub async fn refresh_order_state(
-        &self,
-        req: &Request,
-        order: &mut AcmeOrder,
-    ) -> Result<(), RvError> {
+    pub async fn refresh_order_state(&self, req: &Request, order: &mut AcmeOrder) -> Result<(), RvError> {
         if order.status == "valid" || order.status == "invalid" {
             return Ok(());
         }
@@ -576,8 +513,7 @@ impl PkiBackendInner {
         for az_id in &order.authorizations {
             match self.load_authz(req, az_id).await? {
                 Some(a) => {
-                    if a.status == "invalid" || a.status == "expired" || a.status == "deactivated"
-                    {
+                    if a.status == "invalid" || a.status == "expired" || a.status == "deactivated" {
                         any_invalid = true;
                     }
                     if a.status != "valid" {
@@ -606,18 +542,9 @@ impl PkiBackendInner {
             None => Ok(None),
         }
     }
-    pub async fn save_order(
-        &self,
-        req: &mut Request,
-        id: &str,
-        order: &AcmeOrder,
-    ) -> Result<(), RvError> {
+    pub async fn save_order(&self, req: &mut Request, id: &str, order: &AcmeOrder) -> Result<(), RvError> {
         let bytes = serde_json::to_vec(order)?;
-        req.storage_put(&StorageEntry {
-            key: format!("{ORDER_PREFIX}{id}"),
-            value: bytes,
-        })
-        .await
+        req.storage_put(&StorageEntry { key: format!("{ORDER_PREFIX}{id}"), value: bytes }).await
     }
     pub async fn load_authz(&self, req: &Request, id: &str) -> Result<Option<AcmeAuthz>, RvError> {
         match req.storage_get(&format!("{AUTHZ_PREFIX}{id}")).await? {
@@ -625,18 +552,9 @@ impl PkiBackendInner {
             None => Ok(None),
         }
     }
-    pub async fn save_authz(
-        &self,
-        req: &mut Request,
-        id: &str,
-        authz: &AcmeAuthz,
-    ) -> Result<(), RvError> {
+    pub async fn save_authz(&self, req: &mut Request, id: &str, authz: &AcmeAuthz) -> Result<(), RvError> {
         let bytes = serde_json::to_vec(authz)?;
-        req.storage_put(&StorageEntry {
-            key: format!("{AUTHZ_PREFIX}{id}"),
-            value: bytes,
-        })
-        .await
+        req.storage_put(&StorageEntry { key: format!("{AUTHZ_PREFIX}{id}"), value: bytes }).await
     }
     pub async fn load_chall(&self, req: &Request, id: &str) -> Result<Option<AcmeChall>, RvError> {
         match req.storage_get(&format!("{CHALL_PREFIX}{id}")).await? {
@@ -644,18 +562,9 @@ impl PkiBackendInner {
             None => Ok(None),
         }
     }
-    pub async fn save_chall(
-        &self,
-        req: &mut Request,
-        id: &str,
-        chall: &AcmeChall,
-    ) -> Result<(), RvError> {
+    pub async fn save_chall(&self, req: &mut Request, id: &str, chall: &AcmeChall) -> Result<(), RvError> {
         let bytes = serde_json::to_vec(chall)?;
-        req.storage_put(&StorageEntry {
-            key: format!("{CHALL_PREFIX}{id}"),
-            value: bytes,
-        })
-        .await
+        req.storage_put(&StorageEntry { key: format!("{CHALL_PREFIX}{id}"), value: bytes }).await
     }
 
     // ── JWS / response helpers ───────────────────────────────────
@@ -677,8 +586,8 @@ impl PkiBackendInner {
         let header_bytes = B64
             .decode(envelope.protected.as_bytes())
             .map_err(|_| RvError::ErrString("acme: protected not base64url".into()))?;
-        let header: Value = serde_json::from_slice(&header_bytes)
-            .map_err(|_| RvError::ErrString("acme: protected not JSON".into()))?;
+        let header: Value =
+            serde_json::from_slice(&header_bytes).map_err(|_| RvError::ErrString("acme: protected not JSON".into()))?;
         let kid = header
             .get("kid")
             .and_then(|v| v.as_str())
@@ -686,11 +595,7 @@ impl PkiBackendInner {
             .to_string();
         // The kid is always the full account URL ending in
         // `/acme/account/<id>`.
-        let account_id = kid
-            .rsplit('/')
-            .next()
-            .map(|s| s.to_string())
-            .unwrap_or_default();
+        let account_id = kid.rsplit('/').next().map(|s| s.to_string()).unwrap_or_default();
         if account_id.is_empty() {
             return Err(RvError::ErrString("acme: malformed kid".into()));
         }
@@ -700,21 +605,13 @@ impl PkiBackendInner {
             .ok_or_else(|| RvError::ErrString(format!("acme: unknown account `{account_id}`")))?;
         let stored_jwk = account.jwk.clone();
         let kid_for_lookup = kid.clone();
-        let verified = verify(envelope, move |k| {
-            if k == kid_for_lookup {
-                Some(stored_jwk)
-            } else {
-                None
-            }
-        })?;
+        let verified = verify(envelope, move |k| if k == kid_for_lookup { Some(stored_jwk) } else { None })?;
         // Replay protection.
         if verified.header.nonce.is_empty() {
             return Err(RvError::ErrString("acme: badNonce (missing)".into()));
         }
         if !self.consume_nonce(req, &verified.header.nonce).await? {
-            return Err(RvError::ErrString(
-                "acme: badNonce (unknown / replayed)".into(),
-            ));
+            return Err(RvError::ErrString("acme: badNonce (unknown / replayed)".into()));
         }
         // The JWS-bound url must match the endpoint tail (mirrors
         // the looser check in account.rs — proxies can rewrite the
@@ -742,31 +639,16 @@ impl PkiBackendInner {
 
         let mut data = Map::new();
         data.insert("status".into(), Value::String(order.status.clone()));
-        data.insert(
-            "expires".into(),
-            Value::String(rfc3339_from_unix(order.expires_at_unix)),
-        );
-        let identifiers: Vec<Value> = order
-            .identifiers
-            .iter()
-            .map(|i| json!({ "type": i.typ, "value": i.value }))
-            .collect();
+        data.insert("expires".into(), Value::String(rfc3339_from_unix(order.expires_at_unix)));
+        let identifiers: Vec<Value> =
+            order.identifiers.iter().map(|i| json!({ "type": i.typ, "value": i.value })).collect();
         data.insert("identifiers".into(), Value::Array(identifiers));
-        let auth_urls: Vec<Value> = order
-            .authorizations
-            .iter()
-            .map(|a| Value::String(format!("{base}/acme/authz/{a}")))
-            .collect();
+        let auth_urls: Vec<Value> =
+            order.authorizations.iter().map(|a| Value::String(format!("{base}/acme/authz/{a}"))).collect();
         data.insert("authorizations".into(), Value::Array(auth_urls));
-        data.insert(
-            "finalize".into(),
-            Value::String(format!("{base}/acme/order/{id}/finalize")),
-        );
+        data.insert("finalize".into(), Value::String(format!("{base}/acme/order/{id}/finalize")));
         if !order.cert_id.is_empty() {
-            data.insert(
-                "certificate".into(),
-                Value::String(format!("{base}/acme/cert/{}", order.cert_id)),
-            );
+            data.insert("certificate".into(), Value::String(format!("{base}/acme/cert/{}", order.cert_id)));
         }
 
         let nonce = self.mint_nonce(req).await?;
@@ -774,46 +656,21 @@ impl PkiBackendInner {
         headers.insert("Replay-Nonce".to_string(), nonce);
         headers.insert("Cache-Control".to_string(), "no-store".to_string());
         headers.insert("Location".to_string(), location);
-        headers.insert(
-            "Link".to_string(),
-            format!(r#"<{base}/acme/directory>;rel="index""#),
-        );
-        Ok(Some(Response {
-            data: Some(data),
-            headers: Some(headers),
-            ..Default::default()
-        }))
+        headers.insert("Link".to_string(), format!(r#"<{base}/acme/directory>;rel="index""#));
+        Ok(Some(Response { data: Some(data), headers: Some(headers), ..Default::default() }))
     }
 }
 
 // ── Free helpers ─────────────────────────────────────────────────
 
 fn parse_envelope(req: &Request) -> Result<JwsEnvelope, RvError> {
-    let protected = req
-        .get_data("protected")
-        .ok()
-        .and_then(|v| v.as_str().map(String::from))
-        .unwrap_or_default();
-    let payload = req
-        .get_data("payload")
-        .ok()
-        .and_then(|v| v.as_str().map(String::from))
-        .unwrap_or_default();
-    let signature = req
-        .get_data("signature")
-        .ok()
-        .and_then(|v| v.as_str().map(String::from))
-        .unwrap_or_default();
+    let protected = req.get_data("protected").ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
+    let payload = req.get_data("payload").ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
+    let signature = req.get_data("signature").ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
     if protected.is_empty() || signature.is_empty() {
-        return Err(RvError::ErrString(
-            "acme: malformed JWS envelope (missing protected or signature)".into(),
-        ));
+        return Err(RvError::ErrString("acme: malformed JWS envelope (missing protected or signature)".into()));
     }
-    Ok(JwsEnvelope {
-        protected,
-        payload,
-        signature,
-    })
+    Ok(JwsEnvelope { protected, payload, signature })
 }
 
 fn parse_identifiers(payload: &Value) -> Result<Vec<AcmeIdentifier>, RvError> {
@@ -831,10 +688,7 @@ fn parse_identifiers(payload: &Value) -> Result<Vec<AcmeIdentifier>, RvError> {
             .get("value")
             .and_then(|t| t.as_str())
             .ok_or_else(|| RvError::ErrString("acme: identifier.value missing".into()))?;
-        out.push(AcmeIdentifier {
-            typ: typ.to_string(),
-            value: value.to_string(),
-        });
+        out.push(AcmeIdentifier { typ: typ.to_string(), value: value.to_string() });
     }
     Ok(out)
 }
@@ -871,10 +725,7 @@ fn directory_base(cfg: &super::storage::AcmeConfig, req: &Request) -> String {
 }
 
 fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
 fn rfc3339_from_unix(t: u64) -> String {

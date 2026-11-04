@@ -59,9 +59,8 @@ fn machine_id() -> Option<String> {
     }
     #[cfg(target_os = "macos")]
     {
-        if let Ok(out) = std::process::Command::new("/usr/sbin/ioreg")
-            .args(["-rd1", "-c", "IOPlatformExpertDevice"])
-            .output()
+        if let Ok(out) =
+            std::process::Command::new("/usr/sbin/ioreg").args(["-rd1", "-c", "IOPlatformExpertDevice"]).output()
         {
             if out.status.success() {
                 let text = String::from_utf8_lossy(&out.stdout);
@@ -99,39 +98,25 @@ fn encrypt_with_key(token: &str, key: &[u8; 32]) -> Option<String> {
     let cipher = XChaCha20Poly1305::new_from_slice(key).ok()?;
     let mut nonce = [0u8; XCHACHA_NONCE_LEN];
     rand::rng().fill_bytes(&mut nonce);
-    let ciphertext = cipher
-        .encrypt(
-            XNonce::from_slice(&nonce),
-            Payload { msg: token.as_bytes(), aad: TOKEN_AAD },
-        )
-        .ok()?;
+    let ciphertext =
+        cipher.encrypt(XNonce::from_slice(&nonce), Payload { msg: token.as_bytes(), aad: TOKEN_AAD }).ok()?;
     let mut blob = Vec::with_capacity(nonce.len() + ciphertext.len());
     blob.extend_from_slice(&nonce);
     blob.extend_from_slice(&ciphertext);
-    Some(format!(
-        "{TOKEN_ENC_PREFIX}{}",
-        base64::engine::general_purpose::STANDARD.encode(&blob)
-    ))
+    Some(format!("{TOKEN_ENC_PREFIX}{}", base64::engine::general_purpose::STANDARD.encode(&blob)))
 }
 
 /// Reverse of `encrypt_with_key`. Returns `None` on any malformed input or
 /// authentication failure (wrong machine, tampered file).
 fn decrypt_with_key(contents: &str, key: &[u8; 32]) -> Option<String> {
     let b64 = contents.trim().strip_prefix(TOKEN_ENC_PREFIX)?;
-    let blob = base64::engine::general_purpose::STANDARD
-        .decode(b64.as_bytes())
-        .ok()?;
+    let blob = base64::engine::general_purpose::STANDARD.decode(b64.as_bytes()).ok()?;
     if blob.len() <= XCHACHA_NONCE_LEN {
         return None;
     }
     let (nonce, ciphertext) = blob.split_at(XCHACHA_NONCE_LEN);
     let cipher = XChaCha20Poly1305::new_from_slice(key).ok()?;
-    let plaintext = cipher
-        .decrypt(
-            XNonce::from_slice(nonce),
-            Payload { msg: ciphertext, aad: TOKEN_AAD },
-        )
-        .ok()?;
+    let plaintext = cipher.decrypt(XNonce::from_slice(nonce), Payload { msg: ciphertext, aad: TOKEN_AAD }).ok()?;
     let s = String::from_utf8(plaintext).ok()?;
     let trimmed = s.trim();
     if trimmed.is_empty() {
@@ -175,8 +160,7 @@ pub fn read_persisted_token() -> Option<String> {
 /// abort the surrounding command — the token is still usable from this shell
 /// via the printed value.
 pub fn write_persisted_token(token: &str) -> std::io::Result<PathBuf> {
-    let path = token_helper_path()
-        .ok_or_else(|| std::io::Error::other("no token helper path"))?;
+    let path = token_helper_path().ok_or_else(|| std::io::Error::other("no token helper path"))?;
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;
@@ -190,17 +174,13 @@ pub fn write_persisted_token(token: &str) -> std::io::Result<PathBuf> {
             match enc {
                 Some(c) => c,
                 None => {
-                    log::warn!(
-                        "token helper: encryption failed; writing token in plaintext"
-                    );
+                    log::warn!("token helper: encryption failed; writing token in plaintext");
                     token.to_string()
                 }
             }
         }
         None => {
-            log::warn!(
-                "token helper: no machine id available; writing token in plaintext"
-            );
+            log::warn!("token helper: no machine id available; writing token in plaintext");
             token.to_string()
         }
     };

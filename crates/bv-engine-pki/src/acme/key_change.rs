@@ -57,9 +57,7 @@ impl PkiBackendInner {
         // tail matches `key-change`, and returns the resolved
         // account id + decoded payload (which is itself the inner
         // JWS as raw JSON bytes).
-        let (account_id, inner_bytes) = self
-            .verify_kid_jws(req, &outer, "key-change")
-            .await?;
+        let (account_id, inner_bytes) = self.verify_kid_jws(req, &outer, "key-change").await?;
 
         // The inner JWS is signed by the NEW key; its protected
         // header carries `jwk` (embedded — the new key isn't yet
@@ -76,9 +74,7 @@ impl PkiBackendInner {
         let inner_verified = verify(&inner, |_kid| None)
             .map_err(|e| RvError::ErrString(format!("acme: key-change inner verify: {e}")))?;
         if inner_verified.header.jwk.is_none() {
-            return Err(RvError::ErrString(
-                "acme: key-change inner JWS must embed jwk (not kid)".into(),
-            ));
+            return Err(RvError::ErrString("acme: key-change inner JWS must embed jwk (not kid)".into()));
         }
         // RFC 8555 §7.3.5: the inner `url` MUST equal the outer `url`.
         // We already pinned the outer to `key-change` in
@@ -98,19 +94,12 @@ impl PkiBackendInner {
             .get("account")
             .and_then(|v| v.as_str())
             .ok_or_else(|| RvError::ErrString("acme: key-change.account missing".into()))?;
-        let bind_account_id = bind_account
-            .rsplit('/')
-            .next()
-            .unwrap_or("")
-            .to_string();
+        let bind_account_id = bind_account.rsplit('/').next().unwrap_or("").to_string();
         if bind_account_id != account_id {
-            return Err(RvError::ErrString(
-                "acme: key-change inner.account does not match outer kid".into(),
-            ));
+            return Err(RvError::ErrString("acme: key-change inner.account does not match outer kid".into()));
         }
-        let bind_old_key = bind
-            .get("oldKey")
-            .ok_or_else(|| RvError::ErrString("acme: key-change.oldKey missing".into()))?;
+        let bind_old_key =
+            bind.get("oldKey").ok_or_else(|| RvError::ErrString("acme: key-change.oldKey missing".into()))?;
 
         // Load current account; the bind's `oldKey` MUST equal the
         // currently-stored JWK (compared by canonical thumbprint to
@@ -122,9 +111,7 @@ impl PkiBackendInner {
         let old_tp_stored = jwk_thumbprint(&account.jwk).map_err(RvError::from)?;
         let old_tp_bind = jwk_thumbprint(bind_old_key).map_err(RvError::from)?;
         if old_tp_stored != old_tp_bind {
-            return Err(RvError::ErrString(
-                "acme: key-change.oldKey does not match the current account key".into(),
-            ));
+            return Err(RvError::ErrString("acme: key-change.oldKey does not match the current account key".into()));
         }
 
         // Refuse to roll onto a key already attached to a different
@@ -133,9 +120,7 @@ impl PkiBackendInner {
         let new_tp = jwk_thumbprint(&inner_verified.jwk).map_err(RvError::from)?;
         if new_tp != old_tp_stored {
             if let Some(_collision) = self.load_account(req, &new_tp).await? {
-                return Err(RvError::ErrString(
-                    "acme: key-change new key is already in use by another account".into(),
-                ));
+                return Err(RvError::ErrString("acme: key-change new key is already in use by another account".into()));
             }
         }
 
@@ -162,34 +147,15 @@ impl PkiBackendInner {
         let location = format!("{base}/acme/account/{id}");
         let mut data = Map::new();
         data.insert("status".into(), Value::String(account.status.clone()));
-        data.insert(
-            "contact".into(),
-            Value::Array(
-                account
-                    .contact
-                    .iter()
-                    .map(|c| Value::String(c.clone()))
-                    .collect(),
-            ),
-        );
-        data.insert(
-            "orders".into(),
-            Value::String(format!("{base}/acme/account/{id}/orders")),
-        );
+        data.insert("contact".into(), Value::Array(account.contact.iter().map(|c| Value::String(c.clone())).collect()));
+        data.insert("orders".into(), Value::String(format!("{base}/acme/account/{id}/orders")));
         let nonce = self.mint_nonce(req).await?;
         let mut headers = HashMap::new();
         headers.insert("Replay-Nonce".to_string(), nonce);
         headers.insert("Cache-Control".to_string(), "no-store".to_string());
         headers.insert("Location".to_string(), location);
-        headers.insert(
-            "Link".to_string(),
-            format!(r#"<{base}/acme/directory>;rel="index""#),
-        );
-        Ok(Some(Response {
-            data: Some(data),
-            headers: Some(headers),
-            ..Default::default()
-        }))
+        headers.insert("Link".to_string(), format!(r#"<{base}/acme/directory>;rel="index""#));
+        Ok(Some(Response { data: Some(data), headers: Some(headers), ..Default::default() }))
     }
 }
 
@@ -201,31 +167,13 @@ fn take_str(v: &Value, name: &str) -> Result<String, RvError> {
 }
 
 fn parse_envelope(req: &Request) -> Result<JwsEnvelope, RvError> {
-    let protected = req
-        .get_data("protected")
-        .ok()
-        .and_then(|v| v.as_str().map(String::from))
-        .unwrap_or_default();
-    let payload = req
-        .get_data("payload")
-        .ok()
-        .and_then(|v| v.as_str().map(String::from))
-        .unwrap_or_default();
-    let signature = req
-        .get_data("signature")
-        .ok()
-        .and_then(|v| v.as_str().map(String::from))
-        .unwrap_or_default();
+    let protected = req.get_data("protected").ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
+    let payload = req.get_data("payload").ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
+    let signature = req.get_data("signature").ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
     if protected.is_empty() || signature.is_empty() {
-        return Err(RvError::ErrString(
-            "acme: malformed JWS envelope (missing protected or signature)".into(),
-        ));
+        return Err(RvError::ErrString("acme: malformed JWS envelope (missing protected or signature)".into()));
     }
-    Ok(JwsEnvelope {
-        protected,
-        payload,
-        signature,
-    })
+    Ok(JwsEnvelope { protected, payload, signature })
 }
 
 fn directory_base(cfg: &super::storage::AcmeConfig, req: &Request) -> String {
@@ -288,11 +236,7 @@ mod tests {
         let pl_b64 = B64.encode(serde_json::to_vec(&bind).unwrap());
         let signing_input = format!("{p_b64}.{pl_b64}");
         let sig = new_sk.sign(signing_input.as_bytes());
-        let env = JwsEnvelope {
-            protected: p_b64,
-            payload: pl_b64,
-            signature: B64.encode(sig.to_bytes()),
-        };
+        let env = JwsEnvelope { protected: p_b64, payload: pl_b64, signature: B64.encode(sig.to_bytes()) };
         let v = verify(&env, |_| None).unwrap();
         assert_eq!(v.header.alg, "EdDSA");
         assert!(v.header.jwk.is_some());

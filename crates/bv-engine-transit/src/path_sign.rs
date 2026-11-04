@@ -57,38 +57,24 @@ impl TransitBackend {
 
 #[maybe_async::maybe_async]
 impl TransitBackendInner {
-    pub async fn handle_sign(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_sign(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let name = take_str(req, "name");
         let input_b64 = take_str(req, "input");
-        let input = B64
-            .decode(input_b64.as_bytes())
-            .map_err(|e| RvError::ErrString(format!("input: not base64 ({e})")))?;
+        let input =
+            B64.decode(input_b64.as_bytes()).map_err(|e| RvError::ErrString(format!("input: not base64 ({e})")))?;
 
-        let p = self
-            .get_policy(req, &name)
-            .await?
-            .ok_or_else(|| RvError::ErrString(format!("unknown key `{name}`")))?;
+        let p =
+            self.get_policy(req, &name).await?.ok_or_else(|| RvError::ErrString(format!("unknown key `{name}`")))?;
         if !p.key_type.supports_sign() {
-            return Err(RvError::ErrString(format!(
-                "{} keys do not support /sign",
-                p.key_type.as_str()
-            )));
+            return Err(RvError::ErrString(format!("{} keys do not support /sign", p.key_type.as_str())));
         }
         let v = p.latest().ok_or_else(|| RvError::ErrString("key has no versions".into()))?;
 
         let sig = match p.key_type {
             KeyType::Ed25519 => ed25519::sign(&v.material, &input)?,
-            KeyType::MlDsa44 | KeyType::MlDsa65 | KeyType::MlDsa87 => {
-                ml_dsa::sign(p.key_type, &v.material, &input)?
-            }
+            KeyType::MlDsa44 | KeyType::MlDsa65 | KeyType::MlDsa87 => ml_dsa::sign(p.key_type, &v.material, &input)?,
             #[cfg(feature = "transit_pqc_hybrid")]
-            KeyType::HybridEd25519MlDsa65 => {
-                super::crypto::hybrid::sign_composite(&v.material, &input)?
-            }
+            KeyType::HybridEd25519MlDsa65 => super::crypto::hybrid::sign_composite(&v.material, &input)?,
             _ => unreachable!("supports_sign() guarded above"),
         };
         let wire = ciphertext::build(v.version, p.key_type.pqc_wire_tag(), &sig);
@@ -98,23 +84,16 @@ impl TransitBackendInner {
         Ok(Some(Response::data_response(Some(data))))
     }
 
-    pub async fn handle_verify(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_verify(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let name = take_str(req, "name");
         let input_b64 = take_str(req, "input");
         let sig_str = take_str(req, "signature");
-        let input = B64
-            .decode(input_b64.as_bytes())
-            .map_err(|e| RvError::ErrString(format!("input: not base64 ({e})")))?;
+        let input =
+            B64.decode(input_b64.as_bytes()).map_err(|e| RvError::ErrString(format!("input: not base64 ({e})")))?;
 
         let framed = ciphertext::parse(&sig_str)?;
-        let p = self
-            .get_policy(req, &name)
-            .await?
-            .ok_or_else(|| RvError::ErrString(format!("unknown key `{name}`")))?;
+        let p =
+            self.get_policy(req, &name).await?.ok_or_else(|| RvError::ErrString(format!("unknown key `{name}`")))?;
 
         // Algorithm-tag agreement: a signature framed as PQC must
         // match the key's PQC tag exactly. A classical signature
@@ -129,24 +108,15 @@ impl TransitBackendInner {
             )));
         }
 
-        let v = p
-            .version_for_decrypt(framed.version)
-            .map_err(RvError::ErrString)?;
+        let v = p.version_for_decrypt(framed.version).map_err(RvError::ErrString)?;
         let valid = match p.key_type {
             KeyType::Ed25519 => ed25519::verify(&v.pk, &input, &framed.bytes)?,
             KeyType::MlDsa44 | KeyType::MlDsa65 | KeyType::MlDsa87 => {
                 ml_dsa::verify(p.key_type, &v.material, &input, &framed.bytes)?
             }
             #[cfg(feature = "transit_pqc_hybrid")]
-            KeyType::HybridEd25519MlDsa65 => {
-                super::crypto::hybrid::verify_composite(&v.pk, &input, &framed.bytes)?
-            }
-            _ => {
-                return Err(RvError::ErrString(format!(
-                    "{} keys do not support /verify",
-                    p.key_type.as_str()
-                )))
-            }
+            KeyType::HybridEd25519MlDsa65 => super::crypto::hybrid::verify_composite(&v.pk, &input, &framed.bytes)?,
+            _ => return Err(RvError::ErrString(format!("{} keys do not support /verify", p.key_type.as_str()))),
         };
         let mut data = Map::new();
         data.insert("valid".into(), Value::Bool(valid));
@@ -155,8 +125,5 @@ impl TransitBackendInner {
 }
 
 fn take_str(req: &Request, key: &str) -> String {
-    req.get_data(key)
-        .ok()
-        .and_then(|v| v.as_str().map(|s| s.to_string()))
-        .unwrap_or_default()
+    req.get_data(key).ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default()
 }

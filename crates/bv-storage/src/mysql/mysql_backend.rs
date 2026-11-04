@@ -69,8 +69,9 @@ impl MysqlBackendLock {
     }
 
     fn release_lock(&mut self) -> Result<(), RvError> {
-        let rows_affected =
-            diesel::sql_query(sql!("SELECT RELEASE_LOCK(?)").as_str()).bind::<Text, _>(&self.lock_name).execute(&mut self.conn)?;
+        let rows_affected = diesel::sql_query(sql!("SELECT RELEASE_LOCK(?)").as_str())
+            .bind::<Text, _>(&self.lock_name)
+            .execute(&mut self.conn)?;
 
         if rows_affected == 0 {
             log::error!("MysqlBackendLock failed to release lock: {}", self.lock_name);
@@ -218,10 +219,8 @@ mod test {
 
     use super::MysqlBackend;
 
+    use crate::test::{test_backend_curd, test_backend_list_prefix, test_backend_list_prefix_is_literal};
     use bv_errors::RvError;
-    use crate::test::{
-        test_backend_curd, test_backend_list_prefix, test_backend_list_prefix_is_literal,
-    };
 
     fn mysql_table_clear(backend: &MysqlBackend) -> Result<(), RvError> {
         let conn: &mut MysqlConnection = &mut backend.pool.get().unwrap();

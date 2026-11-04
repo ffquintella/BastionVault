@@ -17,12 +17,7 @@ use std::sync::{Arc, RwLock};
 
 pub use bv_kernel_api::mount::*;
 
-use crate::{
-    core::Core,
-    errors::RvError,
-    storage::barrier_view::BarrierView,
-    utils::generate_uuid,
-};
+use crate::{core::Core, errors::RvError, storage::barrier_view::BarrierView, utils::generate_uuid};
 
 #[maybe_async::maybe_async]
 impl Core {

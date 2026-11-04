@@ -3,11 +3,7 @@ use std::collections::HashMap;
 use clap::Parser;
 use serde_json::Value;
 
-use crate::{
-    command::CommandExecutor,
-    errors::RvError,
-    storage,
-};
+use crate::{command::CommandExecutor, errors::RvError, storage};
 
 #[derive(Parser)]
 #[command(
@@ -60,9 +56,7 @@ pub struct Migrate {
 fn parse_config_pairs(pairs: &[String]) -> Result<HashMap<String, Value>, RvError> {
     let mut conf = HashMap::new();
     for pair in pairs {
-        let (key, val) = pair.split_once('=').ok_or_else(|| {
-            RvError::ErrConfigLoadFailed
-        })?;
+        let (key, val) = pair.split_once('=').ok_or_else(|| RvError::ErrConfigLoadFailed)?;
         // Try to parse as number first, then as string
         let value = if let Ok(n) = val.parse::<u64>() {
             Value::Number(n.into())

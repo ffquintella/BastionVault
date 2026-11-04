@@ -59,18 +59,10 @@ impl NodeBehavior {
         }
     }
     fn sealed() -> Self {
-        Self {
-            body: r#"{"initialized":true,"sealed":true}"#.to_string(),
-            delay: None,
-            drop_connection: false,
-        }
+        Self { body: r#"{"initialized":true,"sealed":true}"#.to_string(), delay: None, drop_connection: false }
     }
     fn dead() -> Self {
-        Self {
-            body: String::new(),
-            delay: None,
-            drop_connection: true,
-        }
+        Self { body: String::new(), delay: None, drop_connection: true }
     }
     fn slow_leader(cluster_id: &str, delay: Duration) -> Self {
         let mut n = Self::leader(cluster_id);
@@ -151,22 +143,11 @@ impl SrvLookup for CannedResolver {
 }
 
 fn record_for(node: &FakeNode, priority: u16, weight: u16) -> SrvRecord {
-    SrvRecord {
-        target: "127.0.0.1".to_string(),
-        port: node.port,
-        priority,
-        weight,
-    }
+    SrvRecord { target: "127.0.0.1".to_string(), port: node.port, priority, weight }
 }
 
 fn cand_for(node: &FakeNode, priority: u16, weight: u16) -> SrvCandidate {
-    SrvCandidate {
-        target: "127.0.0.1".to_string(),
-        port: node.port,
-        scheme: "http".to_string(),
-        priority,
-        weight,
-    }
+    SrvCandidate { target: "127.0.0.1".to_string(), port: node.port, scheme: "http".to_string(), priority, weight }
 }
 
 fn health_cfg() -> HealthConfig {
@@ -190,22 +171,13 @@ async fn discovery_picks_leader_among_healthy_nodes() {
     let follower2 = FakeNode::spawn(NodeBehavior::follower("cid"));
 
     let resolver = CannedResolver {
-        records: vec![
-            record_for(&leader, 10, 50),
-            record_for(&follower1, 10, 50),
-            record_for(&follower2, 10, 50),
-        ],
+        records: vec![record_for(&leader, 10, 50), record_for(&follower1, 10, 50), record_for(&follower2, 10, 50)],
     };
 
     // Tell `discovery::resolve` to use `http://` so the probe
     // listeners don't have to terminate TLS.
-    let cfg = DiscoveryConfig {
-        default_scheme: "http".to_string(),
-        ..Default::default()
-    };
-    let resolved = discovery::resolve("vault.test.local", &cfg, &resolver)
-        .await
-        .unwrap();
+    let cfg = DiscoveryConfig { default_scheme: "http".to_string(), ..Default::default() };
+    let resolved = discovery::resolve("vault.test.local", &cfg, &resolver).await.unwrap();
     let candidates: Vec<SrvCandidate> = resolved.into_candidates();
 
     let probes = health::probe_all(&candidates, &health_cfg(), None).await;
@@ -230,10 +202,7 @@ async fn discovery_respects_srv_priority_floor() {
     let sealed = FakeNode::spawn(NodeBehavior::sealed());
     let leader = FakeNode::spawn(NodeBehavior::leader("cid"));
 
-    let candidates = vec![
-        cand_for(&sealed, 10, 50),
-        cand_for(&leader, 20, 50),
-    ];
+    let candidates = vec![cand_for(&sealed, 10, 50), cand_for(&leader, 20, 50)];
 
     let probes = health::probe_all(&candidates, &health_cfg(), None).await;
     let picked = health::pick(&probes).expect("priority-20 leader should win");
@@ -247,10 +216,7 @@ async fn discovery_priority_floor_blocks_lower_when_higher_has_follower() {
     let follower = FakeNode::spawn(NodeBehavior::follower("cid"));
     let leader = FakeNode::spawn(NodeBehavior::leader("cid"));
 
-    let candidates = vec![
-        cand_for(&follower, 10, 50),
-        cand_for(&leader, 20, 50),
-    ];
+    let candidates = vec![cand_for(&follower, 10, 50), cand_for(&leader, 20, 50)];
     let probes = health::probe_all(&candidates, &health_cfg(), None).await;
     let picked = health::pick(&probes).expect("priority-10 follower should win");
     assert_eq!(picked.candidate.port, follower.port);
@@ -279,11 +245,7 @@ async fn discovery_drops_minority_cluster_id() {
     let a2 = FakeNode::spawn(NodeBehavior::follower("A"));
     let rogue = FakeNode::spawn(NodeBehavior::leader("B"));
 
-    let candidates = vec![
-        cand_for(&a1, 10, 50),
-        cand_for(&a2, 10, 50),
-        cand_for(&rogue, 10, 50),
-    ];
+    let candidates = vec![cand_for(&a1, 10, 50), cand_for(&a2, 10, 50), cand_for(&rogue, 10, 50)];
     let probes = health::probe_all(&candidates, &health_cfg(), None).await;
     let picked = health::pick(&probes).expect("a winner from cluster A");
     assert_eq!(picked.cluster_id.as_deref(), Some("A"));
@@ -295,10 +257,7 @@ async fn discovery_rtt_tiebreak_prefers_faster_node() {
     // Both nodes are leaders of the same cluster; the slow one
     // sleeps before responding, so the fast one wins.
     let fast = FakeNode::spawn(NodeBehavior::leader("cid"));
-    let slow = FakeNode::spawn(NodeBehavior::slow_leader(
-        "cid",
-        Duration::from_millis(200),
-    ));
+    let slow = FakeNode::spawn(NodeBehavior::slow_leader("cid", Duration::from_millis(200)));
     let candidates = vec![cand_for(&fast, 10, 50), cand_for(&slow, 10, 50)];
     let probes = health::probe_all(&candidates, &health_cfg(), None).await;
     let picked = health::pick(&probes).expect("fast leader wins on RTT");
@@ -340,17 +299,12 @@ async fn read_fails_over_in_session_when_pinned_node_dies() {
     let be = RemoteBackend::builder()
         .with_address(&leader_url)
         .with_health_config(health_cfg())
-        .with_failover_candidates(vec![
-            cand_for(&leader, 10, 50),
-            cand_for(&follower, 10, 50),
-        ])
+        .with_failover_candidates(vec![cand_for(&leader, 10, 50), cand_for(&follower, 10, 50)])
         .build();
     assert_eq!(be.address(), leader_url);
 
     // Healthy: the read lands on the pinned leader.
-    be.handle(Operation::Read, "sys/internal/ui/mounts", None, "tok")
-        .await
-        .expect("read against healthy leader");
+    be.handle(Operation::Read, "sys/internal/ui/mounts", None, "tok").await.expect("read against healthy leader");
     assert_eq!(be.address(), leader_url, "no failover while leader is up");
 
     // The leader drops. The next read must fail over to the follower
@@ -359,11 +313,7 @@ async fn read_fails_over_in_session_when_pinned_node_dies() {
     be.handle(Operation::Read, "sys/internal/ui/mounts", None, "tok")
         .await
         .expect("read should succeed after failing over to follower");
-    assert_eq!(
-        be.address(),
-        follower_url,
-        "backend should now be pinned to the surviving follower"
-    );
+    assert_eq!(be.address(), follower_url, "backend should now be pinned to the surviving follower");
 }
 
 #[tokio::test]
@@ -379,10 +329,7 @@ async fn write_does_not_fail_over() {
     let be = RemoteBackend::builder()
         .with_address(&leader_url)
         .with_health_config(health_cfg())
-        .with_failover_candidates(vec![
-            cand_for(&leader, 10, 50),
-            cand_for(&follower, 10, 50),
-        ])
+        .with_failover_candidates(vec![cand_for(&leader, 10, 50), cand_for(&follower, 10, 50)])
         .build();
 
     let err = be
@@ -390,9 +337,5 @@ async fn write_does_not_fail_over() {
         .await
         .expect_err("write to a dead node must error");
     assert!(err.is_node_unavailable(), "expected NodeUnavailable, got {err}");
-    assert_eq!(
-        be.address(),
-        leader_url,
-        "a write must not silently move the session to another node"
-    );
+    assert_eq!(be.address(), leader_url, "a write must not silently move the session to another node");
 }

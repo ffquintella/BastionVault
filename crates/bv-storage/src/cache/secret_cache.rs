@@ -220,12 +220,7 @@ mod tests {
         }
         async fn get(&self, k: &str) -> Result<Option<BackendEntry>, RvError> {
             self.get_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            Ok(self
-                .entries
-                .lock()
-                .unwrap()
-                .get(k)
-                .map(|v| BackendEntry { key: k.to_string(), value: v.clone() }))
+            Ok(self.entries.lock().unwrap().get(k).map(|v| BackendEntry { key: k.to_string(), value: v.clone() }))
         }
         async fn put(&self, entry: &BackendEntry) -> Result<(), RvError> {
             self.entries.lock().unwrap().insert(entry.key.clone(), entry.value.clone());
@@ -312,10 +307,7 @@ mod tests {
     fn cached_ciphertext_debug_is_redacted() {
         let c = CachedCiphertext::new(b"marker-DO-NOT-LEAK".to_vec());
         let rendered = format!("{c:?}");
-        assert!(
-            !rendered.contains("marker-DO-NOT-LEAK"),
-            "Debug must not leak bytes: {rendered}"
-        );
+        assert!(!rendered.contains("marker-DO-NOT-LEAK"), "Debug must not leak bytes: {rendered}");
         assert_eq!(rendered, "<cached:ciphertext:redacted>");
     }
 

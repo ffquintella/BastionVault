@@ -30,20 +30,14 @@ pub fn verify(
     expected_origin: &str,
     expected_challenge: &Challenge,
 ) -> Result<(), RpError> {
-    let cd: CollectedClientData = serde_json::from_slice(raw)
-        .map_err(|e| RpError::BadClientData(format!("not valid JSON: {e}")))?;
+    let cd: CollectedClientData =
+        serde_json::from_slice(raw).map_err(|e| RpError::BadClientData(format!("not valid JSON: {e}")))?;
 
     if cd.ty != expected_type {
-        return Err(RpError::ClientDataType {
-            expected: expected_type.to_string(),
-            actual: cd.ty,
-        });
+        return Err(RpError::ClientDataType { expected: expected_type.to_string(), actual: cd.ty });
     }
     if cd.origin != expected_origin {
-        return Err(RpError::OriginMismatch {
-            expected: expected_origin.to_string(),
-            actual: cd.origin,
-        });
+        return Err(RpError::OriginMismatch { expected: expected_origin.to_string(), actual: cd.origin });
     }
     // Both sides are base64url-no-pad strings — string compare is fine.
     // Browsers MUST emit base64url-no-pad per spec; if a future browser

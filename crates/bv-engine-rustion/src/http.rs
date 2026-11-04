@@ -40,22 +40,13 @@ use super::config::RustionTarget;
 /// redirect policy is hard-pinned to `none` — a misbehaving (or
 /// compromised) bastion must not be able to redirect us to an
 /// arbitrary URL.
-pub fn build_client_for(
-    target: &RustionTarget,
-    timeout: Duration,
-) -> Result<reqwest::Client, RvError> {
-    let mut builder = reqwest::ClientBuilder::new()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(timeout);
+pub fn build_client_for(target: &RustionTarget, timeout: Duration) -> Result<reqwest::Client, RvError> {
+    let mut builder = reqwest::ClientBuilder::new().redirect(reqwest::redirect::Policy::none()).timeout(timeout);
 
     let pem = target.tls_pinned_cert_pem.trim();
     if !pem.is_empty() {
-        let cert = reqwest::Certificate::from_pem(pem.as_bytes()).map_err(|e| {
-            RvError::ErrString(format!(
-                "rustion: parse pinned cert for target {}: {e}",
-                target.id
-            ))
-        })?;
+        let cert = reqwest::Certificate::from_pem(pem.as_bytes())
+            .map_err(|e| RvError::ErrString(format!("rustion: parse pinned cert for target {}: {e}", target.id)))?;
         builder = builder
             .add_root_certificate(cert)
             // Self-signed *leaf* certs (no `BasicConstraints: CA=true`)
@@ -68,7 +59,5 @@ pub fn build_client_for(
             .danger_accept_invalid_hostnames(true);
     }
 
-    builder
-        .build()
-        .map_err(|e| RvError::ErrString(format!("rustion: build http client: {e}")))
+    builder.build().map_err(|e| RvError::ErrString(format!("rustion: build http client: {e}")))
 }

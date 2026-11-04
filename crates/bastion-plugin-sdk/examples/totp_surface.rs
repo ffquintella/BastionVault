@@ -18,10 +18,9 @@
 #[cfg(feature = "surface")]
 fn main() {
     use bastion_plugin_sdk::surface::{
-        surface_builder, SurfaceBinding, SurfaceColumn, SurfaceComponent,
-        SurfaceDetail, SurfaceDetailField, SurfaceForm, SurfaceMenu,
-        SurfaceOp, SurfacePage, SurfaceRowAction, SurfaceSection,
-        SurfaceSubmit, SurfaceTable,
+        surface_builder, SurfaceBinding, SurfaceColumn, SurfaceComponent, SurfaceDetail, SurfaceDetailField,
+        SurfaceForm, SurfaceMenu, SurfaceOp, SurfacePage, SurfaceRowAction, SurfaceSection, SurfaceSubmit,
+        SurfaceTable,
     };
 
     let mut s = surface_builder("TOTP");
@@ -46,26 +45,14 @@ fn main() {
             // List view: one row per registered code.
             SurfaceComponent::Table(SurfaceTable {
                 id: "totp.list".to_string(),
-                binding: SurfaceBinding {
-                    op: SurfaceOp::List,
-                    path: "{mount}/codes".to_string(),
-                },
+                binding: SurfaceBinding { op: SurfaceOp::List, path: "{mount}/codes".to_string() },
                 columns: vec![
-                    SurfaceColumn {
-                        field: "name".to_string(),
-                        label: "Name".to_string(),
-                    },
-                    SurfaceColumn {
-                        field: "issuer".to_string(),
-                        label: "Issuer".to_string(),
-                    },
+                    SurfaceColumn { field: "name".to_string(), label: "Name".to_string() },
+                    SurfaceColumn { field: "issuer".to_string(), label: "Issuer".to_string() },
                 ],
                 row_actions: vec![SurfaceRowAction {
                     label: "Delete".to_string(),
-                    binding: SurfaceBinding {
-                        op: SurfaceOp::Delete,
-                        path: "{mount}/codes/{name}".to_string(),
-                    },
+                    binding: SurfaceBinding { op: SurfaceOp::Delete, path: "{mount}/codes/{name}".to_string() },
                     confirm: true,
                     open_form: None,
                 }],
@@ -105,10 +92,7 @@ fn main() {
                 }),
                 submit: SurfaceSubmit {
                     label: "Register".to_string(),
-                    binding: SurfaceBinding {
-                        op: SurfaceOp::Write,
-                        path: "{mount}/codes/{name}".to_string(),
-                    },
+                    binding: SurfaceBinding { op: SurfaceOp::Write, path: "{mount}/codes/{name}".to_string() },
                 },
                 hook: "totp-form-hooks.wasm#validate_create".to_string(),
                 presentation: Default::default(),
@@ -123,26 +107,11 @@ fn main() {
         title: "TOTP code".to_string(),
         components: vec![SurfaceComponent::Detail(SurfaceDetail {
             id: "totp.show".to_string(),
-            binding: SurfaceBinding {
-                op: SurfaceOp::Read,
-                path: "{mount}/codes/{name}".to_string(),
-            },
+            binding: SurfaceBinding { op: SurfaceOp::Read, path: "{mount}/codes/{name}".to_string() },
             fields: vec![
-                SurfaceDetailField {
-                    field: "name".to_string(),
-                    label: "Name".to_string(),
-                    live: false,
-                },
-                SurfaceDetailField {
-                    field: "issuer".to_string(),
-                    label: "Issuer".to_string(),
-                    live: false,
-                },
-                SurfaceDetailField {
-                    field: "code".to_string(),
-                    label: "Current code".to_string(),
-                    live: true,
-                },
+                SurfaceDetailField { field: "name".to_string(), label: "Name".to_string(), live: false },
+                SurfaceDetailField { field: "issuer".to_string(), label: "Issuer".to_string(), live: false },
+                SurfaceDetailField { field: "code".to_string(), label: "Current code".to_string(), live: true },
             ],
         })],
     });

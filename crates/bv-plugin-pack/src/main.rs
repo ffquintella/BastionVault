@@ -152,19 +152,13 @@ fn main() {
     let cli = Cli::parse();
     let result = match cli.cmd {
         Some(Cmd::Keygen { out }) => keygen(out),
-        Some(Cmd::Test {
-            bundle,
-            publisher_pub_hex,
-            publisher_pub_file,
-            op,
-            path,
-            data,
-            expect_status,
-        }) => test_bundle(bundle, publisher_pub_hex, publisher_pub_file, op, path, data, expect_status),
+        Some(Cmd::Test { bundle, publisher_pub_hex, publisher_pub_file, op, path, data, expect_status }) => {
+            test_bundle(bundle, publisher_pub_hex, publisher_pub_file, op, path, data, expect_status)
+        }
         None => {
-            let manifest = cli.manifest.expect(
-                "--manifest is required when no subcommand is given (use `keygen` to mint signing keys)",
-            );
+            let manifest = cli
+                .manifest
+                .expect("--manifest is required when no subcommand is given (use `keygen` to mint signing keys)");
             let binary = cli.binary.expect("--binary is required");
             run(PackArgs {
                 manifest,
@@ -183,23 +177,19 @@ fn main() {
 }
 
 fn run(args: PackArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let toml_text = fs::read_to_string(&args.manifest)
-        .map_err(|e| format!("reading manifest {}: {e}", args.manifest.display()))?;
-    let mut manifest: PluginManifest = toml::from_str(&toml_text)
-        .map_err(|e| format!("parsing manifest {}: {e}", args.manifest.display()))?;
+    let toml_text =
+        fs::read_to_string(&args.manifest).map_err(|e| format!("reading manifest {}: {e}", args.manifest.display()))?;
+    let mut manifest: PluginManifest =
+        toml::from_str(&toml_text).map_err(|e| format!("parsing manifest {}: {e}", args.manifest.display()))?;
 
-    let binary = fs::read(&args.binary)
-        .map_err(|e| format!("reading binary {}: {e}", args.binary.display()))?;
+    let binary = fs::read(&args.binary).map_err(|e| format!("reading binary {}: {e}", args.binary.display()))?;
 
     let mut hasher = Sha256::new();
     hasher.update(&binary);
     let digest = hasher.finalize();
     let sha256 = digest.iter().map(|b| format!("{:02x}", b)).collect::<String>();
 
-    if !manifest.sha256.is_empty()
-        && !is_placeholder_sha(&manifest.sha256)
-        && manifest.sha256 != sha256
-    {
+    if !manifest.sha256.is_empty() && !is_placeholder_sha(&manifest.sha256) && manifest.sha256 != sha256 {
         return Err(format!(
             "manifest sha256 ({}) does not match the binary's actual sha256 ({}). \
              Either fix the manifest or remove the field so the packer fills it.",
@@ -224,10 +214,7 @@ fn run(args: PackArgs) -> Result<(), Box<dyn std::error::Error>> {
         if asset.kind != "app-module" {
             continue;
         }
-        if !asset.sha256.is_empty()
-            && !is_placeholder_sha(&asset.sha256)
-            && asset.sha256 != bin_sha
-        {
+        if !asset.sha256.is_empty() && !is_placeholder_sha(&asset.sha256) && asset.sha256 != bin_sha {
             return Err(format!(
                 "client asset `{}` (app-module) sha256 ({}) does not match the binary's \
                  actual sha256 ({}). Either fix the manifest or remove the field so the \
@@ -247,18 +234,13 @@ fn run(args: PackArgs) -> Result<(), Box<dyn std::error::Error>> {
     // the uploaded bytes at registration and on read.
     let surface = load_declared_surface(&args.manifest, &mut manifest)?;
 
-    manifest
-        .validate()
-        .map_err(|e| format!("manifest validation failed after stamping bundle content: {e}"))?;
+    manifest.validate().map_err(|e| format!("manifest validation failed after stamping bundle content: {e}"))?;
 
     // Optional signing pass — runs *after* sha256/size are stamped so
     // the canonical message the host re-derives matches byte-for-byte.
     let seed = resolve_signing_seed(&args)?;
     if let Some(seed_bytes) = seed {
-        let key_name = args
-            .signing_key_name
-            .clone()
-            .ok_or("`--signing-key-name` is required when signing")?;
+        let key_name = args.signing_key_name.clone().ok_or("`--signing-key-name` is required when signing")?;
         manifest.signing_key = key_name;
         manifest.signature.clear();
         // The signed message is built by the *shared* `signing_message`
@@ -266,17 +248,13 @@ fn run(args: PackArgs) -> Result<(), Box<dyn std::error::Error>> {
         // signature verifies regardless of serde field ordering.
         let message = signing_message(&manifest, &binary);
         let provider = MlDsa65Provider;
-        let sig_bytes = provider
-            .sign(&seed_bytes, &message, &[])
-            .map_err(|e| format!("ml-dsa-65 sign: {e:?}"))?;
+        let sig_bytes = provider.sign(&seed_bytes, &message, &[]).map_err(|e| format!("ml-dsa-65 sign: {e:?}"))?;
         manifest.signature = hex::encode(&sig_bytes);
     }
 
     let manifest_json = serde_json::to_vec(&manifest)?;
-    let manifest_len = u32::try_from(manifest_json.len())
-        .map_err(|_| "manifest larger than 4 GiB — not supported")?;
-    let binary_len = u32::try_from(binary.len())
-        .map_err(|_| "binary larger than 4 GiB — not supported")?;
+    let manifest_len = u32::try_from(manifest_json.len()).map_err(|_| "manifest larger than 4 GiB — not supported")?;
+    let binary_len = u32::try_from(binary.len()).map_err(|_| "binary larger than 4 GiB — not supported")?;
 
     let out = args.out.unwrap_or_else(|| {
         let mut p = args.binary.clone();
@@ -286,18 +264,10 @@ fn run(args: PackArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     let surface_len = surface
         .as_ref()
-        .map(|bytes| {
-            u32::try_from(bytes.len())
-                .map_err(|_| "surface larger than 4 GiB — not supported")
-        })
+        .map(|bytes| u32::try_from(bytes.len()).map_err(|_| "surface larger than 4 GiB — not supported"))
         .transpose()?;
-    let format_version = if surface.is_some() {
-        SURFACE_FORMAT_VERSION
-    } else {
-        LEGACY_FORMAT_VERSION
-    };
-    let mut f = fs::File::create(&out)
-        .map_err(|e| format!("creating {}: {e}", out.display()))?;
+    let format_version = if surface.is_some() { SURFACE_FORMAT_VERSION } else { LEGACY_FORMAT_VERSION };
+    let mut f = fs::File::create(&out).map_err(|e| format!("creating {}: {e}", out.display()))?;
     f.write_all(MAGIC)?;
     f.write_all(&[format_version, 0, 0, 0])?;
     f.write_all(&manifest_len.to_le_bytes())?;
@@ -320,11 +290,7 @@ fn run(args: PackArgs) -> Result<(), Box<dyn std::error::Error>> {
         manifest_json.len(),
         surface.as_ref().map_or(0, Vec::len),
         binary.len(),
-        if manifest.signature.is_empty() {
-            ""
-        } else {
-            " — signed"
-        },
+        if manifest.signature.is_empty() { "" } else { " — signed" },
     );
     Ok(())
 }
@@ -336,18 +302,12 @@ fn load_declared_surface(
     let Some(surface_ref) = manifest.surface.as_mut() else {
         return Ok(None);
     };
-    let surface_path = manifest_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("surface.json");
+    let surface_path = manifest_path.parent().unwrap_or_else(|| Path::new(".")).join("surface.json");
     let bytes = fs::read(&surface_path).map_err(|e| {
-        format!(
-            "manifest declares [surface], but reading sibling {} failed: {e}",
-            surface_path.display()
-        )
+        format!("manifest declares [surface], but reading sibling {} failed: {e}", surface_path.display())
     })?;
-    let parsed: SurfaceManifest = serde_json::from_slice(&bytes)
-        .map_err(|e| format!("parsing {}: {e}", surface_path.display()))?;
+    let parsed: SurfaceManifest =
+        serde_json::from_slice(&bytes).map_err(|e| format!("parsing {}: {e}", surface_path.display()))?;
     if parsed.schema_version != surface_ref.schema_version {
         return Err(format!(
             "surface schema_version {} does not match manifest [surface] schema_version {}",
@@ -355,20 +315,13 @@ fn load_declared_surface(
         )
         .into());
     }
-    let declared_assets: BTreeSet<&str> = manifest
-        .client_assets
-        .iter()
-        .map(|asset| asset.name.as_str())
-        .collect();
+    let declared_assets: BTreeSet<&str> = manifest.client_assets.iter().map(|asset| asset.name.as_str()).collect();
     parsed
         .validate(&manifest.name, &declared_assets)
         .map_err(|e| format!("{} failed validation: {e}", surface_path.display()))?;
 
     let actual_sha = hex::encode(Sha256::digest(&bytes));
-    if !surface_ref.sha256.is_empty()
-        && !is_placeholder_sha(&surface_ref.sha256)
-        && surface_ref.sha256 != actual_sha
-    {
+    if !surface_ref.sha256.is_empty() && !is_placeholder_sha(&surface_ref.sha256) && surface_ref.sha256 != actual_sha {
         return Err(format!(
             "manifest surface sha256 ({}) does not match {} ({actual_sha})",
             surface_ref.sha256,
@@ -396,23 +349,16 @@ fn load_declared_surface(
 /// signing step".
 fn resolve_signing_seed(args: &PackArgs) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
     let raw = match (&args.signing_seed_hex, &args.signing_seed_file) {
-        (Some(_), Some(_)) => {
-            return Err("supply --signing-seed-hex OR --signing-seed-file, not both".into())
-        }
+        (Some(_), Some(_)) => return Err("supply --signing-seed-hex OR --signing-seed-file, not both".into()),
         (Some(s), None) => s.trim().to_string(),
-        (None, Some(p)) => fs::read_to_string(p)
-            .map_err(|e| format!("reading {}: {e}", p.display()))?
-            .trim()
-            .to_string(),
+        (None, Some(p)) => {
+            fs::read_to_string(p).map_err(|e| format!("reading {}: {e}", p.display()))?.trim().to_string()
+        }
         (None, None) => return Ok(None),
     };
     let seed = hex::decode(&raw).map_err(|e| format!("seed must be hex: {e}"))?;
     if seed.len() != 32 {
-        return Err(format!(
-            "ML-DSA-65 seed must be 32 bytes (64 hex chars); got {} bytes",
-            seed.len()
-        )
-        .into());
+        return Err(format!("ML-DSA-65 seed must be 32 bytes (64 hex chars); got {} bytes", seed.len()).into());
     }
     Ok(Some(seed))
 }
@@ -429,16 +375,12 @@ fn test_bundle(
     let bytes = fs::read(&bundle).map_err(|e| format!("reading {}: {e}", bundle.display()))?;
     let pub_hex = match (pub_hex, pub_file) {
         (Some(h), _) => Some(h),
-        (None, Some(p)) => Some(
-            fs::read_to_string(&p).map_err(|e| format!("reading {}: {e}", p.display()))?,
-        ),
+        (None, Some(p)) => Some(fs::read_to_string(&p).map_err(|e| format!("reading {}: {e}", p.display()))?),
         (None, None) => None,
     };
-    let publisher_pub = pub_hex
-        .map(|h| hex::decode(h.trim()).map_err(|e| format!("publisher key must be hex: {e}")))
-        .transpose()?;
-    let data: serde_json::Value =
-        serde_json::from_str(&data).map_err(|e| format!("--data is not valid JSON: {e}"))?;
+    let publisher_pub =
+        pub_hex.map(|h| hex::decode(h.trim()).map_err(|e| format!("publisher key must be hex: {e}"))).transpose()?;
+    let data: serde_json::Value = serde_json::from_str(&data).map_err(|e| format!("--data is not valid JSON: {e}"))?;
     let report = bundle_test::check_bundle(
         &bytes,
         publisher_pub.as_deref(),
@@ -460,9 +402,7 @@ fn test_bundle(
 
 fn keygen(out: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let provider = MlDsa65Provider;
-    let kp = provider
-        .generate_keypair()
-        .map_err(|e| format!("keygen: {e:?}"))?;
+    let kp = provider.generate_keypair().map_err(|e| format!("keygen: {e:?}"))?;
     let seed_path = with_ext(&out, "seed");
     let pub_path = with_ext(&out, "pub");
     if let Some(parent) = seed_path.parent() {
@@ -472,8 +412,7 @@ fn keygen(out: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     }
     fs::write(&seed_path, hex::encode(kp.secret_seed()))
         .map_err(|e| format!("writing {}: {e}", seed_path.display()))?;
-    fs::write(&pub_path, hex::encode(kp.public_key()))
-        .map_err(|e| format!("writing {}: {e}", pub_path.display()))?;
+    fs::write(&pub_path, hex::encode(kp.public_key())).map_err(|e| format!("writing {}: {e}", pub_path.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -523,8 +462,8 @@ mod tests {
     /// covered unconditionally by the fixture test below.
     #[test]
     fn shipped_email_manifest_parses_with_required_if() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../plugins-ext/bastion-plugin-email/plugin.toml");
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins-ext/bastion-plugin-email/plugin.toml");
         // Skip only on an un-checked-out submodule. Any *other* read
         // failure (a truncated or unreadable file) still fails the
         // test rather than passing quietly.
@@ -539,11 +478,7 @@ mod tests {
         let text = fs::read_to_string(&path).expect("email plugin.toml is readable");
         let m: PluginManifest = toml::from_str(&text).expect("email plugin.toml parses");
         m.validate().expect("email plugin.toml validates");
-        let from = m
-            .config_schema
-            .iter()
-            .find(|f| f.name == "from_address")
-            .expect("from_address is declared");
+        let from = m.config_schema.iter().find(|f| f.name == "from_address").expect("from_address is declared");
         let cond = from.required_if.as_ref().expect("from_address is mode-scoped");
         assert_eq!(cond.field, "mode");
         assert!(cond.matches("smtp"));
@@ -660,8 +595,7 @@ default = "6"
         fs::File::open(&out_path).unwrap().read_to_end(&mut bundle).unwrap();
         assert_eq!(&bundle[0..4], MAGIC);
         assert_eq!(bundle[4], LEGACY_FORMAT_VERSION);
-        let mlen =
-            u32::from_le_bytes(bundle[8..12].try_into().unwrap()) as usize;
+        let mlen = u32::from_le_bytes(bundle[8..12].try_into().unwrap()) as usize;
         let manifest_json = &bundle[12..12 + mlen];
         let parsed: PluginManifest = serde_json::from_slice(manifest_json).unwrap();
         assert_eq!(parsed.name, "totp");
@@ -737,15 +671,12 @@ size = 0
         assert_eq!(bundle[4], SURFACE_FORMAT_VERSION);
         let manifest_len = u32::from_le_bytes(bundle[8..12].try_into().unwrap()) as usize;
         let manifest_end = LEGACY_HEADER_LEN + manifest_len;
-        let binary_len =
-            u32::from_le_bytes(bundle[manifest_end..manifest_end + 4].try_into().unwrap()) as usize;
+        let binary_len = u32::from_le_bytes(bundle[manifest_end..manifest_end + 4].try_into().unwrap()) as usize;
         let binary_end = manifest_end + 4 + binary_len;
-        let surface_len =
-            u32::from_le_bytes(bundle[binary_end..binary_end + 4].try_into().unwrap()) as usize;
+        let surface_len = u32::from_le_bytes(bundle[binary_end..binary_end + 4].try_into().unwrap()) as usize;
         let surface_start = binary_end + 4;
         let surface_end = surface_start + surface_len;
-        let parsed: PluginManifest =
-            serde_json::from_slice(&bundle[LEGACY_HEADER_LEN..manifest_end]).unwrap();
+        let parsed: PluginManifest = serde_json::from_slice(&bundle[LEGACY_HEADER_LEN..manifest_end]).unwrap();
         let surface_ref = parsed.surface.expect("surface reference is retained");
         assert_eq!(surface_ref.size, surface.len() as u64);
         assert_eq!(surface_ref.sha256, hex::encode(Sha256::digest(surface)));
@@ -841,8 +772,7 @@ size = 0
         let mut bundle = Vec::new();
         fs::File::open(&out_path).unwrap().read_to_end(&mut bundle).unwrap();
         let mlen = u32::from_le_bytes(bundle[8..12].try_into().unwrap()) as usize;
-        let parsed: PluginManifest =
-            serde_json::from_slice(&bundle[12..12 + mlen]).unwrap();
+        let parsed: PluginManifest = serde_json::from_slice(&bundle[12..12 + mlen]).unwrap();
 
         // The app-module client asset must be stamped to match the
         // embedded binary, not left as the placeholder zeros.
@@ -965,10 +895,7 @@ size = 0
         let p = std::env::temp_dir().join(format!(
             "bv-plugin-pack-test-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
         ));
         fs::create_dir_all(&p).unwrap();
         p

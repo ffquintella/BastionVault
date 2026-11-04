@@ -59,10 +59,7 @@ impl NamespaceMountRegistry {
     /// Number of mounts currently registered for a namespace (0 if the
     /// namespace has no router yet). Used by the delete guard.
     pub fn mount_count(&self, uuid: &str) -> usize {
-        self.routers
-            .get(uuid)
-            .and_then(|r| r.mounts.entries.read().ok().map(|e| e.len()))
-            .unwrap_or(0)
+        self.routers.get(uuid).and_then(|r| r.mounts.entries.read().ok().map(|e| e.len())).unwrap_or(0)
     }
 }
 
@@ -122,11 +119,7 @@ impl NamespaceMountRegistry {
         // Both built routers are equivalent (same persisted table, same shared
         // trie), and `setup` above is idempotent, so the loser is simply
         // dropped rather than clobbering the winner mid-flight.
-        let cached = self
-            .routers
-            .entry(ns_uuid.to_string())
-            .or_insert_with(|| mounts_router.clone())
-            .clone();
+        let cached = self.routers.entry(ns_uuid.to_string()).or_insert_with(|| mounts_router.clone()).clone();
         Ok(cached)
     }
 

@@ -808,7 +808,10 @@ mod tests {
                 "files/files/f1",
             ] {
                 for cap in [Capability::Read, Capability::Update, Capability::Connect, Capability::Delete] {
-                    assert!(!acl.explain_capability(path, cap).allowed, "{name} grants {cap:?} on {path} with no share");
+                    assert!(
+                        !acl.explain_capability(path, cap).allowed,
+                        "{name} grants {cap:?} on {path} with no share"
+                    );
                 }
             }
         }

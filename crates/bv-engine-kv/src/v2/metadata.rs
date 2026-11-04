@@ -50,11 +50,6 @@ pub struct EngineConfig {
 
 impl Default for EngineConfig {
     fn default() -> Self {
-        Self {
-            max_versions: 0,
-            cas_required: false,
-            delete_version_after: "0s".to_string(),
-            environments: Vec::new(),
-        }
+        Self { max_versions: 0, cas_required: false, delete_version_after: "0s".to_string(), environments: Vec::new() }
     }
 }

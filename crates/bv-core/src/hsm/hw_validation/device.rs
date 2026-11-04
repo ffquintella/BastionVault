@@ -138,10 +138,7 @@ pub fn fetch_status(port: u16) -> Result<ConnectorStatus, RvError> {
     write!(stream, "GET /connector/status HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n\r\n")
         .map_err(|e| harness_error(format!("status: {e}")))?;
     let mut response = String::new();
-    stream
-        .take(MAX_STATUS_BYTES)
-        .read_to_string(&mut response)
-        .map_err(|e| harness_error(format!("status: {e}")))?;
+    stream.take(MAX_STATUS_BYTES).read_to_string(&mut response).map_err(|e| harness_error(format!("status: {e}")))?;
     let body = response.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or_default();
     Ok(parse_connector_status(body))
 }
@@ -184,7 +181,10 @@ pub fn read_snapshot(client: &Client, status: &ConnectorStatus) -> Result<Device
         });
     }
     let command_audit = reading(client.get_commands_audit_options()).map_or_unavailable(|options| {
-        options.into_iter().map(|c| (format!("{:#04x}", c.command_type().to_u8()), audit_name(c.audit_option()))).collect()
+        options
+            .into_iter()
+            .map(|c| (format!("{:#04x}", c.command_type().to_u8()), audit_name(c.audit_option())))
+            .collect()
     });
     let device_attestation_certificate = match device_attestation_certificate(client) {
         Ok(der) => match certificate_summary(&der) {
@@ -212,11 +212,8 @@ pub fn read_snapshot(client: &Client, status: &ConnectorStatus) -> Result<Device
                     digest: e.digest.0,
                 })
                 .collect();
-            let log = DeviceLog {
-                unlogged_boot: log.unlogged_boot_events,
-                unlogged_auth: log.unlogged_auth_events,
-                entries,
-            };
+            let log =
+                DeviceLog { unlogged_boot: log.unlogged_boot_events, unlogged_auth: log.unlogged_auth_events, entries };
             match DeviceLogCapture::new(log) {
                 Ok(capture) => Reading::Read(capture),
                 Err(e) => Reading::Unavailable(e.to_string()),

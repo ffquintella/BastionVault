@@ -136,8 +136,7 @@ pub const RESERVED_TOKEN_META_PREFIXES: &[&str] = &["approle_env_"];
 /// re-implement the prefix half of the rule. See
 /// [`RESERVED_TOKEN_META_KEYS`].
 pub fn is_reserved_token_meta_key(key: &str) -> bool {
-    RESERVED_TOKEN_META_KEYS.contains(&key)
-        || RESERVED_TOKEN_META_PREFIXES.iter().any(|prefix| key.starts_with(prefix))
+    RESERVED_TOKEN_META_KEYS.contains(&key) || RESERVED_TOKEN_META_PREFIXES.iter().any(|prefix| key.starts_with(prefix))
 }
 
 /// Split a token's identity into `(acting principal, attesting machine)`
@@ -160,12 +159,7 @@ pub fn is_reserved_token_meta_key(key: &str) -> bool {
 ///
 /// Both returned values may be empty; callers own the "(unnamed
 /// principal)" style of placeholder, which differs per store.
-pub fn split_principal(
-    display_name: &str,
-    spiffe_id: &str,
-    username: &str,
-    entity_id: &str,
-) -> (String, String) {
+pub fn split_principal(display_name: &str, spiffe_id: &str, username: &str, entity_id: &str) -> (String, String) {
     if spiffe_id.is_empty() {
         return (display_name.to_string(), String::new());
     }
@@ -489,10 +483,8 @@ mod mcp_binding_tests {
         assert_eq!(b.policy_namespace, None);
         assert_eq!(b.policy_namespaces, vec![String::new(), "dti/esi".to_string()]);
 
-        let narrowed = McpBinding {
-            policy_namespace: Some(McpPolicyNamespace { path: "dti".into(), id: "ns-1".into() }),
-            ..b
-        };
+        let narrowed =
+            McpBinding { policy_namespace: Some(McpPolicyNamespace { path: "dti".into(), id: "ns-1".into() }), ..b };
         let json = serde_json::to_string(&narrowed).unwrap();
         assert_eq!(serde_json::from_str::<McpBinding>(&json).unwrap(), narrowed);
         let partial: McpPolicyNamespace = serde_json::from_str(r#"{"path":""}"#).unwrap();

@@ -46,14 +46,15 @@ use bastion_vault::{
     errors::RvError,
     storage::Backend,
     test_utils::{
-        get_project_binary_path, new_test_bastion_vault, new_unseal_test_bastion_vault,
-        unseal_test_bastion_vault_core,
+        get_project_binary_path, new_test_bastion_vault, new_unseal_test_bastion_vault, unseal_test_bastion_vault_core,
     },
     utils::rustls::OptionalClientAuthVerifier,
     BastionVault,
 };
 
-use crate::{client_ip::TrustedProxies, init_service, middleware::metrics::metrics_midleware, request_on_connect_handler};
+use crate::{
+    client_ip::TrustedProxies, init_service, middleware::metrics::metrics_midleware, request_on_connect_handler,
+};
 
 #[derive(Debug, Clone)]
 pub struct TestTlsConfig {
@@ -90,7 +91,6 @@ pub struct TestHttpServer {
 #[maybe_async::maybe_async]
 impl TestHttpServer {
     pub async fn new(name: &str, tls_enable: bool) -> Self {
-        
         let seal_config = SealConfig { secret_shares: 10, secret_threshold: 5 };
         let mut test_http_server = TestHttpServer::new_without_init(name, tls_enable);
 
@@ -397,10 +397,8 @@ impl TestHttpServer {
         };
 
         let method_upper = method.to_uppercase();
-        let mut req_builder = ::http::Request::builder()
-            .method(method_upper.as_str())
-            .uri(&url)
-            .header("Accept", "application/json");
+        let mut req_builder =
+            ::http::Request::builder().method(method_upper.as_str()).uri(&url).header("Accept", "application/json");
         if !path.ends_with("/login") {
             req_builder = req_builder.header("X-BastionVault-Token", tk);
         }
@@ -495,10 +493,8 @@ impl TestHttpServer {
         };
 
         let method_upper = method.to_uppercase();
-        let mut req_builder = ::http::Request::builder()
-            .method(method_upper.as_str())
-            .uri(&url)
-            .header("Accept", "application/json");
+        let mut req_builder =
+            ::http::Request::builder().method(method_upper.as_str()).uri(&url).header("Accept", "application/json");
         if !path.ends_with("/login") {
             req_builder = req_builder.header("X-BastionVault-Token", tk);
         }
@@ -629,7 +625,11 @@ pub fn new_test_http_server(core: Arc<Core>, tls_config: Option<TestTlsConfig>) 
     // exercise `/v2/mcp` / `/v2/mcp/token` without a way to plumb a
     // custom `Config` through `TestHttpServer::new`'s existing call
     // sites. Test-only, behind the `test-support` feature.
-    let mcp_config = web::Data::new(bastion_vault::config::McpConfig { enabled: true, allow_plaintext_loopback: true, ..Default::default() });
+    let mcp_config = web::Data::new(bastion_vault::config::McpConfig {
+        enabled: true,
+        allow_plaintext_loopback: true,
+        ..Default::default()
+    });
     let mut http_server = HttpServer::new(move || {
         App::new()
             .wrap(middleware::Logger::default())

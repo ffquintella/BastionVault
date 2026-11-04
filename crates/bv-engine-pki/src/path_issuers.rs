@@ -130,16 +130,8 @@ impl PkiBackendInner {
         Ok(Some(Response::data_response(Some(data))))
     }
 
-    pub async fn read_issuer_chain(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
-        let reference = req
-            .get_data("ref")?
-            .as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?
-            .to_string();
+    pub async fn read_issuer_chain(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let reference = req.get_data("ref")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
         let issuer = issuers::load_issuer(req, &reference).await?;
         let chain = issuers::build_issuer_chain(req, &issuer).await?;
         let bundle: String = chain.join("");
@@ -181,10 +173,7 @@ impl PkiBackendInner {
         use crate::logical::field::FieldTrait;
         let reference = req.get_data("ref")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
         let new_name = req.get_data_or_default("issuer_name")?.as_str().unwrap_or("").to_string();
-        let usage_names = req
-            .get_data_or_default("usage")?
-            .as_comma_string_slice()
-            .unwrap_or_default();
+        let usage_names = req.get_data_or_default("usage")?.as_comma_string_slice().unwrap_or_default();
 
         // Empty-everything is a no-op (pure read) — error rather than
         // silently succeed so the operator knows the request did nothing.
@@ -195,8 +184,8 @@ impl PkiBackendInner {
             issuers::rename_issuer(req, &reference, &new_name).await?;
         }
         if !usage_names.is_empty() {
-            let usages = super::storage::IssuerUsages::from_names(&usage_names)
-                .map_err(|_| RvError::ErrRequestFieldInvalid)?;
+            let usages =
+                super::storage::IssuerUsages::from_names(&usage_names).map_err(|_| RvError::ErrRequestFieldInvalid)?;
             issuers::set_issuer_usages(req, &reference, usages).await?;
         }
         Ok(None)
@@ -214,9 +203,10 @@ impl PkiBackendInner {
         let lifetime = if ttl.is_empty() {
             RenewLifetime::SameSpan
         } else {
-            RenewLifetime::Ttl(parse_duration(&ttl).map_err(|e| {
-                RvError::ErrResponseStatus(400, format!("renew: `ttl` is not a duration ({e})"))
-            })?)
+            RenewLifetime::Ttl(
+                parse_duration(&ttl)
+                    .map_err(|e| RvError::ErrResponseStatus(400, format!("renew: `ttl` is not a duration ({e})")))?,
+            )
         };
         let outcome = issuer_renew::renew_issuer(req, &reference, lifetime).await?;
 
@@ -239,11 +229,7 @@ impl PkiBackendInner {
         Ok(Some(Response::data_response(Some(data))))
     }
 
-    pub async fn read_issuer_history(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn read_issuer_history(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let reference = req.get_data("ref")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
         let issuer = issuers::load_issuer(req, &reference).await?;
         let history = issuer_renew::load_history(req, &issuer.id).await?;
@@ -267,11 +253,7 @@ impl PkiBackendInner {
         Ok(Some(Response::data_response(Some(data))))
     }
 
-    pub async fn read_config_issuers(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn read_config_issuers(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let cfg = issuers::read_default_pointer(req).await.unwrap_or_default();
         let index = issuers::list_issuers(req).await.unwrap_or_default();
         let default_name = index.by_id.get(&cfg.default_id).cloned().unwrap_or_default();
@@ -281,11 +263,7 @@ impl PkiBackendInner {
         Ok(Some(Response::data_response(Some(data))))
     }
 
-    pub async fn write_config_issuers(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn write_config_issuers(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let target = req.get_data_or_default("default")?.as_str().unwrap_or("").to_string();
         if target.is_empty() {
             return Err(RvError::ErrRequestFieldInvalid);

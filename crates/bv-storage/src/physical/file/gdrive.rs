@@ -112,10 +112,7 @@ impl GoogleDriveTarget {
             .and_then(|v| v.as_str())
             .ok_or_else(|| RvError::ErrString("gdrive target: `client_id` is required".into()))?
             .to_string();
-        let client_secret = conf
-            .get("client_secret")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+        let client_secret = conf.get("client_secret").and_then(|v| v.as_str()).map(|s| s.to_string());
         let credentials_ref = conf
             .get("credentials_ref")
             .and_then(|v| v.as_str())
@@ -127,19 +124,15 @@ impl GoogleDriveTarget {
                 )
             })?
             .to_string();
-        let prefix_segments =
-            split_path(conf.get("prefix").and_then(|v| v.as_str()).unwrap_or(""));
+        let prefix_segments = split_path(conf.get("prefix").and_then(|v| v.as_str()).unwrap_or(""));
         let http_timeout = conf
             .get("http_timeout_secs")
             .and_then(|v| v.as_u64())
             .map(Duration::from_secs)
             .unwrap_or(DEFAULT_HTTP_TIMEOUT);
 
-        let agent: Agent = UreqConfig::builder()
-            .timeout_global(Some(http_timeout))
-            .http_status_as_error(false)
-            .build()
-            .into();
+        let agent: Agent =
+            UreqConfig::builder().timeout_global(Some(http_timeout)).http_status_as_error(false).build().into();
 
         // Fail-fast on a typoed credentials_ref.
         let _ = creds::resolve(&credentials_ref)?;
@@ -162,9 +155,10 @@ impl GoogleDriveTarget {
 impl Inner {
     fn ensure_access_token(&self) -> Result<String, RvError> {
         {
-            let cache = self.cached_access_token.lock().map_err(|e| {
-                RvError::ErrString(format!("gdrive: token cache poisoned: {e}"))
-            })?;
+            let cache = self
+                .cached_access_token
+                .lock()
+                .map_err(|e| RvError::ErrString(format!("gdrive: token cache poisoned: {e}")))?;
             if let Some(entry) = cache.as_ref() {
                 if entry.expires_at > Instant::now() + TOKEN_EXPIRY_SKEW {
                     return Ok(entry.token.clone());
@@ -174,17 +168,16 @@ impl Inner {
         let refresh_secret = creds::resolve(&self.credentials_ref)?;
         let refresh_str = refresh_secret.as_str()?.trim().to_string();
         let provider = oauth::well_known_provider("gdrive")?;
-        let creds_obj = oauth::OAuthCredentials {
-            client_id: self.client_id.clone(),
-            client_secret: self.client_secret.clone(),
-        };
+        let creds_obj =
+            oauth::OAuthCredentials { client_id: self.client_id.clone(), client_secret: self.client_secret.clone() };
         let resp = oauth::refresh_access_token(&provider, &creds_obj, &refresh_str)?;
         let new_token = resp.access_token.clone();
         let expires_in = resp.expires_in.unwrap_or(3600);
         {
-            let mut cache = self.cached_access_token.lock().map_err(|e| {
-                RvError::ErrString(format!("gdrive: token cache poisoned: {e}"))
-            })?;
+            let mut cache = self
+                .cached_access_token
+                .lock()
+                .map_err(|e| RvError::ErrString(format!("gdrive: token cache poisoned: {e}")))?;
             *cache = Some(CachedAccessToken {
                 token: new_token.clone(),
                 expires_at: Instant::now() + Duration::from_secs(expires_in),
@@ -287,12 +280,10 @@ impl Inner {
             .read_to_string()
             .map_err(|e| RvError::ErrString(format!("gdrive: create folder body: {e}")))?;
         if !(200..300).contains(&status) {
-            return Err(RvError::ErrString(format!(
-                "gdrive: create folder `{name}`: http status {status}: {text}"
-            )));
+            return Err(RvError::ErrString(format!("gdrive: create folder `{name}`: http status {status}: {text}")));
         }
-        let parsed: FileId = serde_json::from_str(&text)
-            .map_err(|e| RvError::ErrString(format!("gdrive: create folder parse: {e}")))?;
+        let parsed: FileId =
+            serde_json::from_str(&text).map_err(|e| RvError::ErrString(format!("gdrive: create folder parse: {e}")))?;
         Ok(parsed.id)
     }
 
@@ -311,31 +302,19 @@ impl Inner {
             .call()
             .map_err(|e| RvError::ErrString(format!("gdrive: search: {e}")))?;
         let status = resp.status().as_u16();
-        let text = resp
-            .into_body()
-            .read_to_string()
-            .map_err(|e| RvError::ErrString(format!("gdrive: search body: {e}")))?;
+        let text =
+            resp.into_body().read_to_string().map_err(|e| RvError::ErrString(format!("gdrive: search body: {e}")))?;
         if !(200..300).contains(&status) {
-            return Err(RvError::ErrString(format!(
-                "gdrive: search: http status {status}: {text}"
-            )));
+            return Err(RvError::ErrString(format!("gdrive: search: http status {status}: {text}")));
         }
-        let parsed: SearchResponse = serde_json::from_str(&text)
-            .map_err(|e| RvError::ErrString(format!("gdrive: search parse: {e}")))?;
+        let parsed: SearchResponse =
+            serde_json::from_str(&text).map_err(|e| RvError::ErrString(format!("gdrive: search parse: {e}")))?;
         Ok(parsed.files)
     }
 
-    fn upload_new_file(
-        &self,
-        parent_id: &str,
-        name: &str,
-        bytes: &[u8],
-    ) -> Result<String, RvError> {
-        let boundary = format!(
-            "bvault-{}-{}",
-            std::process::id(),
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
-        );
+    fn upload_new_file(&self, parent_id: &str, name: &str, bytes: &[u8]) -> Result<String, RvError> {
+        let boundary =
+            format!("bvault-{}-{}", std::process::id(), chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0));
         let metadata = json!({ "name": name, "parents": [parent_id] });
         let metadata_bytes = serde_json::to_vec(&metadata).unwrap();
 
@@ -358,24 +337,17 @@ impl Inner {
             .agent
             .post(&url)
             .header("Authorization", format!("Bearer {token}"))
-            .header(
-                "Content-Type",
-                format!("multipart/related; boundary={boundary}"),
-            )
+            .header("Content-Type", format!("multipart/related; boundary={boundary}"))
             .send(&body[..])
             .map_err(|e| RvError::ErrString(format!("gdrive: upload `{name}`: {e}")))?;
         let status = resp.status().as_u16();
-        let text = resp
-            .into_body()
-            .read_to_string()
-            .map_err(|e| RvError::ErrString(format!("gdrive: upload body: {e}")))?;
+        let text =
+            resp.into_body().read_to_string().map_err(|e| RvError::ErrString(format!("gdrive: upload body: {e}")))?;
         if !(200..300).contains(&status) {
-            return Err(RvError::ErrString(format!(
-                "gdrive: upload `{name}`: http status {status}: {text}"
-            )));
+            return Err(RvError::ErrString(format!("gdrive: upload `{name}`: http status {status}: {text}")));
         }
-        let parsed: FileId = serde_json::from_str(&text)
-            .map_err(|e| RvError::ErrString(format!("gdrive: upload parse: {e}")))?;
+        let parsed: FileId =
+            serde_json::from_str(&text).map_err(|e| RvError::ErrString(format!("gdrive: upload parse: {e}")))?;
         Ok(parsed.id)
     }
 
@@ -391,13 +363,8 @@ impl Inner {
             .map_err(|e| RvError::ErrString(format!("gdrive: update `{file_id}`: {e}")))?;
         let status = resp.status().as_u16();
         if !(200..300).contains(&status) {
-            let detail = resp
-                .into_body()
-                .read_to_string()
-                .unwrap_or_else(|_| "<no body>".into());
-            return Err(RvError::ErrString(format!(
-                "gdrive: update `{file_id}`: http status {status}: {detail}"
-            )));
+            let detail = resp.into_body().read_to_string().unwrap_or_else(|_| "<no body>".into());
+            return Err(RvError::ErrString(format!("gdrive: update `{file_id}`: http status {status}: {detail}")));
         }
         Ok(())
     }
@@ -413,13 +380,9 @@ impl Inner {
             .map_err(|e| RvError::ErrString(format!("gdrive: download `{file_id}`: {e}")))?;
         let status = resp.status().as_u16();
         if !(200..300).contains(&status) {
-            return Err(RvError::ErrString(format!(
-                "gdrive: download `{file_id}`: http status {status}"
-            )));
+            return Err(RvError::ErrString(format!("gdrive: download `{file_id}`: http status {status}")));
         }
-        resp.into_body()
-            .read_to_vec()
-            .map_err(|e| RvError::ErrString(format!("gdrive: download body: {e}")))
+        resp.into_body().read_to_vec().map_err(|e| RvError::ErrString(format!("gdrive: download body: {e}")))
     }
 
     fn delete_file(&self, file_id: &str) -> Result<(), RvError> {
@@ -435,9 +398,7 @@ impl Inner {
         if status == 204 || status == 404 || (200..300).contains(&status) {
             Ok(())
         } else {
-            Err(RvError::ErrString(format!(
-                "gdrive: delete `{file_id}`: http status {status}"
-            )))
+            Err(RvError::ErrString(format!("gdrive: delete `{file_id}`: http status {status}")))
         }
     }
 }
@@ -446,10 +407,7 @@ impl Inner {
 /// leading / trailing / empty parts. `""` → `[]`, `"a"` → `["a"]`,
 /// `"/a/b/"` → `["a","b"]`, `"a//b"` → `["a","b"]`.
 fn split_path(p: &str) -> Vec<String> {
-    p.split('/')
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-        .collect()
+    p.split('/').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect()
 }
 
 /// Split a vault key into `(parent_segments, filename)`.
@@ -502,9 +460,7 @@ where
 {
     match tokio::task::spawn_blocking(f).await {
         Ok(r) => r,
-        Err(e) => Err(RvError::ErrString(format!(
-            "gdrive: worker panic/cancel: {e}"
-        ))),
+        Err(e) => Err(RvError::ErrString(format!("gdrive: worker panic/cancel: {e}"))),
     }
 }
 
@@ -535,13 +491,10 @@ impl FileTarget for GoogleDriveTarget {
         blocking(move || {
             let (parent_segs, name) = split_parent_and_name(&key);
             if name.is_empty() {
-                return Err(RvError::ErrString(format!(
-                    "gdrive: empty filename in key `{key}`"
-                )));
+                return Err(RvError::ErrString(format!("gdrive: empty filename in key `{key}`")));
             }
-            let parent_id = inner
-                .resolve_folder_chain(&parent_segs, true)?
-                .expect("create_missing=true always returns Some");
+            let parent_id =
+                inner.resolve_folder_chain(&parent_segs, true)?.expect("create_missing=true always returns Some");
             match inner.lookup_file(&parent_id, &name)? {
                 Some(id) => inner.update_file_content(&id, &bytes),
                 None => inner.upload_new_file(&parent_id, &name, &bytes).map(|_| ()),
@@ -579,10 +532,7 @@ impl FileTarget for GoogleDriveTarget {
                 Some(id) => id,
                 None => return Ok(Vec::new()),
             };
-            let q = format!(
-                "'{}' in parents and trashed=false",
-                escape_query(&parent_id)
-            );
+            let q = format!("'{}' in parents and trashed=false", escape_query(&parent_id));
             let hits = inner.search(&q)?;
             let mut out = Vec::with_capacity(hits.len());
             for h in hits {
@@ -705,10 +655,7 @@ mod tests {
             "http_timeout_secs": 15,
         })))
         .unwrap();
-        assert_eq!(
-            t.inner.prefix_segments,
-            vec!["bvault".to_string(), "data".to_string()]
-        );
+        assert_eq!(t.inner.prefix_segments, vec!["bvault".to_string(), "data".to_string()]);
         assert_eq!(t.inner.http_timeout, Duration::from_secs(15));
         std::fs::remove_file(&path).ok();
     }
@@ -746,14 +693,9 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn gdrive_target_live_roundtrip() {
-        let client_id =
-            std::env::var("BVAULT_TEST_GDRIVE_CLIENT_ID").expect("BVAULT_TEST_GDRIVE_CLIENT_ID");
-        let creds_file =
-            std::env::var("BVAULT_TEST_GDRIVE_CREDS_FILE").expect("BVAULT_TEST_GDRIVE_CREDS_FILE");
-        let prefix = format!(
-            "bvault-test-{}",
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
-        );
+        let client_id = std::env::var("BVAULT_TEST_GDRIVE_CLIENT_ID").expect("BVAULT_TEST_GDRIVE_CLIENT_ID");
+        let creds_file = std::env::var("BVAULT_TEST_GDRIVE_CREDS_FILE").expect("BVAULT_TEST_GDRIVE_CREDS_FILE");
+        let prefix = format!("bvault-test-{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0));
 
         let target = GoogleDriveTarget::from_config(&cfg(json!({
             "client_id": client_id,

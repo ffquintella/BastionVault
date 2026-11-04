@@ -1151,24 +1151,33 @@ mod mod_test {
 
         // Confirmed by the operator (as the gatekeeper asserts it), then not.
         let confirmed_args = json!({ "mount": "mcpkv", "path": "ai" });
-        let confirmed = json!({ "io.bastionvault/confirmation": { "by": "operator", "at": 1_760_000_000u64, "mfa": false } });
-        let ok = answer(handle_jsonrpc(&ep, &mcp_token, &call(1, "bv_kv_list", confirmed_args.clone(), confirmed)).await.unwrap());
+        let confirmed =
+            json!({ "io.bastionvault/confirmation": { "by": "operator", "at": 1_760_000_000u64, "mfa": false } });
+        let ok = answer(
+            handle_jsonrpc(&ep, &mcp_token, &call(1, "bv_kv_list", confirmed_args.clone(), confirmed)).await.unwrap(),
+        );
         assert!(ok["error"].is_null(), "{ok}");
         let plain_args = json!({ "mount": "mcpkv" });
-        let ok = answer(handle_jsonrpc(&ep, &mcp_token, &call(2, "bv_kv_list", plain_args.clone(), json!({}))).await.unwrap());
+        let ok = answer(
+            handle_jsonrpc(&ep, &mcp_token, &call(2, "bv_kv_list", plain_args.clone(), json!({}))).await.unwrap(),
+        );
         assert!(ok["error"].is_null(), "{ok}");
 
         // A session tool: refused by the dispatcher (no session tool ships yet).
         let session_args = json!({ "resource": "web-01", "profile": "p_agent", "command": "id" });
-        let refused =
-            answer(handle_jsonrpc(&ep, &mcp_token, &call(3, "bv_resource_ssh_exec", session_args, json!({}))).await.unwrap());
+        let refused = answer(
+            handle_jsonrpc(&ep, &mcp_token, &call(3, "bv_resource_ssh_exec", session_args, json!({}))).await.unwrap(),
+        );
         let code = refused["error"]["data"]["code"].as_str().unwrap().to_string();
 
         let entries = audit_lines(&audit_log);
         let blocks: Vec<&Value> = entries.iter().filter(|e| e["request"]["mcp"].is_object()).collect();
         let first = blocks
             .iter()
-            .find(|e| e["request"]["mcp"]["args_hash"] == json!(bv_mcp::dispatcher::args_hash(confirmed_args.as_object().unwrap())))
+            .find(|e| {
+                e["request"]["mcp"]["args_hash"]
+                    == json!(bv_mcp::dispatcher::args_hash(confirmed_args.as_object().unwrap()))
+            })
             .unwrap_or_else(|| panic!("the confirmed call's block is in the audit log: {blocks:#?}"));
         let mcp = &first["request"]["mcp"];
         assert_eq!(mcp["kind"], json!("pairing"));
@@ -1185,7 +1194,10 @@ mod mod_test {
 
         let second = blocks
             .iter()
-            .find(|e| e["request"]["mcp"]["args_hash"] == json!(bv_mcp::dispatcher::args_hash(plain_args.as_object().unwrap())))
+            .find(|e| {
+                e["request"]["mcp"]["args_hash"]
+                    == json!(bv_mcp::dispatcher::args_hash(plain_args.as_object().unwrap()))
+            })
             .expect("the unconfirmed call's block");
         assert_eq!(second["request"]["mcp"]["confirmed_by_operator"], json!(false));
         assert!(second["request"]["mcp"].get("operator_confirmation").is_none());
@@ -1237,7 +1249,8 @@ mod mod_test {
         config.mcp.brokered_sessions.enabled = true;
         config.mcp.brokered_sessions.protocols = vec!["ssh".into()];
         config.mcp.brokered_sessions.allowed_target_cidrs = Some(vec!["10.9.0.0/16".into()]);
-        let bvault = crate::BastionVault::new(new_test_backend("test_mcp_config_effective_hcl"), Some(&config)).unwrap();
+        let bvault =
+            crate::BastionVault::new(new_test_backend("test_mcp_config_effective_hcl"), Some(&config)).unwrap();
         let seal = crate::core::SealConfig { secret_shares: 1, secret_threshold: 1 };
         let init = init_test_bastion_vault(&bvault, &seal).await;
         assert!(unseal_test_bastion_vault(&bvault, &[init.secret_shares[0].as_slice()]).await);
@@ -1254,10 +1267,11 @@ mod mod_test {
 
         // The runtime layer replaces it, an empty list included; `null` hands
         // back to the server config. The write's own response says so too.
-        let resp = write_mcp_config(core, &root, json!({ "brokered_sessions_allowed_target_cidrs": ["10.20.0.0/16"] }), true)
-            .await
-            .unwrap()
-            .unwrap();
+        let resp =
+            write_mcp_config(core, &root, json!({ "brokered_sessions_allowed_target_cidrs": ["10.20.0.0/16"] }), true)
+                .await
+                .unwrap()
+                .unwrap();
         let written = resp.data.unwrap();
         assert_eq!(written["brokered_sessions_target_cidrs_source"], json!("runtime"));
         assert_eq!(written["brokered_sessions_effective_target_cidrs"], json!(["10.20.0.0/16"]));
@@ -1271,7 +1285,9 @@ mod mod_test {
         assert_eq!(data["brokered_sessions_effective_target_cidrs"], json!(["10.9.0.0/16"]));
 
         // The derived keys are read-only: writing one changes nothing stored.
-        write_mcp_config(core, &root, json!({ "brokered_sessions_target_cidrs_source": "runtime" }), true).await.unwrap();
+        write_mcp_config(core, &root, json!({ "brokered_sessions_target_cidrs_source": "runtime" }), true)
+            .await
+            .unwrap();
         let view = sys_mount_view(core);
         let stored: Value = serde_json::from_slice(&view.get("mcp/config").await.unwrap().unwrap().value).unwrap();
         assert!(stored.get("brokered_sessions_target_cidrs_source").is_none(), "{stored}");
@@ -1925,8 +1941,9 @@ mod mod_test {
             path "dti/esi/resources/resources/*"      { capabilities = ["list"] }
             path "dti/esi/resources/resources/gw-esi" { capabilities = ["read"] }
         "#;
-        let _ = test_write_api(core, &root, "sys/policy/esi-reader", true, json!({ "policy": esi }).as_object().cloned())
-            .await;
+        let _ =
+            test_write_api(core, &root, "sys/policy/esi-reader", true, json!({ "policy": esi }).as_object().cloned())
+                .await;
         let user = json!({ "password": "pw", "policies": "mcp-root,esi-reader" }).as_object().cloned();
         let _ = test_write_api(core, &root, "auth/userpass/users/felipe", true, user).await;
         // A wider, same-named policy authored in the target: what the old
@@ -1942,7 +1959,8 @@ mod mod_test {
             .unwrap()
             .unwrap();
 
-        let data = narrow_as(core, &felipe, "esi", "dti/esi").await.expect("`mcp-root` is not in dti/esi, and need not be");
+        let data =
+            narrow_as(core, &felipe, "esi", "dti/esi").await.expect("`mcp-root` is not in dti/esi, and need not be");
         assert_eq!(data["auth"]["metadata"]["namespace"], json!("dti/esi"));
         let token = data["auth"]["client_token"].as_str().unwrap().to_string();
         let auth_module = core.module_manager().get_module::<crate::modules::auth::AuthModule>("auth").unwrap();
@@ -1964,14 +1982,20 @@ mod mod_test {
         let own_list = ns_call(core, &felipe, Operation::List, "dti/esi", "resources/resources/", None).await.unwrap();
         let own_keys = own_list.and_then(|r| r.data).map(|d| d["keys"].clone()).unwrap();
         assert!(ns_call(core, &felipe, Operation::Read, "dti/esi", "resources/resources/gw-esi", None).await.is_ok());
-        assert!(ns_call(core, &felipe, Operation::Read, "dti/esi", "resources/resources/gw-secret", None).await.is_err());
+        assert!(ns_call(core, &felipe, Operation::Read, "dti/esi", "resources/resources/gw-secret", None)
+            .await
+            .is_err());
 
         let listed = ok(tool_call(&ep, &token, "bv_resource_list", json!({})).await);
         assert_eq!((listed["keys"].clone(), listed["namespace"].clone()), (own_keys, json!("dti/esi")));
         let gw = ok(tool_call(&ep, &token, "bv_resource_describe", json!({ "name": "gw-esi" })).await);
         assert_eq!(gw["hostname"], json!("gw-esi.example"));
         let answer = tool_call(&ep, &token, "bv_resource_describe", json!({ "name": "gw-secret" })).await;
-        assert_eq!(refusal_code(&answer), "mcp_backend_error", "the tenant's same-named policy must not apply: {answer}");
+        assert_eq!(
+            refusal_code(&answer),
+            "mcp_backend_error",
+            "the tenant's same-named policy must not apply: {answer}"
+        );
 
         // Out of the operator's reach: still refused, nothing minted.
         let err = narrow_as(core, &felipe, "esi-out", "dti/ops").await.unwrap_err();
@@ -1990,7 +2014,14 @@ mod mod_test {
         dti_tree(core, &root).await;
         tenant_policy(core, "dti/esi", "esi-shared-connect", &tenant_operator_policy("dti/esi")).await;
         let reader = r#"path "sys/policies/acl/*" { capabilities = ["read"] }"#;
-        let _ = test_write_api(core, &root, "sys/policy/mcp-policy-reader", true, json!({ "policy": reader }).as_object().cloned()).await;
+        let _ = test_write_api(
+            core,
+            &root,
+            "sys/policy/mcp-policy-reader",
+            true,
+            json!({ "policy": reader }).as_object().cloned(),
+        )
+        .await;
         let users = [("felipe", "mcp-root,mcp-policy-reader"), ("bob", "mcp-root")];
         for (user, policies) in users {
             let body = json!({ "password": "pw", "policies": policies }).as_object().cloned();
@@ -2015,7 +2046,12 @@ mod mod_test {
                 let mut body = tenant_pairing(id).unwrap();
                 body["pairing"]["tool_allowlist"] = json!(["bv_policy_read"]);
                 body["pairing"]["path_scope"] = json!(["*"]);
-                let data = test_write_api(ep_core, &user, "sys/mcp/token", true, Some(body)).await.unwrap().unwrap().data.unwrap();
+                let data = test_write_api(ep_core, &user, "sys/mcp/token", true, Some(body))
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .data
+                    .unwrap();
                 data["auth"]["client_token"].as_str().unwrap().to_string()
             }
         };
@@ -2066,7 +2102,14 @@ mod mod_test {
         let core: &crate::core::Core = &core_arc;
         tenants(core, &root).await;
         let reader = r#"path "sys/audit/events" { capabilities = ["read", "sudo"] }"#;
-        let _ = test_write_api(core, &root, "sys/policy/mcp-audit-reader", true, json!({ "policy": reader }).as_object().cloned()).await;
+        let _ = test_write_api(
+            core,
+            &root,
+            "sys/policy/mcp-audit-reader",
+            true,
+            json!({ "policy": reader }).as_object().cloned(),
+        )
+        .await;
         for (user, policies) in [("felipe", "mcp-root,mcp-audit-reader"), ("bob", "mcp-root")] {
             let body = json!({ "password": "pw", "policies": policies }).as_object().cloned();
             let _ = test_write_api(core, &root, &format!("auth/userpass/users/{user}"), true, body).await;
@@ -2084,14 +2127,16 @@ mod mod_test {
             let mut body = tenant_pairing(id).unwrap();
             body["pairing"]["tool_allowlist"] = json!(["bv_audit_read"]);
             body["pairing"]["path_scope"] = json!(["sys/audit/events"]);
-            let data = test_write_api(core, &user, "sys/mcp/token", true, Some(body)).await.unwrap().unwrap().data.unwrap();
+            let data =
+                test_write_api(core, &user, "sys/mcp/token", true, Some(body)).await.unwrap().unwrap().data.unwrap();
             data["auth"]["client_token"].as_str().unwrap().to_string()
         };
 
         let felipe = login_in(core, "felipe", "").await;
         let bob = login_in(core, "bob", "").await;
 
-        let allowed = ok(tool_call(&ep, &pair(felipe, "pr-audit-felipe").await, "bv_audit_read", json!({ "limit": 5 })).await);
+        let allowed =
+            ok(tool_call(&ep, &pair(felipe, "pr-audit-felipe").await, "bv_audit_read", json!({ "limit": 5 })).await);
         assert!(allowed["events"].is_array(), "{allowed}");
         assert!(allowed["failed_sources"].is_array(), "{allowed}");
 

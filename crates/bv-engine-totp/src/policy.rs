@@ -47,13 +47,10 @@ impl Algorithm {
             "SHA1" | "" => Ok(Algorithm::Sha1),
             "SHA256" => Ok(Algorithm::Sha256),
             "SHA512" => Ok(Algorithm::Sha512),
-            other => Err(format!(
-                "unsupported algorithm `{other}`; expected one of SHA1, SHA256, SHA512"
-            )),
+            other => Err(format!("unsupported algorithm `{other}`; expected one of SHA1, SHA256, SHA512")),
         }
     }
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyPolicy {
@@ -105,19 +102,13 @@ impl KeyPolicy {
     /// generate mode) lives in the path handler.
     pub fn validate(&self) -> Result<(), String> {
         if !(self.digits == 6 || self.digits == 8) {
-            return Err(format!(
-                "digits must be 6 or 8, got {}",
-                self.digits
-            ));
+            return Err(format!("digits must be 6 or 8, got {}", self.digits));
         }
         if self.period == 0 {
             return Err("period must be > 0".to_string());
         }
         if self.skew > 10 {
-            return Err(format!(
-                "skew must be <= 10 (got {}); larger windows defeat the point of TOTP",
-                self.skew
-            ));
+            return Err(format!("skew must be <= 10 (got {}); larger windows defeat the point of TOTP", self.skew));
         }
         if self.key.is_empty() {
             return Err("key is empty".to_string());

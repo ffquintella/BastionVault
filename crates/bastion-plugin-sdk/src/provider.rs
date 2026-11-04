@@ -167,17 +167,9 @@ pub struct LogicalOp {
 
 /// What a credential provider implements.
 pub trait CredentialProvider {
-    fn candidates(
-        caller: &Caller,
-        query: &CandidatesQuery,
-        host: &Host,
-    ) -> Result<Vec<Candidate>, ProviderError>;
+    fn candidates(caller: &Caller, query: &CandidatesQuery, host: &Host) -> Result<Vec<Candidate>, ProviderError>;
 
-    fn release(
-        caller: &Caller,
-        req: &ReleaseRequest,
-        host: &Host,
-    ) -> Result<Released, ProviderError>;
+    fn release(caller: &Caller, req: &ReleaseRequest, host: &Host) -> Result<Released, ProviderError>;
 
     /// The plugin's own API (its CRUD paths). `caller` is the attested caller.
     fn handle_logical(caller: &Caller, op: LogicalOp, host: &Host) -> Response;
@@ -230,11 +222,7 @@ pub fn dispatch<P: CredentialProvider>(req: Request<'_>, host: &Host) -> Respons
             Err(_) => err(ProviderError::BAD_REQUEST),
         },
         other if other.starts_with("provider.") => err(ProviderError::BAD_REQUEST),
-        _ => P::handle_logical(
-            &caller,
-            LogicalOp { op: env.op, path: env.path, data: env.data },
-            host,
-        ),
+        _ => P::handle_logical(&caller, LogicalOp { op: env.op, path: env.path, data: env.data }, host),
     }
 }
 
@@ -266,11 +254,7 @@ mod tests {
 
     struct P;
     impl CredentialProvider for P {
-        fn candidates(
-            caller: &Caller,
-            q: &CandidatesQuery,
-            _h: &Host,
-        ) -> Result<Vec<Candidate>, ProviderError> {
+        fn candidates(caller: &Caller, q: &CandidatesQuery, _h: &Host) -> Result<Vec<Candidate>, ProviderError> {
             if q.protocol == "web" {
                 return Err(ProviderError::NO_MATCH);
             }

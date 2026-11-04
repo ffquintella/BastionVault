@@ -113,11 +113,7 @@ pub fn peer_addrs(backend: &dyn Backend) -> Vec<String> {
 }
 
 /// Remove `node_id` from the Raft membership. `None` when not clustered.
-pub async fn remove_node(
-    backend: &dyn Backend,
-    node_id: u64,
-    stay_as_learner: bool,
-) -> Option<Result<(), RvError>> {
+pub async fn remove_node(backend: &dyn Backend, node_id: u64, stay_as_learner: bool) -> Option<Result<(), RvError>> {
     #[cfg(all(not(feature = "sync_handler"), feature = "storage_hiqlite"))]
     {
         return cluster_backend(backend).map(|cluster| cluster.remove_node(node_id, stay_as_learner));

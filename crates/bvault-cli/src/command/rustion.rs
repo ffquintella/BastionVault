@@ -2,9 +2,8 @@ use clap::{Parser, Subcommand};
 use sysexits::ExitCode;
 
 use super::{
-    rustion_master_export, rustion_master_issue, rustion_master_read, rustion_master_rotate,
-    rustion_target_add, rustion_target_delete, rustion_target_health, rustion_target_list,
-    rustion_target_read, rustion_target_test,
+    rustion_master_export, rustion_master_issue, rustion_master_read, rustion_master_rotate, rustion_target_add,
+    rustion_target_delete, rustion_target_health, rustion_target_list, rustion_target_read, rustion_target_test,
 };
 use crate::{command::CommandExecutor, EXIT_CODE_INSUFFICIENT_PARAMS};
 

@@ -25,8 +25,8 @@ use std::time::Duration;
 
 use chrono::Utc;
 
-use crate::kernel_api::VaultCtx;
 use crate::errors::RvError;
+use crate::kernel_api::VaultCtx;
 use crate::keystroke_index;
 use crate::recordings;
 
@@ -45,10 +45,7 @@ pub const MAX_RETENTION: chrono::Duration = chrono::Duration::hours(24);
 /// can hold it; dropping the handle does not stop the task (tokio
 /// detaches when the parent crate-level futures terminate). Same
 /// shape as `rustion::probe::start_pinger`.
-pub fn start_poller(
-    core: Arc<dyn VaultCtx>,
-    stores: Arc<super::RustionStores>,
-) -> tokio::task::JoinHandle<()> {
+pub fn start_poller(core: Arc<dyn VaultCtx>, stores: Arc<super::RustionStores>) -> tokio::task::JoinHandle<()> {
     tokio::task::spawn(async move {
         log::info!(
             "rustion/poller: started (tick every {}s, max retention {}h)",
@@ -96,14 +93,7 @@ async fn tick(stores: &super::RustionStores) -> Result<(), RvError> {
     // here must not stop the pull-fallback pass below, which is the
     // reason this recording index exists at all.
     if let Some(keystrokes) = stores.keystrokes() {
-        match keystroke_index::index_sweep(
-            &store,
-            &recs,
-            &keystrokes,
-            keystroke_index::SWEEP_BATCH,
-        )
-        .await
-        {
+        match keystroke_index::index_sweep(&store, &recs, &keystrokes, keystroke_index::SWEEP_BATCH).await {
             Ok(report) => {
                 if report.indexed > 0 || report.failed > 0 || report.remaining > 0 {
                     log::info!(
@@ -151,9 +141,7 @@ async fn tick(stores: &super::RustionStores) -> Result<(), RvError> {
             continue;
         }
         attempted += 1;
-        match recordings::pull_recording(&store, &recs, &pr.bastion_id, &pr.session_id)
-            .await
-        {
+        match recordings::pull_recording(&store, &recs, &pr.bastion_id, &pr.session_id).await {
             Ok(entry) => {
                 pulled += 1;
                 log::info!(
@@ -173,12 +161,7 @@ async fn tick(stores: &super::RustionStores) -> Result<(), RvError> {
         }
     }
     if attempted > 0 || dropped > 0 {
-        log::info!(
-            "rustion/poller: tick complete — attempted={} pulled={} dropped={}",
-            attempted,
-            pulled,
-            dropped
-        );
+        log::info!("rustion/poller: tick complete — attempted={} pulled={} dropped={}", attempted, pulled, dropped);
     }
     Ok(())
 }

@@ -113,10 +113,7 @@ impl AuditBroker {
                 if let Ok(Some(raw)) = config_view.get(&k).await {
                     if let Ok(cfg) = serde_json::from_slice::<AuditDeviceConfig>(&raw.value) {
                         if let Err(e) = broker.instantiate_and_register(&cfg).await {
-                            log::warn!(
-                                "audit: failed to re-enable device {}: {e}. Skipping.",
-                                cfg.path,
-                            );
+                            log::warn!("audit: failed to re-enable device {}: {e}. Skipping.", cfg.path,);
                         }
                     }
                 }
@@ -141,21 +138,14 @@ impl AuditBroker {
         // across the async writes.
         let (own_devices, mirror_devices): FanoutTargets = {
             let g = self.devices.lock().unwrap();
-            let own = g
-                .iter()
-                .filter(|d| d.namespace == ns)
-                .map(|d| d.device.clone())
-                .collect();
+            let own = g.iter().filter(|d| d.namespace == ns).map(|d| d.device.clone()).collect();
             // Mirror only carries *tenant* events into root; a root event is
             // already covered by `own` above (root mirror devices have
             // namespace == "" == ns), so skip the mirror pass at root.
             let mirror = if ns.is_empty() {
                 Vec::new()
             } else {
-                g.iter()
-                    .filter(|d| d.mirror && d.namespace.is_empty())
-                    .map(|d| d.device.clone())
-                    .collect()
+                g.iter().filter(|d| d.mirror && d.namespace.is_empty()).map(|d| d.device.clone()).collect()
             };
             (own, mirror)
         };
@@ -217,13 +207,8 @@ impl AuditBroker {
     /// (sorted + deduped) so a caller can pair each path with a stable
     /// cursor sidecar.
     pub fn file_source_paths(&self) -> Vec<std::path::PathBuf> {
-        let mut paths: Vec<std::path::PathBuf> = self
-            .devices
-            .lock()
-            .unwrap()
-            .iter()
-            .filter_map(|d| d.device.source_path())
-            .collect();
+        let mut paths: Vec<std::path::PathBuf> =
+            self.devices.lock().unwrap().iter().filter_map(|d| d.device.source_path()).collect();
         paths.sort();
         paths.dedup();
         paths
@@ -286,9 +271,7 @@ impl AuditBroker {
         let device: Arc<dyn AuditDevice> = match cfg.device_type.as_str() {
             "file" => FileAuditDevice::new(&cfg.options).await?,
             other => {
-                return Err(bv_error_string!(format!(
-                    "audit: unsupported device type `{other}`. Supported: file."
-                )));
+                return Err(bv_error_string!(format!("audit: unsupported device type `{other}`. Supported: file.")));
             }
         };
         let entry = DeviceEntry {

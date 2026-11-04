@@ -30,9 +30,7 @@ use cms::{
     encrypted_data::EncryptedData,
     enveloped_data::EncryptedContentInfo,
     revocation::RevocationInfoChoices,
-    signed_data::{
-        CertificateSet, EncapsulatedContentInfo, SignedData, SignerInfos,
-    },
+    signed_data::{CertificateSet, EncapsulatedContentInfo, SignedData, SignerInfos},
 };
 use const_oid::ObjectIdentifier;
 use hmac::{Hmac, KeyInit, Mac};
@@ -42,14 +40,14 @@ use rand::Rng;
 // dep is on the 0.11 family (digest 0.11); routing through the
 // `sha2-saml` alias — which is `sha2 0.10` (digest 0.10) — gives us a
 // trait-compatible Sha256 to feed `pkcs12::kdf::derive_key_utf8::<D>`.
-use sha2_saml::Sha256 as Sha256Pkcs12Kdf;
 use sha2::Sha256;
+use sha2_saml::Sha256 as Sha256Pkcs12Kdf;
+use x509_cert::attr::{Attribute, Attributes};
 use x509_cert::der::{
     self,
     asn1::{Any, AnyRef, OctetString, SetOfVec},
     Decode, Encode,
 };
-use x509_cert::attr::{Attribute, Attributes};
 use x509_cert::spki::AlgorithmIdentifierOwned;
 use x509_cert::Certificate;
 
@@ -82,9 +80,9 @@ impl ExportFormat {
             "" | "pem" => Ok(Self::Pem),
             "pkcs7" | "p7b" | "p7c" => Ok(Self::Pkcs7),
             "pkcs12" | "p12" | "pfx" => Ok(Self::Pkcs12),
-            other => Err(RvError::ErrString(format!(
-                "export: unknown format `{other}` (accepted: pem, pkcs7, pkcs12)"
-            ))),
+            other => {
+                Err(RvError::ErrString(format!("export: unknown format `{other}` (accepted: pem, pkcs7, pkcs12)")))
+            }
         }
     }
 
@@ -99,11 +97,7 @@ impl ExportFormat {
 /// supplied. All inputs are expected to already be valid PEM
 /// (`-----BEGIN <label>-----` … `-----END <label>-----` with trailing
 /// newline).
-pub fn pem_bundle(
-    cert_pem: &str,
-    chain_pems: &[String],
-    private_key_pem: Option<&str>,
-) -> ExportBundle {
+pub fn pem_bundle(cert_pem: &str, chain_pems: &[String], private_key_pem: Option<&str>) -> ExportBundle {
     let mut out = String::with_capacity(
         cert_pem.len()
             + chain_pems.iter().map(|p| p.len()).sum::<usize>()
@@ -120,11 +114,7 @@ pub fn pem_bundle(
         out.push_str(k.trim_end());
         out.push('\n');
     }
-    ExportBundle {
-        format: ExportFormat::Pem,
-        body: out.into_bytes(),
-        extension: "pem",
-    }
+    ExportBundle { format: ExportFormat::Pem, body: out.into_bytes(), extension: "pem" }
 }
 
 /// Wrap one or more cert PEMs in a certs-only PKCS#7 `SignedData`
@@ -136,10 +126,7 @@ pub fn pem_bundle(
 /// PKCS#7 doesn't carry private keys, so any caller-supplied
 /// `include_private_key=true` is rejected at the route handler before
 /// reaching this function.
-pub fn pkcs7_certs_only(
-    cert_pem: &str,
-    chain_pems: &[String],
-) -> Result<ExportBundle, RvError> {
+pub fn pkcs7_certs_only(cert_pem: &str, chain_pems: &[String]) -> Result<ExportBundle, RvError> {
     let leaf = parse_cert_pem(cert_pem)?;
     let mut certs: Vec<Certificate> = Vec::with_capacity(chain_pems.len() + 1);
     certs.push(leaf);
@@ -159,19 +146,13 @@ pub fn pkcs7_certs_only(
     // 0.2.x line we're pinned to. The component pieces ARE stable.
     let mut cert_set: CertificateSet = CertificateSet(SetOfVec::new());
     for cert in certs {
-        cert_set
-            .0
-            .insert(CertificateChoices::Certificate(cert))
-            .map_err(der_err)?;
+        cert_set.0.insert(CertificateChoices::Certificate(cert)).map_err(der_err)?;
     }
 
     let signed_data = SignedData {
         version: CmsVersion::V1,
         digest_algorithms: SetOfVec::new(),
-        encap_content_info: EncapsulatedContentInfo {
-            econtent_type: const_oid::db::rfc5911::ID_DATA,
-            econtent: None,
-        },
+        encap_content_info: EncapsulatedContentInfo { econtent_type: const_oid::db::rfc5911::ID_DATA, econtent: None },
         certificates: Some(cert_set),
         // Match OpenSSL's certs-only PKCS#7 shape — emit an empty
         // `crls` field rather than omitting it. Some Java verifiers
@@ -180,33 +161,21 @@ pub fn pkcs7_certs_only(
         signer_infos: SignerInfos(SetOfVec::new()),
     };
     let inner_der = signed_data.to_der().map_err(der_err)?;
-    let inner_any =
-        Any::from_der(&inner_der).map_err(der_err)?;
+    let inner_any = Any::from_der(&inner_der).map_err(der_err)?;
     let _ = AnyRef::try_from(inner_der.as_slice()); // sanity-only
-    let content_info = ContentInfo {
-        content_type: const_oid::db::rfc5911::ID_SIGNED_DATA,
-        content: inner_any,
-    };
+    let content_info = ContentInfo { content_type: const_oid::db::rfc5911::ID_SIGNED_DATA, content: inner_any };
 
     let der = content_info.to_der().map_err(der_err)?;
     // PEM-armor the DER — `.p7b` is always PEM in practice.
     let armored = pem::encode(&pem::Pem::new("PKCS7", der));
 
-    Ok(ExportBundle {
-        format: ExportFormat::Pkcs7,
-        body: armored.into_bytes(),
-        extension: "p7b",
-    })
+    Ok(ExportBundle { format: ExportFormat::Pkcs7, body: armored.into_bytes(), extension: "p7b" })
 }
 
 fn parse_cert_pem(pem_str: &str) -> Result<Certificate, RvError> {
-    let parsed = pem::parse(pem_str.trim())
-        .map_err(|e| RvError::ErrString(format!("export: bad PEM: {e}")))?;
+    let parsed = pem::parse(pem_str.trim()).map_err(|e| RvError::ErrString(format!("export: bad PEM: {e}")))?;
     if parsed.tag() != "CERTIFICATE" {
-        return Err(RvError::ErrString(format!(
-            "export: expected CERTIFICATE PEM, got `{}`",
-            parsed.tag()
-        )));
+        return Err(RvError::ErrString(format!("export: expected CERTIFICATE PEM, got `{}`", parsed.tag())));
     }
     Certificate::from_der(parsed.contents()).map_err(der_err)
 }
@@ -226,8 +195,7 @@ const MAC_ITERATIONS: i32 = 100_000;
 const ID_DATA: ObjectIdentifier = const_oid::db::rfc5911::ID_DATA;
 /// `id-encryptedData` content-type OID — wraps a PBES2-encrypted
 /// SafeContents. (1.2.840.113549.1.7.6)
-const ID_ENCRYPTED_DATA: ObjectIdentifier =
-    const_oid::db::rfc5911::ID_ENCRYPTED_DATA;
+const ID_ENCRYPTED_DATA: ObjectIdentifier = const_oid::db::rfc5911::ID_ENCRYPTED_DATA;
 /// `id-sha256` digest OID for the outer PFX MAC.
 /// (2.16.840.1.101.3.4.2.1)
 ///
@@ -253,8 +221,7 @@ const ID_SHA256: ObjectIdentifier = const_oid::db::rfc5912::ID_SHA_256;
 /// usable private key. For an export whose entire purpose is to move an
 /// identity, that is a broken file, so the leaf and the key always carry
 /// this attribute.
-const ID_LOCAL_KEY_ID: ObjectIdentifier =
-    ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.21");
+const ID_LOCAL_KEY_ID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.21");
 
 /// Build a password-encrypted PKCS#12 (`.p12`) bundle.
 ///
@@ -283,11 +250,11 @@ pub fn build_pkcs12(
     private_key_pem: Option<&str>,
     password: &str,
 ) -> Result<ExportBundle, RvError> {
-    use pkcs12::{
-        digest_info::DigestInfo, mac_data::MacData, pfx::Pfx, pfx::Version,
-        safe_bag::SafeBag, PKCS_12_PKCS8_KEY_BAG_OID, PKCS_12_X509_CERT_OID,
-    };
     use pkcs12::cert_type::CertBag;
+    use pkcs12::{
+        digest_info::DigestInfo, mac_data::MacData, pfx::Pfx, pfx::Version, safe_bag::SafeBag,
+        PKCS_12_PKCS8_KEY_BAG_OID, PKCS_12_X509_CERT_OID,
+    };
 
     if password.is_empty() {
         return Err(RvError::ErrString(
@@ -326,10 +293,8 @@ pub fn build_pkcs12(
     let mut cert_bags: Vec<SafeBag> = Vec::with_capacity(all_certs.len());
     for (idx, cert) in all_certs.iter().enumerate() {
         let cert_der = cert.to_der().map_err(der_err)?;
-        let cert_bag = CertBag {
-            cert_id: PKCS_12_X509_CERT_OID,
-            cert_value: OctetString::new(cert_der).map_err(der_err)?,
-        };
+        let cert_bag =
+            CertBag { cert_id: PKCS_12_X509_CERT_OID, cert_value: OctetString::new(cert_der).map_err(der_err)? };
         let cert_bag_der = cert_bag.to_der().map_err(der_err)?;
         // Only the leaf (index 0) is the key's certificate; the chain
         // above it must stay in the CA bucket on import.
@@ -337,11 +302,7 @@ pub fn build_pkcs12(
             (0, Some(id)) => Some(local_key_id_attributes(id)?),
             _ => None,
         };
-        cert_bags.push(SafeBag {
-            bag_id: pkcs12::PKCS_12_CERT_BAG_OID,
-            bag_value: cert_bag_der,
-            bag_attributes,
-        });
+        cert_bags.push(SafeBag { bag_id: pkcs12::PKCS_12_CERT_BAG_OID, bag_value: cert_bag_der, bag_attributes });
     }
     let cert_safe_contents_der = encode_safe_contents(&cert_bags)?;
 
@@ -350,15 +311,10 @@ pub fn build_pkcs12(
     let mut cert_pbes_iv = [0u8; 16];
     rng.fill_bytes(&mut cert_pbes_salt);
     rng.fill_bytes(&mut cert_pbes_iv);
-    let cert_pbes_params = pkcs5::pbes2::Parameters::pbkdf2_sha256_aes256cbc(
-        PBKDF2_ITERATIONS,
-        &cert_pbes_salt,
-        &cert_pbes_iv,
-    )
-    .map_err(pkcs5_err)?;
-    let cert_ciphertext = cert_pbes_params
-        .encrypt(password, &cert_safe_contents_der)
-        .map_err(pkcs5_err)?;
+    let cert_pbes_params =
+        pkcs5::pbes2::Parameters::pbkdf2_sha256_aes256cbc(PBKDF2_ITERATIONS, &cert_pbes_salt, &cert_pbes_iv)
+            .map_err(pkcs5_err)?;
+    let cert_ciphertext = cert_pbes_params.encrypt(password, &cert_safe_contents_der).map_err(pkcs5_err)?;
 
     // Encode `pbes2 + AlgorithmIdentifier` as the contentEncryptionAlgorithm.
     // pkcs5::pbes2::Parameters implements `Sequence`, so we wrap it in
@@ -366,20 +322,15 @@ pub fn build_pkcs12(
     let pbes2_params_der = cert_pbes_params.to_der().map_err(der_err)?;
     let cert_enc_alg = AlgorithmIdentifierOwned {
         oid: pkcs5::pbes2::PBES2_OID,
-        parameters: Some(
-            x509_cert::der::Any::from_der(&pbes2_params_der).map_err(der_err)?,
-        ),
+        parameters: Some(x509_cert::der::Any::from_der(&pbes2_params_der).map_err(der_err)?),
     };
     let cert_enc_content_info = EncryptedContentInfo {
         content_type: ID_DATA,
         content_enc_alg: cert_enc_alg,
         encrypted_content: Some(OctetString::new(cert_ciphertext).map_err(der_err)?),
     };
-    let cert_encrypted_data = EncryptedData {
-        version: CmsVersion::V0,
-        enc_content_info: cert_enc_content_info,
-        unprotected_attrs: None,
-    };
+    let cert_encrypted_data =
+        EncryptedData { version: CmsVersion::V0, enc_content_info: cert_enc_content_info, unprotected_attrs: None };
     let cert_encrypted_data_der = cert_encrypted_data.to_der().map_err(der_err)?;
     let cert_content_info = ContentInfo {
         content_type: ID_ENCRYPTED_DATA,
@@ -390,14 +341,10 @@ pub fn build_pkcs12(
     let mut auth_safe: Vec<ContentInfo> = vec![cert_content_info];
 
     if let Some(key_pem) = private_key_pem {
-        let parsed = pem::parse(key_pem.trim()).map_err(|e| {
-            RvError::ErrString(format!("export: bad private-key PEM: {e}"))
-        })?;
+        let parsed =
+            pem::parse(key_pem.trim()).map_err(|e| RvError::ErrString(format!("export: bad private-key PEM: {e}")))?;
         if parsed.tag() != "PRIVATE KEY" {
-            return Err(RvError::ErrString(format!(
-                "export: expected `PRIVATE KEY` PEM, got `{}`",
-                parsed.tag()
-            )));
+            return Err(RvError::ErrString(format!("export: expected `PRIVATE KEY` PEM, got `{}`", parsed.tag())));
         }
         let pkcs8_der = parsed.contents();
 
@@ -406,21 +353,15 @@ pub fn build_pkcs12(
         let mut key_pbes_iv = [0u8; 16];
         rng.fill_bytes(&mut key_pbes_salt);
         rng.fill_bytes(&mut key_pbes_iv);
-        let key_pbes_params = pkcs5::pbes2::Parameters::pbkdf2_sha256_aes256cbc(
-            PBKDF2_ITERATIONS,
-            &key_pbes_salt,
-            &key_pbes_iv,
-        )
-        .map_err(pkcs5_err)?;
-        let key_ciphertext = key_pbes_params
-            .encrypt(password, pkcs8_der)
-            .map_err(pkcs5_err)?;
+        let key_pbes_params =
+            pkcs5::pbes2::Parameters::pbkdf2_sha256_aes256cbc(PBKDF2_ITERATIONS, &key_pbes_salt, &key_pbes_iv)
+                .map_err(pkcs5_err)?;
+        let key_ciphertext = key_pbes_params.encrypt(password, pkcs8_der).map_err(pkcs5_err)?;
 
         // Build EncryptedPrivateKeyInfo manually as
         //   SEQUENCE { AlgorithmIdentifier(pbes2 + params), OCTET STRING ct }
         let key_pbes_der = key_pbes_params.to_der().map_err(der_err)?;
-        let alg_id_bytes =
-            encode_algorithm_identifier(pkcs5::pbes2::PBES2_OID, &key_pbes_der)?;
+        let alg_id_bytes = encode_algorithm_identifier(pkcs5::pbes2::PBES2_OID, &key_pbes_der)?;
         let ct_bytes = encode_octet_string(&key_ciphertext)?;
         let mut epki_inner = Vec::with_capacity(alg_id_bytes.len() + ct_bytes.len());
         epki_inner.extend_from_slice(&alg_id_bytes);
@@ -441,8 +382,7 @@ pub fn build_pkcs12(
         let key_safe_contents_der = encode_safe_contents(&[key_bag])?;
         let key_content_info = ContentInfo {
             content_type: ID_DATA,
-            content: Any::from_der(&encode_octet_string(&key_safe_contents_der)?)
-                .map_err(der_err)?,
+            content: Any::from_der(&encode_octet_string(&key_safe_contents_der)?).map_err(der_err)?,
         };
         auth_safe.push(key_content_info);
     }
@@ -451,8 +391,7 @@ pub fn build_pkcs12(
     let auth_safe_der = encode_authenticated_safe(&auth_safe)?;
     let outer_content_info = ContentInfo {
         content_type: ID_DATA,
-        content: Any::from_der(&encode_octet_string(&auth_safe_der)?)
-            .map_err(der_err)?,
+        content: Any::from_der(&encode_octet_string(&auth_safe_der)?).map_err(der_err)?,
     };
 
     // ── 4. MAC over the AuthenticatedSafe DER ───────────────────────
@@ -466,19 +405,14 @@ pub fn build_pkcs12(
         32,
     )
     .map_err(der_err)?;
-    let mut mac =
-        <Hmac<Sha256>>::new_from_slice(&mac_key).map_err(|e| {
-            RvError::ErrString(format!("export: hmac key length: {e}"))
-        })?;
+    let mut mac = <Hmac<Sha256>>::new_from_slice(&mac_key)
+        .map_err(|e| RvError::ErrString(format!("export: hmac key length: {e}")))?;
     mac.update(&auth_safe_der);
     let mac_digest = mac.finalize().into_bytes();
 
     let mac_data = MacData {
         mac: DigestInfo {
-            algorithm: AlgorithmIdentifierOwned {
-                oid: ID_SHA256,
-                parameters: None,
-            },
+            algorithm: AlgorithmIdentifierOwned { oid: ID_SHA256, parameters: None },
             digest: OctetString::new(mac_digest.to_vec()).map_err(der_err)?,
         },
         mac_salt: OctetString::new(mac_salt.to_vec()).map_err(der_err)?,
@@ -486,18 +420,10 @@ pub fn build_pkcs12(
     };
 
     // ── 5. PFX top-level ────────────────────────────────────────────
-    let pfx = Pfx {
-        version: Version::V3,
-        auth_safe: outer_content_info,
-        mac_data: Some(mac_data),
-    };
+    let pfx = Pfx { version: Version::V3, auth_safe: outer_content_info, mac_data: Some(mac_data) };
     let der = pfx.to_der().map_err(der_err)?;
 
-    Ok(ExportBundle {
-        format: ExportFormat::Pkcs12,
-        body: der,
-        extension: "p12",
-    })
+    Ok(ExportBundle { format: ExportFormat::Pkcs12, body: der, extension: "p12" })
 }
 
 // ── ASN.1 helpers ───────────────────────────────────────────────────
@@ -510,18 +436,11 @@ fn local_key_id_attributes(id: &[u8]) -> Result<Attributes, RvError> {
     let mut values = SetOfVec::new();
     values.insert(value).map_err(der_err)?;
     let mut attrs = SetOfVec::new();
-    attrs
-        .insert(Attribute {
-            oid: ID_LOCAL_KEY_ID,
-            values,
-        })
-        .map_err(der_err)?;
+    attrs.insert(Attribute { oid: ID_LOCAL_KEY_ID, values }).map_err(der_err)?;
     Ok(attrs)
 }
 
-fn encode_safe_contents(
-    bags: &[pkcs12::safe_bag::SafeBag],
-) -> Result<Vec<u8>, RvError> {
+fn encode_safe_contents(bags: &[pkcs12::safe_bag::SafeBag]) -> Result<Vec<u8>, RvError> {
     // SafeContents = SEQUENCE OF SafeBag.  Each bag encodes itself
     // through `der::Encode`; we wrap them in an outer SEQUENCE.
     let mut inner = Vec::new();
@@ -547,10 +466,7 @@ fn encode_octet_string(content: &[u8]) -> Result<Vec<u8>, RvError> {
     Ok(wrap_in_tag(0x04, content))
 }
 
-fn encode_algorithm_identifier(
-    oid: ObjectIdentifier,
-    params_der: &[u8],
-) -> Result<Vec<u8>, RvError> {
+fn encode_algorithm_identifier(oid: ObjectIdentifier, params_der: &[u8]) -> Result<Vec<u8>, RvError> {
     let mut inner = Vec::new();
     let mut oid_bytes = Vec::new();
     oid.encode(&mut oid_bytes).map_err(der_err)?;
@@ -628,10 +544,7 @@ GLacNrytqq7jmwIEAcciE0sn9aGO7vrPc47k0MR8I+5Dqlx6Fpnvcai0\n\
         assert_eq!(bundle.extension, "p12");
         assert!(bundle.format.is_binary(), "pkcs12 must ship as bytes");
         assert_eq!(bundle.body.first(), Some(&0x30), "PFX is a DER SEQUENCE");
-        assert!(
-            !String::from_utf8_lossy(&bundle.body).contains("BEGIN"),
-            "a PKCS#12 body must never carry PEM armour"
-        );
+        assert!(!String::from_utf8_lossy(&bundle.body).contains("BEGIN"), "a PKCS#12 body must never carry PEM armour");
         Pfx::from_der(&bundle.body).expect("output parses as a PFX")
     }
 
@@ -642,14 +555,10 @@ GLacNrytqq7jmwIEAcciE0sn9aGO7vrPc47k0MR8I+5Dqlx6Fpnvcai0\n\
     /// chasing a password that was never wrong.
     #[test]
     fn pkcs12_mac_uses_the_digest_oid_not_the_hmac_oid() {
-        let bundle =
-            build_pkcs12(FIXTURE_CERT_PEM, &[], None, PASSWORD).expect("build");
+        let bundle = build_pkcs12(FIXTURE_CERT_PEM, &[], None, PASSWORD).expect("build");
         let pfx = parse_pfx(&bundle);
         let mac = pfx.mac_data.expect("PFX must be MAC'd");
-        assert_eq!(
-            mac.mac.algorithm.oid, ID_SHA256,
-            "MacData.mac.digestAlgorithm must be id-sha256"
-        );
+        assert_eq!(mac.mac.algorithm.oid, ID_SHA256, "MacData.mac.digestAlgorithm must be id-sha256");
         assert_eq!(mac.iterations, MAC_ITERATIONS);
         assert_eq!(mac.mac.digest.as_bytes().len(), 32, "HMAC-SHA256 is 32 bytes");
     }
@@ -659,26 +568,18 @@ GLacNrytqq7jmwIEAcciE0sn9aGO7vrPc47k0MR8I+5Dqlx6Fpnvcai0\n\
     /// under `-cacerts`). Both bags carry the same localKeyId.
     #[test]
     fn pkcs12_binds_the_key_to_the_leaf_with_a_local_key_id() {
-        let bundle =
-            build_pkcs12(FIXTURE_CERT_PEM, &[], Some(FIXTURE_KEY_PEM), PASSWORD)
-                .expect("build");
+        let bundle = build_pkcs12(FIXTURE_CERT_PEM, &[], Some(FIXTURE_KEY_PEM), PASSWORD).expect("build");
         let _ = parse_pfx(&bundle);
 
         // The cert bags sit inside a PBES2 envelope, so assert on what is
         // reachable without decrypting: the key's SafeContents is
         // `id-data`, i.e. in the clear, so the attribute DER derived from
         // the leaf must appear verbatim in the output.
-        let leaf_der = parse_cert_pem(FIXTURE_CERT_PEM)
-            .unwrap()
-            .to_der()
-            .unwrap();
+        let leaf_der = parse_cert_pem(FIXTURE_CERT_PEM).unwrap().to_der().unwrap();
         let expected = &<Sha256 as sha2::Digest>::digest(&leaf_der)[..20];
         let attrs_der = local_key_id_attributes(expected).unwrap().to_der().unwrap();
         assert!(
-            bundle
-                .body
-                .windows(attrs_der.len())
-                .any(|w| w == attrs_der.as_slice()),
+            bundle.body.windows(attrs_der.len()).any(|w| w == attrs_der.as_slice()),
             "the key bag must carry the leaf's localKeyId attribute"
         );
     }
@@ -687,8 +588,7 @@ GLacNrytqq7jmwIEAcciE0sn9aGO7vrPc47k0MR8I+5Dqlx6Fpnvcai0\n\
     /// identity it does not carry.
     #[test]
     fn pkcs12_without_a_key_carries_no_local_key_id() {
-        let bundle =
-            build_pkcs12(FIXTURE_CERT_PEM, &[], None, PASSWORD).expect("build");
+        let bundle = build_pkcs12(FIXTURE_CERT_PEM, &[], None, PASSWORD).expect("build");
         let _ = parse_pfx(&bundle);
         let oid_der = ID_LOCAL_KEY_ID.as_bytes();
         assert!(
@@ -706,10 +606,7 @@ GLacNrytqq7jmwIEAcciE0sn9aGO7vrPc47k0MR8I+5Dqlx6Fpnvcai0\n\
             Err(e) => e,
             Ok(_) => panic!("an empty password must be refused"),
         };
-        assert!(
-            format!("{err:?}").contains("password"),
-            "error should name the password: {err:?}"
-        );
+        assert!(format!("{err:?}").contains("password"), "error should name the password: {err:?}");
     }
 
     /// PKCS#7 is certs-only and text; the route rejects a key request for

@@ -200,8 +200,8 @@ impl MlDsaSigner {
     /// `pki/issue` and `pki/intermediate/generate/exported`).
     pub fn to_pkcs8_pem(&self) -> Result<Zeroizing<String>, RvError> {
         use pkcs8::{
-            der::{asn1::OctetString, pem::LineEnding, EncodePem},
             der::Encode,
+            der::{asn1::OctetString, pem::LineEnding, EncodePem},
             AlgorithmIdentifierRef, PrivateKeyInfo,
         };
         let alg = AlgorithmIdentifierRef { oid: self.level.oid(), parameters: None };

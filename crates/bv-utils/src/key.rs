@@ -1,7 +1,5 @@
 use better_default::Default;
-use bv_crypto::{
-    KemDemEnvelopeV1, MlDsa65Provider, MlKem768Provider, ML_DSA_65_SEED_LEN, ML_KEM_768_SEED_LEN,
-};
+use bv_crypto::{KemDemEnvelopeV1, MlDsa65Provider, MlKem768Provider, ML_DSA_65_SEED_LEN, ML_KEM_768_SEED_LEN};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
@@ -75,11 +73,8 @@ impl KeyBundle {
         validate_key_bits(self.key_type.as_str(), self.bits)?;
         self.iv.clear();
 
-        let seed_len = if is_pq_signature_key_type(self.key_type.as_str()) {
-            ML_DSA_65_SEED_LEN
-        } else {
-            ML_KEM_768_SEED_LEN
-        };
+        let seed_len =
+            if is_pq_signature_key_type(self.key_type.as_str()) { ML_DSA_65_SEED_LEN } else { ML_KEM_768_SEED_LEN };
         self.key = vec![0u8; seed_len];
         rand::rng().fill_bytes(&mut self.key);
 
@@ -95,11 +90,8 @@ impl KeyBundle {
             return Err(RvError::ErrPkiKeyTypeInvalid);
         }
 
-        let expected_len = if is_pq_signature_key_type(self.key_type.as_str()) {
-            ML_DSA_65_SEED_LEN
-        } else {
-            ML_KEM_768_SEED_LEN
-        };
+        let expected_len =
+            if is_pq_signature_key_type(self.key_type.as_str()) { ML_DSA_65_SEED_LEN } else { ML_KEM_768_SEED_LEN };
 
         if seed.len() != expected_len {
             return Err(RvError::ErrPkiKeyBitsInvalid);
@@ -143,10 +135,9 @@ impl KeyBundle {
                 validate_key_bits(self.key_type.as_str(), self.bits)?;
                 let aad = aad_from_extra(self.iv.as_slice(), extra);
                 let provider = MlKem768Provider;
-                let keypair =
-                    provider.keypair_from_seed(&self.key).map_err(|_| RvError::ErrPkiInternal)?;
-                let envelope =
-                    KemDemEnvelopeV1::seal(&provider, keypair.public_key(), aad, data).map_err(|_| RvError::ErrPkiInternal)?;
+                let keypair = provider.keypair_from_seed(&self.key).map_err(|_| RvError::ErrPkiInternal)?;
+                let envelope = KemDemEnvelopeV1::seal(&provider, keypair.public_key(), aad, data)
+                    .map_err(|_| RvError::ErrPkiInternal)?;
                 serde_json::to_vec(&envelope).map_err(From::from)
             }
             _ => Err(RvError::ErrPkiKeyOperationInvalid),
@@ -160,8 +151,7 @@ impl KeyBundle {
                 let aad = aad_from_extra(self.iv.as_slice(), extra);
                 let envelope: KemDemEnvelopeV1 = serde_json::from_slice(data)?;
                 let provider = MlKem768Provider;
-                let keypair =
-                    provider.keypair_from_seed(&self.key).map_err(|_| RvError::ErrPkiInternal)?;
+                let keypair = provider.keypair_from_seed(&self.key).map_err(|_| RvError::ErrPkiInternal)?;
                 envelope.open(&provider, keypair.secret_key(), aad).map_err(|_| RvError::ErrPkiInternal)
             }
             _ => Err(RvError::ErrPkiKeyOperationInvalid),
@@ -217,5 +207,4 @@ mod test {
         assert!(key_bundle.sign(b"123456789").is_err());
         assert!(key_bundle.verify(b"123456789", b"signature").is_err());
     }
-
 }

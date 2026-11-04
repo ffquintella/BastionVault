@@ -57,22 +57,10 @@ impl TransitBackend {
 
 #[maybe_async::maybe_async]
 impl TransitBackendInner {
-    pub async fn handle_random(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
-        let n = req
-            .get_data("bytes")
-            .ok()
-            .and_then(|v| v.as_i64())
-            .filter(|n| *n > 0)
-            .map(|n| n as u64)
-            .unwrap_or(32);
+    pub async fn handle_random(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let n = req.get_data("bytes").ok().and_then(|v| v.as_i64()).filter(|n| *n > 0).map(|n| n as u64).unwrap_or(32);
         if n > RANDOM_MAX_BYTES {
-            return Err(RvError::ErrString(format!(
-                "bytes capped at {RANDOM_MAX_BYTES}, got {n}"
-            )));
+            return Err(RvError::ErrString(format!("bytes capped at {RANDOM_MAX_BYTES}, got {n}")));
         }
         let mut buf = vec![0u8; n as usize];
         rand::rng().fill(&mut buf[..]);
@@ -81,25 +69,12 @@ impl TransitBackendInner {
         Ok(Some(Response::data_response(Some(data))))
     }
 
-    pub async fn handle_hash(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
-        let input_b64 = req
-            .get_data("input")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_default();
-        let algo = req
-            .get_data("algorithm")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_default();
+    pub async fn handle_hash(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let input_b64 = req.get_data("input").ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
+        let algo = req.get_data("algorithm").ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
         let algo = HashAlgo::parse(&algo).map_err(RvError::ErrString)?;
-        let input = B64
-            .decode(input_b64.as_bytes())
-            .map_err(|e| RvError::ErrString(format!("input: not base64 ({e})")))?;
+        let input =
+            B64.decode(input_b64.as_bytes()).map_err(|e| RvError::ErrString(format!("input: not base64 ({e})")))?;
         let digest = hash(algo, &input);
         let mut data = Map::new();
         data.insert("sum".into(), Value::String(B64.encode(&digest)));

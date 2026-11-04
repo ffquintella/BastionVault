@@ -27,12 +27,9 @@ use bv_server::middleware::{dos::dos_middleware, metrics::metrics_midleware};
 
 use crate::kernel_api::VaultCtx;
 use crate::{
-    command, config, config::TlsVersion,
-    errors::RvError,
-    metrics::manager::MetricsManager,
-    storage,
-    utils::rustls::OptionalClientAuthVerifier,
-    BastionVault, EXIT_CODE_INSUFFICIENT_PARAMS, EXIT_CODE_LOAD_CONFIG_FAILURE, EXIT_CODE_OK,
+    command, config, config::TlsVersion, errors::RvError, metrics::manager::MetricsManager, storage,
+    utils::rustls::OptionalClientAuthVerifier, BastionVault, EXIT_CODE_INSUFFICIENT_PARAMS,
+    EXIT_CODE_LOAD_CONFIG_FAILURE, EXIT_CODE_OK,
 };
 
 pub const WORK_DIR_PATH_DEFAULT: &str = "/tmp/bastion_vault";
@@ -123,10 +120,7 @@ impl Server {
         if !config.plugin_runtime_dir.is_empty() {
             crate::plugins::set_plugin_runtime_dir(config.plugin_runtime_dir.as_str());
             if let Err(e) = fs::create_dir_all(config.plugin_runtime_dir.as_str()) {
-                log::warn!(
-                    "could not create plugin_runtime_dir {}: {e}",
-                    config.plugin_runtime_dir
-                );
+                log::warn!("could not create plugin_runtime_dir {}: {e}", config.plugin_runtime_dir);
             }
         }
 
@@ -140,9 +134,7 @@ impl Server {
             level: config.log_level.as_str(),
             log_dir: config.log_dir.as_str(),
             log_to_stderr: config.log_to_stderr,
-            rotate_size_bytes: config
-                .log_rotate_size_mb
-                .saturating_mul(1024 * 1024),
+            rotate_size_bytes: config.log_rotate_size_mb.saturating_mul(1024 * 1024),
             rotate_keep: config.log_rotate_keep,
         }) {
             eprintln!("logging init failed: {e}. Falling back to env_logger.");
@@ -239,10 +231,8 @@ impl Server {
                 .enable_all()
                 .build()
                 .expect("tokio runtime for backend bootstrap");
-            rt.block_on(async {
-                storage::new_backend_async(storage.stype.as_str(), &storage.config).await
-            })
-            .expect("backend init")
+            rt.block_on(async { storage::new_backend_async(storage.stype.as_str(), &storage.config).await })
+                .expect("backend init")
         };
 
         let metrics_manager = MetricsManager::new(config.collection_interval);
@@ -278,9 +268,7 @@ impl Server {
         // which is the safe default.
         let (trusted_proxies, bad_cidrs) = http::client_ip::TrustedProxies::from_env();
         for bad in &bad_cidrs {
-            log::warn!(
-                "BASTIONVAULT_TRUSTED_PROXIES: ignoring entry `{bad}` (not a valid CIDR)"
-            );
+            log::warn!("BASTIONVAULT_TRUSTED_PROXIES: ignoring entry `{bad}` (not a valid CIDR)");
         }
         if !trusted_proxies.is_empty() {
             log::info!(
@@ -353,8 +341,7 @@ impl Server {
         }
         // One store for the whole server: the preview token minted by one
         // worker must be redeemable by whichever worker handles the apply.
-        let exchange_preview_store =
-            web::Data::new(bastion_vault::exchange::PreviewStore::default());
+        let exchange_preview_store = web::Data::new(bastion_vault::exchange::PreviewStore::default());
 
         // Clone for the background DoS sweep task (see below); the original
         // `core` is moved into the per-worker `App` factory closure.
@@ -486,9 +473,8 @@ fn build_rustls_server_config(listener: &config::Listener) -> Result<ServerConfi
         }
 
         let client_roots = load_rustls_root_store(ca_file)?;
-        let verifier = WebPkiClientVerifier::builder(Arc::new(client_roots))
-            .build()
-            .map_err(|_| RvError::ErrConfigLoadFailed)?;
+        let verifier =
+            WebPkiClientVerifier::builder(Arc::new(client_roots)).build().map_err(|_| RvError::ErrConfigLoadFailed)?;
         builder.with_client_cert_verifier(verifier).with_single_cert(cert_chain, private_key)?
     } else if listener.tls_disable_client_certs {
         builder.with_no_client_auth().with_single_cert(cert_chain, private_key)?
@@ -518,7 +504,7 @@ fn rustls_versions(
         (TlsVersion::Tls12, TlsVersion::Tls13) => vec![&rustls::version::TLS13, &rustls::version::TLS12],
         _ => {
             log::error!("rustls server mode only supports tls12 and tls13");
-            return Err(RvError::ErrConfigLoadFailed)
+            return Err(RvError::ErrConfigLoadFailed);
         }
     };
 
@@ -545,21 +531,16 @@ fn publish_ca_for_local_clients(listener: &config::Listener) {
         }
     }
     match fs::copy(&listener.tls_cert_file, dest) {
-        Ok(_) => log::info!(
-            "published serving cert to {} for local CLI trust",
-            dest.display()
-        ),
-        Err(e) => log::warn!(
-            "tls_publish_ca_path: failed to copy {} -> {}: {}",
-            listener.tls_cert_file,
-            dest.display(),
-            e
-        ),
+        Ok(_) => log::info!("published serving cert to {} for local CLI trust", dest.display()),
+        Err(e) => {
+            log::warn!("tls_publish_ca_path: failed to copy {} -> {}: {}", listener.tls_cert_file, dest.display(), e)
+        }
     }
 }
 
 fn load_rustls_cert_chain(path: &Path) -> Result<Vec<CertificateDer<'static>>, RvError> {
-    let cert_pem = fs::read(path).map_err(|err| format_err!("unable to read proxy cert {} - {}", path.display(), err))?;
+    let cert_pem =
+        fs::read(path).map_err(|err| format_err!("unable to read proxy cert {} - {}", path.display(), err))?;
     Ok(CertificateDer::pem_slice_iter(&cert_pem).collect::<Result<Vec<_>, _>>()?)
 }
 
@@ -573,8 +554,7 @@ fn load_rustls_private_key(path: &Path) -> Result<PrivateKeyDer<'static>, RvErro
 
 fn load_rustls_root_store(path: &Path) -> Result<RootCertStore, RvError> {
     let ca_pem = fs::read(path).map_err(|err| format_err!("unable to read client CA {} - {}", path.display(), err))?;
-    let cert_chain =
-        CertificateDer::pem_slice_iter(&ca_pem).collect::<Result<Vec<_>, _>>()?;
+    let cert_chain = CertificateDer::pem_slice_iter(&ca_pem).collect::<Result<Vec<_>, _>>()?;
 
     let mut roots = RootCertStore::empty();
     for cert in cert_chain {

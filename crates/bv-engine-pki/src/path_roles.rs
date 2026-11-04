@@ -11,7 +11,6 @@ use humantime::parse_duration;
 use serde::{Deserialize, Serialize};
 
 use super::{crypto::KeyAlgorithm, PkiBackend, PkiBackendInner};
-use bv_storage::StorageEntry;
 use crate::{
     context::Context,
     errors::RvError,
@@ -19,6 +18,7 @@ use crate::{
     new_fields, new_fields_internal, new_path, new_path_internal,
     utils::{deserialize_duration, serialize_duration},
 };
+use bv_storage::StorageEntry;
 
 const DEFAULT_TTL: Duration = Duration::from_secs(30 * 24 * 3600); // 30d
 const DEFAULT_MAX_TTL: Duration = Duration::from_secs(90 * 24 * 3600); // 90d
@@ -289,16 +289,15 @@ impl PkiBackendInner {
     pub async fn write_role(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let name = req.get_data("name")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
 
-        let key_type = req.get_data_or_default("key_type")?.as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
-        let key_bits = req.get_data_or_default("key_bits")?.as_u64()
-            .ok_or(RvError::ErrRequestFieldInvalid)? as u32;
+        let key_type =
+            req.get_data_or_default("key_type")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
+        let key_bits = req.get_data_or_default("key_bits")?.as_u64().ok_or(RvError::ErrRequestFieldInvalid)? as u32;
         // Validate up-front so misconfigured roles fail at write time, not
         // mid-issuance. `KeyAlgorithm::from_role` is the single source of truth.
         KeyAlgorithm::from_role(&key_type, key_bits)?;
 
-        let signature_bits = req.get_data_or_default("signature_bits")?.as_u64()
-            .ok_or(RvError::ErrRequestFieldInvalid)? as u32;
+        let signature_bits =
+            req.get_data_or_default("signature_bits")?.as_u64().ok_or(RvError::ErrRequestFieldInvalid)? as u32;
 
         let ttl = parse_opt_duration(req, "ttl", DEFAULT_TTL)?;
         let max_ttl = parse_opt_duration(req, "max_ttl", DEFAULT_MAX_TTL)?;
@@ -308,14 +307,10 @@ impl PkiBackendInner {
         // mistyped SID that only surfaced at issuance would produce a
         // certificate Windows silently refuses, which is a miserable
         // thing to debug from the client side.
-        let ext_key_usage_oids: Vec<String> = req
-            .get_data_or_default("ext_key_usage_oids")?
-            .as_comma_string_slice()
-            .unwrap_or_default();
+        let ext_key_usage_oids: Vec<String> =
+            req.get_data_or_default("ext_key_usage_oids")?.as_comma_string_slice().unwrap_or_default();
         for oid in &ext_key_usage_oids {
-            super::ad_ext::parse_oid_arcs(oid).map_err(|e| {
-                RvError::ErrString(format!("ext_key_usage_oids: {e}"))
-            })?;
+            super::ad_ext::parse_oid_arcs(oid).map_err(|e| RvError::ErrString(format!("ext_key_usage_oids: {e}")))?;
         }
         let ext_key_usage: Vec<String> =
             req.get_data_or_default("ext_key_usage")?.as_comma_string_slice().unwrap_or_default();
@@ -374,15 +369,9 @@ impl PkiBackendInner {
             generate_lease: bool_or(req, "generate_lease", false)?,
             issuer_ref: str_or(req, "issuer_ref")?,
             allow_key_reuse: bool_or(req, "allow_key_reuse", false)?,
-            allowed_key_refs: req
-                .get_data_or_default("allowed_key_refs")?
-                .as_comma_string_slice()
-                .unwrap_or_default(),
+            allowed_key_refs: req.get_data_or_default("allowed_key_refs")?.as_comma_string_slice().unwrap_or_default(),
             manage_private_key: bool_or(req, "manage_private_key", false)?,
-            allowed_domains: req
-                .get_data_or_default("allowed_domains")?
-                .as_comma_string_slice()
-                .unwrap_or_default(),
+            allowed_domains: req.get_data_or_default("allowed_domains")?.as_comma_string_slice().unwrap_or_default(),
             allow_glob_domains: bool_or(req, "allow_glob_domains", false)?,
             acme_enabled: bool_or(req, "acme_enabled", true)?,
             allow_upn_sans: bool_or(req, "allow_upn_sans", false)?,
@@ -436,9 +425,7 @@ fn parse_opt_duration(req: &Request, key: &str, default: Duration) -> Result<Dur
         return Ok(default);
     }
     parse_duration(s).map_err(|e| {
-        RvError::ErrString(format!(
-            "{key}: '{s}' is not a valid duration ({e}); use a unit suffix like '720h' or '5m'"
-        ))
+        RvError::ErrString(format!("{key}: '{s}' is not a valid duration ({e}); use a unit suffix like '720h' or '5m'"))
     })
 }
 

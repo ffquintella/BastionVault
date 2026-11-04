@@ -119,7 +119,12 @@ mod self_accounts_connect_tests {
 
     /// Write through the full pipeline without printing the response (it may
     /// carry a credential). Errors come back as `(status, message)`.
-    async fn call(core: &dyn VaultCtx, token: &str, path: &str, body: Value) -> Result<Map<String, Value>, (u16, String)> {
+    async fn call(
+        core: &dyn VaultCtx,
+        token: &str,
+        path: &str,
+        body: Value,
+    ) -> Result<Map<String, Value>, (u16, String)> {
         let mut req = Request::new(path);
         req.operation = Operation::Write;
         req.client_token = token.to_string();
@@ -164,9 +169,15 @@ mod self_accounts_connect_tests {
     /// carrying `policy_hcl`; returns its token, which carries an entity.
     async fn user(core: &Arc<Core>, root: &str, name: &str, policy_hcl: &str) -> String {
         let _ = call(core.as_ref(), root, "sys/auth/userpass", json!({ "type": "userpass" })).await;
-        test_write_api(core.as_ref(), root, &format!("sys/policy/p-{name}"), true, obj(json!({ "policy": policy_hcl })))
-            .await
-            .unwrap();
+        test_write_api(
+            core.as_ref(),
+            root,
+            &format!("sys/policy/p-{name}"),
+            true,
+            obj(json!({ "policy": policy_hcl })),
+        )
+        .await
+        .unwrap();
         test_write_api(
             core.as_ref(),
             root,
@@ -282,7 +293,8 @@ mod self_accounts_connect_tests {
         let f = Fixture { core, root, alice, bob, mallory, audit_log, audit_dir, _vault: vault };
 
         root_write(&f, "resources/resources/dc01", dc01("dc01.corp.example.com")).await;
-        root_write(&f, "resources/secrets/dc01/admin", json!({ "username": "Administrator", "password": "shared" })).await;
+        root_write(&f, "resources/secrets/dc01/admin", json!({ "username": "Administrator", "password": "shared" }))
+            .await;
         root_write(
             &f,
             "resources/config/types",
@@ -420,13 +432,25 @@ mod self_accounts_connect_tests {
         assert!(b["candidates"].as_array().unwrap().is_empty());
 
         // Mallory has no `connect` on dc01.
-        errors.push(refused(call(core, &f.mallory, CANDIDATES, body("dc01", "p_rdp", json!({}))).await, 403, "permission denied"));
+        errors.push(refused(
+            call(core, &f.mallory, CANDIDATES, body("dc01", "p_rdp", json!({}))).await,
+            403,
+            "permission denied",
+        ));
         // The root token has no identity entity: refused before the plugin runs.
         errors.push(refused(call(core, &f.root, CANDIDATES, body("dc01", "p_rdp", json!({}))).await, 403, "no_entity"));
         // A profile that is not a provider profile.
-        errors.push(refused(call(core, &f.alice, CANDIDATES, body("dc01", "p_secret", json!({}))).await, 400, "invalid_profile"));
+        errors.push(refused(
+            call(core, &f.alice, CANDIDATES, body("dc01", "p_secret", json!({}))).await,
+            400,
+            "invalid_profile",
+        ));
         // A provider that is not approved here.
-        errors.push(refused(call(core, &f.alice, CANDIDATES, body("dc01", "p_other", json!({}))).await, 403, "not_granted"));
+        errors.push(refused(
+            call(core, &f.alice, CANDIDATES, body("dc01", "p_other", json!({}))).await,
+            403,
+            "not_granted",
+        ));
 
         // The audit trail names every call; success lines count candidates.
         let lines = audit_lines("connect.provider.candidates");
@@ -635,7 +659,11 @@ mod self_accounts_connect_tests {
                 core,
                 &f.alice,
                 LAUNCH,
-                body("fw01", "p_web_wide", json!({ "recipe_hash": hash, "provider_account_id": id, "connect_ticket": t })),
+                body(
+                    "fw01",
+                    "p_web_wide",
+                    json!({ "recipe_hash": hash, "provider_account_id": id, "connect_ticket": t }),
+                ),
             )
             .await,
             404,
@@ -824,7 +852,11 @@ mod self_accounts_connect_tests {
 
         // Refused before the MFA gate, so none of these costs a ticket.
         let t = ticket(&f, "alice", "dc01", "p_rdp").await;
-        errors.push(refused(call(core, &f.alice, OPEN, open(json!({ "connect_ticket": t }))).await, 400, "invalid_request"));
+        errors.push(refused(
+            call(core, &f.alice, OPEN, open(json!({ "connect_ticket": t }))).await,
+            400,
+            "invalid_request",
+        ));
         errors.push(refused(
             call(
                 core,
@@ -837,8 +869,13 @@ mod self_accounts_connect_tests {
             "invalid_request",
         ));
         errors.push(refused(
-            call(core, &f.alice, OPEN, open(json!({ "connect_ticket": t, "provider_account_id": id, "target_port": 22 })))
-                .await,
+            call(
+                core,
+                &f.alice,
+                OPEN,
+                open(json!({ "connect_ticket": t, "provider_account_id": id, "target_port": 22 })),
+            )
+            .await,
             400,
             "invalid_request",
         ));

@@ -134,11 +134,7 @@ impl NamespaceStore {
     pub fn new(core: &dyn VaultCtx) -> Result<Self, RvError> {
         let barrier = core.barrier().clone();
         let view = Arc::new(BarrierView::new(barrier, NAMESPACE_REGISTRY_PREFIX));
-        Ok(Self {
-            view,
-            path_cache: RwLock::new(HashMap::new()),
-            root_uuid: RwLock::new(String::new()),
-        })
+        Ok(Self { view, path_cache: RwLock::new(HashMap::new()), root_uuid: RwLock::new(String::new()) })
     }
 
     /// Ensure the implicit root namespace exists, returning its UUID. Idempotent:
@@ -162,9 +158,7 @@ impl NamespaceStore {
             child_visible_default: false,
         };
         self.persist(&ns).await?;
-        self.view
-            .put(&StorageEntry { key: ROOT_UUID_KEY.to_string(), value: uuid.clone().into_bytes() })
-            .await?;
+        self.view.put(&StorageEntry { key: ROOT_UUID_KEY.to_string(), value: uuid.clone().into_bytes() }).await?;
         *self.root_uuid.write()? = uuid.clone();
         Ok(uuid)
     }
@@ -180,9 +174,7 @@ impl NamespaceStore {
     async fn persist(&self, ns: &Namespace) -> Result<(), RvError> {
         let value = serde_json::to_vec(ns)?;
         self.view.put(&StorageEntry { key: config_key(&ns.uuid), value }).await?;
-        self.view
-            .put(&StorageEntry { key: path_index_key(&ns.path), value: ns.uuid.clone().into_bytes() })
-            .await?;
+        self.view.put(&StorageEntry { key: path_index_key(&ns.path), value: ns.uuid.clone().into_bytes() }).await?;
         self.path_cache.write()?.insert(ns.path.clone(), ns.uuid.clone());
         Ok(())
     }
@@ -204,8 +196,8 @@ impl NamespaceStore {
         }
         match self.view.get(&path_index_key(&path)).await? {
             Some(entry) => {
-                let uuid = String::from_utf8(entry.value)
-                    .map_err(|e| bv_error_string!(format!("corrupt path index: {e}")))?;
+                let uuid =
+                    String::from_utf8(entry.value).map_err(|e| bv_error_string!(format!("corrupt path index: {e}")))?;
                 self.path_cache.write()?.insert(path, uuid.clone());
                 self.get_by_uuid(&uuid).await
             }
@@ -241,9 +233,10 @@ impl NamespaceStore {
 
     /// Immediate child namespaces of `parent_path` (leaf names, sorted).
     pub async fn list_children(&self, parent_path: &str) -> Result<Vec<String>, RvError> {
-        let parent = self.get_by_path(parent_path).await?.ok_or_else(|| {
-            bv_error_response_status!(404, &format!("no such namespace: {parent_path:?}"))
-        })?;
+        let parent = self
+            .get_by_path(parent_path)
+            .await?
+            .ok_or_else(|| bv_error_response_status!(404, &format!("no such namespace: {parent_path:?}")))?;
         let mut names: Vec<String> = self
             .list_all()
             .await?
@@ -270,19 +263,14 @@ impl NamespaceStore {
         if self.get_by_path(&path).await?.is_some() {
             return Err(bv_error_response_status!(409, &format!("namespace already exists: {path:?}")));
         }
-        let (parent_path, _leaf) =
-            split_parent(&path).ok_or_else(|| bv_error_string!("invalid namespace path"))?;
+        let (parent_path, _leaf) = split_parent(&path).ok_or_else(|| bv_error_string!("invalid namespace path"))?;
         let parent = self.get_by_path(&parent_path).await?.ok_or_else(|| {
             bv_error_response_status!(404, &format!("parent namespace does not exist: {parent_path:?}"))
         })?;
 
         // Quota: refuse when the parent is already at its child-namespace cap.
         let child_count = self.list_children(&parent_path).await?.len();
-        super::quota::check_capacity(
-            "child namespaces",
-            child_count,
-            parent.quotas.max_child_namespaces,
-        )?;
+        super::quota::check_capacity("child namespaces", child_count, parent.quotas.max_child_namespaces)?;
 
         let ns = Namespace {
             uuid: generate_uuid(),
@@ -376,10 +364,7 @@ mod tests {
         assert_eq!(normalize_path("/").unwrap(), "");
         assert_eq!(normalize_path("engineering").unwrap(), "engineering");
         assert_eq!(normalize_path("/engineering/").unwrap(), "engineering");
-        assert_eq!(
-            normalize_path("engineering/platform/secops").unwrap(),
-            "engineering/platform/secops"
-        );
+        assert_eq!(normalize_path("engineering/platform/secops").unwrap(), "engineering/platform/secops");
         assert_eq!(normalize_path("  engineering/platform  ").unwrap(), "engineering/platform");
         // Any invalid segment fails the whole path.
         assert!(normalize_path("engineering/../marketing").is_err());
@@ -390,9 +375,6 @@ mod tests {
     fn test_split_parent() {
         assert_eq!(split_parent(""), None);
         assert_eq!(split_parent("a"), Some((String::new(), "a".to_string())));
-        assert_eq!(
-            split_parent("a/b/c"),
-            Some(("a/b".to_string(), "c".to_string()))
-        );
+        assert_eq!(split_parent("a/b/c"), Some(("a/b".to_string(), "c".to_string())));
     }
 }

@@ -33,11 +33,7 @@ pub struct StaticRole {
     /// scheduler is a Phase 3 follow-up; today the field is
     /// persisted and the manual `/rotate-role/:name` endpoint drives
     /// every rotation.
-    #[serde(
-        default,
-        serialize_with = "serialize_duration",
-        deserialize_with = "deserialize_duration"
-    )]
+    #[serde(default, serialize_with = "serialize_duration", deserialize_with = "deserialize_duration")]
     pub rotation_period: Duration,
     /// Per-role generator override. Empty = mount default.
     #[serde(default)]
@@ -90,11 +86,7 @@ pub struct LibrarySet {
     /// entity id, and consulted on the next check-out from the same
     /// entity. Expired records are dropped on first sight (lazy
     /// expiration); a periodic sweep is a follow-up.
-    #[serde(
-        default,
-        serialize_with = "serialize_duration",
-        deserialize_with = "deserialize_duration"
-    )]
+    #[serde(default, serialize_with = "serialize_duration", deserialize_with = "deserialize_duration")]
     pub affinity_ttl: Duration,
 }
 
@@ -143,10 +135,7 @@ impl LibrarySet {
             return Err("service_account_names must contain at least one entry".into());
         }
         if self.max_ttl < self.ttl {
-            return Err(format!(
-                "max_ttl {:?} must be >= ttl {:?}",
-                self.max_ttl, self.ttl
-            ));
+            return Err(format!("max_ttl {:?} must be >= ttl {:?}", self.max_ttl, self.ttl));
         }
         for n in &self.service_account_names {
             if n.trim().is_empty() {

@@ -36,10 +36,7 @@ pub fn digest(entry: &AuditEntry) -> Result<String, RvError> {
 /// failure. `expected_first_prev` is what the first entry's
 /// `prev_hash` must equal — usually `genesis()` for full-chain
 /// verification.
-pub fn verify(
-    entries: &[AuditEntry],
-    expected_first_prev: &str,
-) -> Result<String, VerifyError> {
+pub fn verify(entries: &[AuditEntry], expected_first_prev: &str) -> Result<String, VerifyError> {
     let mut expected = expected_first_prev.to_string();
     for (i, e) in entries.iter().enumerate() {
         if e.prev_hash != expected {

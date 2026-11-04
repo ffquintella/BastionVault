@@ -5,8 +5,8 @@
 
 use std::sync::Arc;
 
-use bv_errors::RvError;
 use crate::Backend;
+use bv_errors::RvError;
 
 /// Result of a migration operation.
 pub struct MigrateResult {

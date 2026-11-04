@@ -47,9 +47,8 @@ use crate::kernel_api::{
     engines::{profile_gate_flag, PluginHost},
     provider::{
         host_target, profile_provider, provider_resource, reason, refusal, refusal_reason, require_not_brokered_for,
-        CallerIdentity,
-        CredentialProviderDecl, ProviderConnectContext, ProviderNeeds, ProviderQuery, ProviderReleaseRequest,
-        ProviderResource, ProviderTarget, ReleasedCredential, ReleasedSecret,
+        CallerIdentity, CredentialProviderDecl, ProviderConnectContext, ProviderNeeds, ProviderQuery,
+        ProviderReleaseRequest, ProviderResource, ProviderTarget, ReleasedCredential, ReleasedSecret,
     },
 };
 use crate::{
@@ -243,10 +242,16 @@ impl super::ResourceBackendInner {
                  this token has no identity entity",
             ));
         }
-        let not_approved =
-            || refusal(403, reason::NOT_GRANTED, format!("credential provider `{provider}` is not approved on this server"));
+        let not_approved = || {
+            refusal(
+                403,
+                reason::NOT_GRANTED,
+                format!("credential provider `{provider}` is not approved on this server"),
+            )
+        };
         let host = self.core.plugin_host().ok_or_else(not_approved)?;
-        let decl = host.credential_providers().await.into_iter().find(|d| d.plugin == provider).ok_or_else(not_approved)?;
+        let decl =
+            host.credential_providers().await.into_iter().find(|d| d.plugin == provider).ok_or_else(not_approved)?;
         if !decl.protocols.iter().any(|p| p == protocol) {
             return Err(refusal(
                 400,
@@ -356,9 +361,8 @@ impl super::ResourceBackendInner {
         let (resource, profile_id, meta) = self.connect_target_record(req).await?;
         audit.resource = resource.clone();
         audit.profile_id = profile_id.clone();
-        let meta = meta.ok_or_else(|| {
-            refusal(404, reason::INVALID_REQUEST, format!("resource `{resource}` not found"))
-        })?;
+        let meta =
+            meta.ok_or_else(|| refusal(404, reason::INVALID_REQUEST, format!("resource `{resource}` not found")))?;
         let profile = find_profile(&meta, &profile_id).ok_or_else(|| {
             refusal(404, reason::INVALID_REQUEST, format!("profile `{profile_id}` not found on resource `{resource}`"))
         })?;
@@ -372,8 +376,11 @@ impl super::ResourceBackendInner {
 
         let (resource_desc, target) = self.provider_query_parts(&profile, &meta, protocol)?;
         let launch = self.provider_launch(req, &provider, protocol, resource_desc, target).await?;
-        let query =
-            ProviderQuery { protocol: protocol.into(), resource: launch.resource.clone(), target: launch.target.clone() };
+        let query = ProviderQuery {
+            protocol: protocol.into(),
+            resource: launch.resource.clone(),
+            target: launch.target.clone(),
+        };
         let candidates = launch.host.provider_candidates(&provider, &launch.caller, &query).await?;
         let display_name = launch
             .host

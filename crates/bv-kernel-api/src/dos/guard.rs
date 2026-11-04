@@ -172,9 +172,7 @@ impl DosGuard {
         let is_auth = is_auth_path(path);
         let (over_general, over_auth) = {
             let mut windows = self.windows.lock().unwrap();
-            let w = windows
-                .entry(ip)
-                .or_insert_with(|| Window { count_total: 0, count_auth: 0, start: now });
+            let w = windows.entry(ip).or_insert_with(|| Window { count_total: 0, count_auth: 0, start: now });
             if now.duration_since(w.start) >= Duration::from_secs(cfg.window_secs) {
                 w.count_total = 0;
                 w.count_auth = 0;
@@ -198,10 +196,7 @@ impl DosGuard {
                     cfg.auth_max_requests, cfg.window_secs
                 )
             } else {
-                format!(
-                    "request rate exceeded: >{} req/{}s",
-                    cfg.max_requests, cfg.window_secs
-                )
+                format!("request rate exceeded: >{} req/{}s", cfg.max_requests, cfg.window_secs)
             };
             let mut bans = self.bans.lock().unwrap();
             // Don't clobber a still-live ban (e.g. a manual one) with a fresh
@@ -218,16 +213,9 @@ impl DosGuard {
                     },
                 );
             }
-            let existing_retry = bans
-                .get(&ip)
-                .map(|b| b.until.saturating_duration_since(now).as_secs().max(1))
-                .unwrap_or(cfg.ban_secs);
-            return Err(BanInfo {
-                retry_after_secs: existing_retry,
-                reason,
-                kind: BanKind::Auto,
-                newly_banned,
-            });
+            let existing_retry =
+                bans.get(&ip).map(|b| b.until.saturating_duration_since(now).as_secs().max(1)).unwrap_or(cfg.ban_secs);
+            return Err(BanInfo { retry_after_secs: existing_retry, reason, kind: BanKind::Auto, newly_banned });
         }
 
         Ok(())
@@ -345,10 +333,7 @@ pub fn is_auth_path(path: &str) -> bool {
 /// are never banned.
 pub fn is_exempt_path(path: &str) -> bool {
     let p = path.trim_end_matches('/');
-    p.ends_with("/health")
-        || p.ends_with("/seal-status")
-        || p.ends_with("/metrics")
-        || p == "/metrics"
+    p.ends_with("/health") || p.ends_with("/seal-status") || p.ends_with("/metrics") || p == "/metrics"
 }
 
 #[cfg(test)]

@@ -125,7 +125,8 @@ pub trait HsmBackend: Send + Sync {
 
     /// AES-CCM unwrap of a serialized [`BvHsmBlob`] (v1 or v2), enforcing that
     /// its AAD matches `ctx` and this device ([`blob::open_blob`]).
-    async fn unwrap_data(&self, key: HsmObjectId, ctx: &Context, wrapped: &[u8]) -> Result<Zeroizing<Vec<u8>>, RvError>;
+    async fn unwrap_data(&self, key: HsmObjectId, ctx: &Context, wrapped: &[u8])
+        -> Result<Zeroizing<Vec<u8>>, RvError>;
 
     /// Signature with an HSM-resident key. The object type selects the
     /// algorithm: ECDSA-P256 for `bv-identity`, Ed25519 for `bv-authz`. The
@@ -190,7 +191,8 @@ pub fn verify_identity_signature(public_key: &[u8], ctx: &str, msg: &[u8], sig: 
     let signature = Signature::from_der(sig)
         .or_else(|_| Signature::from_slice(sig))
         .map_err(|_| RvError::ErrHsmAttestationInvalid("bad identity signature".into()))?;
-    vk.verify(&signed, &signature).map_err(|_| RvError::ErrHsmAttestationInvalid("identity signature verify failed".into()))
+    vk.verify(&signed, &signature)
+        .map_err(|_| RvError::ErrHsmAttestationInvalid("identity signature verify failed".into()))
 }
 
 /// Hex SHA-256 fingerprint of a public key.
@@ -756,18 +758,17 @@ fn resolve_pool(backend_type: &str, raw: &HsmConfigBlock) -> Result<ResolvedPool
                 auth_key_id: if m.auth_key_id == 0 { HsmObjectIds::default().auth_key } else { m.auth_key_id },
                 password: Zeroizing::new(String::new()),
             };
-            let from = match backend_type {
-                "mock" if !from.state_path.is_empty() && from.connector.is_empty() && m.password.is_empty() => from,
-                "mock" => return Err(config_err("a mock `migrate_from` takes only `state_path`")),
-                _ if !from.connector.is_empty() && from.state_path.is_empty() && m.password.starts_with("env:") => {
-                    ResolvedMigrateFrom { password: resolve_secret(&m.password)?, ..from }
-                }
-                _ => {
-                    return Err(config_err(
+            let from =
+                match backend_type {
+                    "mock" if !from.state_path.is_empty() && from.connector.is_empty() && m.password.is_empty() => from,
+                    "mock" => return Err(config_err("a mock `migrate_from` takes only `state_path`")),
+                    _ if !from.connector.is_empty() && from.state_path.is_empty() && m.password.starts_with("env:") => {
+                        ResolvedMigrateFrom { password: resolve_secret(&m.password)?, ..from }
+                    }
+                    _ => return Err(config_err(
                         "a yubihsm2 `migrate_from` needs `connector` and `password = \"env:VAR\"` (never a literal)",
-                    ))
-                }
-            };
+                    )),
+                };
             Some(from)
         }
     };
@@ -1004,9 +1005,16 @@ impl ConfigMemberOpener {
         let pool = self.config.pool.as_ref().ok_or_else(|| config_err("not a pool configuration"))?;
         let block = pool.members.iter().find(|m| m.name == target.name);
         let local = block.map(|b| b.connector.as_str()).unwrap_or_default();
-        let gateway = if target.gateway.is_empty() { block.map(|b| b.gateway.as_str()).unwrap_or_default() } else { &target.gateway };
+        let gateway = if target.gateway.is_empty() {
+            block.map(|b| b.gateway.as_str()).unwrap_or_default()
+        } else {
+            &target.gateway
+        };
         if local.is_empty() && gateway.is_empty() {
-            return Err(RvError::ErrHsmTransport(format!("no connector or gateway for HSM pool member {}", target.name)));
+            return Err(RvError::ErrHsmTransport(format!(
+                "no connector or gateway for HSM pool member {}",
+                target.name
+            )));
         }
         // Config validation sees only `member` blocks; a member the record
         // alone names is refused here, by name, when this node has no link.
@@ -1035,7 +1043,8 @@ impl MemberOpener for ConfigMemberOpener {
                     ))
                 })?;
                 let (connector, relay) = self.yubihsm2_route(target)?;
-                let client = yubihsm2::YubiHsm2Backend::open_pool_member(connector, relay, &credential, self.config.objects)?;
+                let client =
+                    yubihsm2::YubiHsm2Backend::open_pool_member(connector, relay, &credential, self.config.objects)?;
                 return Ok(Arc::new(client));
             }
             #[cfg(not(feature = "hsm_yubihsm2"))]

@@ -154,9 +154,7 @@ mod test {
     use rand::Rng;
 
     use super::*;
-    use bv_storage::{
-        barrier::SecurityBarrier, barrier_aes_gcm, barrier_view, test_support::new_test_backend,
-    };
+    use bv_storage::{barrier::SecurityBarrier, barrier_aes_gcm, barrier_view, test_support::new_test_backend};
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_salt() {

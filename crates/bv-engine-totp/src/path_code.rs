@@ -53,25 +53,13 @@ impl TotpBackend {
 
 #[maybe_async::maybe_async]
 impl TotpBackendInner {
-    pub async fn handle_code_read(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
-        let name = req
-            .get_data("name")?
-            .as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?
-            .to_string();
-        let policy = self
-            .get_key(req, &name)
-            .await?
-            .ok_or_else(|| RvError::ErrString(format!("unknown totp key `{name}`")))?;
+    pub async fn handle_code_read(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let name = req.get_data("name")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
+        let policy =
+            self.get_key(req, &name).await?.ok_or_else(|| RvError::ErrString(format!("unknown totp key `{name}`")))?;
 
         if !policy.generate {
-            return Err(RvError::ErrString(
-                "this key is provider-mode; POST a `code` to validate, not GET".into(),
-            ));
+            return Err(RvError::ErrString("this key is provider-mode; POST a `code` to validate, not GET".into()));
         }
 
         let now = unix_now()?;
@@ -81,34 +69,18 @@ impl TotpBackendInner {
         Ok(Some(Response::data_response(Some(data))))
     }
 
-    pub async fn handle_code_write(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
-        let name = req
-            .get_data("name")?
-            .as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?
-            .to_string();
-        let candidate = req
-            .get_data("code")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_default();
+    pub async fn handle_code_write(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let name = req.get_data("name")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
+        let candidate = req.get_data("code").ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
         if candidate.is_empty() {
             return Err(RvError::ErrString("`code` is required".into()));
         }
 
-        let policy = self
-            .get_key(req, &name)
-            .await?
-            .ok_or_else(|| RvError::ErrString(format!("unknown totp key `{name}`")))?;
+        let policy =
+            self.get_key(req, &name).await?.ok_or_else(|| RvError::ErrString(format!("unknown totp key `{name}`")))?;
 
         if policy.generate {
-            return Err(RvError::ErrString(
-                "this key is generate-mode; GET the code, do not POST".into(),
-            ));
+            return Err(RvError::ErrString("this key is generate-mode; GET the code, do not POST".into()));
         }
 
         let now = unix_now()?;
@@ -146,11 +118,7 @@ impl TotpBackendInner {
                         // Same step+code presented before; reject.
                         false
                     } else {
-                        let entry = UsedEntry {
-                            step,
-                            code_hash: code_hash(&candidate),
-                            written_at: now,
-                        };
+                        let entry = UsedEntry { step, code_hash: code_hash(&candidate), written_at: now };
                         self.put_used(req, &name, &entry).await?;
                         // Opportunistic sweep keeps the index bounded
                         // without an explicit tidy endpoint.

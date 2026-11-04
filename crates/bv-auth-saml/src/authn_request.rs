@@ -97,10 +97,7 @@ pub fn saml_now() -> String {
     // pulling in `chrono` for this one use-case; the integer
     // arithmetic below is exact and well-tested in civil-date
     // literature.
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
     let (y, m, d, hh, mm, ss) = break_down_utc(now);
     format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
 }
@@ -168,10 +165,7 @@ mod tests {
 
     #[test]
     fn xml_escape_handles_ampersand_and_quotes() {
-        assert_eq!(
-            xml_escape("a & b < c > d \" e ' f"),
-            "a &amp; b &lt; c &gt; d &quot; e &apos; f"
-        );
+        assert_eq!(xml_escape("a & b < c > d \" e ' f"), "a &amp; b &lt; c &gt; d &quot; e &apos; f");
     }
 
     #[test]
@@ -224,10 +218,7 @@ mod tests {
         assert_ne!(a, b);
         assert!(a.starts_with("id-"));
         for c in a.chars() {
-            assert!(
-                c.is_ascii_alphanumeric() || c == '-',
-                "request id `{a}` contains `{c}`, not NCName-safe"
-            );
+            assert!(c.is_ascii_alphanumeric() || c == '-', "request id `{a}` contains `{c}`, not NCName-safe");
         }
     }
 }

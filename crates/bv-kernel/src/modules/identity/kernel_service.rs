@@ -23,14 +23,13 @@ use std::sync::Arc;
 use crate::{
     errors::RvError,
     kernel_api::identity::{
-        AliasRef, EntityProfile, GroupKind as ApiGroupKind, IdentityService, ObjectKind,
-        UserAuditRecord,
+        AliasRef, EntityProfile, GroupKind as ApiGroupKind, IdentityService, ObjectKind, UserAuditRecord,
     },
 };
 
 use super::{
-    entity_store::Entity, group_store::GroupKind, owner_store::OwnerStore,
-    share_store::ShareTargetKind, user_audit_store::UserAuditEntry, IdentityModule,
+    entity_store::Entity, group_store::GroupKind, owner_store::OwnerStore, share_store::ShareTargetKind,
+    user_audit_store::UserAuditEntry, IdentityModule,
 };
 
 impl From<ApiGroupKind> for GroupKind {
@@ -56,11 +55,7 @@ impl From<Entity> for EntityProfile {
         EntityProfile {
             id: e.id,
             primary_name: e.primary_name,
-            aliases: e
-                .aliases
-                .into_iter()
-                .map(|a| AliasRef { mount: a.mount, name: a.name })
-                .collect(),
+            aliases: e.aliases.into_iter().map(|a| AliasRef { mount: a.mount, name: a.name }).collect(),
         }
     }
 }
@@ -75,27 +70,16 @@ fn share_kind(kind: ObjectKind) -> ShareTargetKind {
 
 #[maybe_async::maybe_async]
 impl IdentityService for IdentityModule {
-    async fn entity_id_for_alias(
-        &self,
-        mount: &str,
-        name: &str,
-        ns_path: &str,
-    ) -> Result<Option<String>, RvError> {
+    async fn entity_id_for_alias(&self, mount: &str, name: &str, ns_path: &str) -> Result<Option<String>, RvError> {
         let Some(store) = self.entity_store() else {
             return Ok(None);
         };
         Ok(store.get_by_alias_ns(mount, name, ns_path).await?.map(|e| e.id))
     }
 
-    async fn ensure_entity_id(
-        &self,
-        mount: &str,
-        name: &str,
-        ns_path: &str,
-    ) -> Result<String, RvError> {
-        let store = self
-            .entity_store()
-            .ok_or_else(|| crate::bv_error_string!("identity entity store not initialised"))?;
+    async fn ensure_entity_id(&self, mount: &str, name: &str, ns_path: &str) -> Result<String, RvError> {
+        let store =
+            self.entity_store().ok_or_else(|| crate::bv_error_string!("identity entity store not initialised"))?;
         Ok(store.get_or_create_entity_ns(mount, name, ns_path).await?.id)
     }
 
@@ -116,11 +100,7 @@ impl IdentityService for IdentityModule {
         // purge, retried by the next automatic purge and by every
         // `DELETE v2/sys/plugins/<name>/entity-data/<id>`.
         if let Some(id) = entity_id {
-            let still_reachable = store
-                .list_aliases()
-                .await?
-                .iter()
-                .any(|a| a.entity_id == id);
+            let still_reachable = store.list_aliases().await?.iter().any(|a| a.entity_id == id);
             if !still_reachable {
                 if let Some(host) = crate::kernel_api::VaultCtx::plugin_host(self.core.as_ref()) {
                     if let Err(e) = host.purge_entity_data(&id).await {
@@ -155,20 +135,11 @@ impl IdentityService for IdentityModule {
         store.expand_policies_ns(kind.into(), member, direct, ns_path).await
     }
 
-    async fn group_members(
-        &self,
-        kind: ApiGroupKind,
-        name: &str,
-        ns_path: &str,
-    ) -> Result<Vec<String>, RvError> {
+    async fn group_members(&self, kind: ApiGroupKind, name: &str, ns_path: &str) -> Result<Vec<String>, RvError> {
         let Some(store) = self.group_store() else {
             return Ok(Vec::new());
         };
-        Ok(store
-            .get_group_ns(kind.into(), name, ns_path)
-            .await?
-            .map(|g| g.members)
-            .unwrap_or_default())
+        Ok(store.get_group_ns(kind.into(), name, ns_path).await?.map(|g| g.members).unwrap_or_default())
     }
 
     async fn list_entity_ids(&self, ns_path: &str) -> Result<Vec<String>, RvError> {
@@ -230,18 +201,14 @@ impl IdentityService for IdentityModule {
         // Owner and share records are keyed `<ns>/<name>` inside a namespace,
         // so a rename must move the namespace's own records and never touch a
         // root object that happens to share the name.
-        let old_key =
-            OwnerStore::scope_target_name(old_name, ns_path).unwrap_or_else(|| old_name.to_string());
-        let new_key =
-            OwnerStore::scope_target_name(new_name, ns_path).unwrap_or_else(|| new_name.to_string());
+        let old_key = OwnerStore::scope_target_name(old_name, ns_path).unwrap_or_else(|| old_name.to_string());
+        let new_key = OwnerStore::scope_target_name(new_name, ns_path).unwrap_or_else(|| new_name.to_string());
 
         // The two stores are moved independently: they are created together at
         // unseal, but one of them being absent must not silently skip the
         // other's records.
         if let Some(share_store) = self.share_store() {
-            if let Err(e) =
-                share_store.rename_target(share_kind(kind), &old_key, &new_key, actor).await
-            {
+            if let Err(e) = share_store.rename_target(share_kind(kind), &old_key, &new_key, actor).await {
                 log::warn!("share rename failed for {kind:?} '{old_name}' -> '{new_name}': {e}");
             }
         }
@@ -257,9 +224,7 @@ impl IdentityService for IdentityModule {
             Ok(Some(rec)) if !rec.entity_id.is_empty() => {
                 let moved = match kind {
                     ObjectKind::File => owner_store.set_file_owner(&new_key, &rec.entity_id).await,
-                    ObjectKind::Resource => {
-                        owner_store.set_resource_owner(&new_key, &rec.entity_id).await
-                    }
+                    ObjectKind::Resource => owner_store.set_resource_owner(&new_key, &rec.entity_id).await,
                 };
                 match moved {
                     Ok(()) => {
@@ -268,14 +233,10 @@ impl IdentityService for IdentityModule {
                         // no owner at all, which silently widens access.
                         let _ = match kind {
                             ObjectKind::File => owner_store.forget_file_owner(&old_key).await,
-                            ObjectKind::Resource => {
-                                owner_store.forget_resource_owner(&old_key).await
-                            }
+                            ObjectKind::Resource => owner_store.forget_resource_owner(&old_key).await,
                         };
                     }
-                    Err(e) => log::warn!(
-                        "owner rename failed for {kind:?} '{old_name}' -> '{new_name}': {e}"
-                    ),
+                    Err(e) => log::warn!("owner rename failed for {kind:?} '{old_name}' -> '{new_name}': {e}"),
                 }
             }
             Ok(_) => {}

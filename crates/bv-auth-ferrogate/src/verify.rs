@@ -252,11 +252,7 @@ fn normalize_origin(uri: &str) -> String {
 
     // Trim trailing slash(es) only on a clean path (no query/fragment), so a
     // bare `/` collapses to the empty path and `/a/` matches `/a`.
-    let tail = if tail.starts_with('/') && !tail.contains(['?', '#']) {
-        tail.trim_end_matches('/')
-    } else {
-        tail
-    };
+    let tail = if tail.starts_with('/') && !tail.contains(['?', '#']) { tail.trim_end_matches('/') } else { tail };
 
     let mut out = String::with_capacity(uri.len());
     out.push_str(&scheme);

@@ -55,8 +55,7 @@ impl Secret {
     /// View as UTF-8 text when the target expects a string form
     /// (AWS profile name, OAuth refresh token, …).
     pub fn as_str(&self) -> Result<&str, RvError> {
-        std::str::from_utf8(&self.0)
-            .map_err(|e| RvError::ErrString(format!("credentials_ref: not valid utf-8: {e}")))
+        std::str::from_utf8(&self.0).map_err(|e| RvError::ErrString(format!("credentials_ref: not valid utf-8: {e}")))
     }
 }
 
@@ -75,11 +74,11 @@ impl std::fmt::Debug for Secret {
 /// source (env var value, file contents) is returned verbatim.
 pub fn resolve(reference: &str) -> Result<Secret, RvError> {
     let trimmed = reference.trim();
-    let (scheme, rest) = trimmed
-        .split_once(':')
-        .ok_or_else(|| RvError::ErrString(format!(
+    let (scheme, rest) = trimmed.split_once(':').ok_or_else(|| {
+        RvError::ErrString(format!(
             "credentials_ref: missing scheme (expected `env:`, `file:`, `inline:`, or `keychain:`), got: {trimmed}"
-        )))?;
+        ))
+    })?;
 
     match scheme {
         "env" => resolve_env(rest),
@@ -105,11 +104,8 @@ pub fn resolve(reference: &str) -> Result<Secret, RvError> {
 #[cfg(feature = "cloud_keychain")]
 fn resolve_keychain(label: &str) -> Result<Secret, RvError> {
     let (service, user) = parse_keychain_label(label)?;
-    let entry = keyring::Entry::new(&service, &user).map_err(|e| {
-        RvError::ErrString(format!(
-            "credentials_ref: keychain open `{service}`/`{user}`: {e}"
-        ))
-    })?;
+    let entry = keyring::Entry::new(&service, &user)
+        .map_err(|e| RvError::ErrString(format!("credentials_ref: keychain open `{service}`/`{user}`: {e}")))?;
     match entry.get_secret() {
         Ok(bytes) => Ok(Secret::new(bytes)),
         Err(keyring::Error::NoEntry) => Err(RvError::ErrString(format!(
@@ -117,52 +113,40 @@ fn resolve_keychain(label: &str) -> Result<Secret, RvError> {
              `bvault operator cloud-target connect` or use the GUI Settings page to \
              populate it"
         ))),
-        Err(e) => Err(RvError::ErrString(format!(
-            "credentials_ref: keychain read `{service}`/`{user}`: {e}"
-        ))),
+        Err(e) => Err(RvError::ErrString(format!("credentials_ref: keychain read `{service}`/`{user}`: {e}"))),
     }
 }
 
 #[cfg(not(feature = "cloud_keychain"))]
 fn resolve_keychain(_label: &str) -> Result<Secret, RvError> {
-    Err(RvError::ErrString(
-        "credentials_ref: `keychain:` requires the `cloud_keychain` build feature".into(),
-    ))
+    Err(RvError::ErrString("credentials_ref: `keychain:` requires the `cloud_keychain` build feature".into()))
 }
 
 fn resolve_env(varname: &str) -> Result<Secret, RvError> {
     if varname.is_empty() {
-        return Err(RvError::ErrString(
-            "credentials_ref: `env:` requires a variable name".into(),
-        ));
+        return Err(RvError::ErrString("credentials_ref: `env:` requires a variable name".into()));
     }
     // `env::var` returns `NotUnicode` for OS strings that aren't
     // valid UTF-8; fall back to `env::var_os` + the lossy path so
     // the caller gets a clearer error than a raw panic.
     match env::var(varname) {
         Ok(v) => Ok(Secret::new(v.into_bytes())),
-        Err(env::VarError::NotPresent) => Err(RvError::ErrString(format!(
-            "credentials_ref: env var `{varname}` is not set"
-        ))),
-        Err(env::VarError::NotUnicode(_)) => Err(RvError::ErrString(format!(
-            "credentials_ref: env var `{varname}` is not valid UTF-8"
-        ))),
+        Err(env::VarError::NotPresent) => {
+            Err(RvError::ErrString(format!("credentials_ref: env var `{varname}` is not set")))
+        }
+        Err(env::VarError::NotUnicode(_)) => {
+            Err(RvError::ErrString(format!("credentials_ref: env var `{varname}` is not valid UTF-8")))
+        }
     }
 }
 
 fn resolve_file(path: &str) -> Result<Secret, RvError> {
     if path.is_empty() {
-        return Err(RvError::ErrString(
-            "credentials_ref: `file:` requires a path".into(),
-        ));
+        return Err(RvError::ErrString("credentials_ref: `file:` requires a path".into()));
     }
     let p = PathBuf::from(path);
-    let bytes = fs::read(&p).map_err(|e| {
-        RvError::ErrString(format!(
-            "credentials_ref: cannot read `{}`: {e}",
-            p.display()
-        ))
-    })?;
+    let bytes =
+        fs::read(&p).map_err(|e| RvError::ErrString(format!("credentials_ref: cannot read `{}`: {e}", p.display())))?;
     Ok(Secret::new(bytes))
 }
 
@@ -183,31 +167,26 @@ fn resolve_file(path: &str) -> Result<Secret, RvError> {
 pub fn persist(reference: &str, bytes: &[u8]) -> Result<(), RvError> {
     let trimmed = reference.trim();
     let (scheme, rest) = trimmed.split_once(':').ok_or_else(|| {
-        RvError::ErrString(format!(
-            "credentials_ref: missing scheme (expected `file:` or `keychain:`), got: {trimmed}"
-        ))
+        RvError::ErrString(format!("credentials_ref: missing scheme (expected `file:` or `keychain:`), got: {trimmed}"))
     })?;
     match scheme {
         "file" => persist_file(rest, bytes),
         "env" => Err(RvError::ErrString(
-            "credentials_ref: `env:` cannot be written durably — use `file:` for a refresh token"
-                .into(),
+            "credentials_ref: `env:` cannot be written durably — use `file:` for a refresh token".into(),
         )),
-        "inline" => Err(RvError::ErrString(
-            "credentials_ref: `inline:` is read-only (value comes from server config)".into(),
-        )),
+        "inline" => {
+            Err(RvError::ErrString("credentials_ref: `inline:` is read-only (value comes from server config)".into()))
+        }
         "keychain" => persist_keychain(rest, bytes),
-        other => Err(RvError::ErrString(format!(
-            "credentials_ref: unknown scheme `{other}` (expected `file` / `keychain`)"
-        ))),
+        other => {
+            Err(RvError::ErrString(format!("credentials_ref: unknown scheme `{other}` (expected `file` / `keychain`)")))
+        }
     }
 }
 
 fn persist_file(path: &str, bytes: &[u8]) -> Result<(), RvError> {
     if path.is_empty() {
-        return Err(RvError::ErrString(
-            "credentials_ref: `file:` requires a path".into(),
-        ));
+        return Err(RvError::ErrString("credentials_ref: `file:` requires a path".into()));
     }
     let p = PathBuf::from(path);
     // Ensure the parent dir exists so operators can point at
@@ -216,10 +195,7 @@ fn persist_file(path: &str, bytes: &[u8]) -> Result<(), RvError> {
     if let Some(parent) = p.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent).map_err(|e| {
-                RvError::ErrString(format!(
-                    "credentials_ref: create parent `{}`: {e}",
-                    parent.display()
-                ))
+                RvError::ErrString(format!("credentials_ref: create parent `{}`: {e}", parent.display()))
             })?;
         }
     }
@@ -228,35 +204,20 @@ fn persist_file(path: &str, bytes: &[u8]) -> Result<(), RvError> {
     // old bytes or the new bytes, never a partial write — matters
     // for `credentials_ref` because a half-written refresh token
     // locks the target out of re-auth.
-    let tmp = p.with_extension(format!(
-        "bvault-creds-tmp-{}",
-        chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
-    ));
-    fs::write(&tmp, bytes).map_err(|e| {
-        RvError::ErrString(format!(
-            "credentials_ref: write tmp `{}`: {e}",
-            tmp.display()
-        ))
-    })?;
+    let tmp = p.with_extension(format!("bvault-creds-tmp-{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)));
+    fs::write(&tmp, bytes)
+        .map_err(|e| RvError::ErrString(format!("credentials_ref: write tmp `{}`: {e}", tmp.display())))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let perms = std::fs::Permissions::from_mode(0o600);
-        fs::set_permissions(&tmp, perms).map_err(|e| {
-            RvError::ErrString(format!(
-                "credentials_ref: chmod 0600 `{}`: {e}",
-                tmp.display()
-            ))
-        })?;
+        fs::set_permissions(&tmp, perms)
+            .map_err(|e| RvError::ErrString(format!("credentials_ref: chmod 0600 `{}`: {e}", tmp.display())))?;
     }
     fs::rename(&tmp, &p).map_err(|e| {
         // Best-effort cleanup of the tmp file if the rename fails.
         let _ = fs::remove_file(&tmp);
-        RvError::ErrString(format!(
-            "credentials_ref: rename `{}` -> `{}`: {e}",
-            tmp.display(),
-            p.display()
-        ))
+        RvError::ErrString(format!("credentials_ref: rename `{}` -> `{}`: {e}", tmp.display(), p.display()))
     })?;
     Ok(())
 }
@@ -266,23 +227,16 @@ fn persist_file(path: &str, bytes: &[u8]) -> Result<(), RvError> {
 #[cfg(feature = "cloud_keychain")]
 fn persist_keychain(label: &str, bytes: &[u8]) -> Result<(), RvError> {
     let (service, user) = parse_keychain_label(label)?;
-    let entry = keyring::Entry::new(&service, &user).map_err(|e| {
-        RvError::ErrString(format!(
-            "credentials_ref: keychain open `{service}`/`{user}`: {e}"
-        ))
-    })?;
-    entry.set_secret(bytes).map_err(|e| {
-        RvError::ErrString(format!(
-            "credentials_ref: keychain write `{service}`/`{user}`: {e}"
-        ))
-    })
+    let entry = keyring::Entry::new(&service, &user)
+        .map_err(|e| RvError::ErrString(format!("credentials_ref: keychain open `{service}`/`{user}`: {e}")))?;
+    entry
+        .set_secret(bytes)
+        .map_err(|e| RvError::ErrString(format!("credentials_ref: keychain write `{service}`/`{user}`: {e}")))
 }
 
 #[cfg(not(feature = "cloud_keychain"))]
 fn persist_keychain(_label: &str, _bytes: &[u8]) -> Result<(), RvError> {
-    Err(RvError::ErrString(
-        "credentials_ref: `keychain:` requires the `cloud_keychain` build feature".into(),
-    ))
+    Err(RvError::ErrString("credentials_ref: `keychain:` requires the `cloud_keychain` build feature".into()))
 }
 
 /// Split `<service>/<user>` into its two keychain-identifier axes.
@@ -298,14 +252,10 @@ fn persist_keychain(_label: &str, _bytes: &[u8]) -> Result<(), RvError> {
 fn parse_keychain_label(label: &str) -> Result<(String, String), RvError> {
     let trimmed = label.trim();
     if trimmed.is_empty() {
-        return Err(RvError::ErrString(
-            "credentials_ref: `keychain:` requires a label".into(),
-        ));
+        return Err(RvError::ErrString("credentials_ref: `keychain:` requires a label".into()));
     }
     match trimmed.split_once('/') {
-        Some((svc, user)) if !svc.is_empty() && !user.is_empty() => {
-            Ok((svc.to_string(), user.to_string()))
-        }
+        Some((svc, user)) if !svc.is_empty() && !user.is_empty() => Ok((svc.to_string(), user.to_string())),
         Some(_) => Err(RvError::ErrString(format!(
             "credentials_ref: keychain label `{trimmed}` must have non-empty service and user \
              parts on either side of the `/`"
@@ -316,13 +266,11 @@ fn parse_keychain_label(label: &str) -> Result<(String, String), RvError> {
 
 fn resolve_inline(b64: &str) -> Result<Secret, RvError> {
     if b64.is_empty() {
-        return Err(RvError::ErrString(
-            "credentials_ref: `inline:` requires a base64 payload".into(),
-        ));
+        return Err(RvError::ErrString("credentials_ref: `inline:` requires a base64 payload".into()));
     }
-    let bytes = STANDARD.decode(b64).map_err(|e| {
-        RvError::ErrString(format!("credentials_ref: `inline:` base64 decode: {e}"))
-    })?;
+    let bytes = STANDARD
+        .decode(b64)
+        .map_err(|e| RvError::ErrString(format!("credentials_ref: `inline:` base64 decode: {e}")))?;
     Ok(Secret::new(bytes))
 }
 
@@ -352,10 +300,7 @@ mod tests {
     fn env_resolves_set_var() {
         // Use a nanos-tagged var name so parallel test runs don't
         // race each other through the global process env.
-        let var = format!(
-            "BVAULT_CREDS_TEST_{}",
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
-        );
+        let var = format!("BVAULT_CREDS_TEST_{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0));
         std::env::set_var(&var, "super-secret");
         let s = resolve(&format!("env:{var}")).expect("resolve ok");
         assert_eq!(s.as_str().unwrap(), "super-secret");
@@ -364,10 +309,7 @@ mod tests {
 
     #[test]
     fn env_missing_var_errors_clearly() {
-        let var = format!(
-            "BVAULT_CREDS_TEST_MISSING_{}",
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
-        );
+        let var = format!("BVAULT_CREDS_TEST_MISSING_{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0));
         // Defensive: ensure it really isn't set before we check.
         std::env::remove_var(&var);
         let err = resolve(&format!("env:{var}")).unwrap_err();
@@ -386,10 +328,7 @@ mod tests {
         // Manual tempfile (no tempfile dep in the tree for this
         // crate; nanos-tagged path is collision-free enough).
         let mut p = std::env::temp_dir();
-        p.push(format!(
-            "bvault_creds_test_{}.bin",
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
-        ));
+        p.push(format!("bvault_creds_test_{}.bin", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)));
         std::fs::write(&p, b"file-body").unwrap();
 
         let s = resolve(&format!("file:{}", p.display())).expect("resolve ok");
@@ -449,15 +388,9 @@ mod tests {
     #[test]
     fn keychain_rejected_without_feature() {
         let err = resolve("keychain:my-label").unwrap_err();
-        assert!(
-            format!("{err}").contains("cloud_keychain"),
-            "got: {err}"
-        );
+        assert!(format!("{err}").contains("cloud_keychain"), "got: {err}");
         let err = persist("keychain:my-label", b"x").unwrap_err();
-        assert!(
-            format!("{err}").contains("cloud_keychain"),
-            "got: {err}"
-        );
+        assert!(format!("{err}").contains("cloud_keychain"), "got: {err}");
     }
 
     /// Roundtrip against the real OS keychain — ignored by default
@@ -514,10 +447,7 @@ mod tests {
     #[test]
     fn persist_file_writes_and_resolve_reads_back() {
         let mut p = std::env::temp_dir();
-        p.push(format!(
-            "bvault_creds_persist_{}.bin",
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
-        ));
+        p.push(format!("bvault_creds_persist_{}.bin", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)));
         let reference = format!("file:{}", p.display());
         persist(&reference, b"fresh-refresh-token").unwrap();
         let round = resolve(&reference).unwrap();
@@ -530,10 +460,7 @@ mod tests {
         // Write the first value, then overwrite. A reader after the
         // second write must see the full second value, never a mix.
         let mut p = std::env::temp_dir();
-        p.push(format!(
-            "bvault_creds_atomic_{}.bin",
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
-        ));
+        p.push(format!("bvault_creds_atomic_{}.bin", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)));
         let reference = format!("file:{}", p.display());
         persist(&reference, b"v1-tokens").unwrap();
         persist(&reference, b"v2-fresh-rotated-token").unwrap();
@@ -547,10 +474,7 @@ mod tests {
     fn persist_file_sets_0600_perms() {
         use std::os::unix::fs::PermissionsExt;
         let mut p = std::env::temp_dir();
-        p.push(format!(
-            "bvault_creds_perms_{}.bin",
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
-        ));
+        p.push(format!("bvault_creds_perms_{}.bin", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)));
         let reference = format!("file:{}", p.display());
         persist(&reference, b"secret").unwrap();
         let meta = std::fs::metadata(&p).unwrap();

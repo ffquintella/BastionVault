@@ -25,18 +25,18 @@ use crate::{Backend, BackendEntry};
 
 pub mod cache;
 pub mod creds;
-pub mod local;
-pub mod obfuscate;
-pub mod target;
-#[cfg(feature = "cloud_s3")]
-pub mod s3;
-#[cfg(feature = "cloud_onedrive")]
-pub mod onedrive;
-#[cfg(feature = "cloud_gdrive")]
-pub mod gdrive;
 #[cfg(feature = "cloud_dropbox")]
 pub mod dropbox;
+#[cfg(feature = "cloud_gdrive")]
+pub mod gdrive;
+pub mod local;
 pub mod oauth;
+pub mod obfuscate;
+#[cfg(feature = "cloud_onedrive")]
+pub mod onedrive;
+#[cfg(feature = "cloud_s3")]
+pub mod s3;
+pub mod target;
 
 pub use local::LocalFsTarget;
 pub use target::FileTarget;
@@ -70,23 +70,14 @@ fn cache_config_from(conf: &HashMap<String, Value>) -> cache::CacheConfig {
     // strings or a comma-separated string for CLI-friendliness.
     if let Some(v) = conf.get("cache_prefetch_keys") {
         cfg.prefetch_keys = match v {
-            Value::Array(a) => a
-                .iter()
-                .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
-                .filter(|s| !s.is_empty())
-                .collect(),
-            Value::String(s) => s
-                .split(',')
-                .map(|p| p.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect(),
+            Value::Array(a) => {
+                a.iter().filter_map(|x| x.as_str().map(|s| s.trim().to_string())).filter(|s| !s.is_empty()).collect()
+            }
+            Value::String(s) => s.split(',').map(|p| p.trim().to_string()).filter(|s| !s.is_empty()).collect(),
             _ => Vec::new(),
         };
     }
-    if let Some(n) = conf
-        .get("cache_prefetch_concurrency")
-        .and_then(|v| v.as_u64())
-    {
+    if let Some(n) = conf.get("cache_prefetch_concurrency").and_then(|v| v.as_u64()) {
         cfg.prefetch_concurrency = n as usize;
     }
     cfg
@@ -117,10 +108,7 @@ impl FileBackend {
     /// and the only option in Phase 1). Target-specific keys are
     /// parsed by the target's own constructor.
     pub fn new(conf: &HashMap<String, Value>) -> Result<Self, RvError> {
-        let kind = conf
-            .get("target")
-            .and_then(|v| v.as_str())
-            .unwrap_or("local");
+        let kind = conf.get("target").and_then(|v| v.as_str()).unwrap_or("local");
         let use_cache = cache_enabled_for(kind, conf);
 
         // Loud warning when `obfuscate_keys` is set through the
@@ -135,11 +123,7 @@ impl FileBackend {
         // backup` / `operator restore` / `operator migrate`, which
         // intentionally treat the cloud bucket as a flat
         // hashed-key store at the underlying-target level).
-        if conf
-            .get("obfuscate_keys")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
-        {
+        if conf.get("obfuscate_keys").and_then(|v| v.as_bool()).unwrap_or(false) {
             log::warn!(
                 "file backend: `obfuscate_keys = true` is set but this construction path \
                  cannot honor it. The server + desktop bootstraps now route through \
@@ -151,10 +135,7 @@ impl FileBackend {
 
         match kind {
             "local" => {
-                let path = conf
-                    .get("path")
-                    .and_then(|v| v.as_str())
-                    .ok_or(RvError::ErrPhysicalConfigItemMissing)?;
+                let path = conf.get("path").and_then(|v| v.as_str()).ok_or(RvError::ErrPhysicalConfigItemMissing)?;
                 let target = LocalFsTarget::new(path.into())?;
                 Ok(Self { target: Arc::new(target) })
             }
@@ -164,36 +145,34 @@ impl FileBackend {
                 Ok(Self { target: Arc::new(target) })
             }
             #[cfg(not(feature = "cloud_s3"))]
-            "s3" => Err(RvError::ErrString(
-                "file target `s3` requires the `cloud_s3` build feature".into(),
-            )),
+            "s3" => Err(RvError::ErrString("file target `s3` requires the `cloud_s3` build feature".into())),
             #[cfg(feature = "cloud_onedrive")]
             "onedrive" => {
                 let target = onedrive::OneDriveTarget::from_config(conf)?;
                 Ok(Self { target: Arc::new(target) })
             }
             #[cfg(not(feature = "cloud_onedrive"))]
-            "onedrive" => Err(RvError::ErrString(
-                "file target `onedrive` requires the `cloud_onedrive` build feature".into(),
-            )),
+            "onedrive" => {
+                Err(RvError::ErrString("file target `onedrive` requires the `cloud_onedrive` build feature".into()))
+            }
             #[cfg(feature = "cloud_gdrive")]
             "gdrive" => {
                 let target = gdrive::GoogleDriveTarget::from_config(conf)?;
                 Ok(Self { target: Arc::new(target) })
             }
             #[cfg(not(feature = "cloud_gdrive"))]
-            "gdrive" => Err(RvError::ErrString(
-                "file target `gdrive` requires the `cloud_gdrive` build feature".into(),
-            )),
+            "gdrive" => {
+                Err(RvError::ErrString("file target `gdrive` requires the `cloud_gdrive` build feature".into()))
+            }
             #[cfg(feature = "cloud_dropbox")]
             "dropbox" => {
                 let target = dropbox::DropboxTarget::from_config(conf)?;
                 Ok(Self { target: Arc::new(target) })
             }
             #[cfg(not(feature = "cloud_dropbox"))]
-            "dropbox" => Err(RvError::ErrString(
-                "file target `dropbox` requires the `cloud_dropbox` build feature".into(),
-            )),
+            "dropbox" => {
+                Err(RvError::ErrString("file target `dropbox` requires the `cloud_dropbox` build feature".into()))
+            }
             other => {
                 log::error!("unknown file target kind: {other}");
                 return Err(RvError::ErrPhysicalConfigItemMissing);
@@ -202,9 +181,7 @@ impl FileBackend {
         .map(|b: Self| {
             if use_cache {
                 let cfg = cache_config_from(conf);
-                Self {
-                    target: Arc::new(cache::CachingTarget::new(b.target, cfg)),
-                }
+                Self { target: Arc::new(cache::CachingTarget::new(b.target, cfg)) }
             } else {
                 b
             }
@@ -238,21 +215,14 @@ impl FileBackend {
     /// sync `new` path ignores `obfuscate_keys` entirely and logs
     /// a warning so a misconfigured config is loud rather than
     /// silently degraded.
-    pub async fn new_maybe_obfuscated(
-        conf: &HashMap<String, Value>,
-    ) -> Result<Self, RvError> {
+    pub async fn new_maybe_obfuscated(conf: &HashMap<String, Value>) -> Result<Self, RvError> {
         let base = Self::new(conf)?;
-        let obfuscate = conf
-            .get("obfuscate_keys")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let obfuscate = conf.get("obfuscate_keys").and_then(|v| v.as_bool()).unwrap_or(false);
         if !obfuscate {
             return Ok(base);
         }
         let wrapped = obfuscate::ObfuscatingTarget::bootstrap(base.target.clone()).await?;
-        Ok(Self {
-            target: Arc::new(wrapped),
-        })
+        Ok(Self { target: Arc::new(wrapped) })
     }
 }
 
@@ -306,10 +276,8 @@ impl Backend for FileBackend {
 
 #[cfg(test)]
 mod test {
+    use super::super::super::test::{test_backend_curd, test_backend_list_prefix, test_backend_list_prefix_is_literal};
     use super::*;
-    use super::super::super::test::{
-        test_backend_curd, test_backend_list_prefix, test_backend_list_prefix_is_literal,
-    };
     use crate::test_support::{new_test_backend, new_test_temp_dir};
 
     use std::sync::Mutex;
@@ -371,22 +339,12 @@ mod test {
     #[tokio::test]
     async fn test_file_backend_honors_obfuscate_keys() {
         let dir = new_test_temp_dir("test_file_backend_obfuscate");
-        let mut conf: std::collections::HashMap<String, serde_json::Value> =
-            std::collections::HashMap::new();
-        conf.insert(
-            "path".into(),
-            serde_json::Value::String(dir.clone()),
-        );
-        conf.insert(
-            "obfuscate_keys".into(),
-            serde_json::Value::Bool(true),
-        );
+        let mut conf: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
+        conf.insert("path".into(), serde_json::Value::String(dir.clone()));
+        conf.insert("obfuscate_keys".into(), serde_json::Value::Bool(true));
 
         let backend = FileBackend::new_maybe_obfuscated(&conf).await.unwrap();
-        let entry = BackendEntry {
-            key: "sys/policy/admin".to_string(),
-            value: b"encrypted-payload".to_vec(),
-        };
+        let entry = BackendEntry { key: "sys/policy/admin".to_string(), value: b"encrypted-payload".to_vec() };
         backend.put(&entry).await.unwrap();
         let got = backend.get("sys/policy/admin").await.unwrap().unwrap();
         assert_eq!(got, entry);
@@ -421,10 +379,7 @@ mod test {
         let backend = FileBackend::from_target(target.clone());
 
         // put -> target receives serialized JSON bytes
-        let entry = BackendEntry {
-            key: "sys/foo".to_string(),
-            value: b"ciphertext-ish".to_vec(),
-        };
+        let entry = BackendEntry { key: "sys/foo".to_string(), value: b"ciphertext-ish".to_vec() };
         backend.put(&entry).await.unwrap();
 
         let raw = target.writes.lock().unwrap().get("sys/foo").cloned().unwrap();

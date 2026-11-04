@@ -166,9 +166,9 @@ impl PluginCatalog {
     pub async fn put(&self, storage: &dyn Storage, manifest: &PluginManifest, binary: &[u8]) -> Result<(), RvError> {
         // T62: say *why* a manifest is refused (capability minimisation in
         // particular must be explained, not just answered with a bare 400).
-        manifest
-            .validate()
-            .map_err(|e| RvError::ErrResponseStatus(400, format!("invalid plugin manifest `{}`: {e}", manifest.name)))?;
+        manifest.validate().map_err(|e| {
+            RvError::ErrResponseStatus(400, format!("invalid plugin manifest `{}`: {e}", manifest.name))
+        })?;
         Self::verify_integrity(manifest, binary)?;
         // A WASM module importing anything but the host's `bv` namespace
         // (notably WASI, from a `wasm32-wasip1` build) can never be

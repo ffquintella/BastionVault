@@ -100,89 +100,47 @@ impl PkiBackend {
 
 #[maybe_async::maybe_async]
 impl PkiBackendInner {
-    pub async fn export_cert(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
-        let serial = req
-            .get_data("serial")?
-            .as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?
-            .to_string();
-        let serial_hex = serial
-            .chars()
-            .filter(|c| c.is_ascii_hexdigit())
-            .collect::<String>()
-            .to_ascii_lowercase();
+    pub async fn export_cert(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let serial = req.get_data("serial")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
+        let serial_hex = serial.chars().filter(|c| c.is_ascii_hexdigit()).collect::<String>().to_ascii_lowercase();
 
-        let format_str = req
-            .get_data_or_default("format")?
-            .as_str()
-            .unwrap_or("pem")
-            .to_string();
+        let format_str = req.get_data_or_default("format")?.as_str().unwrap_or("pem").to_string();
         let format = ExportFormat::parse(&format_str)?;
 
-        let include_private_key = req
-            .get_data_or_default("include_private_key")?
-            .as_bool()
-            .unwrap_or(false);
+        let include_private_key = req.get_data_or_default("include_private_key")?.as_bool().unwrap_or(false);
 
-        let mode = req
-            .get_data_or_default("mode")?
-            .as_str()
-            .unwrap_or("normal")
-            .to_string();
+        let mode = req.get_data_or_default("mode")?.as_str().unwrap_or("normal").to_string();
         let backup_mode = match mode.as_str() {
             "" | "normal" => false,
             "backup" => true,
             other => {
-                return Err(RvError::ErrString(format!(
-                    "export: unknown mode `{other}` (accepted: normal, backup)"
-                )));
+                return Err(RvError::ErrString(format!("export: unknown mode `{other}` (accepted: normal, backup)")));
             }
         };
 
-        let password = req
-            .get_data_or_default("password")?
-            .as_str()
-            .unwrap_or("")
-            .to_string();
+        let password = req.get_data_or_default("password")?.as_str().unwrap_or("").to_string();
 
         // PKCS#7 doesn't carry private keys.
         if include_private_key && matches!(format, ExportFormat::Pkcs7) {
             return Err(RvError::ErrString(
-                "export: PKCS#7 cannot carry a private key; pick format=pem or pkcs12"
-                    .into(),
+                "export: PKCS#7 cannot carry a private key; pick format=pem or pkcs12".into(),
             ));
         }
         // PKCS#12 requires a password (it's the file's encryption key).
         if matches!(format, ExportFormat::Pkcs12) && password.is_empty() {
-            return Err(RvError::ErrString(
-                "export: PKCS#12 requires a password to encrypt the bag".into(),
-            ));
+            return Err(RvError::ErrString("export: PKCS#12 requires a password to encrypt the bag".into()));
         }
         // Backup mode bypasses the per-key `exportable` flag, but only
         // for encrypted formats — i.e. PKCS#12. PEM / PKCS#7 plaintext
         // would defeat the point of the read-only flag.
         if backup_mode && !matches!(format, ExportFormat::Pkcs12) {
-            return Err(RvError::ErrString(
-                "export: mode=backup requires an encrypted format (PKCS#12)"
-                    .into(),
-            ));
+            return Err(RvError::ErrString("export: mode=backup requires an encrypted format (PKCS#12)".into()));
         }
 
         // Cert lookup — error cleanly when the serial doesn't exist.
-        let record: storage::CertRecord = storage::get_json(
-            req,
-            &storage::cert_storage_key(&serial_hex),
-        )
-        .await?
-        .ok_or_else(|| {
-            RvError::ErrString(format!(
-                "export: no cert at serial `{serial_hex}`"
-            ))
-        })?;
+        let record: storage::CertRecord = storage::get_json(req, &storage::cert_storage_key(&serial_hex))
+            .await?
+            .ok_or_else(|| RvError::ErrString(format!("export: no cert at serial `{serial_hex}`")))?;
 
         // Build the issuer chain when we can. Chain construction
         // requires a known issuer; orphan certs (imported via
@@ -204,10 +162,7 @@ impl PkiBackendInner {
                 ));
             }
             let entry = keys::load_key(req, &record.key_id).await?.ok_or_else(|| {
-                RvError::ErrString(format!(
-                    "export: bound managed key `{}` is missing",
-                    record.key_id
-                ))
+                RvError::ErrString(format!("export: bound managed key `{}` is missing", record.key_id))
             })?;
             if !entry.exportable && !backup_mode {
                 return Err(RvError::ErrString(
@@ -228,71 +183,33 @@ impl PkiBackendInner {
         };
 
         let bundle = match format {
-            ExportFormat::Pem => pem_bundle(
-                &record.certificate_pem,
-                &chain_pems,
-                private_key_pem.as_deref(),
-            ),
-            ExportFormat::Pkcs7 => {
-                pkcs7_certs_only(&record.certificate_pem, &chain_pems)?
+            ExportFormat::Pem => pem_bundle(&record.certificate_pem, &chain_pems, private_key_pem.as_deref()),
+            ExportFormat::Pkcs7 => pkcs7_certs_only(&record.certificate_pem, &chain_pems)?,
+            ExportFormat::Pkcs12 => {
+                build_pkcs12(&record.certificate_pem, &chain_pems, private_key_pem.as_deref(), &password)?
             }
-            ExportFormat::Pkcs12 => build_pkcs12(
-                &record.certificate_pem,
-                &chain_pems,
-                private_key_pem.as_deref(),
-                &password,
-            )?,
         };
 
-        Ok(Some(Response::data_response(Some(bundle_to_data(
-            &bundle,
-            &serial_hex,
-            include_private_key,
-            backup_mode,
-        )))))
+        Ok(Some(Response::data_response(Some(bundle_to_data(&bundle, &serial_hex, include_private_key, backup_mode)))))
     }
 
-    pub async fn export_issuer(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
-        let issuer_ref = req
-            .get_data("issuer_ref")?
-            .as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?
-            .to_string();
+    pub async fn export_issuer(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let issuer_ref = req.get_data("issuer_ref")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
 
-        let format_str = req
-            .get_data_or_default("format")?
-            .as_str()
-            .unwrap_or("pem")
-            .to_string();
+        let format_str = req.get_data_or_default("format")?.as_str().unwrap_or("pem").to_string();
         let format = ExportFormat::parse(&format_str)?;
 
-        let include_chain = req
-            .get_data_or_default("include_chain")?
-            .as_bool()
-            .unwrap_or(true);
+        let include_chain = req.get_data_or_default("include_chain")?.as_bool().unwrap_or(true);
 
-        let password = req
-            .get_data_or_default("password")?
-            .as_str()
-            .unwrap_or("")
-            .to_string();
+        let password = req.get_data_or_default("password")?.as_str().unwrap_or("").to_string();
         if matches!(format, ExportFormat::Pkcs12) && password.is_empty() {
-            return Err(RvError::ErrString(
-                "export: PKCS#12 requires a password to encrypt the bag".into(),
-            ));
+            return Err(RvError::ErrString("export: PKCS#12 requires a password to encrypt the bag".into()));
         }
 
         let issuer = issuers::load_issuer(req, &issuer_ref).await?;
 
-        let chain_pems: Vec<String> = if include_chain {
-            issuers::build_issuer_chain(req, &issuer).await?
-        } else {
-            Vec::new()
-        };
+        let chain_pems: Vec<String> =
+            if include_chain { issuers::build_issuer_chain(req, &issuer).await? } else { Vec::new() };
 
         // Issuer route never emits the private key, regardless of
         // body params or mode. The API just doesn't accept those
@@ -300,12 +217,8 @@ impl PkiBackendInner {
         // PKCS#12 path is forced through with `private_key_pem=None`.
         let bundle = match format {
             ExportFormat::Pem => pem_bundle(&issuer.cert_pem, &chain_pems, None),
-            ExportFormat::Pkcs7 => {
-                pkcs7_certs_only(&issuer.cert_pem, &chain_pems)?
-            }
-            ExportFormat::Pkcs12 => {
-                build_pkcs12(&issuer.cert_pem, &chain_pems, None, &password)?
-            }
+            ExportFormat::Pkcs7 => pkcs7_certs_only(&issuer.cert_pem, &chain_pems)?,
+            ExportFormat::Pkcs12 => build_pkcs12(&issuer.cert_pem, &chain_pems, None, &password)?,
         };
 
         let mut data: Map<String, Value> = Map::new();
@@ -340,10 +253,7 @@ fn body_encoding(bundle: &ExportBundle) -> &'static str {
 }
 
 #[maybe_async::maybe_async]
-async fn build_chain_for_record(
-    req: &Request,
-    record: &storage::CertRecord,
-) -> Result<Vec<String>, RvError> {
+async fn build_chain_for_record(req: &Request, record: &storage::CertRecord) -> Result<Vec<String>, RvError> {
     if record.is_orphaned || record.issuer_id.is_empty() {
         return Ok(Vec::new());
     }

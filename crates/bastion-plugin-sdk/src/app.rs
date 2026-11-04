@@ -230,12 +230,7 @@ impl AppHost {
     /// `{mount}`; it must stay under the plugin's declared `api_paths`.
     /// Returns the raw response JSON bytes (the `{"data":…}` or
     /// `{"error":…}` envelope). Requires a non-empty `api_paths`.
-    pub fn api_request(
-        &self,
-        op: ApiOp,
-        path: &str,
-        data: Option<&[u8]>,
-    ) -> Result<Vec<u8>, HostError> {
+    pub fn api_request(&self, op: ApiOp, path: &str, data: Option<&[u8]>) -> Result<Vec<u8>, HostError> {
         // Build the request JSON by hand to avoid forcing a serde_json
         // Value dependency on `data`'s shape.
         let mut req = Vec::new();
@@ -550,44 +545,16 @@ mod app_bindings {
         unsafe { raw::window_emit(handle, payload.as_ptr() as i32, payload.len() as i32) }
     }
     pub fn api_request(req: &[u8], out: &mut [u8]) -> i32 {
-        unsafe {
-            raw::api_request(
-                req.as_ptr() as i32,
-                req.len() as i32,
-                out.as_mut_ptr() as i32,
-                out.len() as i32,
-            )
-        }
+        unsafe { raw::api_request(req.as_ptr() as i32, req.len() as i32, out.as_mut_ptr() as i32, out.len() as i32) }
     }
     pub fn net_http(req: &[u8], out: &mut [u8]) -> i32 {
-        unsafe {
-            raw::net_http(
-                req.as_ptr() as i32,
-                req.len() as i32,
-                out.as_mut_ptr() as i32,
-                out.len() as i32,
-            )
-        }
+        unsafe { raw::net_http(req.as_ptr() as i32, req.len() as i32, out.as_mut_ptr() as i32, out.len() as i32) }
     }
     pub fn notify_send(req: &[u8], out: &mut [u8]) -> i32 {
-        unsafe {
-            raw::notify_send(
-                req.as_ptr() as i32,
-                req.len() as i32,
-                out.as_mut_ptr() as i32,
-                out.len() as i32,
-            )
-        }
+        unsafe { raw::notify_send(req.as_ptr() as i32, req.len() as i32, out.as_mut_ptr() as i32, out.len() as i32) }
     }
     pub fn notify_list(req: &[u8], out: &mut [u8]) -> i32 {
-        unsafe {
-            raw::notify_list(
-                req.as_ptr() as i32,
-                req.len() as i32,
-                out.as_mut_ptr() as i32,
-                out.len() as i32,
-            )
-        }
+        unsafe { raw::notify_list(req.as_ptr() as i32, req.len() as i32, out.as_mut_ptr() as i32, out.len() as i32) }
     }
     pub fn notify_open() -> i32 {
         unsafe { raw::notify_open() }
@@ -750,32 +717,17 @@ pub mod test_support {
 
     /// Queue a scripted `api_request` response (returned in FIFO order).
     pub fn script_api(response_json: &[u8]) {
-        STATE
-            .lock()
-            .unwrap()
-            .api_script
-            .get_or_insert_with(Vec::new)
-            .push(response_json.to_vec());
+        STATE.lock().unwrap().api_script.get_or_insert_with(Vec::new).push(response_json.to_vec());
     }
 
     /// Queue a scripted `http` success response.
     pub fn script_net_ok(response_json: &[u8]) {
-        STATE
-            .lock()
-            .unwrap()
-            .net_script
-            .get_or_insert_with(Vec::new)
-            .push(Ok(response_json.to_vec()));
+        STATE.lock().unwrap().net_script.get_or_insert_with(Vec::new).push(Ok(response_json.to_vec()));
     }
 
     /// Queue a scripted `http` refusal code (e.g. `NET_HOST_DENIED`).
     pub fn script_net_err(code: i32) {
-        STATE
-            .lock()
-            .unwrap()
-            .net_script
-            .get_or_insert_with(Vec::new)
-            .push(Err(code));
+        STATE.lock().unwrap().net_script.get_or_insert_with(Vec::new).push(Err(code));
     }
 
     /// The `bvx.notify_send` payloads the module raised, in call order.
@@ -791,11 +743,7 @@ pub mod test_support {
     /// The dynamic menus the module upserted, keyed by id (raw JSON).
     pub fn menus() -> Vec<(String, Vec<u8>)> {
         let s = STATE.lock().unwrap();
-        s.menus
-            .clone()
-            .unwrap_or_default()
-            .into_iter()
-            .collect()
+        s.menus.clone().unwrap_or_default().into_iter().collect()
     }
 
     /// The window-open specs the module recorded (raw JSON).
@@ -882,34 +830,44 @@ mod tests {
         test_support::reset();
         // Not granted by default.
         let host = AppHost::new();
-        assert_eq!(host.http(&HttpRequest {
-            method: "GET".into(),
-            url: "https://hooks.example.com/x".into(),
-            headers: Default::default(),
-            body_b64: None,
-            timeout_ms: None,
-        }).unwrap_err(), NetError::NotGranted);
+        assert_eq!(
+            host.http(&HttpRequest {
+                method: "GET".into(),
+                url: "https://hooks.example.com/x".into(),
+                headers: Default::default(),
+                body_b64: None,
+                timeout_ms: None,
+            })
+            .unwrap_err(),
+            NetError::NotGranted
+        );
 
         // Scripted success.
         test_support::script_net_ok(br#"{"status":200,"bytes":2,"body_b64":"aGk="}"#);
-        let resp = host.http(&HttpRequest {
-            method: "GET".into(),
-            url: "https://hooks.example.com/x".into(),
-            headers: Default::default(),
-            body_b64: None,
-            timeout_ms: None,
-        }).unwrap();
+        let resp = host
+            .http(&HttpRequest {
+                method: "GET".into(),
+                url: "https://hooks.example.com/x".into(),
+                headers: Default::default(),
+                body_b64: None,
+                timeout_ms: None,
+            })
+            .unwrap();
         assert_eq!(resp.status, 200);
         assert_eq!(resp.bytes, 2);
 
         // Scripted denial.
         test_support::script_net_err(NET_HOST_DENIED);
-        assert_eq!(host.http(&HttpRequest {
-            method: "GET".into(),
-            url: "https://blocked.example.com/x".into(),
-            headers: Default::default(),
-            body_b64: None,
-            timeout_ms: None,
-        }).unwrap_err(), NetError::HostDenied);
+        assert_eq!(
+            host.http(&HttpRequest {
+                method: "GET".into(),
+                url: "https://blocked.example.com/x".into(),
+                headers: Default::default(),
+                body_b64: None,
+                timeout_ms: None,
+            })
+            .unwrap_err(),
+            NetError::HostDenied
+        );
     }
 }

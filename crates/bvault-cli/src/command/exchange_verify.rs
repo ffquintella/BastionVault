@@ -64,13 +64,10 @@ fn read_password_if_needed(format: &str, looks_encrypted: bool) -> Result<Option
     }
     use std::io::IsTerminal;
     let pw = if std::io::stdin().is_terminal() {
-        rpassword::prompt_password("Backup password (will not echo): ")
-            .map_err(|_| RvError::ErrRequestInvalid)?
+        rpassword::prompt_password("Backup password (will not echo): ").map_err(|_| RvError::ErrRequestInvalid)?
     } else {
         let mut buf = String::new();
-        std::io::stdin()
-            .read_line(&mut buf)
-            .map_err(|_| RvError::ErrRequestInvalid)?;
+        std::io::stdin().read_line(&mut buf).map_err(|_| RvError::ErrRequestInvalid)?;
         buf.trim_end_matches(['\r', '\n']).to_string()
     };
     Ok(Some(pw))

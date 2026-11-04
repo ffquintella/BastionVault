@@ -32,8 +32,8 @@ use crate::{
     bv_error_response_status,
     core::Core,
     errors::RvError,
-    response_json_ok, HttpError,
     modules::rustion::{audit, recordings, store::RustionStore, webhook_verify},
+    response_json_ok, HttpError,
 };
 
 const SIG_HEADER: &str = "X-Rustion-Signature";
@@ -95,19 +95,9 @@ impl FromRequest for SignatureVerified {
 
 /// Resolve which enrolled target's pinned key verifies `body`, or refuse.
 async fn verify_signature(req: &HttpRequest, body: &web::Bytes, core: &Arc<Core>) -> Result<String, HttpError> {
-    let sig = req
-        .headers()
-        .get(SIG_HEADER)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .trim()
-        .to_string();
+    let sig = req.headers().get(SIG_HEADER).and_then(|v| v.to_str().ok()).unwrap_or("").trim().to_string();
     if sig.is_empty() {
-        return Err(bv_error_response_status!(
-            400,
-            "X-Rustion-Signature header is required"
-        )
-        .into());
+        return Err(bv_error_response_status!(400, "X-Rustion-Signature header is required").into());
     }
     if body.is_empty() {
         return Err(bv_error_response_status!(400, "empty request body").into());
@@ -124,16 +114,12 @@ async fn verify_signature(req: &HttpRequest, body: &web::Bytes, core: &Arc<Core>
     // Resolve which enrolled target's pinned key verifies the payload.
     let bastion_id = match &bastion_hint {
         Some(bid) => {
-            let target = targets.get_target(bid).await?.ok_or_else(|| {
-                bv_error_response_status!(404, &format!("bastion `{bid}` not enrolled"))
-            })?;
-            webhook_verify::verify(
-                &target.public_key.ed25519,
-                &target.public_key.mldsa65,
-                &sig,
-                body,
-            )
-            .map_err(|e| bv_error_response_status!(401, &format!("signature verify: {e}")))?;
+            let target = targets
+                .get_target(bid)
+                .await?
+                .ok_or_else(|| bv_error_response_status!(404, &format!("bastion `{bid}` not enrolled")))?;
+            webhook_verify::verify(&target.public_key.ed25519, &target.public_key.mldsa65, &sig, body)
+                .map_err(|e| bv_error_response_status!(401, &format!("signature verify: {e}")))?;
             bid.clone()
         }
         None => {
@@ -141,43 +127,27 @@ async fn verify_signature(req: &HttpRequest, body: &web::Bytes, core: &Arc<Core>
             // every enrolled target until one verifies.
             let mut matched = None;
             for t in targets.list_targets().await? {
-                if webhook_verify::verify(
-                    &t.public_key.ed25519,
-                    &t.public_key.mldsa65,
-                    &sig,
-                    body,
-                )
-                .is_ok()
-                {
+                if webhook_verify::verify(&t.public_key.ed25519, &t.public_key.mldsa65, &sig, body).is_ok() {
                     matched = Some(t.id);
                     break;
                 }
             }
-            matched.ok_or_else(|| {
-                bv_error_response_status!(401, "signature did not match any enrolled bastion")
-            })?
+            matched.ok_or_else(|| bv_error_response_status!(401, "signature did not match any enrolled bastion"))?
         }
     };
 
     Ok(bastion_id)
 }
 
-async fn recording_ready(
-    verified: SignatureVerified,
-    core: web::Data<Arc<Core>>,
-) -> Result<HttpResponse, HttpError> {
+async fn recording_ready(verified: SignatureVerified, core: web::Data<Arc<Core>>) -> Result<HttpResponse, HttpError> {
     let bastion_id = verified.bastion_id().to_string();
     let body = verified.body();
 
     // Parse the verified sidecar.
-    let sidecar: Value = serde_json::from_slice(body)
-        .map_err(|e| bv_error_response_status!(400, &format!("sidecar parse: {e}")))?;
-    let sd = sidecar
-        .as_object()
-        .ok_or_else(|| bv_error_response_status!(400, "sidecar must be a JSON object"))?;
-    let s = |k: &str| -> String {
-        sd.get(k).and_then(|v| v.as_str()).map(String::from).unwrap_or_default()
-    };
+    let sidecar: Value =
+        serde_json::from_slice(body).map_err(|e| bv_error_response_status!(400, &format!("sidecar parse: {e}")))?;
+    let sd = sidecar.as_object().ok_or_else(|| bv_error_response_status!(400, "sidecar must be a JSON object"))?;
+    let s = |k: &str| -> String { sd.get(k).and_then(|v| v.as_str()).map(String::from).unwrap_or_default() };
     let u = |k: &str| -> u64 { sd.get(k).and_then(|v| v.as_u64()).unwrap_or(0) };
     let parse_iso = |k: &str| -> chrono::DateTime<chrono::Utc> {
         sd.get(k)

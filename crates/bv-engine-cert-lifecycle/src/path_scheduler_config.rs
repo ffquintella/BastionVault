@@ -49,8 +49,7 @@ impl CertLifecycleBackendInner {
         _b: &dyn Backend,
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        let cfg: SchedulerConfig =
-            storage::get_json(req, KEY_SCHEDULER_CONFIG).await?.unwrap_or_default();
+        let cfg: SchedulerConfig = storage::get_json(req, KEY_SCHEDULER_CONFIG).await?.unwrap_or_default();
         let mut data: Map<String, Value> = Map::new();
         data.insert("enabled".into(), json!(cfg.enabled));
         data.insert("tick_interval_seconds".into(), json!(cfg.tick_interval_seconds));
@@ -68,31 +67,21 @@ impl CertLifecycleBackendInner {
         _b: &dyn Backend,
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        let existing: SchedulerConfig =
-            storage::get_json(req, KEY_SCHEDULER_CONFIG).await?.unwrap_or_default();
+        let existing: SchedulerConfig = storage::get_json(req, KEY_SCHEDULER_CONFIG).await?.unwrap_or_default();
 
-        let enabled = req
-            .get_data_or_default("enabled")?
-            .as_bool()
-            .unwrap_or(existing.enabled);
-        let tick_interval_seconds = req
-            .get_data_or_default("tick_interval_seconds")?
-            .as_u64()
-            .unwrap_or(existing.tick_interval_seconds);
+        let enabled = req.get_data_or_default("enabled")?.as_bool().unwrap_or(existing.enabled);
+        let tick_interval_seconds =
+            req.get_data_or_default("tick_interval_seconds")?.as_u64().unwrap_or(existing.tick_interval_seconds);
         // `client_token` is a write-only field: missing in the request
         // body means "preserve". An explicit empty string clears it.
         let client_token = match req.get_data("client_token").ok().and_then(|v| v.as_str().map(|s| s.to_string())) {
             Some(s) => s,
             None => existing.client_token.clone(),
         };
-        let base_backoff_seconds = req
-            .get_data_or_default("base_backoff_seconds")?
-            .as_u64()
-            .unwrap_or(existing.base_backoff_seconds);
-        let max_backoff_seconds = req
-            .get_data_or_default("max_backoff_seconds")?
-            .as_u64()
-            .unwrap_or(existing.max_backoff_seconds);
+        let base_backoff_seconds =
+            req.get_data_or_default("base_backoff_seconds")?.as_u64().unwrap_or(existing.base_backoff_seconds);
+        let max_backoff_seconds =
+            req.get_data_or_default("max_backoff_seconds")?.as_u64().unwrap_or(existing.max_backoff_seconds);
 
         if enabled && client_token.is_empty() {
             return Err(RvError::ErrString(

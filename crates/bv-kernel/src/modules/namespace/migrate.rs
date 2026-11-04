@@ -29,7 +29,6 @@
 //! still "restore the pre-migration BVBK backup" (the legacy keys also remain in
 //! place on disk after activation, unused).
 
-
 use crate::kernel_api::VaultCtx;
 use crate::{
     bv_error_string,
@@ -99,10 +98,7 @@ async fn set_activation_active(barrier: &dyn Storage) -> Result<(), RvError> {
 ///   the legacy layout this boot (legacy keys are untouched) and retry next boot
 ///   rather than block unseal or point at unverified data.
 #[maybe_async::maybe_async]
-pub async fn resolve_root_activation(
-    core: &dyn VaultCtx,
-    store: &NamespaceStore,
-) -> Result<Option<String>, RvError> {
+pub async fn resolve_root_activation(core: &dyn VaultCtx, store: &NamespaceStore) -> Result<Option<String>, RvError> {
     let __barrier = core.barrier();
     let barrier = __barrier.as_storage();
     let root_uuid = store.root_uuid()?;
@@ -156,9 +152,10 @@ async fn read_migration_version(store_view: &dyn Storage) -> Result<Option<u32>,
         Some(entry) => {
             let s = String::from_utf8(entry.value)
                 .map_err(|e| bv_error_string!(format!("corrupt migration-version: {e}")))?;
-            let v = s.trim().parse::<u32>().map_err(|e| {
-                bv_error_string!(format!("invalid migration-version {s:?}: {e}"))
-            })?;
+            let v = s
+                .trim()
+                .parse::<u32>()
+                .map_err(|e| bv_error_string!(format!("invalid migration-version {s:?}: {e}")))?;
             Ok(Some(v))
         }
         None => Ok(None),
@@ -168,9 +165,7 @@ async fn read_migration_version(store_view: &dyn Storage) -> Result<Option<u32>,
 #[maybe_async::maybe_async]
 async fn write_migration_version(store_view: &dyn Storage, version: u32) -> Result<(), RvError> {
     let key = format!("{NAMESPACE_REGISTRY_PREFIX}{MIGRATION_VERSION_KEY}");
-    store_view
-        .put(&StorageEntry { key, value: version.to_string().into_bytes() })
-        .await
+    store_view.put(&StorageEntry { key, value: version.to_string().into_bytes() }).await
 }
 
 /// Recursively collect every concrete (non-directory) key under `prefix` from
@@ -226,10 +221,7 @@ pub fn reroot_destination(root_uuid: &str, key: &str) -> Option<String> {
 /// Run the copy + verify stage. Idempotent: a no-op once the version marker is
 /// present. Must be called after the namespace store's root has been minted.
 #[maybe_async::maybe_async]
-pub async fn migrate_root_copy(
-    core: &dyn VaultCtx,
-    store: &NamespaceStore,
-) -> Result<MigrationReport, RvError> {
+pub async fn migrate_root_copy(core: &dyn VaultCtx, store: &NamespaceStore) -> Result<MigrationReport, RvError> {
     let __barrier = core.barrier();
     let barrier = __barrier.as_storage();
 
@@ -275,16 +267,10 @@ pub async fn migrate_root_copy(
         match (s, d) {
             (Some(s), Some(d)) if s.value == d.value => report.keys_verified += 1,
             (None, _) => report.keys_verified += 1, // source deleted mid-flight; tolerate
-            _ => {
-                return Err(bv_error_string!(format!(
-                    "namespace re-root verification failed for {src} -> {dst}"
-                )))
-            }
+            _ => return Err(bv_error_string!(format!("namespace re-root verification failed for {src} -> {dst}"))),
         }
     }
 
     write_migration_version(barrier, REROOT_MIGRATION_VERSION).await?;
     Ok(report)
 }
-
-

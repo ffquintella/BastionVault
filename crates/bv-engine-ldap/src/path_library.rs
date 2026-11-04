@@ -52,10 +52,7 @@ fn library_locks() -> &'static DashMap<String, Arc<Mutex<()>>> {
 }
 
 fn lock_for(set: &str) -> Arc<Mutex<()>> {
-    library_locks()
-        .entry(set.to_string())
-        .or_insert_with(|| Arc::new(Mutex::new(())))
-        .clone()
+    library_locks().entry(set.to_string()).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
 }
 
 impl LdapBackend {
@@ -132,36 +129,19 @@ impl LdapBackend {
 
 #[maybe_async::maybe_async]
 impl LdapBackendInner {
-    pub async fn get_set(
-        &self,
-        req: &Request,
-        set: &str,
-    ) -> Result<Option<LibrarySet>, RvError> {
+    pub async fn get_set(&self, req: &Request, set: &str) -> Result<Option<LibrarySet>, RvError> {
         match req.storage_get(&format!("{LIBRARY_PREFIX}{set}")).await? {
             Some(e) => Ok(Some(serde_json::from_slice(&e.value)?)),
             None => Ok(None),
         }
     }
 
-    pub async fn put_set(
-        &self,
-        req: &mut Request,
-        set: &str,
-        s: &LibrarySet,
-    ) -> Result<(), RvError> {
+    pub async fn put_set(&self, req: &mut Request, set: &str, s: &LibrarySet) -> Result<(), RvError> {
         let bytes = serde_json::to_vec(s)?;
-        req.storage_put(&StorageEntry {
-            key: format!("{LIBRARY_PREFIX}{set}"),
-            value: bytes,
-        })
-        .await
+        req.storage_put(&StorageEntry { key: format!("{LIBRARY_PREFIX}{set}"), value: bytes }).await
     }
 
-    pub async fn handle_set_read(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_set_read(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let set = take_str(req, "set");
         match self.get_set(req, &set).await? {
             None => Ok(None),
@@ -169,50 +149,27 @@ impl LdapBackendInner {
                 let mut data = Map::new();
                 data.insert(
                     "service_account_names".into(),
-                    Value::Array(
-                        s.service_account_names
-                            .iter()
-                            .map(|n| Value::String(n.clone()))
-                            .collect(),
-                    ),
+                    Value::Array(s.service_account_names.iter().map(|n| Value::String(n.clone())).collect()),
                 );
                 data.insert("ttl".into(), Value::Number(s.ttl.as_secs().into()));
                 data.insert("max_ttl".into(), Value::Number(s.max_ttl.as_secs().into()));
-                data.insert(
-                    "disable_check_in_enforcement".into(),
-                    Value::Bool(s.disable_check_in_enforcement),
-                );
-                data.insert(
-                    "affinity_ttl".into(),
-                    Value::Number(s.affinity_ttl.as_secs().into()),
-                );
+                data.insert("disable_check_in_enforcement".into(), Value::Bool(s.disable_check_in_enforcement));
+                data.insert("affinity_ttl".into(), Value::Number(s.affinity_ttl.as_secs().into()));
                 Ok(Some(Response::data_response(Some(data))))
             }
         }
     }
 
-    pub async fn handle_set_write(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_set_write(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let set = take_str(req, "set");
         if set.is_empty() {
             return Err(RvError::ErrString("set name is required".into()));
         }
         let raw = take_str(req, "service_account_names");
-        let names: Vec<String> = raw
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
+        let names: Vec<String> = raw.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
         let ttl = req.get_data("ttl").ok().and_then(|v| v.as_u64()).unwrap_or(3600);
         let max_ttl = req.get_data("max_ttl").ok().and_then(|v| v.as_u64()).unwrap_or(86400);
-        let affinity_ttl = req
-            .get_data("affinity_ttl")
-            .ok()
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
+        let affinity_ttl = req.get_data("affinity_ttl").ok().and_then(|v| v.as_u64()).unwrap_or(0);
         let s = LibrarySet {
             service_account_names: names,
             ttl: std::time::Duration::from_secs(ttl),
@@ -229,11 +186,7 @@ impl LdapBackendInner {
         Ok(None)
     }
 
-    pub async fn handle_set_delete(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_set_delete(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let set = take_str(req, "set");
         // Drop check-out + affinity records under the set first,
         // then the set itself. We deliberately scrub affinity here
@@ -255,27 +208,16 @@ impl LdapBackendInner {
         Ok(None)
     }
 
-    pub async fn handle_set_list(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_set_list(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let names = req.storage_list(LIBRARY_PREFIX).await?;
         // The storage layout has both `library/<set>` and
         // `library/<set>/checked-out/...`; filter the children so
         // the LIST returns only set names.
-        let names: Vec<String> = names
-            .into_iter()
-            .filter(|n| !n.contains('/'))
-            .collect();
+        let names: Vec<String> = names.into_iter().filter(|n| !n.contains('/')).collect();
         Ok(Some(Response::list_response(&names)))
     }
 
-    pub async fn handle_check_out(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_check_out(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let set_name = take_str(req, "set");
         let _gate = lock_for(&set_name).lock_owned().await;
 
@@ -285,12 +227,8 @@ impl LdapBackendInner {
             .ok_or_else(|| RvError::ErrString(format!("unknown library set `{set_name}`")))?;
 
         // Determine effective TTL.
-        let mut ttl = req
-            .get_data("ttl")
-            .ok()
-            .and_then(|v| v.as_u64())
-            .map(std::time::Duration::from_secs)
-            .unwrap_or(set.ttl);
+        let mut ttl =
+            req.get_data("ttl").ok().and_then(|v| v.as_u64()).map(std::time::Duration::from_secs).unwrap_or(set.ttl);
         if !set.max_ttl.is_zero() && ttl > set.max_ttl {
             ttl = set.max_ttl;
         }
@@ -304,10 +242,8 @@ impl LdapBackendInner {
         // account is in use" error.
         let prefix = format!("{LIBRARY_PREFIX}{set_name}/checked-out/");
         let in_flight = req.storage_list(&prefix).await.unwrap_or_default();
-        let in_flight_set: std::collections::BTreeSet<String> = in_flight
-            .into_iter()
-            .map(|n| n.trim_end_matches('/').to_string())
-            .collect();
+        let in_flight_set: std::collections::BTreeSet<String> =
+            in_flight.into_iter().map(|n| n.trim_end_matches('/').to_string()).collect();
 
         let entity = req.client_token.clone();
         let now_secs = unix_now();
@@ -319,12 +255,9 @@ impl LdapBackendInner {
 
         let chosen = match affinity_pick {
             Some(account)
-                if set.service_account_names.iter().any(|n| n == &account)
-                    && !in_flight_set.contains(&account) =>
+                if set.service_account_names.iter().any(|n| n == &account) && !in_flight_set.contains(&account) =>
             {
-                log::debug!(
-                    "openldap: check-out affinity hit on set `{set_name}`: account `{account}`"
-                );
+                log::debug!("openldap: check-out affinity hit on set `{set_name}`: account `{account}`");
                 account
             }
             _ => set
@@ -332,22 +265,16 @@ impl LdapBackendInner {
                 .iter()
                 .find(|n| !in_flight_set.contains(*n))
                 .ok_or_else(|| {
-                    RvError::ErrString(format!(
-                        "library `{set_name}` is exhausted; every account is checked out"
-                    ))
+                    RvError::ErrString(format!("library `{set_name}` is exhausted; every account is checked out"))
                 })?
                 .clone(),
         };
 
-        let cfg = self
-            .load_config(req)
-            .await?
-            .ok_or_else(|| RvError::ErrString("ldap engine not configured".into()))?;
+        let cfg =
+            self.load_config(req).await?.ok_or_else(|| RvError::ErrString("ldap engine not configured".into()))?;
 
         let new_password = super::password::generate(super::password::DEFAULT_LENGTH);
-        let mut ldap = client::bind(&cfg)
-            .await
-            .map_err(|e| RvError::ErrString(format!("check-out: bind: {e}")))?;
+        let mut ldap = client::bind(&cfg).await.map_err(|e| RvError::ErrString(format!("check-out: bind: {e}")))?;
         client::set_password(&mut ldap, &cfg, &chosen, &new_password)
             .await
             .map_err(|e| RvError::ErrString(format!("check-out: write: {e}")))?;
@@ -364,11 +291,7 @@ impl LdapBackendInner {
             expires_at_unix: now.saturating_add(ttl.as_secs()),
         };
         let bytes = serde_json::to_vec(&record)?;
-        req.storage_put(&StorageEntry {
-            key: format!("{prefix}{chosen}"),
-            value: bytes,
-        })
-        .await?;
+        req.storage_put(&StorageEntry { key: format!("{prefix}{chosen}"), value: bytes }).await?;
 
         let mut data = Map::new();
         data.insert("service_account_name".into(), Value::String(chosen));
@@ -384,13 +307,7 @@ impl LdapBackendInner {
     /// when the record exists and is fresh; on any read / parse error,
     /// or when the record is stale, returns `None` and silently drops
     /// the stale entry (lazy expiration).
-    pub async fn read_affinity(
-        &self,
-        req: &mut Request,
-        set: &str,
-        entity: &str,
-        now_secs: u64,
-    ) -> Option<String> {
+    pub async fn read_affinity(&self, req: &mut Request, set: &str, entity: &str, now_secs: u64) -> Option<String> {
         let key = affinity_key(set, entity);
         let entry = req.storage_get(&key).await.ok().flatten()?;
         let rec: AffinityRecord = serde_json::from_slice(&entry.value).ok()?;
@@ -420,18 +337,10 @@ impl LdapBackendInner {
             expires_at_unix: now.saturating_add(ttl.as_secs()),
         };
         let bytes = serde_json::to_vec(&rec)?;
-        req.storage_put(&StorageEntry {
-            key: affinity_key(set, entity),
-            value: bytes,
-        })
-        .await
+        req.storage_put(&StorageEntry { key: affinity_key(set, entity), value: bytes }).await
     }
 
-    pub async fn handle_check_in(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_check_in(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let set_name = take_str(req, "set");
         let account_in = take_str(req, "account");
         let _gate = lock_for(&set_name).lock_owned().await;
@@ -474,11 +383,7 @@ impl LdapBackendInner {
         let entry = req
             .storage_get(&key)
             .await?
-            .ok_or_else(|| {
-                RvError::ErrString(format!(
-                    "account `{to_release}` is not checked out in `{set_name}`"
-                ))
-            })?;
+            .ok_or_else(|| RvError::ErrString(format!("account `{to_release}` is not checked out in `{set_name}`")))?;
         let record: CheckOutRecord = serde_json::from_slice(&entry.value)?;
 
         if !set.disable_check_in_enforcement && record.checked_out_by != entity {
@@ -486,24 +391,17 @@ impl LdapBackendInner {
             use subtle::ConstantTimeEq;
             let owner = record.checked_out_by.as_bytes();
             let caller = entity.as_bytes();
-            let same = owner.len() == caller.len()
-                && bool::from(owner.ct_eq(caller));
+            let same = owner.len() == caller.len() && bool::from(owner.ct_eq(caller));
             if !same {
-                return Err(RvError::ErrString(
-                    "check-in refused: caller is not the owner of this check-out".into(),
-                ));
+                return Err(RvError::ErrString("check-in refused: caller is not the owner of this check-out".into()));
             }
         }
 
         // Rotate again to invalidate the password the caller still holds.
-        let cfg = self
-            .load_config(req)
-            .await?
-            .ok_or_else(|| RvError::ErrString("ldap engine not configured".into()))?;
+        let cfg =
+            self.load_config(req).await?.ok_or_else(|| RvError::ErrString("ldap engine not configured".into()))?;
         let new_password = super::password::generate(super::password::DEFAULT_LENGTH);
-        let mut ldap = client::bind(&cfg)
-            .await
-            .map_err(|e| RvError::ErrString(format!("check-in: bind: {e}")))?;
+        let mut ldap = client::bind(&cfg).await.map_err(|e| RvError::ErrString(format!("check-in: bind: {e}")))?;
         client::set_password(&mut ldap, &cfg, &to_release, &new_password)
             .await
             .map_err(|e| RvError::ErrString(format!("check-in: write: {e}")))?;
@@ -518,17 +416,12 @@ impl LdapBackendInner {
         // sees the same account again") is keyed on the caller of
         // the next check-out, which is also the caller here.
         if !set.affinity_ttl.is_zero() && !entity.is_empty() {
-            self.write_affinity(req, &set_name, &entity, &to_release, set.affinity_ttl)
-                .await?;
+            self.write_affinity(req, &set_name, &entity, &to_release, set.affinity_ttl).await?;
         }
         Ok(None)
     }
 
-    pub async fn handle_status(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_status(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let set_name = take_str(req, "set");
         let set = self
             .get_set(req, &set_name)
@@ -544,10 +437,7 @@ impl LdapBackendInner {
                 if let Ok(rec) = serde_json::from_slice::<CheckOutRecord>(&entry.value) {
                     let mut entry_data = Map::new();
                     entry_data.insert("lease_id".into(), Value::String(rec.lease_id));
-                    entry_data.insert(
-                        "expires_at_unix".into(),
-                        Value::Number(rec.expires_at_unix.into()),
-                    );
+                    entry_data.insert("expires_at_unix".into(), Value::Number(rec.expires_at_unix.into()));
                     checked_out.insert(rec.account, Value::Object(entry_data));
                 }
             }
@@ -567,17 +457,11 @@ impl LdapBackendInner {
 }
 
 fn take_str(req: &Request, key: &str) -> String {
-    req.get_data(key)
-        .ok()
-        .and_then(|v| v.as_str().map(|s| s.to_string()))
-        .unwrap_or_default()
+    req.get_data(key).ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default()
 }
 
 fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
 /// Storage key for the `(set, entity)` affinity record. We store
