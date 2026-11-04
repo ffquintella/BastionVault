@@ -348,7 +348,7 @@ widths today (of 41 packages `test-plan` considers): one engine → 5,
 
 ```bash
 cargo check -p bv-engine-pki          # front-end only, one crate
-cargo fmt -p bv-engine-pki
+cargo fmt -p bv-engine-pki            # mandatory; see "Formatting" in §7
 cargo clippy -p bv-engine-pki --lib   # never --all-features (see §5)
 cargo check --lib                     # root crate only; NOT --workspace
 ```
@@ -603,6 +603,31 @@ operational debuggability → performance.
   incident conditions. No broad catch-all error handling — bubble up errors with enough
   context for an operator. Comments only where they clarify non-obvious security or
   operational intent. Do not suppress a warning without a concrete stated reason.
+
+### Formatting
+
+The whole tree is `rustfmt`-clean on the pinned **stable** toolchain with the
+root `rustfmt.toml`, and must stay that way so diffs show only real changes.
+
+- Run `cargo fmt -p <pkg>` on every crate you touched before handing a change
+  off (the L1 step in §4). `cargo fmt --all` is fine too — it is cheap and does
+  not take the `target/` build lock.
+- Verify with `cargo fmt --all --check`; it must print no `Diff in` lines.
+  Ignore the `Warning: can't set …` lines: `rustfmt.toml` carries nightly-only
+  options (`group_imports`, `imports_granularity`, `format_strings`, …) that
+  stable skips on purpose. Never switch to nightly to "honor" them, and never
+  run `cargo +nightly fmt` — it would reflow the whole tree.
+- Never hand-format against rustfmt, add `#[rustfmt::skip]` or edit
+  `rustfmt.toml` to dodge a diff. A deliberate exception needs a one-line
+  reason in a comment.
+- Keep formatting out of functional commits: a change that reflows files it
+  does not otherwise touch is its own `style:` commit. Do not format
+  `plugins-ext/`, `IronRDP/` or `third_party/` (§6).
+- Files outside the workspace (`crates/bv-sql-classify/fuzz`,
+  `gui/wasm/rdp-replay`) are not reached by `cargo fmt`; run
+  `rustfmt --edition 2021 <file>` on them if you edit them.
+- GUI code is checked by `cd gui && npx tsc --noEmit`; it has no formatter
+  gate here, so match the surrounding style.
 
 ### Per-crate versioning
 
