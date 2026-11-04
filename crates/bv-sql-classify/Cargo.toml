@@ -1,6 +1,6 @@
 [package]
 name = "bv-sql-classify"
-version = "0.41.0"
+version = "0.41.1"
 edition = "2021"
 description = "Pure SQL statement classifier for BastionVault's SQL browser: maps each statement to the sql_* privileges it needs, or refuses it"
 license = "Apache-2.0"
