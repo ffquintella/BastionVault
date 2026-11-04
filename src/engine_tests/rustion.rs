@@ -239,6 +239,54 @@ mod connect_only_tests {
         );
     }
 
+    /// A secret holding a `private_key` (a key / "pass-key" account) is
+    /// brokered as `ssh-key`, like a password secret. A passphrase-protected
+    /// or non-OpenSSH key is refused with 422 — the envelope has no
+    /// passphrase channel, so it must never be forwarded or downgraded.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_session_open_v2_brokers_stored_ssh_key() {
+        use ssh_key::{rand_core::OsRng, Algorithm, LineEnding, PrivateKey};
+
+        let mut server = TestHttpServer::new("test_session_open_v2_ssh_key", true).await;
+        let root = server.root_token.clone();
+        server.token = root.clone();
+
+        let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+        let plain = key.to_openssh(LineEnding::LF).unwrap().to_string();
+        let encrypted = key.encrypt(&mut OsRng, "pw").unwrap().to_openssh(LineEnding::LF).unwrap().to_string();
+
+        for (id, body) in [
+            ("plain", serde_json::json!({ "private_key": plain, "username": "ops" })),
+            ("locked", serde_json::json!({ "private_key": encrypted, "username": "ops" })),
+            ("junk", serde_json::json!({ "private_key": "not a key", "username": "ops" })),
+        ] {
+            server.write(&format!("resources/secrets/box/{id}"), body.as_object().cloned(), Some(&root)).unwrap();
+        }
+
+        let open = |id: &str| {
+            server
+                .write(
+                    "rustion/v2/session/open",
+                    serde_json::json!({
+                        "resource_name": "box",
+                        "credential_source": { "kind": "secret", "secret_id": id },
+                        "target_host": "10.0.0.7",
+                        "target_port": 22,
+                        "target_protocol": "ssh"
+                    })
+                    .as_object()
+                    .cloned(),
+                    Some(&root),
+                )
+                .unwrap()
+                .0
+        };
+        let plain_status = open("plain");
+        assert!(plain_status == 502 || plain_status == 503, "stored key should reach dispatch, got {plain_status}");
+        assert_eq!(open("locked"), 422, "passphrase-protected key must be refused");
+        assert_eq!(open("junk"), 422, "non-OpenSSH key must be refused");
+    }
+
     /// v1 `session/open` had **no** per-resource gate: it authorized only the
     /// endpoint path, then brokered a session to a caller-named `target_host`
     /// with caller-supplied credential material. That is why it could not be

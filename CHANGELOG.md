@@ -297,6 +297,10 @@ EXAMPLE ENTRY:
 
 ### Fixed
 
+#### Rustion: key accounts
+
+- **Connect through Rustion with a stored SSH key, not only a password** -- `rustion/v2/session/open` with a `secret` credential source refused any secret without a `password` field (`HTTP 422: … only password-shaped credentials … can be brokered server-side today`), so a key-based account (for example a profile bound to a secret holding a `private_key`) could not Connect on a `rustion-required` resource. A secret holding an OpenSSH `private_key` (Ed25519 or ECDSA) is now sealed into the envelope as `ssh-key`, like the provider source already did; a passphrase-protected or non-OpenSSH key is still refused with a 422 that says why, since the envelope has no passphrase channel. (T103, S107)
+
 #### Admin audit: search before the row cap
 
 - **Find share grants and user changes on the Audit page when logins and accesses fill the newest rows** (T472, S110) -- Category, operation and the search box used to look only at the 500 newest rows already loaded, so a share or a user change could be pushed out of that window and the category was not even offered. The server now applies them before the row cap (`category`, `op` and `search` on `sys/audit/events`), and the page lists every category. FIDO2 credential and step-up changes are still not recorded.

@@ -2297,13 +2297,19 @@ impl RustionBackendInner {
                         .and_then(|v| v.as_str())
                         .ok_or_else(|| bv_error_response_status!(400, "credential_source.secret_id is required"))?
                         .to_string();
-                    let (material_b64, username) =
-                        self.resolve_secret_credential(&ns_prefix, &resource_name, &secret_id, &auth).await?;
+                    let requested_kind = req
+                        .get_data("credential_kind")
+                        .ok()
+                        .and_then(|v| v.as_str().map(|s| s.trim().to_string()))
+                        .unwrap_or_default();
+                    let (material_b64, username, resolved_kind) = self
+                        .resolve_secret_credential(&ns_prefix, &resource_name, &secret_id, &requested_kind, &auth)
+                        .await?;
                     let data = req.data.get_or_insert_with(Map::new);
                     data.insert("credential_material".into(), Value::String(material_b64));
-                    if data.get("credential_kind").and_then(|v| v.as_str()).unwrap_or_default().is_empty() {
-                        data.insert("credential_kind".into(), Value::String("ssh-password".into()));
-                    }
+                    // The kind follows what the secret actually holds: a stored private key
+                    // travels as `ssh-key`, not as a password the bastion would fail to use.
+                    data.insert("credential_kind".into(), Value::String(resolved_kind.into()));
                     if let Some(u) = username {
                         if data.get("credential_username").and_then(|v| v.as_str()).unwrap_or_default().is_empty() {
                             data.insert("credential_username".into(), Value::String(u));
@@ -2408,30 +2414,26 @@ impl RustionBackendInner {
         opened
     }
 
-    /// Resolve a resource-stored secret to base64-encoded password
-    /// credential material (`ssh-password` or `rdp-password`, selected by
-    /// the caller's `credential_kind`), using BastionVault's own authority —
-    /// NOT the caller's `read` capability. The caller's `connect` grant must
-    /// already have been verified. `ns_prefix` is the caller's namespace
-    /// prefix ([`Self::namespace_sub_request_prefix`]).
+    /// Resolve a resource-stored secret to base64-encoded credential material,
+    /// using BastionVault's own authority — NOT the caller's `read` capability.
+    /// The caller's `connect` grant must already have been verified.
     ///
-    /// The read itself is the shared server-side resolver
-    /// ([`kernel_api::ssh_credentials::resolve_secret_credential`]), which MCP
-    /// agent sessions use too; this path seals a password for the bastion and
-    /// still refuses a stored key, which the bastion envelope cannot carry.
+    /// Returns `(material_b64, username, envelope_kind)`. A secret holding a
+    /// `password` yields `ssh-password` / `rdp-password` (per `requested_kind`);
+    /// one holding only a `private_key` yields `ssh-key` (OpenSSH, SSH only).
+    /// A passphrase-protected or non-OpenSSH key is refused (422): the envelope
+    /// has no passphrase channel, so it is never forwarded or downgraded.
     async fn resolve_secret_credential(
         &self,
         ns_prefix: &str,
         resource_name: &str,
         secret_id: &str,
+        requested_kind: &str,
         auth: &crate::logical::Auth,
-    ) -> Result<(String, Option<String>), RvError> {
+    ) -> Result<(String, Option<String>, &'static str), RvError> {
         use base64::{engine::general_purpose::STANDARD, Engine as _};
 
-        // The resolver writes the security-log line, attributed to the
-        // connecting operator, so "who pulled a credential to broker a
-        // connect-only session" lands in security.log (the router-direct read
-        // has no caller identity of its own).
+        // The resolver writes the security-log line, attributed to the connecting operator.
         let actor = auth.metadata.get("username").map(String::as_str).unwrap_or("");
         let resolved = kernel_api::ssh_credentials::resolve_secret_credential(
             self.core.as_ref(),
@@ -2441,16 +2443,47 @@ impl RustionBackendInner {
             &kernel_api::ssh_credentials::SecretResolution { audit_label: "rustion-connect-resolve", actor },
         )
         .await?;
-        let password = resolved.password.as_ref().ok_or_else(|| {
+
+        let is_rdp = requested_kind.starts_with("rdp");
+        let want_key = requested_kind == "ssh-key" || (resolved.password.is_none() && !is_rdp);
+
+        if !want_key {
+            let password = resolved.password.as_ref().ok_or_else(|| {
+                bv_error_response_status!(
+                    422,
+                    &format!("secret `{secret_id}` carries no `password` field; RDP can only be brokered with a password")
+                )
+            })?;
+            let kind = if is_rdp { "rdp-password" } else { "ssh-password" };
+            return Ok((STANDARD.encode(password.as_bytes()), resolved.username.clone(), kind));
+        }
+
+        let key = resolved.private_key.as_ref().ok_or_else(|| {
+            bv_error_response_status!(
+                422,
+                &format!("secret `{secret_id}` carries neither a `password` nor a `private_key` field")
+            )
+        })?;
+        let parsed = ssh_key::PrivateKey::from_openssh(key.as_bytes()).map_err(|_| {
             bv_error_response_status!(
                 422,
                 &format!(
-                    "secret `{secret_id}` carries no `password` field — only password-shaped \
-                     credentials (ssh-password / rdp-password) can be brokered server-side today"
+                    "secret `{secret_id}` holds a `private_key` that is not a supported OpenSSH private key \
+                     (Ed25519 or ECDSA, OpenSSH format); only those can be brokered through a bastion"
                 )
             )
         })?;
-        Ok((STANDARD.encode(password.as_bytes()), resolved.username.clone()))
+        if parsed.is_encrypted() || resolved.passphrase.is_some() {
+            return Err(bv_error_response_status!(
+                422,
+                &format!(
+                    "secret `{secret_id}` holds a passphrase-protected private key, which cannot be brokered \
+                     through a bastion (the envelope has no passphrase channel); store an unencrypted key"
+                )
+            ));
+        }
+        drop(parsed);
+        Ok((STANDARD.encode(key.as_bytes()), resolved.username.clone(), "ssh-key"))
     }
 
     /// Mint a brokered SSH certificate for the Rustion path through the
