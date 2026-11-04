@@ -78,7 +78,8 @@ record of that decision and of what replaces the old guarantee. Plainly:
   - default-off switches;
   - explicit grants on both the MCP side and the resource side;
   - **a human confirming every call**, which is the compensating control and
-    is permanent;
+    is permanent (the desktop app's operator may, per call, time-box it to one
+    resource for 10 minutes; see §9 and T473);
   - a destination allow-list on the vault's own egress;
   - caps;
   - an audit trail with transcripts.
@@ -129,9 +130,10 @@ record of that decision and of what replaces the old guarantee. Plainly:
 
   The existing `connect` gate runs on top of all six.
 - **Unattended sessions.** Every call is confirmed by the operator, through the
-  desktop app's dialog or the CLI's controlling terminal. With no operator
-  reachable, the call is refused (`crates/bv-mcp/src/local/server.rs:508-514`).
-  This is permanent (§9).
+  desktop app's dialog or the CLI's controlling terminal, except calls to a
+  resource the operator allowed in that dialog for the last 10 minutes (T473).
+  With no operator reachable, the call is refused
+  (`crates/bv-mcp/src/local/server.rs:508-514`). This is permanent (§9).
 - **Bypassing a bastion.** A profile whose effective transport is
   `rustion-required` is refused, not silently dialed direct (§5.6).
 - **Bypassing MFA.**
@@ -429,7 +431,7 @@ this design reuses or must work around:
 | Identity for the connect gate | The MCP token stays entity-less; only policy grants pass `may_connect_target` | Stamping `entity_id` onto MCP tokens. That makes every share and ownership a session grant for agents |
 | Reveal + connect on one binding | **Allowed.** Decided 2026-10-14 by the owner. Such a grant holds the full lethal trifecta; per-call confirmation is the compensating control, and the pairing dialog warns (§9) | Mutual exclusion, proposed in the first draft and declined by the owner |
 | Network-mode apps | **Never.** Decided 2026-10-14 by the owner. Permanent, not a v1 limit: an app binding has no human to confirm or to complete MFA, and per-call confirmation is an invariant. `sys/mcp/apps` refuses open-world tools in `tool_allowlist`; the dispatcher refuses an `App` binding regardless | A separately gated app mode |
-| Confirmation | **Mandatory per call, permanently.** Decided 2026-10-14 by the owner (§9) | Optional confirmation, or exact-match command allow-lists that skip it |
+| Confirmation | **Mandatory per call, permanently.** Decided 2026-10-14 by the owner (§9). **Amended 2026-11-04 (T473):** the desktop app's dialog gains *Allow this server for 10 min*, an operator's own, in-memory, fixed-length allowance for one client + namespace + resource + protocol. It is never offered on an MFA-gated profile, is forgotten when the server stops or the app closes, and the CLI terminal prompt has none | Optional confirmation, or exact-match command allow-lists that skip it |
 | MFA-gated profiles | **In scope.** Decided 2026-10-14 by the owner. The operator completes the step-up in the confirmation dialog, and the ticket is bound to that one call (§3.1) | Refusing gated profiles, as the first draft proposed |
 | Non-userpass operators on MFA-gated profiles | **Refused.** The operator must be a userpass user (§3.1) | Extending step-up to OIDC/SAML/cert/LDAP principals inside this feature |
 | SSH credential | Certificate **preferred**; `secret` passwords and stored keys **allowed**, used server-side only. Decided 2026-10-14 by the owner (§5.2) | Certificate-only, as the first draft proposed |

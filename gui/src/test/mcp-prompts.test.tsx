@@ -373,6 +373,23 @@ describe("McpPromptHost", () => {
     });
   });
 
+  it("offers to allow a server for 10 minutes, and never on an MFA-gated profile", async () => {
+    const user = userEvent.setup();
+    await mount();
+    send(SESSION_PROMPT);
+    await screen.findByText("Run a command on web-01?");
+    await user.click(screen.getByRole("button", { name: /allow this server for 10 min/i }));
+    await waitFor(() => expect(calls("mcp_prompt_answer")).toHaveLength(1));
+    expect(calls("mcp_prompt_answer")[0][1]).toEqual({
+      id: "mcp-prompt-7",
+      answer: { kind: "confirm", allow: true, remember: true },
+    });
+
+    send({ ...SESSION_PROMPT, id: "mcp-prompt-11", mfa: { methods: ["totp"] } });
+    await screen.findByText("Run a command on web-01?");
+    expect(screen.queryByRole("button", { name: /allow this server/i })).not.toBeInTheDocument();
+  });
+
   it("reports a refused factor: the call is denied and the dialog closes", async () => {
     const user = userEvent.setup();
     answer = () => Promise.reject({ message: "MFA was not accepted, so the call was refused: invalid TOTP code" });

@@ -19,7 +19,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc, Arc, Mutex, MutexGuard,
 };
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bv_mcp::{
     catalogue,
@@ -37,6 +37,8 @@ use zeroize::Zeroizing;
 pub const PAIRING_TIMEOUT: Duration = Duration::from_secs(180);
 /// How long a per-call confirmation stays open before the call is refused.
 pub const CONFIRM_TIMEOUT: Duration = Duration::from_secs(90);
+/// How long "allow this server" lasts. Fixed here, not chosen by the window.
+pub const SESSION_ALLOW_TTL: Duration = Duration::from_secs(10 * 60);
 /// The second factors this host can collect for a session call: a TOTP code
 /// typed in the dialog, and the native security-key assertion.
 pub const MFA_METHODS: &[&str] = &["totp", "fido2"];
@@ -195,6 +197,11 @@ pub enum McpPromptAnswer {
         allow: bool,
         #[serde(default)]
         mfa: Option<McpMfaInput>,
+        /// "Allow every call to this server for [`SESSION_ALLOW_TTL`]":
+        /// honoured only for an approval of a session call whose profile is
+        /// not MFA-gated. The window cannot choose the duration.
+        #[serde(default)]
+        remember: bool,
     },
 }
 
@@ -210,6 +217,8 @@ pub struct MfaReply {
 pub struct ConfirmReply {
     pub allow: bool,
     pub mfa: Option<MfaReply>,
+    /// See [`McpPromptAnswer::Confirm::remember`].
+    pub remember: bool,
 }
 
 #[derive(Debug)]
@@ -245,10 +254,12 @@ pub fn reply_for(answer: McpPromptAnswer) -> Result<PromptReply, String> {
             })?;
             Ok(PromptReply::Pairing(PairingDecision::Approved(grant)))
         }
-        McpPromptAnswer::Confirm { allow: true, mfa: Some(_) } => {
+        McpPromptAnswer::Confirm { allow: true, mfa: Some(_), .. } => {
             Err("an answer with a second factor is completed by the host".to_string())
         }
-        McpPromptAnswer::Confirm { allow, .. } => Ok(PromptReply::Confirm(ConfirmReply { allow, mfa: None })),
+        McpPromptAnswer::Confirm { allow, remember, .. } => {
+            Ok(PromptReply::Confirm(ConfirmReply { allow, mfa: None, remember }))
+        }
     }
 }
 
@@ -287,6 +298,20 @@ pub struct PromptBroker {
     one_at_a_time: Mutex<()>,
     pending: Mutex<Option<Pending>>,
     next_id: AtomicU64,
+    /// Operator-granted, time-boxed "allow this server" entries. In memory
+    /// only: they die with the app, and with [`Self::close`].
+    allowances: Mutex<Vec<(AllowKey, Instant)>>,
+}
+
+/// What an allowance covers: one client, in one namespace, calling one
+/// resource over one protocol. Another client, resource or protocol still
+/// prompts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AllowKey {
+    client: String,
+    namespace: Option<String>,
+    resource: String,
+    protocol: String,
 }
 
 impl PromptBroker {
@@ -303,6 +328,7 @@ impl PromptBroker {
     /// whose connection then gets `None` (a refusal) at once.
     pub fn close(&self) -> Option<String> {
         self.accepting.store(false, Ordering::SeqCst);
+        lock(&self.allowances).clear();
         lock(&self.pending).take().map(|p| p.prompt.id().to_string())
     }
 
@@ -342,6 +368,21 @@ impl PromptBroker {
         // is gone either way.
         let _ = current.reply.send(reply);
         Ok(())
+    }
+
+    /// Whether the operator allowed this client's calls to this resource and
+    /// the allowance has not run out. Expired entries are dropped.
+    fn allowed(&self, key: &AllowKey) -> bool {
+        let now = Instant::now();
+        let mut allowances = lock(&self.allowances);
+        allowances.retain(|(_, until)| *until > now);
+        self.accepting.load(Ordering::SeqCst) && allowances.iter().any(|(k, _)| k == key)
+    }
+
+    fn allow(&self, key: AllowKey, ttl: Duration) {
+        let mut allowances = lock(&self.allowances);
+        allowances.retain(|(k, _)| *k != key);
+        allowances.push((key, Instant::now() + ttl));
     }
 
     fn new_id(&self) -> String {
@@ -423,6 +464,16 @@ impl Prompter for GuiPrompter {
     }
 
     fn confirm(&self, request: &ConfirmRequest<'_>) -> Option<bool> {
+        // An MFA-gated profile always asks: a factor is never remembered.
+        let allow_key = request.session.filter(|_| request.mfa.is_none()).map(|call| AllowKey {
+            client: request.client_name.to_string(),
+            namespace: request.namespace.map(str::to_string),
+            resource: call.resource.clone(),
+            protocol: call.protocol.to_string(),
+        });
+        if allow_key.as_ref().is_some_and(|key| self.broker.allowed(key)) {
+            return Some(true);
+        }
         let session = request.session.map(|call| SessionPrompt {
             resource: escape_for_display(&call.resource),
             profile: escape_for_display(&call.profile),
@@ -467,7 +518,12 @@ impl Prompter for GuiPrompter {
             }
             // Gated, and no factor: not an approval.
             (true, None, Some(_)) => Some(false),
-            (true, None, None) => Some(true),
+            (true, None, None) => {
+                if let (true, Some(key)) = (reply.remember, allow_key) {
+                    self.broker.allow(key, SESSION_ALLOW_TTL);
+                }
+                Some(true)
+            }
             (true, Some(mfa), None) => {
                 let _ = mfa.done.send(Err("this call did not ask for MFA".to_string()));
                 Some(false)
@@ -728,10 +784,11 @@ mod tests {
             mfa: None,
             namespace: Some(""),
         };
-        let answering = answer_when_shown(broker.clone(), McpPromptAnswer::Confirm { allow: false, mfa: None });
+        let answering =
+            answer_when_shown(broker.clone(), McpPromptAnswer::Confirm { allow: false, mfa: None, remember: false });
         assert_eq!(p.confirm(&call), Some(false));
         answering.join().unwrap();
-        let answering = answer_when_shown(broker, McpPromptAnswer::Confirm { allow: true, mfa: None });
+        let answering = answer_when_shown(broker, McpPromptAnswer::Confirm { allow: true, mfa: None, remember: false });
         assert_eq!(p.confirm(&call), Some(true));
         answering.join().unwrap();
 
@@ -747,7 +804,7 @@ mod tests {
     fn answers_must_name_the_waiting_prompt_and_match_its_kind() {
         let sink = Arc::new(FakeSink::default());
         let (broker, p) = prompter(&sink);
-        let yes = || PromptReply::Confirm(ConfirmReply { allow: true, mfa: None });
+        let yes = || PromptReply::Confirm(ConfirmReply { allow: true, mfa: None, remember: false });
         assert!(broker.answer("mcp-prompt-0", yes()).is_err(), "nothing is waiting");
 
         let waiting = {
@@ -798,7 +855,10 @@ mod tests {
         assert!(matches!(reply_for(answer), Ok(PromptReply::Pairing(PairingDecision::Approved(_)))));
         let answer: McpPromptAnswer =
             serde_json::from_value(serde_json::json!({ "kind": "confirm", "allow": true })).unwrap();
-        assert!(matches!(reply_for(answer), Ok(PromptReply::Confirm(ConfirmReply { allow: true, mfa: None }))));
+        assert!(matches!(
+            reply_for(answer),
+            Ok(PromptReply::Confirm(ConfirmReply { allow: true, mfa: None, remember: false }))
+        ));
         let prompt = McpPrompt::Confirm(ConfirmPrompt {
             id: "x".into(),
             client_name: "c".into(),
@@ -861,8 +921,11 @@ mod tests {
                 if let Some(p) = broker.pending() {
                     let (done, result) = mpsc::channel();
                     let factor = totp_factor(Some(code)).unwrap();
-                    let reply =
-                        PromptReply::Confirm(ConfirmReply { allow: true, mfa: Some(MfaReply { factor, done }) });
+                    let reply = PromptReply::Confirm(ConfirmReply {
+                        allow: true,
+                        mfa: Some(MfaReply { factor, done }),
+                        remember: false,
+                    });
                     broker.answer(p.id(), reply).unwrap();
                     return result.recv_timeout(Duration::from_secs(5)).unwrap();
                 }
@@ -923,7 +986,12 @@ mod tests {
         let answering = std::thread::spawn(move || {
             for _ in 0..500 {
                 if let Some(pending) = broker.pending() {
-                    broker.answer(pending.id(), PromptReply::Confirm(ConfirmReply { allow: true, mfa: None })).unwrap();
+                    broker
+                        .answer(
+                            pending.id(),
+                            PromptReply::Confirm(ConfirmReply { allow: true, mfa: None, remember: false }),
+                        )
+                        .unwrap();
                     return;
                 }
                 std::thread::sleep(Duration::from_millis(5));
@@ -940,6 +1008,83 @@ mod tests {
             ("web", "grafana", Some("HEAD"), Some("/api?x=1"))
         );
         assert_eq!((session.command.as_str(), session.path_bytes), ("", Some(8)));
+    }
+
+    /// "Allow this server for 10 minutes": the next call to the same resource
+    /// is approved without a dialog; another resource, another client, an
+    /// MFA-gated profile, an expired entry and a closed broker all prompt.
+    #[test]
+    fn an_allowance_skips_the_dialog_for_that_server_only() {
+        let sink = Arc::new(FakeSink::default());
+        let (broker, p) = prompter(&sink);
+        let call = session_call("uptime");
+        let detail = bv_mcp::local::render_session_detail(&call);
+
+        let answering =
+            answer_when_shown(broker.clone(), McpPromptAnswer::Confirm { allow: true, mfa: None, remember: true });
+        assert_eq!(p.confirm(&session_request(&call, &detail, None)), Some(true));
+        answering.join().unwrap();
+        assert_eq!(lock(&sink.shown).len(), 1);
+
+        // Same client, namespace and resource: no second dialog.
+        assert_eq!(p.confirm(&session_request(&call, &detail, None)), Some(true));
+        assert_eq!(lock(&sink.shown).len(), 1, "an allowed server is not asked again");
+
+        // A different client is not covered: it is asked, and a denial denies.
+        let answering =
+            answer_when_shown(broker.clone(), McpPromptAnswer::Confirm { allow: false, mfa: None, remember: false });
+        let mut other = session_request(&call, &detail, None);
+        other.client_name = "another-assistant";
+        assert_eq!(p.confirm(&other), Some(false));
+        answering.join().unwrap();
+        assert_eq!(lock(&sink.shown).len(), 2);
+
+        // An MFA-gated profile always asks, allowance or not.
+        let challenge = bv_mcp::local::MfaChallenge { methods: vec!["totp".into()], fido2: None };
+        let verify = |_: MfaFactor| -> Result<(), String> { Ok(()) };
+        let step = bv_mcp::local::MfaStep { challenge: &challenge, verify: &verify };
+        let answering = answer_with_factor(broker.clone(), "123456");
+        assert_eq!(p.confirm(&session_request(&call, &detail, Some(step))), Some(true));
+        assert_eq!(answering.join().unwrap(), Ok(()));
+        assert_eq!(lock(&sink.shown).len(), 3, "a factor is never remembered");
+
+        // The entry runs out.
+        lock(&broker.allowances).iter_mut().for_each(|(_, until)| *until = Instant::now());
+        let answering =
+            answer_when_shown(broker.clone(), McpPromptAnswer::Confirm { allow: false, mfa: None, remember: false });
+        assert_eq!(p.confirm(&session_request(&call, &detail, None)), Some(false));
+        answering.join().unwrap();
+        assert_eq!(lock(&sink.shown).len(), 4, "an expired allowance asks again");
+    }
+
+    /// Stopping the server forgets every allowance.
+    #[test]
+    fn closing_the_broker_forgets_allowances() {
+        let sink = Arc::new(FakeSink::default());
+        let (broker, p) = prompter(&sink);
+        let call = session_call("uptime");
+        let detail = bv_mcp::local::render_session_detail(&call);
+        let answering =
+            answer_when_shown(broker.clone(), McpPromptAnswer::Confirm { allow: true, mfa: None, remember: true });
+        assert_eq!(p.confirm(&session_request(&call, &detail, None)), Some(true));
+        answering.join().unwrap();
+        broker.close();
+        broker.open();
+        assert!(lock(&broker.allowances).is_empty());
+    }
+
+    /// `remember` rides only an approval; a denial remembers nothing.
+    #[test]
+    fn a_denial_never_creates_an_allowance() {
+        let sink = Arc::new(FakeSink::default());
+        let (broker, p) = prompter(&sink);
+        let call = session_call("uptime");
+        let detail = bv_mcp::local::render_session_detail(&call);
+        let answering =
+            answer_when_shown(broker.clone(), McpPromptAnswer::Confirm { allow: false, mfa: None, remember: true });
+        assert_eq!(p.confirm(&session_request(&call, &detail, None)), Some(false));
+        answering.join().unwrap();
+        assert!(lock(&broker.allowances).is_empty());
     }
 
     /// A factor the vault refuses denies the call, and the dialog is told
@@ -963,12 +1108,13 @@ mod tests {
         assert_eq!(p.confirm(&session_request(&call, &detail, Some(step()))), Some(false));
         assert_eq!(answering.join().unwrap(), Err("invalid TOTP code".to_string()));
 
-        let answering = answer_when_shown(broker.clone(), McpPromptAnswer::Confirm { allow: true, mfa: None });
+        let answering =
+            answer_when_shown(broker.clone(), McpPromptAnswer::Confirm { allow: true, mfa: None, remember: false });
         assert_eq!(p.confirm(&session_request(&call, &detail, Some(step()))), Some(false));
         answering.join().unwrap();
 
         // Ungated: a plain yes is a yes.
-        let answering = answer_when_shown(broker, McpPromptAnswer::Confirm { allow: true, mfa: None });
+        let answering = answer_when_shown(broker, McpPromptAnswer::Confirm { allow: true, mfa: None, remember: false });
         assert_eq!(p.confirm(&session_request(&call, &detail, None)), Some(true));
         answering.join().unwrap();
         assert_eq!(p.mfa_methods(), &["totp", "fido2"]);

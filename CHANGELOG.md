@@ -62,6 +62,11 @@ EXAMPLE ENTRY:
 
 - **Open the SQL browser from a database's card, and mark a default SQL profile** (T125, S109) -- A database card on the Resources page gains an **Open** button in the Database icon's colour, the way SSH and RDP cards have **Connect**: it opens the SQL browser with the resource's default SQL profile, or with the only one, or lets the plugin pick the smallest that covers your grant, and takes you to the Connection tab when the database has no SQL profile yet. The SQL profile list gains a **DEFAULT** badge and a **Set default** action, with one default across the whole profile list as for the other protocols.
 
+#### MCP brokered sessions: allow a server for 10 minutes
+
+- **Stop approving every command to a server you are already working on** (T473, S111)
+  -- The desktop app's *Run a command on …* and *Fetch a page from …* dialogs gain **Allow this server for 10 min**. It approves the call and skips the dialog for that assistant's later calls to the same resource and protocol, in the same namespace, for ten minutes. The allowance lives in memory only: it ends when the assistant server stops or the app closes, is never offered on a profile that requires MFA (a factor is always collected), and the duration cannot be set by the window. Other servers, other assistants and `bvault mcp serve` still ask every time.
+
 #### MCP brokered sessions: opt-in controls in the GUI
 
 - **Turn on assistant sessions for a resource type and a connection profile from the GUI** (T136, S111)

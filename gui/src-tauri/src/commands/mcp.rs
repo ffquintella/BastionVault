@@ -470,7 +470,7 @@ pub async fn mcp_prompt_answer(
     main_window_only(&webview)?;
     let broker = state.mcp_host.prompts();
     let mfa = match answer {
-        McpPromptAnswer::Confirm { allow: true, mfa: Some(mfa) } => mfa,
+        McpPromptAnswer::Confirm { allow: true, mfa: Some(mfa), .. } => mfa,
         other => {
             broker.answer(&id, reply_for(other)?)?;
             return Ok(());
@@ -488,7 +488,10 @@ pub async fn mcp_prompt_answer(
         other => return Err(format!("`{other}` is not a factor this app can collect").into()),
     };
     let (done, verified) = std::sync::mpsc::channel();
-    broker.answer(&id, PromptReply::Confirm(ConfirmReply { allow: true, mfa: Some(MfaReply { factor, done }) }))?;
+    broker.answer(
+        &id,
+        PromptReply::Confirm(ConfirmReply { allow: true, mfa: Some(MfaReply { factor, done }), remember: false }),
+    )?;
     let outcome = tauri::async_runtime::spawn_blocking(move || verified.recv_timeout(MFA_VERIFY_WAIT)).await;
     match outcome {
         Ok(Ok(Ok(()))) => Ok(()),

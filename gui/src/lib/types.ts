@@ -2558,7 +2558,13 @@ export type McpMfaAnswer = { method: "totp"; code: string } | { method: "fido2" 
 
 export type McpPromptAnswer =
   | { kind: "pairing"; approved: boolean; grant?: McpGrantInput }
-  | { kind: "confirm"; allow: boolean; mfa?: McpMfaAnswer };
+  | {
+      kind: "confirm";
+      allow: boolean;
+      mfa?: McpMfaAnswer;
+      /** Approve and skip the dialog for this server for 10 minutes. Ignored on an MFA-gated profile. */
+      remember?: boolean;
+    };
 
 /** A client the operator approved on this workstation. Carries no secret. */
 export interface McpPairing {

@@ -100,8 +100,13 @@ protect against, is in
 
 **You approve every call.** The desktop app or `bvault mcp serve` shows each
 session call before anything is dialed — resource, profile, protocol and the
-exact command — and it runs only if you allow it. There is no setting, grant
-or "allow for a while" that skips this. See
+exact command — and it runs only if you allow it. There is no setting or grant
+that skips this. The one exception is yours to make, one server at a time: the
+desktop app's dialog has **Allow this server for 10 min**, which approves that
+call and every later call from the same assistant to the same resource for ten
+minutes, without showing the dialog. It is held in memory only (stopping the
+assistant server or closing the app ends it), is never offered on a profile
+that requires MFA, and `bvault mcp serve` has no equivalent. See
 [Approving session calls](#approving-session-calls).
 
 **What turns it on.** All of these, and a binary built with the

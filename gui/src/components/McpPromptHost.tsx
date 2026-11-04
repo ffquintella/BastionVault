@@ -520,7 +520,7 @@ function McpSessionConfirmModal({
   const hasTotp = methods.includes("totp");
   const hasKey = methods.includes("fido2");
   const [code, setCode] = useState("");
-  const [busy, setBusy] = useState<null | "deny" | "allow" | "key">(null);
+  const [busy, setBusy] = useState<null | "deny" | "allow" | "remember" | "key">(null);
   const [error, setError] = useState<string | null>(null);
   const [keyStatus, setKeyStatus] = useState<string | null>(null);
   const [pinOpen, setPinOpen] = useState(false);
@@ -545,11 +545,14 @@ function McpSessionConfirmModal({
     };
   }, [hasKey]);
 
-  async function send(allow: boolean, mfa?: McpMfaAnswer) {
-    setBusy(!allow ? "deny" : mfa?.method === "fido2" ? "key" : "allow");
+  async function send(allow: boolean, mfa?: McpMfaAnswer, remember = false) {
+    setBusy(!allow ? "deny" : mfa?.method === "fido2" ? "key" : remember ? "remember" : "allow");
     setError(null);
     try {
-      await api.mcpPromptAnswer(prompt.id, mfa ? { kind: "confirm", allow, mfa } : { kind: "confirm", allow });
+      await api.mcpPromptAnswer(
+        prompt.id,
+        mfa ? { kind: "confirm", allow, mfa } : remember ? { kind: "confirm", allow, remember } : { kind: "confirm", allow },
+      );
       onDone();
     } catch (e) {
       const message = extractError(e);
@@ -596,7 +599,18 @@ function McpSessionConfirmModal({
             Deny
           </Button>
           {!needsMfa && (
-            <Button variant="danger" onClick={() => void send(true)} loading={busy === "allow"}>
+            <Button
+              variant="ghost"
+              onClick={() => void send(true, undefined, true)}
+              loading={busy === "remember"}
+              disabled={busy !== null}
+              title={`Approve this call, and every later call from ${prompt.client_name} to ${session.resource}, for 10 minutes. Closing the server or the app ends it.`}
+            >
+              Allow this server for 10 min
+            </Button>
+          )}
+          {!needsMfa && (
+            <Button variant="danger" onClick={() => void send(true)} loading={busy === "allow"} disabled={busy !== null}>
               {web ? "Fetch once" : "Run once"}
             </Button>
           )}
