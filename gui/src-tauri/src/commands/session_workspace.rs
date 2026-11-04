@@ -75,7 +75,7 @@ pub async fn session_list_open(state: State<'_, AppState>, webview: Webview) -> 
         .lock()
         .await
         .iter()
-        .filter(|(_, s)| matches!(s, SessionState::Ssh(_) | SessionState::Rdp(_)))
+        .filter(|(_, s)| renders_in_workspace(s))
         .map(|(t, _)| t.clone())
         .collect();
     let listing = state.session_attachments.lock().await.list();
@@ -761,11 +761,38 @@ fn window_state(app: &AppHandle, label: &str, policy: ReapPolicy) -> WindowState
     }
 }
 
+/// Whether the Session Workspace can render this registry entry as a pane:
+/// the kinds `PaneKind` knows (ssh, rdp, sql). A kind left out here is
+/// opened and registered but never listed, so its window stays empty.
+fn renders_in_workspace(state: &SessionState) -> bool {
+    matches!(state, SessionState::Ssh(_) | SessionState::Rdp(_) | SessionState::Sql(_))
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
 
+    use super::renders_in_workspace;
+    use crate::session::sql::SqlSessionState;
     use crate::session::workspace::WORKSPACE_WINDOW_LABEL;
+    use crate::session::SessionState;
+
+    /// A SQL session opened into the workspace was dropped from the live
+    /// list (only SSH and RDP passed), so the window opened with no pane.
+    #[test]
+    fn a_sql_session_is_listed_for_the_workspace() {
+        let sql = SqlSessionState {
+            mount: "dbms/".into(),
+            session_id: "s".into(),
+            namespace: None,
+            resource: "db".into(),
+            catalog: "app".into(),
+            opened_on: "2026-11-04".into(),
+            profile: "ro".into(),
+            shared: Default::default(),
+        };
+        assert!(renders_in_workspace(&SessionState::Sql(sql)));
+    }
 
     fn capability_windows(file: &str) -> Vec<String> {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("capabilities").join(file);
