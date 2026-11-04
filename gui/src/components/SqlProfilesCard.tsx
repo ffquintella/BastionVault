@@ -110,10 +110,10 @@ export function SqlProfilesCard({
   }, [name]);
 
   /** Write the record with `connection_profiles` rebuilt around `nextUnknown`. */
-  async function persist(nextUnknown: unknown[], ok: string) {
+  async function persist(nextUnknown: unknown[], ok: string, nextKnown = known) {
     setBusy(true);
     try {
-      const toWrite = profilesForWrite(known, nextUnknown);
+      const toWrite = profilesForWrite(nextKnown, nextUnknown);
       await api.writeResource(name, { ...meta, connection_profiles: toWrite } as unknown as ResourceMetadata);
       toast("success", ok);
       onUpdated();
@@ -126,12 +126,24 @@ export function SqlProfilesCard({
     }
   }
 
+  const isFlagged = (p: unknown) => typeof p === "object" && p !== null && (p as { is_default?: unknown }).is_default === true;
   const sameId = (p: unknown, id: string) => isSqlProfileEntry(p) && (p as Record<string, unknown>)["id"] === id;
 
   async function saveProfile(form: SqlProfileForm, isNew: boolean) {
     const written = serializeSqlProfile(form);
     const next = isNew ? [...unknown, written] : unknown.map((p) => (sameId(p, form.id) ? written : p));
     if (await persist(next, "SQL profile saved")) setEditing(null);
+  }
+
+  // One default across the whole stored list, as for SSH and RDP: flag this
+  // SQL profile and clear every other flag, known profiles included.
+  async function setDefaultProfile(form: SqlProfileForm) {
+    const next = unknown.map((p) => {
+      if (!isSqlProfileEntry(p)) return isFlagged(p) ? { ...(p as Record<string, unknown>), is_default: false } : p;
+      const { is_default: _drop, ...rest } = p as Record<string, unknown>;
+      return sameId(p, form.id) ? { ...rest, is_default: true } : rest;
+    });
+    await persist(next, "Default SQL profile set", known.map((p) => ({ ...p, is_default: false })));
   }
 
   async function deleteProfile(form: SqlProfileForm) {
@@ -311,9 +323,16 @@ export function SqlProfilesCard({
               disabled={readOnly || !engine}
               onEdit={(form, problems) => setEditing({ form, isNew: false, problems })}
               onDelete={(form) => setDeleting(form)}
+              onSetDefault={(form) => void setDefaultProfile(form)}
               onOpen={
                 onOpenSql && engine && gate.offered
-                  ? (form) => onOpenSql({ id: form.id, name: form.name || form.id, requireMfa: form.requireMfa })
+                  ? (form) =>
+                      onOpenSql({
+                        id: form.id,
+                        name: form.name || form.id,
+                        requireMfa: form.requireMfa,
+                        isDefault: form.isDefault,
+                      })
                   : undefined
               }
             />
@@ -366,6 +385,7 @@ function SqlProfileRow({
   disabled,
   onEdit,
   onDelete,
+  onSetDefault,
   onOpen,
 }: {
   raw: unknown;
@@ -373,6 +393,8 @@ function SqlProfileRow({
   disabled: boolean;
   onEdit: (form: SqlProfileForm, problems: string[]) => void;
   onDelete: (form: SqlProfileForm) => void;
+  /** Make this the profile the one-click Open launches (valid profiles only). */
+  onSetDefault: (form: SqlProfileForm) => void;
   /** Open the SQL browser with this profile (valid profiles only). */
   onOpen?: (form: SqlProfileForm) => void;
 }) {
@@ -383,6 +405,7 @@ function SqlProfileRow({
         <div className="flex flex-wrap items-center gap-2 min-w-0">
           <strong className="truncate">{form.name || form.id || "(unnamed)"}</strong>
           <Badge label="SQL" />
+          {form.isDefault && <Badge label="DEFAULT" variant="success" />}
           {form.requireMfa && <Badge variant="info" label="MFA required" />}
           <Badge variant="neutral" label={`TLS ${form.tlsMode}`} />
           {problems.length > 0 && <Badge variant="error" label="invalid" />}
@@ -417,6 +440,17 @@ function SqlProfileRow({
         {onOpen && problems.length === 0 && form.id && (
           <Button size="sm" variant="secondary" onClick={() => onOpen(form)} aria-label={`Open SQL browser with ${form.name || form.id}`}>
             Open
+          </Button>
+        )}
+        {!form.isDefault && problems.length === 0 && form.id && (
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={disabled}
+            onClick={() => onSetDefault(form)}
+            title="Make this the profile the one-click Open launches"
+          >
+            Set default
           </Button>
         )}
         <Button size="sm" variant="ghost" disabled={disabled} onClick={() => onEdit(form, problems)}>

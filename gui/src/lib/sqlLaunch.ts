@@ -15,6 +15,8 @@ export interface SqlLaunchProfile {
   id: string;
   name: string;
   requireMfa: boolean;
+  /** Flagged `is_default` on the resource, as the other protocols' profiles are. */
+  isDefault: boolean;
 }
 
 /** The resource's `sql` profiles the server would accept (an invalid one is
@@ -26,7 +28,7 @@ export function launchableSqlProfiles(meta: Record<string, unknown>): SqlLaunchP
     .filter(isSqlProfileEntry)
     .map((raw) => readSqlProfile(raw, engine.id))
     .filter((r) => r.problems.length === 0 && r.form.id !== "")
-    .map((r) => ({ id: r.form.id, name: r.form.name || r.form.id, requireMfa: r.form.requireMfa }));
+    .map((r) => ({ id: r.form.id, name: r.form.name || r.form.id, requireMfa: r.form.requireMfa, isDefault: r.form.isDefault }));
 }
 
 export type GateConnect = (resourceName: string, profileId: string, profileName: string) => Promise<ConnectMfaOutcome>;
@@ -61,7 +63,10 @@ export async function openSqlBrowser(
   }
 }
 
-/** The profile a one-click launch uses: the only one, else let the plugin choose. */
+/** The profile a one-click launch uses: the one flagged default, else the
+ *  only one, else let the plugin choose. */
 export function defaultSqlProfile(profiles: readonly SqlLaunchProfile[]): SqlLaunchProfile | null {
+  const flagged = profiles.find((p) => p.isDefault);
+  if (flagged) return flagged;
   return profiles.length === 1 ? profiles[0] : null;
 }

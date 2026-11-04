@@ -58,6 +58,10 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### SQL browser: Open shortcut and default profile
+
+- **Open the SQL browser from a database's card, and mark a default SQL profile** (T125, S109) -- A database card on the Resources page gains an **Open** button in the Database icon's colour, the way SSH and RDP cards have **Connect**: it opens the SQL browser with the resource's default SQL profile, or with the only one, or lets the plugin pick the smallest that covers your grant, and takes you to the Connection tab when the database has no SQL profile yet. The SQL profile list gains a **DEFAULT** badge and a **Set default** action, with one default across the whole profile list as for the other protocols.
+
 #### MCP brokered sessions: opt-in controls in the GUI
 
 - **Turn on assistant sessions for a resource type and a connection profile from the GUI** (T136, S111)

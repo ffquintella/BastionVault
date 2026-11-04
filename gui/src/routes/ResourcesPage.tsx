@@ -136,6 +136,17 @@ function loadRecent(): string[] {
   }
 }
 
+// The filled counterpart of the type icon's tint (`ResourceTypeIcon`), so a
+// card's action button matches its icon: Connect is the primary blue of the
+// SSH/RDP icon, Open is the Database icon's rose.
+const SOLID_BY_TYPE_COLOR: Record<string, string> = {
+  info: "bg-[var(--color-primary)]",
+  success: "bg-emerald-600",
+  warning: "bg-amber-600",
+  error: "bg-rose-500",
+  neutral: "bg-slate-500",
+};
+
 function ResourceCard({
   meta,
   typeConfig,
@@ -144,6 +155,7 @@ function ResourceCard({
   connecting,
   onSelect,
   onConnect,
+  onOpenSql,
   onPickGroup,
   onContextMenu,
 }: {
@@ -160,6 +172,8 @@ function ResourceCard({
   connecting: boolean;
   onSelect: (name: string) => void;
   onConnect: (name: string) => void;
+  /** Open the SQL browser on a database card (features/sql-browser.md §10). */
+  onOpenSql: (name: string) => void;
   onPickGroup: (group: string) => void;
   onContextMenu: (ev: ReactMouseEvent, meta: api.ResourceCardEntry) => void;
 }) {
@@ -254,6 +268,38 @@ function ResourceCard({
             {connecting ? "Connecting…" : "Connect"}
           </span>
         ))}
+        {String(meta.type || "") === "database" && (
+          // Same shape as Connect, in the type icon's own colour: a database
+          // opens in the SQL browser, not through a Connect protocol.
+          <span
+            role="button"
+            aria-disabled={connecting ? "true" : undefined}
+            tabIndex={connecting ? -1 : 0}
+            onClick={(ev) => {
+              ev.stopPropagation();
+              if (connecting) return;
+              onOpenSql(meta.name);
+            }}
+            onKeyDown={(ev) => {
+              if (connecting) return;
+              if (ev.key === "Enter" || ev.key === " ") {
+                ev.stopPropagation();
+                ev.preventDefault();
+                onOpenSql(meta.name);
+              }
+            }}
+            className={
+              `px-2 py-0.5 ${SOLID_BY_TYPE_COLOR[td.color ?? "neutral"] ?? SOLID_BY_TYPE_COLOR.neutral} text-white rounded text-xs shrink-0 inline-flex items-center gap-1.5` +
+              (connecting ? " opacity-70 cursor-wait" : " cursor-pointer hover:opacity-80")
+            }
+            title={connecting ? "Opening…" : "Open the SQL browser"}
+          >
+            {connecting && (
+              <span className="w-2.5 h-2.5 border-2 border-current border-t-transparent rounded-full animate-spin" />
+            )}
+            {connecting ? "Opening…" : "Open"}
+          </span>
+        )}
         <ResourceTypeIcon typeDef={td} />
       </div>
       {meta.hostname ? (
@@ -819,15 +865,34 @@ export function ResourcesPage() {
    * `null`: the plugin picks; a profile: that one, MFA gate first.
    */
   async function openSql(name: string, profile?: SqlLaunchProfile | null) {
+    setConnectingCards((cur) => new Set(cur).add(name));
     try {
       let chosen = profile ?? null;
       if (profile === undefined) {
         const info = await api.readResource(name);
-        chosen = defaultSqlProfile(launchableSqlProfiles(info as Record<string, unknown>));
+        const launchable = launchableSqlProfiles(info as Record<string, unknown>);
+        // Nothing to open with: the Connection tab is where a SQL profile
+        // is added, as Connect does for a resource with no profile.
+        if (launchable.length === 0) {
+          setSelected(name);
+          setResourceInfo(info);
+          setDetailTab("connection");
+          toast("info", "This database has no SQL profile yet — add one to open the SQL browser.");
+          return;
+        }
+        chosen = defaultSqlProfile(launchable);
       }
+      setRecent(pushRecent(name));
       await openSqlBrowser(gateConnect, name, chosen);
     } catch (e: unknown) {
       toast("error", extractError(e));
+    } finally {
+      setConnectingCards((cur) => {
+        if (!cur.has(name)) return cur;
+        const next = new Set(cur);
+        next.delete(name);
+        return next;
+      });
     }
   }
 
@@ -1170,6 +1235,7 @@ export function ResourcesPage() {
                       connecting={connectingCards.has(meta.name)}
                       onSelect={selectResource}
                       onConnect={connectResource}
+                      onOpenSql={(n) => void openSql(n)}
                       onPickGroup={(g) => setFilterGroup((cur) => (cur === g ? "" : g))}
                       onContextMenu={openCardMenu}
                     />
@@ -1197,6 +1263,7 @@ export function ResourcesPage() {
                   connecting={connectingCards.has(meta.name)}
                   onSelect={selectResource}
                   onConnect={connectResource}
+                  onOpenSql={(n) => void openSql(n)}
                   onPickGroup={(g) => setFilterGroup((cur) => (cur === g ? "" : g))}
                   onContextMenu={openCardMenu}
                 />

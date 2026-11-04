@@ -55,16 +55,25 @@ beforeEach(() => {
 describe("the SQL launcher", () => {
   it("offers only the sql profiles the server would accept", () => {
     expect(launchableSqlProfiles(db() as Record<string, unknown>)).toEqual([
-      { id: "p_ro", name: "Read-only", requireMfa: true },
+      { id: "p_ro", name: "Read-only", requireMfa: true, isDefault: false },
     ]);
     expect(launchableSqlProfiles(db({ engine: "" }) as Record<string, unknown>)).toEqual([]);
     expect(defaultSqlProfile([])).toBeNull();
   });
 
+  it("prefers the profile flagged default, then the only one, else lets the plugin pick", () => {
+    const ro = { id: "ro", name: "Read-only", requireMfa: false, isDefault: false };
+    const rw = { id: "rw", name: "Read-write", requireMfa: false, isDefault: false };
+    expect(defaultSqlProfile([ro])).toBe(ro);
+    expect(defaultSqlProfile([ro, rw])).toBeNull();
+    const flagged = { ...rw, isDefault: true };
+    expect(defaultSqlProfile([ro, flagged])).toBe(flagged);
+  });
+
   it("runs the MFA gate for a named profile and passes its ticket to the open", async () => {
     mockInvoke.mockResolvedValue(OPENED);
     const gate = vi.fn().mockResolvedValue({ connect_ticket: "tkt" });
-    await openSqlBrowser(gate, "netrisk-db", { id: "p_ro", name: "Read-only", requireMfa: true }, "workspace-tab");
+    await openSqlBrowser(gate, "netrisk-db", { id: "p_ro", name: "Read-only", requireMfa: true, isDefault: false }, "workspace-tab");
     expect(gate).toHaveBeenCalledWith("netrisk-db", "p_ro", "Read-only");
     expect(mockInvoke).toHaveBeenCalledWith("sql_session_open", {
       request: { resource_name: "netrisk-db", profile_id: "p_ro", connect_ticket: "tkt", placement: "workspace-tab" },
@@ -73,7 +82,7 @@ describe("the SQL launcher", () => {
 
   it("opens nothing when the factor prompt is cancelled", async () => {
     const gate = vi.fn().mockResolvedValue(null);
-    expect(await openSqlBrowser(gate, "netrisk-db", { id: "p_ro", name: "Read-only", requireMfa: true })).toBeNull();
+    expect(await openSqlBrowser(gate, "netrisk-db", { id: "p_ro", name: "Read-only", requireMfa: true, isDefault: false })).toBeNull();
     expect(mockInvoke).not.toHaveBeenCalled();
   });
 
@@ -139,7 +148,7 @@ describe("Connection tab", () => {
       />,
     );
     await userEvent.click(screen.getByRole("button", { name: "Open SQL browser with Read-only" }));
-    expect(onOpenSql).toHaveBeenLastCalledWith({ id: "p_ro", name: "Read-only", requireMfa: true });
+    expect(onOpenSql).toHaveBeenLastCalledWith({ id: "p_ro", name: "Read-only", requireMfa: true, isDefault: false });
     // The broken profile offers no Open.
     expect(screen.queryByRole("button", { name: "Open SQL browser with Broken" })).toBeNull();
     await userEvent.click(screen.getByRole("button", { name: "Open SQL browser" }));

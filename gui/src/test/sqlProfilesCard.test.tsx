@@ -428,3 +428,25 @@ describe("the type editor's sql switch (a saved list must not lose sql)", () => 
     expect(onSave.mock.calls[0][0].connect.protocols).toEqual([]);
   });
 });
+
+describe("the default SQL profile", () => {
+  it("flags the chosen SQL profile and clears the default every other profile held", async () => {
+    const user = userEvent.setup();
+    const { onUpdated } = mount();
+    expect(screen.queryByText("DEFAULT")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Set default" }));
+    await waitFor(() => expect(onUpdated).toHaveBeenCalled());
+    const profiles = written().connection_profiles as Record<string, unknown>[];
+    expect(profiles.find((p) => p.id === "p_ro")?.is_default).toBe(true);
+    // One default across the stored list: the SSH profile gave it up.
+    expect(profiles.find((p) => p.id === "p_ssh")?.is_default).toBe(false);
+    // A profile this build cannot read is carried through untouched.
+    expect(profiles.find((p) => p.id === "p_future")).toEqual(FUTURE_PROFILE);
+  });
+
+  it("shows a DEFAULT badge on the flagged profile and offers no second Set default", () => {
+    mount(resource({ connection_profiles: [{ ...STORED_SQL, is_default: true }] }));
+    expect(screen.getByText("DEFAULT")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Set default" })).not.toBeInTheDocument();
+  });
+});
