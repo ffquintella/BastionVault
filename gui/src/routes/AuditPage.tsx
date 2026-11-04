@@ -74,6 +74,13 @@ const OP_VARIANTS: Record<string, "info" | "success" | "warning" | "error" | "ne
  * the `from` / `to` date inputs are pushed to the server to bound
  * large vaults.
  */
+/** `datetime-local` value (local time) → RFC3339 UTC; empty/invalid → "". */
+function toRfc3339(local: string): string {
+  if (!local.trim()) return "";
+  const d = new Date(local);
+  return Number.isNaN(d.getTime()) ? "" : d.toISOString();
+}
+
 export function AuditPage() {
   const { toast } = useToast();
   const [events, setEvents] = useState<AuditEvent[]>([]);
@@ -85,15 +92,23 @@ export function AuditPage() {
   const [categoryFilter, setCategoryFilter] = useState("");
   const [opFilter, setOpFilter] = useState("");
 
+  // Category, operation and search are applied by the server before the
+  // row cap, so a rare event (a share, a user change) is found even when
+  // login/access rows fill the newest-first window. Search is debounced.
   useEffect(() => {
-    load();
+    const t = setTimeout(load, search ? 400 : 0);
+    return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [categoryFilter, opFilter, search]);
 
   async function load() {
     setLoading(true);
     try {
-      const list = await api.listAuditEvents(from.trim(), to.trim(), limit);
+      const list = await api.listAuditEvents(toRfc3339(from), toRfc3339(to), limit, {
+        category: categoryFilter,
+        op: opFilter,
+        search: search.trim(),
+      });
       setEvents(list);
     } catch (e: unknown) {
       toast("error", extractError(e));
@@ -116,11 +131,12 @@ export function AuditPage() {
     });
   }, [events, search, categoryFilter, opFilter]);
 
-  // Distinct category values present in the current page — drives the
-  // filter dropdown options so operators don't see labels for a kind
-  // with zero matches.
-  const categoriesPresent = useMemo(() => {
-    const s = new Set<string>();
+  // Every known category plus any unknown one seen in the page. The list
+  // must not depend on the loaded rows alone: the filter is applied by the
+  // server, and a category crowded out of the window would otherwise not
+  // be offered at all.
+  const categoriesAvailable = useMemo(() => {
+    const s = new Set<string>(Object.keys(CATEGORY_LABELS));
     for (const e of events) s.add(e.category);
     return Array.from(s).sort();
   }, [events]);
@@ -227,17 +243,21 @@ export function AuditPage() {
           <div className="space-y-3">
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
               <Input
-                label="From (RFC3339)"
+                label="From"
+                type="datetime-local"
+                step={1}
                 value={from}
                 onChange={(e) => setFrom(e.target.value)}
-                placeholder="2026-01-01T00:00:00Z"
+                className="[color-scheme:dark]"
                 hint="Empty: the 24 hours before To (or now)"
               />
               <Input
-                label="To (RFC3339)"
+                label="To"
+                type="datetime-local"
+                step={1}
                 value={to}
                 onChange={(e) => setTo(e.target.value)}
-                placeholder="2026-12-31T23:59:59Z"
+                className="[color-scheme:dark]"
               />
               <Input
                 label="Max rows"
@@ -270,7 +290,7 @@ export function AuditPage() {
                 onChange={(e) => setCategoryFilter(e.target.value)}
                 options={[
                   { value: "", label: "All" },
-                  ...categoriesPresent.map((c) => ({
+                  ...categoriesAvailable.map((c) => ({
                     value: c,
                     label: CATEGORY_LABELS[c] ?? c,
                   })),

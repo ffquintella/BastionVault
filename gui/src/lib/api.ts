@@ -435,8 +435,20 @@ export interface HsmDeviceAuditStatus {
   members?: HsmDeviceAuditMember[];
 }
 export const hsmStatus = () => invoke<HsmStatus>("hsm_status");
-export const listAuditEvents = (from: string, to: string, limit?: number) =>
-  invoke<AuditEvent[]>("list_audit_events", { from, to, limit });
+export const listAuditEvents = (
+  from: string,
+  to: string,
+  limit?: number,
+  filters?: { category?: string; op?: string; search?: string },
+) =>
+  invoke<AuditEvent[]>("list_audit_events", {
+    from,
+    to,
+    limit,
+    category: filters?.category || undefined,
+    op: filters?.op || undefined,
+    search: filters?.search || undefined,
+  });
 
 /** Precomputed audit statistics (`audit_stats` of `sys/dashboard/summary`).
  *  The server refreshes them every 10 minutes in the background, so the

@@ -200,3 +200,87 @@ async fn audit_events_percent_encoded_offset_is_decoded() {
     let raw = events_at(&server, "sys/audit/events?from=2099-01-01T00:00:00+00:00");
     assert!(raw.is_empty(), "a raw `+` offset must be treated as an offset, not a space: {raw:?}");
 }
+
+/// User lifecycle and share grants must reach the aggregator the Admin →
+/// Audit page reads, end to end over HTTP.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn audit_events_include_user_changes_and_share_grants() {
+    let server = boot_with_events("audit_events_user_share").await;
+
+    server.write("sys/auth/userpass/", obj(json!({"type": "userpass"})), None).unwrap();
+    for policies in ["default", "default,window1"] {
+        let (status, got) = server
+            .write(
+                "auth/userpass/users/audited",
+                obj(json!({"password": "correct-horse-battery-staple", "policies": policies})),
+                None,
+            )
+            .unwrap();
+        assert!(status == 200 || status == 204, "user write failed ({status}): {got}");
+    }
+
+    let target = base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, "res-audited");
+    let (status, got) = server
+        .write(
+            &format!("identity/sharing/by-target/resource/{target}/some-grantee"),
+            obj(json!({"target_kind": "resource", "target_path": "res-audited", "capabilities": "read"})),
+            None,
+        )
+        .unwrap();
+    assert!(status == 200 || status == 204, "share grant failed ({status}): {got}");
+
+    let events = events_at(&server, "sys/audit/events");
+    let has = |cat: &str, op: &str| events.iter().any(|e| e["category"] == cat && e["op"] == op);
+    assert!(has("user", "create"), "user create missing from the trail: {events:?}");
+    assert!(has("user", "update"), "user update missing from the trail: {events:?}");
+    assert!(has("share", "grant"), "share grant missing from the trail: {events:?}");
+}
+
+/// `category`, `op` and `search` are applied before `limit`: a rare event is
+/// found even when newer, high-volume rows would fill the capped window.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn audit_events_filters_apply_before_the_row_cap() {
+    let mut server = TestHttpServer::new("audit_events_filter_before_cap", false).await;
+    server.token = server.root_token.clone();
+
+    server.write("sys/auth/userpass/", obj(json!({"type": "userpass"})), None).unwrap();
+    let (status, got) = server
+        .write(
+            "auth/userpass/users/needle",
+            obj(json!({"password": "correct-horse-battery-staple", "policies": "default"})),
+            None,
+        )
+        .unwrap();
+    assert!(status == 200 || status == 204, "user write failed ({status}): {got}");
+
+    // Newer rows of another category, so an unfiltered `limit=1` is a policy row.
+    for i in 1..=3 {
+        server
+            .write(
+                &format!("sys/policies/acl/newer{i}"),
+                obj(json!({"policy": "path \"secret/x/*\" { capabilities = [\"read\"] }"})),
+                None,
+            )
+            .unwrap();
+    }
+
+    let unfiltered = events_at(&server, "sys/audit/events?limit=1");
+    assert_eq!(unfiltered[0]["category"], "policy", "setup: newest row must be a policy row: {unfiltered:?}");
+
+    let by_category = events_at(&server, "sys/audit/events?limit=1&category=user");
+    assert_eq!(by_category.len(), 1, "the user event must survive the cap: {by_category:?}");
+    assert_eq!(by_category[0]["category"], "user");
+
+    let by_search = events_at(&server, "sys/audit/events?limit=1&search=NEEDLE");
+    assert_eq!(by_search.len(), 1, "search is case-insensitive and applied before the cap: {by_search:?}");
+    assert!(by_search[0]["target"].as_str().unwrap_or("").contains("needle"));
+
+    let by_op = events_at(&server, "sys/audit/events?limit=1&category=user&op=create");
+    assert_eq!(by_op.len(), 1, "{by_op:?}");
+    let none = events_at(&server, "sys/audit/events?category=user&op=grant");
+    assert!(none.is_empty(), "op must narrow within the category: {none:?}");
+
+    let (status, got) =
+        server.request("GET", "sys/audit/events", obj(json!({"category": 5})), None, None).unwrap();
+    assert_eq!(status, 400, "a non-string filter must be refused, not ignored: {got}");
+}

@@ -644,6 +644,21 @@ impl SystemBackend {
                             required: false,
                             field_type: FieldType::Int,
                             description: "Maximum number of events to return (default 500)."
+                        },
+                        "category": {
+                            required: false,
+                            field_type: FieldType::Str,
+                            description: "Only events of this category (e.g. share, user), applied before `limit`."
+                        },
+                        "op": {
+                            required: false,
+                            field_type: FieldType::Str,
+                            description: "Only events with this operation (e.g. grant, update), applied before `limit`."
+                        },
+                        "search": {
+                            required: false,
+                            field_type: FieldType::Str,
+                            description: "Case-insensitive substring over user, target, category, op and changed fields, applied before `limit`."
                         }
                     },
                     operations: [
@@ -2333,6 +2348,21 @@ impl SystemBackend {
         let from = parse_bound("from")?;
         let to = parse_bound("to")?;
 
+        // Exact-match `category` / `op` and a case-insensitive substring
+        // `search`, applied before `limit` so a rare event (a share, a user
+        // change) is not pushed out of the window by high-volume login and
+        // access rows. Empty means "no filter"; a non-string is a 400.
+        let text_filter = |name: &str| -> Result<Option<String>, RvError> {
+            match supplied(name)? {
+                None | Some(Value::Null) => Ok(None),
+                Some(Value::String(s)) => Ok(Some(s.trim().to_string()).filter(|s| !s.is_empty())),
+                Some(_) => Err(bv_error_response_status!(400, "`{}` must be a string", name)),
+            }
+        };
+        let category = text_filter("category")?;
+        let op = text_filter("op")?;
+        let search = text_filter("search")?.map(|s| s.to_lowercase());
+
         // `limit` is a JSON number from a body-bearing caller and a
         // numeric string from the HTTP query shim; both are accepted, and
         // a present-but-unusable value is refused rather than quietly
@@ -2393,6 +2423,27 @@ impl SystemBackend {
                 }
                 if let Some(t) = &to {
                     if e.ts > *t {
+                        return false;
+                    }
+                }
+                if category.as_deref().is_some_and(|c| e.category != c) {
+                    return false;
+                }
+                if op.as_deref().is_some_and(|o| e.op != o) {
+                    return false;
+                }
+                if let Some(q) = &search {
+                    let hay = format!(
+                        "{} {} {} {} {} {}",
+                        e.user,
+                        e.machine,
+                        e.target,
+                        e.category,
+                        e.op,
+                        e.changed_fields.join(" ")
+                    )
+                    .to_lowercase();
+                    if !hay.contains(q) {
                         return false;
                     }
                 }

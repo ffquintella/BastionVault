@@ -847,6 +847,9 @@ pub async fn list_audit_events(
     from: String,
     to: String,
     limit: Option<u32>,
+    category: Option<String>,
+    op: Option<String>,
+    search: Option<String>,
 ) -> CmdResult<Vec<AuditEvent>> {
     // The window travels on the query string *and* in the body, on
     // purpose — one form per backend.
@@ -881,6 +884,15 @@ pub async fn list_audit_events(
     if let Some(l) = limit {
         query.push(format!("limit={l}"));
         body.insert("limit".into(), Value::Number(l.into()));
+    }
+    // Server-side filters, applied before `limit`. Free text goes in the
+    // body only: it is user-typed and would need query-string escaping,
+    // and the embedded backend reads the body anyway. The remote shim
+    // parses a body on GET (see above), so both backends see it.
+    for (key, value) in [("category", category), ("op", op), ("search", search)] {
+        if let Some(v) = value.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()) {
+            body.insert(key.into(), Value::String(v));
+        }
     }
     let path =
         if query.is_empty() { "sys/audit/events".to_string() } else { format!("sys/audit/events?{}", query.join("&")) };

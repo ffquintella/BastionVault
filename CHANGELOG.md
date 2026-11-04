@@ -297,6 +297,10 @@ EXAMPLE ENTRY:
 
 ### Fixed
 
+#### Admin audit: search before the row cap
+
+- **Find share grants and user changes on the Audit page when logins and accesses fill the newest rows** (T472, S110) -- Category, operation and the search box used to look only at the 500 newest rows already loaded, so a share or a user change could be pushed out of that window and the category was not even offered. The server now applies them before the row cap (`category`, `op` and `search` on `sys/audit/events`), and the page lists every category. FIDO2 credential and step-up changes are still not recorded.
+
 #### SQL browser: generated statements per engine
 
 - **Open a table in the SQL browser on MariaDB, MySQL, SQL Server and Oracle without needing `sql_admin`** (T125, S109) -- The **Open** button of the object tree and **Export table** wrote every name in double quotes with `LIMIT`, which is PostgreSQL syntax: MySQL and MariaDB read a double-quoted name as a string, so the classifier could not read the statement and a read-only grant was refused with "needs `sql_admin`"; SQL Server and Oracle have no `LIMIT`. Names are now quoted for the session's engine (backticks, brackets or double quotes) and the row limit uses `TOP`, `FETCH FIRST` or `LIMIT`. A statement you type yourself is unchanged.
