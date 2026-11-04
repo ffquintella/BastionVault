@@ -916,3 +916,27 @@ fn multi_table_writes_are_conservative() {
         }
     }
 }
+
+/// The statement the SQL browser's **Open** puts in the editor. Backticks name
+/// the object, so a read-only grant covers it with `sql_select` alone. A
+/// double-quoted name is a string literal to MySQL and MariaDB (no
+/// ANSI_QUOTES), so `FROM "t"."u"` is not a statement the classifier can read
+/// and only `sql_admin` may run it as unclassified: the browser must not
+/// generate that form for these engines.
+#[test]
+fn the_browsers_open_statement_needs_only_sql_select() {
+    for d in [Dialect::MySql, Dialect::MariaDb] {
+        let s = one_with(
+            d,
+            st(false, false),
+            "SELECT * FROM `netrisk`.`ai_models` LIMIT 500;",
+            &NameContext::mysql(Some("netrisk".into())),
+        );
+        let want: BTreeSet<String> = ["sql_select rel:netrisk.ai_models".to_string()].into();
+        assert_eq!(render(&s), want, "{d:?}");
+        assert!(
+            run_with(d, st(false, false), "SELECT * FROM \"netrisk\".\"ai_models\" LIMIT 500;", &ctx()).is_err(),
+            "{d:?}: the double-quoted form must stay refused without ANSI_QUOTES"
+        );
+    }
+}

@@ -16,6 +16,7 @@ import {
   gridEditBlocker,
   isSessionGone,
   parsePluginError,
+  exportTableSql,
   quoteIdent,
   refusals,
   selectAllFrom,
@@ -90,7 +91,16 @@ describe("formatter", () => {
   it("builds EXPLAIN and the Open statement with quoted identifiers", () => {
     expect(explainOf("select 1;  ")).toBe("EXPLAIN select 1");
     expect(quoteIdent('we"ird')).toBe('"we""ird"');
+    // MySQL and MariaDB read "x" as a string, so a generated SELECT would not parse.
+    expect(quoteIdent("we`ird", "mariadb")).toBe("`we``ird`");
+    expect(quoteIdent("t", "mysql")).toBe("`t`");
+    expect(quoteIdent("we]ird", "mssql")).toBe("[we]]ird]");
+    expect(selectAllFrom("netrisk", "ai_models", 500, "mariadb")).toBe("SELECT * FROM `netrisk`.`ai_models` LIMIT 500;");
+    expect(selectAllFrom("dbo", "Users", 100, "mssql")).toBe("SELECT TOP 100 * FROM [dbo].[Users];");
+    expect(selectAllFrom("HR", "EMP", 500, "oracle")).toBe('SELECT * FROM "HR"."EMP" FETCH FIRST 500 ROWS ONLY');
+    expect(exportTableSql("netrisk", "t", "mysql")).toBe("SELECT * FROM `netrisk`.`t`");
     expect(selectAllFrom("public", "Users")).toBe('SELECT * FROM "public"."Users" LIMIT 500;');
+    expect(selectAllFrom("public", "Users", 500, "postgresql")).toBe('SELECT * FROM "public"."Users" LIMIT 500;');
   });
 });
 

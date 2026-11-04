@@ -455,7 +455,7 @@ export default function SqlWorkspace({
   };
 
   const openTable = async (schema: string, object: string) => {
-    const text = selectAllFrom(schema, object);
+    const text = selectAllFrom(schema, object, undefined, status?.engine);
     const id = nextId("e");
     setEditors((es) => [...es, { id, title: `${schema}.${object}`, text }]);
     setActiveEditor(id);
@@ -771,7 +771,7 @@ export default function SqlWorkspace({
             disabled={!live}
             onOpen={(s, o) => void openTable(s, o)}
             onDescribe={(s, o) => void describe(s, o)}
-            onExport={has("sql_export") && !exporting ? (s, o) => setExportReq({ sql: exportTableSql(s, o), table: { schema: s, name: o } }) : undefined}
+            onExport={has("sql_export") && !exporting ? (s, o) => setExportReq({ sql: exportTableSql(s, o, status?.engine), table: { schema: s, name: o } }) : undefined}
             onError={(m) => addLog("error", m)}
           />
         </div>

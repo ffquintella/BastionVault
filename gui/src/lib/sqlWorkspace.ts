@@ -277,18 +277,37 @@ export function manualCommitUnavailable(engine: string | undefined, readOnly: bo
   return null;
 }
 
-export function quoteIdent(name: string): string {
+/**
+ * Quote one identifier the way the session's engine reads it. MySQL and
+ * MariaDB read a double-quoted name as a string unless ANSI_QUOTES is on, so
+ * they take backticks; SQL Server takes brackets; PostgreSQL and Oracle take
+ * double quotes, which is also the answer when the engine is not known.
+ */
+export function quoteIdent(name: string, engine?: string): string {
+  if (engine === "mysql" || engine === "mariadb") return `\`${name.replace(/`/g, "``")}\``;
+  if (engine === "mssql") return `[${name.replace(/]/g, "]]")}]`;
   return `"${name.replace(/"/g, '""')}"`;
 }
 
-/** The statement **Open** puts in the editor for a table or view. */
-export function selectAllFrom(schema: string, object: string, limit = 500): string {
-  return `SELECT * FROM ${quoteIdent(schema)}.${quoteIdent(object)} LIMIT ${limit};`;
+function qualified(schema: string, object: string, engine?: string): string {
+  return `${quoteIdent(schema, engine)}.${quoteIdent(object, engine)}`;
+}
+
+/**
+ * The statement **Open** puts in the editor for a table or view: the first
+ * `limit` rows, in the engine's own row-limit syntax (`LIMIT` is not SQL
+ * Server or Oracle). Oracle takes no trailing `;` on a single statement.
+ */
+export function selectAllFrom(schema: string, object: string, limit = 500, engine?: string): string {
+  const from = qualified(schema, object, engine);
+  if (engine === "mssql") return `SELECT TOP ${limit} * FROM ${from};`;
+  if (engine === "oracle") return `SELECT * FROM ${from} FETCH FIRST ${limit} ROWS ONLY`;
+  return `SELECT * FROM ${from} LIMIT ${limit};`;
 }
 
 /** "Export table" (§8.1): every row of the qualified name, as ordinary SQL. */
-export function exportTableSql(schema: string, object: string): string {
-  return `SELECT * FROM ${quoteIdent(schema)}.${quoteIdent(object)}`;
+export function exportTableSql(schema: string, object: string, engine?: string): string {
+  return `SELECT * FROM ${qualified(schema, object, engine)}`;
 }
 
 /** The capabilities of a step-up action (`sql_drop,sql_script`). */

@@ -297,6 +297,10 @@ EXAMPLE ENTRY:
 
 ### Fixed
 
+#### SQL browser: generated statements per engine
+
+- **Open a table in the SQL browser on MariaDB, MySQL, SQL Server and Oracle without needing `sql_admin`** (T125, S109) -- The **Open** button of the object tree and **Export table** wrote every name in double quotes with `LIMIT`, which is PostgreSQL syntax: MySQL and MariaDB read a double-quoted name as a string, so the classifier could not read the statement and a read-only grant was refused with "needs `sql_admin`"; SQL Server and Oracle have no `LIMIT`. Names are now quoted for the session's engine (backticks, brackets or double quotes) and the row limit uses `TOP`, `FETCH FIRST` or `LIMIT`. A statement you type yourself is unchanged.
+
 #### Resources
 
 - **Pasting an SSH private key into a resource secret no longer collapses it to one line** -- the secret editor's value field was a single-line password input that stripped the newlines, so Connect failed with `parse private key: Could not read key`. Values under keys like `private_key`, `ssh_key`, `pem` or `cert`, and any value that already has a line break, now use a multi-line field that keeps them. A key saved before this fix stays corrupted and must be pasted again.
