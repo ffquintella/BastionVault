@@ -1,6 +1,6 @@
 [package]
 name = "bv-auth-cert"
-version = "0.41.1"
+version = "0.41.2"
 edition = "2021"
 description = "BastionVault's certificate auth backend (retired in the OpenSSL-free build)"
 license = "Apache-2.0"

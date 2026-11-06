@@ -1,6 +1,6 @@
 [package]
 name = "bv-auth-ferrogate"
-version = "0.41.2"
+version = "0.41.3"
 edition = "2021"
 description = "BastionVault's FerroGate machine-identity auth backend (CMIS, SVID, DPoP)"
 license = "Apache-2.0"
