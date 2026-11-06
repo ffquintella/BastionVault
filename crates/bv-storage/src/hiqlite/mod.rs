@@ -1,10 +1,20 @@
-use std::{any::Any, borrow::Cow, collections::HashMap, net::ToSocketAddrs, path::Path};
+use std::{
+    any::Any,
+    borrow::Cow,
+    collections::HashMap,
+    net::ToSocketAddrs,
+    path::Path,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use hiqlite::{tls::ServerTlsConfig, Client, Node, NodeConfig, Param};
 use serde_json::Value;
 use tokio::net::TcpListener;
 
-use bv_errors::RvError;
+use bv_errors::{
+    retry::{is_transient_cluster, retry_transient},
+    RvError,
+};
 use bv_sql_guard::{sql, SqlIdent};
 
 use crate::{Backend, BackendEntry};
@@ -107,6 +117,9 @@ pub struct HiqliteBackend {
     /// Keeps the tokio runtime alive so hiqlite's background tasks (Raft, RPC servers) continue running.
     /// Without this, dropping the runtime kills all spawned tasks and the node becomes unreachable.
     _runtime: Option<tokio::runtime::Runtime>,
+    /// Reads retry transient cluster errors while set (see
+    /// [`Backend::set_transient_read_retry`]).
+    read_retry: AtomicBool,
 }
 
 impl std::fmt::Debug for HiqliteBackend {
@@ -135,6 +148,10 @@ impl<'a, 'r> From<&'a mut hiqlite::Row<'r>> for VaultRow {
 impl Backend for HiqliteBackend {
     fn backend_kind(&self) -> &'static str {
         "hiqlite"
+    }
+
+    fn set_transient_read_retry(&self, on: bool) {
+        self.read_retry.store(on, Ordering::SeqCst);
     }
 
     /// Immediate children of `prefix`, `dir/` entries de-duplicated, in
@@ -167,13 +184,16 @@ impl Backend for HiqliteBackend {
         }
 
         let result: Option<VaultRow> = self
-            .client
-            .query_consistent_map(
-                sql!("SELECT vault_key, vault_value FROM {} WHERE vault_key = ?", &self.table).into_cow(),
-                vec![Param::from(key)],
-            )
-            .await
-            .map_err(map_hiqlite_error)?
+            .retrying_read("hiqlite get", || async {
+                self.client
+                    .query_consistent_map(
+                        sql!("SELECT vault_key, vault_value FROM {} WHERE vault_key = ?", &self.table).into_cow(),
+                        vec![Param::from(key)],
+                    )
+                    .await
+                    .map_err(map_hiqlite_error)
+            })
+            .await?
             .into_iter()
             .next();
 
@@ -255,12 +275,29 @@ fn page_row_error(e: hiqlite::Error) -> RvError {
 /// range and kept as a second, independent narrowing; Rust's prefix test
 /// in the pagers stays authoritative.
 impl HiqliteBackend {
+    /// Run a read, retrying transient cluster errors while
+    /// [`Backend::set_transient_read_retry`] is on; otherwise exactly once.
+    async fn retrying_read<T, F, Fut>(&self, what: &str, op: F) -> Result<T, RvError>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<T, RvError>>,
+    {
+        if self.read_retry.load(Ordering::SeqCst) {
+            retry_transient(what, is_transient_cluster, op).await
+        } else {
+            let mut op = op;
+            op().await
+        }
+    }
+
     async fn list_paged(&self, prefix: &str, limits: PageLimits) -> Result<Vec<String>, RvError> {
         let like = like_prefix_pattern(prefix);
         let upper = prefix_upper_bound(prefix);
         let mut pager = ListPager::new(prefix, limits);
         while let Some(start) = pager.next_start().cloned() {
-            let rows = self.query_list_page(&like, &start, upper.as_deref(), limits).await?;
+            let rows = self
+                .retrying_read("hiqlite list", || self.query_list_page(&like, &start, upper.as_deref(), limits))
+                .await?;
             pager.accept(rows)?;
         }
         Ok(pager.finish())
@@ -276,7 +313,9 @@ impl HiqliteBackend {
         let upper = prefix_upper_bound(prefix);
         let mut pager = ScanPager::new(prefix, start_key, limits);
         while let Some(start) = pager.next_start().cloned() {
-            let rows = self.query_scan_page(&like, &start, upper.as_deref(), limits).await?;
+            let rows = self
+                .retrying_read("hiqlite scan", || self.query_scan_page(&like, &start, upper.as_deref(), limits))
+                .await?;
             pager.accept(rows)?;
         }
         Ok(pager.finish())
@@ -673,6 +712,7 @@ impl HiqliteBackend {
             peer_addrs,
             tls_api_auto_certs,
             _runtime: None,
+            read_retry: AtomicBool::new(false),
         })
     }
 

@@ -35,6 +35,8 @@ url = "2.5"
 rustls = { version = "0.23.37", features = ["aws_lc_rs"] }
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "process", "time", "io-util"] }
 lockfile = "0.4.0"
+# Warning line of `retry::retry_transient`.
+log = "0.4"
 diesel = { version = "2.3.8", features = ["mysql", "r2d2"], optional = true }
 r2d2 = { version = "0.8.10", optional = true }
 
@@ -57,3 +59,7 @@ ignored = [
 # largest carries a `String`, so the type is wide by construction. Matches
 # the root crate's allow.
 result_large_err = "allow"
+
+[dev-dependencies]
+# `start_paused` for the retry tests, so backoff costs no wall-clock time.
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "test-util"] }

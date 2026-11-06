@@ -396,6 +396,14 @@ impl Core {
             return Err(RvError::ErrBarrierAlreadyInit);
         }
 
+        // Once the barrier is initialized a failed read throws the root token
+        // away, so let idempotent storage reads retry transient cluster errors
+        // until init is over.
+        self.physical.set_transient_read_retry(true);
+        defer! {
+            self.physical.set_transient_read_retry(false);
+        }
+
         seal_config.validate()?;
         // Before the first write: a provider refusal after `barrier.init`
         // would leave an initialized barrier whose KEK nobody holds.

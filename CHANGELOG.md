@@ -302,6 +302,10 @@ EXAMPLE ENTRY:
 
 ### Fixed
 
+#### HSM pool init: cluster hiccup no longer loses the root token
+
+- **Keep `operator init` from failing with `Cluster lost quorum` after the vault is already initialized** (T474, S114, S17) -- On a two-node hiqlite cluster, a read in the last steps of `init` could miss its 500 ms leadership confirmation; the vault was then initialized and sealed but the root token was never returned, and with `recovery = "none"` it could not be regenerated. While `init` runs, storage reads now retry that error (no leader, quorum not confirmed, node unhealthy) up to 5 times with 0.5, 1, 2 and 4 s waits, then fail as before; writes are never retried. The HSM pool init probe retries a transport error the same way, so the first `init` after `operator hsm bootstrap` no longer fails with `bad response from connector` when the connector dropped an idle connection. Checked with the mock HSM only. The retry does not make `init` atomic, and the 500 ms limit itself is unchanged.
+
 #### Rustion: key accounts
 
 - **Connect through Rustion with a stored SSH key, not only a password** -- `rustion/v2/session/open` with a `secret` credential source refused any secret without a `password` field (`HTTP 422: … only password-shaped credentials … can be brokered server-side today`), so a key-based account (for example a profile bound to a secret holding a `private_key`) could not Connect on a `rustion-required` resource. A secret holding an OpenSSH `private_key` (Ed25519 or ECDSA) is now sealed into the envelope as `ssh-key`, like the provider source already did; a passphrase-protected or non-OpenSSH key is still refused with a 422 that says why, since the envelope has no passphrase channel. (T103, S107)

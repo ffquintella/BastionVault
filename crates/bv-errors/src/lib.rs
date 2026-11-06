@@ -19,6 +19,8 @@ use std::{
 
 use thiserror::Error;
 
+pub mod retry;
+
 #[derive(Error, Debug)]
 pub enum RvError {
     #[error("Cipher operation update failed.")]

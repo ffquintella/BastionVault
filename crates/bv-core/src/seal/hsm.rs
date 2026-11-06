@@ -48,6 +48,8 @@ use crate::{
     storage::{Backend as PhysicalBackend, BackendEntry},
 };
 
+use crate::transient_retry;
+
 use self::record::{HsmMember, HsmSealRecord, MemberState, RecoveryPublicKey, StoredSealRecord, Topology};
 
 /// Physical-storage key for the HSM seal record. Non-secret (holds only
@@ -748,7 +750,29 @@ impl HsmSealProvider {
         let mut unreachable = Vec::new();
         for member in pool.members() {
             let reachable = match member.backend() {
-                Ok(backend) => backend.probe().await.map(|_| ()),
+                Ok(backend) => {
+                    // A keep-alive connection that went stale while idle fails
+                    // its first request; the next one reconnects.
+                    let mut attempt = 1;
+                    loop {
+                        match backend.probe().await {
+                            Ok(_) => break Ok(()),
+                            Err(e)
+                                if transient_retry::is_transient_hsm(&e) && attempt < transient_retry::MAX_ATTEMPTS =>
+                            {
+                                log::warn!(
+                                    target: "security",
+                                    "pool init probe of {} failed ({e}); attempt {attempt}/{}, retrying",
+                                    member.name(),
+                                    transient_retry::MAX_ATTEMPTS
+                                );
+                                transient_retry::pause(transient_retry::backoff(attempt)).await;
+                                attempt += 1;
+                            }
+                            Err(e) => break Err(e),
+                        }
+                    }
+                }
                 Err(e) => Err(e),
             };
             if let Err(e) = reachable {
@@ -1954,7 +1978,19 @@ mod tests {
         assert_eq!(c.events.count(PoolEventKind::CryptoFailure), 0);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
+    async fn pool_init_probe_retries_a_stale_connection() {
+        let c = Cluster::new("initretry");
+        c.a.fail_next_probes(4);
+        c.provider("n1").check_init(&seal_config()).await.unwrap();
+
+        // One more failure than the attempt budget: refused, naming the member.
+        c.a.fail_next_probes(transient_retry::MAX_ATTEMPTS);
+        let err = c.provider("n1").check_init(&seal_config()).await.unwrap_err();
+        assert!(matches!(&err, RvError::ErrHsmPoolUnavailable(_)), "{err}");
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn pool_init_needs_explicit_recovery_and_both_members() {
         let c = Cluster::new("initgate");
         let mut implicit = c.config("n1", 1);

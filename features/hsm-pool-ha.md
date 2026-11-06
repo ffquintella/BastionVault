@@ -885,6 +885,7 @@ Metrics:
 | Cryptographic mismatch on unwrap (AAD, authz, MAC) | `hsm.crypto_failure` audit event and the operation fails. It does **not** fail over as if it were an outage. |
 | Device-log chain break or overflow | `hsm.device_log_gap` and metric. Operations continue unless `device_audit = "forced"`. |
 | Raft quorum lost | No node can read the seal record, so nothing unseals. Unchanged from today. |
+| Brief Raft hiccup during `init` (no leader, quorum not confirmed within one heartbeat, 500 ms) | Reads made by `init` retry up to 5 attempts (0.5, 1, 2, 4 s) so the root token is still returned (T474); writes are not retried, so `init` is not atomic. The pool init probe retries a transport error the same way (stale `yubihsm-connector` connection). Mock-tested only. |
 | Node compromised | Revoke its auth keys on both devices and its link certificate. Rotate the barrier key and the HSM epoch if it was unsealed. |
 
 ## Security considerations

@@ -334,4 +334,59 @@ mod test {
         let result = core.unseal_once(&keys3[4]).await;
         assert!(result.is_ok());
     }
+
+    /// `init` lets storage reads retry transient cluster errors for its
+    /// duration only: once the barrier is initialized a failed read throws the
+    /// root token away, while steady-state reads must keep failing fast.
+    mod init_read_retry {
+        use std::sync::{Arc, Mutex};
+
+        use bv_core::core::SealConfig;
+
+        use crate::{
+            errors::RvError,
+            storage::{Backend, BackendEntry},
+            test_utils::new_test_backend,
+            BastionVault,
+        };
+
+        struct Recording {
+            inner: Arc<dyn Backend>,
+            toggles: Arc<Mutex<Vec<bool>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl Backend for Recording {
+            async fn list(&self, prefix: &str) -> Result<Vec<String>, RvError> {
+                self.inner.list(prefix).await
+            }
+
+            async fn get(&self, key: &str) -> Result<Option<BackendEntry>, RvError> {
+                self.inner.get(key).await
+            }
+
+            async fn put(&self, entry: &BackendEntry) -> Result<(), RvError> {
+                self.inner.put(entry).await
+            }
+
+            async fn delete(&self, key: &str) -> Result<(), RvError> {
+                self.inner.delete(key).await
+            }
+
+            fn set_transient_read_retry(&self, on: bool) {
+                self.toggles.lock().unwrap().push(on);
+            }
+        }
+
+        #[tokio::test]
+        async fn init_turns_read_retry_on_and_back_off() {
+            let toggles = Arc::new(Mutex::new(Vec::new()));
+            let backend = Recording { inner: new_test_backend("init_read_retry"), toggles: toggles.clone() };
+            let bvault = BastionVault::new(Arc::new(backend), None).unwrap();
+
+            let result = bvault.init(&SealConfig { secret_shares: 1, secret_threshold: 1 }).await.unwrap();
+            assert!(!result.root_token.is_empty());
+            assert_eq!(*toggles.lock().unwrap(), vec![true, false]);
+        }
+    }
 }

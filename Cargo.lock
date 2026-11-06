@@ -2193,6 +2193,7 @@ dependencies = [
  "humantime",
  "ipnetwork",
  "lockfile",
+ "log",
  "pem 3.0.6",
  "r2d2",
  "regex",

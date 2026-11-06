@@ -103,7 +103,7 @@ bv-storage = { path = "../bv-storage", features = ["test-support"] }
 # `#[tokio::test]` through `maybe_async::test`. Without this they did not
 # compile at all, so nothing ran them. Already in the graph through bv-errors
 # with these features, so it adds no compile cost.
-tokio = { version = "1.52", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "test-util"] }
 # The attestation verifier's unit tests (`hsm::attestation`) build fake Yubico
 # chains -- root, intermediate, device certificate, attested key with the
 # YubiHSM extensions -- and parse them with the verifier's own crate. Both are

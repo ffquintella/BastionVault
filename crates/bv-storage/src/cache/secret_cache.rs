@@ -137,6 +137,10 @@ impl Backend for CachingBackend {
         self.inner.backend_kind()
     }
 
+    fn set_transient_read_retry(&self, on: bool) {
+        self.inner.set_transient_read_retry(on);
+    }
+
     async fn list(&self, prefix: &str) -> Result<Vec<String>, RvError> {
         // Listing is not cached: results are small, change on every
         // adjacent write, and there is no cheap per-prefix invalidation

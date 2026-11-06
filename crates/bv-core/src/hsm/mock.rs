@@ -20,7 +20,7 @@
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
         Arc, Mutex, RwLock,
     },
     time::Duration,
@@ -185,6 +185,8 @@ pub struct MockHsmDevice {
     /// `state_path` are two devices as far as the session limit goes.
     sessions: Mutex<BTreeMap<String, Duration>>,
     offline: AtomicBool,
+    /// Probes still to fail with a transport error (a stale keep-alive).
+    flaky_probes: AtomicU32,
     clock: Arc<dyn Clock>,
     log: Mutex<MockLog>,
 }
@@ -196,6 +198,7 @@ impl MockHsmDevice {
             state: RwLock::new(state),
             sessions: Mutex::new(BTreeMap::new()),
             offline: AtomicBool::new(false),
+            flaky_probes: AtomicU32::new(0),
             clock,
             log: Mutex::new(MockLog::default()),
         })
@@ -332,6 +335,11 @@ impl MockHsmDevice {
     /// Simulate the device, its host or its link going down (or coming back).
     pub fn set_offline(&self, offline: bool) {
         self.offline.store(offline, Ordering::SeqCst);
+    }
+
+    /// Fail the next `n` probes with a transport error, then answer again.
+    pub fn fail_next_probes(&self, n: u32) {
+        self.flaky_probes.store(n, Ordering::SeqCst);
     }
 
     /// Sessions currently held (idle ones past the timeout are not counted).
@@ -938,6 +946,9 @@ impl HsmBackend for MockHsmBackend {
     /// `device-info` holds no session, so it answers even at `SESSIONS_FULL`.
     async fn probe(&self) -> Result<String, RvError> {
         self.device.reachable()?;
+        if self.device.flaky_probes.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1)).is_ok() {
+            return Err(RvError::ErrHsmTransport("mock HSM: stale connection".into()));
+        }
         Ok(self.device.serial())
     }
 
