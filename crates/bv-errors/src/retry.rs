@@ -31,6 +31,10 @@ pub fn is_transient_hsm(e: &RvError) -> bool {
 /// Run `op` up to [`MAX_ATTEMPTS`] times, sleeping [`backoff`] between
 /// attempts, retrying only errors `is_transient` accepts. `op` must be safe
 /// to repeat (a read). `what` names the operation in the warning.
+///
+/// Each retry is a `warn` under the `security` target (`security.log`): the
+/// policy is switched on only around seal operations (`init`, HSM
+/// auto-unseal), and a seal path that recovered must not do so silently.
 pub async fn retry_transient<T, F, Fut>(what: &str, is_transient: fn(&RvError) -> bool, mut op: F) -> Result<T, RvError>
 where
     F: FnMut() -> Fut,
@@ -41,7 +45,10 @@ where
         match op().await {
             Err(e) if is_transient(&e) && attempt < MAX_ATTEMPTS => {
                 let wait = backoff(attempt);
-                log::warn!("{what}: transient error ({e}); attempt {attempt}/{MAX_ATTEMPTS}, retrying in {wait:?}");
+                log::warn!(
+                    target: "security",
+                    "{what}: transient error ({e}); attempt {attempt}/{MAX_ATTEMPTS}, retrying in {wait:?}"
+                );
                 tokio::time::sleep(wait).await;
                 attempt += 1;
             }
@@ -82,6 +89,16 @@ mod tests {
         assert!(!is_transient_cluster(&RvError::ErrCluster("x".into())));
         assert!(is_transient_hsm(&RvError::ErrHsmTransport("x".into())));
         assert!(!is_transient_hsm(&RvError::ErrHsmContextMismatch));
+    }
+
+    /// A crypto, authorization or blob failure is a verdict, not an outage:
+    /// neither class may ever retry it (T475, HSM auto-unseal).
+    #[test]
+    fn hsm_verdicts_are_never_transient() {
+        for e in [RvError::ErrHsmContextMismatch, RvError::ErrHsmAuthzInvalid, RvError::ErrHsmBlobInvalid] {
+            assert!(!is_transient_cluster(&e), "{e}");
+            assert!(!is_transient_hsm(&e), "{e}");
+        }
     }
 
     async fn run_failing(failures: u32, err: fn() -> RvError) -> (Result<u32, RvError>, u32) {

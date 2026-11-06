@@ -809,6 +809,16 @@ impl Core {
             return Ok(false);
         }
 
+        // T475: one read that misses its Raft leadership confirmation used to
+        // leave this node sealed until the next restart. Every read below,
+        // `post_unseal` included, retries no-leader / quorum-lost / unhealthy
+        // (5 attempts, 0.5-4 s, each a `security` warning). Reads only: the
+        // unwrap runs once, writes are never repeated, crypto errors are final.
+        self.physical.set_transient_read_retry(true);
+        defer! {
+            self.physical.set_transient_read_retry(false);
+        }
+
         let inited = self.barrier.inited().await?;
         if !inited {
             return Err(RvError::ErrBarrierNotInit);
@@ -844,6 +854,23 @@ impl Core {
         }
 
         Ok(true)
+    }
+
+    /// [`Self::auto_unseal`] at server start, with the outcome in the
+    /// `security` log. Fail closed and never fatal to the process: on any
+    /// error the vault stays sealed and the error is logged at `error`, so
+    /// `sys/seal-status` can still report it. An uninitialized vault is not
+    /// an error here: `operator init` will wrap the KEK under the HSM.
+    pub async fn auto_unseal_at_startup(&self) {
+        match self.auto_unseal().await {
+            Ok(true) => log::info!(target: "security", "HSM auto-unseal succeeded"),
+            Ok(false) => {}
+            Err(RvError::ErrBarrierNotInit) => log::info!(
+                target: "security",
+                "HSM seal configured; vault not initialized — `operator init` will wrap the KEK under the HSM"
+            ),
+            Err(e) => log::error!(target: "security", "HSM auto-unseal failed; vault remains sealed: {e}"),
+        }
     }
 
     /// Unseals the bastion_vault once and immediately generates new unseal keys.

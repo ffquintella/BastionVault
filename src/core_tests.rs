@@ -389,4 +389,287 @@ mod test {
             assert_eq!(*toggles.lock().unwrap(), vec![true, false]);
         }
     }
+
+    /// HSM auto-unseal rides out a transient cluster error on its storage
+    /// reads (T475). Reported on a two-node hiqlite cluster: a read made by
+    /// `post_unseal`, after the KEK was unwrapped, missed its leadership
+    /// confirmation and the node stayed sealed until the next restart.
+    #[cfg(not(feature = "sync_handler"))]
+    mod auto_unseal_read_retry {
+        use std::sync::{
+            atomic::{AtomicBool, AtomicU32, Ordering::SeqCst},
+            Arc, Mutex,
+        };
+
+        use bv_core::core::{Core, SealConfig};
+        use zeroize::Zeroizing;
+
+        use crate::{
+            errors::{
+                retry::{is_transient_cluster, retry_transient, MAX_ATTEMPTS},
+                RvError,
+            },
+            kernel_api::mount::CORE_MOUNT_CONFIG_PATH,
+            seal::SealProvider,
+            storage::{Backend, BackendEntry},
+            test_utils::new_test_backend,
+            BastionVault,
+        };
+
+        /// A process-wide `log` sink (nextest runs each test in its own process).
+        mod capture {
+            use std::sync::{Mutex, OnceLock};
+
+            static LINES: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+            static INSTALLED: OnceLock<bool> = OnceLock::new();
+            struct Capture;
+            impl log::Log for Capture {
+                fn enabled(&self, _: &log::Metadata<'_>) -> bool {
+                    true
+                }
+                fn log(&self, r: &log::Record<'_>) {
+                    let line = format!("{} {} {}", r.level(), r.target(), r.args());
+                    LINES.get_or_init(Default::default).lock().unwrap().push(line);
+                }
+                fn flush(&self) {}
+            }
+            static LOGGER: Capture = Capture;
+
+            /// `false` when another logger was installed first (`cargo test`
+            /// runs every test in one process): skip the log assertions then.
+            pub fn install() -> bool {
+                *INSTALLED.get_or_init(|| {
+                    let ok = log::set_logger(&LOGGER).is_ok();
+                    if ok {
+                        log::set_max_level(log::LevelFilter::Info);
+                    }
+                    ok
+                })
+            }
+
+            /// Captured lines that start with `prefix` and contain `text`.
+            pub fn lines(prefix: &str, text: &str) -> Vec<String> {
+                let all = LINES.get_or_init(Default::default).lock().unwrap();
+                all.iter().filter(|l| l.starts_with(prefix) && l.contains(text)).cloned().collect()
+            }
+        }
+
+        /// A file backend whose root mount-table read (made by `post_unseal`,
+        /// after the unwrap, as on the reporting node) fails on demand. It
+        /// honours the retry switch as `HiqliteBackend::retrying_read` does.
+        struct Flaky {
+            inner: Arc<dyn Backend>,
+            label: String,
+            retry: AtomicBool,
+            toggles: Mutex<Vec<bool>>,
+            failures_left: AtomicU32,
+            fail_with: Mutex<fn() -> RvError>,
+            failed_reads: AtomicU32,
+        }
+
+        impl Flaky {
+            fn new(name: &str) -> Arc<Self> {
+                Arc::new(Self {
+                    inner: new_test_backend(name),
+                    label: format!("flaky get ({name})"),
+                    retry: AtomicBool::new(false),
+                    toggles: Mutex::new(Vec::new()),
+                    failures_left: AtomicU32::new(0),
+                    fail_with: Mutex::new(|| RvError::ErrClusterQuorumLost),
+                    failed_reads: AtomicU32::new(0),
+                })
+            }
+
+            /// Fail the next `n` mount-table reads with `err`.
+            fn fail_next(&self, n: u32, err: fn() -> RvError) {
+                *self.fail_with.lock().unwrap() = err;
+                self.failures_left.store(n, SeqCst);
+            }
+
+            async fn get_once(&self, key: &str) -> Result<Option<BackendEntry>, RvError> {
+                if key.ends_with(CORE_MOUNT_CONFIG_PATH)
+                    && self.failures_left.try_update(SeqCst, SeqCst, |n| n.checked_sub(1)).is_ok()
+                {
+                    self.failed_reads.fetch_add(1, SeqCst);
+                    let err = *self.fail_with.lock().unwrap();
+                    return Err(err());
+                }
+                self.inner.get(key).await
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl Backend for Flaky {
+            async fn list(&self, prefix: &str) -> Result<Vec<String>, RvError> {
+                self.inner.list(prefix).await
+            }
+
+            async fn get(&self, key: &str) -> Result<Option<BackendEntry>, RvError> {
+                if self.retry.load(SeqCst) {
+                    retry_transient(&self.label, is_transient_cluster, || self.get_once(key)).await
+                } else {
+                    self.get_once(key).await
+                }
+            }
+
+            async fn put(&self, entry: &BackendEntry) -> Result<(), RvError> {
+                self.inner.put(entry).await
+            }
+
+            async fn delete(&self, key: &str) -> Result<(), RvError> {
+                self.inner.delete(key).await
+            }
+
+            fn set_transient_read_retry(&self, on: bool) {
+                self.retry.store(on, SeqCst);
+                self.toggles.lock().unwrap().push(on);
+            }
+        }
+
+        /// The HSM unwrap without the HSM: hands back the KEK, or fails with
+        /// `verdict`, and counts the calls.
+        struct FixedKek {
+            kek: Zeroizing<Vec<u8>>,
+            verdict: Option<fn() -> RvError>,
+            unwraps: AtomicU32,
+        }
+
+        #[async_trait::async_trait]
+        impl SealProvider for FixedKek {
+            fn seal_type(&self) -> &str {
+                "test-auto-unseal"
+            }
+
+            fn requires_shares(&self) -> bool {
+                false
+            }
+
+            async fn init_kek(&self, _kek: &[u8], _: &SealConfig) -> Result<Zeroizing<Vec<Vec<u8>>>, RvError> {
+                Err(RvError::ErrBarrierUnsealing)
+            }
+
+            async fn recover_kek(&self) -> Result<Zeroizing<Vec<u8>>, RvError> {
+                self.unwraps.fetch_add(1, SeqCst);
+                match self.verdict {
+                    Some(verdict) => Err(verdict()),
+                    None => Ok(self.kek.clone()),
+                }
+            }
+        }
+
+        struct Fixture {
+            _bvault: BastionVault,
+            core: Arc<Core>,
+            flaky: Arc<Flaky>,
+            provider: Arc<FixedKek>,
+        }
+
+        /// An initialized, sealed vault whose seal provider is `FixedKek`.
+        async fn sealed_vault(name: &str, verdict: Option<fn() -> RvError>) -> Fixture {
+            let flaky = Flaky::new(name);
+            let bvault = BastionVault::new(flaky.clone(), None).unwrap();
+            // 1-of-1 Shamir: the single share is the KEK itself.
+            let init = bvault.init(&SealConfig { secret_shares: 1, secret_threshold: 1 }).await.unwrap();
+            let core = bvault.core.load_full();
+            assert!(core.sealed());
+            let kek = Zeroizing::new(init.secret_shares[0].clone());
+            let provider = Arc::new(FixedKek { kek, verdict, unwraps: AtomicU32::new(0) });
+            core.set_seal_provider(provider.clone());
+            Fixture { _bvault: bvault, core, flaky, provider }
+        }
+
+        #[tokio::test]
+        async fn a_transient_read_error_after_the_unwrap_is_retried_and_the_vault_unseals() {
+            let logs = capture::install();
+            let name = "auto_unseal_retry_recovers";
+            let f = sealed_vault(name, None).await;
+            f.flaky.fail_next(2, || RvError::ErrClusterQuorumLost);
+
+            f.core.auto_unseal_at_startup().await;
+
+            assert!(!f.core.sealed(), "two quorum misses inside the budget must not keep the vault sealed");
+            assert_eq!(f.flaky.failed_reads.load(SeqCst), 2);
+            assert_eq!(f.provider.unwraps.load(SeqCst), 1, "the KEK is unwrapped once, never per retry");
+            // On for init, off; on for the unseal, off: steady-state reads fail fast.
+            assert_eq!(*f.flaky.toggles.lock().unwrap(), vec![true, false, true, false]);
+            if logs {
+                let warns = capture::lines("WARN security", &format!("flaky get ({name}): transient error"));
+                assert_eq!(warns.len(), 2, "{warns:?}");
+                assert!(warns[0].contains("Cluster lost quorum.") && warns[0].contains("attempt 1/5"), "{warns:?}");
+                assert_eq!(capture::lines("INFO security", "HSM auto-unseal succeeded").len(), 1);
+            }
+        }
+
+        #[tokio::test]
+        async fn a_persistent_transient_error_fails_after_the_budget_and_stays_sealed() {
+            let logs = capture::install();
+            let name = "auto_unseal_retry_exhausted";
+            let f = sealed_vault(name, None).await;
+            f.flaky.fail_next(u32::MAX, || RvError::ErrClusterQuorumLost);
+
+            f.core.auto_unseal_at_startup().await;
+
+            assert!(f.core.sealed());
+            assert_eq!(f.flaky.failed_reads.load(SeqCst), MAX_ATTEMPTS, "bounded by the policy's attempts");
+            assert_eq!(f.provider.unwraps.load(SeqCst), 1);
+            assert_eq!(f.flaky.toggles.lock().unwrap().last(), Some(&false));
+            if logs {
+                let warns = capture::lines("WARN security", &format!("flaky get ({name}): transient error"));
+                assert_eq!(warns.len() as u32, MAX_ATTEMPTS - 1, "{warns:?}");
+                let failed = capture::lines("ERROR security", "HSM auto-unseal failed; vault remains sealed");
+                assert_eq!(failed.len(), 1, "{failed:?}");
+                assert!(failed[0].ends_with("Cluster lost quorum."), "{failed:?}");
+            }
+        }
+
+        #[tokio::test]
+        async fn an_hsm_verdict_is_final_and_the_unwrap_runs_once() {
+            let verdicts: [fn() -> RvError; 3] =
+                [|| RvError::ErrHsmBlobInvalid, || RvError::ErrHsmContextMismatch, || RvError::ErrHsmAuthzInvalid];
+            for (i, verdict) in verdicts.into_iter().enumerate() {
+                let f = sealed_vault(&format!("auto_unseal_verdict_{i}"), Some(verdict)).await;
+
+                assert_eq!(f.core.auto_unseal().await.unwrap_err(), verdict());
+                assert_eq!(f.provider.unwraps.load(SeqCst), 1, "{}", verdict());
+                assert!(f.core.sealed());
+                assert_eq!(f.flaky.toggles.lock().unwrap().last(), Some(&false));
+            }
+        }
+
+        #[tokio::test]
+        async fn a_non_transient_storage_error_is_not_retried() {
+            let f = sealed_vault("auto_unseal_storage_fatal", None).await;
+            f.flaky.fail_next(u32::MAX, || RvError::ErrCluster("raft log corrupted".into()));
+
+            let err = f.core.auto_unseal().await.unwrap_err();
+
+            assert!(matches!(err, RvError::ErrCluster(_)), "{err}");
+            assert_eq!(f.flaky.failed_reads.load(SeqCst), 1);
+            assert_eq!(f.provider.unwraps.load(SeqCst), 1);
+            assert!(f.core.sealed());
+        }
+
+        /// The startup path folds the old separate `inited()` check into
+        /// `auto_unseal`: an uninitialized vault is reported, not an error.
+        #[tokio::test]
+        async fn an_uninitialized_vault_is_not_an_unseal_failure() {
+            let logs = capture::install();
+            let flaky = Flaky::new("auto_unseal_not_inited");
+            let bvault = BastionVault::new(flaky.clone(), None).unwrap();
+            let core = bvault.core.load_full();
+            let provider =
+                Arc::new(FixedKek { kek: Zeroizing::new(Vec::new()), verdict: None, unwraps: AtomicU32::new(0) });
+            core.set_seal_provider(provider.clone());
+
+            core.auto_unseal_at_startup().await;
+
+            assert!(core.sealed());
+            assert_eq!(provider.unwraps.load(SeqCst), 0);
+            assert_eq!(*flaky.toggles.lock().unwrap(), vec![true, false]);
+            if logs {
+                assert_eq!(capture::lines("INFO security", "vault not initialized").len(), 1);
+                assert!(capture::lines("ERROR security", "HSM auto-unseal failed").is_empty());
+            }
+        }
+    }
 }

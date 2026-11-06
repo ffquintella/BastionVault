@@ -160,9 +160,9 @@ pub trait Backend: Send + Sync + std::any::Any {
 
     /// Let idempotent reads ride out brief cluster hiccups (no leader, quorum
     /// not confirmed in time) with the bounded `bv_errors::retry` policy while
-    /// `on`. `Core::init` turns it on: once the vault is initialized a failed
-    /// read discards the root token. Writes are never retried. Decorators
-    /// delegate; the default is a no-op.
+    /// `on`. `Core::init` (T474) and `Core::auto_unseal` (T475) turn it on
+    /// for their duration. Writes are never retried. Decorators delegate;
+    /// the default is a no-op.
     fn set_transient_read_retry(&self, _on: bool) {}
 
     /// Physical-layer counterpart of [`Storage::scan`]: bulk-read every

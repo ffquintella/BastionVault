@@ -403,7 +403,7 @@ impl Server {
             // loudly; the process still serves requests so the condition is
             // diagnosable via `/sys/seal-status`.
             if let Some((hsm_cfg, physical, hsm_core)) = hsm_bootstrap {
-                let result = async {
+                let opened = async {
                     // Per node: this node's device. Pool (T454): this node's
                     // client for each member, plus the 10 s health probe.
                     let provider = crate::seal::hsm::HsmSealProvider::open(&hsm_cfg, physical).await?;
@@ -412,20 +412,14 @@ impl Server {
                     // 5-minute / member-up repair tick (T454 phase 4).
                     provider.attach(&hsm_core);
                     hsm_core.set_seal_provider(provider);
-                    if hsm_core.inited().await? {
-                        hsm_core.auto_unseal().await
-                    } else {
-                        log::info!(
-                            target: "security",
-                            "HSM seal configured; vault not initialized — `operator init` will wrap the KEK under the HSM"
-                        );
-                        Ok(false)
-                    }
+                    Ok::<(), RvError>(())
                 }
                 .await;
-                match result {
-                    Ok(true) => log::info!(target: "security", "HSM auto-unseal succeeded"),
-                    Ok(false) => {}
+                match opened {
+                    // The init check, the unwrap and `post_unseal` in one
+                    // call, so their reads all ride out a transient cluster
+                    // error (T475); it logs its own outcome.
+                    Ok(()) => hsm_core.auto_unseal_at_startup().await,
                     Err(e) => log::error!(
                         target: "security",
                         "HSM auto-unseal failed; vault remains sealed: {e}"

@@ -884,8 +884,9 @@ Metrics:
 | Device was reset or tampered with (objects missing, factory key present) | Member marked `faulted` (stays down until an operator acts), `error` log and audit, never auto-recovered. Handle with the replacement flow. |
 | Cryptographic mismatch on unwrap (AAD, authz, MAC) | `hsm.crypto_failure` audit event and the operation fails. It does **not** fail over as if it were an outage. |
 | Device-log chain break or overflow | `hsm.device_log_gap` and metric. Operations continue unless `device_audit = "forced"`. |
-| Raft quorum lost | No node can read the seal record, so nothing unseals. Unchanged from today. |
+| Raft quorum lost | No node can read the seal record, so nothing unseals. A restarting node retries each read of its auto-unseal for about 7.5 s (5 attempts, see the next row), then logs `HSM auto-unseal failed; vault remains sealed` and stays sealed. No fallback. |
 | Brief Raft hiccup during `init` (no leader, quorum not confirmed within one heartbeat, 500 ms) | Reads made by `init` retry up to 5 attempts (0.5, 1, 2, 4 s) so the root token is still returned (T474); writes are not retried, so `init` is not atomic. The pool init probe retries a transport error the same way (stale `yubihsm-connector` connection). Mock-tested only. |
+| Brief Raft hiccup during HSM auto-unseal (same errors), at startup or after `migrate-to-pool` / `recover` | Every storage read of the unseal retries the same way (T475): the init check, the seal record, the unwrap counter, the keyring and everything `post_unseal` loads (the reported failure was a read in `post_unseal`, after `vault auto-unsealed via HSM`). The KEK unwrap is not repeated, writes are not retried, and a crypto, authz or blob error is final. Each retry is a `warn` in `security.log`; if the budget runs out, the node logs the error and stays sealed. Tested with a test seal provider and simulated storage errors only. |
 | Node compromised | Revoke its auth keys on both devices and its link certificate. Rotate the barrier key and the HSM epoch if it was unsealed. |
 
 ## Security considerations
@@ -972,6 +973,11 @@ and digest chain and found a decoding bug in the harness (see
 has run on a device yet. The **pool of one** (operator decision 2026-10-27) is
 implemented on the mock: a cluster starts with one device and adds the second
 later.
+
+Cluster hiccups (T474, T475): while `init` or an HSM auto-unseal runs, storage
+reads retry a transient cluster error (no leader, quorum not confirmed, node
+unhealthy) with the `bv_errors::retry` policy, each retry a `security`
+warning; see [Failure modes](#failure-modes).
 
 Pool of one (mock; the YubiHSM 2 path compiles, unverified on hardware like
 the rest of phase 7). Supersedes the "exactly two `member` blocks" rule of
