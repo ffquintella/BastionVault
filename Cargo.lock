@@ -984,7 +984,7 @@ dependencies = [
 
 [[package]]
 name = "bastion-plugin-sdk"
-version = "0.41.4"
+version = "0.41.5"
 dependencies = [
  "base64 0.22.1",
  "bv_plugin_surface",
@@ -996,7 +996,7 @@ dependencies = [
 
 [[package]]
 name = "bastion-plugin-testkit"
-version = "0.41.4"
+version = "0.41.5"
 dependencies = [
  "base64 0.22.1",
  "serde_json",
@@ -1535,7 +1535,7 @@ dependencies = [
 
 [[package]]
 name = "bv-audit"
-version = "0.42.0"
+version = "0.42.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1555,7 +1555,7 @@ dependencies = [
 
 [[package]]
 name = "bv-auth-approle"
-version = "0.41.5"
+version = "0.41.6"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -1579,7 +1579,7 @@ dependencies = [
 
 [[package]]
 name = "bv-auth-audit"
-version = "0.41.2"
+version = "0.41.3"
 dependencies = [
  "async-trait",
  "bv-errors",
@@ -1595,7 +1595,7 @@ dependencies = [
 
 [[package]]
 name = "bv-auth-cert"
-version = "0.41.1"
+version = "0.41.2"
 dependencies = [
  "async-trait",
  "bv-errors",
@@ -1608,7 +1608,7 @@ dependencies = [
 
 [[package]]
 name = "bv-auth-ferrogate"
-version = "0.41.2"
+version = "0.41.3"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -1647,7 +1647,7 @@ dependencies = [
 
 [[package]]
 name = "bv-auth-fido2"
-version = "0.41.3"
+version = "0.41.4"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1675,7 +1675,7 @@ dependencies = [
 
 [[package]]
 name = "bv-auth-oidc"
-version = "0.41.4"
+version = "0.41.5"
 dependencies = [
  "async-trait",
  "bv-auth-audit",
@@ -1695,7 +1695,7 @@ dependencies = [
 
 [[package]]
 name = "bv-auth-saml"
-version = "0.41.4"
+version = "0.41.5"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1721,7 +1721,7 @@ dependencies = [
 
 [[package]]
 name = "bv-auth-userpass"
-version = "0.41.6"
+version = "0.41.7"
 dependencies = [
  "async-trait",
  "bcrypt",
@@ -1743,7 +1743,7 @@ dependencies = [
 
 [[package]]
 name = "bv-client"
-version = "0.42.5"
+version = "0.42.6"
 dependencies = [
  "async-trait",
  "bv_plugin_surface",
@@ -1773,7 +1773,7 @@ dependencies = [
 
 [[package]]
 name = "bv-core"
-version = "0.42.2"
+version = "0.42.3"
 dependencies = [
  "aes-gcm 0.10.3",
  "arc-swap",
@@ -1851,7 +1851,7 @@ dependencies = [
 
 [[package]]
 name = "bv-engine-cert-lifecycle"
-version = "0.41.3"
+version = "0.41.4"
 dependencies = [
  "async-trait",
  "bv-context",
@@ -1873,7 +1873,7 @@ dependencies = [
 
 [[package]]
 name = "bv-engine-files"
-version = "0.41.3"
+version = "0.41.4"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1898,7 +1898,7 @@ dependencies = [
 
 [[package]]
 name = "bv-engine-kv"
-version = "0.41.2"
+version = "0.41.3"
 dependencies = [
  "async-trait",
  "bv-context",
@@ -1917,7 +1917,7 @@ dependencies = [
 
 [[package]]
 name = "bv-engine-ldap"
-version = "0.41.2"
+version = "0.41.3"
 dependencies = [
  "async-trait",
  "bv-context",
@@ -1942,7 +1942,7 @@ dependencies = [
 
 [[package]]
 name = "bv-engine-notifications"
-version = "0.41.2"
+version = "0.41.3"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -1963,7 +1963,7 @@ dependencies = [
 
 [[package]]
 name = "bv-engine-pki"
-version = "0.41.9"
+version = "0.41.10"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2009,7 +2009,7 @@ dependencies = [
 
 [[package]]
 name = "bv-engine-resource"
-version = "0.43.5"
+version = "0.43.6"
 dependencies = [
  "async-trait",
  "base32",
@@ -2045,7 +2045,7 @@ dependencies = [
 
 [[package]]
 name = "bv-engine-rustion"
-version = "0.41.9"
+version = "0.41.10"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -2079,7 +2079,7 @@ dependencies = [
 
 [[package]]
 name = "bv-engine-ssh"
-version = "0.41.3"
+version = "0.41.4"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2108,7 +2108,7 @@ dependencies = [
 
 [[package]]
 name = "bv-engine-ssh-broker"
-version = "0.41.2"
+version = "0.41.3"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -2127,7 +2127,7 @@ dependencies = [
 
 [[package]]
 name = "bv-engine-totp"
-version = "0.41.2"
+version = "0.41.3"
 dependencies = [
  "async-trait",
  "base32",
@@ -2154,7 +2154,7 @@ dependencies = [
 
 [[package]]
 name = "bv-engine-transit"
-version = "0.41.2"
+version = "0.41.3"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2181,7 +2181,7 @@ dependencies = [
 
 [[package]]
 name = "bv-errors"
-version = "0.41.2"
+version = "0.41.3"
 dependencies = [
  "anyhow",
  "bcrypt",
@@ -2226,7 +2226,7 @@ dependencies = [
 
 [[package]]
 name = "bv-kernel"
-version = "0.42.6"
+version = "0.42.7"
 dependencies = [
  "actix-rt",
  "arc-swap",
@@ -2277,7 +2277,7 @@ dependencies = [
 
 [[package]]
 name = "bv-kernel-api"
-version = "0.42.2"
+version = "0.42.3"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -2302,7 +2302,7 @@ dependencies = [
 
 [[package]]
 name = "bv-logical"
-version = "0.42.3"
+version = "0.42.4"
 dependencies = [
  "actix-rt",
  "async-trait",
@@ -2326,7 +2326,7 @@ dependencies = [
 
 [[package]]
 name = "bv-mcp"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2346,7 +2346,7 @@ dependencies = [
 
 [[package]]
 name = "bv-metrics"
-version = "0.41.2"
+version = "0.41.3"
 dependencies = [
  "prometheus-client",
  "sysinfo",
@@ -2355,7 +2355,7 @@ dependencies = [
 
 [[package]]
 name = "bv-plugin-pack"
-version = "0.41.4"
+version = "0.41.5"
 dependencies = [
  "bastion-plugin-testkit",
  "bv_crypto",
@@ -2418,7 +2418,7 @@ dependencies = [
 
 [[package]]
 name = "bv-sql-classify"
-version = "0.41.1"
+version = "0.41.2"
 dependencies = [
  "proptest",
  "sqlparser",
@@ -2433,7 +2433,7 @@ dependencies = [
 
 [[package]]
 name = "bv-storage"
-version = "0.41.4"
+version = "0.41.5"
 dependencies = [
  "aes-gcm 0.10.3",
  "arc-swap",
@@ -2473,7 +2473,7 @@ dependencies = [
 
 [[package]]
 name = "bv-utils"
-version = "0.41.4"
+version = "0.41.5"
 dependencies = [
  "as-any",
  "base64 0.22.1",
@@ -2507,7 +2507,7 @@ dependencies = [
 
 [[package]]
 name = "bv_crypto"
-version = "0.41.2"
+version = "0.41.3"
 dependencies = [
  "chacha20poly1305 0.10.1",
  "ciborium",
@@ -2523,7 +2523,7 @@ dependencies = [
 
 [[package]]
 name = "bv_plugin_manifest"
-version = "0.41.3"
+version = "0.41.4"
 dependencies = [
  "bv_plugin_surface",
  "serde",
@@ -2533,7 +2533,7 @@ dependencies = [
 
 [[package]]
 name = "bv_plugin_surface"
-version = "0.42.0"
+version = "0.42.1"
 dependencies = [
  "hex",
  "serde",
