@@ -118,6 +118,8 @@ Next-up list recorded before the migration, in its order:
   - note: [spec](features/hsm-pool-ha.md) — `v2/sys/hsm/status` omitted `this_node_enrolled` for `topology = "pool"`, so the GUI showed "This Node Enrolled: No" on an unsealed node. Pool status now reports it as true when a member of this node's pool holds a KEK copy; `enrolled_nodes` stays absent (the pool record tracks members, not nodes). Covered by `pool_status_reports_members_and_never_secrets`.
 - [x] T477 Treat a connector that dropped its HTTP connection as a link failure, and stop showing a healed pool member's old error (S114, S17)
   - note: [spec](features/hsm-pool-ha.md) — reported on build 0.45.48: `hsm-b` showed `probe: … protocol error: bad response from connector: error reading response` while Up. `map_yubi` now classifies `bad response from connector` as `ErrHsmTransport` (counted by the breaker, retried and failed over), and `record_success` clears the member's `last_error`. Covered by `a_dropped_connector_connection_is_a_link_failure` and an extension of `pool_status_reports_members_and_never_secrets`; `make check-hsm` passes. Not verified on the devices; the probe itself still has no retry of its own.
+- [ ] T478 Let a retired HSM pool member's reset device rejoin the pool under the same serial after a fresh `provision` (S116, S114)
+  - note: [spec](features/hsm-member-reentry.md) — spec written, awaiting operator review; nothing implemented. A reset YubiHSM 2 keeps its serial and loses every key, and `member add` refuses a serial already in the seal record, so upgrading a pool to the drain's `bv-admin` needs two spare devices. Supersedes the retired entry in place as a new incarnation (optional `incarnation`, `retire_reason`, `previous` on the member plus an append-only tombstone, no version bump), behind a sudo `member reenter` ceremony that re-attests the device and refuses unchanged keys; rolling retire, reset, re-enter, repair, promote, one member at a time.
 
 ## [M4] Core vault
 > outcome: Done when the Vault-compatible core, KV, policy, identity, scoping and audit surfaces are complete and connect-only access is enforced end to end.
@@ -719,3 +721,4 @@ Next-up list recorded before the migration, in its order:
 | S113 | Feature: Module Policies — per-module full / read / connect / shared baselines | features/module-policies.md |
 | S114 | Feature: HSM Pool HA — an N-node cluster served by two YubiHSM 2 devices | features/hsm-pool-ha.md |
 | S115 | Feature: MCP Namespace Selection — agent calls run in the operator's child namespace | features/mcp-namespace-selection.md |
+| S116 | Feature: HSM Member Re-entry — a retired pool device rejoins after a reset and a fresh provision | features/hsm-member-reentry.md |
