@@ -1773,7 +1773,7 @@ dependencies = [
 
 [[package]]
 name = "bv-core"
-version = "0.42.3"
+version = "0.42.4"
 dependencies = [
  "aes-gcm 0.10.3",
  "arc-swap",
@@ -2181,7 +2181,7 @@ dependencies = [
 
 [[package]]
 name = "bv-errors"
-version = "0.41.3"
+version = "0.41.4"
 dependencies = [
  "anyhow",
  "bcrypt",
@@ -2433,7 +2433,7 @@ dependencies = [
 
 [[package]]
 name = "bv-storage"
-version = "0.41.5"
+version = "0.41.6"
 dependencies = [
  "aes-gcm 0.10.3",
  "arc-swap",
