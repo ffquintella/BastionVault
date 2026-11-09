@@ -2260,6 +2260,12 @@ mod tests {
         }
         let b = members.iter().find(|m| m["name"] == c.name_b.as_str()).unwrap();
         assert!(b["last_error"].as_str().unwrap().contains("unreachable"), "{b}");
+        // Once the member answers again, the old failure is no longer shown.
+        c.b.set_offline(false);
+        provider.pool().unwrap().probe_all().await;
+        let status = provider.status().await.unwrap();
+        let b = status["members"].as_array().unwrap().iter().find(|m| m["name"] == c.name_b.as_str()).unwrap().clone();
+        assert!(b["last_error"].is_null(), "a member that answers must not keep its old error: {b}");
         let text = status.to_string();
         for secret in ["165,165,165", "wrapped", "authz_pub", "identity_pub"] {
             assert!(!text.contains(secret), "status leaks {secret:?}: {text}");

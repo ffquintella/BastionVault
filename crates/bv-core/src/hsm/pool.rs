@@ -450,6 +450,8 @@ impl HsmPool {
         h.consecutive_failures = 0;
         h.down = false;
         h.breaker_backoff = Duration::ZERO;
+        // A member that answers is not showing an old failure as its current one.
+        h.last_error = None;
         if reset_sessions_full {
             h.sessions_full_backoff = Duration::ZERO;
             h.sessions_full_until = Duration::ZERO;

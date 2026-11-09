@@ -316,6 +316,11 @@ EXAMPLE ENTRY:
 - **Stop the HSM / Seal page showing "This Node Enrolled: No" on a pool node that is unsealed and holds its KEK copies** (T476, S114, S17)
   `v2/sys/hsm/status` did not report `this_node_enrolled` for `topology = "pool"`, and the GUI read the missing value as No. It is now true when a member of this node's pool holds a KEK copy, and false before init or when none does. `enrolled_nodes` is still not reported for a pool (the seal record lists members, not nodes), so the page keeps showing "—" there.
 
+#### HSM pool: connector drops and stale member errors
+
+- **Count a `yubihsm-connector` that dropped its HTTP connection as a link failure, and clear a pool member's last error once it answers again** (T477, S114, S17)
+  A kept-alive connection the connector had closed surfaced as `yubihsm: protocol error: bad response from connector: error reading response`, which the pool treated as a device error: the member stayed Up, nothing retried it, and the HSM / Seal page kept showing the message after the member recovered. It is now a transport failure (breaker, retry, failover) and `Last Error` is cleared on the next successful probe or operation. Checked with the mock and `make check-hsm`, not on the devices.
+
 #### Rustion: key accounts
 
 - **Connect through Rustion with a stored SSH key, not only a password** -- `rustion/v2/session/open` with a `secret` credential source refused any secret without a `password` field (`HTTP 422: … only password-shaped credentials … can be brokered server-side today`), so a key-based account (for example a profile bound to a secret holding a `private_key`) could not Connect on a `rustion-required` resource. A secret holding an OpenSSH `private_key` (Ed25519 or ECDSA) is now sealed into the envelope as `ssh-key`, like the provider source already did; a passphrase-protected or non-OpenSSH key is still refused with a 422 that says why, since the envelope has no passphrase channel. (T103, S107)

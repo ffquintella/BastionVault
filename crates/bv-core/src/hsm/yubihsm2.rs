@@ -125,8 +125,18 @@ fn map_yubi(e: yubihsm::client::Error) -> RvError {
         ErrorKind::ConnectorError | ErrorKind::ClosedSessionError | ErrorKind::CreateFailed => {
             RvError::ErrHsmTransport(format!("yubihsm: {e}"))
         }
+        // The connector dropped a kept-alive HTTP connection (typically one that
+        // sat idle) and the crate reports it as a protocol error. It is a link
+        // failure, not a device one: the pool must count it and retry.
+        _ if is_connector_drop(&e.to_string()) => RvError::ErrHsmTransport(format!("yubihsm: {e}")),
         _ => RvError::ErrHsm(format!("yubihsm: {e}")),
     }
+}
+
+/// True for the `yubihsm` crate's rendering of a connector that closed or cut
+/// the HTTP response (`bad response from connector: error reading response`).
+fn is_connector_drop(message: &str) -> bool {
+    message.contains("bad response from connector")
 }
 
 /// `unwrap-data` on a blob whose AES-CCM tag does not verify. The device
@@ -723,6 +733,12 @@ pub async fn provision(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_dropped_connector_connection_is_a_link_failure() {
+        assert!(super::is_connector_drop("protocol error: bad response from connector: error reading response"));
+        assert!(!super::is_connector_drop("device error: invalid data"));
+    }
+
     use super::*;
 
     /// What attestation must say is the provision table, in the bit values
