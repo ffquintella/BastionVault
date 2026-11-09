@@ -1,6 +1,6 @@
 # Feature: HSM Member Re-entry — a retired pool device rejoins after a reset and a fresh `provision`
 
-> Status: **spec, awaiting operator review** (T478, S116). Nothing here is
+> Status: **spec, operator decisions recorded 2026-11-09, awaiting go-ahead to implement** (T478, S116). Nothing here is
 > implemented. Written 2026-11-09 against `95455565`. Extends
 > [HSM Pool HA](hsm-pool-ha.md) (S114), whose rules apply unchanged unless a
 > section below says otherwise and why. Touches the seal record (a persisted
@@ -101,8 +101,8 @@ safely.
 
 **R1. Explicit ceremony, never implicit.** `member add` keeps refusing a
 retired id, with a message that names `member reenter`. `member reenter`
-refuses an id that is not in the record, not `retired`, or whose
-`retire_reason` is `lost` or `compromised` (see Open question 1). It is
+refuses an id that is not in the record, not `retired`, or retired without a
+recorded `retire_reason` (Decision 4). It is
 sudo-gated like every `hsm/members/*` route (`system/mod.rs:1696`, root paths
 `hsm/members/*`), needs the device's `bv-admin` credential (as `add` does,
 `pool_admin.rs:929`), and raises a distinct audit event, `hsm.member_reentered`
@@ -160,15 +160,16 @@ node credentials until reset. R3 is what makes closing them safe: new keys
 prove a reset, and a reset deletes every auth key. They are copied to
 `unapplied_revocations` and into the audit event, never silently dropped.
 
-**R7. Lost or compromised devices.** Retire gains `--reason replaced|lost|
+**R7. Reasons, and what is tombstoned.** Retire gains `--reason replaced|lost|
 compromised` (route field `reason`, default `replaced`; recorded as
-`retire_reason`). `recover` retires lost members with `lost`
-(`recovery_ceremony.rs:513-514`, which sets no reason today). A `lost`/`compromised` member is a permanent
-tombstone: its serial can never re-enter, and its replacement is a different
-device through the ordinary `member add`. Records retired before this feature
-have `None`: re-entry is allowed, because the operator's `--reenter` plus the
-R3 key comparison is the evidence, and the audit event says the reason was
-unrecorded.
+`retire_reason`). The reason is **required evidence of a deliberate retire
+under this build and is otherwise informational**: every reason may re-enter
+(Decision 1), because the device is not the problem, its old keys are. What is
+tombstoned is the **old incarnation's keys and fingerprints** (R3), forever:
+a `compromised` device that is reset comes back with new keys and is a new
+incarnation; the old keys can never be accepted again. A record retired before
+this feature has no reason and **cannot re-enter** (Decision 4); `recover`
+(`recovery_ceremony.rs:513-514`) sets `lost` on the members it retires.
 
 **R8. Failure to attest leaves nothing behind.** The existing rollback in
 `add_member_on` deletes node auth keys it created when any later step fails
@@ -197,10 +198,15 @@ member, after the tombstone exists.
   refused when fewer than `min_wrap_copies` others would remain
   (`pool_admin.rs:1053-1059`). A swap runs on one device between the retire
   and the promotion, so with `min_wrap_copies = 2` and no recovery key the
-  operator must set `min_wrap_copies = 1` (and
-  `acknowledge_single_member_without_recovery = true`, `seal/hsm.rs:568-585`)
-  on every node first, as `docs/hsm.md` already says. **This feature does not
-  weaken either guard.** See Open question 2.
+  operator either sets `min_wrap_copies = 1` on every node first, as
+  `docs/hsm.md` says today, or (Decision 2) passes `member retire
+  --allow-below-min-copies`: sudo, audited, and scoped to that one retire. It
+  bypasses **only** the `min_wrap_copies` check at `pool_admin.rs:1053-1059`;
+  the last-active-member, stranded-set and pool-of-one-acknowledgement guards
+  (`seal/hsm.rs:568-585`, a per-node config value) stay. The retire event
+  records `below_min_copies=true`. While the pool runs on one device, nodes
+  still configured with `min_wrap_copies = 2` cannot create **new** custody
+  keys (a wrap must reach two copies); unseal and reads are unaffected.
 
 ### Rolling procedure: retire, reset, re-enter — chosen
 
@@ -216,9 +222,9 @@ Per member, never both at once (`hsm-a` first, then `hsm-b` from `hsm-a`'s
 promoted incarnation):
 
 ```text
-0. once: min_wrap_copies = 1 (+ acknowledgement if recovery = "none") on every node; repair --run;
+0. once: acknowledgement on every node if recovery = "none"; repair --run;
    under_replicated = 0; both members active
-1. member retire hsm-a --reason replaced     (refused if any set lacks a copy on hsm-b)
+1. member retire hsm-a --reason replaced --allow-below-min-copies   (refused if any set lacks a copy on hsm-b)
 2. repair --run                              (drops hsm-a's copies)
 3. physically reset hsm-a; provision with this build; start its gateway
 4. member reenter hsm-a --bundle a2.json --gateway https://… --admin hsm-a
@@ -237,7 +243,7 @@ only moment the pool depends on one device is the whole window, so:
 |---|---|---|
 | `retire` refused | nothing changed | fix what it names (run repair, lower `min_wrap_copies`) |
 | Reset device never comes back (dead, lost, wrong firmware) | hsm-a retired, pool of one on hsm-b, `hsm.pool_not_redundant` and `bv_hsm_pool_redundancy{level="none"}` raised | the retired entry does not count toward the cap (`pool_admin.rs:917`): add a **different** device with the ordinary `member add`. Or leave the pool of one. If hsm-b also fails: `recover` needs the recovery key, which can only be chosen at init, so a `recovery = "none"` pool has **no** way back — the existing, loudly stated pool-of-one risk |
-| Operator changes mind after the retire, device not reset | hsm-a retired, keys unchanged | `member reenter` refuses (R3: same keys). Reset and re-provision it, or `add` another device. There is deliberately no "un-retire" (Open question 3) |
+| Operator changes mind after the retire, device not reset | hsm-a retired, keys unchanged | `member reenter` refuses (R3: same keys). Reset and re-provision it, or `add` another device. There is deliberately no "un-retire" (Decision 3) |
 | `reenter` fails midway (attestation, device error, storage) | tombstone may exist; record unchanged; auth keys created on the device are deleted (R8) | fix the cause and re-run; idempotent |
 | `reenter` succeeded but repair cannot fill (hsm-b unreachable) | hsm-a `joining`, holds no copy; hsm-b still the only copy holder | restore hsm-b's link; repair resumes (5-minute tick, member-up trigger, `hsm-pool-ha.md` § Degraded operation) |
 | hsm-b fails during the window | pool lost unless a recovery key exists | the same risk as any pool of one; the runbook says to check the recovery copy before step 1 |
@@ -258,7 +264,7 @@ prove hsm-b holds every copy.
   secrets), at `seal/hsm.rs:1150-1169`.
 - **CLI.** `bvault operator hsm member reenter <name> --bundle <file>
   --gateway <url> --admin <name>` (the same flags as `member add`), and
-  `member retire <name> [--reason replaced|lost|compromised]`.
+  `member retire <name> [--reason replaced|lost|compromised] [--allow-below-min-copies]`.
 - **GUI** (`gui/src/routes/HsmStatusPage.tsx`, `PoolMembersCard`, `:102-135`):
   read-only. An **Incarnation** column, a *re-entered* note and the previous
   incarnations under a member, and for a retired member whose reason allows
@@ -295,15 +301,17 @@ Happy path and ordering:
 Refusals (each asserts the record, enrollments and deliveries are unchanged):
 
 5. `member add` of a retired id still refuses and names `reenter`.
-6. `reenter` of: an unknown id, an `active` or `joining` member, a `lost` or
-   `compromised` member.
+6. `reenter` of: an unknown id, an `active` or `joining` member, a member
+   retired before this feature (no reason); a `compromised`-retired device
+   with fresh keys is **accepted**, and its old keys are refused afterwards.
 7. **Replay:** the old bundle and the same device un-reset (same keys): refused
    by R3; a bundle whose attestation does not verify, whose serial differs from
    the device reached, or whose challenge fails: refused.
 8. A set that still holds a copy for the id (repair not run): refused;
    barrier sealed or absent: refused.
 9. Retire guards unchanged: last active member, `min_wrap_copies`, stranded
-   set, unacknowledged pool of one.
+   set, unacknowledged pool of one; `--allow-below-min-copies` bypasses only
+   the `min_wrap_copies` one, is audited, and a nonsudo caller is refused.
 10. Failure injection in `add_member_on` after the device keys are created:
     auth keys rolled back, record not superseded, tombstone idempotent on
     retry.
@@ -348,23 +356,19 @@ production, and these are the claims that need a real YubiHSM 2:
 5. Timing of repair filling a re-entered device under `repair_rate`.
 6. The retire guard refusing at `min_wrap_copies = 2` on the two-device pool.
 
-## Open questions for the operator
+## Decisions by the operator (2026-11-09)
 
-1. **Permanent tombstone for `lost` / `compromised` (R7).** Recommended: yes,
-   the serial never re-enters. Alternative: re-entry always allowed with
-   `--reenter`, reason only informational. The first is safer; the second
-   spares the operator a spare device if a "lost" device is found.
-2. **Lowering `min_wrap_copies` on every node and restarting them twice per
-   swap is the heaviest step.** Recommended: keep it (no guard weakened).
-   Alternative: `member retire --allow-below-min-copies`, sudo, audited,
-   scoped to that one ceremony.
-3. **No un-retire.** Recommended: none. A retired device that was never reset
-   can be reset and re-entered, or replaced by another serial.
-4. **`retire_reason` on records retired before this feature is `None`.**
-   Recommended: allow re-entry for them, as R7 says. Alternative: refuse them,
-   which would block exactly the case that motivated this.
-5. **Same name only.** Re-entry keeps the retired member's name. Allowing a new
-   name adds a rename path for little benefit.
+1. **Every reason may re-enter.** The serial is never tombstoned; the old
+   incarnation's keys and fingerprints are (R3, R7).
+2. **`member retire --allow-below-min-copies`** is added: sudo, audited,
+   scoped to that retire, bypassing only the `min_wrap_copies` check.
+3. **No un-retire.** A retired device that was never reset needs a reset first
+   (R3 refuses its unchanged keys).
+4. **A record retired before this feature cannot re-enter** (no recorded
+   reason). The first swap therefore retires with this build.
+   *Reading to confirm:* this is taken as "refuse legacy-retired records",
+   compatible with Decision 1 because reasons gate nothing else.
+5. **Same name only.**
 
 ## Tracking text (to land with the implementation, not before)
 
@@ -374,5 +378,5 @@ production, and these are the claims that need a real YubiHSM 2:
 
 ```markdown
 - **Rejoin a retired HSM pool member after a reset and a fresh `provision`, under the same serial** (T478, S116, S114)
-  -- `bvault operator hsm member reenter <name>` (`POST v2/sys/hsm/members/<name>/reenter`, sudo, the device's bv-admin credential) adds a retired member's reset device back as a new incarnation: it is attested again through the pinned Yubico chain, its new keys are pinned, its wrap copies and node credentials are made afresh and none of the old incarnation's are trusted, and the old incarnation's keys, fingerprints and pending revocations stay in the record and in an append-only tombstone. A device that was not reset (same keys) is refused. `member retire` takes `--reason replaced|lost|compromised`; a lost or compromised serial never re-enters. `member add` still refuses a retired serial. The seal record gains optional `incarnation`, `retire_reason` and `previous` fields (read-old/write-new, no version bump). A two-device pool can now be moved to a `bv-admin` that delegates `get-log-entries` one member at a time with no spare device; the pool runs on one device between the retire and the promotion. Verified with the mock only.
+  -- `bvault operator hsm member reenter <name>` (`POST v2/sys/hsm/members/<name>/reenter`, sudo, the device's bv-admin credential) adds a retired member's reset device back as a new incarnation: it is attested again through the pinned Yubico chain, its new keys are pinned, its wrap copies and node credentials are made afresh and none of the old incarnation's are trusted, and the old incarnation's keys, fingerprints and pending revocations stay in the record and in an append-only tombstone. A device that was not reset (same keys) is refused. `member retire` takes `--reason replaced|lost|compromised`; every reason may re-enter, the old incarnation's keys never again, and `--allow-below-min-copies` retires below `min_wrap_copies` for one audited ceremony. `member add` still refuses a retired serial. The seal record gains optional `incarnation`, `retire_reason` and `previous` fields (read-old/write-new, no version bump). A two-device pool can now be moved to a `bv-admin` that delegates `get-log-entries` one member at a time with no spare device; the pool runs on one device between the retire and the promotion. Verified with the mock only.
 ```
