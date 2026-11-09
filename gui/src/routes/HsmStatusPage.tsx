@@ -100,6 +100,7 @@ const WARN_BOX =
   "rounded-lg border border-yellow-500/30 bg-yellow-500/10 text-yellow-400 px-3 py-2 text-sm";
 
 function PoolMembersCard({ members }: { members: HsmPoolMember[] }) {
+  const reenterable = members.filter((m) => m.state === "retired" && m.retire_reason);
   return (
     <Card title="Pool Members">
       <div className="overflow-x-auto">
@@ -145,6 +146,31 @@ function PoolMembersCard({ members }: { members: HsmPoolMember[] }) {
               header: "Latency",
               className: "w-20 pr-2",
               render: (m) => (m.latency_ms != null ? `${m.latency_ms} ms` : "—"),
+            },
+            {
+              key: "incarnation",
+              header: "Incarnation",
+              className: "w-28 pr-2",
+              render: (m) => {
+                const prior = m.previous?.length ?? 0;
+                return (
+                  <div
+                    className="min-w-0 truncate"
+                    title={
+                      prior > 0
+                        ? `Re-entered after a reset; ${prior} earlier incarnation(s) are kept and their keys refused`
+                        : ""
+                    }
+                  >
+                    {m.incarnation ?? "—"}
+                    {prior > 0 && (
+                      <span className="ml-1 text-xs text-[var(--color-text-muted)]">
+                        (re-entered)
+                      </span>
+                    )}
+                  </div>
+                );
+              },
             },
             {
               key: "serial",
@@ -201,6 +227,12 @@ function PoolMembersCard({ members }: { members: HsmPoolMember[] }) {
           ]}
         />
       </div>
+      {reenterable.map((m) => (
+        <p key={m.name} className="mt-2 text-xs text-[var(--color-text-muted)]">
+          {m.name} is retired ({m.retire_reason}). After a physical reset and a fresh provision, rejoin it with{" "}
+          <code className="font-mono break-all">bvault operator hsm member reenter {m.name} --bundle &lt;file&gt;</code>.
+        </p>
+      ))}
     </Card>
   );
 }

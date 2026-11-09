@@ -417,6 +417,9 @@ pub(crate) const V2_ONLY: &[ResourceSpec] = &[
     resource!("/hsm/members/{name}/retire" => [
         route!(routed Post => sys_hsm_pool_request_handler, "sys/hsm/members/{name}/retire"),
     ]),
+    resource!("/hsm/members/{name}/reenter" => [
+        route!(routed Post => sys_hsm_pool_request_handler, "sys/hsm/members/{name}/reenter"),
+    ]),
     resource!("/hsm/members/{name}" => [
         route!(routed Post => sys_hsm_pool_request_handler, "sys/hsm/members/{name}"),
     ]),

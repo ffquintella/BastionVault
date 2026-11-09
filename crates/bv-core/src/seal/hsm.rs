@@ -896,6 +896,9 @@ impl HsmSealProvider {
                     attestation_fps,
                     state: MemberState::Active,
                     pending_revocations: Vec::new(),
+                    incarnation: 1,
+                    retire_reason: None,
+                    previous: Vec::new(),
                 },
             );
         }
@@ -1153,6 +1156,9 @@ impl HsmSealProvider {
                     "last_error": m.last_error,
                     "latency_ms": m.latency_ms,
                     "pending_revocations": recorded.map(|rm| rm.pending_revocations.clone()).unwrap_or_default(),
+                    "incarnation": recorded.map(|rm| rm.incarnation),
+                    "retire_reason": recorded.and_then(|rm| rm.retire_reason),
+                    "previous": recorded.map(|rm| rm.incarnation_json()["previous"].clone()),
                 })
             })
             .collect();
@@ -1685,6 +1691,9 @@ mod tests {
                 attestation_fps: vec![],
                 state: record::MemberState::Active,
                 pending_revocations: vec![],
+                incarnation: 1,
+                retire_reason: None,
+                previous: Vec::new(),
             },
         );
         provider.store_record(&record).await.unwrap();

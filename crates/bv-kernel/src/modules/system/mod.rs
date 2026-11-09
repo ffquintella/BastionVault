@@ -185,6 +185,7 @@ impl SystemBackend {
         let sys_backend_hsm_members = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_hsm_member_add = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_hsm_member_retire = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_hsm_member_reenter = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_hsm_nodes = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_hsm_node_enroll = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_hsm_node_revoke = self.self_ptr.upgrade().unwrap().clone();
@@ -799,10 +800,50 @@ impl SystemBackend {
                             field_type: FieldType::Str,
                             required: true,
                             description: "Pool member to retire."
+                        },
+                        "reason": {
+                            field_type: FieldType::Str,
+                            required: false,
+                            description: "replaced (default), lost or compromised; recorded with the member."
+                        },
+                        "allow_below_min_copies": {
+                            field_type: FieldType::Bool,
+                            required: false,
+                            description: "Skip the min_wrap_copies check for this retire only (audited)."
                         }
                     },
                     operations: [
                         {op: Operation::Write, handler: sys_backend_hsm_member_retire.handle_hsm_member_retire}
+                    ]
+                },
+                {
+                    // T478: a retired member's reset, re-provisioned device
+                    // rejoins as a new incarnation (features/hsm-member-reentry.md).
+                    pattern: r"hsm/members/(?P<name>[A-Za-z0-9._-]{1,64})/reenter$",
+                    fields: {
+                        "name": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Retired pool member whose reset device rejoins."
+                        },
+                        "bundle": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Attestation bundle (JSON) that `provision` produced on the reset device."
+                        },
+                        "gateway": {
+                            field_type: FieldType::Str,
+                            required: false,
+                            description: "https:// mTLS gateway URL of the member (yubihsm2)."
+                        },
+                        "admin_credentials": {
+                            field_type: FieldType::Map,
+                            required: true,
+                            description: "Member name to bv-admin credential, for this request only."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: sys_backend_hsm_member_reenter.handle_hsm_member_reenter}
                     ]
                 },
                 {
@@ -4041,7 +4082,37 @@ impl SystemBackend {
         let provider = self.hsm_pool_provider()?;
         let hsm = provider.as_hsm().ok_or(RvError::ErrHsmUnavailable)?;
         let barrier: &dyn crate::storage::Storage = self.core.barrier.as_ref();
-        Self::hsm_json(hsm.retire_member(&name, Some(barrier), &actor).await.map_err(Self::hsm_refusal)?)
+        let reason = match req.get_data("reason").ok().and_then(|v| v.as_str().map(str::to_string)) {
+            Some(raw) => bv_core::seal::hsm::record::RetireReason::parse(&raw).map_err(Self::hsm_refusal)?,
+            None => bv_core::seal::hsm::record::RetireReason::Replaced,
+        };
+        let below_min = req.get_data("allow_below_min_copies").ok().and_then(|v| v.as_bool()).unwrap_or(false);
+        Self::hsm_json(
+            hsm.retire_member_with(&name, Some(barrier), &actor, reason, below_min).await.map_err(Self::hsm_refusal)?,
+        )
+    }
+
+    /// `POST v2/sys/hsm/members/:name/reenter` — a retired member's reset device rejoins (sudo).
+    pub async fn handle_hsm_member_reenter(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let name = req.get_data_as_str("name")?;
+        let raw_bundle = req.get_data_as_str("bundle")?;
+        let gateway = req.get_data("gateway").ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+        let admin = Self::hsm_admin_credentials(req)?;
+        let bundle =
+            bv_core::hsm::ceremony::AttestationBundle::decode(raw_bundle.as_bytes()).map_err(Self::hsm_refusal)?;
+        let actor = crate::modules::identity::caller_audit_actor(req);
+        let provider = self.hsm_pool_provider()?;
+        let hsm = provider.as_hsm().ok_or(RvError::ErrHsmUnavailable)?;
+        let barrier: &dyn crate::storage::Storage = self.core.barrier.as_ref();
+        Self::hsm_json(
+            hsm.reenter_member(&name, &bundle, &gateway, &admin, Some(barrier), &actor)
+                .await
+                .map_err(Self::hsm_refusal)?,
+        )
     }
 
     /// `GET v2/sys/hsm/nodes` — enrolled and pending nodes (sudo).

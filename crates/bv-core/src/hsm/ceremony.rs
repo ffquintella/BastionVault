@@ -26,6 +26,9 @@ use crate::{
 pub const NODE_ENROLLMENT_PREFIX: &str = "core/hsm/nodes/";
 /// Physical keyspace of member promotion transcripts.
 pub const PROMOTION_PREFIX: &str = "core/hsm/promotions/";
+/// Physical keyspace of superseded-incarnation tombstones (T478). Written
+/// before the seal record is, never rewritten, never touched by an older build.
+pub const INCARNATION_PREFIX: &str = "core/hsm/incarnations/";
 
 const RECORD_VERSION: u8 = 1;
 pub const ENROLLMENT_CONTEXT: &str = "bastionvault/hsm/node-enrollment/v1";
@@ -444,4 +447,73 @@ mod tests {
         let bad = AttestationBundle::new("softhsm", "A", "x", b"", b"");
         assert!(AttestationBundle::decode(&serde_json::to_vec(&bad).unwrap()).is_err());
     }
+}
+
+/// What a re-entry supersedes: the keys and fingerprints of one earlier
+/// incarnation of a device, kept outside the seal record so they survive a
+/// rewrite of the record by an older build.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IncarnationTombstone {
+    pub version: u8,
+    pub hsm_id: HsmId,
+    pub incarnation: u32,
+    #[serde(with = "serde_bytes")]
+    pub identity_pub: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    pub authz_pub: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    pub seed_ecdh_pub: Vec<u8>,
+    #[serde(default)]
+    pub attestation_fps: Vec<String>,
+    pub superseded_at: u64,
+    pub superseded_by: String,
+}
+
+impl IncarnationTombstone {
+    /// Whether any key or fingerprint here appears in the given set.
+    pub fn refuses(&self, identity: &[u8], authz: &[u8], seed_ecdh: &[u8], fps: &[String]) -> bool {
+        [&self.identity_pub, &self.authz_pub, &self.seed_ecdh_pub]
+            .iter()
+            .any(|k| [identity, authz, seed_ecdh].contains(&k.as_slice()))
+            || self.attestation_fps.iter().any(|f| fps.contains(f))
+    }
+}
+
+fn incarnation_key(hsm_id: &HsmId, incarnation: u32) -> String {
+    format!("{INCARNATION_PREFIX}{}-{incarnation}", hsm_id.as_str().replace(':', "_"))
+}
+
+/// Write the tombstone of `t.incarnation`. Idempotent: the key names the
+/// incarnation, so a retry after a crash rewrites the same entry.
+#[maybe_async::maybe_async]
+pub async fn write_incarnation(physical: &dyn PhysicalBackend, t: &IncarnationTombstone) -> Result<(), RvError> {
+    let value = serde_json::to_vec(t).map_err(|e| RvError::ErrHsm(format!("incarnation tombstone encode: {e}")))?;
+    physical.put(&BackendEntry { key: incarnation_key(&t.hsm_id, t.incarnation), value }).await
+}
+
+/// Every tombstone of `hsm_id`. An unreadable entry is an error: the replay
+/// check must not pass because a tombstone could not be read.
+#[maybe_async::maybe_async]
+pub async fn list_incarnations(
+    physical: &dyn PhysicalBackend,
+    hsm_id: &HsmId,
+) -> Result<Vec<IncarnationTombstone>, RvError> {
+    let stem = format!("{}-", hsm_id.as_str().replace(':', "_"));
+    let mut out = Vec::new();
+    for name in physical.list(INCARNATION_PREFIX).await? {
+        // `<backend>_<serial>-<n>`: a serial may hold `-`, so match the stem
+        // exactly and require only digits after it.
+        let Some(rest) = name.strip_prefix(&stem) else { continue };
+        if rest.is_empty() || !rest.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let Some(entry) = physical.get(&format!("{INCARNATION_PREFIX}{name}")).await? else { continue };
+        let t: IncarnationTombstone = serde_json::from_slice(&entry.value)
+            .map_err(|e| RvError::ErrHsm(format!("invalid incarnation tombstone {name}: {e}")))?;
+        if t.hsm_id != *hsm_id {
+            return Err(RvError::ErrHsm(format!("incarnation tombstone {name} names {}", t.hsm_id)));
+        }
+        out.push(t);
+    }
+    Ok(out)
 }

@@ -53,6 +53,8 @@ pub enum MemberCommands {
     Add(MemberAdd),
     /// Retire a member; repair then removes its copies.
     Retire(MemberRetire),
+    /// Rejoin a retired member's device after a physical reset and a fresh `provision` (needs its admin credential).
+    Reenter(MemberReenter),
 }
 
 #[derive(Subcommand)]
@@ -73,6 +75,7 @@ impl Hsm {
             HsmCommands::Members(c) => c.run("/v2/sys/hsm/members"),
             HsmCommands::Member(MemberCommands::Add(c)) => c.execute(),
             HsmCommands::Member(MemberCommands::Retire(c)) => c.execute(),
+            HsmCommands::Member(MemberCommands::Reenter(c)) => c.execute(),
             HsmCommands::Node(NodeCommands::Add(c)) => c.execute(),
             HsmCommands::Node(NodeCommands::Revoke(c)) => c.execute(),
             HsmCommands::Node(NodeCommands::List(c)) => c.run("/v2/sys/hsm/nodes"),
@@ -253,6 +256,13 @@ impl CommandExecutor for MemberAdd {
 #[derive(Parser, Deref)]
 pub struct MemberRetire {
     name: String,
+    /// Why: `replaced` (default), `lost` or `compromised`. Recorded with the member; every reason may re-enter.
+    #[arg(long, default_value = "replaced", value_parser = ["replaced", "lost", "compromised"])]
+    reason: String,
+    /// Retire even though fewer active members than `min_wrap_copies` remain (a one-device swap). Audited; skips
+    /// only that check.
+    #[arg(long)]
+    allow_below_min_copies: bool,
     #[deref]
     #[command(flatten, next_help_heading = "HTTP Options")]
     http_options: command::HttpOptions,
@@ -264,7 +274,45 @@ impl CommandExecutor for MemberRetire {
     }
 
     fn main(&self) -> Result<(), RvError> {
-        let resp = self.client()?.request_write(format!("/v2/sys/hsm/members/{}/retire", self.name), None)?;
+        let mut data = Map::new();
+        data.insert("reason".into(), Value::String(self.reason.clone()));
+        data.insert("allow_below_min_copies".into(), Value::Bool(self.allow_below_min_copies));
+        let resp = self.client()?.request_write(format!("/v2/sys/hsm/members/{}/retire", self.name), Some(data))?;
+        print_response(&resp);
+        Ok(())
+    }
+}
+
+#[derive(Parser, Deref)]
+pub struct MemberReenter {
+    /// The retired member's name (kept).
+    name: String,
+    /// The attestation bundle `provision` wrote on the reset device (JSON file).
+    #[arg(long)]
+    bundle: std::path::PathBuf,
+    /// The member's https:// mTLS gateway URL (yubihsm2).
+    #[arg(long, default_value = "")]
+    gateway: String,
+    #[command(flatten)]
+    admin: AdminArgs,
+    #[deref]
+    #[command(flatten, next_help_heading = "HTTP Options")]
+    http_options: command::HttpOptions,
+}
+
+impl CommandExecutor for MemberReenter {
+    fn execute(&mut self) -> ExitCode {
+        exit_code(self.main())
+    }
+
+    fn main(&self) -> Result<(), RvError> {
+        let bundle = std::fs::read_to_string(&self.bundle)
+            .map_err(|e| RvError::ErrString(format!("reading {}: {e}", self.bundle.display())))?;
+        let mut data = Map::new();
+        data.insert("bundle".into(), Value::String(bundle));
+        data.insert("gateway".into(), Value::String(self.gateway.clone()));
+        data.insert("admin_credentials".into(), Value::Object(self.admin.credentials()?));
+        let resp = self.client()?.request_write(format!("/v2/sys/hsm/members/{}/reenter", self.name), Some(data))?;
         print_response(&resp);
         Ok(())
     }

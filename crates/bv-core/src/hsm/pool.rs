@@ -79,6 +79,8 @@ pub enum PoolEventKind {
     RevocationPending,
     MemberAdded,
     MemberRetired,
+    /// A reset device rejoined as a new incarnation (T478).
+    MemberReentered,
     MemberPromoted,
     EpochRotated,
     RecoveryCeremony,
@@ -106,6 +108,7 @@ impl PoolEventKind {
             PoolEventKind::RevocationPending => "hsm.revocation_pending",
             PoolEventKind::MemberAdded => "hsm.member_added",
             PoolEventKind::MemberRetired => "hsm.member_retired",
+            PoolEventKind::MemberReentered => "hsm.member_reentered",
             PoolEventKind::MemberPromoted => "hsm.member_promoted",
             PoolEventKind::EpochRotated => "hsm.epoch_rotated",
             PoolEventKind::RecoveryCeremony => "hsm.recovery_ceremony",
@@ -150,6 +153,7 @@ impl PoolEventSink for LogEventSink {
             }
             PoolEventKind::NodeRevoked
             | PoolEventKind::MemberRetired
+            | PoolEventKind::MemberReentered
             | PoolEventKind::RevocationPending
             | PoolEventKind::RecoveryCeremony
             | PoolEventKind::PoolNotRedundant => {

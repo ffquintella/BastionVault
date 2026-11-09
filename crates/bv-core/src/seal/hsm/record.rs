@@ -90,6 +90,108 @@ pub struct HsmMember {
     pub state: MemberState,
     #[serde(default)]
     pub pending_revocations: Vec<String>,
+    /// Which life of this device the record describes (T478): 1 for every
+    /// record written before re-entry, +1 each time a reset device rejoins.
+    #[serde(default = "first_incarnation", skip_serializing_if = "is_first_incarnation")]
+    pub incarnation: u32,
+    /// Why the member was retired; `None` while it is not, and on every
+    /// record retired before T478 (which therefore cannot re-enter).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retire_reason: Option<RetireReason>,
+    /// Earlier incarnations of this device, oldest first. Never trusted for
+    /// anything: kept so their keys can be refused and the history audited.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub previous: Vec<SupersededIncarnation>,
+}
+
+fn first_incarnation() -> u32 {
+    1
+}
+
+fn is_first_incarnation(n: &u32) -> bool {
+    *n == 1
+}
+
+impl HsmMember {
+    /// The incarnation fields as status shows them: fingerprints only.
+    pub fn incarnation_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "incarnation": self.incarnation,
+            "retire_reason": self.retire_reason,
+            "previous": self.previous.iter().map(|p| serde_json::json!({
+                "incarnation": p.incarnation,
+                "name": p.name,
+                "attestation_fps": p.attestation_fps,
+                "unapplied_revocations": p.unapplied_revocations,
+                "retired_with": p.retired_with,
+                "superseded_at": p.superseded_at,
+                "superseded_by": p.superseded_by,
+            })).collect::<Vec<_>>(),
+        })
+    }
+}
+
+/// Why `member retire` was run. Informational: every reason may re-enter
+/// (spec `features/hsm-member-reentry.md`, Decision 1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RetireReason {
+    Replaced,
+    Lost,
+    Compromised,
+}
+
+impl RetireReason {
+    pub fn parse(raw: &str) -> Result<Self, RvError> {
+        match raw {
+            "replaced" => Ok(Self::Replaced),
+            "lost" => Ok(Self::Lost),
+            "compromised" => Ok(Self::Compromised),
+            other => {
+                Err(RvError::ErrHsm(format!("unknown retire reason {other:?}; expected replaced, lost or compromised")))
+            }
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Replaced => "replaced",
+            Self::Lost => "lost",
+            Self::Compromised => "compromised",
+        }
+    }
+}
+
+/// An incarnation of a member that a reset replaced (T478). Its keys and
+/// fingerprints are refused for every later incarnation of the same device.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SupersededIncarnation {
+    pub incarnation: u32,
+    pub name: String,
+    #[serde(with = "serde_bytes")]
+    pub identity_pub: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    pub authz_pub: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    pub seed_ecdh_pub: Vec<u8>,
+    #[serde(default)]
+    pub attestation_fps: Vec<String>,
+    /// The old `pending_revocations`: closed by the reset, never applied.
+    #[serde(default)]
+    pub unapplied_revocations: Vec<String>,
+    pub retired_with: RetireReason,
+    pub superseded_at: u64,
+    pub superseded_by: String,
+}
+
+impl SupersededIncarnation {
+    /// The keys and attestation fingerprints this incarnation had.
+    pub fn refuses(&self, identity: &[u8], authz: &[u8], seed_ecdh: &[u8], fps: &[String]) -> bool {
+        [&self.identity_pub, &self.authz_pub, &self.seed_ecdh_pub]
+            .iter()
+            .any(|k| [identity, authz, seed_ecdh].contains(&k.as_slice()))
+            || self.attestation_fps.iter().any(|f| fps.contains(f))
+    }
 }
 
 /// The recovery key's public half, its fingerprint and the Shamir split of
@@ -286,6 +388,30 @@ impl HsmSealRecord {
                 return Err(invalid(format!("rotation to epoch {target} from {} has no recorded keys", self.epoch)));
             }
         }
+        for (id, m) in &self.members {
+            if m.incarnation == 0 {
+                return Err(invalid(format!("member {id} has incarnation 0")));
+            }
+            let mut last = 0u32;
+            for old in &m.previous {
+                if old.incarnation == 0 || old.incarnation <= last || old.incarnation >= m.incarnation {
+                    return Err(invalid(format!(
+                        "member {id}: previous incarnation {} is out of order or not below {}",
+                        old.incarnation, m.incarnation
+                    )));
+                }
+                last = old.incarnation;
+                if [&old.identity_pub, &old.authz_pub, &old.seed_ecdh_pub].iter().any(|k| k.is_empty()) {
+                    return Err(invalid(format!(
+                        "member {id}: previous incarnation {} has an empty key",
+                        old.incarnation
+                    )));
+                }
+            }
+            if m.retire_reason.is_some() && m.state != MemberState::Retired {
+                return Err(invalid(format!("member {id} has a retire reason but is not retired")));
+            }
+        }
         for (node_id, blob) in &self.legacy_node_blobs {
             if node_id.is_empty() || blob.is_empty() {
                 return Err(invalid("empty legacy_node_blobs entry"));
@@ -364,6 +490,9 @@ mod tests {
             attestation_fps: vec![],
             state,
             pending_revocations: vec![],
+            incarnation: 1,
+            retire_reason: None,
+            previous: Vec::new(),
         }
     }
 
@@ -586,5 +715,94 @@ mod tests {
         let bytes = r.encode().unwrap();
         assert!(!String::from_utf8(bytes.clone()).unwrap().contains("recovery"));
         assert_eq!(HsmSealRecord::decode(&bytes).unwrap().record.encode().unwrap(), bytes);
+    }
+
+    fn pool_record_with(m: HsmMember) -> HsmSealRecord {
+        let id = HsmId::from_parts("mock", "A").unwrap();
+        let mut active = member(MemberState::Active);
+        active.name = "hsm-b".into();
+        let other = HsmId::from_parts("mock", "B").unwrap();
+        let mut members = BTreeMap::from([(id, m), (other, active)]);
+        members.get_mut(&HsmId::from_parts("mock", "B").unwrap()).unwrap().serial = "B".into();
+        HsmSealRecord::new_pool("clu".into(), 0, members, v2_kek_set("B", 0))
+    }
+
+    fn superseded(incarnation: u32) -> SupersededIncarnation {
+        SupersededIncarnation {
+            incarnation,
+            name: "hsm-a".into(),
+            identity_pub: vec![7; 65],
+            authz_pub: vec![8; 32],
+            seed_ecdh_pub: vec![9; 65],
+            attestation_fps: vec!["fp".into()],
+            unapplied_revocations: vec![],
+            retired_with: RetireReason::Lost,
+            superseded_at: 1,
+            superseded_by: "root".into(),
+        }
+    }
+
+    /// A record written before T478 carries none of the new fields: it loads
+    /// with the defaults and encodes back without them, byte for byte.
+    #[test]
+    fn a_record_without_incarnation_fields_loads_with_defaults_and_encodes_unchanged() {
+        let mut a = member(MemberState::Retired);
+        a.retire_reason = None;
+        let record = pool_record_with(a);
+        let bytes = record.encode().unwrap();
+        let text = String::from_utf8(bytes.clone()).unwrap();
+        for field in ["incarnation", "retire_reason", "previous"] {
+            assert!(!text.contains(field), "{field} must not be written while default: {text}");
+        }
+        let decoded = HsmSealRecord::decode(&bytes).unwrap().record;
+        let a = &decoded.members[&HsmId::from_parts("mock", "A").unwrap()];
+        assert_eq!((a.incarnation, a.retire_reason, a.previous.len()), (1, None, 0));
+        assert_eq!(decoded.encode().unwrap(), bytes);
+    }
+
+    #[test]
+    fn incarnations_round_trip_and_a_reason_is_kebab_case() {
+        let mut a = member(MemberState::Retired);
+        a.incarnation = 3;
+        a.retire_reason = Some(RetireReason::Compromised);
+        a.previous = vec![superseded(1), superseded(2)];
+        let record = pool_record_with(a);
+        let bytes = record.encode().unwrap();
+        assert!(String::from_utf8(bytes.clone()).unwrap().contains("\"compromised\""));
+        assert_eq!(HsmSealRecord::decode(&bytes).unwrap().record, record);
+        assert_eq!(RetireReason::parse("lost").unwrap(), RetireReason::Lost);
+        assert!(RetireReason::parse("stolen").is_err());
+    }
+
+    #[test]
+    fn malformed_incarnation_data_is_refused() {
+        let with = |f: &dyn Fn(&mut HsmMember)| {
+            let mut a = member(MemberState::Retired);
+            a.incarnation = 3;
+            a.previous = vec![superseded(1), superseded(2)];
+            f(&mut a);
+            pool_record_with(a).validate()
+        };
+        assert!(with(&|_| ()).is_ok());
+        assert!(with(&|a| a.incarnation = 0).is_err(), "incarnation 0");
+        assert!(with(&|a| a.previous = vec![superseded(2), superseded(1)]).is_err(), "out of order");
+        assert!(with(&|a| a.previous = vec![superseded(1), superseded(1)]).is_err(), "repeated");
+        assert!(with(&|a| a.previous = vec![superseded(3)]).is_err(), "not below the current incarnation");
+        assert!(with(&|a| a.previous[0].identity_pub.clear()).is_err(), "empty key");
+        assert!(with(&|a| a.retire_reason = Some(RetireReason::Lost)).is_ok());
+        let mut active = member(MemberState::Active);
+        active.retire_reason = Some(RetireReason::Lost);
+        assert!(pool_record_with(active).validate().is_err(), "a reason on a member that is not retired");
+    }
+
+    #[test]
+    fn a_superseded_incarnation_refuses_any_of_its_keys_or_fingerprints() {
+        let old = superseded(1);
+        let fresh = (vec![1; 65], vec![2; 32], vec![3; 65]);
+        assert!(!old.refuses(&fresh.0, &fresh.1, &fresh.2, &["other".into()]));
+        assert!(old.refuses(&old.identity_pub, &fresh.1, &fresh.2, &[]));
+        assert!(old.refuses(&fresh.0, &old.authz_pub, &fresh.2, &[]));
+        assert!(old.refuses(&fresh.0, &fresh.1, &old.seed_ecdh_pub, &[]));
+        assert!(old.refuses(&fresh.0, &fresh.1, &fresh.2, &["fp".into()]));
     }
 }

@@ -58,6 +58,11 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### HSM pool: re-enter a reset device
+
+- **Rejoin a retired HSM pool member after a reset and a fresh `provision`, under the same serial** (T478, S116, S114)
+  -- `bvault operator hsm member reenter <name>` (`POST v2/sys/hsm/members/<name>/reenter`, sudo, the device's bv-admin credential) adds a retired member's reset device back as a new incarnation: it is attested again through the pinned Yubico chain, its new keys are pinned, its wrap copies and node credentials are made afresh and none of the old incarnation's are trusted, and the old incarnation's keys, fingerprints and pending revocations stay in the seal record and in an append-only tombstone. A device that was not reset (same keys) is refused. `member retire` takes `--reason replaced|lost|compromised` (every reason may re-enter; a member retired before this build has none and cannot) and `--allow-below-min-copies`, which skips only the `min_wrap_copies` check for that one audited retire. `member add` still refuses a retired serial and names `reenter`. The seal record gains optional `incarnation`, `retire_reason` and `previous` fields (read-old/write-new, no version bump; an older build still unseals). A two-device pool can be moved to the `bv-admin` that delegates `get-log-entries` one member at a time with no spare device; the pool runs on one device between the retire and the promotion. `v2/sys/hsm/members` and the HSM / Seal page show each member's incarnation. Verified with the mock only.
+
 #### SQL browser: Open shortcut and default profile
 
 - **Open the SQL browser from a database's card, and mark a default SQL profile** (T125, S109) -- A database card on the Resources page gains an **Open** button in the Database icon's colour, the way SSH and RDP cards have **Connect**: it opens the SQL browser with the resource's default SQL profile, or with the only one, or lets the plugin pick the smallest that covers your grant, and takes you to the Connection tab when the database has no SQL profile yet. The SQL profile list gains a **DEFAULT** badge and a **Set default** action, with one default across the whole profile list as for the other protocols.

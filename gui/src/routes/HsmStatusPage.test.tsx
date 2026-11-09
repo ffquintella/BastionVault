@@ -156,6 +156,21 @@ describe("HsmStatusPage pool topology", () => {
     expect(banner.className).toContain("yellow");
   });
 
+  it("shows the incarnation of a re-entered member and how a retired one rejoins", async () => {
+    serve({
+      ...BASE,
+      topology: "pool",
+      members: [
+        { name: "hsm-a", state: "active", up: true, incarnation: 2, previous: [{ incarnation: 1 }] },
+        { name: "hsm-b", state: "retired", up: false, incarnation: 1, retire_reason: "lost" },
+      ],
+    });
+    renderPage();
+    expect(await screen.findByText("(re-entered)")).toBeInTheDocument();
+    expect(screen.getByText(/member reenter hsm-b/)).toBeInTheDocument();
+    expect(screen.queryByText(/member reenter hsm-a/)).not.toBeInTheDocument();
+  });
+
   it("renders the members table with the down member's error", async () => {
     renderPage();
     await screen.findByText("Pool Members");

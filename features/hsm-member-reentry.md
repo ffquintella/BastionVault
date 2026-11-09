@@ -1,7 +1,6 @@
 # Feature: HSM Member Re-entry — a retired pool device rejoins after a reset and a fresh `provision`
 
-> Status: **spec, operator decisions recorded 2026-11-09, awaiting go-ahead to implement** (T478, S116). Nothing here is
-> implemented. Written 2026-11-09 against `95455565`. Extends
+> Status: **implemented on the mock (T478, S116), 2026-11-09**; not validated on hardware (see the list below). Written 2026-11-09 against `95455565`. Extends
 > [HSM Pool HA](hsm-pool-ha.md) (S114), whose rules apply unchanged unless a
 > section below says otherwise and why. Touches the seal record (a persisted
 > format) and pool membership semantics: AGENTS.md §7 and L4 apply (review the

@@ -151,7 +151,8 @@ Every verb but `status`, `provision` (local) and `bootstrap` (loopback, before i
 bvault operator hsm status
 bvault operator hsm members
 bvault operator hsm member add <name> --bundle <file> [--gateway https://…] --admin <name>
-bvault operator hsm member retire <name>
+bvault operator hsm member retire <name> [--reason replaced|lost|compromised] [--allow-below-min-copies]
+bvault operator hsm member reenter <name> --bundle <file> [--gateway https://…] --admin <name>
 bvault operator hsm node add <node_id> --fingerprint <fp> --admin <member> [--admin <member>…]
 bvault operator hsm node revoke <node_id> --admin <member> [--admin <member>…]
 bvault operator hsm node list

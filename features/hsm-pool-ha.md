@@ -2084,9 +2084,9 @@ Decisions where the crate or the documentation left room:
   acknowledgement); and `member add` refuses a device whose `hsm_id` (backend
   and serial) is already in the record, retired members included
   (`add_member`), and retired members are never removed, so **a reset and
-  re-provisioned original cannot rejoin**: replacing both members takes two
-  spare devices. Allowing a retired, re-provisioned device back would change
-  membership semantics and is not done here. The pool stays unsealable on the
+  re-provisioned original could not rejoin** (T454 as shipped): replacing both
+  members took two spare devices. T478 lifts that with `member reenter`, a new
+  incarnation of the same serial (see [HSM Member Re-entry](hsm-member-reentry.md)). The pool stays unsealable on the
   other member throughout, because retire is refused while any set lacks a
   copy on another active member.
 

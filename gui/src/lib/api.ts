@@ -390,6 +390,20 @@ export interface HsmPoolMember {
   /** Wall time of the last successful command from this node, in ms. */
   latency_ms?: number | null;
   pending_revocations?: string[];
+  /** Which life of the device this is; 2+ after a reset device re-entered. */
+  incarnation?: number | null;
+  retire_reason?: "replaced" | "lost" | "compromised" | null;
+  /** Earlier incarnations, oldest first: fingerprints only, never keys. */
+  previous?: HsmPreviousIncarnation[] | null;
+}
+export interface HsmPreviousIncarnation {
+  incarnation: number;
+  name?: string;
+  attestation_fps?: string[];
+  unapplied_revocations?: string[];
+  retired_with?: string;
+  superseded_at?: number;
+  superseded_by?: string;
 }
 export interface HsmPendingRevocation {
   member: string;

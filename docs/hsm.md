@@ -573,56 +573,77 @@ Factory key 1, the only key that could, was deleted by `provision`, and
 `bv-admin` cannot reset the device. BastionVault therefore does not offer an
 "update bv-admin" command.
 
-**What works: replace each device by a device provisioned by this build, one
-member at a time.** The pool keeps unsealing on the other member throughout:
-`member retire` is refused while any set (the KEK or a custody key) lacks a
-copy on another active member, and while it would leave no active member.
+**What works: reset each device and rejoin it, one member at a time.** A
+retired member's device, after a physical factory reset and a fresh `provision`
+with this build, rejoins the pool under the same serial with
+`member reenter`. It is a **new incarnation**: attested again through the
+pinned Yubico chain, its new keys pinned, its wrap copies and node credentials
+made afresh, and nothing of the old incarnation trusted. The old incarnation's
+keys and attestation fingerprints are kept in the seal record and in an
+append-only tombstone, and a device that was **not** reset (it presents the
+same keys) is refused. The pool keeps unsealing on the other member throughout.
+No spare device is needed.
 
-Two constraints decide the hardware you need:
+Constraints:
 
-- **A device that was ever a member cannot rejoin the pool**, even after a
-  factory reset: the seal record keeps a retired member, keyed by the device
-  serial, and `member add` refuses a serial already in the record. Replacing
-  both members takes **two spare YubiHSM 2 devices**; the reset originals can
-  serve another cluster.
-- **`min_wrap_copies = 2` refuses the retire** (it would leave one active
-  member). Lower it to `1` first, and with `recovery = "none"` also set
-  `acknowledge_single_member_without_recovery = true`: for the duration of
-  each swap the pool runs on one device, and losing it then loses the vault
-  unless a recovery copy exists.
+- **The pool runs on one device** from the retire until the re-entered device
+  is promoted. Losing that device in the window loses the vault unless the pool
+  was initialized with a recovery key (it cannot be added later). With
+  `recovery = "none"` also set `acknowledge_single_member_without_recovery =
+  true` on every node first.
+- **`min_wrap_copies = 2` refuses the retire.** Either lower it to `1` on every
+  node first, or retire with `--allow-below-min-copies` (sudo, audited, skips
+  only that check). While the pool runs on one device, nodes still at
+  `min_wrap_copies = 2` cannot create new custody keys; unseal is unaffected.
+- **Retire with this build.** A member retired by an earlier build has no
+  recorded reason and cannot re-enter; every reason (`replaced`, `lost`,
+  `compromised`) may.
+- **Never reset a device before its retire succeeded.** The retire's checks are
+  what prove the other member holds a copy of every set.
+- A `provision`-d device that is **not** in the retired entry's serial is a
+  different device: add it with `member add` instead (a retired member does not
+  count toward the two-device limit).
 
-Per member, never both at once (example: `hsm-a` replaced by spare `hsm-c`):
+Per member, never both at once (example: `hsm-a` first, then `hsm-b`):
 
 ~~~bash
-# 0. Once, before the first swap: on every node set min_wrap_copies = 1 (and
-#    the acknowledgement with recovery = "none"), then restart the nodes one at
-#    a time; each auto-unseals through the pool.
+# 0. Once: the acknowledgement on every node if recovery = "none", then
 bvault operator hsm repair --run           # under_replicated must be 0
 bvault operator hsm members                # both members active
 
-# 1. On the spare's host: provision it with this build and start its gateway.
-bvault operator hsm provision --connector http://127.0.0.1:12345 --out c.json
+# 1. Retire the old member (refused if any set would lose its last copy).
+bvault operator hsm member retire hsm-a --reason replaced --allow-below-min-copies
+bvault operator hsm repair --run           # drops hsm-a's copies (required before step 3)
 
-# 2. Retire the old member (refused if any set would lose its last copy).
-bvault operator hsm member retire hsm-a
-bvault operator hsm repair --run           # drops hsm-a's copies
+# 2. By hand, on hsm-a's host: factory-reset the device (BastionVault never
+#    resets one), provision it with this build, start its gateway.
+bvault operator hsm provision --connector http://127.0.0.1:12345 --out a2.json
 
-# 3. Add the spare, fill its copies, promote it. The admin run also installs
-#    bv-auditor on hsm-c; it reports hsm-b's old bv-admin in failures.
-bvault operator hsm member add hsm-c --bundle c.json --gateway https://hsm-c.example:8443 --admin hsm-c
+# 3. Rejoin it as a new incarnation, fill its copies, promote it. The admin run
+#    also installs bv-auditor on hsm-a.
+bvault operator hsm member reenter hsm-a --bundle a2.json --gateway https://hsm-a.example:8443 --admin hsm-a
 bvault operator hsm repair --run
-bvault operator hsm repair --run --admin hsm-b --admin hsm-c   # promotes hsm-c
-bvault operator hsm members                # hsm-c active
-bvault operator hsm status                 # device_audit: hsm-c enrolled
+bvault operator hsm repair --run --admin hsm-a --admin hsm-b   # promotes hsm-a
+bvault operator hsm members                # hsm-a active, incarnation 2
+bvault operator hsm status                 # device_audit: hsm-a enrolled
 
-# 4. Only now: factory-reset the old device (by hand; BastionVault never resets
-#    a device). Then repeat 1-4 for hsm-b with a second spare, hsm-d.
+# 4. Repeat 1-3 for hsm-b, with hsm-a as the witness.
 ~~~
 
-After both swaps, restore `min_wrap_copies = 2`, remove the acknowledgement,
-restart the nodes one at a time, and check that `repair --run --admin hsm-c
---admin hsm-d` reports both members with `can_install_auditor: true` and no
-failures.
+If the reset device never comes back, the pool stays on the other member
+(`hsm.pool_not_redundant`, `bv_hsm_pool_redundancy{level="none"}`); add a
+different device with `member add` (the retired entry does not count toward the
+limit). A device that was retired but not reset cannot return: reset and
+provision it, or use another device. The spare-device route (provision a second
+device, `member add`, then retire) still works when no one-device window is
+acceptable, and needs two spares to replace both members.
+
+After both swaps, restore `min_wrap_copies = 2` if you lowered it, remove the
+acknowledgement, restart the nodes one at a time, and check that `repair --run
+--admin hsm-a --admin hsm-b` reports both members with `can_install_auditor:
+true` and no failures. Not validated on hardware: that a reset followed by
+`provision` yields new keys for the same serial, and that it removes the node
+credentials; the check against unchanged keys is the replay defence.
 
 #### Recovery (pool topology, `shamir-ceremony`)
 

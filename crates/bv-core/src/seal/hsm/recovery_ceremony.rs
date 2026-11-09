@@ -14,7 +14,7 @@ use zeroize::Zeroizing;
 
 use super::{
     pool_admin::{close_all, Sessions},
-    record::{HsmMember, HsmSealRecord, MemberState, Topology},
+    record::{HsmMember, HsmSealRecord, MemberState, RetireReason, Topology},
     targets_of, HsmSealProvider, PoolDevices, HSM_SEAL_RECORD_PATH,
 };
 use crate::{
@@ -351,6 +351,9 @@ impl HsmSealProvider {
                     attestation_fps: verified.attestation_fps,
                     state: MemberState::Active,
                     pending_revocations: Vec::new(),
+                    incarnation: 1,
+                    retire_reason: None,
+                    previous: Vec::new(),
                 },
             );
         }
@@ -512,6 +515,7 @@ impl HsmSealProvider {
         let mut retired = Vec::new();
         for m in committed.members.values_mut().filter(|m| m.state != MemberState::Retired) {
             m.state = MemberState::Retired;
+            m.retire_reason = Some(RetireReason::Lost);
             if !m.pending_revocations.is_empty() {
                 log::warn!(
                     target: "security",

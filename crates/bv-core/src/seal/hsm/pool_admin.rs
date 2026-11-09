@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 use zeroize::Zeroizing;
 
 use super::{
-    record::{HsmMember, HsmSealRecord, MemberState, Topology, WrapKeyIds},
+    record::{HsmMember, HsmSealRecord, MemberState, RetireReason, SupersededIncarnation, Topology, WrapKeyIds},
     targets_of, Devices, HsmSealProvider, PoolDevices,
 };
 use crate::{
@@ -31,9 +31,9 @@ use crate::{
         blob::{AuthzAlg, BvHsmBlob, Context, HsmId, Purpose},
         blobset::{unix_now_secs, BvHsmBlobSet},
         ceremony::{
-            list_enrollments, read_enrollment, verify_member, write_bootstrap, write_enrollment, write_promotion,
-            AttestationBundle, BootstrapRecord, NodeEnrollment, PromotionTranscript, Revocation, ENROLLMENT_CONTEXT,
-            PROMOTION_CONTEXT,
+            list_enrollments, list_incarnations, read_enrollment, verify_member, write_bootstrap, write_enrollment,
+            write_incarnation, write_promotion, AttestationBundle, BootstrapRecord, IncarnationTombstone,
+            NodeEnrollment, PromotionTranscript, Revocation, VerifiedMember, ENROLLMENT_CONTEXT, PROMOTION_CONTEXT,
         },
         custody_store::{is_key_id, CustodyRecord, CUSTODY_STORE_PREFIX, HSM_CUSTODY_LOCK},
         device_audit::{DeviceAuditMode, HSM_DEVICE_AUDIT_LOCK},
@@ -196,6 +196,9 @@ impl HsmSealProvider {
                     "authz_alg": m.authz_alg,
                     "attestation_fps": m.attestation_fps,
                     "pending_revocations": m.pending_revocations,
+                    "incarnation": m.incarnation,
+                    "retire_reason": m.retire_reason,
+                    "previous": m.incarnation_json()["previous"],
                     "holds_kek_copy": record.kek.as_ref().is_some_and(|k| k.copy_for(id).is_some()),
                     "up": seen.map(|v| v.up),
                     "last_error": seen.and_then(|v| v.last_error.clone()),
@@ -907,8 +910,13 @@ impl HsmSealProvider {
             return Err(RvError::ErrHsm(format!("the HSM pool already has a member named {name:?}")));
         }
         if let Some(existing) = record.members.get(&hsm_id) {
+            let hint = if existing.state == MemberState::Retired {
+                "; a retired device that was reset and provisioned again rejoins with `operator hsm member reenter`"
+            } else {
+                ""
+            };
             return Err(RvError::ErrHsm(format!(
-                "{hsm_id} is already member {:?} ({:?})",
+                "{hsm_id} is already member {:?} ({:?}){hint}",
                 existing.name, existing.state
             )));
         }
@@ -925,7 +933,7 @@ impl HsmSealProvider {
         }
         let target = MemberTarget { name: name.to_string(), hsm_id: hsm_id.clone(), gateway: gateway.to_string() };
         let sessions = self.open_admin_sessions(vec![target], admin).await?;
-        let result = self.add_member_on(&sessions, &mut record, bundle, actor).await;
+        let result = self.add_member_on(&sessions, &mut record, bundle, actor, None).await;
         close_all(sessions).await;
         result
     }
@@ -937,10 +945,14 @@ impl HsmSealProvider {
         record: &mut HsmSealRecord,
         bundle: &AttestationBundle,
         actor: &str,
+        reentry: Option<&Reentry>,
     ) -> Result<Value, RvError> {
         let physical = self.physical.as_ref();
         let (target, session) = &sessions[0];
         let verified = verify_member(session.as_ref(), bundle, &self.config.objects).await?;
+        if let Some(re) = reentry {
+            re.refuse_old_keys(&verified)?;
+        }
         // A device provisioned after a rotation holds only the default ids.
         let mut epoch_keys = vec![record.wrap_key_ids(record.epoch, &self.config.objects)?];
         if let Some(target_epoch) = record.rotating_to {
@@ -948,6 +960,14 @@ impl HsmSealProvider {
         }
         Self::ensure_wrap_keys(session.as_ref(), &epoch_keys).await?;
         let mut enrollments = list_enrollments(physical).await?;
+        if reentry.is_some() {
+            // Nothing the old incarnation held is trusted for the new one: its
+            // auth-key ids and enrollment signatures go, revoked nodes' too.
+            for e in enrollments.iter_mut() {
+                e.auth_keys.remove(&target.hsm_id);
+                e.signatures.remove(&target.hsm_id);
+            }
+        }
         let mut created: Vec<u16> = Vec::new();
         let mut deliveries: Vec<CredentialDelivery> = Vec::new();
         let outcome: Result<(), RvError> = async {
@@ -969,6 +989,17 @@ impl HsmSealProvider {
                     .await?;
                 e.signatures.insert(target.hsm_id.clone(), hex::encode(sig));
             }
+            let (incarnation, previous) = match reentry {
+                Some(re) => {
+                    let superseded_at = unix_now_secs()?;
+                    let old = re.superseded(actor, superseded_at);
+                    write_incarnation(physical, &re.tombstone(&target.hsm_id, actor, superseded_at)).await?;
+                    let mut previous = re.prior.previous.clone();
+                    previous.push(old);
+                    (re.prior.incarnation + 1, previous)
+                }
+                None => (1, Vec::new()),
+            };
             record.members.insert(
                 target.hsm_id.clone(),
                 HsmMember {
@@ -984,13 +1015,16 @@ impl HsmSealProvider {
                     attestation_fps: verified.attestation_fps.clone(),
                     state: MemberState::Joining,
                     pending_revocations: Vec::new(),
+                    incarnation,
+                    retire_reason: None,
+                    previous,
                 },
             );
             self.store_record(record).await?;
             for delivery in &deliveries {
                 write_delivery(physical, delivery).await?;
             }
-            for e in enrollments.iter().filter(|e| !e.is_revoked()) {
+            for e in enrollments.iter().filter(|e| reentry.is_some() || !e.is_revoked()) {
                 write_enrollment(physical, e).await?;
             }
             Ok(())
@@ -1007,16 +1041,114 @@ impl HsmSealProvider {
         }
         let nodes: Vec<&str> = enrollments.iter().filter(|e| !e.is_revoked()).map(|e| e.node_id.as_str()).collect();
         let detail = format!("state=joining nodes_enrolled={nodes:?} by={actor}");
-        self.event(PoolEventKind::MemberAdded, &target.name, target.hsm_id.as_str(), &detail);
+        if let Some(re) = reentry {
+            let detail = format!(
+                "incarnation={} -> {} old_attestation_fps={:?} new_attestation_fps={:?} old_retire_reason={} \
+                 unapplied_revocations={:?} nodes_enrolled={nodes:?} by={actor}",
+                re.prior.incarnation,
+                re.prior.incarnation + 1,
+                re.prior.attestation_fps,
+                verified.attestation_fps,
+                re.prior.retire_reason.map(|r| r.as_str()).unwrap_or("unrecorded"),
+                re.prior.pending_revocations,
+            );
+            self.event(PoolEventKind::MemberReentered, &target.name, target.hsm_id.as_str(), &detail);
+        } else {
+            self.event(PoolEventKind::MemberAdded, &target.name, target.hsm_id.as_str(), &detail);
+        }
         Ok(json!({
             "name": target.name,
             "hsm_id": target.hsm_id,
             "state": "joining",
+            "incarnation": reentry.map(|re| re.prior.incarnation + 1).unwrap_or(1),
             "nodes_enrolled": nodes,
             "attestation_fps": verified.attestation_fps,
             "next": "repair fills this member's copies; a repair run with admin credentials for it and an active \
                      member promotes it to active",
         }))
+    }
+
+    /// `member reenter` (spec `features/hsm-member-reentry.md`): a retired
+    /// member's device, after a physical reset and a fresh `provision`, rejoins
+    /// as a new incarnation. It is attested again; the old incarnation's keys
+    /// and fingerprints are refused for it, and nothing it held is trusted.
+    /// Needs the unsealed barrier: no set may still hold a copy for the id.
+    #[maybe_async::maybe_async]
+    pub async fn reenter_member(
+        &self,
+        name: &str,
+        bundle: &AttestationBundle,
+        gateway: &str,
+        admin: &AdminCredentials,
+        barrier: Option<&dyn Storage>,
+        actor: &str,
+    ) -> Result<Value, RvError> {
+        let gateway = gateway.trim();
+        if self.config.backend_type == "yubihsm2" && !gateway.starts_with("https://") {
+            return Err(RvError::ErrHsm("a yubihsm2 member needs an https:// (mTLS) gateway URL".into()));
+        }
+        self.pool_devices()?;
+        let hsm_id = bundle.hsm_id()?;
+        let physical = self.physical.as_ref();
+        let _custody_lock = physical.lock(HSM_CUSTODY_LOCK).await?;
+        let mut record = self.pool_record().await?;
+        let (named_id, prior) = member_named(&record, name)?;
+        if *named_id != hsm_id {
+            return Err(RvError::ErrHsm(format!("the bundle is for {hsm_id}, but member {name:?} is {named_id}")));
+        }
+        if prior.state != MemberState::Retired {
+            return Err(RvError::ErrHsm(format!(
+                "member {name:?} is {:?}; only a retired member can re-enter",
+                prior.state
+            )));
+        }
+        if prior.retire_reason.is_none() {
+            return Err(RvError::ErrHsm(format!(
+                "member {name:?} was retired before retire reasons were recorded and cannot re-enter; use \
+                 another device"
+            )));
+        }
+        let live_members =
+            record.members.iter().filter(|(id, m)| m.state != MemberState::Retired && **id != hsm_id).count();
+        if live_members >= MAX_POOL_MEMBERS {
+            return Err(RvError::ErrHsm(format!(
+                "the pool already has {live_members} members that are not retired; a cluster has at most \
+                 {MAX_POOL_MEMBERS} HSMs"
+            )));
+        }
+        let barrier = barrier.ok_or_else(|| {
+            RvError::ErrHsm("re-entering a member needs the unsealed barrier to check every custody set".into())
+        })?;
+        let mut holding = Vec::new();
+        if record.kek.as_ref().is_some_and(|set| set.copy_for(&hsm_id).is_some()) {
+            holding.push("the barrier KEK".to_string());
+        }
+        for key_id in barrier.list(CUSTODY_STORE_PREFIX).await? {
+            if let Some(entry) = barrier.get(&format!("{CUSTODY_STORE_PREFIX}{key_id}")).await? {
+                match CustodyRecord::decode(&key_id, &entry.value) {
+                    Ok(r) if r.set.copy_for(&hsm_id).is_some() => holding.push(format!("custody key {key_id}")),
+                    Ok(_) => {}
+                    Err(e) => {
+                        return Err(RvError::ErrHsm(format!(
+                            "custody key {key_id} cannot be checked ({e}); repair it before re-entering {name}"
+                        )))
+                    }
+                }
+            }
+        }
+        if !holding.is_empty() {
+            return Err(RvError::ErrHsm(format!(
+                "{} still hold a copy for {hsm_id}, which the reset device cannot open; run `operator hsm repair \
+                 --run` to drop the retired member's copies first",
+                holding.join(", ")
+            )));
+        }
+        let reentry = Reentry { prior: prior.clone(), tombstones: list_incarnations(physical, &hsm_id).await? };
+        let target = MemberTarget { name: name.to_string(), hsm_id: hsm_id.clone(), gateway: gateway.to_string() };
+        let sessions = self.open_admin_sessions(vec![target], admin).await?;
+        let result = self.add_member_on(&sessions, &mut record, bundle, actor, Some(&reentry)).await;
+        close_all(sessions).await;
+        result
     }
 
     /// `member retire`: refused for the last active member, if it would leave
@@ -1030,6 +1162,21 @@ impl HsmSealProvider {
         barrier: Option<&dyn Storage>,
         actor: &str,
     ) -> Result<Value, RvError> {
+        self.retire_member_with(name, barrier, actor, RetireReason::Replaced, false).await
+    }
+
+    /// `member retire` with the reason to record and, for a swap that runs
+    /// on one device, `allow_below_min_copies`: it skips only the
+    /// `min_wrap_copies` check, for this retire, and is logged and audited.
+    #[maybe_async::maybe_async]
+    pub async fn retire_member_with(
+        &self,
+        name: &str,
+        barrier: Option<&dyn Storage>,
+        actor: &str,
+        reason: RetireReason,
+        allow_below_min_copies: bool,
+    ) -> Result<Value, RvError> {
         self.pool_devices()?;
         let min_copies = self.config.pool.as_ref().map(|p| p.min_wrap_copies).unwrap_or(1).max(1);
         let physical = self.physical.as_ref();
@@ -1040,6 +1187,7 @@ impl HsmSealProvider {
         if member.state == MemberState::Retired {
             return Err(RvError::ErrHsm(format!("member {name:?} is already retired")));
         }
+        let mut below_min = false;
         if member.state == MemberState::Active {
             let others: BTreeSet<HsmId> =
                 record.active_members().map(|(id, _)| id.clone()).filter(|id| *id != hsm_id).collect();
@@ -1050,10 +1198,17 @@ impl HsmSealProvider {
                      unseals through it. Add and promote another member first"
                 )));
             }
-            if others.len() < min_copies {
+            if others.len() < min_copies && allow_below_min_copies {
+                below_min = true;
+                log::warn!(
+                    target: "security",
+                    "retiring {name} below min_wrap_copies = {min_copies} ({} active member(s) remain), allowed by {actor}",
+                    others.len()
+                );
+            } else if others.len() < min_copies {
                 return Err(RvError::ErrHsm(format!(
                     "retiring {name} would leave {} active member(s); min_wrap_copies = {min_copies} needs at least \
-                     {min_copies}",
+                     {min_copies}; a one-device swap may pass --allow-below-min-copies",
                     others.len()
                 )));
             }
@@ -1088,15 +1243,24 @@ impl HsmSealProvider {
         }
         if let Some(m) = record.members.get_mut(&hsm_id) {
             m.state = MemberState::Retired;
+            m.retire_reason = Some(reason);
         }
         self.store_record(&record).await?;
-        self.event(PoolEventKind::MemberRetired, name, hsm_id.as_str(), &format!("by={actor}"));
+        self.event(
+            PoolEventKind::MemberRetired,
+            name,
+            hsm_id.as_str(),
+            &format!("by={actor} reason={} below_min_copies={below_min}", reason.as_str()),
+        );
         self.report_redundancy(&record, "retire");
         Ok(json!({
             "name": name,
             "hsm_id": hsm_id,
             "state": "retired",
-            "next": "repair removes its copies from every set; reset or destroy the device",
+            "retire_reason": reason.as_str(),
+            "below_min_copies": below_min,
+            "next": "repair removes its copies from every set; reset or destroy the device, or reset and provision it \
+                     again and rejoin it with `member reenter`",
         }))
     }
 
@@ -1507,6 +1671,72 @@ impl HsmSealProvider {
         }
         self.report_redundancy(&record, "promotion");
         Ok(())
+    }
+}
+
+/// What a re-entry supersedes: the retired entry as the record holds it, and
+/// the tombstones already written for the same device.
+pub(super) struct Reentry {
+    pub(super) prior: HsmMember,
+    pub(super) tombstones: Vec<IncarnationTombstone>,
+}
+
+impl Reentry {
+    /// A device that was not reset presents the keys it always had. Refuse
+    /// any key or attestation fingerprint any earlier incarnation held, in the
+    /// record or in a tombstone.
+    fn refuse_old_keys(&self, new: &VerifiedMember) -> Result<(), RvError> {
+        let (i, a, e, f) = (&new.identity_pub, &new.authz_pub, &new.seed_ecdh_pub, &new.attestation_fps);
+        let current = self.prior.identity_pub == *i
+            || self.prior.authz_pub == *a
+            || self.prior.seed_ecdh_pub == *e
+            || self.prior.attestation_fps.iter().any(|x| f.contains(x));
+        let earlier = self.prior.previous.iter().any(|p| p.refuses(i, a, e, f))
+            || self.tombstones.iter().any(|t| t.refuses(i, a, e, f));
+        if current || earlier {
+            log::error!(
+                target: "security",
+                "re-entry of {} refused: the device presents keys an earlier incarnation held; it was not reset",
+                self.prior.name
+            );
+            return Err(RvError::ErrHsmAttestationInvalid(format!(
+                "{} presents the same keys or attestations as an earlier incarnation: it was not reset and provisioned \
+                 again",
+                self.prior.name
+            )));
+        }
+        Ok(())
+    }
+
+    fn superseded(&self, by: &str, at: u64) -> SupersededIncarnation {
+        let p = &self.prior;
+        SupersededIncarnation {
+            incarnation: p.incarnation,
+            name: p.name.clone(),
+            identity_pub: p.identity_pub.clone(),
+            authz_pub: p.authz_pub.clone(),
+            seed_ecdh_pub: p.seed_ecdh_pub.clone(),
+            attestation_fps: p.attestation_fps.clone(),
+            unapplied_revocations: p.pending_revocations.clone(),
+            retired_with: p.retire_reason.unwrap_or(RetireReason::Replaced),
+            superseded_at: at,
+            superseded_by: by.to_string(),
+        }
+    }
+
+    fn tombstone(&self, hsm_id: &HsmId, by: &str, at: u64) -> IncarnationTombstone {
+        let p = &self.prior;
+        IncarnationTombstone {
+            version: 1,
+            hsm_id: hsm_id.clone(),
+            incarnation: p.incarnation,
+            identity_pub: p.identity_pub.clone(),
+            authz_pub: p.authz_pub.clone(),
+            seed_ecdh_pub: p.seed_ecdh_pub.clone(),
+            attestation_fps: p.attestation_fps.clone(),
+            superseded_at: at,
+            superseded_by: by.to_string(),
+        }
     }
 }
 
@@ -2575,6 +2805,11 @@ mod tests {
         assert_eq!(active, vec![&p.name("c"), &p.name("d")]);
         assert!(after.members[&id_of(&p.a)].state == MemberState::Retired);
         assert!(after.members[&id_of(&p.b)].state == MemberState::Retired);
+        assert!(after
+            .members
+            .values()
+            .filter(|m| m.state == MemberState::Retired)
+            .all(|m| m.retire_reason == Some(RetireReason::Lost)));
         let kek_set = after.kek.as_ref().unwrap();
         assert_eq!(
             kek_set.copies.keys().cloned().collect::<Vec<_>>(),
@@ -2900,5 +3135,227 @@ mod tests {
         assert!(report.auditors_installed.is_empty());
         assert_eq!(n1.drain_device_logs(barrier.as_ref()).await.unwrap(), crate::seal::hsm::DrainReport::default());
         assert_eq!(n1.status().await.unwrap()["device_audit"]["mode"], "off");
+    }
+
+    /// A two-device pool with a node and two custody keys, `a` retired and
+    /// its copies dropped, ready for the device to be reset.
+    async fn retired_a(p: &Pool, n1: &HsmSealProvider, barrier: &Arc<dyn Storage>) {
+        let store = p.custody(n1, barrier.clone()).await;
+        store.create(PqcKeyKind::MlKem768).await.unwrap();
+        store.create(PqcKeyKind::MlDsa65).await.unwrap();
+        n1.retire_member_with(&p.name("a"), Some(barrier.as_ref()), "root", RetireReason::Compromised, true)
+            .await
+            .unwrap();
+        let report = n1.repair(Some(barrier.clone()), None).await.unwrap();
+        assert_eq!(report.copies_removed, 3, "{report:?}");
+    }
+
+    /// Reset `a` in place: same serial, factory state, a new admin password.
+    async fn reset_a(p: &Pool, password: &str) -> AttestationBundle {
+        let (device, bundle) = provisioned(&p.a.serial(), password, &p.clock).await;
+        p.registry.lock().unwrap().insert(id_of(&device), device);
+        bundle
+    }
+
+    #[tokio::test]
+    async fn a_reset_device_rejoins_as_a_new_incarnation_and_unseals_alone() {
+        let p = Pool { acknowledged: true, ..Pool::new(2).await };
+        let n1 = p.init().await;
+        let n2 = p.join("n2", &n1).await;
+        let barrier = p.barrier().await;
+
+        // min_wrap_copies = 2 refuses the retire unless the operator says so.
+        let err = n1.retire_member(&p.name("a"), Some(barrier.as_ref()), "root").await.unwrap_err();
+        assert!(err.to_string().contains("--allow-below-min-copies"), "{err}");
+        retired_a(&p, &n1, &barrier).await;
+        let record = n1.pool_record().await.unwrap();
+        let old = record.members[&id_of(&p.a)].clone();
+        assert_eq!(
+            (old.state, old.retire_reason, old.incarnation),
+            (MemberState::Retired, Some(RetireReason::Compromised), 1)
+        );
+        let retired = device_log_events(&p, PoolEventKind::MemberRetired);
+        assert!(retired[0].detail.contains("reason=compromised below_min_copies=true"), "{:?}", retired[0]);
+
+        // The device that was not reset presents its old keys: refused, nothing changes.
+        let a_admin = p.admin(&[("a", "admin-a")]);
+        let before = n1.pool_record().await.unwrap();
+        let err = n1
+            .reenter_member(&p.name("a"), &p.bundles[&p.name("a")], "", &a_admin, Some(barrier.as_ref()), "root")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("was not reset") || err.to_string().contains("not reset"), "{err}");
+        assert_eq!(n1.pool_record().await.unwrap(), before);
+        assert_eq!(p.seen.count(PoolEventKind::MemberReentered), 0);
+
+        let fresh = reset_a(&p, "admin-a2").await;
+        let a2_admin = p.admin(&[("a", "admin-a2")]);
+        let out = n1.reenter_member(&p.name("a"), &fresh, "", &a2_admin, Some(barrier.as_ref()), "root").await.unwrap();
+        assert_eq!((out["state"].as_str(), out["incarnation"].as_u64()), (Some("joining"), Some(2)), "{out}");
+        assert_eq!(out["nodes_enrolled"].as_array().unwrap().len(), 2);
+        let record = n1.pool_record().await.unwrap();
+        let a = &record.members[&id_of(&p.a)];
+        assert_eq!((a.state, a.incarnation, a.retire_reason), (MemberState::Joining, 2, None));
+        assert_ne!(a.identity_pub, old.identity_pub);
+        assert_eq!(a.previous.len(), 1);
+        assert_eq!(a.previous[0].identity_pub, old.identity_pub);
+        assert_eq!(a.previous[0].retired_with, RetireReason::Compromised);
+        let tombstones = list_incarnations(p.physical.as_ref(), &id_of(&p.a)).await.unwrap();
+        assert_eq!(tombstones.len(), 1);
+        assert_eq!(tombstones[0].incarnation, 1);
+        let events = device_log_events(&p, PoolEventKind::MemberReentered);
+        assert_eq!(events.len(), 1);
+        assert!(
+            events[0].detail.contains("incarnation=1 -> 2")
+                && events[0].detail.contains("old_retire_reason=compromised")
+        );
+        for secret in [hex::encode(&a.identity_pub), hex::encode(&old.identity_pub)] {
+            assert!(!events[0].detail.contains(&secret), "no key material in the audit event");
+        }
+
+        // The old node auth keys went with the reset; the new device has one per node.
+        assert_eq!(p.node_keys(&p.registry.lock().unwrap()[&id_of(&p.a)].clone(), "admin-a2").len(), 2);
+
+        // Repair fills the new device, then promotion by an admin run.
+        let report = n1.repair(Some(barrier.clone()), None).await.unwrap();
+        assert_eq!(report.copies_added, 3, "{report:?}");
+        let both = p.admin(&[("a", "admin-a2"), ("b", "admin-b")]);
+        let report = n1.repair(Some(barrier.clone()), Some(&both)).await.unwrap();
+        assert_eq!(report.promoted, vec![p.name("a")], "{report:?}");
+        let record = n1.pool_record().await.unwrap();
+        assert_eq!(record.members[&id_of(&p.a)].state, MemberState::Active);
+        assert_eq!(record.kek.as_ref().unwrap().copies.len(), 2);
+
+        // Either device alone now unseals; n2 picked up its replacement credential.
+        p.b.set_offline(true);
+        let n2_again = p.provider("n2");
+        n2_again.refresh_membership().await.unwrap();
+        assert_eq!(n2_again.recover_kek().await.unwrap().as_slice(), &KEK, "the new incarnation alone unseals");
+        p.b.set_offline(false);
+        drop(n2);
+    }
+
+    #[tokio::test]
+    async fn re_entry_refuses_what_it_should_and_changes_nothing() {
+        let p = Pool { acknowledged: true, ..Pool::new(2).await };
+        let n1 = p.init().await;
+        let barrier = p.barrier().await;
+        let a_admin = p.admin(&[("a", "admin-a")]);
+        let reenter = |name: String, bundle: AttestationBundle, b: Option<Arc<dyn Storage>>| {
+            let n1 = &n1;
+            let admin = &a_admin;
+            async move { n1.reenter_member(&name, &bundle, "", admin, b.as_deref(), "root").await }
+        };
+
+        // Active member, unknown name.
+        let err = reenter(p.name("a"), p.bundles[&p.name("a")].clone(), Some(barrier.clone())).await.unwrap_err();
+        assert!(err.to_string().contains("only a retired member"), "{err}");
+        let err = reenter("nobody".into(), p.bundles[&p.name("a")].clone(), Some(barrier.clone())).await.unwrap_err();
+        assert!(err.to_string().contains("not an HSM pool member"), "{err}");
+        // `member add` still refuses a retired id and names the way back.
+        n1.retire_member_with(&p.name("a"), Some(barrier.as_ref()), "root", RetireReason::Replaced, true)
+            .await
+            .unwrap();
+        let err = n1.add_member(&p.name("x"), &p.bundles[&p.name("a")], "", &a_admin, "root").await.unwrap_err();
+        assert!(err.to_string().contains("member reenter"), "{err}");
+
+        let fresh = reset_a(&p, "admin-a2").await;
+        let a2 = p.admin(&[("a", "admin-a2")]);
+        let before = n1.pool_record().await.unwrap();
+        // The bundle of another device.
+        let err = reenter(p.name("a"), p.bundles[&p.name("b")].clone(), Some(barrier.clone())).await.unwrap_err();
+        assert!(err.to_string().contains("but member"), "{err}");
+        // No barrier to scan the custody sets with.
+        let err = n1.reenter_member(&p.name("a"), &fresh, "", &a2, None, "root").await.unwrap_err();
+        assert!(err.to_string().contains("unsealed barrier"), "{err}");
+        // A copy for the id is still in a set (repair has not run).
+        let err = n1.reenter_member(&p.name("a"), &fresh, "", &a2, Some(barrier.as_ref()), "root").await.unwrap_err();
+        assert!(err.to_string().contains("repair"), "{err}");
+        assert_eq!(n1.pool_record().await.unwrap(), before);
+        assert!(list_incarnations(p.physical.as_ref(), &id_of(&p.a)).await.unwrap().is_empty());
+
+        // A record retired before reasons were recorded cannot re-enter.
+        n1.repair(Some(barrier.clone()), None).await.unwrap();
+        let mut record = n1.pool_record().await.unwrap();
+        record.members.get_mut(&id_of(&p.a)).unwrap().retire_reason = None;
+        n1.store_record(&record).await.unwrap();
+        let err = n1.reenter_member(&p.name("a"), &fresh, "", &a2, Some(barrier.as_ref()), "root").await.unwrap_err();
+        assert!(err.to_string().contains("before retire reasons were recorded"), "{err}");
+        assert_eq!(p.seen.count(PoolEventKind::MemberReentered), 0);
+    }
+
+    #[tokio::test]
+    async fn a_failed_attestation_rolls_the_device_back_and_leaves_no_tombstone() {
+        let p = Pool { acknowledged: true, ..Pool::new(2).await };
+        let n1 = p.init().await;
+        let barrier = p.barrier().await;
+        retired_a(&p, &n1, &barrier).await;
+        let mut fresh = reset_a(&p, "admin-a2").await;
+        let before = n1.pool_record().await.unwrap();
+        fresh.identity_attestation.replace_range(0..2, "ff");
+        let a2 = p.admin(&[("a", "admin-a2")]);
+        assert!(n1.reenter_member(&p.name("a"), &fresh, "", &a2, Some(barrier.as_ref()), "root").await.is_err());
+        assert_eq!(n1.pool_record().await.unwrap(), before);
+        assert!(list_incarnations(p.physical.as_ref(), &id_of(&p.a)).await.unwrap().is_empty());
+    }
+
+    /// A device whose keys an earlier incarnation held is refused even when the
+    /// record forgot them (an older build rewrote it): the tombstones decide.
+    #[test]
+    fn the_replay_check_reads_the_record_and_the_tombstones() {
+        let ver = |i: u8| VerifiedMember {
+            hsm_id: HsmId::from_parts("mock", "A").unwrap(),
+            identity_pub: vec![i; 65],
+            authz_pub: vec![i + 1; 32],
+            seed_ecdh_pub: vec![i + 2; 65],
+            attestation_fps: vec![format!("fp{i}")],
+        };
+        let prior = HsmMember {
+            name: "hsm-a".into(),
+            gateway: String::new(),
+            serial: "A".into(),
+            identity_pub: vec![10; 65],
+            seed_ecdh_pub: vec![12; 65],
+            authz_pub: vec![11; 32],
+            authz_alg: AuthzAlg::Ed25519,
+            attestation_fps: vec!["fp10".into()],
+            state: MemberState::Retired,
+            pending_revocations: vec![],
+            incarnation: 2,
+            retire_reason: Some(RetireReason::Replaced),
+            previous: vec![],
+        };
+        let tomb = IncarnationTombstone {
+            version: 1,
+            hsm_id: HsmId::from_parts("mock", "A").unwrap(),
+            incarnation: 1,
+            identity_pub: vec![50; 65],
+            authz_pub: vec![51; 32],
+            seed_ecdh_pub: vec![52; 65],
+            attestation_fps: vec!["fp50".into()],
+            superseded_at: 1,
+            superseded_by: "root".into(),
+        };
+        let re = Reentry { prior, tombstones: vec![tomb] };
+        assert!(re.refuse_old_keys(&ver(1)).is_ok(), "all-new keys pass");
+        assert!(re.refuse_old_keys(&ver(10)).is_err(), "the retired entry's keys");
+        assert!(re.refuse_old_keys(&ver(50)).is_err(), "a tombstoned incarnation's keys");
+        let mut one = ver(1);
+        one.attestation_fps = vec!["fp50".into()];
+        assert!(re.refuse_old_keys(&one).is_err(), "one old fingerprint is enough");
+    }
+
+    #[tokio::test]
+    async fn retire_defaults_to_replaced_and_rejects_an_unknown_reason() {
+        assert!(RetireReason::parse("stolen").is_err());
+        let p = Pool { acknowledged: true, ..Pool::new(1).await };
+        let n1 = p.init().await;
+        let barrier = p.barrier().await;
+        n1.retire_member(&p.name("b"), Some(barrier.as_ref()), "root").await.unwrap();
+        assert_eq!(
+            n1.pool_record().await.unwrap().members[&id_of(&p.b)].retire_reason,
+            Some(RetireReason::Replaced),
+            "the default reason"
+        );
     }
 }
