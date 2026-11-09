@@ -1165,9 +1165,10 @@ impl HsmSealProvider {
                     let _audit_lock = physical.lock(HSM_DEVICE_AUDIT_LOCK).await?;
                     match self.open_admin_sessions(targets, admin).await {
                         Ok(sessions) => {
-                            let (installed, failures) = self.ensure_auditors(&sessions, barrier.as_ref()).await;
+                            let (installed, failures, checks) = self.ensure_auditors(&sessions, barrier.as_ref()).await;
                             close_all(sessions).await;
                             report.auditors_installed = installed;
+                            report.admin_capabilities = checks;
                             report.failures.extend(failures);
                         }
                         Err(e) => report.failures.push(format!("bv-auditor: {e}")),
@@ -2855,6 +2856,39 @@ mod tests {
         assert!(refused.contains("LOG_FULL"), "{refused}");
         n1.drain_device_logs(barrier.as_ref()).await.unwrap();
         assert_eq!(n1.recover_kek().await.unwrap().as_slice(), &KEK, "acknowledged: the pool serves again");
+    }
+
+    /// Regression: a member whose bv-admin predates the drain is reported in
+    /// `admin_capabilities` with what it lacks, refused with the supported
+    /// path, and never written to; the other member gets its auditor.
+    #[tokio::test]
+    async fn a_pre_drain_bv_admin_is_reported_and_never_written() {
+        let p = Pool { device_audit: DeviceAuditMode::Forced, ..Pool::new(1).await };
+        let n1 = p.init().await;
+        let barrier = p.barrier().await;
+        p.a.simulate_pre_drain_admin();
+
+        let report = n1.repair(Some(barrier.clone()), Some(&p.both())).await.unwrap();
+        assert_eq!(report.auditors_installed, vec![p.name("b")], "{report:?}");
+        let check_of = |m: &str| report.admin_capabilities.iter().find(|c| c.member == p.name(m)).cloned().unwrap();
+        let (a, b) = (check_of("a"), check_of("b"));
+        assert!(!a.can_install_auditor && !a.can_set_forced_audit, "{a:?}");
+        assert_eq!(
+            (a.auditor_missing.clone(), a.forced_audit_missing.clone()),
+            (vec!["delegated get-log-entries".to_string()], vec!["capability set-option".to_string()])
+        );
+        assert!(b.can_install_auditor && b.can_set_forced_audit, "{b:?}");
+        assert_eq!(report.failures.len(), 1, "one line for a, nothing after it: {report:?}");
+        let failure = &report.failures[0];
+        assert!(failure.contains("delegated get-log-entries") && failure.contains("one member at a time"), "{failure}");
+
+        // Nothing was written to a: no key 8, no option, no stored credential.
+        let admin_a = p.a.admin_session("admin-a", HsmObjectIds::default()).unwrap();
+        assert!(!admin_a.auth_key_ids().await.unwrap().contains(&crate::hsm::device_audit::AUDITOR_AUTH_KEY_ID));
+        assert!(!p.a.forced_audit_on() && p.b.forced_audit_on());
+        assert!(crate::hsm::device_audit::read_auditor(barrier.as_ref(), &id_of(&p.a)).await.unwrap().is_none());
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["admin_capabilities"].as_array().unwrap().len(), 2, "in the API response");
     }
 
     #[tokio::test]

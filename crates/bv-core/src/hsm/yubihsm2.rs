@@ -28,6 +28,7 @@ use bv_hsm_link::{GatewayUrl, LinkTls, Relay, RelayConfig, RelayLimits};
 use sha2::{Digest, Sha256};
 use yubihsm::{
     asymmetric,
+    audit::AuditOption,
     connector::{HttpConfig, UsbConfig},
     object, wrap, Capability, Client, Connector, Credentials, Domain,
 };
@@ -43,6 +44,9 @@ use crate::{
         attestation::{self, AttestedKeyAlgorithm, ExpectedKey, YubiHsmAttestation, YubicoTrustAnchors},
         blob::{open_blob, seal_blob, Context, HsmId},
         ceremony::AttestationBundle,
+        device_audit::{
+            log_result_from_yubihsm, AuditorCredential, DeviceLog, DeviceLogEntry, HsmAuditSession, AUDITOR_AUTH_KEY_ID,
+        },
         domain_separated, AttestedKey, HsmBackend, HsmObjectId, HsmObjectIds, ResolvedHsmConfig, ResolvedLink,
     },
 };
@@ -418,34 +422,27 @@ impl YubiHsm2Backend {
     }
 }
 
-/// Capability names as the layout check spells them; any other bit is
-/// reported as `unmapped:<bits>` so an exact comparison fails on it.
+/// Capability names as the device documents them (the `yubihsm` crate's
+/// spelling: `set-option` for `PUT_OPTION`), one per bit, so the layout check
+/// and the bv-admin capability check compare names. A bit the crate cannot
+/// name is reported as `unmapped:<bit>`, so an exact comparison fails on it.
 fn capability_names(caps: Capability) -> Vec<String> {
-    let known = [
-        (Capability::WRAP_DATA, "wrap-data"),
-        (Capability::UNWRAP_DATA, "unwrap-data"),
-        (Capability::EXPORTABLE_UNDER_WRAP, "exportable-under-wrap"),
-        (Capability::EXPORT_WRAPPED, "export-wrapped"),
-        (Capability::SIGN_ECDSA, "sign-ecdsa"),
-        (Capability::SIGN_EDDSA, "sign-eddsa"),
-        (Capability::DERIVE_ECDH, "derive-ecdh"),
-        (Capability::GET_PSEUDO_RANDOM, "get-pseudo-random"),
-        (Capability::SIGN_ATTESTATION_CERTIFICATE, "sign-attestation-certificate"),
-    ];
-    let mut out = Vec::new();
-    let mut rest = caps;
-    for (flag, name) in known {
-        if caps.contains(flag) {
-            out.push(name.to_string());
-            rest.remove(flag);
-        }
-    }
-    if !rest.is_empty() {
-        out.push(format!("unmapped:{:#x}", rest.bits()));
-    }
-    out
+    caps.iter()
+        .map(|flag| {
+            // `Display` errs on a bit it has no name for; never `to_string()`,
+            // which would panic on that.
+            let mut name = String::new();
+            match std::fmt::write(&mut name, format_args!("{flag}")) {
+                Ok(()) => name,
+                Err(_) => format!("unmapped:{:#x}", flag.bits()),
+            }
+        })
+        .collect()
 }
 
+/// `bv-admin` as `provision` creates it. `PUT_OPTION` (`set-option`) is for
+/// the forced-audit option (T454 phase 6); a device provisioned before it was
+/// added lacks it, which `admin_capability_check` reports.
 fn admin_capabilities() -> Capability {
     Capability::DELETE_ASYMMETRIC_KEY
         | Capability::DELETE_AUTHENTICATION_KEY
@@ -453,8 +450,19 @@ fn admin_capabilities() -> Capability {
         | Capability::GENERATE_ASYMMETRIC_KEY
         | Capability::GENERATE_WRAP_KEY
         | Capability::PUT_AUTHENTICATION_KEY
+        | Capability::PUT_OPTION
         | Capability::SIGN_ATTESTATION_CERTIFICATE
         | Capability::SIGN_ECDSA
+}
+
+/// `bv-auditor` (auth key 8) on a YubiHSM 2: `get-log-entries` only. The
+/// device has no `set-log-index` capability (neither `yubihsm` 0.42's
+/// `Capability` nor Yubico's capability list names one, and Yubico's command
+/// reference says Set Log Index needs "no specific capabilities"), so this one
+/// bit is the whole read-and-acknowledge role. That a key holding only it can
+/// `set-log-index` is unverified on hardware (T454 phase 7).
+pub fn auditor_capabilities() -> Capability {
+    Capability::GET_LOG_ENTRIES
 }
 
 fn node_capabilities() -> Capability {
@@ -466,9 +474,29 @@ fn node_capabilities() -> Capability {
 }
 
 /// What `bv-admin` may hand on: exactly the capabilities of the objects it
-/// creates, so it can never mint an exportable object.
+/// creates (node keys, `bv-identity`, `bv-auditor`), so it can never mint an
+/// exportable object. A new key's capabilities must all be in the creating
+/// key's delegated set (Yubico, Put Authentication Key), which is why a device
+/// provisioned before `bv-auditor` existed cannot create it, and why no key in
+/// the layout can widen bv-admin: what it creates is bounded by this set.
 fn admin_delegated() -> Capability {
-    node_capabilities() | Capability::SIGN_ECDSA
+    node_capabilities() | Capability::SIGN_ECDSA | auditor_capabilities()
+}
+
+/// A refused device command, with the step that failed. The class
+/// `map_yubi` gives (transport, sessions full, device) is kept.
+fn refused(step: &str, e: yubihsm::client::Error) -> RvError {
+    match map_yubi(e) {
+        RvError::ErrHsm(why) => RvError::ErrHsm(format!("{step}: {why}")),
+        other => other,
+    }
+}
+
+/// The `bv-auditor` credential as a YubiHSM 2 authentication key (AES-128
+/// encryption key ‖ AES-128 MAC key). The error never repeats the key.
+fn auditor_key(credential: &AuditorCredential) -> Result<yubihsm::authentication::Key, RvError> {
+    yubihsm::authentication::Key::from_slice(credential.key())
+        .map_err(|_| RvError::ErrHsm("the bv-auditor credential is not a YubiHSM 2 authentication key".into()))
 }
 
 fn label(text: &str) -> Result<object::Label, RvError> {
@@ -641,6 +669,128 @@ impl HsmAdminSession for YubiHsm2AdminSession {
     async fn close(&self) -> Result<(), RvError> {
         Ok(())
     }
+
+    /// Replace `bv-auditor`: auth key 8, [`auditor_capabilities`], domain 1,
+    /// nothing delegated, `YubicoAes` with the credential. Implemented from
+    /// Yubico's command reference and the mock; unverified on hardware.
+    async fn put_auditor_auth_key(&self, credential: &AuditorCredential) -> Result<(), RvError> {
+        // Read-only first. A bv-admin from an older `provision` cannot
+        // delegate `get-log-entries`, and the device would refuse the put
+        // after the delete below; refuse before writing anything instead.
+        self.admin_capability_check().await?.require_auditor()?;
+        let hsm_id = self.hsm_id()?;
+        let key = auditor_key(credential)?;
+        let client = self.client()?;
+        // Replace is delete, then put. Yubico's reference does not say whether
+        // `put-authentication-key` on an id in use overwrites or fails (the
+        // device has an OBJECT_EXISTS status, 0x11; `yubihsm`'s own MockHsm
+        // overwrites), so neither is relied on. A failure in between leaves no
+        // key 8: the drain stops authenticating, nothing new is stored (the
+        // caller stores after this returns), and the next admin repair
+        // installs one.
+        match client.delete_object(AUDITOR_AUTH_KEY_ID, object::Type::AuthenticationKey) {
+            Ok(()) => {}
+            Err(e) if is_not_found(&e) => {}
+            Err(e) => return Err(refused(&format!("{hsm_id}: deleting the old bv-auditor (auth key 8)"), e)),
+        }
+        client
+            .put_authentication_key(
+                AUDITOR_AUTH_KEY_ID,
+                label("bv-auditor")?,
+                Domain::DOM1,
+                auditor_capabilities(),
+                Capability::empty(),
+                yubihsm::authentication::Algorithm::YubicoAes,
+                key,
+            )
+            .map_err(|e| refused(&format!("{hsm_id}: creating bv-auditor (put-authentication-key, auth key 8)"), e))?;
+        Ok(())
+    }
+
+    /// The device's force-audit option: `On` or `Off`, never `Fix` (Yubico:
+    /// enabled until a factory reset). Implemented from the `yubihsm` crate
+    /// and Yubico's command reference; unverified on hardware. Refused first,
+    /// without writing, when bv-admin lacks `set-option`: Yubico's reference
+    /// says Set Option needs no capability, but a device whose bv-admin
+    /// predates the drain cannot install `bv-auditor` either, and forced
+    /// audit on a log nobody drains would stop the device once it fills.
+    async fn set_forced_audit(&self, on: bool) -> Result<(), RvError> {
+        self.admin_capability_check().await?.require_forced_audit()?;
+        let hsm_id = self.hsm_id()?;
+        let option = if on { AuditOption::On } else { AuditOption::Off };
+        self.client()?
+            .set_force_audit_option(option)
+            .map_err(|e| refused(&format!("{hsm_id}: set-option force-audit {}", if on { "on" } else { "off" }), e))
+    }
+}
+
+/// A `bv-auditor` session on a YubiHSM 2 (T454 phase 6): read and acknowledge
+/// the device log. Implemented from Yubico's command reference, the `yubihsm`
+/// crate and the mock; unverified on hardware (T454 phase 7).
+///
+/// `yubihsm` 0.42 has no public way to send `CloseSession` from a `Client`, so
+/// [`HsmAuditSession::close`] only drops the host side and the device frees
+/// the slot on its 30 s idle expiry.
+pub struct YubiHsm2AuditSession {
+    client: Mutex<Client>,
+    serial: String,
+    /// After `client`, so the client is dropped first.
+    _relay: Option<Relay>,
+}
+
+impl YubiHsm2AuditSession {
+    /// Authenticate as auth key 8 and read the serial the drain checks the
+    /// member's `hsm_id` against. Fails when the credential does not
+    /// authenticate, which is how a repair finds a stale one.
+    pub fn open(connector: Connector, relay: Option<Relay>, credential: &AuditorCredential) -> Result<Self, RvError> {
+        let key = auditor_key(credential)?;
+        // No reconnect: the client keeps no copy of the credential once the
+        // session is up, and a session the device expired fails that drain
+        // tick (the next tick opens a new one) rather than re-authenticating.
+        let client = Client::open(connector, Credentials::new(AUDITOR_AUTH_KEY_ID, key), false).map_err(map_yubi)?;
+        let serial = client.device_info().map(|i| i.serial_number.to_string()).map_err(map_yubi)?;
+        Ok(Self { client: Mutex::new(client), serial, _relay: relay })
+    }
+
+    fn client(&self) -> Result<std::sync::MutexGuard<'_, Client>, RvError> {
+        self.client.lock().map_err(|_| RvError::ErrRwLockWritePoison)
+    }
+}
+
+#[maybe_async::maybe_async]
+impl HsmAuditSession for YubiHsm2AuditSession {
+    fn hsm_id(&self) -> Result<HsmId, RvError> {
+        HsmId::from_parts("yubihsm2", &self.serial)
+    }
+
+    /// The fields as the device lays them out (`DeviceLogEntry::data`), with
+    /// the result byte the device wrote: the digest covers that byte, not
+    /// `yubihsm`'s re-encoding of it (`log_result_from_yubihsm`). An entry
+    /// whose command byte `yubihsm` 0.42 does not know fails the whole read
+    /// in the crate, which the drain reports as a failure, never a skip.
+    async fn get_log_entries(&self) -> Result<DeviceLog, RvError> {
+        let log = self.client()?.get_log_entries().map_err(|e| refused("get-log-entries", e))?;
+        let entries = log
+            .entries
+            .into_iter()
+            .map(|e| DeviceLogEntry {
+                index: e.item,
+                command: e.cmd.to_u8(),
+                length: e.length,
+                session_key: e.session_key,
+                target_key: e.target_key,
+                second_key: e.second_key,
+                result: log_result_from_yubihsm(e.result.to_u8()),
+                systick: e.tick,
+                digest: e.digest.0,
+            })
+            .collect();
+        Ok(DeviceLog { unlogged_boot: log.unlogged_boot_events, unlogged_auth: log.unlogged_auth_events, entries })
+    }
+
+    async fn set_log_index(&self, index: u16) -> Result<(), RvError> {
+        self.client()?.set_log_index(index).map_err(|e| refused(&format!("set-log-index {index}"), e))
+    }
 }
 
 /// `bvault operator hsm provision` on a YubiHSM 2 (spec § Provision a
@@ -759,6 +909,98 @@ mod tests {
         for wrap_key in [objects.wrap_barrier, objects.wrap_pqc] {
             assert!(expected_attested_key(&objects, wrap_key, 1).is_err(), "{wrap_key:#x}");
         }
+    }
+
+    /// The bits a device receives, pinned: a `yubihsm` upgrade that renumbers
+    /// them fails here rather than on a device.
+    #[test]
+    fn the_drain_capabilities_and_option_values_are_the_wire_values() {
+        assert_eq!(auditor_capabilities().bits(), 0x0100_0000, "get-log-entries");
+        assert_eq!(Capability::PUT_OPTION.bits(), 0x0002_0000, "set-option");
+        assert_eq!((AuditOption::Off.to_u8(), AuditOption::On.to_u8()), (0x00, 0x01));
+        assert_eq!(capability_names(auditor_capabilities()), vec!["get-log-entries"]);
+    }
+
+    use crate::hsm::admin::AdminCapabilityCheck;
+
+    /// bv-admin's object info as the device would report these masks.
+    fn admin_info(capabilities: Capability, delegated: Capability) -> ObjectInfo {
+        ObjectInfo {
+            id: ADMIN_AUTH_KEY_ID,
+            kind: ObjectKind::AuthenticationKey,
+            label: "bv-admin".into(),
+            capabilities: capability_names(capabilities),
+            delegated: capability_names(delegated),
+        }
+    }
+
+    fn check(capabilities: Capability, delegated: Capability) -> AdminCapabilityCheck {
+        let hsm_id = HsmId::from_parts("yubihsm2", "36470559").unwrap();
+        AdminCapabilityCheck::evaluate(&hsm_id, &admin_info(capabilities, delegated))
+    }
+
+    /// A newly provisioned bv-admin passes the shared check (the device's
+    /// names are the check's names); it still delegates nothing that exports
+    /// nor anything that would widen an admin, and bv-auditor can do nothing
+    /// but read the log.
+    #[test]
+    fn a_new_bv_admin_can_install_the_auditor_and_never_mints_an_exportable_key() {
+        let new = check(admin_capabilities(), admin_delegated());
+        assert!(new.can_install_auditor && new.can_set_forced_audit, "{new:?}");
+        let export = Capability::EXPORTABLE_UNDER_WRAP | Capability::EXPORT_WRAPPED;
+        assert!(!admin_delegated().intersects(export));
+        let widening = Capability::PUT_OPTION
+            | Capability::PUT_AUTHENTICATION_KEY
+            | Capability::DELETE_AUTHENTICATION_KEY
+            | Capability::CHANGE_AUTHENTICATION_KEY
+            | Capability::RESET_DEVICE;
+        assert!(!admin_delegated().intersects(widening));
+        assert_eq!(auditor_capabilities(), Capability::GET_LOG_ENTRIES);
+        // The layout the mock models is the one provision writes.
+        let mut provisioned = capability_names(admin_delegated());
+        provisioned.sort();
+        assert_eq!(provisioned, crate::hsm::admin::AuthKeyRole::Admin.delegated());
+    }
+
+    /// Regression: a bv-admin with the masks an earlier `provision` wrote
+    /// (no `set-option`, delegated = node capabilities and `sign-ecdsa`) is
+    /// refused for both writes, before any write, naming each missing bit.
+    #[test]
+    fn a_bv_admin_provisioned_before_the_drain_is_refused_explicitly() {
+        let old = check(admin_capabilities() - Capability::PUT_OPTION, node_capabilities() | Capability::SIGN_ECDSA);
+        assert!(!old.can_install_auditor && !old.can_set_forced_audit, "{old:?}");
+        assert_eq!(old.auditor_missing, vec!["delegated get-log-entries"]);
+        assert_eq!(old.forced_audit_missing, vec!["capability set-option"]);
+        let err = old.require_auditor().unwrap_err();
+        assert!(matches!(err, RvError::ErrHsm(_)), "never a transport failure: {err:?}");
+        let text = err.to_string();
+        for part in ["36470559", "provisioned before the device-log drain", "get-log-entries", "cannot be changed"] {
+            assert!(text.contains(part), "{part:?} missing from {text}");
+        }
+    }
+
+    /// Every bit the crate names comes back by its documented name; a bit it
+    /// cannot name is reported, never dropped and never a panic.
+    #[test]
+    fn capability_names_cover_every_bit() {
+        assert_eq!(
+            capability_names(Capability::PUT_AUTHENTICATION_KEY | Capability::PUT_OPTION),
+            vec!["put-authentication-key", "set-option"]
+        );
+        let unknown = Capability::from_bits_retain(0x8000_0000_0000);
+        assert_eq!(capability_names(unknown), vec!["unmapped:0x800000000000"]);
+        assert_eq!(capability_names(Capability::WRAP_DATA | Capability::UNWRAP_DATA).len(), 2);
+    }
+
+    #[test]
+    fn the_auditor_credential_is_a_device_key_and_refusals_name_their_step() {
+        let credential = AuditorCredential::from_key(Zeroizing::new(vec![0x5a; 32])).unwrap();
+        assert!(auditor_key(&credential).is_ok(), "32 bytes is a YubiHSM 2 authentication key");
+        let err = refused("step", yubihsm::client::ErrorKind::ProtocolError.into());
+        assert!(matches!(&err, RvError::ErrHsm(why) if why == "step: yubihsm: protocol error"), "{err:?}");
+        // A transport failure keeps its class, so the pool still counts it.
+        let err = refused("step", yubihsm::client::ErrorKind::ConnectorError.into());
+        assert!(matches!(err, RvError::ErrHsmTransport(_)), "{err:?}");
     }
 
     /// No trust file configured: refused, naming the setting.

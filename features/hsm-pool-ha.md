@@ -183,13 +183,13 @@ overridden in config.
 | Id | Label | Type | Capabilities | Purpose |
 |---|---|---|---|---|
 | 1 | *(factory default auth key)* | auth | — | **Deleted** by `provision`. A device still holding key 1 is refused. |
-| 2 | `bv-admin` | auth key (password-derived), **domains 1 and 2** | `generate-asymmetric-key`, `generate-wrap-key`, `put-authentication-key`, `delete-authentication-key`, `delete-asymmetric-key`, `delete-wrap-key`, `get-object-info`, `sign-attestation-certificate`, `sign-ecdsa`; delegated = exactly the union of the capabilities of the objects in this table (so it can never mint an exportable object) | Ceremonies only. Credential held by operators, never stored by BastionVault. |
+| 2 | `bv-admin` | auth key (password-derived), **domains 1 and 2** | `generate-asymmetric-key`, `generate-wrap-key`, `put-authentication-key`, `delete-authentication-key`, `delete-asymmetric-key`, `delete-wrap-key`, `get-object-info`, `set-option` (forced audit; added 2026-11-09, see [Phase 7 findings: device log](#phase-7-findings-device-log)), `sign-attestation-certificate`, `sign-ecdsa`; delegated = exactly the union of the capabilities of the objects in this table (so it can never mint an exportable object) | Ceremonies only. Credential held by operators, never stored by BastionVault. |
 | 3 | `bv-wrap-barrier` | AES-256-CCM wrap key | `wrap-data`, `unwrap-data`; **no** `exportable-under-wrap`, no `export-wrapped`; delegated = none | Wraps the barrier KEK. |
 | 4 | `bv-wrap-pqc` | AES-256-CCM wrap key | same as above | Wraps PQC seeds (separate from the barrier key, rule 5). |
 | 5 | `bv-identity` | EC P-256, **domain 2** | `sign-ecdsa` | Device identity: signs pool-membership and re-wrap transcripts. Attested. Not usable by node keys (domain 2). |
 | 6 | `bv-seed-ecdh` | EC P-256 | `derive-ecdh` | Hardware contribution to PQC seed derivation (spec S17 Capability 2, step 3). Attested. |
 | 7 | `bv-authz` | Ed25519 | `sign-eddsa` | Signs every unwrap authorization. Attested. |
-| 8 | `bv-auditor` | auth key (random) | `get-log-entries`; domain 1 | Device-log drain. |
+| 8 | `bv-auditor` | auth key (random) | `get-log-entries` (the device has no `set-log-index` capability); domain 1; delegated = none | Device-log drain. Created by an admin repair, not by `provision`. |
 | 0x100 + n | `bv-node-<node_id>` | auth key (random AES pair) | `wrap-data`, `unwrap-data`, `sign-eddsa`, `derive-ecdh`, `get-pseudo-random`, `get-object-info`; delegated = none; domain 1 only | One per enrolled node. |
 
 Why this layout differs from S17's per-node table:
@@ -963,8 +963,9 @@ promotion), credential delivery and the repair job, all on the **mock**; a
 the relay and the device's admin commands in. Phase 5 adds the recovery key,
 recovery copies and the recovery ceremony, also on the mock. Phase 6 adds the
 device-log drain, the remaining metrics, the extended status and the GUI pool
-sections; the drain runs on the mock and is refused on a YubiHSM 2 until
-phase 7. Phase 7 is **prepared, awaiting the hardware run**: the Yubico
+sections; the drain runs on the mock, and its YubiHSM 2 side is implemented
+from Yubico's documentation and the mock but not yet validated on a device
+(see [Phase 7 findings: device log](#phase-7-findings-device-log)). Phase 7 is **prepared, awaiting the hardware run**: the Yubico
 attestation chain is verified against an operator-supplied trust file, and a
 hardware suite that only an operator runs is in place. Its first read-only
 run (`snapshot`, one device, 2026-10-27) confirmed the device log's layout
@@ -1260,18 +1261,18 @@ Decisions made in phase 6 where this spec left room:
   command (one more admin surface for what repair already reaches).
 - `hsm.device_log` goes to the `security` log at `debug` only; the audit
   device is its record. Gaps are `error`.
-- `bv-admin`'s capability list is unchanged: the `set-option` and
-  `put-authentication-key` delegation the device needs for forced audit and
-  `bv-auditor` are confirmed with the log layout in phase 7.
+- `bv-admin`'s capability list was left unchanged in phase 6, pending phase 7.
+  *Changed 2026-11-09:* `provision` now gives `bv-admin` `set-option` and
+  delegates `get-log-entries`, so it can create `bv-auditor` and set the
+  forced-audit option; a device provisioned earlier keeps its `bv-admin` and is
+  refused explicitly (see [Phase 7 findings: device log](#phase-7-findings-device-log)).
 
 Not done in phase 6, deliberately (phase 7, hardware):
 
-- The YubiHSM 2 side: `put_auditor_auth_key`, `set_forced_audit` and
-  `open_auditor` refuse on a YubiHSM 2, naming phase 7, until the entry layout,
-  the digest chain, whether the device logs `get-log-entries` /
-  `set-log-index`, and `LOG_FULL` behaviour are confirmed on a device. The
-  byte order and the digest chain are now confirmed; the rest is open (see
-  [Phase 7 findings: device log](#phase-7-findings-device-log)).
+- The YubiHSM 2 side, refused in phase 6, is implemented since 2026-11-09
+  from Yubico's documentation and the mock, and is **not validated on a
+  device** (see [Phase 7 findings: device log](#phase-7-findings-device-log)
+  for what is still open).
 - Gateway-side counters (`GatewayStats`) stay in the gateway's log; the metric
   is the node's relay view.
 - The mock's log is per process: a mock pool whose nodes run in separate
@@ -1792,7 +1793,7 @@ Not done in phase 2, deliberately:
 | 5. Recovery | Recovery keypair, Shamir split, recovery copies, `recover` route | `crates/bv-core/src/hsm/recovery.rs`, `crates/bv-core/src/seal/hsm/recovery_ceremony.rs`, `crates/bv-server/src/sys.rs`, `crates/bvault-cli` | Done (mock; the YubiHSM 2 ceremony waits on phase 7 attestation) |
 | 6. Audit and observability | Device-log drain, events, metrics, status, GUI page, `docs/hsm.md`, `docs/api.md` | `crates/bv-core/src/hsm/device_audit.rs`, `crates/bv-core/src/seal/hsm/device_drain.rs`, `gui/src/routes/HsmStatusPage.tsx` | Done (mock; the YubiHSM 2 drain waits on phase 7) |
 | Amendment: pool of one (2026-10-27) | One or two members; init, bootstrap and unseal with one; `acknowledge_single_member_without_recovery`; at most two members not retired; redundancy status, event and metric | `crates/bv-core/src/hsm/{mod,pool}.rs`, `crates/bv-core/src/seal/hsm.rs`, `crates/bv-core/src/seal/hsm/pool_admin.rs`, `crates/bv-metrics/src/hsm_metrics.rs` | Done (mock; YubiHSM 2 with phase 7) |
-| 7. Hardware validation | Two physical devices plus three nodes; pin the Yubico attestation chain and lift the YubiHSM 2 attestation refusal; validate `provision`, bootstrap, enrollment and the relay; confirm the device log layout, digest chain and forced audit, and lift the YubiHSM 2 drain refusal; measure latencies; confirm the FIPS Ed25519 question; **end every run by factory-resetting both devices and checking they provision again** (see [Resetting the test devices](#resetting-the-test-devices)) | `crates/bv-core/src/hsm/{attestation,yubihsm2}.rs`, `crates/bv-core/src/hsm/hw_validation/`, `crates/bv-core/tests/hsm_pool_hardware.rs` (feature `hsm_hardware_tests`, behind `BVAULT_TEST_YUBIHSM_POOL=1`), `docs/hsm.md` | Run on one device, 36470559, on 2026-10-27 (see [Phase 7 results](#phase-7-results-pool-of-one-on-36470559)): attestation pinned through the Yubico chain, device-log byte order and digest chain confirmed (see [Phase 7 findings: device log](#phase-7-findings-device-log)), provision, enrollment, wrap/unwrap, tamper detection, the domain-2 refusal, the mTLS relay, latencies and the physical reset passed. Everything that needs a second device, the three-node run, the forced-audit option and the YubiHSM 2 drain are not done. The suite validates a pool of one on a single device (the planned run, 36470559) or a two-member pool; on a pool of one the cross-device checks are listed as `not exercised (pool of one)` |
+| 7. Hardware validation | Two physical devices plus three nodes; pin the Yubico attestation chain and lift the YubiHSM 2 attestation refusal; validate `provision`, bootstrap, enrollment and the relay; confirm the device log layout, digest chain and forced audit, and lift the YubiHSM 2 drain refusal; measure latencies; confirm the FIPS Ed25519 question; **end every run by factory-resetting both devices and checking they provision again** (see [Resetting the test devices](#resetting-the-test-devices)) | `crates/bv-core/src/hsm/{attestation,yubihsm2}.rs`, `crates/bv-core/src/hsm/hw_validation/`, `crates/bv-core/tests/hsm_pool_hardware.rs` (feature `hsm_hardware_tests`, behind `BVAULT_TEST_YUBIHSM_POOL=1`), `docs/hsm.md` | Run on one device, 36470559, on 2026-10-27 (see [Phase 7 results](#phase-7-results-pool-of-one-on-36470559)): attestation pinned through the Yubico chain, device-log byte order and digest chain confirmed (see [Phase 7 findings: device log](#phase-7-findings-device-log)), provision, enrollment, wrap/unwrap, tamper detection, the domain-2 refusal, the mTLS relay, latencies and the physical reset passed. Everything that needs a second device and the three-node run are not done; the forced-audit option and the YubiHSM 2 drain are implemented (2026-11-09, from the docs and the mock) but not run on a device. The suite validates a pool of one on a single device (the planned run, 36470559) or a two-member pool; on a pool of one the cross-device checks are listed as `not exercised (pool of one)` |
 
 **What happens to the existing modules:**
 
@@ -2010,17 +2011,113 @@ whose 8 log entries are committed as
   an old capture checked again from its decoded bytes. The device log is
   never compared between snapshots, so `compare` is unaffected.
 
-**The YubiHSM 2 drain stays refused.** A factory device with command audit
-off logs only boot entries, so this run confirmed the byte order and the
-chain, not the meaning of the key fields of a command entry. Still to confirm
-on a device, after `provision` turns command audit on: a logged command's
-session, target and second key fields; a failed command's result byte (the
-mock writes 0x7f, `yubihsm` expects a status 0x01..=0x13); whether
-`get-log-entries` and `set-log-index` are themselves logged; `set-log-index`
-and `LOG_FULL` under forced audit; and `bv-admin`'s delegation of
-`put-authentication-key` and `set-option` for `bv-auditor`. The YubiHSM 2
-`open_auditor`, `put_auditor_auth_key` and `set_forced_audit` are not
-written yet; they use `log_result_from_yubihsm` when they are.
+A factory device with command audit off logs only boot entries, so this run
+confirmed the byte order and the chain, not the meaning of the key fields of
+a command entry.
+
+**The YubiHSM 2 drain: implemented, not validated on a device** (2026-11-09).
+Written from Yubico's command reference, the `yubihsm` 0.42 API and the mock,
+without running anything against a device; the operator validates it in
+production. In `hsm/yubihsm2.rs`:
+
+- **bv-admin capability check** (`hsm/admin.rs`, `AdminCapabilityCheck`, the
+  trait's `admin_capability_check`): read-only `get-object-info` on auth key
+  2, judged against what the drain needs (`delete-authentication-key`,
+  `put-authentication-key`, delegated `get-log-entries`; `set-option` for the
+  option). Every admin-credentialed repair reports it per member as
+  `admin_capabilities`, and `put_auditor_auth_key` and `set_forced_audit` (mock
+  and YubiHSM 2) refuse on it before any write, naming what is missing and the
+  supported path.
+- `put_auditor_auth_key` then deletes key 8 if present (Yubico's reference
+  does not say whether a put on an id in use overwrites or fails; the device
+  has an `OBJECT_EXISTS` status and `yubihsm`'s own MockHsm overwrites, so
+  neither is relied on) and puts it: label `bv-auditor`, domain 1, capability
+  `get-log-entries` only, nothing delegated, `YubicoAes` with the 32-byte
+  credential. A failure between the delete and the put leaves no key 8; the
+  credential is stored only after the put, so the next admin repair retries.
+- `set_forced_audit` is `set-option` force-audit `On` / `Off`
+  (`Client::set_force_audit_option`), never `Fix`.
+- `YubiHsm2AuditSession` authenticates as key 8 (no reconnect), reads the
+  serial the drain checks against the member's `hsm_id`, and maps
+  `get-log-entries` to `DeviceLog` with `log_result_from_yubihsm`;
+  `set-log-index` acknowledges. `ConfigMemberOpener::open_auditor` reaches it
+  like the node client and admin session: the member block's connector, else
+  the gateway through the link.
+- `provision` now creates `bv-admin` with `set-option` and delegated
+  `get-log-entries`. `verify_layout` and attestation never read `bv-admin`'s
+  capabilities, so devices provisioned before and after both verify.
+
+Decisions where the crate or the documentation left room:
+
+- **No `set-log-index` capability.** Neither `yubihsm`'s `Capability` nor
+  Yubico's capability list has one, and Yubico's reference says Set Log Index
+  needs "no specific capabilities". `bv-auditor` carries `get-log-entries`
+  alone. If any authenticated key can acknowledge the log, a node key could
+  free entries before the drain reads them; they would then be overwritten,
+  which the drain reports as an index jump (a gap), never silently.
+- **`set-option` on `bv-admin`.** Yubico's reference also says Set Option
+  needs no capability, but the capability exists (`set-option`, 0x20000), so
+  `provision` grants it, and `set_forced_audit` refuses a `bv-admin` without
+  it before writing: such a device also cannot install `bv-auditor`, and
+  forced audit on a log nobody drains would stop the device once it fills.
+- **Devices provisioned before 2026-11-09 cannot be updated in place.**
+  Evidence: no command changes an object's capabilities (`yubihsm` 0.42's
+  client has none; Change Authentication Key, which the crate does not even
+  expose, replaces key material and needs `change-authentication-key`, which
+  `bv-admin` lacks); a new key's capabilities and delegated capabilities must
+  lie within the creating key's delegated set (Yubico, Put Authentication
+  Key), and the old `bv-admin` delegates only the node capabilities and
+  `sign-ecdsa` (`yubihsm2.rs` before this change, `admin_delegated`), so it can
+  create neither `bv-auditor` nor a stronger admin, and could only re-create
+  itself weaker; `provision` deletes factory key 1, and `bv-admin` has no
+  `reset-device`. So no update command exists: an admin repair reports the
+  member in `admin_capabilities` with `can_install_auditor: false`, refuses
+  with `bv-auditor on <member>: … it lacks delegated get-log-entries (read from
+  its object info; nothing was written) …`, and writes nothing.
+- **The supported path is replacing each member, one at a time, by a device
+  provisioned by this build** (`docs/hsm.md`, "Give an existing pool the
+  drain's bv-admin"), with the existing `member retire` / `member add` /
+  repair machinery. Two facts from the code shape it: `member retire` is
+  refused when it would leave fewer active members than `min_wrap_copies`
+  (`seal/hsm/pool_admin.rs`, `retire_member`), so `min_wrap_copies = 2` must be
+  lowered to 1 for the swap (and `recovery = "none"` needs the pool-of-one
+  acknowledgement); and `member add` refuses a device whose `hsm_id` (backend
+  and serial) is already in the record, retired members included
+  (`add_member`), and retired members are never removed, so **a reset and
+  re-provisioned original cannot rejoin**: replacing both members takes two
+  spare devices. Allowing a retired, re-provisioned device back would change
+  membership semantics and is not done here. The pool stays unsealable on the
+  other member throughout, because retire is refused while any set lacks a
+  copy on another active member.
+
+Still unconfirmed on a device:
+
+- That `put-authentication-key` with these masks succeeds under `bv-admin`,
+  and that a key with only `get-log-entries` may `set-log-index`.
+- Whether the device requires `set-option` for Set Option, and what
+  `set-option` force-audit returns on success.
+- A logged command's session, target and second key fields; a failed
+  command's result byte (the mock writes 0x7f, `yubihsm` expects a status
+  0x01..=0x13).
+- Whether create-session, authenticate, device-info, `get-log-entries` and
+  `set-log-index` are logged (the drain filters entries whose session key is 8,
+  assuming they carry it), and whether they still run with a full log under
+  forced audit. If they do not, a full log stops the device until it is
+  acknowledged by hand (`yubihsm-shell`); `device_audit = "drain"` (the
+  default) never turns forced audit on.
+- **Command audit is off on a factory device and nothing turns it on.** The
+  phase 7 snapshot read every command's audit option as off, and neither
+  `provision` nor repair sets it, so on such a device the drain sees boot and
+  authentication entries only, not node commands. Turning command audit on
+  (which commands, `On` never `Fix`) is an operator decision not taken here.
+- **Session slots.** `yubihsm` 0.42 cannot send `CloseSession` from a
+  `Client`, so each drain tick leaves its `bv-auditor` session to the device's
+  30 s idle expiry: up to about 7 open at once per device, against the one this
+  spec budgets. With few nodes there is room; near 12 nodes the pool could see
+  `SESSIONS_FULL`. Keeping one auditor session across ticks is a follow-up.
+- An entry whose command byte `yubihsm` 0.42 does not know makes the crate
+  refuse the whole `get-log-entries` answer: the drain reports a failure for
+  that member, never a skip.
 
 
 ### Phase 7 results: pool of one on 36470559

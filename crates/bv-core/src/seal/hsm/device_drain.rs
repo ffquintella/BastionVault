@@ -19,7 +19,7 @@ use super::{
 use crate::{
     errors::RvError,
     hsm::{
-        admin::HsmAdminSession,
+        admin::{AdminCapabilityCheck, HsmAdminSession},
         blob::HsmId,
         blobset::unix_now_secs,
         ceremony::{list_enrollments, NodeEnrollment},
@@ -261,18 +261,24 @@ impl HsmSealProvider {
 
     /// Give each member in `sessions` a working `bv-auditor` and set its
     /// forced-audit option to match `device_audit`. Returns the members that
-    /// got a new credential and one failure line per member that did not.
+    /// got a new credential, one failure line per member that did not, and
+    /// each member's read-only bv-admin capability check (taken first).
     #[maybe_async::maybe_async]
     pub(super) async fn ensure_auditors(
         &self,
         sessions: &Sessions,
         barrier: &dyn Storage,
-    ) -> (Vec<String>, Vec<String>) {
+    ) -> (Vec<String>, Vec<String>, Vec<AdminCapabilityCheck>) {
         let mut installed = Vec::new();
         let mut failures = Vec::new();
-        let Ok(devices) = self.pool_devices() else { return (installed, failures) };
+        let mut checks = Vec::new();
+        let Ok(devices) = self.pool_devices() else { return (installed, failures, checks) };
         let forced = self.device_audit_mode() == DeviceAuditMode::Forced;
         for (target, session) in sessions {
+            match session.admin_capability_check().await {
+                Ok(check) => checks.push(AdminCapabilityCheck { member: target.name.clone(), ..check }),
+                Err(e) => failures.push(format!("bv-admin capabilities on {}: {e}", target.name)),
+            }
             match self.ensure_auditor(devices, target, session.as_ref(), barrier).await {
                 Ok(true) => installed.push(target.name.clone()),
                 Ok(false) => {}
@@ -285,7 +291,7 @@ impl HsmSealProvider {
                 failures.push(format!("forced audit {} on {}: {e}", if forced { "on" } else { "off" }, target.name));
             }
         }
-        (installed, failures)
+        (installed, failures, checks)
     }
 
     /// Keep a stored credential that still authenticates; otherwise replace

@@ -189,6 +189,10 @@ pub struct MockHsmDevice {
     flaky_probes: AtomicU32,
     clock: Arc<dyn Clock>,
     log: Mutex<MockLog>,
+    /// Tests only: bv-admin reports the masks an earlier `provision` wrote
+    /// (no `set-option`, no delegated `get-log-entries`). In memory, never
+    /// persisted, so the state file format is unchanged.
+    pre_drain_admin: AtomicBool,
 }
 
 impl MockHsmDevice {
@@ -201,7 +205,25 @@ impl MockHsmDevice {
             flaky_probes: AtomicU32::new(0),
             clock,
             log: Mutex::new(MockLog::default()),
+            pre_drain_admin: AtomicBool::new(false),
         })
+    }
+
+    /// Make bv-admin report the capabilities a device provisioned before the
+    /// device-log drain has, as a YubiHSM 2 would (tests).
+    #[cfg(test)]
+    pub(crate) fn simulate_pre_drain_admin(&self) {
+        self.pre_drain_admin.store(true, Ordering::SeqCst);
+    }
+
+    /// bv-admin's capabilities and delegated capabilities as `get-object-info`
+    /// reports them: the layout's, or a pre-drain device's.
+    fn admin_masks(&self) -> (Vec<String>, Vec<String>) {
+        let old = self.pre_drain_admin.load(Ordering::SeqCst);
+        let keep = |names: &[&str], drop: &str| -> Vec<String> {
+            names.iter().filter(|n| !(old && **n == drop)).map(|n| n.to_string()).collect()
+        };
+        (keep(AuthKeyRole::Admin.capabilities(), "set-option"), keep(AuthKeyRole::Admin.delegated(), "get-log-entries"))
     }
 
     fn device_log(&self) -> std::sync::MutexGuard<'_, MockLog> {
@@ -536,9 +558,16 @@ impl HsmAdminSession for MockAdminSession {
                 delegated: Vec::new(),
             };
             Ok(match kind {
-                ObjectKind::AuthenticationKey => {
-                    state.auth_keys.get(&id).map(|k| info(&k.label, k.role.capabilities(), &[]))
-                }
+                ObjectKind::AuthenticationKey => state.auth_keys.get(&id).map(|k| match k.role {
+                    AuthKeyRole::Admin => {
+                        let (capabilities, delegated) = self.device.admin_masks();
+                        ObjectInfo { capabilities, delegated, ..info(&k.label, &[], &[]) }
+                    }
+                    role => ObjectInfo {
+                        delegated: role.delegated().iter().map(|c| c.to_string()).collect(),
+                        ..info(&k.label, role.capabilities(), &[])
+                    },
+                }),
                 ObjectKind::WrapKey => state
                     .objects
                     .get(&id)
@@ -646,8 +675,10 @@ impl HsmAdminSession for MockAdminSession {
         Ok(())
     }
 
-    /// Replace auth key 8 with `credential`, role `bv-auditor`.
+    /// Replace auth key 8 with `credential`, role `bv-auditor`, after the
+    /// read-only bv-admin capability check (as on a YubiHSM 2).
     async fn put_auditor_auth_key(&self, credential: &AuditorCredential) -> Result<(), RvError> {
+        self.admin_capability_check().await?.require_auditor()?;
         self.logged(cmd::PUT_AUTHENTICATION_KEY, AUDITOR_AUTH_KEY_ID, || {
             let mut state = self.device.state.write().map_err(|_| RvError::ErrRwLockWritePoison)?;
             let key =
@@ -658,6 +689,7 @@ impl HsmAdminSession for MockAdminSession {
     }
 
     async fn set_forced_audit(&self, on: bool) -> Result<(), RvError> {
+        self.admin_capability_check().await?.require_forced_audit()?;
         self.logged(cmd::SET_OPTION, NO_KEY, || {
             let mut state = self.device.state.write().map_err(|_| RvError::ErrRwLockWritePoison)?;
             if state.forced_audit != on {

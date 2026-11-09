@@ -300,6 +300,11 @@ A repair report: `sets_scanned`, `copies_added`, `copies_removed`,
 `under_replicated` (still missing a copy), `failures`, `invalid_custody_entries`,
 `ready_to_promote`, `promoted`, `revocations_applied`, `revocations_pending`,
 `auditors_installed` (members given a new `bv-auditor` credential),
+`admin_capabilities` (one per member an admin-credentialed run reached, read
+before any write: `member`, `hsm_id`, bv-admin's `capabilities` and
+`delegated` as the device reports them, `can_install_auditor`,
+`can_set_forced_audit`, `auditor_missing`, `forced_audit_missing`; empty
+without `admin_credentials` or with `device_audit = "off"`),
 `custody_scanned`, `started_at`, `finished_at`. A revoke response adds
 `revoked_on`, `revocation_pending` (`member`, `reason`), `operator_steps` and,
 when a revocation is pending, `residual_risk`.

@@ -473,7 +473,7 @@ bvault operator hsm repair --run --admin hsm-a --admin hsm-b2   # promotes hsm-b
   A migrated pool has no recovery key (it is made at init only), so the node
   must run `recovery = "none"` for the migration.
 
-#### Device audit log and observability (phase 6, mock)
+#### Device audit log and observability (phase 6; YubiHSM 2 not yet validated)
 
 Each pool device keeps its own audit log: the last 62 commands, each with the
 auth key that ran it and a digest chained from the entry before. BastionVault
@@ -489,7 +489,7 @@ bvault operator hsm status        # device_audit.members[].enrolled = true
 ~~~
 
 - **Drain.** Every 5 s while unsealed, each member's log is read with
-  `bv-auditor` (auth key 8: `get-log-entries` and `set-log-index` only), the
+  `bv-auditor` (auth key 8: it may only read the log, `get-log-entries`, and acknowledge it, `set-log-index`), the
   chain is verified from the member's cursor (`core/hsm/audit-cursor/<hsm_id>`),
   every new command becomes an `hsm.device_log` audit event (command, auth key,
   the node the key belongs to, target object, result), and the log is
@@ -510,13 +510,39 @@ bvault operator hsm status        # device_audit.members[].enrolled = true
 - **The credential** is random, made by BastionVault during an admin repair,
   stored behind the barrier at `core/hsm/auditor/<hsm_id>` and never shown. A
   repair replaces it when it no longer authenticates (device reset).
-- **YubiHSM 2:** installing `bv-auditor`, the forced-audit option and the drain
-  are refused, naming phase 7, until the log is confirmed on a device.
-  `v2/sys/hsm/status` then shows each member with `enrolled: false`. The first
-  read-only run confirmed the entry byte order and the digest chain on a
-  factory device; a logged command's fields, a failed command's result byte
-  and `LOG_FULL` under forced audit are still to confirm
-  (`features/hsm-pool-ha.md` § Phase 7 findings: device log).
+- **YubiHSM 2: implemented, not yet validated on a device.** Installing
+  `bv-auditor` (auth key 8, `get-log-entries` only, domain 1: the device has
+  no `set-log-index` capability), the forced-audit option (`set-option`
+  force-audit `on` / `off`, never `fix`) and the drain session are written
+  from Yubico's documentation and the mock. The first read-only run confirmed
+  the entry byte order and the digest chain on a factory device. Still to
+  confirm on a device: that `bv-admin` can create `bv-auditor` with these
+  masks and that it can `set-log-index`; whether the device requires
+  `set-option`; a logged command's fields and a failed command's result
+  byte; whether the drain's own commands are logged and still run under
+  `LOG_FULL` with forced audit (if not, a full log stops the device until you
+  acknowledge it by hand with `yubihsm-shell`; the default `drain` mode never
+  turns forced audit on). Details in `features/hsm-pool-ha.md` § Phase 7
+  findings: device log.
+- **Command audit is off on a factory YubiHSM 2**, and neither `provision`
+  nor repair turns it on: until you enable it for the commands you want
+  recorded (`On`, not `Fix`, which only a reset clears), the log holds boot
+  and authentication entries only, and the drain has no node command to
+  report.
+- **Session slots (YubiHSM 2).** The `yubihsm` client cannot close a session
+  explicitly, so each drain tick's `bv-auditor` session stays open on the
+  device until its 30 s idle expiry: about 7 at a time per device, on top of
+  one per node. Mind the device's 16 sessions in a large cluster.
+- **Devices provisioned before this build** (2026-11-09) have a `bv-admin`
+  without `set-option` and without delegated `get-log-entries`. Every
+  `repair --run --admin` reports each reached member's `bv-admin` in
+  `admin_capabilities` (`capabilities` and `delegated` as the device reports
+  them, `can_install_auditor`, `can_set_forced_audit`, and what each lacks),
+  read before any write. On such a member it writes nothing and reports in
+  `failures`: `bv-auditor on <member>: … bv-admin cannot create bv-auditor: it
+  lacks delegated get-log-entries (read from its object info; nothing was
+  written) …`; the member stays `enrolled: false` and its log is not drained.
+  The way out is under "Give an existing pool the drain's bv-admin" below.
 
 Metrics (`/metrics`):
 
@@ -534,6 +560,69 @@ Metrics (`/metrics`):
 `v2/sys/hsm/status` (and the GUI's **HSM / Seal** page) adds, for a pool, each
 member's `latency_ms` and pending revocations, the last repair run and each
 member's drain (see `docs/api.md`).
+
+##### Give an existing pool the drain's bv-admin
+
+**It cannot be done in place.** An authentication key's capabilities are set
+when it is created; no command changes them. A key can only create keys whose
+capabilities and delegated capabilities lie within its own *delegated* set
+(Yubico, Put Authentication Key), and the old `bv-admin` delegates only the
+node capabilities and `sign-ecdsa`: it can neither create `bv-auditor` nor a
+stronger admin, and re-creating itself would lose its ceremony capabilities.
+Factory key 1, the only key that could, was deleted by `provision`, and
+`bv-admin` cannot reset the device. BastionVault therefore does not offer an
+"update bv-admin" command.
+
+**What works: replace each device by a device provisioned by this build, one
+member at a time.** The pool keeps unsealing on the other member throughout:
+`member retire` is refused while any set (the KEK or a custody key) lacks a
+copy on another active member, and while it would leave no active member.
+
+Two constraints decide the hardware you need:
+
+- **A device that was ever a member cannot rejoin the pool**, even after a
+  factory reset: the seal record keeps a retired member, keyed by the device
+  serial, and `member add` refuses a serial already in the record. Replacing
+  both members takes **two spare YubiHSM 2 devices**; the reset originals can
+  serve another cluster.
+- **`min_wrap_copies = 2` refuses the retire** (it would leave one active
+  member). Lower it to `1` first, and with `recovery = "none"` also set
+  `acknowledge_single_member_without_recovery = true`: for the duration of
+  each swap the pool runs on one device, and losing it then loses the vault
+  unless a recovery copy exists.
+
+Per member, never both at once (example: `hsm-a` replaced by spare `hsm-c`):
+
+~~~bash
+# 0. Once, before the first swap: on every node set min_wrap_copies = 1 (and
+#    the acknowledgement with recovery = "none"), then restart the nodes one at
+#    a time; each auto-unseals through the pool.
+bvault operator hsm repair --run           # under_replicated must be 0
+bvault operator hsm members                # both members active
+
+# 1. On the spare's host: provision it with this build and start its gateway.
+bvault operator hsm provision --connector http://127.0.0.1:12345 --out c.json
+
+# 2. Retire the old member (refused if any set would lose its last copy).
+bvault operator hsm member retire hsm-a
+bvault operator hsm repair --run           # drops hsm-a's copies
+
+# 3. Add the spare, fill its copies, promote it. The admin run also installs
+#    bv-auditor on hsm-c; it reports hsm-b's old bv-admin in failures.
+bvault operator hsm member add hsm-c --bundle c.json --gateway https://hsm-c.example:8443 --admin hsm-c
+bvault operator hsm repair --run
+bvault operator hsm repair --run --admin hsm-b --admin hsm-c   # promotes hsm-c
+bvault operator hsm members                # hsm-c active
+bvault operator hsm status                 # device_audit: hsm-c enrolled
+
+# 4. Only now: factory-reset the old device (by hand; BastionVault never resets
+#    a device). Then repeat 1-4 for hsm-b with a second spare, hsm-d.
+~~~
+
+After both swaps, restore `min_wrap_copies = 2`, remove the acknowledgement,
+restart the nodes one at a time, and check that `repair --run --admin hsm-c
+--admin hsm-d` reports both members with `can_install_auditor: true` and no
+failures.
 
 #### Recovery (pool topology, `shamir-ceremony`)
 

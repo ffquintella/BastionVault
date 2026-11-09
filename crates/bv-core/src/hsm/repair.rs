@@ -10,7 +10,7 @@ use std::{collections::BTreeSet, time::Duration};
 
 use serde::Serialize;
 
-use crate::hsm::{blob::HsmId, blobset::BvHsmBlobSet};
+use crate::hsm::{admin::AdminCapabilityCheck, blob::HsmId, blobset::BvHsmBlobSet};
 
 /// The cluster lock that keeps two repair runs apart.
 pub const HSM_REPAIR_LOCK: &str = "hsm-repair";
@@ -98,6 +98,12 @@ pub struct RepairReport {
     /// Members given a new `bv-auditor` credential by an admin-credentialed
     /// run (T454 phase 6: the device-log drain needs one per member).
     pub auditors_installed: Vec<String>,
+    /// Per member an admin-credentialed run reached: bv-admin's capabilities
+    /// and delegated capabilities as the device reports them, and whether it
+    /// can install `bv-auditor` and set the forced-audit option. Read before
+    /// any write; a device provisioned before the drain shows what it lacks.
+    #[serde(default)]
+    pub admin_capabilities: Vec<AdminCapabilityCheck>,
     /// False when the barrier was not available (custody sets not scanned).
     pub custody_scanned: bool,
 }

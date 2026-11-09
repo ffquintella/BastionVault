@@ -189,7 +189,7 @@ unreachable.
 | `--admin <member>=env:VAR` | Read it from the environment variable `VAR` instead. Any other `=value` is refused: an argument would sit in the process list and the shell history |
 | `--fingerprint` | The node's transport key fingerprint, as its log shows it; confirm it out of band |
 | `--bundle` | The attestation bundle (JSON) that provisioning the device produced |
-| `--run` | Run the repair job now instead of showing the last run. With `--admin`, it also applies pending revocations, promotes joining members and installs the `bv-auditor` key the device-log drain needs on each named member (`auditors_installed` in the report) |
+| `--run` | Run the repair job now instead of showing the last run. With `--admin`, it also applies pending revocations, promotes joining members and installs the `bv-auditor` key the device-log drain needs on each named member (`auditors_installed` in the report), after a read-only check of each member's `bv-admin` (`admin_capabilities`: what it holds and delegates, and whether it can install `bv-auditor` and set the forced-audit option; a device provisioned before 2026-11-09 cannot, see `docs/hsm.md`) |
 | `--member <name>=<file>` | `recover`: a new device and its attestation bundle |
 | `--share env:VAR` | `recover`: read one recovery share (hex) from `VAR`; repeat per share |
 | `--reset` | `recover`: discard the shares this node holds for a running ceremony |

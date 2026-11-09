@@ -1098,13 +1098,18 @@ impl MemberOpener for ConfigMemberOpener {
         credential: &device_audit::AuditorCredential,
     ) -> Result<Box<dyn device_audit::HsmAuditSession>, RvError> {
         if self.config.backend_type == "yubihsm2" {
-            // Explicit until phase 7: the entry layout and digest chain the
-            // drain verifies must be confirmed on a real device first.
-            return Err(RvError::ErrHsm(
-                "the device-log drain on a YubiHSM 2 is not validated yet (T454 phase 7: confirm the log entry \
-                 layout and digest chain on hardware)"
-                    .into(),
-            ));
+            // Reached like the node client and admin session: the member
+            // block's local connector, else the gateway through the link.
+            // Implemented from the docs and the mock; unverified on hardware
+            // (T454 phase 7, features/hsm-pool-ha.md § Phase 7 findings).
+            #[cfg(feature = "hsm_yubihsm2")]
+            {
+                let (connector, relay) = self.yubihsm2_route(target)?;
+                let session = yubihsm2::YubiHsm2AuditSession::open(connector, relay, credential)?;
+                return Ok(Box::new(session));
+            }
+            #[cfg(not(feature = "hsm_yubihsm2"))]
+            return Err(RvError::ErrHsmConfigInvalid("this build lacks the `hsm_yubihsm2` feature".into()));
         }
         #[cfg(feature = "hsm_mock")]
         {

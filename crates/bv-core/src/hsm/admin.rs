@@ -64,16 +64,126 @@ impl AuthKeyRole {
                 "generate-wrap-key",
                 "get-object-info",
                 "put-authentication-key",
+                "set-option",
                 "sign-attestation-certificate",
                 "sign-ecdsa",
             ],
             AuthKeyRole::Node => {
                 &["derive-ecdh", "get-object-info", "get-pseudo-random", "sign-eddsa", "unwrap-data", "wrap-data"]
             }
-            // The device capability that `set-log-index` needs is confirmed
-            // on hardware in phase 7; the mock models these two.
-            AuthKeyRole::Auditor => &["get-log-entries", "set-log-index"],
+            // There is no `set-log-index` capability: Yubico's reference says
+            // Set Log Index needs none, so `get-log-entries` is the whole
+            // role (unverified on hardware, T454 phase 7). The mock lets this
+            // key run exactly `get-log-entries` and `set-log-index`.
+            AuthKeyRole::Auditor => &["get-log-entries"],
         }
+    }
+
+    /// What the role may hand on to keys it creates (spec § HSM object
+    /// layout): `bv-admin` delegates exactly the capabilities of the objects
+    /// it creates, so it can never mint an exportable one; nothing else
+    /// delegates.
+    pub fn delegated(&self) -> &'static [&'static str] {
+        match self {
+            AuthKeyRole::Factory => &["all"],
+            AuthKeyRole::Admin => &[
+                "derive-ecdh",
+                "get-log-entries",
+                "get-pseudo-random",
+                "sign-ecdsa",
+                "sign-eddsa",
+                "unwrap-data",
+                "wrap-data",
+            ],
+            AuthKeyRole::Node | AuthKeyRole::Auditor => &[],
+        }
+    }
+}
+
+/// What `bv-admin` needs, besides its other ceremony capabilities, to install
+/// `bv-auditor`: replace auth key 8 (T454 phase 6).
+pub const AUDITOR_INSTALL_CAPABILITIES: &[&str] = &["delete-authentication-key", "put-authentication-key"];
+/// What `bv-admin` must delegate to create `bv-auditor`: a new key's
+/// capabilities must all be in the creating key's delegated set.
+pub const AUDITOR_INSTALL_DELEGATED: &[&str] = &["get-log-entries"];
+/// What `bv-admin` needs to set the device's forced-audit option.
+pub const FORCED_AUDIT_CAPABILITIES: &[&str] = &["set-option"];
+
+/// A read-only look at one member's `bv-admin` (auth key 2), from the
+/// device's own object info, and whether it can do the drain's two writes.
+/// `operator hsm repair --run --admin` reports one per member as
+/// `admin_capabilities`; `put_auditor_auth_key` and `set_forced_audit` refuse
+/// on it before writing. Names and booleans only, never a credential.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct AdminCapabilityCheck {
+    /// The pool member name (set by the caller; empty from the session).
+    #[serde(default)]
+    pub member: String,
+    pub hsm_id: String,
+    /// bv-admin's capabilities as the device reports them.
+    pub capabilities: Vec<String>,
+    /// bv-admin's delegated capabilities as the device reports them.
+    pub delegated: Vec<String>,
+    pub can_install_auditor: bool,
+    pub can_set_forced_audit: bool,
+    /// What installing `bv-auditor` lacks, as `capability <name>` or
+    /// `delegated <name>`; empty when `can_install_auditor`.
+    pub auditor_missing: Vec<String>,
+    /// What setting the forced-audit option lacks; empty when
+    /// `can_set_forced_audit`.
+    pub forced_audit_missing: Vec<String>,
+}
+
+impl AdminCapabilityCheck {
+    /// Judge `bv-admin`'s object info against what the drain needs.
+    pub fn evaluate(hsm_id: &HsmId, info: &ObjectInfo) -> Self {
+        let lacks = |held: &[String], needed: &'static [&'static str], kind: &str| -> Vec<String> {
+            needed.iter().filter(|n| !held.iter().any(|h| h == *n)).map(|n| format!("{kind} {n}")).collect()
+        };
+        let auditor: Vec<String> = lacks(&info.capabilities, AUDITOR_INSTALL_CAPABILITIES, "capability")
+            .into_iter()
+            .chain(lacks(&info.delegated, AUDITOR_INSTALL_DELEGATED, "delegated"))
+            .collect();
+        let forced = lacks(&info.capabilities, FORCED_AUDIT_CAPABILITIES, "capability");
+        Self {
+            member: String::new(),
+            hsm_id: hsm_id.to_string(),
+            capabilities: info.capabilities.clone(),
+            delegated: info.delegated.clone(),
+            can_install_auditor: auditor.is_empty(),
+            can_set_forced_audit: forced.is_empty(),
+            auditor_missing: auditor,
+            forced_audit_missing: forced,
+        }
+    }
+
+    /// Refuse, before any write, a `bv-admin` that cannot create `bv-auditor`.
+    pub fn require_auditor(&self) -> Result<(), RvError> {
+        if self.can_install_auditor {
+            return Ok(());
+        }
+        Err(self.pre_drain_refusal("create bv-auditor", &self.auditor_missing))
+    }
+
+    /// Refuse, before any write, a `bv-admin` that cannot set the option.
+    pub fn require_forced_audit(&self) -> Result<(), RvError> {
+        if self.can_set_forced_audit {
+            return Ok(());
+        }
+        Err(self.pre_drain_refusal("set the forced-audit option", &self.forced_audit_missing))
+    }
+
+    fn pre_drain_refusal(&self, what: &str, missing: &[String]) -> RvError {
+        log::warn!(target: "security", "HSM {}: bv-admin cannot {what}: it lacks {}", self.hsm_id, missing.join(", "));
+        RvError::ErrHsm(format!(
+            "{}: bv-admin cannot {what}: it lacks {} (read from its object info; nothing was written). The device was \
+             provisioned before the device-log drain, and an authentication key's capabilities cannot be changed in \
+             place. BastionVault does not re-provision it: replace the member with a device provisioned by this build, \
+             one member at a time (docs/hsm.md, \"Give an existing pool the drain's bv-admin\"); until then its log \
+             is not drained",
+            self.hsm_id,
+            missing.join(", ")
+        ))
     }
 }
 
@@ -254,21 +364,34 @@ pub trait HsmAdminSession: Send + Sync {
     /// Release the session slot.
     async fn close(&self) -> Result<(), RvError>;
 
-    /// Replace `bv-auditor` (auth key 8, `get-log-entries` / `set-log-index`,
-    /// domain 1, nothing delegated) with `credential` (T454 phase 6). Refused
-    /// by a backend that does not implement the drain yet.
+    /// Read-only: `bv-admin`'s own capabilities and delegated capabilities
+    /// (`get-object-info` on auth key 2) and whether they allow the drain's
+    /// writes. Never writes to the device.
+    async fn admin_capability_check(&self) -> Result<AdminCapabilityCheck, RvError> {
+        let hsm_id = self.hsm_id()?;
+        let Some(info) = self.object_info(ObjectKind::AuthenticationKey, ADMIN_AUTH_KEY_ID).await? else {
+            return Err(RvError::ErrHsm(format!("{hsm_id}: bv-admin (auth key 2) is not on the device")));
+        };
+        Ok(AdminCapabilityCheck::evaluate(&hsm_id, &info))
+    }
+
+    /// Replace `bv-auditor` (auth key 8, `get-log-entries`, domain 1, nothing
+    /// delegated) with `credential` (T454 phase 6). Implementations refuse
+    /// first, without writing, when [`Self::admin_capability_check`] says
+    /// `bv-admin` cannot. Refused by a backend that does not implement the drain.
     async fn put_auditor_auth_key(&self, _credential: &AuditorCredential) -> Result<(), RvError> {
         Err(RvError::ErrHsm(format!(
-            "{}: bv-auditor provisioning is not validated on this device type yet (T454 phase 7)",
+            "{}: this HSM backend does not implement bv-auditor (T454 phase 6)",
             self.hsm_id()?
         )))
     }
 
     /// Turn the device's forced-audit option on or off (`device_audit =
-    /// "forced"`). Refused where the drain is not implemented yet.
+    /// "forced"`), after the same read-only check. Refused by a backend that
+    /// does not implement the drain.
     async fn set_forced_audit(&self, _on: bool) -> Result<(), RvError> {
         Err(RvError::ErrHsm(format!(
-            "{}: the forced-audit option is not validated on this device type yet (T454 phase 7)",
+            "{}: this HSM backend does not implement the forced-audit option (T454 phase 6)",
             self.hsm_id()?
         )))
     }
@@ -363,5 +486,74 @@ mod tests {
             assert!(!node.contains(&cap), "a node key cannot {cap}");
         }
         assert!(EXPORT_CAPABILITIES.iter().all(|c| !node.contains(c) && !admin.contains(c)));
+        // bv-auditor reads the log and nothing else; bv-admin sets the
+        // forced-audit option (T454 phase 6).
+        assert_eq!(AuthKeyRole::Auditor.capabilities(), ["get-log-entries"]);
+        assert!(admin.contains(&"set-option") && !node.contains(&"set-option"));
+        // bv-admin hands on exactly what the keys it creates carry.
+        let delegated = AuthKeyRole::Admin.delegated();
+        for created in [AuthKeyRole::Node, AuthKeyRole::Auditor] {
+            for cap in created.capabilities().iter().filter(|c| **c != "get-object-info") {
+                assert!(delegated.contains(cap), "bv-admin must delegate {cap}");
+            }
+        }
+        assert!(EXPORT_CAPABILITIES.iter().all(|c| !delegated.contains(c)));
+        assert!(!delegated.contains(&"put-authentication-key") && !delegated.contains(&"set-option"));
+    }
+
+    fn admin_info(capabilities: &[&str], delegated: &[&str]) -> ObjectInfo {
+        ObjectInfo {
+            id: ADMIN_AUTH_KEY_ID,
+            kind: ObjectKind::AuthenticationKey,
+            label: "bv-admin".into(),
+            capabilities: capabilities.iter().map(|c| c.to_string()).collect(),
+            delegated: delegated.iter().map(|c| c.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn the_capability_check_passes_the_current_layout() {
+        let hsm_id = HsmId::from_parts("yubihsm2", "36470559").unwrap();
+        let info = admin_info(AuthKeyRole::Admin.capabilities(), AuthKeyRole::Admin.delegated());
+        let check = AdminCapabilityCheck::evaluate(&hsm_id, &info);
+        assert!(check.can_install_auditor && check.can_set_forced_audit, "{check:?}");
+        assert!(check.auditor_missing.is_empty() && check.forced_audit_missing.is_empty());
+        assert!(check.require_auditor().is_ok() && check.require_forced_audit().is_ok());
+        assert_eq!(check.hsm_id, "yubihsm2:36470559");
+    }
+
+    /// Regression: a bv-admin as `provision` wrote it before the drain (no
+    /// `set-option`, no delegated `get-log-entries`) is refused for both
+    /// writes, naming each missing bit and the supported path.
+    #[test]
+    fn the_capability_check_refuses_a_bv_admin_provisioned_before_the_drain() {
+        let hsm_id = HsmId::from_parts("yubihsm2", "36470559").unwrap();
+        let old_capabilities: Vec<&str> =
+            AuthKeyRole::Admin.capabilities().iter().copied().filter(|c| *c != "set-option").collect();
+        let old_delegated: Vec<&str> =
+            AuthKeyRole::Admin.delegated().iter().copied().filter(|c| *c != "get-log-entries").collect();
+        let check = AdminCapabilityCheck::evaluate(&hsm_id, &admin_info(&old_capabilities, &old_delegated));
+        assert!(!check.can_install_auditor && !check.can_set_forced_audit, "{check:?}");
+        assert_eq!(check.auditor_missing, vec!["delegated get-log-entries"]);
+        assert_eq!(check.forced_audit_missing, vec!["capability set-option"]);
+        assert_eq!(check.capabilities.len(), old_capabilities.len(), "the device's own list is reported as read");
+
+        let err = check.require_auditor().unwrap_err().to_string();
+        for part in ["yubihsm2:36470559", "delegated get-log-entries", "nothing was written", "one member at a time"] {
+            assert!(err.contains(part), "{part:?} missing from {err}");
+        }
+        assert!(!err.contains("set-option"), "only what this write lacks: {err}");
+        let err = check.require_forced_audit().unwrap_err().to_string();
+        assert!(err.contains("capability set-option") && !err.contains("get-log-entries"), "{err}");
+
+        let none = AdminCapabilityCheck::evaluate(&hsm_id, &admin_info(&[], &[]));
+        assert_eq!(
+            none.auditor_missing,
+            vec![
+                "capability delete-authentication-key",
+                "capability put-authentication-key",
+                "delegated get-log-entries"
+            ]
+        );
     }
 }
