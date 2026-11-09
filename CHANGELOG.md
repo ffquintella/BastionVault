@@ -311,6 +311,11 @@ EXAMPLE ENTRY:
 - **Keep HSM auto-unseal at server start from failing with `Cluster lost quorum` and leaving the node sealed** (T475, S114, S17)
   On a two-node hiqlite cluster a node could log `vault auto-unsealed via HSM` and, under a second later, `HSM auto-unseal failed; vault remains sealed: Cluster lost quorum.`: one storage read made while loading the mounts missed its 500 ms leadership confirmation, and the node stayed sealed until it was restarted. While HSM auto-unseal runs (at server start, and after `operator hsm migrate-to-pool` or a completed `operator hsm recover`), storage reads now retry that error -- no leader, quorum not confirmed, node unhealthy -- up to 5 times with 0.5, 1, 2 and 4 s waits, then fail as before: the error is logged and the node stays sealed. The HSM unwraps the KEK once per unseal; a cryptographic, authorization or blob error is never retried, and neither is any write. Each retry, here and during `init`, is now a warning in `security.log`. Checked with a test seal provider and simulated storage errors, not on the cluster or the devices.
 
+#### HSM / Seal page: pool node enrollment
+
+- **Stop the HSM / Seal page showing "This Node Enrolled: No" on a pool node that is unsealed and holds its KEK copies** (T476, S114, S17)
+  `v2/sys/hsm/status` did not report `this_node_enrolled` for `topology = "pool"`, and the GUI read the missing value as No. It is now true when a member of this node's pool holds a KEK copy, and false before init or when none does. `enrolled_nodes` is still not reported for a pool (the seal record lists members, not nodes), so the page keeps showing "—" there.
+
 #### Rustion: key accounts
 
 - **Connect through Rustion with a stored SSH key, not only a password** -- `rustion/v2/session/open` with a `secret` credential source refused any secret without a `password` field (`HTTP 422: … only password-shaped credentials … can be brokered server-side today`), so a key-based account (for example a profile bound to a secret holding a `private_key`) could not Connect on a `rustion-required` resource. A secret holding an OpenSSH `private_key` (Ed25519 or ECDSA) is now sealed into the envelope as `ssh-key`, like the provider source already did; a passphrase-protected or non-OpenSSH key is still refused with a 422 that says why, since the envelope has no passphrase channel. (T103, S107)

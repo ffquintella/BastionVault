@@ -1189,8 +1189,14 @@ impl HsmSealProvider {
                 (configured, warning)
             }
         };
+        // A pool node is enrolled when at least one member of *its* pool holds
+        // a KEK copy, i.e. it can recover the KEK. The pool record tracks
+        // members, not nodes, so there is no cluster-wide node count here and
+        // `enrolled_nodes` is deliberately left out (the GUI shows "—").
+        let this_node_enrolled = kek.is_some_and(|k| pool.active_ids().iter().any(|id| k.copy_for(id).is_some()));
         let mut out = json!({
             "topology": Topology::Pool.as_str(),
+            "this_node_enrolled": this_node_enrolled,
             "min_wrap_copies": pool.min_wrap_copies(),
             "redundancy": redundancy_level(members_active),
             "members_active": members_active,
@@ -2244,6 +2250,7 @@ mod tests {
         assert_eq!(status["min_wrap_copies"], 1);
         assert_eq!(status["under_replicated_sets"], 0);
         assert_eq!(status["seal_record_version"], 2);
+        assert_eq!(status["this_node_enrolled"], true);
         let members = status["members"].as_array().unwrap();
         assert_eq!(members.len(), 2);
         for m in members {
