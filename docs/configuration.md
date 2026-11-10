@@ -161,8 +161,43 @@ storage "hiqlite" {
 | `tls_raft_key` | | Path to custom TLS private key for Raft (auto-generated if omitted) |
 | `tls_api_cert` | | Path to custom TLS certificate for API (auto-generated if omitted) |
 | `tls_api_key` | | Path to custom TLS private key for API (auto-generated if omitted) |
+| `raft_heartbeat_interval_ms` | `500` | Leader heartbeat period, which is also the time-to-live of each `AppendEntries` call. See [Raft timing on a lossy link](#raft-timing-on-a-lossy-link) |
+| `raft_election_timeout_min_ms` | `1500` | Shortest follower election timeout; must be at least 3 x the heartbeat |
+| `raft_election_timeout_max_ms` | `3000` | Longest follower election timeout; must exceed the minimum |
+| `raft_allow_aggressive_timeouts` | `false` | Required to set the heartbeat or the election minimum below the defaults |
 
 By default, both Raft and API channels use TLS with auto-generated self-signed certificates, providing post-quantum encryption (X25519MLKEM768 hybrid key exchange) for all inter-node traffic. Peer authentication is handled by the shared secrets (`secret_raft`/`secret_api`), while TLS provides confidentiality. Set `tls_raft_disable`/`tls_api_disable` to `true` only for development or testing.
+
+#### Raft timing on a lossy link
+
+`Cluster lost quorum` together with `timeout after 500ms when AppendEntries`
+in the server log, while the nodes and their clocks are healthy, means the
+link between the nodes drops packets. One TCP retransmission costs at least
+200 ms and a second 400 ms, so two losses in a row already exceed the default
+500 ms heartbeat. Fix the link first. If it cannot be fixed soon, lengthen the
+heartbeat, and raise the election timeouts with it, on **every** node:
+
+~~~hcl
+storage "hiqlite" {
+  # ...
+  raft_heartbeat_interval_ms    = 2000
+  raft_election_timeout_min_ms  = 6000
+  raft_election_timeout_max_ms  = 12000
+}
+~~~
+
+- Only liveness changes: a partitioned leader is noticed later (the
+  `cluster-status` health check follows, at six heartbeats, never below 3 s).
+  Raft safety does not depend on timing, so no acknowledged write is at risk.
+- Setting only the heartbeat is refused at startup, because the election
+  minimum must stay at least three heartbeats. Out-of-range, non-numeric and
+  inconsistent values are refused too, never clamped.
+- Values shorter than the defaults need `raft_allow_aggressive_timeouts = true`.
+- When any value differs from the default the server logs the effective
+  values once at startup.
+- Use the same values on every node, and restart nodes one at a time.
+- This does not give a two-node cluster any fault tolerance: with two voters,
+  one unreachable node still loses quorum for as long as it is unreachable.
 
 #### Upgrading from hiqlite 0.14 (BastionVault releases before hiqlite 0.15.3)
 

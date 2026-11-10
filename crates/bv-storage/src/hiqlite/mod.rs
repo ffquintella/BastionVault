@@ -20,8 +20,10 @@ use bv_sql_guard::{sql, SqlIdent};
 use crate::{Backend, BackendEntry};
 
 mod paging;
+mod raft_timing;
 
 use paging::{prefix_upper_bound, ListPager, PageLimits, PageStart, ScanPager, PAGE_ROW_OVERHEAD_BYTES};
+use raft_timing::RaftTiming;
 
 /// Hiqlite WAL segment size. Must be larger than any single Raft log entry we
 /// produce — hiqlite-wal panics rather than erroring when an entry exceeds the
@@ -33,21 +35,6 @@ const HIQLITE_WAL_SIZE: u32 = 64 * 1024 * 1024;
 /// `HIQLITE_WAL_SIZE` to account for Raft entry framing / serialization
 /// overhead that wraps the raw value before it hits the WAL writer.
 const MAX_PUT_VALUE_BYTES: usize = (HIQLITE_WAL_SIZE as usize) - 1024 * 1024;
-
-/// Maximum age (ms) of a leader's last quorum acknowledgement before we treat
-/// it as unhealthy.
-///
-/// openraft's `millis_since_quorum_ack` reports how long ago the leader last
-/// heard back from a quorum. A leader that can no longer reach a quorum keeps
-/// reporting itself as leader in its *local* cached metrics — so hiqlite's
-/// `is_leader_db()` / `is_healthy_db()` (which only read that local state) stay
-/// green — while every linearizable read fails the read-index confirmation with
-/// a quorum-not-enough timeout. Treating such an isolated leader as unhealthy
-/// makes `cluster-status` mean "can actually serve reads", not just "thinks it
-/// is leader". The read path uses a 500ms read-index timeout, so 3s is several
-/// heartbeat intervals of slack: wide enough to avoid false positives on a
-/// healthy cluster, tight enough to flag a partitioned leader quickly.
-const QUORUM_ACK_STALE_MS: u64 = 3_000;
 
 /// `LIKE` pattern matching every key under `prefix`, wildcards escaped.
 fn like_prefix_pattern(prefix: &str) -> String {
@@ -120,6 +107,11 @@ pub struct HiqliteBackend {
     /// Reads retry transient cluster errors while set (see
     /// [`Backend::set_transient_read_retry`]).
     read_retry: AtomicBool,
+    /// Age (ms) of the leader's last quorum ack past which [`Self::is_healthy`]
+    /// reports it isolated (see [`RaftTiming::stale_ack_ms`]). An isolated
+    /// leader still looks like a leader in its local metrics while every
+    /// linearizable read fails; this makes "healthy" mean "can serve reads".
+    stale_ack_ms: u64,
 }
 
 impl std::fmt::Debug for HiqliteBackend {
@@ -634,7 +626,7 @@ impl HiqliteBackend {
         // Snapshot the peer endpoints before `nodes` is moved into NodeConfig.
         let peer_addrs: Vec<String> = nodes.iter().flat_map(|n| [n.addr_raft.clone(), n.addr_api.clone()]).collect();
 
-        let node_config = NodeConfig {
+        let mut node_config = NodeConfig {
             node_id,
             nodes,
             data_dir: Cow::Owned(data_dir.to_string()),
@@ -652,6 +644,29 @@ impl HiqliteBackend {
             wal_size: HIQLITE_WAL_SIZE,
             ..Default::default()
         };
+
+        // Optional Raft timing overrides (T479, S117). Absent keys leave hiqlite's
+        // own values untouched; hiqlite's `start_node` validates the result again.
+        let raft_defaults = RaftTiming {
+            heartbeat_ms: node_config.raft_config.heartbeat_interval,
+            election_min_ms: node_config.raft_config.election_timeout_min,
+            election_max_ms: node_config.raft_config.election_timeout_max,
+        };
+        let raft_timing = RaftTiming::resolve(conf, raft_defaults)?;
+        node_config.raft_config.heartbeat_interval = raft_timing.heartbeat_ms;
+        node_config.raft_config.election_timeout_min = raft_timing.election_min_ms;
+        node_config.raft_config.election_timeout_max = raft_timing.election_max_ms;
+        if raft_timing.differs_from(raft_defaults) {
+            log::info!(
+                "hiqlite: Raft timing overridden: heartbeat={}ms election={}..{}ms (defaults {}ms, {}..{}ms)",
+                raft_timing.heartbeat_ms,
+                raft_timing.election_min_ms,
+                raft_timing.election_max_ms,
+                raft_defaults.heartbeat_ms,
+                raft_defaults.election_min_ms,
+                raft_defaults.election_max_ms
+            );
+        }
 
         // Install aws_lc_rs as the default rustls crypto provider BEFORE hiqlite starts.
         // This gives us X25519MLKEM768 hybrid post-quantum key exchange in TLS 1.3.
@@ -713,6 +728,7 @@ impl HiqliteBackend {
             tls_api_auto_certs,
             _runtime: None,
             read_retry: AtomicBool::new(false),
+            stale_ack_ms: raft_timing.stale_ack_ms(),
         })
     }
 
@@ -735,7 +751,7 @@ impl HiqliteBackend {
     /// peers keep failing still shows a healthy local state while every
     /// linearizable read fails the read-index quorum confirmation. We layer a
     /// quorum-freshness check on top so "healthy" reflects read-serving
-    /// capability — see [`QUORUM_ACK_STALE_MS`].
+    /// capability — see [`RaftTiming::stale_ack_ms`].
     pub async fn is_healthy(&self) -> bool {
         if self.client.is_healthy_db().await.is_err() {
             return false;
@@ -748,7 +764,7 @@ impl HiqliteBackend {
                 if metrics.current_leader == Some(metrics.id) {
                     matches!(
                         metrics.millis_since_quorum_ack,
-                        Some(ms) if ms <= QUORUM_ACK_STALE_MS
+                        Some(ms) if ms <= self.stale_ack_ms
                     )
                 } else {
                     true

@@ -58,6 +58,11 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### Storage: Raft timing on a lossy link
+
+- **Set the Raft heartbeat and election timeouts of a hiqlite cluster in the `storage "hiqlite"` block** (T479, S117, S114)
+  -- `raft_heartbeat_interval_ms` (default 500), `raft_election_timeout_min_ms` (1500) and `raft_election_timeout_max_ms` (3000), plus `raft_allow_aggressive_timeouts`. The heartbeat is also the time-to-live of each `AppendEntries` call, so on a link that drops packets in bursts two TCP retransmissions already exceed the default and the cluster logs `Cluster lost quorum` while both nodes are healthy. Absent keys change nothing. Out-of-range, non-numeric and inconsistent values stop the server at startup instead of being clamped, raising only the heartbeat is refused (the election minimum must stay at least three heartbeats), and a value shorter than the default needs `raft_allow_aggressive_timeouts = true`. The `cluster-status` isolated-leader threshold follows the heartbeat (six heartbeats, never below 3 s). The server logs the effective values once at startup when any differs from the default. Checked with unit tests only: not yet run on a cluster with induced packet loss, and `cluster-status` does not show the effective values yet. The network path itself and the two-node topology's lack of fault tolerance are not addressed.
+
 #### HSM pool: re-enter a reset device
 
 - **Rejoin a retired HSM pool member after a reset and a fresh `provision`, under the same serial** (T478, S116, S114)
