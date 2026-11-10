@@ -2433,7 +2433,7 @@ dependencies = [
 
 [[package]]
 name = "bv-storage"
-version = "0.41.6"
+version = "0.41.7"
 dependencies = [
  "aes-gcm 0.10.3",
  "arc-swap",
