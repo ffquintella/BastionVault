@@ -603,6 +603,14 @@ operational debuggability → performance.
   incident conditions. No broad catch-all error handling — bubble up errors with enough
   context for an operator. Comments only where they clarify non-obvious security or
   operational intent. Do not suppress a warning without a concrete stated reason.
+- Prompts for other repositories do not belong here. A prompt written to be
+  run in another repository (the Puppet module, Rustion, the plugin repos,
+  the fork submodules) is a hand-off, not part of this tree: give it to the
+  user in the conversation, or write it outside the repository, and never
+  commit it, create a `docs/prompts/` directory for it, or register it in
+  `ROADMAP.md`. What stays in this repo is what BastionVault itself needs: the
+  spec under `features/` and the tracking rows. The one existing exception,
+  `roadmaps/prompts/rustion-browser-isolation.md` (S106), predates this rule.
 
 ### Formatting
 
