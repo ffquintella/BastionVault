@@ -2,6 +2,8 @@
 
 Initializes one YubiHSM 2 on each of two servers, then the vault, and confirms the unseal.
 References: [hsm.md](hsm.md), [configuration.md](configuration.md#hsm-pool-topology-topology--pool), [cli-reference.md](cli-reference.md#hsm-gateway).
+For the full lifecycle (with and without a recovery key, rootless-container notes, troubleshooting and
+re-initialization) see [hsm-pool-lifecycle-runbook.md](hsm-pool-lifecycle-runbook.md).
 
 | Server | Node (`node_id`) | Pool member | YubiHSM serial |
 |---|---|---|---|
