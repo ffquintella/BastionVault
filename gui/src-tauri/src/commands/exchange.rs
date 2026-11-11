@@ -61,7 +61,8 @@ fn parse_field<T: serde::de::DeserializeOwned>(data: &Map<String, Value>, key: &
 
 #[derive(Debug, Deserialize)]
 pub struct ScopeSelectorInput {
-    /// One of "kv_path", "resource", "asset_group", "resource_group".
+    /// One of "kv_path", "resource", "asset_group", "resource_group", "mount"
+    /// (whole engine mount, via `mount`) or "engine_type" (via `engine`).
     #[serde(rename = "type")]
     pub kind: String,
     #[serde(default)]
@@ -70,6 +71,8 @@ pub struct ScopeSelectorInput {
     pub path: Option<String>,
     #[serde(default)]
     pub id: Option<String>,
+    #[serde(default)]
+    pub engine: Option<String>,
 }
 
 /// Build a `ScopeSpec` from the frontend's selector list.
@@ -99,6 +102,8 @@ fn parse_scope(include: &[ScopeSelectorInput], scope_kind: Option<&str>) -> Resu
             "resource" => exchange::ScopeSelector::Resource { id: s.id.clone().unwrap_or_default() },
             "asset_group" => exchange::ScopeSelector::AssetGroup { id: s.id.clone().unwrap_or_default() },
             "resource_group" => exchange::ScopeSelector::ResourceGroup { id: s.id.clone().unwrap_or_default() },
+            "mount" => exchange::ScopeSelector::Mount { mount: s.mount.clone().unwrap_or_default() },
+            "engine_type" => exchange::ScopeSelector::EngineType { engine: s.engine.clone().unwrap_or_default() },
             _ => return Err("unknown scope selector type".into()),
         };
         out.push(sel);
@@ -108,10 +113,22 @@ fn parse_scope(include: &[ScopeSelectorInput], scope_kind: Option<&str>) -> Resu
 
 #[derive(Debug, Serialize)]
 pub struct ExchangeExportResult {
-    /// Base64-encoded file bytes (`.bvx` envelope or plaintext JSON).
+    /// Base64-encoded file bytes (`.bvx` envelope or plaintext JSON). Empty
+    /// for a split export — see `files`.
     pub file_b64: String,
     pub size_bytes: u64,
     pub format: String,
+    /// One entry per namespace for a split export; empty otherwise.
+    #[serde(default)]
+    pub files: Vec<ExchangeExportFile>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ExchangeExportFile {
+    /// Namespace path; `""` is the root namespace.
+    pub namespace: String,
+    pub size_bytes: u64,
+    pub file_b64: String,
 }
 
 /// `bastion_vault::exchange::export_to_document` then optional `.bvx`
@@ -126,8 +143,12 @@ pub async fn exchange_export(
     allow_plaintext: Option<bool>,
     comment: Option<String>,
     scope_kind: Option<String>,
+    namespaces: Option<Vec<String>>,
+    split: Option<bool>,
 ) -> CmdResult<ExchangeExportResult> {
     let scope = parse_scope(&include, scope_kind.as_deref())?;
+    let namespaces = namespaces.unwrap_or_default();
+    let split = split.unwrap_or(false);
     let allow_plaintext_b = allow_plaintext.unwrap_or(false);
 
     // Remote mode: the embedded `Core` is `None`, so build the same request
@@ -144,11 +165,29 @@ pub async fn exchange_export(
         if let Some(c) = comment {
             body.insert("comment".into(), Value::String(c));
         }
+        if !namespaces.is_empty() {
+            body.insert(
+                "namespaces".into(),
+                serde_json::to_value(&namespaces).map_err(|e| CommandError::from(e.to_string()))?,
+            );
+        }
+        if split {
+            body.insert("split".into(), Value::Bool(true));
+        }
         let data = remote_data(&state, Operation::Write, "sys/exchange/export".into(), Some(body)).await?;
+        if split {
+            return Ok(ExchangeExportResult {
+                file_b64: String::new(),
+                size_bytes: 0,
+                format: parse_field(&data, "format")?,
+                files: parse_field(&data, "files")?,
+            });
+        }
         return Ok(ExchangeExportResult {
             file_b64: parse_field(&data, "file_b64")?,
             size_bytes: parse_field(&data, "size_bytes")?,
             format: parse_field(&data, "format")?,
+            files: Vec::new(),
         });
     }
 
@@ -159,8 +198,17 @@ pub async fn exchange_export(
     drop(vault_guard);
     let token = state.token.lock().await.clone().unwrap_or_default();
 
-    let outcome =
-        exchange_export_inner(&core_arc, scope, format.clone(), password, allow_plaintext_b, comment.clone()).await;
+    let outcome = exchange_export_inner(
+        &core_arc,
+        scope,
+        format.clone(),
+        password,
+        allow_plaintext_b,
+        comment.clone(),
+        &namespaces,
+        split,
+    )
+    .await;
 
     // Audit, success or failure. The audit body records the format +
     // comment + scope-shape (HMAC redaction handles values inside).
@@ -192,12 +240,21 @@ async fn exchange_export_inner(
     password: Option<String>,
     allow_plaintext: bool,
     comment: Option<String>,
+    namespaces: &[String],
+    split: bool,
 ) -> CmdResult<ExchangeExportResult> {
     // An `all_namespaces` export must reach every tenant's barrier prefix
     // (`namespaces/<uuid>/logical/…`), which the root mount index cannot
-    // address — fan out through the namespace-aware exporter instead.
-    let document = if scope.kind == exchange::ScopeKind::AllNamespaces {
-        exchange::export_all_namespaces(core_arc, exchange::ExporterInfo::default(), scope)
+    // address — fan out through the namespace-aware exporter instead. A
+    // selective (engine / path) export fans out only when namespaces are named
+    // or a split is asked for; otherwise it stays root-only, as before.
+    let all_ns = scope.kind == exchange::ScopeKind::AllNamespaces;
+    let fan_out = all_ns || (scope.kind == exchange::ScopeKind::Selective && (split || !namespaces.is_empty()));
+    if !fan_out && (split || !namespaces.is_empty()) {
+        return Err("namespaces and split need an all-namespaces or selective scope".into());
+    }
+    let document = if fan_out {
+        exchange::export_namespaces(core_arc, exchange::ExporterInfo::default(), scope, namespaces)
             .await
             .map_err(CommandError::from)?
     } else {
@@ -212,28 +269,48 @@ async fn exchange_export_inner(
         .map_err(CommandError::from)?
     };
 
-    let inner_bytes = exchange::canonical::to_canonical_vec(&document).map_err(CommandError::from)?;
+    let parts: Vec<(String, exchange::ExchangeDocument)> =
+        if split { exchange::split_by_namespace(&document) } else { vec![(String::new(), document)] };
 
-    let (bytes, format_label) = match format.as_str() {
-        "json" => {
-            if !allow_plaintext {
-                return Err("plaintext export refused (set allowPlaintext: true)".into());
-            }
-            (inner_bytes, "json")
-        }
-        "bvx" => {
-            let pw = password.as_deref().ok_or("password required for bvx format")?;
-            let bytes = exchange::encrypt_bvx(&inner_bytes, pw, "", comment).map_err(CommandError::from)?;
-            (bytes, "bvx")
-        }
-        _ => return Err("format must be \"bvx\" or \"json\"".into()),
-    };
+    if !matches!(format.as_str(), "json" | "bvx") {
+        return Err("format must be \"bvx\" or \"json\"".into());
+    }
+    if format == "json" && !allow_plaintext {
+        return Err("plaintext export refused (set allowPlaintext: true)".into());
+    }
+    if format == "bvx" && password.is_none() {
+        return Err("password required for bvx format".into());
+    }
 
-    Ok(ExchangeExportResult {
-        size_bytes: bytes.len() as u64,
-        file_b64: base64::engine::general_purpose::STANDARD.encode(&bytes),
-        format: format_label.to_string(),
-    })
+    let mut files = Vec::with_capacity(parts.len());
+    for (ns, doc) in &parts {
+        let inner_bytes = exchange::canonical::to_canonical_vec(doc).map_err(CommandError::from)?;
+        let bytes = if format == "bvx" {
+            let pw = password.as_deref().unwrap_or_default();
+            exchange::encrypt_bvx(&inner_bytes, pw, "", comment.clone()).map_err(CommandError::from)?
+        } else {
+            inner_bytes
+        };
+        files.push((ns.clone(), bytes));
+    }
+    let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+    if split {
+        return Ok(ExchangeExportResult {
+            file_b64: String::new(),
+            size_bytes: files.iter().map(|(_, b)| b.len() as u64).sum(),
+            format,
+            files: files
+                .iter()
+                .map(|(ns, b)| ExchangeExportFile {
+                    namespace: ns.clone(),
+                    size_bytes: b.len() as u64,
+                    file_b64: b64(b),
+                })
+                .collect(),
+        });
+    }
+    let bytes = &files[0].1;
+    Ok(ExchangeExportResult { size_bytes: bytes.len() as u64, file_b64: b64(bytes), format, files: Vec::new() })
 }
 
 #[derive(Debug, Serialize)]
@@ -269,8 +346,12 @@ pub async fn exchange_preview(
     format: String,
     password: Option<String>,
     allow_plaintext: Option<bool>,
+    namespaces: Option<Vec<String>>,
+    mounts: Option<Vec<String>>,
 ) -> CmdResult<ExchangePreviewResult> {
     let allow_plaintext = allow_plaintext.unwrap_or(false);
+    let namespaces = namespaces.unwrap_or_default();
+    let mounts = mounts.unwrap_or_default();
     let file_bytes =
         base64::engine::general_purpose::STANDARD.decode(file_b64.as_bytes()).map_err(|_| "input not valid base64")?;
 
@@ -288,6 +369,15 @@ pub async fn exchange_preview(
             body.insert("password".into(), Value::String(p));
         }
         body.insert("allow_plaintext".into(), Value::Bool(allow_plaintext));
+        if !namespaces.is_empty() {
+            body.insert(
+                "namespaces".into(),
+                serde_json::to_value(&namespaces).map_err(|e| CommandError::from(e.to_string()))?,
+            );
+        }
+        if !mounts.is_empty() {
+            body.insert("mounts".into(), serde_json::to_value(&mounts).map_err(|e| CommandError::from(e.to_string()))?);
+        }
         let data = remote_data(&state, Operation::Write, "sys/exchange/import/preview".into(), Some(body)).await?;
         return Ok(ExchangePreviewResult {
             token: parse_field(&data, "token")?,
@@ -315,9 +405,12 @@ pub async fn exchange_preview(
         _ => return Err("format must be \"bvx\" or \"json\"".into()),
     };
 
-    let document: exchange::ExchangeDocument =
+    let mut document: exchange::ExchangeDocument =
         serde_json::from_slice(&document_bytes).map_err(|_| "document is not valid bvx.v1 JSON")?;
     document.validate_schema_tag().map_err(|_| "unsupported bvx schema tag")?;
+    // Narrow before classifying: the stored document is what `apply` writes.
+    let mut select_warnings = exchange::retain_namespaces(&mut document, &namespaces);
+    select_warnings.extend(exchange::retain_mounts(&mut document, &mounts));
 
     let vault_guard = state.vault.lock().await;
     let vault = vault_guard.as_ref().ok_or("Vault not open")?;
@@ -339,7 +432,8 @@ pub async fn exchange_preview(
     .await
     .map_err(CommandError::from)?;
     let (new, identical, conflict) = classify.classification_counts();
-    let warnings = classify.warnings.clone();
+    select_warnings.extend(classify.warnings.iter().cloned());
+    let warnings = select_warnings;
     let items: Vec<PreviewItem> = classify
         .items
         .iter()

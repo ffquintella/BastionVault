@@ -387,10 +387,32 @@ pub(crate) async fn resolve_scope(
                 };
                 resolve_group(storage, mounts, id, kind, &mut items, &mut warnings).await?;
             }
+            ScopeSelector::Mount { mount } => {
+                resolve_mount(storage, mounts, &ensure_trailing_slash(mount), &mut items, &mut warnings).await?;
+            }
+            ScopeSelector::EngineType { engine } => {
+                let wanted: &[&str] = match engine.as_str() {
+                    "kv" | "secret" | "secrets" => &["kv", "kv-v2"],
+                    other => &[other],
+                };
+                let mut paths: Vec<String> = Vec::new();
+                for ty in wanted {
+                    paths.extend(mounts.mounts_of_type(ty).iter().map(|(p, _)| p.clone()));
+                }
+                paths.sort();
+                for path in paths {
+                    resolve_mount(storage, mounts, &ensure_trailing_slash(&path), &mut items, &mut warnings).await?;
+                }
+            }
         }
     }
 
+    let engine_selected =
+        scope.include.iter().any(|s| matches!(s, ScopeSelector::Mount { .. } | ScopeSelector::EngineType { .. }));
     sort_and_dedup(&mut items);
+    if engine_selected && items.local_len() == 0 {
+        warnings.push("the selected engine mount(s) matched no data in this namespace".to_string());
+    }
     Ok((items, warnings))
 }
 
@@ -506,6 +528,47 @@ async fn resolve_full(
     }
 
     Ok(())
+}
+
+/// Export one whole mount, dispatching on its logical type the same way
+/// `resolve_full` does for the whole namespace. A mount that does not exist in
+/// this namespace contributes nothing (the caller warns if nothing at all
+/// matched), and the control-plane types are refused outright.
+async fn resolve_mount(
+    storage: &dyn Storage,
+    mounts: &MountIndex,
+    mount_norm: &str,
+    items: &mut ExchangeItems,
+    warnings: &mut Vec<String>,
+) -> Result<(), RvError> {
+    let Some((logical_type, uuid)) = mounts
+        .iter_by_type()
+        .find_map(|(ty, list)| list.iter().find(|(p, _)| p == mount_norm).map(|(_, u)| (ty.clone(), u.clone())))
+    else {
+        return Ok(());
+    };
+    match logical_type.as_str() {
+        "kv" | "kv-v2" => read_kv_mount(storage, mounts, mount_norm, None, items).await,
+        "resource" | "files" => {
+            let bp = mounts.barrier_prefix(&uuid);
+            for id in storage.list(&format!("{bp}meta/")).await.unwrap_or_default() {
+                if id.ends_with('/') {
+                    continue;
+                }
+                if logical_type == "resource" {
+                    resolve_resource(storage, mounts, &id, items, warnings).await?;
+                } else {
+                    resolve_file(storage, mounts, &id, items, warnings).await?;
+                }
+            }
+            Ok(())
+        }
+        "system" | "identity" | "resource-group" => {
+            warnings.push(format!("mount {mount_norm} (type {logical_type}) is control-plane and is never exported"));
+            Ok(())
+        }
+        _ => read_raw_mount(storage, mounts, mount_norm, items).await,
+    }
 }
 
 /// Logical mount types that `resolve_full` must NOT raw-capture: KV / resource

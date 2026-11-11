@@ -93,6 +93,10 @@ function ExportTab({ toast }: { toast: ToastFn }) {
   // hidden there rather than offered and refused.
   const [atRoot, setAtRoot] = useState(false);
   const [otherNamespaces, setOtherNamespaces] = useState<string[]>([]);
+  // Namespaces to export from (root is ""). Empty = the scope's default:
+  // everything for all-namespaces, the current namespace for selective.
+  const [pickedNs, setPickedNs] = useState<string[]>([]);
+  const [split, setSplit] = useState(false);
 
   useEffect(() => {
     let live = true;
@@ -119,6 +123,12 @@ function ExportTab({ toast }: { toast: ToastFn }) {
 
   const isFull = scopeKind === "full" || scopeKind === "all_namespaces";
   const isAllNamespaces = scopeKind === "all_namespaces";
+  // Choosing namespaces / splitting is a root-session, non-"full" feature.
+  const canPickNs = atRoot && scopeKind !== "full" && otherNamespaces.length > 0;
+
+  function toggleNs(ns: string) {
+    setPickedNs((prev) => (prev.includes(ns) ? prev.filter((n) => n !== ns) : [...prev, ns]));
+  }
 
   /**
    * A full-vault export dumps every secret the caller can read into one
@@ -165,28 +175,42 @@ function ExportTab({ toast }: { toast: ToastFn }) {
         format === "json" ? allowPlaintext : false,
         comment || undefined,
         scopeKind,
+        canPickNs ? pickedNs : [],
+        canPickNs && split,
       );
-      // Trigger a browser download.
-      const bytes = atob(result.file_b64);
-      const arr = new Uint8Array(bytes.length);
-      for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
-      const blob = new Blob([arr], {
-        type: format === "bvx" ? "application/octet-stream" : "application/json",
-      });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
+      // Trigger a browser download (one per namespace for a split export).
+      const download = (b64: string, name: string) => {
+        const bytes = atob(b64);
+        const arr = new Uint8Array(bytes.length);
+        for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
+        const blob = new Blob([arr], {
+          type: format === "bvx" ? "application/octet-stream" : "application/json",
+        });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = name;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+      };
+      const ext = format === "bvx" ? "bvx" : "json";
       const stem = isAllNamespaces
         ? "vault-all-namespaces-export"
         : isFull
           ? "vault-full-export"
           : "exchange";
-      a.download = format === "bvx" ? `${stem}.bvx` : `${stem}.json`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-      toast("success", `Exported ${result.size_bytes} bytes.`);
+      if (result.files && result.files.length > 0) {
+        for (const f of result.files) {
+          const label = f.namespace ? f.namespace.replace(/\//g, "__") : "root";
+          download(f.file_b64, `${stem}-${label}.${ext}`);
+        }
+        toast("success", `Exported ${result.files.length} files (one per namespace).`);
+      } else {
+        download(result.file_b64, `${stem}.${ext}`);
+        toast("success", `Exported ${result.size_bytes} bytes.`);
+      }
     } catch (e) {
       toast("error", scopeExportError(e, scopeKind));
     } finally {
@@ -266,6 +290,8 @@ function ExportTab({ toast }: { toast: ToastFn }) {
                   }
                   options={[
                     { value: "kv_path", label: "KV path" },
+                    { value: "mount", label: "Engine mount (whole mount, e.g. pki/)" },
+                    { value: "engine_type", label: "Engine type (every mount, e.g. pki)" },
                     { value: "resource", label: "Resource (by id)" },
                     { value: "asset_group", label: "Asset group (by name)" },
                     { value: "resource_group", label: "Resource group (by name)" },
@@ -291,6 +317,24 @@ function ExportTab({ toast }: { toast: ToastFn }) {
                     />
                   </div>
                 </>
+              ) : s.type === "mount" ? (
+                <div className="col-span-8">
+                  <Input
+                    label={idx === 0 ? "Mount" : undefined}
+                    value={s.mount ?? ""}
+                    onChange={(e) => updateScope(idx, { mount: e.target.value })}
+                    placeholder="pki/"
+                  />
+                </div>
+              ) : s.type === "engine_type" ? (
+                <div className="col-span-8">
+                  <Input
+                    label={idx === 0 ? "Engine type" : undefined}
+                    value={s.engine ?? ""}
+                    onChange={(e) => updateScope(idx, { engine: e.target.value })}
+                    placeholder="pki, transit, ssh, kv"
+                  />
+                </div>
               ) : (
                 <div className="col-span-8">
                   <Input
@@ -318,6 +362,35 @@ function ExportTab({ toast }: { toast: ToastFn }) {
             </Button>
           )}
         </div>
+
+        {canPickNs && (
+          <div className="space-y-2">
+            <p className="text-sm font-medium">Namespaces</p>
+            <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
+              {["", ...otherNamespaces].map((ns) => (
+                <label key={ns || "<root>"} className="flex items-center gap-2 min-w-0">
+                  <input
+                    type="checkbox"
+                    checked={pickedNs.includes(ns)}
+                    onChange={() => toggleNs(ns)}
+                  />
+                  <span className="truncate">{ns || "root"}</span>
+                </label>
+              ))}
+            </div>
+            <p className="text-xs text-[var(--color-text-muted)]">
+              {pickedNs.length === 0
+                ? isAllNamespaces
+                  ? "None ticked: every namespace is exported."
+                  : "None ticked: only this namespace is exported."
+                : `Only ${pickedNs.map((n) => n || "root").join(", ")} will be read.`}
+            </p>
+            <label className="flex items-center gap-2 text-sm">
+              <input type="checkbox" checked={split} onChange={(e) => setSplit(e.target.checked)} />
+              One file per namespace (each imports on its own)
+            </label>
+          </div>
+        )}
 
         <div className="grid grid-cols-2 gap-3">
           <Select
@@ -408,6 +481,11 @@ function ImportTab({ toast }: { toast: ToastFn }) {
   const [preview, setPreview] = useState<ExchangePreviewResult | null>(null);
   const [conflictPolicy, setConflictPolicy] = useState<"skip" | "overwrite" | "rename">("skip");
   const [busy, setBusy] = useState(false);
+  // Optional narrowing of what the file is allowed to write.
+  const [onlyNamespaces, setOnlyNamespaces] = useState("");
+  const [onlyMounts, setOnlyMounts] = useState("");
+  const splitList = (v: string) =>
+    v.split(",").map((x) => x.trim()).filter((x) => x.length > 0);
 
   async function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0];
@@ -434,6 +512,8 @@ function ImportTab({ toast }: { toast: ToastFn }) {
         format,
         format === "bvx" ? password : undefined,
         format === "json" ? allowPlaintext : false,
+        splitList(onlyNamespaces),
+        splitList(onlyMounts),
       );
       setPreview(result);
     } catch (e) {
@@ -480,6 +560,8 @@ function ImportTab({ toast }: { toast: ToastFn }) {
         format,
         format === "bvx" ? password : undefined,
         format === "json" ? allowPlaintext : false,
+        splitList(onlyNamespaces),
+        splitList(onlyMounts),
       );
       const result = await api.exchangeApply(previewResult.token, conflictPolicy);
       toast(
@@ -542,6 +624,23 @@ function ImportTab({ toast }: { toast: ToastFn }) {
             </label>
           )}
         </div>
+
+        {!preview && (
+          <div className="grid grid-cols-2 gap-3">
+            <Input
+              label="Only these namespaces (optional)"
+              value={onlyNamespaces}
+              onChange={(e) => setOnlyNamespaces(e.target.value)}
+              placeholder="root, team-a"
+            />
+            <Input
+              label="Only these engine mounts (optional)"
+              value={onlyMounts}
+              onChange={(e) => setOnlyMounts(e.target.value)}
+              placeholder="pki/, secret/"
+            />
+          </div>
+        )}
 
         {!preview && (
           <Select

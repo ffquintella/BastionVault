@@ -93,6 +93,13 @@ pub enum ScopeSelector {
     AssetGroup { id: String },
     /// A resource group; expands to every member resource.
     ResourceGroup { id: String },
+    /// One whole secret-engine mount, addressed by mount path (`pki/`,
+    /// `secret/`) — KV mounts as structured items, resource/files mounts as
+    /// resources/files, every other engine as opaque `raw` entries.
+    Mount { mount: String },
+    /// Every mount of one engine type in the namespace (`pki`, `transit`,
+    /// `ssh`, …). `kv` / `secret` / `secrets` mean both KV versions.
+    EngineType { engine: String },
 }
 
 /// The actual exported data. Each variant is independently optional so a

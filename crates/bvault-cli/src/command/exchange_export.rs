@@ -43,8 +43,20 @@ Scope is either a list of --scope selectors or one of the whole-vault modes:
                           operation; restoring it needs each namespace to exist
                           on the destination vault.
 
+Engine-scoped selectors (also via --scope): `mount:<path>` exports one whole
+mount (KV, resource, files, or any other engine such as pki), `engine:<type>`
+every mount of one engine type (`engine:pki`; `engine:kv`/`secrets` = KV).
+
+Namespaces: --namespace (repeatable, `root` = the root namespace, `*` = all)
+fans a --scope or --all-namespaces export out over just those namespaces.
+--split writes one file per namespace into the --output directory instead of
+one combined file; each file imports on its own.
+
 Examples:
 
+  $ bvault exchange export --scope mount:pki/ --namespace root --namespace team-a -o pki.bvx
+  $ bvault exchange export --scope engine:pki --namespace '*' --split -o ./pki-by-ns
+  $ bvault exchange export --all-namespaces --split -o ./by-namespace
   $ bvault exchange export --scope kv:secret/myapp/ --output myapp.bvx
   $ bvault exchange export --scope kv:secret/team-a/ --scope kv:secret/team-b/ \
       --comment "weekly snapshot" --output bundle.bvx
@@ -57,9 +69,8 @@ pub struct ExchangeExport {
     http_options: command::HttpOptions,
 
     /// Scope selector. Repeatable. Format: `kv:<mount>/<path>` (e.g.
-    /// `kv:secret/myapp/`). For now only KV selectors are wired; resource
-    /// and group selectors are reserved in the schema and emit an
-    /// "unresolved" warning if used.
+    /// `kv:secret/myapp/`), `mount:<mount>/`, `engine:<type>`,
+    /// `resource:<id>`, `asset_group:<id>` or `resource_group:<id>`.
     #[arg(long = "scope", value_name = "kv:<mount>/<path>", action = clap::ArgAction::Append)]
     scope: Vec<String>,
 
@@ -70,10 +81,20 @@ pub struct ExchangeExport {
 
     /// Export everything in *every* namespace of the deployment (root
     /// operation). Mutually exclusive with --scope and --full.
-    #[arg(long = "all-namespaces", conflicts_with = "scope")]
+    #[arg(long = "all-namespaces")]
     all_namespaces: bool,
 
-    /// Output file path.
+    /// Restrict the export to these namespaces. Repeatable; `root` is the
+    /// root namespace, `*` means every namespace. Works with --all-namespaces
+    /// and with --scope selectors.
+    #[arg(long = "namespace", value_name = "PATH", action = clap::ArgAction::Append, conflicts_with = "full")]
+    namespace: Vec<String>,
+
+    /// Write one file per namespace into the --output directory.
+    #[arg(long, conflicts_with = "full")]
+    split: bool,
+
+    /// Output file path (a directory with --split).
     #[arg(long, short)]
     output: String,
 
@@ -105,6 +126,8 @@ fn parse_scope(scope: &[String]) -> Result<Vec<serde_json::Value>, RvError> {
                 };
                 out.push(json!({"type":"kv_path","mount":mount,"path":path}));
             }
+            "mount" => out.push(json!({"type":"mount","mount":rest})),
+            "engine" => out.push(json!({"type":"engine_type","engine":rest})),
             "resource" => out.push(json!({"type":"resource","id":rest})),
             "asset_group" => out.push(json!({"type":"asset_group","id":rest})),
             "resource_group" => out.push(json!({"type":"resource_group","id":rest})),
@@ -135,7 +158,7 @@ impl CommandExecutor for ExchangeExport {
         // Whole-vault modes carry no selectors; the resolver enumerates. A
         // selective export with an empty list would produce an empty document,
         // so refuse it rather than write one.
-        let kind = if self.all_namespaces {
+        let kind = if self.all_namespaces && self.scope.is_empty() {
             "all_namespaces"
         } else if self.full {
             "full"
@@ -154,6 +177,15 @@ impl CommandExecutor for ExchangeExport {
         body.insert("format".to_string(), json!(self.format));
         body.insert("scope".to_string(), json!({ "kind": kind, "include": include }));
         body.insert("allow_plaintext".to_string(), json!(self.allow_plaintext));
+        if !self.namespace.is_empty() {
+            body.insert("namespaces".to_string(), json!(self.namespace));
+        } else if self.all_namespaces && kind == "selective" {
+            // `--all-namespaces --scope …` means the selectors in every namespace.
+            body.insert("namespaces".to_string(), json!(["*"]));
+        }
+        if self.split {
+            body.insert("split".to_string(), json!(true));
+        }
         if let Some(ref c) = self.comment {
             body.insert("comment".to_string(), json!(c));
         }
@@ -179,6 +211,23 @@ impl CommandExecutor for ExchangeExport {
         }
 
         let data = ret.response_data.unwrap_or(serde_json::Value::Null);
+        if self.split {
+            let files = data.get("files").and_then(|v| v.as_array()).ok_or(RvError::ErrRequestInvalid)?;
+            std::fs::create_dir_all(&self.output)?;
+            for f in files {
+                let ns = f.get("namespace").and_then(|v| v.as_str()).unwrap_or("");
+                let b64 = f.get("file_b64").and_then(|v| v.as_str()).ok_or(RvError::ErrRequestInvalid)?;
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(b64.as_bytes())
+                    .map_err(|_| RvError::ErrRequestInvalid)?;
+                let name = if ns.is_empty() { "root".to_string() } else { ns.replace('/', "__") };
+                let ext = if self.format == "json" { "json" } else { "bvx" };
+                let path = std::path::Path::new(&self.output).join(format!("{name}.{ext}"));
+                std::fs::write(&path, &bytes)?;
+                println!("Wrote {} bytes to {} (namespace={:?})", bytes.len(), path.display(), ns);
+            }
+            return Ok(());
+        }
         let b64 = data.get("file_b64").and_then(|v| v.as_str()).ok_or(RvError::ErrRequestInvalid)?;
         let bytes =
             base64::engine::general_purpose::STANDARD.decode(b64.as_bytes()).map_err(|_| RvError::ErrRequestInvalid)?;

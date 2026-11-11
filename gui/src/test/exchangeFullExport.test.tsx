@@ -129,6 +129,33 @@ describe("Exchange full-vault export", () => {
     );
   });
 
+  it("sends the chosen namespaces and split flag for an engine export", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    // Engine-scoped selector instead of a KV path.
+    await user.selectOptions(await screen.findByLabelText("Type"), "mount");
+    await user.clear(screen.getByLabelText("Mount"));
+    await user.type(screen.getByLabelText("Mount"), "pki/");
+
+    await user.click(await screen.findByLabelText("engineering"));
+    await user.click(screen.getByLabelText(/One file per namespace/));
+    await user.type(screen.getByLabelText(/^Password/), "correct-horse-battery");
+    await user.click(screen.getByRole("button", { name: "Export & download" }));
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith(
+        "exchange_export",
+        expect.objectContaining({
+          scopeKind: "selective",
+          include: [{ type: "mount", mount: "pki/", path: "" }],
+          namespaces: ["engineering"],
+          split: true,
+        }),
+      ),
+    );
+  });
+
   it("offers an all-namespaces export at the root namespace and sends it", async () => {
     const user = userEvent.setup();
     renderPage();

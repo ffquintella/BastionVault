@@ -1743,17 +1743,30 @@ export const ssoAdminCallbackHints = (mount: string, kind: "oidc" | "saml") =>
 export type ExchangeScopeKind = "selective" | "full" | "all_namespaces";
 
 export interface ExchangeScopeSelector {
-  type: "kv_path" | "resource" | "asset_group" | "resource_group";
+  /** `mount` = one whole engine mount (`mount`); `engine_type` = every mount
+   *  of an engine type such as `pki` (`engine`). */
+  type: "kv_path" | "resource" | "asset_group" | "resource_group" | "mount" | "engine_type";
   mount?: string;
   path?: string;
   id?: string;
+  engine?: string;
+}
+
+export interface ExchangeExportFile {
+  /** Namespace path; `""` is the root namespace. */
+  namespace: string;
+  size_bytes: number;
+  file_b64: string;
 }
 
 export interface ExchangeExportResult {
-  /** Base64-encoded `.bvx` envelope (or plaintext JSON when format = "json"). */
+  /** Base64-encoded `.bvx` envelope (or plaintext JSON when format = "json").
+   *  Empty for a split export — read `files` instead. */
   file_b64: string;
   size_bytes: number;
   format: string;
+  /** One entry per namespace for a split export; empty otherwise. */
+  files?: ExchangeExportFile[];
 }
 
 export interface ExchangePreviewItem {
@@ -1797,6 +1810,11 @@ export const exchangeExport = (
   allowPlaintext: boolean = false,
   comment?: string,
   scopeKind: ExchangeScopeKind = "selective",
+  /** Restrict a fan-out export to these namespaces (`""` = root). Empty =
+   *  all for `all_namespaces`, current namespace only for `selective`. */
+  namespaces: string[] = [],
+  /** One file per namespace instead of one combined file. */
+  split: boolean = false,
 ) =>
   invoke<ExchangeExportResult>("exchange_export", {
     include,
@@ -1805,6 +1823,8 @@ export const exchangeExport = (
     allowPlaintext,
     comment: comment ?? null,
     scopeKind,
+    namespaces: namespaces.length ? namespaces : null,
+    split: split || null,
   });
 
 export const exchangePreview = (
@@ -1812,12 +1832,18 @@ export const exchangePreview = (
   format: "bvx" | "json",
   password?: string,
   allowPlaintext: boolean = false,
+  /** Import only these namespaces out of the file (`""`/`root` = root). */
+  namespaces: string[] = [],
+  /** Import only these engine mounts (`pki/`, `secret/`). */
+  mounts: string[] = [],
 ) =>
   invoke<ExchangePreviewResult>("exchange_preview", {
     fileB64,
     format,
     password: password ?? null,
     allowPlaintext,
+    namespaces: namespaces.length ? namespaces : null,
+    mounts: mounts.length ? mounts : null,
   });
 
 export const exchangeApply = (

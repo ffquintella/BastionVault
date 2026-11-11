@@ -2021,6 +2021,16 @@ struct ExchangeExportRequest {
     allow_plaintext: bool,
     #[serde(default)]
     comment: Option<String>,
+    /// Restrict a fan-out export to these namespaces (`""` or `"root"` = the
+    /// root namespace, `"*"` = all). For `all_namespaces` an empty list means
+    /// every namespace; for `selective` it means the root namespace only.
+    #[serde(default)]
+    namespaces: Vec<String>,
+    /// Produce one file per namespace instead of a single combined file.
+    /// Only for `all_namespaces` / `selective`; the response then carries
+    /// `files: [{namespace, size_bytes, file_b64}]` instead of `file_b64`.
+    #[serde(default)]
+    split: bool,
 }
 
 fn default_format() -> String {
@@ -2068,8 +2078,20 @@ async fn sys_exchange_export_request_handler(
         // `crate::exchange::namespaces`); anything else stays root-scoped.
         let exporter = crate::exchange::ExporterInfo::default();
         let core_arc = core.get_ref().clone();
-        let document = if payload.scope.kind == crate::exchange::ScopeKind::AllNamespaces {
-            crate::exchange::export_all_namespaces(&core_arc, exporter, payload.scope.clone()).await?
+        let all_ns = payload.scope.kind == crate::exchange::ScopeKind::AllNamespaces;
+        // A selective (engine / path) export is root-only unless the caller
+        // names namespaces or asks for a split, which fans it out per namespace.
+        let fan_out = all_ns
+            || (payload.scope.kind == crate::exchange::ScopeKind::Selective
+                && (payload.split || !payload.namespaces.is_empty()));
+        if !fan_out && (payload.split || !payload.namespaces.is_empty()) {
+            return Ok(response_error(
+                StatusCode::BAD_REQUEST,
+                "\"namespaces\" and \"split\" require scope kind \"all_namespaces\" or \"selective\"",
+            ));
+        }
+        let document = if fan_out {
+            crate::exchange::export_namespaces(&core_arc, exporter, payload.scope.clone(), &payload.namespaces).await?
         } else {
             let mounts = crate::exchange::scope::MountIndex::from_core(&core_arc)?;
             crate::exchange::scope::export_to_document(
@@ -2081,46 +2103,70 @@ async fn sys_exchange_export_request_handler(
             .await?
         };
 
-        // Canonical JSON — sorted keys, no whitespace, deterministic across runs.
-        let inner_bytes = crate::exchange::canonical::to_canonical_vec(&document)?;
-
-        let (body_bytes, format_label) = match payload.format.as_str() {
-            "json" => {
-                if !payload.allow_plaintext {
-                    // Loud refusal: the default is encrypted. Operators who want
-                    // plaintext must opt in explicitly so the choice is auditable.
-                    return Ok(response_error(
-                        StatusCode::BAD_REQUEST,
-                        "plaintext export refused (set allow_plaintext: true to override)",
-                    ));
-                }
-                (inner_bytes, "json")
-            }
-            "bvx" => {
-                let Some(password) = payload.password.as_deref() else {
-                    return Ok(response_error(StatusCode::BAD_REQUEST, "password required for format \"bvx\""));
-                };
-                let bytes = crate::exchange::encrypt_bvx(&inner_bytes, password, "", payload.comment.clone())?;
-                // Zeroise the password buffer in our local copy.
-                if let Some(ref mut p) = payload.password {
-                    p.zeroize();
-                }
-                (bytes, "bvx")
-            }
-            _ => {
-                return Ok(response_error(StatusCode::BAD_REQUEST, "format must be \"bvx\" or \"json\""));
-            }
+        // One output file, or — for a split export — one per namespace.
+        let parts: Vec<(Option<String>, crate::exchange::ExchangeDocument)> = if payload.split {
+            crate::exchange::split_by_namespace(&document).into_iter().map(|(ns, d)| (Some(ns), d)).collect()
+        } else {
+            vec![(None, document)]
         };
 
-        use base64::Engine;
-        let body_b64 = base64::engine::general_purpose::STANDARD.encode(&body_bytes);
+        if !matches!(payload.format.as_str(), "json" | "bvx") {
+            return Ok(response_error(StatusCode::BAD_REQUEST, "format must be \"bvx\" or \"json\""));
+        }
+        if payload.format == "json" && !payload.allow_plaintext {
+            // Loud refusal: the default is encrypted. Operators who want
+            // plaintext must opt in explicitly so the choice is auditable.
+            return Ok(response_error(
+                StatusCode::BAD_REQUEST,
+                "plaintext export refused (set allow_plaintext: true to override)",
+            ));
+        }
+        if payload.format == "bvx" && payload.password.is_none() {
+            return Ok(response_error(StatusCode::BAD_REQUEST, "password required for format \"bvx\""));
+        }
 
+        use base64::Engine;
+        let mut files = Vec::with_capacity(parts.len());
+        for (ns, doc) in &parts {
+            // Canonical JSON — sorted keys, no whitespace, deterministic across runs.
+            let inner_bytes = crate::exchange::canonical::to_canonical_vec(doc)?;
+            let bytes = if payload.format == "bvx" {
+                // Each part is sealed independently (fresh salt/nonce) under
+                // the one password, so any part decrypts on its own.
+                let password = payload.password.as_deref().unwrap_or_default();
+                crate::exchange::encrypt_bvx(&inner_bytes, password, "", payload.comment.clone())?
+            } else {
+                inner_bytes
+            };
+            files.push((ns.clone(), bytes));
+        }
+        // Zeroise the password buffer in our local copy.
+        if let Some(ref mut p) = payload.password {
+            p.zeroize();
+        }
+
+        let format_label = payload.format.as_str();
+        let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+        if payload.split {
+            let entries: Vec<_> = files
+                .iter()
+                .map(|(ns, bytes)| {
+                    json!({
+                        "namespace": ns.clone().unwrap_or_default(),
+                        "size_bytes": bytes.len(),
+                        "file_b64": b64(bytes),
+                    })
+                })
+                .collect();
+            return Ok(response_json_ok(None, json!({ "format": format_label, "files": entries })));
+        }
+        let body_bytes = &files[0].1;
         Ok(response_json_ok(
             None,
             json!({
                 "format": format_label,
                 "size_bytes": body_bytes.len(),
-                "file_b64": body_b64,
+                "file_b64": b64(body_bytes),
             }),
         ))
     })
@@ -2144,6 +2190,13 @@ struct ExchangeImportRequest {
     conflict_policy: crate::exchange::ConflictPolicy,
     #[serde(default)]
     allow_plaintext: bool,
+    /// Import only these namespaces out of the document (`""` / `"root"` =
+    /// the root namespace). Empty = everything the document carries.
+    #[serde(default)]
+    namespaces: Vec<String>,
+    /// Import only these mounts (`pki/`, `secret/`) out of the document.
+    #[serde(default)]
+    mounts: Vec<String>,
 }
 
 /// Classify every KV item in an exchange document against the destination
@@ -2227,8 +2280,17 @@ async fn sys_exchange_import_preview_handler(
             serde_json::from_slice(&document_bytes).map_err(|_| RvError::ErrRequestInvalid)?;
         document.validate_schema_tag().map_err(|_| RvError::ErrRequestInvalid)?;
 
+        // Narrow to the selected namespaces first: the stored document is the
+        // one `apply` writes, so the preview must show exactly that part.
+        let mut document = document;
+        let mut select_warnings = crate::exchange::retain_namespaces(&mut document, &payload.namespaces);
+        select_warnings.extend(crate::exchange::retain_mounts(&mut document, &payload.mounts));
+
         // Classify each item against the destination *without* writing.
-        let (new, identical, conflict, items, warnings) = classify_exchange_items(core.get_ref(), &document).await?;
+        let (new, identical, conflict, items, mut warnings) =
+            classify_exchange_items(core.get_ref(), &document).await?;
+        select_warnings.append(&mut warnings);
+        let warnings = select_warnings;
 
         // Owner binding: tokens are bound to the actor's display name; the
         // header was resolved before we moved into the async block.
@@ -4323,12 +4385,15 @@ async fn sys_exchange_import_request_handler(
             }
         };
 
-        let document: crate::exchange::ExchangeDocument =
+        let mut document: crate::exchange::ExchangeDocument =
             serde_json::from_slice(&document_bytes).map_err(|_| RvError::ErrRequestInvalid)?;
+        let mut select_warnings = crate::exchange::retain_namespaces(&mut document, &payload.namespaces);
+        select_warnings.extend(crate::exchange::retain_mounts(&mut document, &payload.mounts));
 
-        let result =
+        let mut result =
             crate::exchange::import_all_namespaces(&core.get_ref().clone(), &document, payload.conflict_policy, false)
                 .await?;
+        result.warnings.splice(0..0, select_warnings);
 
         Ok(response_json_ok(
             None,

@@ -99,15 +99,65 @@ pub async fn export_all_namespaces(
     exporter: ExporterInfo,
     scope: ScopeSpec,
 ) -> Result<ExchangeDocument, RvError> {
+    export_namespaces(core, exporter, scope, &[]).await
+}
+
+/// Normalise a caller-supplied namespace selector to the canonical path the
+/// bundles use: no leading/trailing slash, and `""` (or the alias `root`) for
+/// the root namespace.
+pub fn normalize_namespace_selector(raw: &str) -> String {
+    let t = raw.trim().trim_matches('/');
+    if t == "root" {
+        String::new()
+    } else {
+        t.to_string()
+    }
+}
+
+fn normalize_selectors(only: &[String]) -> Vec<String> {
+    // `*` means "every namespace": it cancels the filter.
+    if only.iter().any(|s| s.trim() == "*") {
+        return Vec::new();
+    }
+    let mut v: Vec<String> = only.iter().map(|s| normalize_namespace_selector(s)).collect();
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// Like [`export_all_namespaces`], restricted to `only` (canonical paths,
+/// `""`/`root` = the root namespace). An empty `only` selects every
+/// namespace. A selector naming a namespace this vault does not have is a
+/// warning, not an error, so a typo is visible in the file but a partially
+/// valid list still exports.
+///
+/// A selected namespace is exported by exactly the same resolver as in the
+/// unrestricted case; unselected namespaces are never read at all.
+pub async fn export_namespaces(
+    core: &Arc<Core>,
+    exporter: ExporterInfo,
+    scope: ScopeSpec,
+    only: &[String],
+) -> Result<ExchangeDocument, RvError> {
+    let only = normalize_selectors(only);
+    let selected = |path: &str| only.is_empty() || only.iter().any(|o| o == path);
     let __barrier = core.barrier();
     let storage = __barrier.as_storage();
     let mut warnings: Vec<String> = Vec::new();
     let indexes = all_namespace_indexes(core, &mut warnings).await?;
+    for o in &only {
+        if !indexes.iter().any(|n| &n.path == o) {
+            warnings.push(format!("namespace {o:?} does not exist on this vault: nothing exported for it"));
+        }
+    }
 
     let mut root_items = ExchangeItems::default();
     let mut bundles: Vec<NamespaceBundle> = Vec::new();
 
     for ns in &indexes {
+        if !selected(&ns.path) {
+            continue;
+        }
         let (items, mut ns_warnings) = scope::resolve_scope(storage, &ns.mounts, &scope).await?;
         if ns.path.is_empty() {
             root_items = items;
@@ -128,6 +178,119 @@ pub async fn export_all_namespaces(
     let mut doc = ExchangeDocument::new(exporter, scope, root_items);
     doc.warnings = warnings;
     Ok(doc)
+}
+
+/// Which namespaces a document carries: `""` for the root namespace when it
+/// has top-level items, then each bundle's path, in document order.
+pub fn document_namespaces(document: &ExchangeDocument) -> Vec<String> {
+    let mut out = Vec::new();
+    if document.items.local_len() > 0 {
+        out.push(String::new());
+    }
+    out.extend(document.items.namespaces.iter().map(|b| b.path.clone()));
+    out
+}
+
+/// Split a document into one standalone document per namespace it carries.
+///
+/// The root namespace's document keeps its items at the top level; every other
+/// namespace becomes a document with **empty** top-level items and a single
+/// [`NamespaceBundle`]. That is deliberate: the importer decides the target
+/// namespace from where an item sits, so a tenant's part must stay a bundle —
+/// hoisting it to the top level would restore it into the root namespace.
+/// Each part is therefore importable on its own, through the same path as the
+/// combined document, and re-importing all of them is equivalent to importing
+/// the original. Parts inherit `exporter`, `scope` and `exported_at`;
+/// document-level warnings are repeated on each so none is lost.
+pub fn split_by_namespace(document: &ExchangeDocument) -> Vec<(String, ExchangeDocument)> {
+    let part = |items: ExchangeItems| ExchangeDocument {
+        schema: document.schema.clone(),
+        exported_at: document.exported_at.clone(),
+        exporter: document.exporter.clone(),
+        scope: document.scope.clone(),
+        items,
+        warnings: document.warnings.clone(),
+    };
+    let mut out = Vec::new();
+    let mut root = document.items.clone();
+    root.namespaces.clear();
+    if root.local_len() > 0 {
+        out.push((String::new(), part(root)));
+    }
+    for b in &document.items.namespaces {
+        out.push((b.path.clone(), part(ExchangeItems { namespaces: vec![b.clone()], ..Default::default() })));
+    }
+    out
+}
+
+/// Narrow a document to the namespaces in `only` (same selector rules as
+/// [`export_namespaces`]; empty = keep everything). Applied before preview or
+/// import, so the classification, the `sql_*` gate and the write all see
+/// exactly the selected part and nothing else. A selector matching nothing in
+/// the document is reported in the returned warnings.
+pub fn retain_namespaces(document: &mut ExchangeDocument, only: &[String]) -> Vec<String> {
+    let only = normalize_selectors(only);
+    if only.is_empty() {
+        return Vec::new();
+    }
+    let mut warnings = Vec::new();
+    let present = document_namespaces(document);
+    for o in &only {
+        if !present.contains(o) {
+            warnings.push(format!("namespace {o:?} is not in this document: nothing to import for it"));
+        }
+    }
+    if !only.iter().any(String::is_empty) {
+        let namespaces = std::mem::take(&mut document.items.namespaces);
+        document.items = ExchangeItems { namespaces, ..Default::default() };
+    }
+    document.items.namespaces.retain(|b| only.contains(&b.path));
+    warnings
+}
+
+/// Narrow a document to the named mounts (`pki/`, `secret/`), in the root
+/// namespace and in every bundle. Empty `only` keeps everything.
+///
+/// KV and raw (non-KV engine) entries carry their mount, so they are filtered
+/// exactly. Resources, files, groups and policies carry no mount, so they
+/// cannot be attributed to one and are dropped — with a warning naming what
+/// was dropped, since an engine-scoped import must never write more than it
+/// was asked to.
+pub fn retain_mounts(document: &mut ExchangeDocument, only: &[String]) -> Vec<String> {
+    let mut only: Vec<String> =
+        only.iter().map(|m| m.trim().trim_matches('/')).filter(|m| !m.is_empty()).map(|m| format!("{m}/")).collect();
+    only.sort();
+    only.dedup();
+    if only.is_empty() {
+        return Vec::new();
+    }
+    let mut dropped = 0usize;
+    let mut narrow = |items: &mut ExchangeItems| {
+        items.kv.retain(|k| only.contains(&k.mount));
+        items.raw.retain(|r| only.contains(&r.mount));
+        dropped += items.resources.len()
+            + items.files.len()
+            + items.asset_groups.len()
+            + items.resource_groups.len()
+            + items.policies.len();
+        items.resources.clear();
+        items.files.clear();
+        items.asset_groups.clear();
+        items.resource_groups.clear();
+        items.policies.clear();
+    };
+    narrow(&mut document.items);
+    for b in &mut document.items.namespaces {
+        narrow(&mut b.items);
+    }
+    document.items.namespaces.retain(|b| b.items.local_len() > 0);
+    let mut warnings = Vec::new();
+    if dropped > 0 {
+        warnings.push(format!(
+            "mount filter {only:?}: {dropped} resource/file/group/policy item(s) cannot be attributed to a mount and were not imported"
+        ));
+    }
+    warnings
 }
 
 /// Import a document that may carry namespace bundles.
@@ -528,6 +691,202 @@ mod tests {
         import_document_gated(&core, &doc, ConflictPolicy::Overwrite, false, &open).await.unwrap();
         assert!(!absent("tenant-a", "sys/policy/analysts").await);
         assert_eq!(read_secret(&core, &root, "", "cubby/app").await, "v1");
+    }
+
+    /// Three namespaces holding the same mount path with different secrets.
+    async fn three_namespace_vault(name: &str) -> (Arc<Core>, String, ExchangeDocument) {
+        let (_bvault, core, root) = new_unseal_test_bastion_vault(name).await;
+        std::mem::forget(_bvault);
+        let store = store_of(&core);
+        store.create("tenant-a", NamespaceQuotas::default(), false).await.unwrap();
+        store.create("tenant-b", NamespaceQuotas::default(), false).await.unwrap();
+        for ns in ["", "tenant-a", "tenant-b"] {
+            ns_req(
+                &core,
+                &root,
+                Operation::Write,
+                "sys/mounts/cubby/",
+                ns,
+                json!({ "type": "kv" }).as_object().cloned(),
+            )
+            .await
+            .unwrap();
+        }
+        put_secret(&core, &root, "", "cubby/foo", "from-root").await;
+        put_secret(&core, &root, "tenant-a", "cubby/foo", "from-a").await;
+        put_secret(&core, &root, "tenant-b", "cubby/foo", "from-b").await;
+        let doc = export_all_namespaces(
+            &core,
+            ExporterInfo::default(),
+            ScopeSpec { kind: ScopeKind::AllNamespaces, include: vec![] },
+        )
+        .await
+        .unwrap();
+        (core, root, doc)
+    }
+
+    /// `export_namespaces` reads only the selected namespaces; `root` and `""`
+    /// both name the root, slashes are tolerated, and a typo is a warning.
+    #[tokio::test]
+    async fn export_can_be_restricted_to_selected_namespaces() {
+        let (core, _root, _full) = three_namespace_vault("test_exchange_ns_filter_export").await;
+        let scope = || ScopeSpec { kind: ScopeKind::AllNamespaces, include: vec![] };
+
+        let only_a =
+            export_namespaces(&core, ExporterInfo::default(), scope(), &["/tenant-a/".to_string()]).await.unwrap();
+        assert_eq!(document_namespaces(&only_a), vec!["tenant-a".to_string()]);
+        assert!(only_a.items.kv.is_empty(), "root must not be exported when unselected");
+
+        let root_and_b = export_namespaces(
+            &core,
+            ExporterInfo::default(),
+            scope(),
+            &["root".to_string(), "tenant-b".to_string(), "nope".to_string()],
+        )
+        .await
+        .unwrap();
+        assert_eq!(document_namespaces(&root_and_b), vec![String::new(), "tenant-b".to_string()]);
+        assert!(root_and_b.warnings.iter().any(|w| w.contains("nope")), "{:?}", root_and_b.warnings);
+
+        let everything = export_namespaces(&core, ExporterInfo::default(), scope(), &[]).await.unwrap();
+        assert_eq!(document_namespaces(&everything).len(), 3);
+    }
+
+    /// Splitting yields one importable document per namespace, a tenant's part
+    /// stays a bundle (never hoisted into the root), and importing every part
+    /// restores the same state as importing the combined document.
+    #[tokio::test]
+    async fn split_parts_each_restore_only_their_own_namespace() {
+        let (core, root, doc) = three_namespace_vault("test_exchange_ns_split").await;
+        let parts = split_by_namespace(&doc);
+        let names: Vec<&str> = parts.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["", "tenant-a", "tenant-b"]);
+        for (ns, part) in &parts {
+            assert_eq!(document_namespaces(part), vec![ns.clone()], "part {ns:?} must carry only itself");
+            if !ns.is_empty() {
+                assert!(part.items.kv.is_empty(), "tenant part must not hoist items to the root level");
+            }
+        }
+
+        for (ns, v) in [("", "x-root"), ("tenant-a", "x-a"), ("tenant-b", "x-b")] {
+            put_secret(&core, &root, ns, "cubby/foo", v).await;
+        }
+        // Restore only tenant-a's part: the others must stay clobbered.
+        let (_, a_part) = parts.iter().find(|(n, _)| n == "tenant-a").unwrap();
+        import_document(&core, a_part, ConflictPolicy::Overwrite, false).await.unwrap();
+        assert_eq!(read_secret(&core, &root, "tenant-a", "cubby/foo").await, "from-a");
+        assert_eq!(read_secret(&core, &root, "tenant-b", "cubby/foo").await, "x-b");
+        assert_eq!(read_secret(&core, &root, "", "cubby/foo").await, "x-root");
+
+        for (_, part) in &parts {
+            import_document(&core, part, ConflictPolicy::Overwrite, false).await.unwrap();
+        }
+        assert_eq!(read_secret(&core, &root, "tenant-b", "cubby/foo").await, "from-b");
+        assert_eq!(read_secret(&core, &root, "", "cubby/foo").await, "from-root");
+    }
+
+    /// `retain_namespaces` narrows a combined document before import, so an
+    /// operator can restore one tenant out of a whole-deployment file.
+    #[tokio::test]
+    async fn import_can_be_restricted_to_selected_namespaces() {
+        let (core, root, doc) = three_namespace_vault("test_exchange_ns_filter_import").await;
+        for (ns, v) in [("", "x-root"), ("tenant-a", "x-a"), ("tenant-b", "x-b")] {
+            put_secret(&core, &root, ns, "cubby/foo", v).await;
+        }
+
+        let mut narrowed = doc.clone();
+        let warnings = retain_namespaces(&mut narrowed, &["tenant-b".to_string(), "ghost".to_string()]);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("ghost"));
+        assert_eq!(document_namespaces(&narrowed), vec!["tenant-b".to_string()]);
+        assert!(narrowed.items.kv.is_empty(), "root items must be dropped when root is not selected");
+
+        import_document(&core, &narrowed, ConflictPolicy::Overwrite, false).await.unwrap();
+        assert_eq!(read_secret(&core, &root, "tenant-b", "cubby/foo").await, "from-b");
+        assert_eq!(read_secret(&core, &root, "tenant-a", "cubby/foo").await, "x-a");
+        assert_eq!(read_secret(&core, &root, "", "cubby/foo").await, "x-root");
+
+        // Selecting the root keeps its items and drops every bundle.
+        let mut root_only = doc.clone();
+        assert!(retain_namespaces(&mut root_only, &["".to_string()]).is_empty());
+        assert_eq!(document_namespaces(&root_only), vec![String::new()]);
+
+        // An empty selector list is "everything".
+        let mut all = doc.clone();
+        assert!(retain_namespaces(&mut all, &[]).is_empty());
+        assert_eq!(all, doc);
+    }
+
+    /// Engine-scoped export: one mount (or one engine type) out of chosen
+    /// namespaces, and nothing else — no sibling mount, no policies.
+    #[tokio::test]
+    async fn engine_scoped_export_and_mount_filtered_import() {
+        use crate::exchange::schema::ScopeSelector;
+        let (core, root, _full) = three_namespace_vault("test_exchange_engine_scope").await;
+        for ns in ["", "tenant-a"] {
+            ns_req(
+                &core,
+                &root,
+                Operation::Write,
+                "sys/mounts/other/",
+                ns,
+                json!({ "type": "kv" }).as_object().cloned(),
+            )
+            .await
+            .unwrap();
+            put_secret(&core, &root, ns, "other/bar", "other-val").await;
+        }
+        let sel = |s: ScopeSelector| ScopeSpec { kind: ScopeKind::Selective, include: vec![s] };
+
+        // One mount, two chosen namespaces.
+        let doc = export_namespaces(
+            &core,
+            ExporterInfo::default(),
+            sel(ScopeSelector::Mount { mount: "cubby".to_string() }),
+            &["tenant-a".to_string(), "tenant-b".to_string()],
+        )
+        .await
+        .unwrap();
+        assert_eq!(document_namespaces(&doc), vec!["tenant-a".to_string(), "tenant-b".to_string()]);
+        for b in &doc.items.namespaces {
+            assert!(b.items.kv.iter().all(|k| k.mount == "cubby/"), "only the selected mount: {:?}", b.items.kv);
+            assert!(!b.items.kv.is_empty());
+            assert!(b.items.policies.is_empty(), "an engine export must not ship policies");
+        }
+
+        // Engine type `kv` with the `*` wildcard reaches every namespace and both mounts.
+        let all_kv = export_namespaces(
+            &core,
+            ExporterInfo::default(),
+            sel(ScopeSelector::EngineType { engine: "secrets".to_string() }),
+            &["*".to_string()],
+        )
+        .await
+        .unwrap();
+        assert_eq!(document_namespaces(&all_kv).len(), 3);
+        assert!(all_kv.items.kv.iter().any(|k| k.mount == "other/"));
+
+        // Import only `cubby/` out of the combined document.
+        for (ns, v) in [("", "x"), ("tenant-a", "x")] {
+            put_secret(&core, &root, ns, "cubby/foo", v).await;
+            put_secret(&core, &root, ns, "other/bar", v).await;
+        }
+        let mut narrowed = all_kv.clone();
+        assert!(retain_mounts(&mut narrowed, &["cubby".to_string()]).is_empty());
+        import_document(&core, &narrowed, ConflictPolicy::Overwrite, false).await.unwrap();
+        assert_eq!(read_secret(&core, &root, "tenant-a", "cubby/foo").await, "from-a");
+        assert_eq!(read_secret(&core, &root, "tenant-a", "other/bar").await, "x", "unselected mount untouched");
+
+        // A mount that exists nowhere is reported, not silently empty.
+        let none = export_namespaces(
+            &core,
+            ExporterInfo::default(),
+            sel(ScopeSelector::Mount { mount: "pki/".to_string() }),
+            &["*".to_string()],
+        )
+        .await
+        .unwrap();
+        assert!(none.warnings.iter().any(|w| w.contains("matched no data")), "{:?}", none.warnings);
     }
 
     /// A bundle naming a namespace this vault does not have is reported, not

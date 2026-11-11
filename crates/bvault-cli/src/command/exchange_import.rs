@@ -23,8 +23,16 @@ resolved according to --conflict-policy.
 Passwords are read from stdin (one line) or interactively if a TTY is
 attached. The CLI does not accept a `--password=` flag.
 
+Selecting a part: --namespace (repeatable; `root` = the root namespace)
+imports only those namespaces out of a multi-namespace file, and --mount
+(repeatable, e.g. `pki/`) only those engine mounts. Resources, files, groups
+and policies cannot be attributed to a mount and are skipped (with a warning)
+when --mount is used. Both filters apply to --preview too.
+
 Examples:
 
+  $ bvault exchange import --input deployment.bvx --namespace team-a
+  $ bvault exchange import --input deployment.bvx --mount pki/ --namespace root
   $ bvault exchange import --input myapp.bvx
   $ bvault exchange import --input myapp.bvx --conflict-policy rename
   $ bvault exchange import --input plain.json --format json --allow-plaintext"#
@@ -49,6 +57,15 @@ pub struct ExchangeImport {
     /// Conflict policy. One of: `skip` (default), `overwrite`, `rename`.
     #[arg(long = "conflict-policy", default_value = "skip")]
     conflict_policy: String,
+
+    /// Import only these namespaces from the file. Repeatable; `root` is the
+    /// root namespace.
+    #[arg(long = "namespace", value_name = "PATH", action = clap::ArgAction::Append)]
+    namespace: Vec<String>,
+
+    /// Import only these engine mounts (e.g. `pki/`, `secret/`). Repeatable.
+    #[arg(long = "mount", value_name = "MOUNT", action = clap::ArgAction::Append)]
+    mount: Vec<String>,
 
     /// Run a preview classification without writing. Returns the per-item
     /// new/identical/conflict breakdown plus a token. With --apply the
@@ -85,6 +102,12 @@ impl CommandExecutor for ExchangeImport {
         body.insert("format".to_string(), json!(self.format));
         body.insert("allow_plaintext".to_string(), json!(self.allow_plaintext));
         body.insert("conflict_policy".to_string(), json!(self.conflict_policy));
+        if !self.namespace.is_empty() {
+            body.insert("namespaces".to_string(), json!(self.namespace));
+        }
+        if !self.mount.is_empty() {
+            body.insert("mounts".to_string(), json!(self.mount));
+        }
         if let Some(ref p) = password {
             body.insert("password".to_string(), json!(p));
         }

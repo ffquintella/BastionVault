@@ -27,7 +27,10 @@ pub mod sql_gate;
 pub mod verify;
 
 pub use envelope::{decrypt_bvx, encrypt_bvx, Envelope, EnvelopeError, MIN_PASSWORD_LEN};
-pub use namespaces::{export_all_namespaces, import_document as import_all_namespaces};
+pub use namespaces::{
+    document_namespaces, export_all_namespaces, export_namespaces, import_document as import_all_namespaces,
+    normalize_namespace_selector, retain_mounts, retain_namespaces, split_by_namespace,
+};
 pub use preview::{PreviewClassificationItem, PreviewStore, PreviewSummary};
 pub use schema::{
     AssetGroupItem, ExchangeDocument, ExchangeItems, ExporterInfo, FileItem, KvItem, NamespaceBundle, PolicyItem,
