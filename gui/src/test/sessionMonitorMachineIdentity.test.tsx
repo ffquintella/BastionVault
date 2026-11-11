@@ -160,3 +160,56 @@ describe("LoginPage FIDO2 sign-in against a server that requires machine identit
     expect(useAuthStore.getState().isAuthenticated).toBe(false);
   });
 });
+
+describe("LoginPage when the store's mode disagrees with the Rust side", () => {
+  beforeEach(() => {
+    mockInvoke.mockReset();
+    useAuthStore.setState({ token: null, policies: [], isAuthenticated: false, sessionExpired: false, sessionEndReason: null });
+  });
+
+  // Regression: the machine binding was gated on the webview store's `mode`,
+  // which resets to "Embedded" on a store reset or a failed bootstrap while the
+  // Rust side is still connected to the remote server. FIDO2 sign-in does not
+  // depend on `mode`, so it "worked" — with no binding, a plain token, and every
+  // request then refused by the server's machine-identity gate. The Rust side
+  // owns the connection; ask it.
+  it("binds the machine when Rust is Remote even though the store says Embedded", async () => {
+    const { useVaultStore } = await import("../stores/vaultStore");
+    useVaultStore.setState({ mode: "Embedded", remoteProfile: null });
+    mockInvoke.mockImplementation((cmd: string) => {
+      switch (cmd) {
+        case "list_sso_providers":
+          return Promise.resolve({ enabled: false, providers: [] });
+        case "get_mode":
+          return Promise.resolve("Remote");
+        case "get_remote_profile":
+          return Promise.resolve({ name: "p", address: "https://v:8200", tls_skip_verify: false });
+        case "fido2_native_login":
+          return Promise.resolve({ token: "hvs.user", policies: ["administrator", "default"] });
+        case "ferrogate_requirement":
+          return Promise.resolve({ advertised: true, require_machine_identity: true, expected_audience: "aud", mia_environment: "" });
+        case "ferrogate_machine_login":
+          return Promise.resolve({ authenticated: false, client_token: "", policies: [], message: "MIA unavailable" });
+        default:
+          return Promise.resolve(null);
+      }
+    });
+    const { LoginPage } = await import("../routes/LoginPage");
+    const userEvent = (await import("@testing-library/user-event")).default;
+    render(
+      <MemoryRouter>
+        <ToastProvider>
+          <LoginPage />
+        </ToastProvider>
+      </MemoryRouter>,
+    );
+    await userEvent.type(screen.getByPlaceholderText("alice"), "alice");
+    await userEvent.click(screen.getByRole("button", { name: /continue/i }));
+
+    expect(await screen.findByText(/MIA unavailable/)).toBeInTheDocument();
+    expect(mockInvoke.mock.calls.map((c) => c[0])).toContain("ferrogate_machine_login");
+    expect(useAuthStore.getState().isAuthenticated).toBe(false);
+    // The store is brought back in line so the rest of the app is not misled.
+    expect(useVaultStore.getState().mode).toBe("Remote");
+  });
+});

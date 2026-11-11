@@ -66,10 +66,34 @@ export function LoginPage() {
     // plain user token became the session, and the server's chokepoint then
     // refused every request. The login looked like it worked and the vault
     // looked broken. The server is the only authority on this flag; ask it.
-    let requireMachine = remoteProfile?.require_machine_identity ?? false;
-    let audience = remoteProfile?.expected_audience || remoteProfile?.address || "";
-    let miaEnvironment = remoteProfile?.mia_environment;
-    if (mode === "Remote" && !policies.includes("root")) {
+    // The connection mode and profile come from the Rust side, which owns the
+    // connection, not from the webview store. The store resets to "Embedded" on
+    // a store reset or a failed bootstrap while Rust is still connected to the
+    // remote server. FIDO2 sign-in does not read `mode`, so it kept working —
+    // with the machine binding silently skipped, a plain token as the session,
+    // and every request then refused by the server's machine-identity gate. A
+    // failed read keeps the store's values rather than guessing.
+    let connMode = mode;
+    let profile = remoteProfile;
+    try {
+      const rustMode = await api.getMode();
+      // Only a recognised answer overrides the store; anything else is treated
+      // like a failed read.
+      if ((rustMode === "Remote" || rustMode === "Embedded") && rustMode !== connMode) {
+        connMode = rustMode;
+        useVaultStore.getState().setMode(rustMode);
+      }
+      if (connMode === "Remote" && !profile) {
+        profile = await api.getRemoteProfile();
+        if (profile) setRemoteProfile(profile);
+      }
+    } catch {
+      /* keep the store's view */
+    }
+    let requireMachine = profile?.require_machine_identity ?? false;
+    let audience = profile?.expected_audience || profile?.address || "";
+    let miaEnvironment = profile?.mia_environment;
+    if (connMode === "Remote" && !policies.includes("root")) {
       const fresh = await api.ferrogateRequirement();
       // Only an answer overrides what we hold. A failed read comes back as
       // `advertised: false` with default fields — treating that as "not
@@ -77,16 +101,16 @@ export function LoginPage() {
       // requirement, so we keep the connect-time value instead.
       if (fresh.advertised) {
         requireMachine = fresh.require_machine_identity;
-        audience = fresh.expected_audience || remoteProfile?.address || "";
+        audience = fresh.expected_audience || profile?.address || "";
         // A profile-pinned MIA environment is the operator's deliberate
         // override and still wins; the server's value only fills a blank.
-        miaEnvironment = remoteProfile?.mia_environment || fresh.mia_environment;
+        miaEnvironment = profile?.mia_environment || fresh.mia_environment;
         // Fold the fresh answer back into the in-memory profile so the rest of
         // the app (and any later login on this connection) stops reading the
         // stale snapshot.
-        if (remoteProfile) {
+        if (profile) {
           setRemoteProfile({
-            ...remoteProfile,
+            ...profile,
             require_machine_identity: requireMachine,
             expected_audience: fresh.expected_audience,
             mia_environment: miaEnvironment,
@@ -95,7 +119,7 @@ export function LoginPage() {
       }
     }
 
-    if (mode === "Remote" && requireMachine && !policies.includes("root")) {
+    if (connMode === "Remote" && requireMachine && !policies.includes("root")) {
       // Sign the DPoP proof with the server's advertised `expected_audience`,
       // matching the connect-time machine gate. Using `address` here would
       // re-introduce the htu mismatch ("DPoP proof does not match the
