@@ -1006,7 +1006,7 @@ dependencies = [
 
 [[package]]
 name = "bastion-vault-gui"
-version = "0.46.1"
+version = "0.46.2"
 dependencies = [
  "arboard",
  "argon2 0.5.3",
@@ -1088,7 +1088,7 @@ dependencies = [
 
 [[package]]
 name = "bastion_vault"
-version = "0.46.1"
+version = "0.46.2"
 dependencies = [
  "actix-rt",
  "anyhow",
@@ -1608,7 +1608,7 @@ dependencies = [
 
 [[package]]
 name = "bv-auth-ferrogate"
-version = "0.41.4"
+version = "0.41.5"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -1773,7 +1773,7 @@ dependencies = [
 
 [[package]]
 name = "bv-core"
-version = "0.42.4"
+version = "0.42.5"
 dependencies = [
  "aes-gcm 0.10.3",
  "arc-swap",
@@ -2544,7 +2544,7 @@ dependencies = [
 
 [[package]]
 name = "bvault-cli"
-version = "0.46.1"
+version = "0.46.2"
 dependencies = [
  "actix-rt",
  "actix-web",
