@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { open as shellOpen } from "@tauri-apps/plugin-shell";
 import { useToast } from "./ui";
 
 const REPO_URL = "https://github.com/ffquintella/BastionVault";
@@ -97,7 +98,6 @@ export function AppMenu({
 
   async function handleOpenRepo() {
     try {
-      const { open: shellOpen } = await import("@tauri-apps/plugin-shell");
       await shellOpen(REPO_URL);
     } catch (e) {
       toast("error", `Open URL failed: ${String(e)}`);

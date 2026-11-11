@@ -1,41 +1,9 @@
-import { useEffect } from "react";
+import { Suspense, lazy, useEffect, type ComponentType } from "react";
 import { HashRouter, Routes, Route, Navigate } from "react-router";
 import { ConnectPage } from "./routes/ConnectPage";
 import { fido2SubmitPin } from "./lib/api";
 import { InitPage } from "./routes/InitPage";
 import { LoginPage } from "./routes/LoginPage";
-import { DashboardPage } from "./routes/DashboardPage";
-import { SecretsPage } from "./routes/SecretsPage";
-import { ResourcesPage } from "./routes/ResourcesPage";
-import { PmpImportPage } from "./routes/PmpImportPage";
-import { FilesPage } from "./routes/FilesPage";
-import { UsersPage } from "./routes/UsersPage";
-import { AppRolePage } from "./routes/AppRolePage";
-import { FerroGatePage } from "./routes/FerroGatePage";
-import { McpAppsPage } from "./routes/McpAppsPage";
-import { AiAssistantsPage } from "./routes/AiAssistantsPage";
-import { GroupsPage } from "./routes/GroupsPage";
-import { AssetGroupsPage } from "./routes/AssetGroupsPage";
-import { SharingPage } from "./routes/SharingPage";
-import { AuditPage } from "./routes/AuditPage";
-import { RecordingsPage } from "./routes/RecordingsPage";
-import { RustionLiveSessionsPage } from "./routes/RustionLiveSessionsPage";
-import { PoliciesPage } from "./routes/PoliciesPage";
-import { NamespacesPage } from "./routes/NamespacesPage";
-import { MountsPage } from "./routes/MountsPage";
-import { SettingsPage } from "./routes/SettingsPage";
-import { ResourceTypesPage } from "./routes/ResourceTypesPage";
-import { ProfilePage } from "./routes/ProfilePage";
-import { HsmStatusPage } from "./routes/HsmStatusPage";
-import { ExchangePage } from "./routes/ExchangePage";
-import { PkiPage } from "./routes/PkiPage";
-import { CertLifecyclePage } from "./routes/CertLifecyclePage";
-import { SshPage } from "./routes/SshPage";
-import { TotpPage } from "./routes/TotpPage";
-import { LdapPage } from "./routes/LdapPage";
-import { PluginsPage } from "./routes/PluginsPage";
-import { LeasesPage } from "./routes/LeasesPage";
-import { NotificationsAdminPage } from "./routes/NotificationsAdminPage";
 import { SurfaceRouter } from "./components/surface/SurfaceRouter";
 import { useAuthStore } from "./stores/authStore";
 import { useVaultStore } from "./stores/vaultStore";
@@ -46,6 +14,49 @@ import { useProviderAccountsLink } from "./hooks/useCredentialProviders";
 import { ServerInfoModal } from "./components/ServerInfoModal";
 import { SessionMonitor } from "./components/SessionMonitor";
 import { McpPromptHost } from "./components/McpPromptHost";
+
+// Route pages are code-split: each becomes its own chunk, fetched on first
+// visit, so the entry bundle holds only the connect/init/login flow and shell.
+// Pages use named exports, hence the `.then` adapter around React.lazy.
+function lazyPage<K extends string>(
+  load: () => Promise<Record<K, ComponentType>>,
+  name: K,
+) {
+  return lazy(() => load().then((m) => ({ default: m[name] })));
+}
+
+const DashboardPage = lazyPage(() => import("./routes/DashboardPage"), "DashboardPage");
+const SecretsPage = lazyPage(() => import("./routes/SecretsPage"), "SecretsPage");
+const ResourcesPage = lazyPage(() => import("./routes/ResourcesPage"), "ResourcesPage");
+const PmpImportPage = lazyPage(() => import("./routes/PmpImportPage"), "PmpImportPage");
+const FilesPage = lazyPage(() => import("./routes/FilesPage"), "FilesPage");
+const UsersPage = lazyPage(() => import("./routes/UsersPage"), "UsersPage");
+const AppRolePage = lazyPage(() => import("./routes/AppRolePage"), "AppRolePage");
+const FerroGatePage = lazyPage(() => import("./routes/FerroGatePage"), "FerroGatePage");
+const McpAppsPage = lazyPage(() => import("./routes/McpAppsPage"), "McpAppsPage");
+const AiAssistantsPage = lazyPage(() => import("./routes/AiAssistantsPage"), "AiAssistantsPage");
+const GroupsPage = lazyPage(() => import("./routes/GroupsPage"), "GroupsPage");
+const AssetGroupsPage = lazyPage(() => import("./routes/AssetGroupsPage"), "AssetGroupsPage");
+const SharingPage = lazyPage(() => import("./routes/SharingPage"), "SharingPage");
+const AuditPage = lazyPage(() => import("./routes/AuditPage"), "AuditPage");
+const RecordingsPage = lazyPage(() => import("./routes/RecordingsPage"), "RecordingsPage");
+const RustionLiveSessionsPage = lazyPage(() => import("./routes/RustionLiveSessionsPage"), "RustionLiveSessionsPage");
+const PoliciesPage = lazyPage(() => import("./routes/PoliciesPage"), "PoliciesPage");
+const NamespacesPage = lazyPage(() => import("./routes/NamespacesPage"), "NamespacesPage");
+const MountsPage = lazyPage(() => import("./routes/MountsPage"), "MountsPage");
+const SettingsPage = lazyPage(() => import("./routes/SettingsPage"), "SettingsPage");
+const ResourceTypesPage = lazyPage(() => import("./routes/ResourceTypesPage"), "ResourceTypesPage");
+const ProfilePage = lazyPage(() => import("./routes/ProfilePage"), "ProfilePage");
+const HsmStatusPage = lazyPage(() => import("./routes/HsmStatusPage"), "HsmStatusPage");
+const ExchangePage = lazyPage(() => import("./routes/ExchangePage"), "ExchangePage");
+const PkiPage = lazyPage(() => import("./routes/PkiPage"), "PkiPage");
+const CertLifecyclePage = lazyPage(() => import("./routes/CertLifecyclePage"), "CertLifecyclePage");
+const SshPage = lazyPage(() => import("./routes/SshPage"), "SshPage");
+const TotpPage = lazyPage(() => import("./routes/TotpPage"), "TotpPage");
+const LdapPage = lazyPage(() => import("./routes/LdapPage"), "LdapPage");
+const PluginsPage = lazyPage(() => import("./routes/PluginsPage"), "PluginsPage");
+const LeasesPage = lazyPage(() => import("./routes/LeasesPage"), "LeasesPage");
+const NotificationsAdminPage = lazyPage(() => import("./routes/NotificationsAdminPage"), "NotificationsAdminPage");
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
@@ -101,6 +112,7 @@ export default function App() {
             answered from any page; renders nothing until one arrives. */}
         <McpPromptHost />
         <HashRouter>
+          <Suspense fallback={null}>
           <Routes>
             <Route path="/" element={<Navigate to="/connect" replace />} />
             <Route path="/connect" element={<ConnectPage />} />
@@ -254,6 +266,7 @@ export default function App() {
               (features/session-workspace.md, T110).
             */}
           </Routes>
+          </Suspense>
           {/* Phase 7 — global ⌘K Connect palette. Sits above the
               router so the shortcut is armed everywhere post-auth. */}
           <AuthedConnectPalette />

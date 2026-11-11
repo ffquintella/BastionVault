@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { open as shellOpen } from "@tauri-apps/plugin-shell";
 import { Button, Modal } from "./ui";
 import { getServerInfo, type ServerInfo } from "../lib/api";
 
@@ -36,7 +37,6 @@ export function AboutModal({ open, onClose }: AboutModalProps) {
 
   async function openRepo() {
     try {
-      const { open: shellOpen } = await import("@tauri-apps/plugin-shell");
       await shellOpen(REPO_URL);
     } catch {
       /* ignore — the link below is also clickable */
