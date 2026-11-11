@@ -328,6 +328,10 @@ EXAMPLE ENTRY:
 
 ### Fixed
 
+#### FerroGate: registration request rejected by a current MIA
+
+- **Fix "this MIA is too old to support registration requests" on a up-to-date MIA** (T51) -- The `RegisterSelf` request put the operation at the top level of the frame, but the MIA only accepts `{v, op: {kind, ...}}` and drops anything else without a reply, which the client reported as an old MIA. The frame now nests `op`, and the message for a silent close names both causes (older than protocol v2, or a request the MIA could not decode). The unit test now asserts the nested layout; not run against a live MIA
+
 #### HSM pool: a connector that closed an idle connection
 
 - **Retry an HSM call once when the local `yubihsm-connector` had already closed its idle connection** (T482, S114) -- On the production pair each node's local YubiHSM failed its probe three times a minute with `bad response from connector: error reading response`: the connector closes an idle keep-alive connection after about 5 s and the pool probes every 10 s, so every second probe wrote into a closed socket. Wrap, unwrap, sign, attest, derive, get-random and the probe now retry once, on a new connection and session, when the error is that drop; any other error and a second drop are reported as before, and provisioning, admin and audit sessions never retry. Each retry leaves an abandoned session on the device until its 30 s idle timeout, about one every 10 s per local member instead of one every 20 s out of 16; keeping the connection under the connector's idle close would remove that and is not done. A reset or broken pipe is not retried. Not run against a real device or connector

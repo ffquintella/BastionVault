@@ -617,7 +617,8 @@ pub const MAX_REASON_CHARS: usize = 200;
 #[derive(Debug, Serialize)]
 struct HelperFrame {
     v: u8,
-    #[serde(flatten)]
+    // Must stay a nested `op` field: the MIA decodes `{v, op}` with
+    // `deny_unknown_fields`, so flattening it makes the MIA drop the connection.
     op: RegisterSelfOp,
 }
 
@@ -793,7 +794,10 @@ fn helper_exchange<Q: Serialize, A: serde::de::DeserializeOwned>(
     let mut len_buf = [0u8; 4];
     if let Err(e) = stream.read_exact(&mut len_buf) {
         if v2 && e.kind() == std::io::ErrorKind::UnexpectedEof {
-            return Err("this MIA is too old to support registration requests (upgrade the MIA)".to_string());
+            return Err("the MIA closed the connection without replying to the registration request: \
+                 it is either older than helper protocol v2 (upgrade the MIA) or could not decode the request \
+                 (client/MIA version mismatch; check the MIA log)"
+                .to_string());
         }
         return Err(format!("read: {e}"));
     }
@@ -840,8 +844,15 @@ mod tests {
         let mut buf = Vec::new();
         ciborium::into_writer(&frame, &mut buf).unwrap();
         let v: ciborium::value::Value = ciborium::from_reader(&buf[..]).unwrap();
-        let map = v.as_map().expect("map").iter().map(|(k, _)| k.as_text().unwrap().to_string()).collect::<Vec<_>>();
-        assert_eq!(map, vec!["v", "kind", "client_request_id", "reason"]);
+        let top = v.as_map().expect("map");
+        let keys = |m: &Vec<(ciborium::value::Value, ciborium::value::Value)>| {
+            m.iter().map(|(k, _)| k.as_text().unwrap().to_string()).collect::<Vec<_>>()
+        };
+        // Regression: `op` was once flattened into the top level, which the MIA
+        // (`deny_unknown_fields`) cannot decode, so it dropped every request.
+        assert_eq!(keys(top), vec!["v", "op"]);
+        let op = top[1].1.as_map().expect("op is a nested map");
+        assert_eq!(keys(op), vec!["kind", "client_request_id", "reason"]);
     }
 
     #[test]
