@@ -73,3 +73,19 @@ impl ClientCertVerifier for OptionalClientAuthVerifier {
         self.supported_algs.supported_schemes()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// A rustls / aws-lc-rs bump that drops `prefer-post-quantum` would silently
+    /// downgrade every TLS link to classical key exchange.
+    #[test]
+    fn default_provider_prefers_hybrid_post_quantum_kx() {
+        let provider = rustls::crypto::aws_lc_rs::default_provider();
+        let groups: Vec<rustls::NamedGroup> = provider.kx_groups.iter().map(|g| g.name()).collect();
+        assert_eq!(
+            groups.first(),
+            Some(&rustls::NamedGroup::X25519MLKEM768),
+            "TLS no longer offers X25519MLKEM768 first; offered groups: {groups:?}"
+        );
+    }
+}

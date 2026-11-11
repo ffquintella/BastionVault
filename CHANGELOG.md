@@ -58,6 +58,10 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### Tests: guards for the Raft stream pool and for post-quantum TLS
+
+- **Fail the HA suite when the linked hiqlite does not reuse Raft streams, and the `bv-utils` tests when TLS stops offering `X25519MLKEM768` first** (T481, S118) -- `test_raft_peer_streams_are_pooled` counts the Raft client's pool-hit and client-built debug events over 100 linearizable reads on a three-node cluster and requires a hit rate of at least 80% (200 of 200 with the pool, 0 of 200 with it disabled). It runs with `CARGO_TEST_HIQLITE=1`, as `make test-hiqlite` does. `default_provider_prefers_hybrid_post_quantum_kx` asserts that the aws-lc-rs provider that `bv-utils` uses offers the hybrid post-quantum group first
+
 #### FerroGate: request MIA registration when the app is not allowlisted
 
 - **Offer to register this application with the MIA when a machine login is refused as "not on the MIA's local allowlist"** (T51)
@@ -267,6 +271,10 @@ EXAMPLE ENTRY:
 
 ### Changed
 
+#### Storage: hiqlite 0.16.0
+
+- **Move the embedded Raft and SQLite engine from hiqlite 0.15.3 to 0.16.0** (T480, S118) -- Taken from the fork's `main-local`: upstream 0.16.0 plus the stream pool and a one-line fix of the 0.16.0 merge, which did not compile (`stored.as_bytes()` on an `Option`). It brings SQLite up with `rusqlite` 0.41, `rustls` 0.23.46 and `aws-lc-sys` 0.47, and drops the `cryptr` and S3 dependencies the backup feature pulled in. The `rustls`, `aws-lc-rs` and `aws-lc-sys` feature sets are the same as before (`prefer-post-quantum` stays on; neither `unstable` nor `fips` is enabled), and the ML-KEM, ML-DSA, composite PKI, SSH, FerroGate, Rustion, mTLS and TLS-helper test suites pass. Not yet exercised: a rolling upgrade of a 0.15.3 pair, and 0.16.0 on an existing 0.15.3 data directory
+
 #### MCP brokered sessions: SSH executor on by default
 
 - Compile the vault-side SSH executor behind `bv_resource_ssh_exec` into every default build: `mcp_sessions_ssh` joins the default features of `bvault-cli` and the root crate, so the server image and every `bvault` binary carry it instead of refusing each call with `mcp_session_protocol_disabled`. Sessions stay off until the server config, the runtime switch, a pairing's `connect_allowed` and the type and profile opt-ins are all set; `--no-default-features` still builds without it, and the desktop app's embedded vault is unchanged. (T136, S111)
@@ -323,6 +331,8 @@ EXAMPLE ENTRY:
 #### Storage: Raft peer streams are reused, not opened per read
 
 - **Stop opening a new TCP, TLS and WebSocket connection to the other node for every linearizable read** (T480, S118, S117) -- On the production two-node pair, even with the longer heartbeat, the leader opened about four connections a second to the peer, one per read, each closed after roughly 11 ms. One lost SYN (a 1 s retransmit) already outlasted the leadership-confirmation timeout, so `Cluster lost quorum` kept appearing around 50 times an hour. The hiqlite fork now keeps up to 4 idle streams per peer, for at most 60 s, and hands one out instead of opening a new one; a stream is used by one caller at a time, a stream that failed or that the peer answered with a fatal error is shut down and replaced, and nothing changes on the wire. Unit tests and hiqlite's cluster suite pass; not yet run on a staging pair with induced loss or on production
+
+- **Make the product build contain the Raft stream pool** (T480, S118) -- The entry above describes the hiqlite fork, not the product: the build resolves hiqlite from the fork's `main-local` branch at the commit `Cargo.lock` records, never from the `third_party/hiqlite` checkout, and the lock still pinned a commit from before the pool, so 0.46.0 shipped without it (its binary has no `Reusing a pooled Raft stream` message, and a debug run on the production leader showed 949 clients built and none reused in four minutes, about 4 new connections a second, each closed with a FIN and an RST); 0.46.1 carried the same lock. The lock now pins the fork commit that has the pool and the compile fix described under Changed. A new HA test fails when the linked hiqlite does not reuse streams. Not yet run on a staging pair with induced loss or on production
 
 #### HSM pool init: cluster hiccup no longer loses the root token
 

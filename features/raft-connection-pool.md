@@ -1,7 +1,9 @@
 # Feature: Raft Connection Pool — reuse the peer stream instead of opening one per linearizable read
 
-> Status: **implemented in the hiqlite fork; unit tests and hiqlite's cluster suite pass,
-> not yet validated on a staging pair or a real cluster (T480, S118)**. The pool and its unit tests are in
+> Status: **in the product build since the `Cargo.lock` pin to fork commit `6bcb940`
+> (2026-11-11), with an HA test that fails without it; hiqlite's cluster suite passes; not yet
+> validated on a staging pair or a real cluster (T480, T481, S118)**. 0.46.0 shipped without it,
+> see "What went wrong with 0.46.0". The pool and its unit tests are in
 > `third_party/hiqlite/hiqlite/src/network/raft_client.rs`. Extends
 > [Raft Timeout Tuning](raft-timeout-tuning.md) (S117), which it completes.
 > Touches the Raft replication path (AGENTS.md §7: storage, high risk):
@@ -41,6 +43,33 @@ Measured on 2026-11-10 on the production pair, after S117 was deployed.
   WebSocket upgrade inside that timeout. One lost SYN costs a 1 s retransmit,
   a second one 3 s in all, which beats the 2 s S117 allows. A stream that is
   already open recovers from a loss in about 200 ms.
+
+## What went wrong with 0.46.0
+
+The pool was in the fork and not in the product. The build resolves `hiqlite` from the fork's
+`main-local` branch on GitHub (`[patch.crates-io]` in the root manifest), at the commit
+`Cargo.lock` records; the `third_party/hiqlite` submodule is only a working copy. The lock
+pinned `ca4cf81e`, which predates the pool, and the commit that moved the submodule pointer did
+not touch it, so tags `v0.45.52` and `v0.46.0` contained the pool in the submodule and not in
+the binary.
+
+Measured on 2026-11-11 on the production pair, running 0.46.0:
+
+- The `bvault` binary of the image has no `Reusing a pooled Raft stream` string; the same image
+  runs on both nodes.
+- With `hiqlite::network::raft_client=debug` on the leader, four minutes logged 949
+  `Building new Raft DB client` and no `Reusing a pooled Raft stream`: about 500 a minute.
+- A two-minute capture of TCP flags on the Raft port showed the leader opening about four
+  connections a second and ending each with a FIN and an RST that it sent itself, so neither
+  the network nor a middlebox was resetting them.
+- The log level comes from `log_level` in the server config and overrides `RUST_LOG`.
+
+Fix: the lock pins `6bcb940` (the pool, plus the one-line fix of the 0.16.0 merge, which did not
+compile), and `bv-storage` requires `hiqlite =0.16.0`. Moving to 0.16.0 changes `rustls`,
+`aws-lc-sys` and `rusqlite`, so the post-quantum and TLS suites were run on it (ML-KEM, ML-DSA,
+composite PKI, SSH, FerroGate, Rustion, mTLS) and `bv-utils` asserts that TLS still offers
+`X25519MLKEM768` first. A rolling upgrade of a 0.15.3 pair and 0.16.0 on an existing 0.15.3 data
+directory are not exercised yet.
 
 ## Non-goals
 
@@ -98,8 +127,9 @@ Measured on 2026-11-10 on the production pair, after S117 was deployed.
 | 0 | Locate who opens the connections | done: openraft `raft_core.rs` `new_client` per read |
 | 1 | Pool in the hiqlite fork, with unit tests | done, 13 tests |
 | 2 | hiqlite cluster suite with the pool | done: passes (it hung before the fatal-answer rule, see Design) |
-| 3 | `bv-storage` consumes the fork; `make test-hiqlite` | done: 9 storage tests and 8 HA fault-injection tests pass; the fork change is not committed and the submodule pointer is not moved yet |
-| 4 | Staging pair with induced loss; then production, one node at a time | planned |
+| 3 | `bv-storage` consumes the fork; `make test-hiqlite` | done: 9 storage tests and 8 HA fault-injection tests pass |
+| 3b | The product build contains the pool | done 2026-11-11: lock pinned to `6bcb940`, `hiqlite =0.16.0`; `test_raft_peer_streams_are_pooled` (T481) passes with the pool and fails with it disabled |
+| 4 | Staging pair with induced loss; then production, one node at a time | planned: confirm on the production leader that `Building new Raft DB client` is mostly followed by `Reusing a pooled Raft stream` |
 
 ## Test plan
 
@@ -112,6 +142,14 @@ Measured on 2026-11-10 on the production pair, after S117 was deployed.
   `cargo test --features cache,counters,dlock,listen_notify,macros,toml,external-state-machine --test cluster`
   with `TEST_SKIP_S3_RESTORE=true`. The original fork passes, and so does the
   pool with the fatal-answer rule.
+- In this repository: `CARGO_TEST_HIQLITE=1 cargo test --test hiqlite_ha_fault_injection
+  test_raft_peer_streams_are_pooled` (also part of `make test-hiqlite`) counts the Raft client's
+  `Building new Raft DB client` events (one per client, pooled or not) and its `Reusing a pooled
+  Raft stream` events over 100 linearizable reads, and requires a hit rate of at least 80%. It
+  scored 200 of 200 with the pool and 0 of 200 with `POOL_MAX_IDLE_PER_PEER = 0`. It matches the
+  debug message text, so a hiqlite that renames the messages fails it with a message that says
+  so. `cargo nextest run -p bv-utils --lib default_provider_prefers` guards the post-quantum TLS
+  group.
 - Staging, manual, never on production: two nodes with `tc netem` loss on the
   Raft port. Compare `Cluster lost quorum` and the new-connection rate (`ss`,
   `nstat TcpActiveOpens`) before and after. Not run.

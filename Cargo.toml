@@ -408,6 +408,8 @@ bv-storage = { path = "crates/bv-storage", features = ["test-support"] }
 # roadmaps/workspace-decomposition.md § Phase 4.
 bv-server = { path = "crates/bv-server", features = ["test-support"] }
 serial_test = "3.4"
+# Already in the graph through hiqlite; the HA test counts its Raft-client events.
+tracing = "0.1"
 cucumber = "0.23"
 # MCP brokered sessions' end-to-end tests (src/engine_tests/mcp_sessions_ssh.rs):
 # the destination policy's loopback seam, and the resource engine's recording

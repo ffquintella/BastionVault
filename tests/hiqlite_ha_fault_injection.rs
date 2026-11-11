@@ -14,7 +14,7 @@ mod ha_tests {
     use std::collections::HashMap;
     use std::env;
     use std::fs;
-    use std::sync::atomic::{AtomicU16, Ordering};
+    use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
     use std::sync::Arc;
 
     use serde_json::Value;
@@ -577,6 +577,111 @@ mod ha_tests {
         let result = cluster.node(leader_id).get("ha/after_leave").await.unwrap();
         assert!(result.is_some());
         assert_eq!(result.unwrap().value, b"post_leave_data");
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Test 9: Raft peer streams are pooled (T480)
+    // ──────────────────────────────────────────────────────────────────────
+    // Without the pool, every leadership confirmation a linearizable read
+    // triggers opens a new TCP + WebSocket connection (~500/min on a
+    // production leader, each dropped with FIN+RST). 0.46.0 shipped that:
+    // Cargo.lock pinned a hiqlite older than the pool.
+    static POOL_REUSED: AtomicUsize = AtomicUsize::new(0);
+    static POOL_BUILT: AtomicUsize = AtomicUsize::new(0);
+
+    // new_client logs "Building new Raft DB client" for EVERY client, pooled
+    // or not; a pool hit also logs "Reusing a pooled Raft stream" at DEBUG.
+    // So reused / built is the hit rate, and a build without the pool is 0.
+    struct RaftClientEventCounter;
+
+    struct MessageOf(String);
+
+    impl tracing::field::Visit for MessageOf {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                self.0 = format!("{value:?}");
+            }
+        }
+    }
+
+    impl tracing::Subscriber for RaftClientEventCounter {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            metadata.target() == "hiqlite::network::raft_client"
+        }
+
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            // Spans are not inspected; any id will do.
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut message = MessageOf(String::new());
+            event.record(&mut message);
+            if message.0.starts_with("Reusing a pooled Raft stream") {
+                POOL_REUSED.fetch_add(1, Ordering::Relaxed);
+            } else if message.0.starts_with("Building new Raft DB client") {
+                POOL_BUILT.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    fn pool_event_counts() -> (usize, usize) {
+        (POOL_BUILT.load(Ordering::Relaxed), POOL_REUSED.load(Ordering::Relaxed))
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn test_raft_peer_streams_are_pooled() {
+        if !should_run() {
+            eprintln!("Skipping HA test (set CARGO_TEST_HIQLITE=1 to enable)");
+            return;
+        }
+
+        // Install before the cluster starts: hiqlite registers its callsites
+        // when they first fire. If another global subscriber won, the counters
+        // stay at zero and the sanity assertion below says so.
+        let _ = tracing::subscriber::set_global_default(RaftClientEventCounter);
+
+        let cluster = TestCluster::new("raft_stream_pool").await;
+        let leader_id = cluster.wait_for_leader(15).await.expect("No leader");
+        cluster.clear_all().await;
+
+        let entry = BackendEntry { key: "ha/pool/key".to_string(), value: b"pooled".to_vec() };
+        cluster.node(leader_id).put(&entry).await.unwrap();
+
+        // Warm-up: let each peer connection be opened once and pooled.
+        for _ in 0..5 {
+            cluster.node(leader_id).get("ha/pool/key").await.unwrap();
+        }
+
+        // Sequential reads: each one confirms leadership with the followers.
+        const READS: usize = 100;
+        let (built_before, reused_before) = pool_event_counts();
+        for _ in 0..READS {
+            let got = cluster.node(leader_id).get("ha/pool/key").await.unwrap();
+            assert_eq!(got.expect("key vanished").value, b"pooled");
+        }
+        let (built_after, reused_after) = pool_event_counts();
+        let built = built_after - built_before;
+        let reused = reused_after - reused_before;
+
+        assert!(
+            built > 0,
+            "no `Building new Raft DB client` events were observed: the global tracing subscriber \
+             was not ours, or hiqlite no longer logs it at DEBUG. Update the message matching in \
+             this test rather than loosening the assertions."
+        );
+        assert!(
+            reused * 10 >= built * 8,
+            "the Raft client reused {reused} pooled streams for {built} clients over {READS} \
+             linearizable reads (hit rate below 80%): this hiqlite build does not pool peer \
+             streams, or does not return them. Check the `hiqlite` commit pinned in Cargo.lock."
+        );
     }
 }
 
