@@ -286,6 +286,29 @@ old audit records.
 
 ---
 
+### Stale connector connection (T482)
+
+`yubihsm-connector` closes an idle keep-alive HTTP connection after about 5 s (measured on 3.0.2
+and 3.0.5: open at 4 to 5 s, closed at 5 to 6 s), and the `yubihsm` crate keeps one connection per
+client. A member reached through its local connector (`connector = "http://127.0.0.1:..."`) is
+probed every 10 s, so every other probe found its connection closed and failed with
+`bad response from connector: error reading response`: three `failed probe` warnings a minute on
+each node, for the local member only. A member reached through the gateway opens a connection per
+call and never failed. T477 classified the drop as a link failure; it did not retry.
+
+Since T482 `YubiHsm2Backend` retries a call once, on a new connection and a new session, when the
+error is that connector drop. It covers wrap, unwrap, sign, attest, derive, get-random and the
+probe, which leave nothing on the device; provisioning, admin and audit sessions never retry. A
+second drop, and any other error, are reported as before. A reset or a broken pipe while writing
+is an I/O error and is not retried.
+
+Cost: the crate only forgets the aborted session, and the device keeps it until its 30 s idle
+timeout. A local member probed every 10 s now abandons one session every 10 s instead of one every
+20 s: about 3 live ones at a time out of 16, besides the sessions of the gateway clients, the
+admin and the audit. Not measured on a device. Removing it means keeping the connection under the
+connector's idle close (a probe interval below about 4 s for local members, or closing the session
+after the probe); neither is done. Not run against a real connector.
+
 ## Key custody: dual-wrap
 
 ### Blob format v2 (`BvHsmBlob`)

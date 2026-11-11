@@ -328,6 +328,10 @@ EXAMPLE ENTRY:
 
 ### Fixed
 
+#### HSM pool: a connector that closed an idle connection
+
+- **Retry an HSM call once when the local `yubihsm-connector` had already closed its idle connection** (T482, S114) -- On the production pair each node's local YubiHSM failed its probe three times a minute with `bad response from connector: error reading response`: the connector closes an idle keep-alive connection after about 5 s and the pool probes every 10 s, so every second probe wrote into a closed socket. Wrap, unwrap, sign, attest, derive, get-random and the probe now retry once, on a new connection and session, when the error is that drop; any other error and a second drop are reported as before, and provisioning, admin and audit sessions never retry. Each retry leaves an abandoned session on the device until its 30 s idle timeout, about one every 10 s per local member instead of one every 20 s out of 16; keeping the connection under the connector's idle close would remove that and is not done. A reset or broken pipe is not retried. Not run against a real device or connector
+
 #### Storage: Raft peer streams are reused, not opened per read
 
 - **Stop opening a new TCP, TLS and WebSocket connection to the other node for every linearizable read** (T480, S118, S117) -- On the production two-node pair, even with the longer heartbeat, the leader opened about four connections a second to the peer, one per read, each closed after roughly 11 ms. One lost SYN (a 1 s retransmit) already outlasted the leadership-confirmation timeout, so `Cluster lost quorum` kept appearing around 50 times an hour. The hiqlite fork now keeps up to 4 idle streams per peer, for at most 60 s, and hands one out instead of opening a new one; a stream is used by one caller at a time, a stream that failed or that the peer answered with a fatal error is shut down and replaced, and nothing changes on the wire. Unit tests and hiqlite's cluster suite pass; not yet run on a staging pair with induced loss or on production

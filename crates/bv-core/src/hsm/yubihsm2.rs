@@ -58,11 +58,11 @@ pub const DEVICE_ATTESTATION_CERT_ID: u16 = 0;
 
 /// Read the device attestation certificate (opaque object 0).
 pub fn device_attestation_certificate(client: &Client) -> Result<Vec<u8>, RvError> {
-    client.get_opaque(DEVICE_ATTESTATION_CERT_ID).map_err(|e| {
-        RvError::ErrHsmAttestationInvalid(format!(
-            "cannot read the device attestation certificate (opaque object 0): {e}"
-        ))
-    })
+    client.get_opaque(DEVICE_ATTESTATION_CERT_ID).map_err(device_certificate_unreadable)
+}
+
+fn device_certificate_unreadable(e: yubihsm::client::Error) -> RvError {
+    RvError::ErrHsmAttestationInvalid(format!("cannot read the device attestation certificate (opaque object 0): {e}"))
 }
 
 /// An attestation as bundles carry it: the attested key's certificate
@@ -153,6 +153,25 @@ fn map_unwrap(e: yubihsm::client::Error) -> RvError {
     map_yubi(e)
 }
 
+/// An idempotent device call, retried once after a connector drop only.
+/// `yubihsm-connector` closes an idle keep-alive connection after ~5 s and the
+/// pool probes every 10 s; the crate then drops that connection and session,
+/// so a `reconnect = true` client retries on fresh ones. Other errors and a
+/// second drop return unchanged. Never for calls that create/delete/reset.
+fn retry_stale_connection<T>(
+    serial: &str,
+    op: &str,
+    mut call: impl FnMut() -> Result<T, yubihsm::client::Error>,
+) -> Result<T, yubihsm::client::Error> {
+    match call() {
+        Err(e) if is_connector_drop(&e.to_string()) => {
+            log::debug!(target: "security", "YubiHSM 2 {serial}: {op}: connector dropped an idle connection ({e}); retrying once");
+            call()
+        }
+        result => result,
+    }
+}
+
 pub struct YubiHsm2Backend {
     // `yubihsm::Client` is internally synchronized but not `Sync` for all
     // operations; guard it so the `Send + Sync` HsmBackend contract holds.
@@ -240,7 +259,8 @@ impl HsmBackend for YubiHsm2Backend {
         let device = self.device_binding()?;
         let client = self.client()?;
         seal_blob("yubihsm2", key, ctx, &device, plaintext, |inner| {
-            let msg = client.wrap_data(key, inner.to_vec()).map_err(map_yubi)?;
+            let msg = retry_stale_connection(&self.serial, "wrap-data", || client.wrap_data(key, inner.to_vec()))
+                .map_err(map_yubi)?;
             Ok(msg.into_vec())
         })
     }
@@ -255,7 +275,8 @@ impl HsmBackend for YubiHsm2Backend {
         let client = self.client()?;
         open_blob(wrapped, ctx, &device, |w| {
             let msg = wrap::Message::from_vec(w.to_vec()).map_err(|_| RvError::ErrHsmBlobInvalid)?;
-            let pt = client.unwrap_data(key, msg).map_err(map_unwrap)?;
+            let pt = retry_stale_connection(&self.serial, "unwrap-data", || client.unwrap_data(key, msg.clone()))
+                .map_err(map_unwrap)?;
             Ok(Zeroizing::new(pt))
         })
     }
@@ -265,13 +286,16 @@ impl HsmBackend for YubiHsm2Backend {
         let client = self.client()?;
         if key == self.objects.authz {
             // bv-authz: pure Ed25519 over the domain-separated bytes.
-            let sig = client.sign_ed25519(key, signed).map_err(map_yubi)?;
+            let sig =
+                retry_stale_connection(&self.serial, "sign-eddsa", || client.sign_ed25519(key, signed.as_slice()))
+                    .map_err(map_yubi)?;
             Ok(sig.to_bytes().to_vec())
         } else {
             // bv-identity: ECDSA-P256 over SHA-256(domain-separated bytes),
             // signed via the device's raw-prehash path. Returns DER.
             let digest = Sha256::digest(&signed).to_vec();
-            client.sign_ecdsa_prehash_raw(key, digest).map_err(map_yubi)
+            retry_stale_connection(&self.serial, "sign-ecdsa", || client.sign_ecdsa_prehash_raw(key, digest.as_slice()))
+                .map_err(map_yubi)
         }
     }
 
@@ -281,8 +305,13 @@ impl HsmBackend for YubiHsm2Backend {
     /// leaf alone, when this auth key cannot read object 0.
     async fn attest(&self, key: HsmObjectId) -> Result<Vec<u8>, RvError> {
         let client = self.client()?;
-        let device = device_attestation_certificate(&client)?;
-        let cert = client.sign_attestation_certificate(key, None).map_err(map_yubi)?;
+        let device =
+            retry_stale_connection(&self.serial, "get-opaque", || client.get_opaque(DEVICE_ATTESTATION_CERT_ID))
+                .map_err(device_certificate_unreadable)?;
+        let cert = retry_stale_connection(&self.serial, "sign-attestation-certificate", || {
+            client.sign_attestation_certificate(key, None)
+        })
+        .map_err(map_yubi)?;
         Ok(attestation_chain(cert.into_vec(), &device))
     }
 
@@ -308,7 +337,8 @@ impl HsmBackend for YubiHsm2Backend {
         let point = yubihsm::ecdh::UncompressedPoint::from_bytes(peer_pub.to_vec())
             .ok_or_else(|| RvError::ErrHsm("bad ECDH peer key".into()))?;
         let client = self.client()?;
-        let shared = client.derive_ecdh(key, point).map_err(map_yubi)?;
+        let shared = retry_stale_connection(&self.serial, "derive-ecdh", || client.derive_ecdh(key, point.clone()))
+            .map_err(map_yubi)?;
         // The shared secret is the X coordinate of the resulting point (32
         // bytes), matching the mock's `raw_secret_bytes`.
         Ok(Zeroizing::new(extract_x_coordinate(shared.as_ref())))
@@ -316,14 +346,19 @@ impl HsmBackend for YubiHsm2Backend {
 
     async fn get_random(&self, len: usize) -> Result<Zeroizing<Vec<u8>>, RvError> {
         let client = self.client()?;
-        Ok(Zeroizing::new(client.get_pseudo_random(len).map_err(map_yubi)?))
+        let random = retry_stale_connection(&self.serial, "get-pseudo-random", || client.get_pseudo_random(len));
+        Ok(Zeroizing::new(random.map_err(map_yubi)?))
     }
 
     /// `yubihsm` 0.42 sends `device-info` inside the client's session; the
     /// session-free probe through the HSM link arrives with T454 phase 3.
+    /// The probe interval outlives the connector's keep-alive, so a drop is
+    /// retried once ([`retry_stale_connection`]) before the pool sees it.
     async fn probe(&self) -> Result<String, RvError> {
         let client = self.client()?;
-        client.device_info().map(|i| i.serial_number.to_string()).map_err(map_yubi)
+        retry_stale_connection(&self.serial, "device-info", || client.device_info())
+            .map(|i| i.serial_number.to_string())
+            .map_err(map_yubi)
     }
 }
 
@@ -1010,5 +1045,105 @@ mod tests {
         assert!(err.contains("attestation_roots_file"), "{err}");
         let err = load_anchors(Some(Path::new("/nonexistent/yubico-attestation.pem"))).unwrap_err().to_string();
         assert!(err.contains("/nonexistent/yubico-attestation.pem"), "{err}");
+    }
+
+    /// The chain the crate builds when the connector closed the kept-alive
+    /// connection: a connector `ResponseError` under two protocol errors.
+    fn connector_drop() -> yubihsm::client::Error {
+        let connector = yubihsm::connector::ErrorKind::ResponseError.context("error reading response");
+        yubihsm::session::Error::from(yubihsm::connector::Error::from(connector)).into()
+    }
+
+    /// A status the device returned, wrapped as `Session::send_command` does.
+    fn device_refusal(kind: yubihsm::device::ErrorKind) -> yubihsm::client::Error {
+        yubihsm::session::Error::from(kind).into()
+    }
+
+    /// Runs `retry_stale_connection` over scripted outcomes, counting attempts;
+    /// an attempt beyond the script panics.
+    fn scripted(outcomes: Vec<Result<u32, yubihsm::client::Error>>) -> (Result<u32, yubihsm::client::Error>, usize) {
+        let mut outcomes = outcomes.into_iter();
+        let mut attempts = 0;
+        let result = retry_stale_connection("36470559", "test", || {
+            attempts += 1;
+            outcomes.next().expect("an attempt beyond the scripted outcomes")
+        });
+        (result, attempts)
+    }
+
+    #[test]
+    fn a_connector_drop_is_retried_once_on_a_fresh_connection() {
+        let drop = connector_drop();
+        assert_eq!(
+            drop.to_string(),
+            "protocol error: protocol error: bad response from connector: error reading response"
+        );
+        assert!(matches!(map_yubi(connector_drop()), RvError::ErrHsmTransport(_)));
+        let (result, attempts) = scripted(vec![Err(drop), Ok(7)]);
+        assert_eq!((result.unwrap(), attempts), (7, 2));
+    }
+
+    /// A connector that drops twice in a row is an outage the pool must see.
+    #[test]
+    fn a_second_connector_drop_is_a_transport_failure_and_never_a_third_attempt() {
+        let (result, attempts) = scripted(vec![Err(connector_drop()), Err(connector_drop()), Ok(7)]);
+        assert_eq!(attempts, 2);
+        let err = map_yubi(result.unwrap_err());
+        assert!(
+            matches!(&err, RvError::ErrHsmTransport(why) if why.contains("bad response from connector")),
+            "{err:?}"
+        );
+        // The retried attempt's own error keeps its class.
+        let (result, attempts) =
+            scripted(vec![Err(connector_drop()), Err(device_refusal(yubihsm::device::ErrorKind::SessionsFull))]);
+        assert_eq!(attempts, 2);
+        assert!(matches!(map_yubi(result.unwrap_err()), RvError::ErrHsmSessionsFull));
+    }
+
+    /// The pool-facing class of a mapped error.
+    fn class(e: &RvError) -> &'static str {
+        match e {
+            RvError::ErrHsm(_) => "device",
+            RvError::ErrHsmSessionsFull => "sessions-full",
+            RvError::ErrHsmTransport(_) => "transport",
+            RvError::ErrHsmContextMismatch => "context-mismatch",
+            _ => "other",
+        }
+    }
+
+    /// Includes a connector that refuses the connection: a real outage, not a
+    /// stale socket, so it fails over at once rather than being retried.
+    #[test]
+    fn errors_other_than_a_connector_drop_are_never_retried() {
+        use yubihsm::{client::ErrorKind, device::ErrorKind as Device};
+        let refused = yubihsm::connector::ErrorKind::ConnectionFailed.context("connection refused");
+        let cases: Vec<(yubihsm::client::Error, &str)> = vec![
+            (ErrorKind::AuthenticationError.into(), "device"),
+            (device_refusal(Device::AuthenticationFailed), "device"),
+            (device_refusal(Device::InsufficientPermissions), "device"),
+            (device_refusal(Device::SessionsFull), "sessions-full"),
+            (ErrorKind::ProtocolError.into(), "device"),
+            (yubihsm::connector::Error::from(refused).into(), "transport"),
+        ];
+        for (error, expected) in cases {
+            let text = error.to_string();
+            let (result, attempts) = scripted(vec![Err(error), Ok(7)]);
+            assert_eq!(attempts, 1, "{text} was retried");
+            let mapped = map_yubi(result.unwrap_err());
+            assert_eq!(class(&mapped), expected, "{text} mapped to {mapped:?}");
+        }
+    }
+
+    /// Regression: a blob whose tag does not verify stays a context mismatch,
+    /// attempted once, so a pool never fails over or replays on it.
+    #[test]
+    fn an_unwrap_tag_failure_is_never_retried() {
+        let (result, attempts) = scripted(vec![Err(device_refusal(yubihsm::device::ErrorKind::InvalidData)), Ok(7)]);
+        assert_eq!(attempts, 1);
+        assert!(matches!(map_unwrap(result.unwrap_err()), RvError::ErrHsmContextMismatch));
+        let (result, attempts) =
+            scripted(vec![Err(connector_drop()), Err(device_refusal(yubihsm::device::ErrorKind::InvalidData))]);
+        assert_eq!(attempts, 2);
+        assert!(matches!(map_unwrap(result.unwrap_err()), RvError::ErrHsmContextMismatch));
     }
 }
