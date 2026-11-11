@@ -112,3 +112,51 @@ describe("LoginPage banner after the session ended", () => {
     expect(screen.queryByText(/session expired/i)).not.toBeInTheDocument();
   });
 });
+
+describe("LoginPage FIDO2 sign-in against a server that requires machine identity", () => {
+  beforeEach(() => {
+    mockInvoke.mockReset();
+    useAuthStore.setState({ token: null, policies: [], isAuthenticated: false, sessionExpired: false, sessionEndReason: null });
+  });
+
+  // The requirement is read from the server at sign-in time, not taken from the
+  // connect-time snapshot, so a gate armed on a live connection is still seen.
+  it("reads the requirement and attempts the machine binding for a non-root user", async () => {
+    const { useVaultStore } = await import("../stores/vaultStore");
+    useVaultStore.setState({
+      mode: "Remote",
+      remoteProfile: { name: "p", address: "https://v:8200", require_machine_identity: false } as never,
+    });
+    mockInvoke.mockImplementation((cmd: string) => {
+      switch (cmd) {
+        case "list_sso_providers":
+          return Promise.resolve({ enabled: false, providers: [] });
+        case "fido2_native_login":
+          return Promise.resolve({ token: "hvs.user", policies: ["administrator", "default"] });
+        case "ferrogate_requirement":
+          return Promise.resolve({ advertised: true, require_machine_identity: true, expected_audience: "aud", mia_environment: "" });
+        case "ferrogate_machine_login":
+          return Promise.resolve({ authenticated: false, client_token: "", policies: [], message: "MIA unavailable" });
+        default:
+          return Promise.resolve(null);
+      }
+    });
+    const { LoginPage } = await import("../routes/LoginPage");
+    const userEvent = (await import("@testing-library/user-event")).default;
+    render(
+      <MemoryRouter>
+        <ToastProvider>
+          <LoginPage />
+        </ToastProvider>
+      </MemoryRouter>,
+    );
+    await userEvent.type(screen.getByPlaceholderText("alice"), "alice");
+    await userEvent.click(screen.getByRole("button", { name: /continue/i }));
+
+    expect(await screen.findByText(/MIA unavailable/)).toBeInTheDocument();
+    const called = mockInvoke.mock.calls.map((c) => c[0]);
+    expect(called).toContain("ferrogate_requirement");
+    expect(called).toContain("ferrogate_machine_login");
+    expect(useAuthStore.getState().isAuthenticated).toBe(false);
+  });
+});
