@@ -163,5 +163,5 @@ branches in separate repositories.
 
 ## Tracking
 
-New task under S111's milestone and a row in `ROADMAP.md`'s Specs table when
-approved; both repositories need their own changelog entries.
+Tracked as S119 (Specs table) and T483 (M8, next to T136–T138), both in
+`ROADMAP.md`. Both repositories need their own changelog entries.
