@@ -166,6 +166,60 @@ describe("FerroGatePage", () => {
     expect(screen.queryByText("CrlStale")).not.toBeInTheDocument();
   });
 
+  it("offers to request MIA registration when the app is not allowlisted, and files it only on confirm", async () => {
+    const user = userEvent.setup();
+    const refusal =
+      "MIA refused: this caller is not on the MIA's local allowlist (review the host's allowlist in CMIS)";
+    mockInvoke.mockImplementation((cmd: string) => {
+      switch (cmd) {
+        case "ferrogate_list_machines":
+          return Promise.resolve([]);
+        case "ferrogate_read_config":
+          return Promise.resolve({
+            trust_domain: "ferrogate.test",
+            expected_audience: "https://vault.example.com",
+            jwks_source: "static_jwks",
+            cmis_endpoint: "",
+            cmis_srv: "",
+            cmis_spki_pins: [],
+            static_jwks: "",
+            accept_svid: false,
+            clock_leeway_secs: 60,
+            default_token_ttl: 0,
+            cmis_tls_enable: true,
+            cmis_same_host: false,
+            jwks_refresh_secs: 60,
+            bootstrap_root_auto_approve: true,
+            bootstrap_policies: ["default"],
+          });
+        case "ferrogate_machine_login":
+          return Promise.reject({ message: refusal });
+        case "ferrogate_register_self":
+          return Promise.resolve({ state: "pending", retry_after: null, message: "Registration request submitted." });
+        default:
+          return Promise.resolve({});
+      }
+    });
+
+    const { FerroGatePage } = await import("../routes/FerroGatePage");
+    renderWithProviders(<FerroGatePage />);
+
+    await user.click(await screen.findByRole("button", { name: /machine login/i }));
+    const loginBtn = await screen.findByRole("button", { name: /^log in$/i });
+    await waitFor(() => expect(loginBtn).toBeEnabled());
+    await user.click(loginBtn);
+
+    // The prompt appears, and nothing has been filed yet.
+    const request = await screen.findByRole("button", { name: /request registration/i });
+    expect(mockInvoke).not.toHaveBeenCalledWith("ferrogate_register_self", expect.anything());
+
+    await user.click(request);
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("ferrogate_register_self", expect.objectContaining({ environment: null }));
+    });
+    await waitFor(() => expect(screen.getAllByText(/Registration request submitted/i).length).toBeGreaterThan(0));
+  });
+
   it("approves a machine via the modal", async () => {
     const user = userEvent.setup();
     const { FerroGatePage } = await import("../routes/FerroGatePage");

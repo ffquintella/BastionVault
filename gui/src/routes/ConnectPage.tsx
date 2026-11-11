@@ -214,6 +214,17 @@ export function ConnectPage() {
   } | null>(null);
   const [machineGateBusy, setMachineGateBusy] = useState(false);
 
+  // The connect-time machine login was refused by the local MIA as "not on the
+  // MIA's local allowlist". Offer to ask the MIA to register this application
+  // (its RegisterSelf request) — only on the operator's explicit confirm; it
+  // files an approval request and grants nothing by itself.
+  const [miaRegister, setMiaRegister] = useState<{
+    environment: string;
+    outcome: api.FerroGateRegistrationOutcome | null;
+  } | null>(null);
+  const [miaRegisterNote, setMiaRegisterNote] = useState("");
+  const [miaRegisterBusy, setMiaRegisterBusy] = useState(false);
+
   // Cloud add-form fields.
   const [cloudProvider, setCloudProvider] = useState<CloudProvider>("s3");
   const [cloudBucket, setCloudBucket] = useState("");
@@ -451,8 +462,13 @@ export function ConnectPage() {
       // enrolment decision. Surface it and stop, but expose the root-token
       // break-glass path: the server exempts root tokens from the machine
       // requirement precisely so recovery is possible when attestation breaks.
-      setError(`Machine identity check failed: ${extractError(e)}`);
+      const msg = extractError(e);
+      setError(`Machine identity check failed: ${msg}`);
       setGateBreakGlass(true);
+      if (api.isMiaNotAllowlisted(msg)) {
+        setMiaRegisterNote("");
+        setMiaRegister({ environment, outcome: null });
+      }
       return true;
     }
     if (r.authenticated) return false; // machine approved → proceed
@@ -472,6 +488,20 @@ export function ConnectPage() {
       message: r.message,
     });
     return true;
+  }
+
+  /** Ask the local MIA to register this application (confirmed in the modal). */
+  async function requestMiaRegistration() {
+    if (!miaRegister) return;
+    setMiaRegisterBusy(true);
+    try {
+      const outcome = await api.ferrogateRegisterSelf("", miaRegister.environment, miaRegisterNote);
+      setMiaRegister({ ...miaRegister, outcome });
+    } catch (e) {
+      toast("error", extractError(e));
+    } finally {
+      setMiaRegisterBusy(false);
+    }
   }
 
   /** Continue the connect flow once the machine gate is satisfied: restore a
@@ -2030,6 +2060,54 @@ export function ConnectPage() {
             </>
           )}
         </div>
+      </Modal>
+
+      {/* The local MIA does not know this application: offer to request
+          registration (the MIA files it for administrator approval). */}
+      <Modal
+        open={miaRegister !== null}
+        onClose={() => setMiaRegister(null)}
+        title="Application not registered with the MIA"
+        size="md"
+        actions={
+          miaRegister?.outcome ? (
+            <Button variant="ghost" onClick={() => setMiaRegister(null)}>
+              Close
+            </Button>
+          ) : (
+            <>
+              <Button variant="ghost" onClick={() => setMiaRegister(null)}>
+                Not now
+              </Button>
+              <Button onClick={() => void requestMiaRegistration()} loading={miaRegisterBusy}>
+                {miaRegisterBusy ? "Requesting…" : "Request registration"}
+              </Button>
+            </>
+          )
+        }
+      >
+        {miaRegister && (
+          <div className="space-y-3 text-sm">
+            {miaRegister.outcome ? (
+              <p className="text-[var(--color-text-muted)]">{miaRegister.outcome.message}</p>
+            ) : (
+              <>
+                <p className="text-[var(--color-text-muted)]">
+                  The local MIA refused the machine-identity check because this application is not on its
+                  allowlist. Do you want to ask the MIA to register it? The request is sent to CMIS for an
+                  administrator to approve; nothing is allowed until then. Once it is approved, connect again.
+                </p>
+                <Input
+                  label="Note for the approver (optional)"
+                  value={miaRegisterNote}
+                  onChange={(e) => setMiaRegisterNote(e.target.value)}
+                  maxLength={200}
+                  placeholder="e.g. BastionVault desktop on my workstation"
+                />
+              </>
+            )}
+          </div>
+        )}
       </Modal>
 
       {/* Machine-identity gate. `pending` offers enrolment + recheck; an

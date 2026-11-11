@@ -443,6 +443,20 @@ pub async fn build_autoconfig(
 /// Largest frame we will read or write (matches the MIA's `MAX_FRAME_LEN`).
 const MAX_FRAME_LEN: usize = 64 * 1024;
 
+/// Operator-facing text of a `PermissionDenied` refusal. Shared with
+/// [`is_not_allowlisted_error`] so the GUI/CLI recognise the refusal (and offer
+/// to request registration) from the very string `describe` produces.
+pub const NOT_ALLOWLISTED_TEXT: &str =
+    "this caller is not on the MIA's local allowlist (review the host's allowlist in CMIS)";
+
+/// Whether `err` (from [`request_child_token`]) is the MIA's "caller is not on
+/// the allowlist" refusal — the one case where asking the MIA to register this
+/// application ([`register_self`]) can help.
+#[must_use]
+pub fn is_not_allowlisted_error(err: &str) -> bool {
+    err.contains(NOT_ALLOWLISTED_TEXT)
+}
+
 /// A token request to the MIA. Mirrors `mia::helper::proto::HelperReq`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HelperReq {
@@ -475,9 +489,7 @@ impl ErrorCode {
     /// look next (the raw opcode alone is not actionable from the GUI/CLI).
     pub fn describe(self) -> &'static str {
         match self {
-            Self::PermissionDenied => {
-                "this caller is not on the MIA's local allowlist (review the host's allowlist in CMIS)"
-            }
+            Self::PermissionDenied => NOT_ALLOWLISTED_TEXT,
             Self::NoHostSvid => {
                 "the MIA has no host SVID yet (host attestation to CMIS has not completed; check the MIA log)"
             }
@@ -592,6 +604,208 @@ pub fn request_child_token(
     }
 }
 
+// ── registration (F19, protocol v2) ─────────────────────────────────────
+
+/// Length of every 128-bit id on the registration wire.
+pub const REG_ID_LEN: usize = 16;
+
+/// Longest requester note the MIA accepts, in characters.
+pub const MAX_REASON_CHARS: usize = 200;
+
+/// A v2 request envelope. Mirrors `mia_helper_proto::HelperFrame`; only the
+/// `RegisterSelf` operation is needed here.
+#[derive(Debug, Serialize)]
+struct HelperFrame {
+    v: u8,
+    #[serde(flatten)]
+    op: RegisterSelfOp,
+}
+
+/// `HelperOp::RegisterSelf`, internally tagged by `kind` like the original.
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind")]
+enum RegisterSelfOp {
+    RegisterSelf { client_request_id: [u8; REG_ID_LEN], reason: Option<String> },
+}
+
+/// Where a local registration request stands. Mirrors `mia_helper_proto::LocalState`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalState {
+    Queued,
+    Pending,
+    Approved,
+    AutoApproved,
+    Denied,
+    Expired,
+    Refused,
+}
+
+/// Refusal opcodes of the registration operations. Mirrors `mia_helper_proto::RegErrorCode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RegErrorCode {
+    PermissionDenied,
+    RegistrationDisabled,
+    ServerUnsupported,
+    FileNotEligible,
+    FileTooLarge,
+    RateLimited,
+    MalformedRequest,
+    Internal,
+}
+
+impl RegErrorCode {
+    fn describe(self) -> &'static str {
+        match self {
+            Self::PermissionDenied => "the MIA could not authenticate this caller",
+            Self::RegistrationDisabled => "registration is switched off on this MIA (`registration.enable`)",
+            Self::ServerUnsupported => "this MIA or its CMIS does not support registration",
+            Self::FileNotEligible | Self::FileTooLarge => "this application's binary cannot be registered",
+            Self::RateLimited => "too many registration requests",
+            Self::MalformedRequest => "it could not parse the request (client/MIA version mismatch?)",
+            Self::Internal => "it hit an internal error (check the MIA log)",
+        }
+    }
+}
+
+/// The MIA's reply to a registration operation. Mirrors `mia_helper_proto::RegistrationResp`
+/// (externally tagged). `Status` carries per-request detail this client does not use, so
+/// it is kept opaque.
+#[derive(Debug, Deserialize)]
+enum RegistrationResp {
+    Submitted {
+        #[allow(dead_code)]
+        request_id: Option<[u8; REG_ID_LEN]>,
+        #[allow(dead_code)]
+        local_id: [u8; REG_ID_LEN],
+        state: LocalState,
+        #[allow(dead_code)]
+        revision: Option<u32>,
+        #[allow(dead_code)]
+        approval_id: Option<[u8; REG_ID_LEN]>,
+        retry_after: Option<u32>,
+    },
+    AlreadyApproved {
+        #[allow(dead_code)]
+        approval_id: [u8; REG_ID_LEN],
+    },
+    Status(#[allow(dead_code)] ciborium::value::Value),
+    Error {
+        code: RegErrorCode,
+        retry_after: Option<u32>,
+    },
+}
+
+/// Outcome of [`register_self`], classified so the UI can branch without parsing text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RegistrationOutcome {
+    /// `queued` (CMIS unreachable / legacy mode — held in the MIA outbox), `pending`
+    /// (awaiting an administrator), `approved` (retry the login), `denied`, `expired`
+    /// or `refused`.
+    pub state: String,
+    /// Seconds to wait before retrying, when the MIA suggested one.
+    pub retry_after: Option<u32>,
+    /// Operator-facing sentence describing what happens next.
+    pub message: String,
+}
+
+impl RegistrationOutcome {
+    fn from_state(state: LocalState, retry_after: Option<u32>) -> Self {
+        let (name, message) = match state {
+            LocalState::Queued => (
+                "queued",
+                "Registration recorded by the MIA and queued; it is submitted to CMIS once CMIS is reachable and accepting app requests. An administrator must then approve it.",
+            ),
+            LocalState::Pending => (
+                "pending",
+                "Registration request submitted. An administrator must approve it in CMIS; then log in again.",
+            ),
+            LocalState::Approved | LocalState::AutoApproved => (
+                "approved",
+                "This application is already approved. The MIA is syncing its allowlist; log in again shortly.",
+            ),
+            LocalState::Denied => ("denied", "An administrator denied the registration request."),
+            LocalState::Expired => ("expired", "The registration request expired before an administrator decided."),
+            LocalState::Refused => ("refused", "CMIS refused the registration request."),
+        };
+        Self { state: name.to_string(), retry_after, message: message.to_string() }
+    }
+}
+
+/// Ask the MIA to register the calling application (the F19 `RegisterSelf` helper operation).
+///
+/// This only files a request: the MIA identifies the caller from the kernel-attested peer
+/// credentials and queues it for administrator approval. It never adds anything to the
+/// allowlist itself, so a following token request stays denied until an administrator approves.
+pub fn register_self(socket_path: &str, reason: Option<&str>) -> Result<RegistrationOutcome, String> {
+    if let Some(r) = reason {
+        if r.chars().count() > MAX_REASON_CHARS {
+            return Err(format!("registration note is longer than {MAX_REASON_CHARS} characters"));
+        }
+    }
+    let frame = HelperFrame {
+        v: 2,
+        op: RegisterSelfOp::RegisterSelf { client_request_id: uuid_v4_bytes(), reason: reason.map(str::to_string) },
+    };
+    let resp: RegistrationResp = helper_exchange(socket_path, &frame, true)?;
+    match resp {
+        RegistrationResp::Submitted { state, retry_after, .. } => {
+            Ok(RegistrationOutcome::from_state(state, retry_after))
+        }
+        RegistrationResp::AlreadyApproved { .. } => Ok(RegistrationOutcome::from_state(LocalState::Approved, None)),
+        RegistrationResp::Status(_) => Err("MIA registration: unexpected status reply".to_string()),
+        RegistrationResp::Error { code, retry_after } => {
+            let hint = retry_after.map(|s| format!(" (retry after {s}s)")).unwrap_or_default();
+            Err(format!("MIA registration refused: {}{hint}", code.describe()))
+        }
+    }
+}
+
+/// A fresh random UUIDv4 idempotency id.
+fn uuid_v4_bytes() -> [u8; REG_ID_LEN] {
+    let mut id: [u8; REG_ID_LEN] = rand::random();
+    id[6] = (id[6] & 0x0f) | 0x40;
+    id[8] = (id[8] & 0x3f) | 0x80;
+    id
+}
+
+/// One framed CBOR request/response exchange over the helper socket. `v2` marks a
+/// request an older MIA cannot decode: such an agent closes the connection without a reply.
+fn helper_exchange<Q: Serialize, A: serde::de::DeserializeOwned>(
+    socket_path: &str,
+    request: &Q,
+    v2: bool,
+) -> Result<A, String> {
+    let mut stream = UnixStream::connect(socket_path).map_err(|e| {
+        format!("ferrogate_mia_unavailable: cannot connect to the MIA helper socket at {socket_path}: {e}")
+    })?;
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
+
+    let mut body = Vec::with_capacity(128);
+    ciborium::into_writer(request, &mut body).map_err(|e| format!("cbor encode: {e}"))?;
+    let len = u32::try_from(body.len()).map_err(|_| "request too large".to_string())?;
+    stream.write_all(&len.to_be_bytes()).map_err(|e| format!("write: {e}"))?;
+    stream.write_all(&body).map_err(|e| format!("write: {e}"))?;
+    stream.flush().map_err(|e| format!("flush: {e}"))?;
+
+    let mut len_buf = [0u8; 4];
+    if let Err(e) = stream.read_exact(&mut len_buf) {
+        if v2 && e.kind() == std::io::ErrorKind::UnexpectedEof {
+            return Err("this MIA is too old to support registration requests (upgrade the MIA)".to_string());
+        }
+        return Err(format!("read: {e}"));
+    }
+    let rlen = u32::from_be_bytes(len_buf) as usize;
+    if rlen > MAX_FRAME_LEN {
+        return Err(format!("MIA response frame too large: {rlen} bytes"));
+    }
+    let mut rbody = vec![0u8; rlen];
+    stream.read_exact(&mut rbody).map_err(|e| format!("read: {e}"))?;
+    ciborium::from_reader(&rbody[..]).map_err(|e| format!("cbor decode: {e}"))
+}
+
 /// Decode (without verifying) the claims segment of a compact JWS and return
 /// the requested string field — used by `whoami` to read the local SPIFFE id
 /// from a freshly minted token.
@@ -606,6 +820,43 @@ pub fn jws_claim_str(jws: &str, field: &str) -> Option<String> {
 mod tests {
     use super::*;
     use ferro_child_verify::{verify_dpop_proof, DpopExpectation};
+
+    #[test]
+    fn not_allowlisted_refusal_is_recognised() {
+        let msg = format!("MIA refused: {}", ErrorCode::PermissionDenied.describe());
+        assert!(is_not_allowlisted_error(&msg));
+        assert!(!is_not_allowlisted_error(&format!("MIA refused: {}", ErrorCode::CrlStale.describe())));
+    }
+
+    #[test]
+    fn register_self_frame_matches_helper_proto_shape() {
+        // The MIA's `HelperFrame` is `{v: 2, op: {kind: "RegisterSelf", ...}}`
+        // with `deny_unknown_fields`; decode our bytes into a generic value and
+        // check the exact layout.
+        let frame = HelperFrame {
+            v: 2,
+            op: RegisterSelfOp::RegisterSelf { client_request_id: [7; REG_ID_LEN], reason: Some("why".into()) },
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&frame, &mut buf).unwrap();
+        let v: ciborium::value::Value = ciborium::from_reader(&buf[..]).unwrap();
+        let map = v.as_map().expect("map").iter().map(|(k, _)| k.as_text().unwrap().to_string()).collect::<Vec<_>>();
+        assert_eq!(map, vec!["v", "kind", "client_request_id", "reason"]);
+    }
+
+    #[test]
+    fn uuid_v4_bytes_has_version_and_variant() {
+        let id = uuid_v4_bytes();
+        assert_eq!(id[6] >> 4, 4);
+        assert_eq!(id[8] >> 6, 0b10);
+    }
+
+    #[test]
+    fn registration_outcome_states() {
+        let o = RegistrationOutcome::from_state(LocalState::Queued, Some(30));
+        assert_eq!((o.state.as_str(), o.retry_after), ("queued", Some(30)));
+        assert_eq!(RegistrationOutcome::from_state(LocalState::AutoApproved, None).state, "approved");
+    }
 
     #[test]
     fn dpop_proof_verifies_against_ferrogate_verifier() {

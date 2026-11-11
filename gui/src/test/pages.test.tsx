@@ -364,6 +364,59 @@ describe("ConnectPage", () => {
     await waitFor(() => expect(calls).toContain("ferrogate_machine_login"));
   });
 
+  it("offers to request MIA registration when the connect-time gate is refused as not allowlisted", async () => {
+    const calls: string[] = [];
+    const refusal =
+      "MIA refused: this caller is not on the MIA's local allowlist (review the host's allowlist in CMIS)";
+    mockInvoke.mockImplementation((cmd: string) => {
+      calls.push(cmd);
+      switch (cmd) {
+        case "list_vault_profiles":
+          return Promise.resolve({
+            vaults: [
+              {
+                id: "v1",
+                name: "Prod",
+                spec: {
+                  kind: "remote",
+                  profile: { name: "Prod", address: "https://vault.example.com:8200", tls_skip_verify: false },
+                },
+              },
+            ],
+            lastUsedId: null,
+          });
+        case "connect_remote":
+        case "get_selected_node":
+        case "set_last_used_vault":
+          return Promise.resolve(null);
+        case "ferrogate_requirement":
+          return Promise.resolve({
+            require_machine_identity: true,
+            expected_audience: "https://vault.example.com:8200",
+            trust_domain: "ferrogate.test",
+          });
+        case "ferrogate_machine_login":
+          return Promise.reject({ message: refusal });
+        case "ferrogate_register_self":
+          return Promise.resolve({ state: "pending", retry_after: null, message: "Registration request submitted." });
+        default:
+          return Promise.reject(new Error(`unmocked: ${cmd}`));
+      }
+    });
+    const { ConnectPage } = await import("../routes/ConnectPage");
+    renderWithProviders(<ConnectPage />);
+
+    await waitFor(() => expect(screen.getByText("Prod")).toBeInTheDocument());
+    await userEvent.click(screen.getByText("Prod"));
+
+    // The prompt appears, and nothing is filed until the operator confirms.
+    const request = await screen.findByRole("button", { name: /request registration/i });
+    expect(calls).not.toContain("ferrogate_register_self");
+    await userEvent.click(request);
+    await waitFor(() => expect(calls).toContain("ferrogate_register_self"));
+    await waitFor(() => expect(screen.getAllByText(/Registration request submitted/i).length).toBeGreaterThan(0));
+  });
+
   it("skips the machine gate when the server does not require it", async () => {
     const calls: string[] = [];
     mockInvoke.mockImplementation((cmd: string) => {

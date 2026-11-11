@@ -609,10 +609,16 @@ function MachineLoginPanel({
   const [audience, setAudience] = useState(expectedAudience);
   const [mount, setMount] = useState("ferrogate");
   const [ttl, setTtl] = useState("300");
-  const [busy, setBusy] = useState<"" | "whoami" | "status" | "login">("");
+  const [busy, setBusy] = useState<"" | "whoami" | "status" | "login" | "register">("");
   const [spiffe, setSpiffe] = useState("");
   const [statusJson, setStatusJson] = useState("");
   const [result, setResult] = useState<FerroGateLoginResult | null>(null);
+  // The MIA refused with "not on the local allowlist": offer to file a
+  // registration request with it (the MIA's RegisterSelf) instead of just
+  // showing the error. Filing only queues an admin approval; it never grants.
+  const [notAllowlisted, setNotAllowlisted] = useState(false);
+  const [regNote, setRegNote] = useState("");
+  const [regOutcome, setRegOutcome] = useState<api.FerroGateRegistrationOutcome | null>(null);
 
   // Prefill the socket field with the MIA path for the selected environment
   // (blank ⇒ the default `mia.toml`), so the operator does not have to know the
@@ -628,14 +634,37 @@ function MachineLoginPanel({
 
   const ttlNum = parseInt(ttl || "0", 10) || 300;
 
+  // Show a MIA/login error; when it is the allowlist refusal, also open the
+  // "request registration?" prompt.
+  function reportMiaError(e: unknown) {
+    const msg = extractError(e);
+    setNotAllowlisted(api.isMiaNotAllowlisted(msg));
+    setRegOutcome(null);
+    toast("error", msg);
+  }
+
+  async function doRegister() {
+    setBusy("register");
+    try {
+      const o = await api.ferrogateRegisterSelf(socket, environment, regNote);
+      setRegOutcome(o);
+      toast(o.state === "denied" || o.state === "refused" ? "error" : "success", o.message);
+    } catch (e) {
+      toast("error", extractError(e));
+    } finally {
+      setBusy("");
+    }
+  }
+
   async function doWhoami() {
     setBusy("whoami");
+    setNotAllowlisted(false);
     try {
       const id = await api.ferrogateWhoami(socket);
       setSpiffe(id);
       toast("success", "MIA reachable");
     } catch (e) {
-      toast("error", extractError(e));
+      reportMiaError(e);
     } finally {
       setBusy("");
     }
@@ -643,12 +672,13 @@ function MachineLoginPanel({
 
   async function doStatus() {
     setBusy("status");
+    setNotAllowlisted(false);
     try {
       const s = await api.ferrogateMachineStatus(audience, socket, mount, ttlNum);
       setStatusJson(JSON.stringify(s, null, 2));
     } catch (e) {
       setStatusJson("");
-      toast("error", extractError(e));
+      reportMiaError(e);
     } finally {
       setBusy("");
     }
@@ -656,6 +686,8 @@ function MachineLoginPanel({
 
   async function doLogin() {
     setBusy("login");
+    setNotAllowlisted(false);
+    setRegOutcome(null);
     try {
       const r = await api.ferrogateMachineLogin(audience, socket, mount, ttlNum);
       setResult(r);
@@ -669,7 +701,7 @@ function MachineLoginPanel({
       }
     } catch (e) {
       setResult(null);
-      toast("error", extractError(e));
+      reportMiaError(e);
     } finally {
       setBusy("");
     }
@@ -754,6 +786,43 @@ function MachineLoginPanel({
             <div className="mb-1 text-sm text-[var(--color-text-muted)]">Enrolment status</div>
             <pre className="overflow-x-auto rounded bg-[var(--color-bg-subtle)] p-3 text-xs">{statusJson}</pre>
           </div>
+        )}
+
+        {notAllowlisted && (
+          <Card>
+            <div className="space-y-3">
+              <div className="flex items-center gap-2">
+                <Badge variant="warning" label="not registered" />
+                <span className="text-sm font-medium">This application is not registered with the MIA</span>
+              </div>
+              {regOutcome ? (
+                <p className="text-sm text-[var(--color-text-muted)]">{regOutcome.message}</p>
+              ) : (
+                <>
+                  <p className="text-sm text-[var(--color-text-muted)]">
+                    The local MIA refused because this application is not on its allowlist. Do you want to ask
+                    the MIA to register it? The request is sent to CMIS for an administrator to approve; nothing
+                    is allowed until then, and you can log in again once it is approved.
+                  </p>
+                  <Input
+                    label="Note for the approver (optional)"
+                    value={regNote}
+                    onChange={(e) => setRegNote(e.target.value)}
+                    maxLength={200}
+                    placeholder="e.g. BastionVault desktop on my workstation"
+                  />
+                  <div className="flex flex-wrap justify-end gap-2">
+                    <Button variant="secondary" onClick={() => setNotAllowlisted(false)} disabled={!!busy}>
+                      Not now
+                    </Button>
+                    <Button onClick={() => void doRegister()} disabled={!!busy}>
+                      {busy === "register" ? "Requesting…" : "Request registration"}
+                    </Button>
+                  </div>
+                </>
+              )}
+            </div>
+          </Card>
         )}
 
         {result?.authenticated && (

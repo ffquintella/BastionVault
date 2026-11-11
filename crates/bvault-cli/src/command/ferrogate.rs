@@ -9,6 +9,9 @@
 //!   for applications that exec this at startup.
 //! - `status` — report this machine's enrolment status without minting a vault
 //!   token (verifies the FerroGate token server-side).
+//! - `register` — ask the local MIA to register this application so an
+//!   administrator can approve it (also offered interactively when a login is
+//!   refused because the app is not on the MIA's allowlist).
 //! - `whoami` — print this host's SPIFFE id (read locally from a freshly minted
 //!   token; no server call).
 
@@ -56,6 +59,8 @@ pub enum Commands {
     Token(Token),
     /// Request self-enrolment of this machine (unauthenticated; awaits admin approval).
     Enroll(Enroll),
+    /// Ask the local MIA to register this application for administrator approval.
+    Register(Register),
     /// Report this machine's enrolment status.
     Status(Status),
     /// Print this host's SPIFFE id (local; no server call).
@@ -81,14 +86,46 @@ fn resolve_socket(socket: Option<&str>, environment: Option<&str>) -> Result<Str
 /// (`token` + `dpop` proof) for the mount's `login` / `status` endpoints.
 fn mia_login_body(socket: &str, audience: &str, ttl: u32) -> Result<Map<String, Value>, RvError> {
     let dpop = DpopKey::generate();
-    let child =
-        ferrogate_mia::request_child_token(socket, audience, &dpop.jkt(), ttl).map_err(|e| bv_error_string!(e))?;
+    let child = match ferrogate_mia::request_child_token(socket, audience, &dpop.jkt(), ttl) {
+        Ok(c) => c,
+        Err(e) if ferrogate_mia::is_not_allowlisted_error(&e) => {
+            offer_registration(socket, &e);
+            return Err(bv_error_string!(e));
+        }
+        Err(e) => return Err(bv_error_string!(e)),
+    };
     let proof = dpop.proof("POST", audience);
 
     let mut body = Map::new();
     body.insert("token".into(), Value::String(child.jws));
     body.insert("dpop".into(), Value::String(proof));
     Ok(body)
+}
+
+/// The MIA refused because this application is not on its allowlist. Tell the
+/// operator, and — only on an interactive terminal, after an explicit "y" —
+/// ask the MIA to register it. The refusal itself is never changed: filing a
+/// request grants nothing until an administrator approves it in CMIS.
+fn offer_registration(socket: &str, refusal: &str) {
+    use std::io::{BufRead, IsTerminal, Write};
+
+    eprintln!("{refusal}");
+    eprintln!("This application is not registered with the MIA.");
+    if !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
+        eprintln!("Run `bvault ferrogate register` to request registration for administrator approval.");
+        return;
+    }
+    eprint!("Request registration with the MIA now? [y/N] ");
+    let _ = std::io::stderr().flush();
+    let mut line = String::new();
+    if std::io::stdin().lock().read_line(&mut line).is_err() || !matches!(line.trim(), "y" | "Y" | "yes" | "YES") {
+        eprintln!("Not requested. Run `bvault ferrogate register` later to request it.");
+        return;
+    }
+    match ferrogate_mia::register_self(socket, None) {
+        Ok(o) => eprintln!("{}", o.message),
+        Err(e) => eprintln!("{e}"),
+    }
 }
 
 /// Pull a human-readable error out of a login response that minted no token.
@@ -112,6 +149,7 @@ impl Ferrogate {
             Commands::Login(c) => c.execute(),
             Commands::Token(c) => c.execute(),
             Commands::Enroll(c) => c.execute(),
+            Commands::Register(c) => c.execute(),
             Commands::Status(c) => c.execute(),
             Commands::Whoami(c) => c.execute(),
             Commands::Autoconfig(c) => c.execute(),
@@ -386,6 +424,45 @@ impl CommandExecutor for Enroll {
         } else {
             resp.print_debug_info();
         }
+        Ok(())
+    }
+}
+
+// ── register ─────────────────────────────────────────────────────────────
+
+#[derive(Parser)]
+#[command(
+    about = "Ask the local MIA to register this application for administrator approval",
+    long_about = r#"Ask the local FerroGate MIA to register this application.
+
+Use this when `bvault ferrogate login` is refused with "this caller is not on the
+MIA's local allowlist". The MIA identifies this binary from the operating system
+and files a request with CMIS for an administrator to approve. Nothing is allowed
+until it is approved; then run `bvault ferrogate login` again.
+
+    $ bvault ferrogate register --reason "BastionVault CLI on build host 12""#
+)]
+pub struct Register {
+    /// Note shown to the approving administrator (max 200 characters; no personal data).
+    #[arg(long)]
+    reason: Option<String>,
+
+    /// MIA helper socket path. Defaults to the installed MIA's configured socket.
+    #[arg(long)]
+    socket: Option<String>,
+
+    /// MIA environment selector (`mia-<env>.toml`). Ignored when `--socket` is given.
+    #[arg(long)]
+    environment: Option<String>,
+}
+
+impl CommandExecutor for Register {
+    fn main(&self) -> Result<(), RvError> {
+        let socket = resolve_socket(self.socket.as_deref(), self.environment.as_deref())?;
+        let outcome =
+            ferrogate_mia::register_self(&socket, self.reason.as_deref().map(str::trim).filter(|r| !r.is_empty()))
+                .map_err(|e| bv_error_string!(e))?;
+        println!("{}: {}", outcome.state, outcome.message);
         Ok(())
     }
 }

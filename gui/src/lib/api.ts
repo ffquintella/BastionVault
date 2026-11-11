@@ -1190,6 +1190,22 @@ export const ferrogateMachineStatus = (
     environment: environment?.trim() || null,
   });
 export const ferrogateWhoami = (socket: string) => invoke<string>("ferrogate_whoami", { socket });
+/** What the MIA did with a self-registration request (snake_case from Rust). */
+export type FerroGateRegistrationOutcome = {
+  /** queued | pending | approved | denied | expired | refused */
+  state: string;
+  retry_after: number | null;
+  message: string;
+};
+/** Ask the local MIA to register this application for administrator approval (MIA `RegisterSelf`). */
+export const ferrogateRegisterSelf = (socket: string, environment?: string, reason?: string) =>
+  invoke<FerroGateRegistrationOutcome>("ferrogate_register_self", {
+    socket,
+    environment: environment?.trim() || null,
+    reason: reason?.trim() || null,
+  });
+/** Whether a MIA error is the "caller is not on the MIA's local allowlist" refusal. */
+export const isMiaNotAllowlisted = (message: string) => message.includes("not on the MIA's local allowlist");
 
 // Identity groups
 export const listGroups = (kind: GroupKind) =>

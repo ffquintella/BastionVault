@@ -593,6 +593,37 @@ pub async fn ferrogate_whoami(socket: String) -> CmdResult<String> {
     Ok(spiffe)
 }
 
+/// Ask the local MIA to register this application (the MIA's `RegisterSelf`
+/// helper operation), for when a login was refused because the caller is not on
+/// the MIA's allowlist. This only files a request for an administrator to
+/// approve in CMIS — it never alters the allowlist, so the login stays refused
+/// until approval. The GUI calls it only after the operator confirms.
+#[cfg(unix)]
+#[tauri::command]
+pub async fn ferrogate_register_self(
+    socket: String,
+    environment: Option<String>,
+    reason: Option<String>,
+) -> CmdResult<bastion_vault::modules::credential::ferrogate::mia::RegistrationOutcome> {
+    use bastion_vault::modules::credential::ferrogate::mia;
+    let socket = norm_socket(socket, environment)?;
+    let reason = reason.map(|r| r.trim().to_string()).filter(|r| !r.is_empty());
+    tokio::task::spawn_blocking(move || mia::register_self(&socket, reason.as_deref()))
+        .await
+        .map_err(|e| format!("MIA worker thread failed: {e}"))?
+        .map_err(Into::into)
+}
+
+#[cfg(not(unix))]
+#[tauri::command]
+pub async fn ferrogate_register_self(
+    _socket: String,
+    _environment: Option<String>,
+    _reason: Option<String>,
+) -> CmdResult<Value> {
+    Err("FerroGate MIA registration is only available on Unix".into())
+}
+
 // On non-Unix targets the MIA helper socket does not exist (Windows named-pipe
 // support is deferred). Provide stubs so the Tauri command table is identical
 // across platforms and the GUI gets a clear error instead of a missing command.

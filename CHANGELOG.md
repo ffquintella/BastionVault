@@ -58,6 +58,11 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### FerroGate: request MIA registration when the app is not allowlisted
+
+- **Offer to register this application with the MIA when a machine login is refused as "not on the MIA's local allowlist"** (T51)
+  -- the Machine Login tab and the connect-time machine gate (Server profile) now show a "not registered" prompt with an optional note for the approver and **Request registration** / **Not now** buttons, instead of only an error toast. Confirming sends the MIA's `RegisterSelf` helper request (protocol v2, mirrored in `bv-auth-ferrogate`'s `mia::register_self`); the MIA queues it to CMIS for an administrator to approve, and the refusal itself is unchanged until approval. `bvault ferrogate login|token|status` ask on an interactive terminal (default no) and otherwise print the hint, and the new `bvault ferrogate register [--reason]` files the request directly. Requires a MIA with `registration.enable`; an older MIA reports "too old to support registration". Checked with unit tests (frame shape, refusal detection) and GUI tests for both screens; not run against a live MIA.
+
 #### Storage: Raft timing on a lossy link
 
 - **Set the Raft heartbeat and election timeouts of a hiqlite cluster in the `storage "hiqlite"` block** (T479, S117, S114)

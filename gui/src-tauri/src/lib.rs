@@ -512,6 +512,7 @@ pub fn run() {
             commands::ferrogate::ferrogate_machine_login,
             commands::ferrogate::ferrogate_machine_status,
             commands::ferrogate::ferrogate_whoami,
+            commands::ferrogate::ferrogate_register_self,
             // MCP Access: vault-side app registry + local pairing store.
             commands::mcp::mcp_list_apps,
             commands::mcp::mcp_write_app,
