@@ -1608,7 +1608,7 @@ dependencies = [
 
 [[package]]
 name = "bv-auth-ferrogate"
-version = "0.41.3"
+version = "0.41.4"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -2433,7 +2433,7 @@ dependencies = [
 
 [[package]]
 name = "bv-storage"
-version = "0.41.7"
+version = "0.41.8"
 dependencies = [
  "aes-gcm 0.10.3",
  "arc-swap",
@@ -2473,7 +2473,7 @@ dependencies = [
 
 [[package]]
 name = "bv-utils"
-version = "0.41.5"
+version = "0.41.6"
 dependencies = [
  "as-any",
  "base64 0.22.1",
