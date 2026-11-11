@@ -3,6 +3,10 @@ import * as api from "../lib/api";
 import { useAuthStore } from "../stores/authStore";
 import { useToast } from "./ui";
 
+/** Shown when the server refused the session for lack of a machine-bound token. */
+export const MACHINE_IDENTITY_MESSAGE =
+  "This server now requires machine identity, and your session is not machine-bound. Sign in again to bind this machine.";
+
 /** How often to probe the active token while authenticated. */
 const POLL_INTERVAL_MS = 30_000;
 /** Warn the operator once when the token has less than this left. */
@@ -57,7 +61,21 @@ export function SessionMonitor() {
         // Ignore transient failures: only act on a definitive answer
         // that the token no longer authenticates.
         if (status.reachable && !status.valid) {
-          expireSession();
+          // A refusal is not necessarily an expiry. When the server requires
+          // machine identity it refuses every token that is not machine-bound,
+          // and `token_status` cannot tell that apart from a dead token. Ask
+          // the server before blaming the clock. Only a positive answer
+          // changes the message: an unanswered read (`advertised: false`)
+          // keeps the plain-expiry behaviour rather than claiming a cause we
+          // did not observe.
+          const req = await api.ferrogateRequirement().catch(() => null);
+          if (cancelled) return;
+          if (req?.advertised && req.require_machine_identity) {
+            expireSession("machine-identity");
+            toast("error", MACHINE_IDENTITY_MESSAGE);
+            return;
+          }
+          expireSession("expired");
           toast("error", "Your session has expired. Please sign in again.");
           return;
         }

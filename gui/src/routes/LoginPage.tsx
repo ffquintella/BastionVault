@@ -5,6 +5,7 @@ import { open as shellOpen } from "@tauri-apps/plugin-shell";
 import { AuthLayout } from "../components/AuthLayout";
 import { Modal } from "../components/ui";
 import { UnsealModal } from "../components/UnsealModal";
+import { MACHINE_IDENTITY_MESSAGE } from "../components/SessionMonitor";
 import { useAuthStore } from "../stores/authStore";
 import { useVaultStore } from "../stores/vaultStore";
 import { useNamespaceStore } from "../stores/namespaceStore";
@@ -31,6 +32,7 @@ export function LoginPage() {
   const breakGlass = searchParams.get("breakglass") === "1";
   const setAuth = useAuthStore((s) => s.setAuth);
   const sessionExpired = useAuthStore((s) => s.sessionExpired);
+  const sessionEndReason = useAuthStore((s) => s.sessionEndReason);
   const loadEntity = useAuthStore((s) => s.loadEntity);
   const rememberSession = useAuthStore((s) => s.rememberSession);
   const landSession = useNamespaceStore((s) => s.landSession);
@@ -469,7 +471,9 @@ export function LoginPage() {
           takes over the slot. Cleared on the next successful login. */}
       {sessionExpired && !error && (
         <div className="mb-4 p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg text-amber-400 text-sm">
-          Your session expired. Please sign in again.
+          {sessionEndReason === "machine-identity"
+            ? MACHINE_IDENTITY_MESSAGE
+            : "Your session expired. Please sign in again."}
         </div>
       )}
 

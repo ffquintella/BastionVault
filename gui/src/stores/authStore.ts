@@ -30,6 +30,9 @@ interface VaultSession {
   rememberedAt: number;
 }
 
+/** See [`AuthState.sessionEndReason`]. */
+export type SessionEndReason = "expired" | "machine-identity";
+
 interface AuthState {
   token: string | null;
   policies: string[];
@@ -50,6 +53,14 @@ interface AuthState {
    * `setAuth` (a fresh login) and on `clearAuth` (deliberate logout).
    */
   sessionExpired: boolean;
+  /**
+   * Why the session was torn down, set together with `sessionExpired`.
+   * `"machine-identity"` means the token was refused because the server
+   * requires a machine-bound token and this one is not; the operator must sign
+   * in again so the login binds the machine. `"expired"` is a genuine expiry
+   * or revocation. `null` while signed in or after a deliberate logout.
+   */
+  sessionEndReason: SessionEndReason | null;
   /** Stable entity_id for the logged-in user, used by ownership and sharing features. */
   entityId: string;
   /** Principal username (UserPass) or role name (AppID); for display only. */
@@ -71,7 +82,7 @@ interface AuthState {
    * the login page can surface the reason. The route guard then
    * bounces any protected page to `/login`.
    */
-  expireSession: () => void;
+  expireSession: (reason?: SessionEndReason) => void;
   /**
    * Re-hydrate auth from the Rust-side `AppState`. Idempotent —
    * called once on app mount (see App.tsx) and short-circuits if a
@@ -107,6 +118,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   entityId: "",
   principal: "",
   sessionExpired: false,
+  sessionEndReason: null,
   sessions: {},
   setAuth: (token, policies) =>
     set({
@@ -115,6 +127,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       isAuthenticated: true,
       bootstrapping: false,
       sessionExpired: false,
+      sessionEndReason: null,
     }),
   clearAuth: () => {
     // Cached listing metadata was read under the outgoing token's
@@ -132,11 +145,12 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       isAuthenticated: false,
       bootstrapping: false,
       sessionExpired: false,
+      sessionEndReason: null,
       entityId: "",
       principal: "",
     });
   },
-  expireSession: () => {
+  expireSession: (reason: SessionEndReason = "expired") => {
     // No-op if already signed out, so a stray poll after a manual
     // logout can't resurrect the "session expired" banner.
     if (!get().isAuthenticated) return;
@@ -151,6 +165,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       isAuthenticated: false,
       bootstrapping: false,
       sessionExpired: true,
+      sessionEndReason: reason,
       entityId: "",
       principal: "",
     });
