@@ -315,6 +315,10 @@ EXAMPLE ENTRY:
 
 ### Fixed
 
+#### Storage: Raft peer streams are reused, not opened per read
+
+- **Stop opening a new TCP, TLS and WebSocket connection to the other node for every linearizable read** (T480, S118, S117) -- On the production two-node pair, even with the longer heartbeat, the leader opened about four connections a second to the peer, one per read, each closed after roughly 11 ms. One lost SYN (a 1 s retransmit) already outlasted the leadership-confirmation timeout, so `Cluster lost quorum` kept appearing around 50 times an hour. The hiqlite fork now keeps up to 4 idle streams per peer, for at most 60 s, and hands one out instead of opening a new one; a stream is used by one caller at a time, a stream that failed or that the peer answered with a fatal error is shut down and replaced, and nothing changes on the wire. Unit tests and hiqlite's cluster suite pass; not yet run on a staging pair with induced loss or on production
+
 #### HSM pool init: cluster hiccup no longer loses the root token
 
 - **Keep `operator init` from failing with `Cluster lost quorum` after the vault is already initialized** (T474, S114, S17) -- On a two-node hiqlite cluster, a read in the last steps of `init` could miss its 500 ms leadership confirmation; the vault was then initialized and sealed but the root token was never returned, and with `recovery = "none"` it could not be regenerated. While `init` runs, storage reads now retry that error (no leader, quorum not confirmed, node unhealthy) up to 5 times with 0.5, 1, 2 and 4 s waits, then fail as before; writes are never retried. The HSM pool init probe retries a transport error the same way, so the first `init` after `operator hsm bootstrap` no longer fails with `bad response from connector` when the connector dropped an idle connection. Checked with the mock HSM only. The retry does not make `init` atomic, and the 500 ms limit itself is unchanged.
