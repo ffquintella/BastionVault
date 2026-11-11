@@ -328,6 +328,14 @@ EXAMPLE ENTRY:
 
 ### Fixed
 
+#### FerroGate: say why the GUI session ended when machine identity becomes required
+
+- **Show "this server now requires machine identity" instead of "Your session expired" when the server starts refusing a non-machine-bound token** (T51) -- turning on `require_machine_identity` makes the server refuse every request from a plain user token, and the GUI's session monitor read that refusal as an expired token, so the operator saw a generic expiry banner with no hint of the cause. The monitor now asks the server for the requirement before blaming the clock, and the sign-in screen and toast name the real reason and tell the operator to sign in again to bind this machine; an unanswered read still reports a plain expiry
+
+#### FerroGate: bind the machine at sign-in even when the GUI's connection state is stale
+
+- **Take the connection mode from the Rust side when signing in, so the machine binding is no longer skipped on a stale webview store** (T51) -- the binding ran only when the webview store said `Remote`, but the store resets to `Embedded` on a store reset or a failed bootstrap while Rust is still connected to the server. A FIDO2 sign-in does not read the mode, so it succeeded with no binding, the plain token became the session, and the server's machine-identity gate then refused every request. The sign-in now asks Rust for the mode and profile, corrects the store, and keeps the store's value only when that read fails
+
 #### FerroGate: registration request rejected by a current MIA
 
 - **Fix "this MIA is too old to support registration requests" on a up-to-date MIA** (T51) -- The `RegisterSelf` request put the operation at the top level of the frame, but the MIA only accepts `{v, op: {kind, ...}}` and drops anything else without a reply, which the client reported as an old MIA. The frame now nests `op`, and the message for a silent close names both causes (older than protocol v2, or a request the MIA could not decode). The unit test now asserts the nested layout; not run against a live MIA
