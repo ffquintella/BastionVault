@@ -1006,7 +1006,7 @@ dependencies = [
 
 [[package]]
 name = "bastion-vault-gui"
-version = "0.46.5"
+version = "0.46.6"
 dependencies = [
  "arboard",
  "argon2 0.5.3",
@@ -1088,7 +1088,7 @@ dependencies = [
 
 [[package]]
 name = "bastion_vault"
-version = "0.46.5"
+version = "0.46.6"
 dependencies = [
  "actix-rt",
  "anyhow",
@@ -2544,7 +2544,7 @@ dependencies = [
 
 [[package]]
 name = "bvault-cli"
-version = "0.46.5"
+version = "0.46.6"
 dependencies = [
  "actix-rt",
  "actix-web",
