@@ -28,7 +28,7 @@ pub mod cluster_members;
 pub mod cluster_remove_node;
 pub mod cluster_status;
 pub mod delete;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub mod ferrogate;
 pub mod format;
 pub mod hsm_gateway;
@@ -48,11 +48,10 @@ pub mod operator_ferrogate;
 pub mod operator_hsm;
 pub mod operator_import;
 pub mod operator_init;
-#[cfg(unix)]
 /// The MIA helper-socket client moved to `bv-auth-ferrogate` in Phase 4 — it
 /// is not command-line code, and the Tauri host needs it too. Re-exported
 /// under its original name so the `bvault ferrogate` call sites are unchanged.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub use bastion_vault::modules::credential::ferrogate::mia as ferrogate_mia;
 pub mod exchange;
 pub mod exchange_export;

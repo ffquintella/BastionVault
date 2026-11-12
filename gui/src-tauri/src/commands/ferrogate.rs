@@ -286,9 +286,10 @@ pub async fn ferrogate_delete_machine(state: State<'_, AppState>, id: String) ->
 // The commands above drive the *relying-party* side: they administer the
 // `auth/ferrogate/*` endpoints that VERIFY a token someone presents. The
 // commands below put the GUI on the *client* side of the same protocol —
-// they dial the local FerroGate Machine Identity Agent (MIA) over its Unix
-// helper socket, mint a short-lived DPoP-bound child token, and exchange it
-// at `auth/<mount>/login` to self-enrol this host.
+// they dial the local FerroGate Machine Identity Agent (MIA) over its local
+// helper listener (a Unix socket, or a named pipe on Windows), mint a
+// short-lived DPoP-bound child token, and exchange it at `auth/<mount>/login`
+// to self-enrol this host.
 //
 // The MIA wire format, DPoP proof construction, and JWK thumbprint are reused
 // verbatim from the CLI (`bastion_vault::modules::credential::ferrogate::mia`) so they
@@ -331,7 +332,6 @@ pub struct FerroGateLoginResult {
 /// limiting, token verification, JWKS resolution) and should surface as a hard
 /// error instead. Keep these prefixes in sync with the server's `login`
 /// handler in `src/modules/credential/ferrogate/path_machines.rs`.
-#[cfg(unix)]
 fn classify_enrolment_error(text: &str) -> Option<&'static str> {
     if text.starts_with("enrolment_pending") {
         Some("pending")
@@ -354,7 +354,6 @@ fn classify_enrolment_error(text: &str) -> Option<&'static str> {
 /// Mint a child token from the MIA and build its DPoP proof. Runs the blocking
 /// `std` socket I/O on a blocking thread so it never stalls the async runtime.
 /// Returns `(child_token_jws, dpop_proof_jws, spiffe_id)`.
-#[cfg(unix)]
 async fn mia_mint(socket: String, audience: String, ttl: u32) -> Result<(String, String, String), String> {
     use bastion_vault::modules::credential::ferrogate::mia::{self, DpopKey};
     tokio::task::spawn_blocking(move || {
@@ -376,32 +375,17 @@ async fn mia_mint(socket: String, audience: String, ttl: u32) -> Result<(String,
 /// (blank/None ⇒ the default `mia.toml`).
 #[tauri::command]
 pub fn ferrogate_default_socket(environment: Option<String>) -> String {
-    #[cfg(unix)]
-    {
-        let env = environment.as_deref().map(str::trim).filter(|s| !s.is_empty());
-        bastion_vault::modules::credential::ferrogate::mia::resolve_mia_socket_for(env)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = environment;
-        String::new()
-    }
+    let env = environment.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    bastion_vault::modules::credential::ferrogate::mia::resolve_mia_socket_for(env)
 }
 
 /// The MIA environment selectors installed on this host (the `<env>` of each
 /// discovered `mia-<env>.toml`), so the GUI can offer them as autocomplete
 /// suggestions. The default environment (`mia.toml`) is implicit — selected by
 /// leaving the field blank — and is not listed.
-#[cfg(unix)]
 #[tauri::command]
 pub fn ferrogate_list_environments() -> Vec<String> {
     bastion_vault::modules::credential::ferrogate::mia::list_environments()
-}
-
-#[cfg(not(unix))]
-#[tauri::command]
-pub fn ferrogate_list_environments() -> Vec<String> {
-    Vec::new()
 }
 
 /// Derive a complete `ferrogate` mount config from the FerroGate MIA installed
@@ -411,7 +395,6 @@ pub fn ferrogate_list_environments() -> Vec<String> {
 /// operator does not hand-copy any of it. This only *reads* local state and
 /// fetches the (public) JWKS — it does not write the mount config; the form's
 /// Save button does that.
-#[cfg(unix)]
 #[tauri::command]
 pub async fn ferrogate_autoconfig(
     audience: String,
@@ -426,24 +409,12 @@ pub async fn ferrogate_autoconfig(
     mia::build_autoconfig(audience, env).await.map_err(Into::into)
 }
 
-#[cfg(not(unix))]
-#[tauri::command]
-pub async fn ferrogate_autoconfig(_audience: String, _environment: Option<String>) -> CmdResult<Value> {
-    Err("FerroGate autoconfig is only available on Unix (the MIA is not supported on this platform yet)".into())
-}
-
 /// Resolve the MIA socket to dial: an explicit socket wins; otherwise resolve
 /// the installed MIA's configured path for `environment` (`mia-<env>.toml`,
 /// blank ⇒ the default `mia.toml`). The environment typically comes from the
 /// server's advertised `mia_environment` so the client dials the MIA that
 /// belongs to the deployment it is connecting to. An invalid environment name
 /// (e.g. path syntax) is refused rather than silently falling back.
-///
-/// Unix-only, like its three callers: the MIA is a unix-socket peer, so the
-/// `cfg(not(unix))` builds of `ferrogate_machine_login` / `_status` /
-/// `_whoami` reject the call outright rather than normalising a socket path
-/// they could not dial anyway.
-#[cfg(unix)]
 fn norm_socket(socket: String, environment: Option<String>) -> Result<String, String> {
     let s = socket.trim();
     if !s.is_empty() {
@@ -456,8 +427,6 @@ fn norm_socket(socket: String, environment: Option<String>) -> Result<String, St
     Ok(ferrogate_default_socket(env.map(str::to_string)))
 }
 
-/// Unix-only, for the same reason as [`norm_socket`].
-#[cfg(unix)]
 fn norm_mount(mount: String) -> String {
     let m = mount.trim().trim_matches('/');
     if m.is_empty() {
@@ -470,7 +439,6 @@ fn norm_mount(mount: String) -> String {
 /// Dial the MIA, mint a child token, and exchange it at `auth/<mount>/login`.
 /// On success the server returns a vault token (machine approved); a pending
 /// or denied enrolment surfaces as an error carrying the server's reason.
-#[cfg(unix)]
 #[tauri::command]
 pub async fn ferrogate_machine_login(
     state: State<'_, AppState>,
@@ -553,7 +521,6 @@ pub async fn ferrogate_machine_login(
 
 /// Report this machine's enrolment status without minting a vault token.
 /// Returns the server's `data` payload (e.g. `{ status, policies, ... }`).
-#[cfg(unix)]
 #[tauri::command]
 pub async fn ferrogate_machine_status(
     state: State<'_, AppState>,
@@ -582,7 +549,6 @@ pub async fn ferrogate_machine_status(
 /// Print this host's SPIFFE id, read locally from a freshly minted token.
 /// No server round-trip — useful to confirm the MIA is reachable and which
 /// identity it would present before attempting a login.
-#[cfg(unix)]
 #[tauri::command]
 pub async fn ferrogate_whoami(socket: String) -> CmdResult<String> {
     let socket = norm_socket(socket, None)?;
@@ -598,7 +564,6 @@ pub async fn ferrogate_whoami(socket: String) -> CmdResult<String> {
 /// the MIA's allowlist. This only files a request for an administrator to
 /// approve in CMIS — it never alters the allowlist, so the login stays refused
 /// until approval. The GUI calls it only after the operator confirms.
-#[cfg(unix)]
 #[tauri::command]
 pub async fn ferrogate_register_self(
     socket: String,
@@ -612,51 +577,4 @@ pub async fn ferrogate_register_self(
         .await
         .map_err(|e| format!("MIA worker thread failed: {e}"))?
         .map_err(Into::into)
-}
-
-#[cfg(not(unix))]
-#[tauri::command]
-pub async fn ferrogate_register_self(
-    _socket: String,
-    _environment: Option<String>,
-    _reason: Option<String>,
-) -> CmdResult<Value> {
-    Err("FerroGate MIA registration is only available on Unix".into())
-}
-
-// On non-Unix targets the MIA helper socket does not exist (Windows named-pipe
-// support is deferred). Provide stubs so the Tauri command table is identical
-// across platforms and the GUI gets a clear error instead of a missing command.
-#[cfg(not(unix))]
-#[tauri::command]
-pub async fn ferrogate_machine_login(
-    _state: State<'_, AppState>,
-    _audience: String,
-    _socket: String,
-    _mount: String,
-    _ttl: u32,
-    _user_token: Option<String>,
-    _environment: Option<String>,
-) -> CmdResult<FerroGateLoginResult> {
-    Err("FerroGate MIA login is only available on Unix (the MIA helper socket is not supported on this platform yet)"
-        .into())
-}
-
-#[cfg(not(unix))]
-#[tauri::command]
-pub async fn ferrogate_machine_status(
-    _state: State<'_, AppState>,
-    _audience: String,
-    _socket: String,
-    _mount: String,
-    _ttl: u32,
-    _environment: Option<String>,
-) -> CmdResult<Value> {
-    Err("FerroGate MIA status is only available on Unix".into())
-}
-
-#[cfg(not(unix))]
-#[tauri::command]
-pub async fn ferrogate_whoami(_socket: String) -> CmdResult<String> {
-    Err("FerroGate MIA whoami is only available on Unix".into())
 }

@@ -65,7 +65,9 @@ pub mod cmis;
 /// machine-binding tests. Leaving it in the CLI would have made the GUI depend
 /// on the CLI, dragging actix-web and clap into the Tauri host — the exact
 /// opposite of what Phase 4 is for.
-#[cfg(unix)]
+///
+/// Unix socket on Linux/macOS, named pipe on Windows (T486).
+#[cfg(any(unix, windows))]
 pub mod mia;
 pub mod path_config;
 pub mod path_machines;

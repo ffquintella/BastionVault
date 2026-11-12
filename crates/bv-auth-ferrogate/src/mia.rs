@@ -1,17 +1,18 @@
 //! Client side of the FerroGate MIA helper API + DPoP proof construction,
 //! used by the `bvault ferrogate` subcommands.
 //!
-//! The MIA (Machine Identity Agent) exposes a local Unix-domain socket
-//! ([`DEFAULT_MIA_SOCKET`] by default) speaking a length-delimited CBOR
+//! The MIA (Machine Identity Agent) exposes a local listener (a Unix socket, or
+//! a named pipe on Windows; [`DEFAULT_MIA_SOCKET`]) speaking a length-delimited CBOR
 //! request/response protocol: a 4-byte big-endian length prefix followed by a
 //! CBOR body. We send a [`HelperReq`] and receive a [`HelperResp`] carrying a
 //! short-lived, DPoP-bound child token. This module re-declares that wire
 //! schema (mirroring `mia::helper::proto`) and speaks it over a blocking
-//! `std` socket — the CLI has no async runtime.
+//! `std` transport — the CLI has no async runtime.
 
-#![cfg(unix)]
+#![cfg(any(unix, windows))]
 
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -33,8 +34,28 @@ use serde::{Deserialize, Serialize};
 /// (`ferrogate/crates/mia/src/setup.rs`).
 #[cfg(target_os = "macos")]
 pub const DEFAULT_MIA_SOCKET: &str = "/Library/Application Support/FerroGate/run/mia.sock";
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+pub const DEFAULT_MIA_SOCKET: &str = r"\\.\pipe\ferrogate-mia";
+#[cfg(not(any(target_os = "macos", windows)))]
 pub const DEFAULT_MIA_SOCKET: &str = "/run/ferrogate/mia.sock";
+
+/// The listener address MIA uses by default for `environment` when no config
+/// names one. On Windows a named environment gets its own pipe
+/// (`\\.\pipe\ferrogate-mia-<env>`) so side-by-side environments never contend
+/// for one name; the Unix defaults are a single well-known path.
+#[cfg(windows)]
+fn default_socket_for(environment: Option<&str>) -> String {
+    match environment {
+        // `validate_environment` keeps the name a single safe path component;
+        // the pipe-name check at connect time is the second line of defence.
+        Some(env) if validate_environment(env).is_ok() => format!(r"\\.\pipe\ferrogate-mia-{env}"),
+        _ => DEFAULT_MIA_SOCKET.to_string(),
+    }
+}
+#[cfg(not(windows))]
+fn default_socket_for(_environment: Option<&str>) -> String {
+    DEFAULT_MIA_SOCKET.to_string()
+}
 
 /// Resolve the MIA helper socket path for the default environment. Equivalent
 /// to [`resolve_mia_socket_for(None)`](resolve_mia_socket_for).
@@ -74,7 +95,7 @@ pub fn resolve_mia_socket_for(environment: Option<&str>) -> String {
     if let Some(s) = mia_config_socket(environment) {
         return s;
     }
-    DEFAULT_MIA_SOCKET.to_string()
+    default_socket_for(environment)
 }
 
 /// `FERROGATE_HELPER_SOCKET`, if set to a non-blank value.
@@ -134,27 +155,41 @@ fn mia_config_candidates(environment: Option<&str>) -> Vec<PathBuf> {
     out
 }
 
-/// The OS-idiomatic *system* config directory (`mia setup` writes here as root):
-/// macOS `/Library/Application Support/FerroGate`, else `/etc/ferrogate`.
+/// The OS-idiomatic *system* config directory (`mia setup` writes here as an
+/// administrator): macOS `/Library/Application Support/FerroGate`, Windows
+/// `%ProgramData%\FerroGate`, else `/etc/ferrogate`.
 #[cfg(target_os = "macos")]
 fn system_config_dir() -> PathBuf {
     PathBuf::from("/Library/Application Support/FerroGate")
 }
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+fn system_config_dir() -> PathBuf {
+    // Same fallback as MIA's own `system_config_dir`.
+    std::env::var_os("ProgramData")
+        .filter(|s| !s.is_empty())
+        .map_or_else(|| PathBuf::from(r"C:\ProgramData"), PathBuf::from)
+        .join("FerroGate")
+}
+#[cfg(not(any(target_os = "macos", windows)))]
 fn system_config_dir() -> PathBuf {
     PathBuf::from("/etc/ferrogate")
 }
 
 /// The OS-idiomatic *per-user* config directory, or `None` if no home/config
-/// var resolves: macOS `~/Library/Application Support/FerroGate`, else
-/// `$XDG_CONFIG_HOME/ferrogate` (or `~/.config/ferrogate`).
+/// var resolves: macOS `~/Library/Application Support/FerroGate`, Windows
+/// `%APPDATA%\FerroGate`, else `$XDG_CONFIG_HOME/ferrogate` (or
+/// `~/.config/ferrogate`).
 #[cfg(target_os = "macos")]
 fn user_config_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .filter(|s| !s.is_empty())
         .map(|h| PathBuf::from(h).join("Library/Application Support/FerroGate"))
 }
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+fn user_config_dir() -> Option<PathBuf> {
+    std::env::var_os("APPDATA").filter(|s| !s.is_empty()).map(|a| PathBuf::from(a).join("FerroGate"))
+}
+#[cfg(not(any(target_os = "macos", windows)))]
 fn user_config_dir() -> Option<PathBuf> {
     if let Some(x) = std::env::var_os("XDG_CONFIG_HOME").filter(|s| !s.is_empty()) {
         return Some(PathBuf::from(x).join("ferrogate"));
@@ -571,29 +606,8 @@ pub fn request_child_token(
     dpop_jkt: &str,
     ttl_secs: u32,
 ) -> Result<ChildToken, String> {
-    let mut stream = UnixStream::connect(socket_path).map_err(|e| {
-        format!("ferrogate_mia_unavailable: cannot connect to the MIA helper socket at {socket_path}: {e}")
-    })?;
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
-
     let req = HelperReq { audience: audience.to_string(), dpop_jkt: dpop_jkt.to_string(), ttl_secs };
-    let mut body = Vec::with_capacity(256);
-    ciborium::into_writer(&req, &mut body).map_err(|e| format!("cbor encode: {e}"))?;
-    let len = u32::try_from(body.len()).map_err(|_| "request too large".to_string())?;
-    stream.write_all(&len.to_be_bytes()).map_err(|e| format!("write: {e}"))?;
-    stream.write_all(&body).map_err(|e| format!("write: {e}"))?;
-    stream.flush().map_err(|e| format!("flush: {e}"))?;
-
-    let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf).map_err(|e| format!("read: {e}"))?;
-    let rlen = u32::from_be_bytes(len_buf) as usize;
-    if rlen > MAX_FRAME_LEN {
-        return Err(format!("MIA response frame too large: {rlen} bytes"));
-    }
-    let mut rbody = vec![0u8; rlen];
-    stream.read_exact(&mut rbody).map_err(|e| format!("read: {e}"))?;
-    let resp: HelperResp = ciborium::from_reader(&rbody[..]).map_err(|e| format!("cbor decode: {e}"))?;
+    let resp: HelperResp = helper_exchange(socket_path, &req, false)?;
 
     match resp {
         HelperResp::Token(t) => Ok(t),
@@ -778,17 +792,22 @@ fn helper_exchange<Q: Serialize, A: serde::de::DeserializeOwned>(
     request: &Q,
     v2: bool,
 ) -> Result<A, String> {
-    let mut stream = UnixStream::connect(socket_path).map_err(|e| {
-        format!("ferrogate_mia_unavailable: cannot connect to the MIA helper socket at {socket_path}: {e}")
-    })?;
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
-
-    let mut body = Vec::with_capacity(128);
+    let mut body = Vec::with_capacity(256);
     ciborium::into_writer(request, &mut body).map_err(|e| format!("cbor encode: {e}"))?;
+    let rbody = exchange_frame(socket_path, body, v2)?;
+    ciborium::from_reader(&rbody[..]).map_err(|e| format!("cbor decode: {e}"))
+}
+
+/// Per-exchange I/O deadline (connect, write and read).
+const IO_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Send `body` as one length-prefixed frame and read one reply frame. `v2`
+/// marks a request an older MIA cannot decode: such an agent closes the
+/// connection without a reply.
+fn frame_io<S: Read + Write>(stream: &mut S, body: &[u8], v2: bool) -> Result<Vec<u8>, String> {
     let len = u32::try_from(body.len()).map_err(|_| "request too large".to_string())?;
     stream.write_all(&len.to_be_bytes()).map_err(|e| format!("write: {e}"))?;
-    stream.write_all(&body).map_err(|e| format!("write: {e}"))?;
+    stream.write_all(body).map_err(|e| format!("write: {e}"))?;
     stream.flush().map_err(|e| format!("flush: {e}"))?;
 
     let mut len_buf = [0u8; 4];
@@ -807,7 +826,143 @@ fn helper_exchange<Q: Serialize, A: serde::de::DeserializeOwned>(
     }
     let mut rbody = vec![0u8; rlen];
     stream.read_exact(&mut rbody).map_err(|e| format!("read: {e}"))?;
-    ciborium::from_reader(&rbody[..]).map_err(|e| format!("cbor decode: {e}"))
+    Ok(rbody)
+}
+
+fn unavailable(socket_path: &str, err: &std::io::Error) -> String {
+    format!("ferrogate_mia_unavailable: cannot connect to the MIA helper socket at {socket_path}: {err}")
+}
+
+#[cfg(unix)]
+fn exchange_frame(socket_path: &str, body: Vec<u8>, v2: bool) -> Result<Vec<u8>, String> {
+    let mut stream = UnixStream::connect(socket_path).map_err(|e| unavailable(socket_path, &e))?;
+    let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
+    frame_io(&mut stream, &body, v2)
+}
+
+/// A synchronous pipe handle has no read timeout, so the whole exchange runs
+/// under [`with_deadline`]: a hung or squatting server cannot block the caller.
+#[cfg(windows)]
+fn exchange_frame(socket_path: &str, body: Vec<u8>, v2: bool) -> Result<Vec<u8>, String> {
+    let path = socket_path.to_string();
+    with_deadline(IO_TIMEOUT, move || {
+        let mut pipe = open_helper_pipe(&path)?;
+        frame_io(&mut pipe, &body, v2)
+    })
+}
+
+// ── Windows named-pipe transport ───────────────────────────────────────────
+
+/// The only accepted pipe-name prefix: a pipe on the local machine.
+#[cfg(any(windows, test))]
+const LOCAL_PIPE_PREFIX: &str = r"\\.\pipe\";
+
+/// The longest accepted full pipe name, in UTF-16 units (the Win32 limit).
+#[cfg(any(windows, test))]
+const MAX_PIPE_NAME_LEN: usize = 256;
+
+/// Whether `name` is a local named pipe, `\\.\pipe\<name>` (prefix case
+/// ignored), that `CreateFileW` cannot resolve to anything but a local pipe.
+///
+/// Fails closed on a remote `\\host\pipe\…`, the `\\?\` form and any file
+/// path; on a name holding `\`, `/` or NUL, or equal to `.`/`..` (Win32 would
+/// normalise `\\.\pipe\..\C:\x` to the *file* `C:\x`); and on an empty or
+/// over-long name. The endpoint comes from `mia.toml` or the environment, so it
+/// is checked before it is dialled. Mirrors `ferro_winauth::is_local_pipe_name`.
+#[cfg(any(windows, test))]
+fn is_local_pipe_name(name: &str) -> bool {
+    let Some(prefix) = name.get(..LOCAL_PIPE_PREFIX.len()) else {
+        return false;
+    };
+    if !prefix.eq_ignore_ascii_case(LOCAL_PIPE_PREFIX) {
+        return false;
+    }
+    let rest = &name[LOCAL_PIPE_PREFIX.len()..];
+    !rest.is_empty()
+        && rest != "."
+        && rest != ".."
+        && !rest.contains(['\\', '/', '\0'])
+        && name.encode_utf16().count() <= MAX_PIPE_NAME_LEN
+}
+
+/// Run `f` on a helper thread and give up after `timeout`. The abandoned thread
+/// ends when the server closes its end of the pipe.
+#[cfg(any(windows, test))]
+fn with_deadline<T: Send + 'static>(
+    timeout: Duration,
+    f: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::Builder::new()
+        .name("ferrogate-mia-io".into())
+        .spawn(move || {
+            // The receiver is gone after a timeout; nothing left to tell.
+            let _ = tx.send(f());
+        })
+        .map_err(|e| format!("cannot start the MIA I/O thread: {e}"))?;
+    match rx.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            Err(format!("the MIA did not answer within {}s", timeout.as_secs()))
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err("the MIA I/O thread panicked".to_string()),
+    }
+}
+
+/// `GENERIC_READ | FILE_WRITE_DATA`: exactly what the pipe DACL grants the
+/// client group. `GENERIC_WRITE` also carries `FILE_APPEND_DATA` (the bit that
+/// is `FILE_CREATE_PIPE_INSTANCE` on a pipe), is withheld by the MIA, and is
+/// refused with `ERROR_ACCESS_DENIED` for a non-administrator.
+#[cfg(windows)]
+const PIPE_CLIENT_DESIRED_ACCESS: u32 = 0x8000_0000 | 0x0000_0002;
+
+/// `SECURITY_IDENTIFICATION`: a process squatting the pipe name can identify
+/// this client but never impersonate it. `std` ORs in `SECURITY_SQOS_PRESENT`.
+#[cfg(windows)]
+const SECURITY_IDENTIFICATION: u32 = 0x0001_0000;
+
+/// Win32 errors with a specific operator hint.
+#[cfg(windows)]
+const ERROR_ACCESS_DENIED: i32 = 5;
+#[cfg(windows)]
+const ERROR_PIPE_BUSY: i32 = 231;
+
+/// Open the MIA helper pipe for a blocking exchange, retrying for about a
+/// second while every pipe instance is busy.
+#[cfg(windows)]
+fn open_helper_pipe(path: &str) -> Result<std::fs::File, String> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    if !is_local_pipe_name(path) {
+        return Err("ferrogate_mia_unavailable: the MIA helper endpoint is not a local named pipe \
+             (expected \\\\.\\pipe\\<name>); check FERROGATE_HELPER_SOCKET and [helper].socket in mia.toml"
+            .to_string());
+    }
+    const BUSY_ATTEMPTS: u32 = 20;
+    const BUSY_RETRY_DELAY: Duration = Duration::from_millis(50);
+    let mut attempt = 1;
+    loop {
+        match std::fs::OpenOptions::new()
+            .access_mode(PIPE_CLIENT_DESIRED_ACCESS)
+            .security_qos_flags(SECURITY_IDENTIFICATION)
+            .open(path)
+        {
+            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) && attempt < BUSY_ATTEMPTS => {
+                attempt += 1;
+                std::thread::sleep(BUSY_RETRY_DELAY);
+            }
+            Err(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED) => {
+                return Err(format!(
+                    "{} — this account may not be in the MIA pipe's client group (default `FerroGateClients`; \
+                     `helper.windows_group` in mia.toml)",
+                    unavailable(path, &e)
+                ));
+            }
+            Err(e) => return Err(unavailable(path, &e)),
+            Ok(file) => return Ok(file),
+        }
+    }
 }
 
 /// Decode (without verifying) the claims segment of a compact JWS and return
@@ -991,6 +1146,115 @@ mod tests {
         for bad in ["", ".", "..", "a/b", "a b", "../etc", "x\\y", "a:b"] {
             assert!(validate_environment(bad).is_err(), "{bad:?} should be rejected");
         }
+    }
+
+    #[test]
+    fn local_pipe_names_are_accepted() {
+        for name in [
+            r"\\.\pipe\ferrogate-mia",
+            r"\\.\pipe\ferrogate-mia-hml",
+            r"\\.\pipe\ferrogate-mia.default",
+            r"\\.\PIPE\ferrogate-mia",
+        ] {
+            assert!(is_local_pipe_name(name), "{name:?} must be accepted");
+        }
+    }
+
+    #[test]
+    fn files_remote_pipes_and_traversal_are_refused() {
+        // The endpoint comes from mia.toml / the environment: anything that
+        // Win32 could resolve to a file or a remote host must fail closed.
+        for name in [
+            "",
+            r"C:\ProgramData\FerroGate\mia.toml",
+            r"\\server\pipe\ferrogate-mia",
+            r"\\?\pipe\ferrogate-mia",
+            r"//./pipe/ferrogate-mia",
+            r"\\.\pipe\",
+            r"\\.\pipe\.",
+            r"\\.\pipe\..",
+            r"\\.\pipe\..\C:\Windows\win.ini",
+            r"\\.\pipe\a\b",
+            r"\\.\pipe\a/b",
+            "\\\\.\\pipe\\a\0b",
+            r"\\.\pip\x",
+            "/run/ferrogate/mia.sock",
+        ] {
+            assert!(!is_local_pipe_name(name), "{name:?} must be refused");
+        }
+        let at_limit = format!("{LOCAL_PIPE_PREFIX}{}", "a".repeat(MAX_PIPE_NAME_LEN - LOCAL_PIPE_PREFIX.len()));
+        assert!(is_local_pipe_name(&at_limit));
+        assert!(!is_local_pipe_name(&format!("{at_limit}a")), "over-long name must be refused");
+    }
+
+    #[test]
+    fn a_silent_server_times_out_and_answers_pass_through() {
+        let started = std::time::Instant::now();
+        let err = with_deadline(Duration::from_millis(50), || {
+            std::thread::sleep(Duration::from_secs(5));
+            Ok(())
+        })
+        .expect_err("must time out");
+        assert!(err.contains("did not answer"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(4), "caller must not wait for the server");
+
+        assert_eq!(with_deadline(Duration::from_secs(5), || Ok(7)).unwrap(), 7);
+        assert_eq!(with_deadline::<()>(Duration::from_secs(5), || Err("boom".into())).unwrap_err(), "boom");
+    }
+
+    #[test]
+    fn frame_io_round_trips_a_length_prefixed_frame() {
+        // A stream that answers with a canned reply frame and records the request.
+        struct Loop {
+            reply: std::io::Cursor<Vec<u8>>,
+            sent: Vec<u8>,
+        }
+        impl Read for Loop {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                self.reply.read(buf)
+            }
+        }
+        impl Write for Loop {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.sent.extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut reply = 3u32.to_be_bytes().to_vec();
+        reply.extend_from_slice(b"abc");
+        let mut s = Loop { reply: std::io::Cursor::new(reply), sent: Vec::new() };
+        assert_eq!(frame_io(&mut s, b"hello", false).unwrap(), b"abc");
+        assert_eq!(&s.sent[..4], &5u32.to_be_bytes(), "request is length-prefixed, big-endian");
+        assert_eq!(&s.sent[4..], b"hello");
+
+        // An oversized reply frame is refused before it is allocated.
+        let big = u32::try_from(MAX_FRAME_LEN + 1).unwrap().to_be_bytes().to_vec();
+        let mut s = Loop { reply: std::io::Cursor::new(big), sent: Vec::new() };
+        assert!(frame_io(&mut s, b"x", false).unwrap_err().contains("too large"));
+
+        // v2 request + immediate EOF is the "MIA older than protocol v2" case.
+        let mut s = Loop { reply: std::io::Cursor::new(Vec::new()), sent: Vec::new() };
+        assert!(frame_io(&mut s, b"x", true).unwrap_err().contains("older than helper protocol v2"));
+        let mut s = Loop { reply: std::io::Cursor::new(Vec::new()), sent: Vec::new() };
+        assert!(frame_io(&mut s, b"x", false).unwrap_err().starts_with("read:"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_defaults_are_named_pipes() {
+        assert_eq!(DEFAULT_MIA_SOCKET, r"\\.\pipe\ferrogate-mia");
+        assert!(is_local_pipe_name(DEFAULT_MIA_SOCKET));
+        assert_eq!(default_socket_for(None), r"\\.\pipe\ferrogate-mia");
+        assert_eq!(default_socket_for(Some("hml")), r"\\.\pipe\ferrogate-mia-hml");
+        // An unvalidated name must never become part of a pipe path.
+        assert_eq!(default_socket_for(Some(r"..\x")), DEFAULT_MIA_SOCKET);
+        // The pipe client must not request GENERIC_WRITE / FILE_CREATE_PIPE_INSTANCE.
+        assert_eq!(PIPE_CLIENT_DESIRED_ACCESS, 0x8000_0002);
+        assert_eq!(PIPE_CLIENT_DESIRED_ACCESS & 0x4000_0000, 0, "GENERIC_WRITE");
+        assert_eq!(PIPE_CLIENT_DESIRED_ACCESS & 0x0000_0004, 0, "FILE_CREATE_PIPE_INSTANCE");
     }
 
     #[test]

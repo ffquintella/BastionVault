@@ -114,6 +114,26 @@ bvault operator ferrogate require-machine-identity on       # enable
 bvault operator ferrogate require-machine-identity off      # disable
 ```
 
+### Platforms
+
+The client commands (`bvault ferrogate …`, and the GUI's Machine Login tab and connect-time machine gate) run on
+Linux, macOS and Windows. They reach the MIA's helper listener, which is a Unix socket on Linux/macOS and a named
+pipe on Windows. The address is resolved the same way on every platform: `FERROGATE_HELPER_SOCKET`, then
+`[helper].socket` in the installed `mia.toml`, then the platform default.
+
+| | Default listener | `mia.toml` (system / per-user) |
+|---|---|---|
+| Linux | `/run/ferrogate/mia.sock` | `/etc/ferrogate` / `$XDG_CONFIG_HOME/ferrogate` |
+| macOS | `/Library/Application Support/FerroGate/run/mia.sock` | `/Library/Application Support/FerroGate` / `~/Library/Application Support/FerroGate` |
+| Windows | `\\.\pipe\ferrogate-mia` (`\\.\pipe\ferrogate-mia-<env>` for a named environment) | `%ProgramData%\FerroGate` / `%APPDATA%\FerroGate` |
+
+On Windows the MIA's pipe grants access only to members of its client group (`FerroGateClients` by default, or
+`helper.windows_group` in `mia.toml`), so the account running `bvault` or the GUI must be a member; otherwise the
+login fails with an access-denied error that names the group. The endpoint must be a local pipe
+(`\\.\pipe\<name>`): a remote pipe, a file path or a name with path separators is refused before it is opened. The
+MIA also identifies the caller by process, so the per-binary allowlist applies to `bvault.exe` and to the GUI
+executable separately.
+
 ## Observability
 
 - **Metrics** (`/metrics`): `bvault_ferrogate_login_total`,

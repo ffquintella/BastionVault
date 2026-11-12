@@ -58,6 +58,10 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### FerroGate: Windows support for the MIA client
+
+- **`bvault ferrogate` and the GUI's Machine Login tab and connect-time machine gate now work on Windows** (T486, S25) -- they talk to FerroGate's Windows MIA over its helper named pipe (`\\.\pipe\ferrogate-mia`, or `...-<env>` for a named environment) instead of being compiled out. The endpoint is resolved as on Linux/macOS (`FERROGATE_HELPER_SOCKET`, then `[helper].socket` in `mia.toml` under `%ProgramData%\FerroGate` or `%APPDATA%\FerroGate`, then the default), so *Autofill from local MIA* and the MIA environment selector work too. The pipe is opened with only the access the MIA grants its client group and as an identification-level client, an endpoint that is not a local pipe is refused before it is dialled, and a silent server times out after 10 s. An account outside the MIA's client group (`FerroGateClients` by default) gets an access-denied error that names the group. The "only available on Unix" errors in the GUI are gone. Verified with unit tests and a Windows type-check on macOS; it has not been run against a live Windows MIA yet.
+
 #### Import / export: split by namespace, and export or import a single engine
 
 - **Export one namespace at a time, a chosen set of them, or one file per namespace; import just one part of a multi-namespace file** (T484, S21) -- `POST /v{1,2}/sys/exchange/export` takes `namespaces` (`""`/`root` is the root namespace, `*` is all) and `split: true`, which returns `files: [{namespace, file_b64}]` instead of one `file_b64`; each file is a standalone document that imports by itself, and a tenant's part stays a bundle so it can never be restored into root. `.../import` and `.../import/preview` take `namespaces` to import only those parts. `bvault exchange export --namespace <path> --split -o <dir>` and `bvault exchange import --namespace <path>` expose it. Unselected namespaces are not read at all; a name the vault or file does not have is a warning.

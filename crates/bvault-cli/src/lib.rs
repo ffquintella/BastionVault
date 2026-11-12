@@ -149,7 +149,7 @@ pub enum Commands {
     Exchange(command::exchange::Exchange),
     Rustion(command::rustion::Rustion),
     SshBroker(command::ssh_broker::SshBroker),
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     Ferrogate(command::ferrogate::Ferrogate),
     Mcp(command::mcp::Mcp),
     HsmGateway(command::hsm_gateway::HsmGateway),
@@ -173,7 +173,7 @@ impl Commands {
             Commands::Exchange(exchange) => exchange.execute(),
             Commands::Rustion(rustion) => rustion.execute(),
             Commands::SshBroker(ssh_broker) => ssh_broker.execute(),
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             Commands::Ferrogate(ferrogate) => ferrogate.execute(),
             Commands::Mcp(mcp) => mcp.execute(),
             Commands::HsmGateway(gateway) => gateway.execute(),

@@ -141,8 +141,8 @@ as its own crate so it stays cleanly separable) that depends only on FerroGate's
   `auth/<mount>/login`, persisting the issued BastionVault token; `status` reports enrolment without minting a
   vault token; `whoami` prints the host SPIFFE id locally. A missing MIA fails clean with
   `ferrogate_mia_unavailable`. The CLI's DPoP construction is proven against FerroGate's own `verify_dpop_proof`
-  in a unit test; the wire framing has a CBOR round-trip test. Unix-only for now (Windows named-pipe is a
-  follow-up). Full live login isn't exercised in the current dev env (the dev CMIS has no RIM bundle, so its MIA
+  in a unit test; the wire framing has a CBOR round-trip test. Runs on Windows too, over the MIA's named pipe
+  (Phase 5.2). Full live login isn't exercised in the current dev env (the dev CMIS has no RIM bundle, so its MIA
   can't attest/mint), but every layer the CLI owns is unit-validated.
 - **Phase 5.1 — app-facing token minting.** `bvault ferrogate token` (2026-07-03) is the headless companion to
   `login` for applications: the same MIA + DPoP exchange at `auth/<mount>/login`, but the minted machine token
@@ -151,6 +151,22 @@ as its own crate so it stays cleanly separable) that depends only on FerroGate's
   helper, so an app can exec it at startup without disturbing the host's stored CLI session. The token serves
   as `X-Vault-Token` for direct API calls or as the `machine_token` of an AppID login. The MIA
   mint/DPoP/body construction is shared with `login`/`status` via a common helper.
+- **Phase 5.2 — Windows MIA client (T486).** FerroGate's Windows MIA serves the helper API on a named pipe
+  (`\\.\pipe\ferrogate-mia`, or `...-<env>`), so `bv-auth-ferrogate`'s `mia` module no longer compiles out on
+  Windows: the CLI's `ferrogate` command and the GUI host's seven Machine Login commands are the same code on
+  every platform and the "Unix-only" stubs are gone. One shared framed exchange replaces the two socket copies;
+  only the connect step differs. The pipe is opened as FerroGate's `docs/helper-api.md` prescribes: access
+  `GENERIC_READ | FILE_WRITE_DATA` (the DACL withholds `GENERIC_WRITE`, so a plain read/write open is refused for
+  a non-administrator), `SECURITY_IDENTIFICATION` (a process squatting the name can identify but not impersonate
+  the client), a local-pipe-name check on the endpoint before it is dialled (it comes from `mia.toml` or the
+  environment), a bounded retry while every pipe instance is busy, and a hard 10 s deadline on the whole
+  exchange, since a synchronous pipe handle has no read timeout. Loopback TCP was rejected: it carries no
+  caller identity, which the MIA's per-binary allowlist depends on. Config discovery reads
+  `%ProgramData%\FerroGate` then `%APPDATA%\FerroGate`. `std` only, no `unsafe` and no new dependency: FerroGate's
+  `ferro-winauth` helper is `publish = false`, so the contract is re-implemented rather than depended on.
+  **Verified on macOS only:** the pure pieces (pipe-name check, deadline, framing) have unit tests, and the
+  `cfg(windows)` code type-checks against the `x86_64-pc-windows-msvc` std; it has not been run against a live
+  Windows MIA.
 - **Phase 6 shipped.** Admin GUI page `Machines (FerroGate)` (route `/ferrogate`, sidebar entry) with Pending /
   Approved / History / Config tabs: approve (policies + TTL + comment), reject (reason), revoke, and a
   trust-anchor config form (trust domain, audience, JWKS source, CMIS endpoint + SPKI pins, static JWKS,
@@ -164,7 +180,7 @@ as its own crate so it stays cleanly separable) that depends only on FerroGate's
   and exchanges it at `auth/<mount>/login`, with *Whoami* / *Check status* / *Log in* actions. Four new Tauri
   commands (`ferrogate_default_socket`, `ferrogate_machine_login`, `ferrogate_machine_status`, `ferrogate_whoami`)
   **reuse `bastion_vault::cli::command::ferrogate_mia` verbatim** (no second copy of the DPoP/CBOR/thumbprint
-  crypto); the blocking socket I/O runs on `spawn_blocking`, and non-Unix targets return clear "Unix-only" stubs.
+  crypto); the blocking socket I/O runs on `spawn_blocking`; the commands are identical on Linux, macOS and Windows.
   The socket field is prefilled with the resolved socket. Logging in here does not replace the admin session
   token.
 - **Phase 6.3 — one-shot mount autoconfig from the local MIA.** `bvault ferrogate autoconfig` (and a GUI
@@ -576,7 +592,7 @@ operator on attested host                     server
 | 2 ✅ | **Verification core (static JWKS) + login** | **Done.** `ferro-child-verify::verify_bound` wired end-to-end against a `static_jwks` anchor (verifier vendored from FerroGate `releases/v0.13.2` under `third_party/`). Child-token + DPoP login mints a token for an approved machine; unknown → pending; audience + trust-domain enforced. DPoP read from `DPoP` header or `dpop` body field. Deterministic test mints a real composite-signed token. |
 | 3 ✅ | **Enrolment state machine + bootstrap** | **Done.** First-seen → pending side effect, token-authenticated self-poll (`POST status`), admin approve/reject/revoke transitions, and the **root-token one-shot bootstrap** (`approved_count == 0` + root). `audit`-target log events on key transitions. Tests cover the bootstrap happy path, the second-machine-not-bootstrapped guard, and the status endpoint. (Self-poll is `POST status` with the token rather than `GET enrolment/{spiffe_id}` — a SPIFFE ID can't be a path segment, and presenting the token both identifies and authorizes the poll.) |
 | 4 ✅ | **CMIS gRPC JWKS source** | **Done — plaintext + PQ-TLS both validated live.** `cmis_grpc` source calls `MachineIdentity/JWKS` with cache + stale-while-revalidate; pre-generated tonic stubs (no protoc in build); transport selectable plaintext / SPKI-pinned hybrid-PQ-TLS via `cmis_tls_enable`. PQ-TLS (`X25519MLKEM768`) validated end-to-end against the live CMIS 0.15.0 on `segdc1vds0005`. SDK vendored at v0.15.0. CRL enforcement applies to the SVID path → folded into Phase 7. |
-| 5 ✅ | **Client CLI** | **Done (Unix).** `bvault ferrogate login|status|whoami` driving the MIA helper socket (CBOR framing mirrored from `mia::helper::proto`) + DPoP proof construction; `ferrogate_mia_unavailable` when the MIA is absent. DPoP proof proven against `ferro-child-verify::verify_dpop_proof`; CBOR wire round-trip test. Windows named-pipe deferred. |
+| 5 ✅ | **Client CLI** | **Done (Unix; Windows in Phase 5.2).** `bvault ferrogate login|status|whoami` driving the MIA helper socket (CBOR framing mirrored from `mia::helper::proto`) + DPoP proof construction; `ferrogate_mia_unavailable` when the MIA is absent. DPoP proof proven against `ferro-child-verify::verify_dpop_proof`; CBOR wire round-trip test. Windows named pipe added in Phase 5.2 (T486). |
 | 6 ✅ | **Admin GUI page** | **Done.** `Machines (FerroGate)` admin page (route `/ferrogate`, sidebar nav) with Pending / Approved / History / Config tabs; approve/reject/revoke modals; enable-mount empty state; `AUTH_TYPES` entry. Seven Tauri commands (`ferrogate_read_config`/`write_config`/`list_machines`/`approve`/`reject`/`revoke`/`delete_machine`) + api.ts wrappers + types. Two vitest tests. |
 | 7 ✅ | **Direct-SVID mode + hardening + docs** | **Done.** Opt-in `accept_svid` via `verify_unrevoked` (CRL-enforced, fail-closed); per-source-IP `login` rate limit; Prometheus counters (`bvault_ferrogate_login_total` / `_login_denied_total{reason}` / `_pending_total` / `_approved_total`); operator + threat-model guide at `docs/ferrogate-machine-auth.md`. Test covers the `accept_svid` gate + CRL-enforced SVID approve→mint. |
 | 9 ✅ | **Unauthenticated machine self-enrolment** | **Done.** `POST auth/ferrogate/enroll` (unauth) records a `pending`, `self_enrolled` machine on a self-asserted SPIFFE ID for admin approval — never mints a token; existing records are returned unchanged. Gated by `self_enroll_enabled` + allow/block lists (source IP/CIDR or claimed id, block-list wins) + per-source-IP `self_enroll_rate_limit_per_min`. GUI Config toggle/list editors + queue badge; `bvault ferrogate enroll` CLI; `self_enroll_denied` metric reason. Four lib tests. |
