@@ -333,6 +333,12 @@ EXAMPLE ENTRY:
 
 ### Fixed
 
+#### Import / export: no more silently empty export files
+
+- **An export that matched nothing is refused instead of written as an empty `.bvx`** (T485, S21) -- `POST /v{1,2}/sys/exchange/export` and the GUI now fail with "export matched no data" plus the exporter's warnings when the chosen namespaces/engines hold nothing, instead of producing a ~800-byte file that looks like a success and is found empty on restore. The response also echoes `namespaces`, and the GUI refuses a namespace selection or split against a server that predates it (such a server ignored the selection and exported the root namespace only). A new cucumber suite (`make test-cucumber`, `tests/features/exchange_export.feature`) exercises every scope type -- full, all namespaces, one nested namespace, engine type, mount, KV path, split, bvx/json round trip, wrong password, and file blobs restoring byte for byte. The suite also restores every export into a second vault and checks the data, file bytes and policies arrive (both file formats, split parts, chosen namespaces/mounts, preview, skip/overwrite/rename).
+
+- **A restore into a vault that lacks the target mount now warns** (T485, S21) -- the importer restores data into a mount and does not create it, so items for a missing mount were reported as written yet stored under a key no engine reads. `ImportResult.warnings` (and so the preview) now names each such mount and how many items it affects.
+
 #### FerroGate: say why the GUI session ended when machine identity becomes required
 
 - **Show "this server now requires machine identity" instead of "Your session expired" when the server starts refusing a non-machine-bound token** (T51) -- turning on `require_machine_identity` makes the server refuse every request from a plain user token, and the GUI's session monitor read that refusal as an expired token, so the operator saw a generic expiry banner with no hint of the cause. The monitor now asks the server for the requirement before blaming the clock, and the sign-in screen and toast name the real reason and tell the operator to sign in again to bind this machine; an unanswered read still reports a plain expiry

@@ -706,6 +706,13 @@ name = "cucumber_hiqlite"
 harness = false
 path = "tests/cucumber_hiqlite.rs"
 
+# Exchange (.bvx) export, one scenario per scope type. Needs `test_utils`, which
+# the dev-dependency on bv-server's `test-support` switches on.
+[[test]]
+name = "cucumber_exchange"
+harness = false
+path = "tests/cucumber_exchange.rs"
+
 
 # ── Dev build speed ────────────────────────────────────────────────
 #

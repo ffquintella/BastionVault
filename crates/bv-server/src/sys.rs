@@ -2103,6 +2103,13 @@ async fn sys_exchange_export_request_handler(
             .await?
         };
 
+        if let Err(e) = crate::exchange::ensure_not_empty(&document) {
+            return Ok(response_error(StatusCode::BAD_REQUEST, &format!("{e}")));
+        }
+        // Echoed so a client that asked for specific namespaces can tell a
+        // server that honoured the selection from one that predates it.
+        let exported_namespaces = crate::exchange::document_namespaces(&document);
+
         // One output file, or — for a split export — one per namespace.
         let parts: Vec<(Option<String>, crate::exchange::ExchangeDocument)> = if payload.split {
             crate::exchange::split_by_namespace(&document).into_iter().map(|(ns, d)| (Some(ns), d)).collect()
@@ -2158,7 +2165,10 @@ async fn sys_exchange_export_request_handler(
                     })
                 })
                 .collect();
-            return Ok(response_json_ok(None, json!({ "format": format_label, "files": entries })));
+            return Ok(response_json_ok(
+                None,
+                json!({ "format": format_label, "files": entries, "namespaces": exported_namespaces }),
+            ));
         }
         let body_bytes = &files[0].1;
         Ok(response_json_ok(
@@ -2167,6 +2177,7 @@ async fn sys_exchange_export_request_handler(
                 "format": format_label,
                 "size_bytes": body_bytes.len(),
                 "file_b64": b64(body_bytes),
+                "namespaces": exported_namespaces,
             }),
         ))
     })

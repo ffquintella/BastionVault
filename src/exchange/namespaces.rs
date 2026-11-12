@@ -191,6 +191,24 @@ pub fn document_namespaces(document: &ExchangeDocument) -> Vec<String> {
     out
 }
 
+/// Refuse to hand an operator an export that carries nothing.
+///
+/// An empty document is a ~800-byte `.bvx` that looks like a successful
+/// export and is discovered only on restore. It happens when the selected
+/// namespace or engine matched no data, or when a server that predates
+/// namespace selection silently ignored the selection and exported root. The
+/// error carries the exporter's own warnings so the cause is visible.
+pub fn ensure_not_empty(document: &ExchangeDocument) -> Result<(), RvError> {
+    if !document_namespaces(document).is_empty() {
+        return Ok(());
+    }
+    let detail =
+        if document.warnings.is_empty() { String::new() } else { format!(" ({})", document.warnings.join("; ")) };
+    Err(RvError::ErrString(format!(
+        "export matched no data: the selected namespaces and engines contain nothing to export{detail}"
+    )))
+}
+
 /// Split a document into one standalone document per namespace it carries.
 ///
 /// The root namespace's document keeps its items at the top level; every other
@@ -887,6 +905,53 @@ mod tests {
         .await
         .unwrap();
         assert!(none.warnings.iter().any(|w| w.contains("matched no data")), "{:?}", none.warnings);
+    }
+
+    /// File blobs of a tenant namespace must survive an engine-scoped export
+    /// chosen from the root session, byte for byte.
+    #[tokio::test]
+    async fn tenant_file_content_is_exported_from_a_root_session() {
+        use crate::exchange::schema::ScopeSelector;
+        use base64::Engine;
+        let (core, root, _full) = three_namespace_vault("test_exchange_ns_files").await;
+        store_of(&core).create("tenant-a/child", NamespaceQuotas::default(), false).await.unwrap();
+        const NS: &str = "tenant-a/child";
+        let payload = vec![0xA5u8; 300_000];
+        ns_req(
+            &core,
+            &root,
+            Operation::Write,
+            "sys/mounts/files/",
+            NS,
+            json!({ "type": "files" }).as_object().cloned(),
+        )
+        .await
+        .unwrap();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&payload);
+        ns_req(
+            &core,
+            &root,
+            Operation::Write,
+            "files/files/f1",
+            NS,
+            json!({ "name": "big.xdb", "content_base64": b64 }).as_object().cloned(),
+        )
+        .await
+        .unwrap();
+        for scope in [
+            ScopeSpec {
+                kind: ScopeKind::Selective,
+                include: vec![ScopeSelector::EngineType { engine: "files".into() }],
+            },
+            ScopeSpec { kind: ScopeKind::Selective, include: vec![ScopeSelector::Mount { mount: "files/".into() }] },
+            ScopeSpec { kind: ScopeKind::AllNamespaces, include: vec![] },
+        ] {
+            let doc = export_namespaces(&core, ExporterInfo::default(), scope, &[NS.to_string()]).await.unwrap();
+            let bundle = doc.items.namespaces.iter().find(|b| b.path == NS).expect("tenant-a bundle");
+            assert_eq!(bundle.items.files.len(), 1, "warnings: {:?}", doc.warnings);
+            let got = base64::engine::general_purpose::STANDARD.decode(&bundle.items.files[0].content_b64).unwrap();
+            assert_eq!(got, payload, "blob bytes must be exported");
+        }
     }
 
     /// A bundle naming a namespace this vault does not have is reported, not

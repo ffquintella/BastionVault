@@ -41,7 +41,7 @@ final-status-level = "slow"
 # Two kinds of test are excluded from every nextest run and covered by
 # their own `make` targets instead. Neither exclusion is about speed.
 #
-#   * `cucumber_hiqlite` is declared `harness = false` in Cargo.toml. It
+#   * `cucumber_hiqlite` and `cucumber_exchange` are declared `harness = false` in Cargo.toml. It
 #     is a plain `main()`, not a libtest binary, so nextest cannot
 #     enumerate its cases. Run it with `make test-cucumber`.
 #
@@ -67,7 +67,7 @@ final-status-level = "slow"
 # same `make` targets under plain `cargo test`. What is excluded here is
 # excluded from *nextest*, not from CI — keep those two facts together, because
 # widening this filter would now silently double-run them.
-default-filter = 'not (binary(cucumber_hiqlite) | binary(hiqlite_ha_fault_injection) | test(/^(storage::)?hiqlite::test::/))'
+default-filter = 'not (binary(cucumber_hiqlite) | binary(cucumber_exchange) | binary(hiqlite_ha_fault_injection) | test(/^(storage::)?hiqlite::test::/))'
 
 # `src/plugins/process_runtime.rs` tests copy the *entire test binary*
 # into a temp dir per invocation (`current_exe_bytes()` → `Vec<u8>`), then

@@ -254,6 +254,7 @@ test-doc: prune-stale ## Run doctests (cargo test --doc; nextest cannot run thes
 # also cannot overlap with another run of itself.
 test-cucumber: prune-stale ## Run the cucumber feature suite (harness = false, so plain cargo test)
 	cargo test --test cucumber_hiqlite
+	cargo test --test cucumber_exchange
 
 # These MUST share one process: both suites hand themselves disjoint TCP
 # ports from a process-global atomic counter, and a dropped hiqlite

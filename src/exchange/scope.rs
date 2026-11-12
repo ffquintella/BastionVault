@@ -1036,6 +1036,28 @@ pub(crate) async fn apply_items(
         }
     };
 
+    // The importer restores data into a mount; it does not create the mount
+    // (the mount table is out of scope for an exchange file). An item whose
+    // mount is missing here is stored under a bare key no engine reads, so it
+    // would be reported as written and then be invisible. Say so, once per mount.
+    let mut orphaned: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for kv in &items.kv {
+        if mounts.kv_uuid_for_mount(&ensure_trailing_slash(&kv.mount)).is_none() {
+            *orphaned.entry(qualify(&kv.mount)).or_default() += 1;
+        }
+    }
+    for raw in &items.raw {
+        if mounts.uuid_for_mount_any(&ensure_trailing_slash(&raw.mount)).is_none() {
+            *orphaned.entry(qualify(&raw.mount)).or_default() += 1;
+        }
+    }
+    for (mount, n) in orphaned {
+        result.warnings.push(format!(
+            "mount {mount:?} does not exist on this vault: {n} item(s) were written to a key no engine reads and will \
+             not be visible. Create the mount and import again."
+        ));
+    }
+
     // KV items — resolved to the live kv backend's barrier key.
     for kv in &items.kv {
         let full_path = mounts.resolve_kv_key(&kv.mount, &kv.path);

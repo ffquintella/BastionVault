@@ -175,6 +175,15 @@ pub async fn exchange_export(
             body.insert("split".into(), Value::Bool(true));
         }
         let data = remote_data(&state, Operation::Write, "sys/exchange/export".into(), Some(body)).await?;
+        // A server that predates namespace selection ignores the field and
+        // exports the root namespace only, with no error. It also never echoes
+        // `namespaces`, which is how the mismatch is caught here.
+        if (!namespaces.is_empty() || split) && !data.contains_key("namespaces") {
+            return Err("the connected server does not support choosing namespaces or splitting an export \
+                        (added in BastionVault 0.46.4). Upgrade the server, or export from a session scoped to \
+                        that namespace."
+                .into());
+        }
         if split {
             return Ok(ExchangeExportResult {
                 file_b64: String::new(),
@@ -268,6 +277,8 @@ async fn exchange_export_inner(
         .await
         .map_err(CommandError::from)?
     };
+
+    exchange::ensure_not_empty(&document).map_err(CommandError::from)?;
 
     let parts: Vec<(String, exchange::ExchangeDocument)> =
         if split { exchange::split_by_namespace(&document) } else { vec![(String::new(), document)] };
