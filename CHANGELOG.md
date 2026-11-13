@@ -337,6 +337,10 @@ EXAMPLE ENTRY:
 
 ### Fixed
 
+#### PKI: set the subject country, OU, province and locality of a role from the GUI
+
+- **The PKI role form now has Country (C), Organizational unit (OU), Province / state (ST) and Locality (L) fields** (T487, S38) -- the engine has always accepted them on a role and writes them into the subject of every certificate the role issues, but the desktop app only showed Organization, so a role could not get `C=BR` or `OU=ESI` without the API or CLI. Saving a role from the GUI sends them back with the rest of the role.
+
 #### Import / export: no more silently empty export files
 
 - **An export that matched nothing is refused instead of written as an empty `.bvx`** (T485, S21) -- `POST /v{1,2}/sys/exchange/export` and the GUI now fail with "export matched no data" plus the exporter's warnings when the chosen namespaces/engines hold nothing, instead of producing a ~800-byte file that looks like a success and is found empty on restore. The response also echoes `namespaces`, and the GUI refuses a namespace selection or split against a server that predates it (such a server ignored the selection and exported the root namespace only). A new cucumber suite (`make test-cucumber`, `tests/features/exchange_export.feature`) exercises every scope type -- full, all namespaces, one nested namespace, engine type, mount, KV path, split, bvx/json round trip, wrong password, and file blobs restoring byte for byte. The suite also restores every export into a second vault and checks the data, file bytes and policies arrive (both file formats, split parts, chosen namespaces/mounts, preview, skip/overwrite/rename).

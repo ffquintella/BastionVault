@@ -114,6 +114,39 @@ describe("PKI role editor round-trip", () => {
     });
   });
 
+  it("edits the subject DN fields (OU, country, province, locality) and sends them on save", async () => {
+    installMocks();
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={["/pki"]}>
+        <ToastProvider>
+          <PkiPage />
+        </ToastProvider>
+      </MemoryRouter>,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Roles" }));
+    await user.click(await screen.findByRole("button", { name: "smartcard" }));
+    await user.click(await screen.findByRole("button", { name: "Edit" }));
+    await user.type(await screen.findByLabelText("Country (C)"), "BR");
+    await user.type(screen.getByLabelText("Organizational unit (OU)"), "ESI");
+    await user.type(screen.getByLabelText("Province / state (ST)"), "RJ");
+    await user.type(screen.getByLabelText("Locality (L)"), "Rio de Janeiro");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      const call = mockInvoke.mock.calls.find((c) => c[0] === "pki_write_role");
+      expect(call).toBeTruthy();
+      expect(call![1].config).toMatchObject({
+        country: "BR",
+        ou: "ESI",
+        province: "RJ",
+        locality: "Rio de Janeiro",
+        organization: "Corp",
+      });
+    });
+  });
+
   it("shows the AD smart-card fields in the editor", async () => {
     installMocks();
     const user = userEvent.setup();

@@ -1857,6 +1857,31 @@ function RoleEditor({
           onChange={(e) => set({ organization: e.target.value })}
           disabled={!editing}
         />
+        <Input
+          label="Organizational unit (OU)"
+          value={config.ou}
+          onChange={(e) => set({ ou: e.target.value })}
+          disabled={!editing}
+        />
+        <Input
+          label="Country (C)"
+          value={config.country}
+          onChange={(e) => set({ country: e.target.value })}
+          disabled={!editing}
+          placeholder="BR"
+        />
+        <Input
+          label="Province / state (ST)"
+          value={config.province}
+          onChange={(e) => set({ province: e.target.value })}
+          disabled={!editing}
+        />
+        <Input
+          label="Locality (L)"
+          value={config.locality}
+          onChange={(e) => set({ locality: e.target.value })}
+          disabled={!editing}
+        />
       </div>
 
       {!compact && (
