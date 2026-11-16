@@ -2338,6 +2338,171 @@ GET  /v2/{mount}/issuer/{ref}/history
   usages) does not grant it. The built-in `pki-full` template covers it
   through `pki/*`; `pki-read` grants neither path.
 
+### Identity Provider: workforce identities (`v2` only, root namespace)
+
+Phase 1 of [`features/identity-provider.md`](../features/identity-provider.md):
+one canonical workforce identity per identity-store entity, with an immutable
+POSIX `(login, uid, primary_gid)` that is allocated once and never reused.
+Not mounted by default; enable it once in the root namespace:
+
+~~~
+POST /v1/sys/mounts/idp          {"type": "idp"}
+~~~
+
+Every `idp` mount shares one root-namespace store, so there is a single
+uid/gid space. Requests under `/v1/idp/...` are refused (`400`), and so is
+any request from a child namespace or through an `idp` mount a child
+namespace created (`403`).
+
+~~~
+GET    /v2/idp/config                                # ranges, high-water marks, used/retired counts
+POST   /v2/idp/config                                # uid_min, uid_max, gid_min, gid_max
+LIST   /v2/idp/identities                            # keys + key_info {login, uid, primary_gid, state}
+POST   /v2/idp/identities/{entity_id}                # allocate, import or update
+GET    /v2/idp/identities/{entity_id}
+DELETE /v2/idp/identities/{entity_id}                # = state "removed" (needs a disabled identity)
+POST   /v2/idp/identities/{entity_id}/state          # {"state": "active"|"disabled"|"removed", "reason"}
+~~~
+
+- **Allocate** (`uid_source` `vault`, the default): `login` is required and
+  must match `^[a-z_][a-z0-9_-]*$` (at most 32 characters; shared names such
+  as `root` and `admin` are refused). The uid is the next free id above the
+  uid high-water mark inside the uid range (default `80000`–`999999`); the
+  primary gid equals the uid when that gid is free, else the next free gid.
+  Optional `display_name` (no `:` or control characters) and `gids`
+  (supplementary groups, an array, at most 64). The first allocation pins
+  the default ranges into `idp/config`. The entity must exist (`404`).
+- **Import** (`uid_source: "imported"`): `uid` is required, `primary_gid`
+  defaults to it. Both must lie in `1000`–`2147483647`, are not reserved
+  (`65534`, `65535`) and may be outside the configured range; a seed that
+  collides with an allocated, imported, retired or shared-group id is
+  refused (`409`). Imports do not move the high-water mark.
+- **Update**: only `display_name` and `gids` change. A different `login`,
+  `uid`, `primary_gid` or `uid_source` is refused (`400`); restating the
+  current value is accepted. A removed identity is frozen (`409`).
+- **Supplementary groups**: a gid that is another identity's primary group,
+  current or removed, is refused (`409`); every accepted gid is reserved so
+  the allocator never hands it out as a primary group.
+- **Lifecycle**: `active -> disabled -> removed`, `disabled -> active`
+  reinstates. Removing an active identity, or changing a removed one, is
+  refused (`409`). Removal retires the uid and primary gid for good; the
+  login is never reused either. Restating the current state is a no-op.
+- **Ranges**: `1000`–`2147483647`, `min <= max`. Allocation never goes at
+  or below the high-water mark, so moving a range below it exhausts the
+  allocator (`409`, "exhausted") rather than reusing space.
+- Errors: `400` malformed input, `404` unknown identity or entity, `409`
+  collision or illegal transition, `500` a stored record that fails to
+  decode (never silently repaired).
+
+### Identity Provider: environments and entitlements (`v2` only, root namespace)
+
+Phase 2 of [`features/identity-provider.md`](../features/identity-provider.md).
+Same mount, guard and error mapping as the identity routes above.
+
+~~~
+LIST   /v2/idp/environments                          # keys + key_info {namespace, state, roles}
+POST   /v2/idp/environments/{name}                   # {"namespace", "roles": {role: [policy, ...]}, "description"}
+GET    /v2/idp/environments/{name}
+DELETE /v2/idp/environments/{name}                   # retire (terminal; the name is never reused)
+POST   /v2/idp/entitlements/{entity_id}/{environment}  # {"roles": [...], "not_after", "source"}
+GET    /v2/idp/entitlements/{entity_id}/{environment}
+DELETE /v2/idp/entitlements/{entity_id}/{environment}  # revoke
+GET    /v2/idp/entitlements/{entity_id}              # {"entity_id", "entitlements": {environment: grant}}
+~~~
+
+- **Environment**: `name` matches `^[a-z0-9][a-z0-9_-]*$` (at most 64).
+  `namespace` is required to create one and names an existing namespace
+  (`""` is root; unknown is `404`); the environment is pinned to that
+  namespace's uuid and can never be re-bound (`400`). At most one active
+  environment per namespace (`409`). `roles` maps role names (same syntax)
+  to ACL policy names in that namespace and replaces the whole map on every
+  write; `root`, `response-wrapping` and `control-group` are refused
+  (`400`); whether a policy exists is not checked. A retired environment is
+  frozen (`409`).
+- **Entitlement**: needs a workforce identity that is not removed (`404` /
+  `409`) and an active environment (`404` / `409`). `roles` (required,
+  non-empty array) must each be defined on the environment (`400`).
+  `not_after` (RFC 3339) must be in the future. `source` is `manual`
+  (default) or `external`; `group` is refused until group-derived
+  entitlements exist. `granted_by` and `granted_at` are stamped by the
+  server. A write replaces the whole grant (`created` says whether it was
+  new).
+- **Issue gate.** The entitlement check is the issue gate every provider
+  (SSH since Phase 3, below; RADIUS, SAML, OIDC and LDAP later) calls before
+  issuing anything. It allows only an active identity with an unexpired
+  entitlement to an active environment whose namespace still resolves to the
+  pinned uuid, for entitled roles the environment still defines, and only
+  when the request comes from the root namespace or that environment's own
+  namespace. Anything else is a deny, including unreadable or malformed
+  records. Each decision is an audit `event` entry named `idp.issue` or
+  `idp.issue-denied` (`decision`, `reason`, `provider`, `entity_id`,
+  `environment`, `caller_namespace`, `requested_roles`, `login`, `uid`,
+  `namespace`, `roles`, `policies`, `not_after`); if the audit device
+  refuses an `idp.issue` event, the issue is denied (`audit_failed`).
+
+### Identity Provider: SSH certificates and revocation (`v2` only, root namespace)
+
+Phase 3 of [`features/identity-provider.md`](../features/identity-provider.md).
+Same mount, guard and error mapping as above.
+
+~~~
+GET  /v2/idp/ssh/config                       # {"enabled": false} until written
+POST /v2/idp/ssh/config                       # {"mount", "role", "default_ttl", "max_ttl"}
+POST /v2/idp/ssh/sign/{environment}           # {"public_key", "ttl", "roles"}  (self-service)
+GET  /v2/idp/ssh/krl                          # {"krl" (base64 OpenSSH KRL), "krl_version", "generated_at", "revoked_serials"}
+GET  /v2/idp/deny-feed                        # {"feed", "signature", "algorithm", "key_id", "feed_version"}
+GET  /v2/idp/deny-feed/key                    # {"algorithm", "key_id", "ed25519", "mldsa65"}  (base64)
+~~~
+
+- **Config**: the provider is off (sign refused, `400`) until the first
+  write, which fills unset fields with `mount: "ssh"`, `role: "idp"`,
+  `default_ttl` 30m and `max_ttl` 1h. Durations are seconds or strings such
+  as `"30m"`; `max_ttl` lies within 60 s–8 h and `default_ttl` within
+  60 s–`max_ttl`.
+- **Sign** signs the caller's own key: the entity is the calling token's
+  (`entity_id` token metadata, set only by auth backends); a token without
+  one, such as the root token, is refused (`403`). The public key, the TTL
+  (above `max_ttl` is `400`, not clamped) and `roles` (a subset of the
+  entitled roles; default all) are checked first, then the issue gate, then
+  the SSH engine at `{mount}/sign/{role}` **inside the environment's
+  namespace** signs router-direct (no ACL on the SSH path is needed or
+  should be granted). The certificate is a user certificate with
+  `valid principals = [login]`, key id
+  `bv:<entity_id>:<login>:uid=<uid>:env=<environment>` and extensions
+  `uid@bastionvault`, `gid@bastionvault` (primary gid),
+  `env@bastionvault` and `roles@bastionvault` (comma-separated). The
+  engine's role must allow those four extensions (or `*`) and any principal
+  (`allowed_users: "*"`), and use an Ed25519 CA. The IdP reads the
+  certificate back and discards it (`502`, nothing recorded or returned)
+  unless the principals, key id, extensions, public key, `user` type and
+  validity window are exactly as requested; extensions and critical options
+  the role adds by default are kept. It is recorded for the KRL before it
+  is returned. Response: `signed_key`, `serial_number` (16 hex digits),
+  `key_id`, `principals`, `login`, `uid`, `gid`, `environment`,
+  `namespace`, `roles`, `valid_after`, `valid_before`.
+- **Revocation**: moving an identity out of `active` (state write or
+  `DELETE`) marks every outstanding certificate of it revoked
+  (`revoked_certificates` in the response) and advances the deny feed
+  (`deny_feed_version`). A certificate is also listed while its owner is
+  not active, and reinstating marks whatever was issued before the disable
+  first, so a reinstated identity never revives an old certificate.
+  Expired certificates leave the lists.
+- **KRL**: an OpenSSH KRL (load it with sshd `RevokedKeys`) with one
+  certificate section per signing CA; `krl_version` equals the deny feed
+  version it was built with.
+- **Deny feed**: `feed` is the base64 of a JSON payload
+  `{format: "bv-idp-deny-feed", format_version: 1, feed_version,
+  generated_at, identities: [{entity_id, login, uid, state, since}],
+  revoked_serials: [hex]}`; `signature` is the base64 of an Ed25519 +
+  ML-DSA-65 composite signature over `"bv-idp-deny-feed/v1\0" || payload`
+  (both halves must verify). `feed_version` moves up by one whenever the
+  content changes and never moves down; a verifier refuses a version below
+  the highest it has accepted. The signing key is created on first use,
+  stored behind the barrier, and not rotated yet; hosts pin
+  `deny-feed/key`.
+- Hosts need a token with `read` on `idp/ssh/krl` and `idp/deny-feed`. The
+  reference host helper is described in the feature file.
+
 ## Authentication Endpoints
 
 ### Token Login

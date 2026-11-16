@@ -214,7 +214,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The module set a default BastionVault server mounts.
 ///
 /// This list lives here, at the assembly point, and not in
-/// `module_manager.rs`: naming the 17 concrete engine types is exactly the
+/// `module_manager.rs`: naming the 18 concrete engine types is exactly the
 /// dependency that would stop `bv-core` from being a crate independent of the
 /// engines. See roadmaps/workspace-decomposition.md Phase 2 step 4.
 ///
@@ -223,11 +223,11 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// reference its store.
 pub fn default_modules() -> Vec<Box<dyn crate::module_manager::ModuleFactory>> {
     use crate::modules::{
-        cert_lifecycle::CertLifecycleModule, files::FilesModule, identity::IdentityModule, kv::KvModule,
-        kv_v2::KvV2Module, ldap::LdapModule, namespace::NamespaceModule, notifications::NotificationsModule,
-        pki::PkiModule, resource::ResourceModule, resource_group::ResourceGroupModule, rustion::RustionModule,
-        ssh::SshModule, ssh_broker::SshBrokerModule, system::SystemModule, totp::TotpModule, transit::TransitModule,
-        Module,
+        cert_lifecycle::CertLifecycleModule, files::FilesModule, identity::IdentityModule, idp::IdpModule,
+        kv::KvModule, kv_v2::KvV2Module, ldap::LdapModule, namespace::NamespaceModule,
+        notifications::NotificationsModule, pki::PkiModule, resource::ResourceModule,
+        resource_group::ResourceGroupModule, rustion::RustionModule, ssh::SshModule, ssh_broker::SshBrokerModule,
+        system::SystemModule, totp::TotpModule, transit::TransitModule, Module,
     };
 
     // One `Box::new(...)` per engine. The closure shape is what the blanket
@@ -255,6 +255,7 @@ pub fn default_modules() -> Vec<Box<dyn crate::module_manager::ModuleFactory>> {
         factory!(TransitModule),
         factory!(LdapModule),
         factory!(CertLifecycleModule),
+        factory!(IdpModule),
         // Namespace before system: see the note above.
         factory!(NamespaceModule),
         factory!(SystemModule),

@@ -64,4 +64,8 @@ pub use bv_engine_cert_lifecycle as cert_lifecycle;
 /// `bv-engine-transit` crate.
 pub use bv_engine_transit as transit;
 
+/// The outbound identity provider (workforce identities, POSIX uid/gid
+/// allocation), the Tier 3 `bv-engine-idp` crate.
+pub use bv_engine_idp as idp;
+
 pub mod credential;

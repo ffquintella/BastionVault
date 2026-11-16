@@ -17,6 +17,7 @@ mod cache_version;
 mod connect_session_open;
 mod ferrogate;
 mod files;
+mod idp;
 mod kv_version_read;
 mod mcp_access;
 mod mcp_sessions_ssh;

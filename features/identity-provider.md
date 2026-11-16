@@ -87,10 +87,206 @@ targets are heterogeneous:
 
 ## Current State
 
-**Specified; not yet implemented.** This document is the design of record. No
-code has been written. Phases below are all **Pending**. The feature depends on
-existing, shipped subsystems (SSH CA engine, entity/identity model, namespaces,
-policy engine, audit chain) and adds new modules under `src/modules/idp/`.
+**Phase 1 (POSIX identity core), Phase 2 (entitlements + gate) and Phase 3
+(SSH identity issue + revocation) are implemented, with caveats; Phases 4–7
+are Pending.** Phases 2 and 3 are described after Phase 1's caveats below.
+The code lives in the Tier 3 crate `crates/bv-engine-idp` (not
+`src/modules/idp/`: engines are separate crates since the workspace
+decomposition), registered in the facade's `default_modules()` as the `idp`
+mount type. What exists:
+
+- **Mounting.** Not a default mount: an operator enables it once in the root
+  namespace (`sys/mounts/idp type=idp`), so existing deployments gain no new
+  surface on upgrade. The store does not live on the mount's own view but on
+  the root system view (`sys/` barrier, sub-path `idp/posix/`), so every `idp`
+  mount shares one uid/gid space. Requests are refused unless they are `v2`,
+  come from the root namespace, *and* arrive through an `idp` mount of the
+  root mount table (a child namespace that mounts the type is refused in both
+  the header and the path-prefix addressing forms).
+- **Records** (all JSON, `version: 1`, unknown versions and unknown fields
+  refused): `config` (uid/gid ranges), `alloc/uid` and `alloc/gid` (high-water
+  mark, run-length-encoded `used` set, `retired` tombstones), `identities/<entity_id>`,
+  and never-deleted index keys `index/{login,uid,gid}/<key>` → `entity_id`.
+- **Allocator.** Every write runs under a process-local mutex plus the storage
+  backend's lock (Raft-replicated on hiqlite, a lock file on the file
+  backend). Allocator state is written before the index keys and the identity
+  record, so a crash burns an id but never reissues one. Four guards against
+  reuse: the high-water mark (vault allocation only moves upward), the `used`
+  set, the `retired` set and the per-id index key (re-checked with an uncached
+  read before an id is committed). Primary gid = uid when free
+  (user-private-group convention).
+- **Import mode** (`uid_source: "imported"`) seeds existing uids/gids from
+  `1000`–`2147483647`, collision-checked against all of the above; imports do
+  not move the high-water mark.
+- **Lifecycle** `active → disabled → removed`, `disabled → active`; removal is
+  terminal, tombstones uid and primary gid, and keeps the login reserved.
+  `DELETE` is the `removed` transition. Only `display_name` and supplementary
+  `gids` are mutable.
+- **Supplementary gids** may not name another identity's primary group
+  (current or removed) and are reserved against future primary allocation.
+
+Decisions taken where this spec was open: logins are never reused (not only
+uids); `DELETE` maps to removal rather than erasing the record; the entity must
+exist in the identity store at allocation time (later updates and lifecycle
+changes do not require it); imported ids below `1000` are refused.
+
+Caveats: not run against a multi-node hiqlite cluster (concurrency is covered
+by unit tests over an in-memory store and by the lock design); with the
+optional `secret_cache_ttl_secs` read cache enabled on a cluster, the allocator
+record can be read stale on a non-leader node — the per-id index check still
+prevents reissuing a uid or primary gid because negative reads are never
+cached, but a supplementary-group reservation (which has no index key) could be
+dropped by a write based on the stale record; on the file backend a
+crash while the lock file is held leaves a stale lock that blocks further
+writes until it is removed (a property of the existing storage lock, not new
+here). No CLI, GUI or dedicated audit-event type yet (lifecycle changes are
+logged under the `idp` log target and appear in the normal request audit).
+
+**Phase 2 (entitlements + gate).** `crates/bv-engine-idp/src/entitlement/`
+(`model.rs`, `store.rs`, `gate.rs`) plus the `v2` handlers in
+`src/backend/authz.rs`, on the same root-only guard. Store: root system view,
+sub-path `idp/authz/`, shared by every `idp` mount; writes take a
+process-local mutex plus the storage lock `bv-idp/authz`.
+
+- **Environments** (`environments/<name>`, JSON `version: 1`, unknown
+  versions and fields refused): a lower-case name bound at creation to one
+  existing namespace, by path *and* the uuid it had then, never re-bound; at
+  most one active environment per namespace; root (`""`) allowed. `roles`
+  maps role names to ACL policy names in that namespace (`root`,
+  `response-wrapping`, `control-group` refused). `DELETE` retires: terminal,
+  and the name stays reserved.
+- **Entitlements** (`entitlements/<entity_id>/<environment>`, `version: 1`):
+  `roles` (each defined on the environment), optional `not_after` (future
+  when granted), `source` `manual` | `external`, and `granted_by` /
+  `granted_at` stamped by the server from the caller. A write replaces the
+  grant; `DELETE` removes it. Needs a non-removed identity and an active
+  environment.
+- **Gate** (`entitlement::gate::IssueGate`, from `IdpModule::issue_gate()`):
+  a Rust API for the providers, with no HTTP route. Allow requires, in
+  order: well-formed input; both stores available; an `active` identity; an
+  `active` environment whose namespace still resolves to the pinned uuid; a
+  caller namespace that is root or the environment's own; an entitlement
+  with `now < not_after`; requested roles all entitled; every effective role
+  still defined on the environment. It returns login, uid, gids, the
+  namespace, the roles and the union of their policies. Anything else is a
+  deny with a reason code, including a storage read error, a record that
+  does not decode, a namespace-registry error and an audit device refusing
+  the allow event.
+- **Audit.** Each decision is a `security` log line plus, with an audit
+  device enabled, an `event` entry `idp.issue` / `idp.issue-denied` through
+  the audit broker (`AuditEntry::event`, as the MCP connect events). Fields:
+  decision, reason, provider, entity_id, environment, caller_namespace,
+  requested_roles, login, uid, namespace, roles, policies, not_after.
+  Caller-supplied strings are cut at 128 characters; no credential field
+  exists.
+
+Decisions taken where this spec was open (Phase 2):
+
+- *Environment ↔ namespace* is an explicit, immutable binding by path and
+  uuid, not "environment name = namespace path": names stay URL-safe
+  single segments while namespaces may nest, and a namespace deleted and
+  recreated under the same path is refused (`namespace_replaced`) instead of
+  inheriting its predecessor's entitlements.
+- *Role ↔ policy* is a per-environment map evaluated at issue time, so a
+  policy change applies to the next issue. Rejected: copying policies into
+  each entitlement, which would freeze them at grant time.
+- *Caller namespace*: root may target any environment; any other namespace
+  only the environment bound to itself (strict equality, no parent reach).
+  Phase 3 settles which namespace a self-service `ssh/sign` caller
+  presents (see Phase 3 below).
+- An entitled role later removed from the environment denies the whole
+  issue (`unknown_role`) rather than silently dropping the role.
+- No `v2` dry-run/check route: the spec lists none, and an admin check would
+  write `idp.issue` for something never issued.
+- `group`-derived entitlements are deferred: the kernel contract has no
+  entity → groups lookup, so `source: "group"` is refused.
+
+Caveats (Phase 2): the SSH provider (Phase 3) is the gate's only caller.
+Policy names are not checked against the namespace's policy store.
+Entitlements are kept, not cascaded, when an identity is removed or an
+environment retired (the gate denies both). Gate events go to root audit
+devices only; a tenant's own devices do not see issuance into its
+namespace. Not run on a multi-node cluster (Phase 1's read-cache caveat
+applies to these records too).
+
+**Phase 3 (SSH identity issue + revocation).** `src/provider/ssh/` (sign
+flow, `idp/ssh/` store), `src/revoke/` (revocation view, KRL encoder, deny
+feed, `idp/revoke/` store), `src/backend/ssh.rs`, and the reference host
+helper (`src/host.rs` + `src/bin/bv-idp-host.rs`). Routes in
+[docs/api.md](../docs/api.md).
+
+- **Sign** (`v2/idp/ssh/sign/<environment>`): input checks, then the gate
+  (its first caller; an issue happens only after an allow, and the gate's
+  `idp.issue` event is the issuance record), then the SSH engine mounted
+  at the configured `mount`/`role` **in the environment's namespace**
+  signs, router-direct as `bv_kernel_api::ssh_credentials` does (no new
+  kernel or SSH-engine API; no second signer). The IdP reads the
+  certificate back with `ssh-key` and discards it unless principals = the
+  login, key id = `bv:<entity_id>:<login>:uid=<uid>:env=<env>`, the four
+  `*@bastionvault` extensions, public key, `user` type and validity all
+  match; it then records it (`certs/<entity_id>/<serial>`, JSON
+  `version: 1`) before returning it. TTL: default 30m, `max_ttl` at most
+  8h, a larger request refused.
+- **Revocation**: leaving `active` marks the identity's outstanding
+  certificates revoked; a certificate whose owner is not active is listed
+  even unmarked; reinstating marks first. The KRL (`v2/idp/ssh/krl`,
+  checked against OpenSSH 10.5 `ssh-keygen -Q`) and the deny feed are built
+  from one view under one version.
+- **Deny feed** (`v2/idp/deny-feed`): signed with `bv_crypto`'s composite
+  Ed25519 + ML-DSA-65 detached signature (the one Rustion's BVRG envelope
+  uses) under a context prefix; version bound to a SHA-256 of the content,
+  advanced under a lock, never lowered. Key in `idp/revoke/feed/key`,
+  created on first use; an unreadable key is an error, never replaced.
+- **Host helper** (`cargo build -p bv-engine-idp --bin bv-idp-host`):
+  `install-feed` verifies a fetched feed (signature, version not below the
+  installed one, `--max-age`, default 24h) and installs it atomically;
+  `principals` is the `AuthorizedPrincipalsCommand`; `nss-entry` prints
+  `libnss-extrausers` passwd/group lines from a certificate it verifies
+  against the CA key. Wiring:
+
+  ~~~
+  TrustedUserCAKeys /etc/ssh/bv_user_ca.pub      # the environment's SSH CA
+  RevokedKeys /etc/ssh/bv_revoked.krl             # base64 -d of .data.krl
+  AuthorizedPrincipalsCommand /usr/local/sbin/bv-idp-host principals --key /etc/bv-idp/feed-key.json --state-dir /var/lib/bv-idp --environment prod %u %s %i
+  AuthorizedPrincipalsCommandUser bv-idp
+  ~~~
+
+  plus a timer that fetches `v2/idp/ssh/krl` and `v2/idp/deny-feed` with a
+  read-only token and runs `install-feed`. `--shared-account <user>` lets
+  every identity log in as one local account, attributed by key id.
+
+Decisions taken where this spec was open (Phase 3):
+
+- *Caller namespace*: the sign route presents the namespace the request is
+  served in (`caller_namespace`), the same rule the Phase 2 gate documents.
+  The guard admits root only, so this is always root and the gate's
+  namespace rule passes; which environments a caller reaches is decided by
+  the entitlement plus the root ACL on `idp/ssh/sign/<environment>`.
+  Rejected: presenting the token's home namespace binding, which no other
+  route uses and which a root-only mount cannot be reached from anyway.
+- *Self-service only*: the entity is the token's; there is no admin
+  sign-on-behalf. The root token (no entity) is refused.
+- *One CA per environment*: the SSH engine of the environment's own
+  namespace signs, so a host trusting the prod CA rejects a dev
+  certificate natively. The KRL has one section per CA.
+- *Extensions*: `uid@`, `gid@` (spec) plus `env@` and `roles@bastionvault`;
+  supplementary gids are not in the certificate.
+- *TTL above `max_ttl`* is refused, not clamped.
+- *Revocation scope*: lifecycle-driven only. Revoking an entitlement stops
+  new issues but leaves outstanding certificates to expire; there is no
+  single-certificate revoke route.
+
+Caveats (Phase 3): no real sshd or Linux host was run; the helper's
+`principals` and `install-feed` logic is unit-tested, its CLI and sshd
+wiring are not. The NSS side is a line generator from a verified
+certificate: sshd looks the user up before authentication, so an account
+must exist first (provisioned with `nss-entry`, or the Phase 6
+LDAP-compat front); on-login materialization is not delivered. An ML-DSA-65
+(PQC) SSH CA is unsupported (certificates are refused at read-back). The
+feed key is not rotated and not HSM-backed. Certificate records of expired
+certificates are pruned 24h after expiry, at that identity's next issue.
+The KRL and feed are authenticated routes (hosts need a token). Not run on a
+multi-node cluster.
 
 ## Concepts and Terminology
 
@@ -281,12 +477,12 @@ channel, because no single channel is sufficient on its own:
 
 | Channel | Propagation mechanism |
 |---|---|
-| **SSH certs** | Add the identity's certs (by serial / by `entity_id` key-id prefix) to an **OpenSSH KRL** served at `GET /v1/idp/ssh/krl`; hosts load it via `RevokedKeys`. Outstanding certs also expire on their own short TTL. |
+| **SSH certs** | Add the identity's certs (by serial / by `entity_id` key-id prefix) to an **OpenSSH KRL** served at `GET /v2/idp/ssh/krl`; hosts load it via `RevokedKeys`. Outstanding certs also expire on their own short TTL. |
 | **SSH future-issue** | The entitlement gate refuses new issues immediately. |
 | **RADIUS** | Access-Request for a non-`active` identity returns Access-Reject. |
 | **SAML / OIDC** | New assertions refused; existing OIDC tokens are short-lived and the OP refresh path refuses; a back-channel logout is emitted to registered RPs that support it. |
 | **LDAP-compat** | Bind fails for non-`active` identities. |
-| **Deny feed** | `GET /v1/idp/deny-feed` returns a **composite-signed (Ed25519 + ML-DSA-65), monotonically-versioned** list of revoked logins/UIDs/cert-serials. Target-side agents (the `AuthorizedPrincipalsCommand`, the NSS helper) poll it and enforce the block **without waiting for TTL expiry**. The feed is signed so a target can trust it offline; versioned so a target can detect rollback. |
+| **Deny feed** | `GET /v2/idp/deny-feed` returns a **composite-signed (Ed25519 + ML-DSA-65), monotonically-versioned** list of revoked logins/UIDs/cert-serials. Target-side agents (the `AuthorizedPrincipalsCommand`, the NSS helper) poll it and enforce the block **without waiting for TTL expiry**. The feed is signed so a target can trust it offline; versioned so a target can detect rollback. |
 
 **Design choice — defense in depth, fail-closed.** Short TTL is the baseline
 (bounded exposure even if every push fails), the KRL/deny-feed is the active
@@ -305,9 +501,16 @@ POST   /v2/idp/identities/:entity_id/state  # active | disabled | removed (+rein
 GET    /v2/idp/config                        # uid/gid ranges, providers enabled
 POST   /v2/idp/config
 
+# Environments (Phase 2 addition: environment <-> namespace and role <-> policy)
+LIST   /v2/idp/environments
+POST   /v2/idp/environments/:environment     # namespace (create only, immutable), roles, description
+GET    /v2/idp/environments/:environment
+DELETE /v2/idp/environments/:environment     # retire; the name is never reused
+
 # Entitlements
 POST   /v2/idp/entitlements/:entity_id/:environment
 GET    /v2/idp/entitlements/:entity_id
+GET    /v2/idp/entitlements/:entity_id/:environment
 DELETE /v2/idp/entitlements/:entity_id/:environment
 
 # Issuance (entitlement-gated)
@@ -344,9 +547,9 @@ nav like the PKI/SSH pages):
 
 | Phase | Scope | Status |
 |---|---|---|
-| **1 — POSIX identity core** | `idp/posix/` store + Raft-serialized UID/GID allocator (range, high-water, free bitmap, tombstone/no-reuse), `v2/idp/identities` CRUD + state machine, `idp/config`. Import mode for seeding existing UIDs. | Pending |
-| **2 — Entitlements + gate** | `entitlement.rs` store, environment↔namespace mapping, role↔policy mapping, the fail-closed issue gate + `idp.issue`/`idp.issue-denied` audit events. | Pending |
-| **3 — SSH identity issue + revocation** | `provider/ssh.rs` identity-bound `sign` wrapping the SSH engine (principals=login, key-id attribution, uid/gid extensions), `GET /v2/idp/ssh/krl`, the signed/versioned `deny-feed`, and the reference `AuthorizedPrincipalsCommand` + NSS helper for Linux. | Pending |
+| **1 — POSIX identity core** | `idp/posix/` store + Raft-serialized UID/GID allocator (range, high-water, free bitmap, tombstone/no-reuse), `v2/idp/identities` CRUD + state machine, `idp/config`. Import mode for seeding existing UIDs. | **Complete, with caveats** — `crates/bv-engine-idp`; opt-in `idp` mount; not run on a multi-node cluster; no CLI/GUI (see Current State) |
+| **2 — Entitlements + gate** | `entitlement.rs` store, environment↔namespace mapping, role↔policy mapping, the fail-closed issue gate + `idp.issue`/`idp.issue-denied` audit events. | **Complete, with caveats** — `crates/bv-engine-idp/src/entitlement/`; `v2/idp/environments` + `v2/idp/entitlements`; the gate is a Rust API with no caller until Phase 3; policy existence unchecked; not run on a multi-node cluster (see Current State) |
+| **3 — SSH identity issue + revocation** | `provider/ssh.rs` identity-bound `sign` wrapping the SSH engine (principals=login, key-id attribution, uid/gid extensions), `GET /v2/idp/ssh/krl`, the signed/versioned `deny-feed`, and the reference `AuthorizedPrincipalsCommand` + NSS helper for Linux. | **Complete, with caveats** — `crates/bv-engine-idp/src/{provider/ssh,revoke}/`, `bin/bv-idp-host`; KRL checked with `ssh-keygen`; no real sshd/Linux host run; NSS helper generates entries from a certificate, no on-login materialization; PQC CA unsupported; feed key not rotated (see Current State) |
 | **4 — RADIUS provider** | `provider/radius.rs` (RadSec + opt-in UDP), per-vendor attribute templates (FortiGate first), entitlement-gated, Access-Reject for non-active. Live-tested against a FortiGate (or `freeradius`/`pyrad` harness). | Pending |
 | **5 — SAML IdP + OIDC OP** | `provider/saml_idp.rs` (reusing the SAML-auth signing core) + `provider/oidc_op.rs` (discovery/JWKS/authz/token), both entitlement-gated, UID + role-set in assertions/claims. | Pending |
 | **6 — LDAP-compat directory** | `provider/ldap_dir.rs` read-only bind+search serving `posixAccount`/`posixGroup`; bind = live active-state check. | Pending |

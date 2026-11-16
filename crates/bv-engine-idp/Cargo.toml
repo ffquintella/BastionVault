@@ -1,0 +1,83 @@
+[package]
+name = "bv-engine-idp"
+version = "0.41.0"
+edition = "2021"
+description = "BastionVault's outbound identity provider: canonical workforce identities with a stable, never-reused POSIX uid/gid mapping"
+license = "Apache-2.0"
+repository = "https://github.com/ffquintella/BastionVault"
+
+publish = ["uox-bastionvault"]
+
+# Tier 3 (roadmaps/workspace-decomposition.md § Phase 3): bv-kernel-api +
+# Tier 0 only. features/identity-provider.md (T52, S19), Phase 1: the POSIX
+# identity core; Phase 2: environments, entitlements and the issue gate;
+# Phase 3: SSH identity certificates, the KRL and the signed deny feed. No
+# cryptography is implemented here: SSH certificates are signed by the SSH
+# engine (router-direct), the deny feed by bv_crypto's composite signer.
+
+[dependencies]
+bv-errors = { path = "../bv-errors", version = "0.41.0", registry = "uox-bastionvault" }
+# `Context` is named by the `new_path!` expansion.
+bv-context = { path = "../bv-context", version = "0.41.0", registry = "uox-bastionvault" }
+bv-logical = { path = "../bv-logical", version = "0.42.0", registry = "uox-bastionvault" }
+bv-storage = { path = "../bv-storage", version = "0.41.0", registry = "uox-bastionvault" }
+bv-kernel-api = { path = "../bv-kernel-api", version = "0.42.0", registry = "uox-bastionvault" }
+# Phase 2: the issue gate writes `idp.issue` / `idp.issue-denied` as
+# `AuditEntry::event` entries on the broker, the same path engine events use.
+bv-audit = { path = "../bv-audit", version = "0.42.0", registry = "uox-bastionvault" }
+
+arc-swap = "1.7"
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+derive_more = "2.1.1"
+log = "0.4"
+maybe-async = "0.2"
+serde = { version = "^1.0", features = ["derive", "rc", "alloc"] }
+serde_json = "^1.0"
+# Process-local half of the allocator lock; the storage lock is the
+# cluster-wide half. Same version line as the other engines.
+tokio = { version = "1.52", features = ["sync"] }
+
+# Phase 3. All already in the workspace graph (no new crate is built).
+# Composite Ed25519 + ML-DSA-65 detached signature over the deny feed
+# (`bv_crypto::bvrg::{sign,verify}_detached_hybrid`); pure Rust.
+bv_crypto = { path = "../bv_crypto", version = "0.41.0", registry = "uox-bastionvault" }
+# Rebuilds the stored Ed25519 half of the feed key (`SigningKey::from_bytes`),
+# the type bv_crypto's signer holds. Same features as bv_crypto's own.
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "rand_core", "zeroize"] }
+# Parse the certificate the SSH engine returns (principals, key id,
+# extensions, signing CA) and the client public key; wire-encode the CA key
+# for the KRL. Same features as bv-kernel-api's.
+ssh-key = { version = "0.6", default-features = false, features = ["alloc", "ed25519", "ecdsa"] }
+base64 = "0.22"
+# Content digest of the deny feed, so its version moves only on a change.
+sha2 = "0.11"
+humantime = "2.3"
+zeroize = "1.8"
+
+[dev-dependencies]
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync"] }
+# The unit tests' stand-in for the SSH engine signs with an in-memory CA.
+ssh-key = { version = "0.6", default-features = false, features = ["alloc", "ed25519", "ecdsa", "getrandom"] }
+
+[features]
+default = []
+sync_handler = [
+    "maybe-async/is_sync",
+    "bv-storage/sync_handler",
+    "bv-logical/sync_handler",
+    "bv-kernel-api/sync_handler",
+    "bv-audit/sync_handler",
+]
+
+# Lints this crate's code trips, all of which the root crate already allows.
+# Per-crate rather than a `[workspace.lints]` block (see bv-logical's manifest).
+[lints.clippy]
+field_reassign_with_default = "allow"
+type_complexity = "allow"
+
+[package.metadata.cargo-machete]
+ignored = [
+    # Used by the `#[maybe_async::maybe_async]` expansion, invisible to a scan.
+    "async-trait",
+]

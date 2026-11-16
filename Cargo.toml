@@ -83,6 +83,8 @@ members = [
     "crates/bv-engine-ldap",
     "crates/bv-engine-cert-lifecycle",
     "crates/bv-engine-transit",
+    # Outbound identity provider (T52, S19): bv-kernel-api + Tier 0 only.
+    "crates/bv-engine-idp",
     # Dynamic-secrets building blocks (T62): bv-kernel-api + Tier 0 only.
     "crates/bv-dynamic",
     # Not part of the Tier 0-4 ladder: a dispatcher, not an engine. See
@@ -180,6 +182,9 @@ bv-engine-ssh-broker = { path = "crates/bv-engine-ssh-broker" }
 bv-engine-ldap = { path = "crates/bv-engine-ldap" }
 bv-engine-cert-lifecycle = { path = "crates/bv-engine-cert-lifecycle" }
 bv-engine-transit = { path = "crates/bv-engine-transit" }
+# Outbound identity provider (T52): workforce identities and the POSIX
+# uid/gid allocator, mounted as the `idp` type.
+bv-engine-idp = { path = "crates/bv-engine-idp" }
 # Dynamic-secrets building blocks (T62): templating, generated credentials,
 # pool, cache and the `dynamic_secret` event. The plugin host in
 # `src/plugins/dynamic/` wires them to the runtimes and the lease manager.
@@ -481,6 +486,7 @@ sync_handler = [
     "bv-engine-files/sync_handler",
     "bv-engine-resource/sync_handler",
     "bv-engine-rustion/sync_handler",
+    "bv-engine-idp/sync_handler",
     "bv-auth-audit/sync_handler",
     "bv-auth-approle/sync_handler",
     "bv-auth-userpass/sync_handler",
