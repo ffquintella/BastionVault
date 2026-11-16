@@ -33,6 +33,7 @@ const FilesPage = lazyPage(() => import("./routes/FilesPage"), "FilesPage");
 const UsersPage = lazyPage(() => import("./routes/UsersPage"), "UsersPage");
 const AppRolePage = lazyPage(() => import("./routes/AppRolePage"), "AppRolePage");
 const FerroGatePage = lazyPage(() => import("./routes/FerroGatePage"), "FerroGatePage");
+const IdentityProviderPage = lazyPage(() => import("./routes/IdentityProviderPage"), "IdentityProviderPage");
 const McpAppsPage = lazyPage(() => import("./routes/McpAppsPage"), "McpAppsPage");
 const AiAssistantsPage = lazyPage(() => import("./routes/AiAssistantsPage"), "AiAssistantsPage");
 const GroupsPage = lazyPage(() => import("./routes/GroupsPage"), "GroupsPage");
@@ -149,6 +150,10 @@ export default function App() {
             <Route
               path="/ferrogate"
               element={<ProtectedRoute><FerroGatePage /></ProtectedRoute>}
+            />
+            <Route
+              path="/identity-provider"
+              element={<ProtectedRoute><IdentityProviderPage /></ProtectedRoute>}
             />
             <Route
               path="/mcp-apps"

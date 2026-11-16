@@ -87,11 +87,11 @@ targets are heterogeneous:
 
 ## Current State
 
-**Phase 1 (POSIX identity core), Phase 2 (entitlements + gate), Phase 3
-(SSH identity issue + revocation), Phase 4 (RADIUS), Phase 5 (SAML IdP +
-OIDC OP) and Phase 6 (LDAP-compat directory) are implemented, with caveats;
-Phase 7 (GUI) is Pending.** Phases 2–6 are described after Phase 1's
-caveats below.
+**All seven phases are implemented, with caveats: Phase 1 (POSIX identity
+core), Phase 2 (entitlements + gate), Phase 3 (SSH identity issue +
+revocation), Phase 4 (RADIUS), Phase 5 (SAML IdP + OIDC OP), Phase 6
+(LDAP-compat directory) and Phase 7 (GUI).** Phases 2–7 are described after
+Phase 1's caveats below, followed by what is not yet implemented.
 The code lives in the Tier 3 crate `crates/bv-engine-idp` (not
 `src/modules/idp/`: engines are separate crates since the workspace
 decomposition), registered in the facade's `default_modules()` as the `idp`
@@ -141,8 +141,9 @@ cached, but a supplementary-group reservation (which has no index key) could be
 dropped by a write based on the stale record; on the file backend a
 crash while the lock file is held leaves a stale lock that blocks further
 writes until it is removed (a property of the existing storage lock, not new
-here). No CLI, GUI or dedicated audit-event type yet (lifecycle changes are
-logged under the `idp` log target and appear in the normal request audit).
+here). No CLI or dedicated audit-event type yet (lifecycle changes are
+logged under the `idp` log target and appear in the normal request audit);
+the GUI arrived in Phase 7.
 
 **Phase 2 (entitlements + gate).** `crates/bv-engine-idp/src/entitlement/`
 (`model.rs`, `store.rs`, `gate.rs`) plus the `v2` handlers in
@@ -504,6 +505,77 @@ accept an already-used passcode from its offline cache, outside the live
 check; the server cannot enforce this. Not run on a multi-node cluster; a
 client added on another node is admitted after the next 30 s refresh.
 
+**Phase 7 (GUI).** `gui/src/routes/IdentityProviderPage.tsx` (shell),
+`gui/src/components/idp/` (one file per tab, provider panel and modal),
+`gui/src/lib/idp.ts` (typed wrappers) and
+`gui/src-tauri/src/commands/idp.rs` (Tauri commands). See the GUI section
+below for what each tab does.
+
+- **Reaching the engine.** Every command names an absolute `/v2/idp/...`
+  path and is pinned to the root namespace (`make_request_root`). The remote
+  backend sends a leading-slash path as the URL path; the embedded backend
+  (`gui/src-tauri/src/backend.rs`) now reads a `/v1/` or `/v2/` prefix as
+  the request's API version, so the v2-only engine is reachable in both
+  modes while every relative path keeps the default version. No idp path
+  ends in `auth/<x>/login`, so the remote backend's tokenless-login rule
+  (`is_auth_login_path`) never drops the token from one.
+- **Route allowlist.** The commands take a settings kind, a record kind or
+  a key ring from closed enums, never a path; a caller-supplied name is one
+  segment (no `/`, `.`/`..`, `?`, `#`, `%` or whitespace). An identity is
+  removed only through its state command, never the generic delete.
+- **Mount detection.** The page probes `v2/idp/config`; "mount not found"
+  (both backends' wording) shows an enable prompt that mounts `idp/` in the
+  root namespace, any other error (a 403, say) is shown as an error.
+- **Secrets.** OIDC client secrets, RADIUS and LDAP passcodes and a UDP
+  shared secret the operator just set are shown once in a dialog with a copy
+  action, held only in that component's state and dropped when it closes;
+  nothing is written to web storage, the console or a URL (tests spy on
+  both). TLS private keys are masked, write-only fields that are never
+  filled from a read and are sent only when typed; settings writes send
+  only the fields that changed.
+- **Self-service.** SSH sign and passcode minting use the session's own
+  token. A token with no entity is refused by the vault (403); the page
+  explains it and warns beforehand when the session holds `root`.
+- **Confirmations.** Disable, reinstate, removal (login typed), environment
+  retirement (name typed), entitlement revocation, client/SP/NAS removal,
+  client-secret rotation and signing-key rotation each name the object and
+  the consequence before any request is sent.
+
+Decisions taken where this spec was open (Phase 7): the page sits in the
+Admin section, root-namespace only and not mount-gated (so it can offer to
+enable the engine); self-service actions live on the provider panels of the
+same page rather than a separate user page; the deny feed is decoded for
+display but not verified in the GUI (hosts verify it with `bv-idp-host`);
+"TLS keys on write" are treated as write-only input, never shown back.
+Rejected: a generic "any idp path" command, which would hand the webview a
+path parameter.
+
+Caveats (Phase 7): **not clicked through against a live vault**, embedded
+or remote; checked by vitest over the page, tabs, dialogs and wrappers with
+a mocked Tauri layer, the command module's unit tests, and one
+embedded-vault test that mounts `idp` and reads `/v2/idp/config` through
+the embedded backend. The page assumes the mount path `idp/` (as the API
+documents); an `idp` mount elsewhere is not found. The entitlement matrix
+reads one identity's grants per row, 20 rows a page. The SSH panel does not
+probe each namespace's SSH engine. A self-service page for people outside
+the Admin section is not provided.
+
+### What is not yet implemented
+
+- A CLI for the `v2/idp` surface.
+- Entitlements derived from identity groups (`source: "group"`).
+- On-login NSS account materialization on Linux hosts (Phase 3 generates
+  entries only); an ML-DSA-65 SSH CA; deny-feed key rotation; a
+  single-certificate revoke route.
+- CHAP, EAP, Access-Challenge and Status-Server for RADIUS.
+- A browser-facing relay or HTTP adapter for standard OIDC/SAML relying
+  parties (discovery, form-encoded token requests, redirects; see T107), a
+  refresh token, userinfo, back-channel logout, signed Responses, encrypted
+  assertions and AuthnRequest signature checks.
+- HSM-backed IdP signing keys.
+- Any run against real targets (sshd, FortiGate/FreeRADIUS, a real SP or
+  RP, sssd/nslcd) or a multi-node cluster, and a live-vault run of the GUI.
+
 ## Concepts and Terminology
 
 | Term | Meaning |
@@ -747,29 +819,39 @@ opt-in), and each can be independently disabled.
 
 ### GUI
 
-A new **Identity Provider** admin page (root/admin-gated, `requiresMountType`-style
-nav like the PKI/SSH pages):
-- **Identities** tab — list with login/UID/GID/state, allocate, disable/remove,
-  reinstate; UID shown read-only with a tooltip explaining immutability.
-- **Entitlements** tab — matrix of identity × environment × roles, with the
-  `not_after` time-box picker.
-- **Providers** tab — enable/configure SSH / RADIUS / SAML-IdP / OIDC-OP /
-  LDAP-compat, copy provider metadata (OIDC discovery URL, SAML metadata XML,
-  RADIUS client config snippet, the `TrustedUserCAKeys`/`AuthorizedPrincipalsCommand`
-  install snippet for Linux).
-- **Revocations** tab — deny-feed version, KRL contents, last propagation status.
+An **Identity Provider** admin page (*Admin → Identity Provider*, root
+namespace only; implemented in Phase 7). The nav item is not mount-gated:
+the page offers to mount `idp/` when the engine is missing.
+- **Identities** tab — allocation ranges and counters (editable), list with
+  login/uid/gid/state and a state filter, allocate or import, edit display
+  name and supplementary gids, disable/reinstate/remove; uid and primary gid
+  shown read-only with a tooltip explaining immutability.
+- **Entitlements** tab — environments (create bound to a namespace, edit the
+  role → policy map, retire), and the matrix of identity × environment ×
+  roles with the `not_after` time-box picker, source and revoke.
+- **Providers** tab — sub-tabs SSH / RADIUS / OIDC / SAML / LDAP: settings,
+  listener status and the engine's warnings; NAS clients and attribute
+  profiles, OIDC clients (secret shown once, rotate), SAML SPs, LDAP
+  clients; signing keys with rotation; copyable OIDC discovery URL, SAML
+  metadata XML, a NAS settings summary, the `TrustedUserCAKeys` /
+  `RevokedKeys` / `AuthorizedPrincipalsCommand` snippet and an sssd snippet;
+  self-service SSH sign and RADIUS/LDAP passcodes. Classic UDP RADIUS and
+  cleartext LDAP carry a prominent warning while enabled.
+- **Revocations** tab — deny-feed version, blocked identities and revoked
+  serials (decoded for display, not verified), the KRL and its version, the
+  identities that are not active, and the feed verification key to pin.
 
 ## Implementation Scope (Phased)
 
 | Phase | Scope | Status |
 |---|---|---|
-| **1 — POSIX identity core** | `idp/posix/` store + Raft-serialized UID/GID allocator (range, high-water, free bitmap, tombstone/no-reuse), `v2/idp/identities` CRUD + state machine, `idp/config`. Import mode for seeding existing UIDs. | **Complete, with caveats** — `crates/bv-engine-idp`; opt-in `idp` mount; not run on a multi-node cluster; no CLI/GUI (see Current State) |
+| **1 — POSIX identity core** | `idp/posix/` store + Raft-serialized UID/GID allocator (range, high-water, free bitmap, tombstone/no-reuse), `v2/idp/identities` CRUD + state machine, `idp/config`. Import mode for seeding existing UIDs. | **Complete, with caveats** — `crates/bv-engine-idp`; opt-in `idp` mount; not run on a multi-node cluster; no CLI (GUI in Phase 7; see Current State) |
 | **2 — Entitlements + gate** | `entitlement.rs` store, environment↔namespace mapping, role↔policy mapping, the fail-closed issue gate + `idp.issue`/`idp.issue-denied` audit events. | **Complete, with caveats** — `crates/bv-engine-idp/src/entitlement/`; `v2/idp/environments` + `v2/idp/entitlements`; the gate is a Rust API with no caller until Phase 3; policy existence unchecked; not run on a multi-node cluster (see Current State) |
 | **3 — SSH identity issue + revocation** | `provider/ssh.rs` identity-bound `sign` wrapping the SSH engine (principals=login, key-id attribution, uid/gid extensions), `GET /v2/idp/ssh/krl`, the signed/versioned `deny-feed`, and the reference `AuthorizedPrincipalsCommand` + NSS helper for Linux. | **Complete, with caveats** — `crates/bv-engine-idp/src/{provider/ssh,revoke}/`, `bin/bv-idp-host`; KRL checked with `ssh-keygen`; no real sshd/Linux host run; NSS helper generates entries from a certificate, no on-login materialization; PQC CA unsupported; feed key not rotated (see Current State) |
 | **4 — RADIUS provider** | `provider/radius.rs` (RadSec + opt-in UDP), per-vendor attribute templates (FortiGate first), entitlement-gated, Access-Reject for non-active. Live-tested against a FortiGate (or `freeradius`/`pyrad` harness). | **Complete, with caveats** — `crates/bv-engine-idp/src/provider/radius/`; one-time passcodes minted through the vault; RadSec with pinned NAS certificates, UDP opt-in; verified by the crate's own client over real sockets only: **no FortiGate, FreeRADIUS or pyrad run**; not run on a multi-node cluster (see Current State) |
 | **5 — SAML IdP + OIDC OP** | `provider/saml_idp.rs` (reusing the SAML-auth signing core) + `provider/oidc_op.rs` (discovery/JWKS/authz/token), both entitlement-gated, UID + role-set in assertions/claims. | **Complete, with caveats** — `crates/bv-engine-idp/src/provider/{saml_idp,oidc_op,federation}/`; aws-lc RS256 signing over `bv-auth-saml`'s C14N; verified with an RP library and the SAML auth verifier only: **no real SP, RP or browser run**; JSON envelope only, so standard RPs need a relay or HTTP adapter; not run on a multi-node cluster (see Current State) |
 | **6 — LDAP-compat directory** | `provider/ldap_dir.rs` read-only bind+search serving `posixAccount`/`posixGroup`; bind = live active-state check. | **Complete, with caveats** — `crates/bv-engine-idp/src/provider/ldap_dir/`; LDAPS with pinned client certificates, StartTLS, cleartext opt-in; one-time bind passcodes, gate-scoped visibility; verified with the ldap3 client over real sockets and OpenLDAP `ldapsearch` over cleartext only: **no sssd/nslcd/pam_ldap run**, no non-rustls TLS client; not run on a multi-node cluster (see Current State) |
-| **7 — GUI** | Identity Provider admin page (Identities / Entitlements / Providers / Revocations tabs) + Tauri commands + API wrappers. | Pending |
+| **7 — GUI** | Identity Provider admin page (Identities / Entitlements / Providers / Revocations tabs) + Tauri commands + API wrappers. | **Complete, with caveats** — `gui/src/routes/IdentityProviderPage.tsx`, `gui/src/components/idp/`, `gui/src/lib/idp.ts`, `gui/src-tauri/src/commands/idp.rs`; embedded backend reads an explicit `/v2/` path; one-time secrets shown once and cleared, TLS keys write-only; unit-tested with a mocked backend plus one embedded-vault test: **not run against a live vault**; mount path fixed at `idp/` (see Current State) |
 
 Phases 1–3 are the minimum viable slice: stable UID + entitlement gate + SSH
 identity certs + revocation. That alone delivers attributable, environment-gated,

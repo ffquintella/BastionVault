@@ -56,6 +56,12 @@ mod embedded {
 
             let core = self.vault.core.load();
 
+            // An absolute `/v1/...` or `/v2/...` path names the API version, as
+            // the remote backend reads it (it sends a leading-slash path as the
+            // URL path). The v2-only identity provider is reached this way;
+            // every relative path keeps the default version.
+            let (api_version, path) = split_api_version(path);
+
             // The GUI glues an `?env=<name>` selector onto the path; the router
             // would otherwise absorb it into the secret name. Split it off and
             // seed `req.data` exactly like the HTTP entry boundary does, so the
@@ -75,6 +81,9 @@ mod embedded {
                 data: query_data,
                 ..Default::default()
             };
+            if let Some(version) = api_version {
+                req.api_version = version;
+            }
             // Multi-tenancy: carry the active namespace as the request header
             // the server resolver reads (case-insensitive). Root / empty omits.
             if let Some(ns) = namespace.map(str::trim).filter(|s| !s.is_empty()) {
@@ -258,6 +267,16 @@ mod embedded {
         }
     }
 
+    /// `/v1/<path>` and `/v2/<path>` carry their version; anything else has none.
+    fn split_api_version(path: &str) -> (Option<u8>, &str) {
+        for (prefix, version) in [("/v1/", 1u8), ("/v2/", 2u8)] {
+            if let Some(rest) = path.strip_prefix(prefix) {
+                return (Some(version), rest);
+            }
+        }
+        (None, path)
+    }
+
     fn plugin_surface_mounts(router: &MountsRouter) -> Result<HashMap<String, String>, String> {
         let entries = router.mounts.entries.read().map_err(|error| error.to_string())?;
         let mut mounts = HashMap::new();
@@ -410,6 +429,40 @@ mod embedded {
             .await
             .unwrap();
             (backend, token, before_mount.etag)
+        }
+
+        #[tokio::test]
+        async fn an_absolute_v2_path_reaches_the_v2_only_idp_engine() {
+            assert_eq!(split_api_version("/v1/sys/health"), (Some(1), "sys/health"));
+            assert_eq!(split_api_version("sys/health"), (None, "sys/health"));
+            assert_eq!(split_api_version("/v3/idp/config"), (None, "/v3/idp/config"));
+
+            let vault = new_test_bastion_vault("embedded_idp_v2_path");
+            let initialized = vault.init(&SealConfig { secret_shares: 1, secret_threshold: 1 }).await.unwrap();
+            let shares = [initialized.secret_shares[0].as_slice()];
+            assert!(vault.unseal(&shares).await.unwrap());
+            let core = vault.core.load_full();
+            core.mount(&MountEntry { path: "idp/".into(), logical_type: "idp".into(), ..Default::default() })
+                .await
+                .unwrap();
+            let token = initialized.root_token.clone();
+            let backend = EmbeddedBackend::new(Arc::new(vault));
+
+            let config = backend
+                .handle(Operation::Read, "/v2/idp/config", None, &token)
+                .await
+                .expect("the v2 read is served")
+                .and_then(|r| r.data)
+                .expect("config data");
+            assert!(config.contains_key("uid_min"), "{config:?}");
+
+            // A relative path keeps the default (v1) and the engine refuses it,
+            // so no other command's behaviour moved.
+            let refused = backend
+                .handle(Operation::Read, "idp/config", None, &token)
+                .await
+                .expect_err("a relative path is v1 and must be refused");
+            assert!(refused.to_string().contains("/v2 only"), "{refused}");
         }
 
         #[tokio::test]

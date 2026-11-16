@@ -155,6 +155,9 @@ const adminNav: NavItem[] = [
   { path: "/users", label: "Users" },
   { path: "/approle", label: "AppID" },
   { path: "/ferrogate", label: "Machines (FerroGate)", rootOnly: true },
+  // T52: the idp engine is root-namespace only and not a default mount, so
+  // the link is not mount-gated: the page itself offers to enable it.
+  { path: "/identity-provider", label: "Identity Provider", rootOnly: true },
   { path: "/mcp-apps", label: "MCP Apps" },
   { path: "/groups", label: "Identity Groups" },
   { path: "/asset-groups", label: "Asset Groups" },

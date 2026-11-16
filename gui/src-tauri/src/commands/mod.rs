@@ -126,6 +126,7 @@ pub mod fido2_native;
 pub mod fido2_windows;
 pub mod files;
 pub mod groups;
+pub mod idp;
 pub mod ldap;
 pub mod leases;
 pub mod mcp;
