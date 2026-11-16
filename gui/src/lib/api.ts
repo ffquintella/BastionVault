@@ -3835,6 +3835,16 @@ export const getSessionWorkspacePrefs = () =>
 export const setSessionWorkspacePrefs = (prefs: SessionWorkspacePrefs) =>
   invoke<void>("set_session_workspace_prefs", { prefs });
 
+/** Where the GUI listens for the OIDC login callback. `fixed`: the first
+ *  free port of `ports` (1 to 3, tried in order); each must be registered
+ *  at the identity provider as `http://127.0.0.1:<port>/callback`.
+ *  `dynamic`: the OS picks a port per login (providers that allow any
+ *  loopback port). */
+export type OidcCallbackPrefs = { mode: "fixed" | "dynamic"; ports: number[] };
+export const getOidcCallbackPrefs = () => invoke<OidcCallbackPrefs>("get_oidc_callback_prefs");
+export const setOidcCallbackPrefs = (prefs: OidcCallbackPrefs) =>
+  invoke<void>("set_oidc_callback_prefs", { prefs });
+
 /** One live SSH/RDP session as `session_list_open` reports it: identity
  *  and routing only — never a credential or session output. */
 export type OpenSessionListing = {
