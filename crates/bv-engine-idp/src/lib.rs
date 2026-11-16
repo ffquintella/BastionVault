@@ -3,8 +3,9 @@
 //! `(login, uid, primary_gid)` allocated once and never reused, plus the
 //! `active -> disabled -> removed` lifecycle. Phase 2: environments,
 //! entitlements and the fail-closed issue gate. Phase 3: identity-bound SSH
-//! certificates, the KRL and the signed deny feed. Served under `v2/idp/`
-//! only and from the root namespace only.
+//! certificates, the KRL and the signed deny feed. Phase 4: the RADIUS
+//! provider (RadSec, opt-in UDP). Served under `v2/idp/` only and from the
+//! root namespace only.
 
 #![deny(unsafe_code)]
 
@@ -26,7 +27,10 @@ use crate::{
     kernel_api::{Module, VaultCtx},
     logical::Backend,
     posix::store::PosixStore,
-    provider::ssh::store::SshStore,
+    provider::{
+        radius::{store::RadiusStore, RadiusRuntime},
+        ssh::store::SshStore,
+    },
     revoke::store::FeedStore,
     storage::Storage,
 };
@@ -57,14 +61,18 @@ const SSH_SUBVIEW: &str = "idp/ssh/";
 /// Phase 3: the deny feed's version state and signing key.
 const REVOKE_SUBVIEW: &str = "idp/revoke/";
 
+/// Phase 4: RADIUS configuration, NAS clients, profiles and passcodes.
+const RADIUS_SUBVIEW: &str = "idp/radius/";
+
 /// Late-bound handle to the store: the backend is built at mount time, the
 /// store only once the barrier is unsealed.
 pub type PosixStoreSlot = arc_swap::ArcSwap<Option<Arc<PosixStore>>>;
 
-/// The Phase 3 stores, set together at unseal.
+/// The Phase 3 and 4 stores, set together at unseal.
 pub struct IssuanceStores {
     pub ssh: SshStore,
     pub feed: FeedStore,
+    pub radius: RadiusStore,
 }
 
 pub type IssuanceSlot = arc_swap::ArcSwap<Option<Arc<IssuanceStores>>>;
@@ -75,6 +83,8 @@ pub struct IdpModule {
     pub store: Arc<PosixStoreSlot>,
     pub authz: Arc<EntitlementStoreSlot>,
     pub issuance: Arc<IssuanceSlot>,
+    /// Phase 4: the RADIUS listeners' supervisor handle.
+    pub radius: Arc<RadiusRuntime>,
 }
 
 impl IdpModule {
@@ -85,6 +95,7 @@ impl IdpModule {
             store: Arc::new(arc_swap::ArcSwap::new(Arc::new(None))),
             authz: Arc::new(arc_swap::ArcSwap::new(Arc::new(None))),
             issuance: Arc::new(arc_swap::ArcSwap::new(Arc::new(None))),
+            radius: Arc::new(RadiusRuntime::default()),
         }
     }
 
@@ -127,8 +138,10 @@ impl Module for IdpModule {
         let store = self.store.clone();
         let authz = self.authz.clone();
         let issuance = self.issuance.clone();
+        let radius = self.radius.clone();
         let backend_new_func = move |ctx: Arc<dyn VaultCtx>| -> Result<Arc<dyn Backend>, RvError> {
-            let mut b = backend::IdpBackend::new(ctx, store.clone(), authz.clone(), issuance.clone()).new_backend();
+            let b = backend::IdpBackend::new(ctx, store.clone(), authz.clone(), issuance.clone(), radius.clone());
+            let mut b = b.new_backend();
             b.init()?;
             Ok(Arc::new(b))
         };
@@ -145,15 +158,36 @@ impl Module for IdpModule {
         self.authz.store(Arc::new(Some(Arc::new(EntitlementStore::new(authz_view)))));
         let ssh_view: Arc<dyn Storage> = Arc::new(system_view.new_sub_view(SSH_SUBVIEW));
         let revoke_view: Arc<dyn Storage> = Arc::new(system_view.new_sub_view(REVOKE_SUBVIEW));
-        let issuance = IssuanceStores { ssh: SshStore::new(ssh_view), feed: FeedStore::new(revoke_view) };
+        let radius_view: Arc<dyn Storage> = Arc::new(system_view.new_sub_view(RADIUS_SUBVIEW));
+        let issuance = IssuanceStores {
+            ssh: SshStore::new(ssh_view),
+            feed: FeedStore::new(revoke_view),
+            radius: RadiusStore::new(radius_view),
+        };
         self.issuance.store(Arc::new(Some(Arc::new(issuance))));
         Ok(())
+    }
+
+    /// The RADIUS supervisor: started once, it binds only what
+    /// `idp/radius/config` asks for (nothing until an operator writes it).
+    fn start_background(&self, core: Arc<dyn VaultCtx>) {
+        #[cfg(not(feature = "sync_handler"))]
+        self.radius.start(Arc::new(provider::radius::server::VaultSource {
+            ctx: Arc::downgrade(&core),
+            posix: self.store.clone(),
+            authz: self.authz.clone(),
+            issuance: self.issuance.clone(),
+        }));
+        #[cfg(feature = "sync_handler")]
+        drop(core);
     }
 
     fn cleanup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         self.store.store(Arc::new(None));
         self.authz.store(Arc::new(None));
         self.issuance.store(Arc::new(None));
+        // Sealed: the supervisor stops the listeners now, not at its tick.
+        self.radius.reconcile_soon();
         core.delete_logical_backend(IDP_LOGICAL_TYPE)
     }
 }

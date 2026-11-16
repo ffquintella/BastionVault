@@ -27,7 +27,7 @@ use crate::{
 const KRL_COMMENT: &str = "BastionVault identity provider";
 
 /// Seconds, as an integer, a string of digits, or a duration like `30m`.
-fn duration_field(req: &Request, key: &str) -> Result<Option<u64>, RvError> {
+pub(super) fn duration_field(req: &Request, key: &str) -> Result<Option<u64>, RvError> {
     let invalid = || PosixError::Invalid(format!("{key} must be a duration such as 600, \"600s\" or \"30m\""));
     match field(req, key)? {
         None => Ok(None),

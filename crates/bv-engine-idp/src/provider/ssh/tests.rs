@@ -17,7 +17,7 @@ use ssh_key::{certificate::Builder, rand_core::OsRng, Algorithm, PrivateKey};
 use super::{store::SshConfigUpdate, *};
 use crate::{
     entitlement::{
-        gate::{DenyReason, IssueAuditSink, IssueEvent, NamespaceLookup},
+        gate::{DenyReason, IssueAuditSink, IssueDenied, IssueEvent, IssueGate, NamespaceLookup},
         model::{Entitlement, EntitlementSource},
         store::{BoundNamespace, EntitlementStore, EntitlementWrite, EnvironmentWrite},
     },

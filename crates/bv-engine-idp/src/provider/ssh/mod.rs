@@ -17,7 +17,7 @@ use serde_json::{Map, Value};
 use ssh_key::{certificate::CertType, Certificate, PublicKey};
 
 use crate::{
-    entitlement::gate::{IssueDenied, IssueGate, IssueGrant, IssueRequest},
+    entitlement::gate::{IssueGrant, IssueRequest},
     errors::RvError,
     kernel_api::{namespace::scoped_mount, VaultCtx},
     logical::{Operation, Request},
@@ -100,21 +100,7 @@ impl IssuedCert {
     }
 }
 
-/// The decision a sign waits on. Implemented by [`IssueGate`] only; the
-/// seam exists for the test that proves the sign tests depend on the gate.
-// Same macro-generated `double_must_use` as the gate's traits.
-#[allow(clippy::double_must_use)]
-#[maybe_async::maybe_async]
-pub(crate) trait Authorizer: Send + Sync {
-    async fn check(&self, req: &IssueRequest, http: Option<&Request>) -> Result<IssueGrant, IssueDenied>;
-}
-
-#[maybe_async::maybe_async]
-impl Authorizer for IssueGate {
-    async fn check(&self, req: &IssueRequest, http: Option<&Request>) -> Result<IssueGrant, IssueDenied> {
-        self.authorize(req, http).await
-    }
-}
+pub(crate) use super::Authorizer;
 
 /// Where the SSH engine that signs lives.
 #[derive(Debug, Clone)]

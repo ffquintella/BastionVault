@@ -87,9 +87,10 @@ targets are heterogeneous:
 
 ## Current State
 
-**Phase 1 (POSIX identity core), Phase 2 (entitlements + gate) and Phase 3
-(SSH identity issue + revocation) are implemented, with caveats; Phases 4–7
-are Pending.** Phases 2 and 3 are described after Phase 1's caveats below.
+**Phase 1 (POSIX identity core), Phase 2 (entitlements + gate), Phase 3
+(SSH identity issue + revocation) and Phase 4 (RADIUS) are implemented, with
+caveats; Phases 5–7 are Pending.** Phases 2–4 are described after Phase 1's
+caveats below.
 The code lives in the Tier 3 crate `crates/bv-engine-idp` (not
 `src/modules/idp/`: engines are separate crates since the workspace
 decomposition), registered in the facade's `default_modules()` as the `idp`
@@ -287,6 +288,75 @@ feed key is not rotated and not HSM-backed. Certificate records of expired
 certificates are pruned 24h after expiry, at that identity's next issue.
 The KRL and feed are authenticated routes (hosts need a token). Not run on a
 multi-node cluster.
+
+**Phase 4 (RADIUS).** `src/provider/radius/` (`packet.rs` codec, `vendor.rs`
+attribute templates, `store.rs` on `idp/radius/`, `tls.rs`, `server.rs`
+listeners, `mod.rs` decision) and `src/backend/radius.rs`. Routes in
+[docs/api.md](../docs/api.md).
+
+- **Who the human is.** Spec §3b says the human authenticates against a
+  BastionVault auth backend. A RADIUS PAP exchange cannot carry FIDO2 or an
+  OIDC redirect, and checking a userpass password from the RADIUS path would
+  bypass the login pipeline (MFA, step-up, lockout). So the human logs in to
+  the vault with any backend and mints a **one-time passcode** for one
+  environment (`v2/idp/radius/passcode/:environment`, self-service, gated
+  as provider `radius-passcode`), then types it as the password at the
+  NAS. 128 random bits, TTL 2m by default (at most 15m), stored only as a
+  SHA-256 under the identity, consumed on first presentation, at most 8
+  outstanding. This mirrors the SSH engine's OTP mode; no password store is
+  added.
+- **Who the NAS is.** A client record binds one NAS to exactly one
+  environment and one attribute profile of that environment. RadSec
+  (default): the NAS certificate must chain to `client_ca_pem` and its
+  SHA-256 must be pinned on a client; the RFC 6614 shared secret `radsec`
+  is used. UDP (opt-in, `udp_enabled`): source IP plus a 16–128 character
+  shared secret. Secrets and the TLS key live behind the barrier, are
+  write-only, zeroized on drop and never logged.
+- **Decision.** Message-Authenticator required and checked in constant
+  time (BlastRADIUS); `User-Name` must be a valid login; the passcode must
+  belong to that login, be unexpired and be for the NAS's environment; the
+  gate (provider `radius`) must allow; the profile must yield at least one
+  attribute for the granted roles. Replies carry the Message-Authenticator
+  first. Unknown NAS, bad or missing Message-Authenticator and malformed
+  packets are discarded silently, as RFC 2865 §3 and RFC 3579 §3.2 require
+  (no reflection, no oracle); every other refusal, including any storage
+  or audit error, is an Access-Reject with no attributes.
+- **Listeners.** Started from `Module::start_background` (no kernel change);
+  a supervisor binds what `idp/radius/config` asks for, re-reads it every
+  30 s and at once after a write, and stops everything when sealed.
+  Unspecified addresses need `allow_unspecified_bind`. Per-source rate
+  limit (default 120/min) before any work, bounded concurrency (64 UDP in
+  flight, 128 RadSec connections), RFC 5080 duplicate cache (30 s) so a
+  retransmission gets the same reply, packets bounded at 4096 octets and
+  128 attributes. Unknown UDP sources never reach the limiter's table.
+- **Profiles** are data: per environment role, `fortinet-group-name` (and
+  `fortinet-vdom-name`, `fortinet-access-profile`, `cisco-avpair`) or a
+  generic `vsa`, validated at write time against the environment's roles.
+- **Audit.** Besides the gate's `idp.issue` / `idp.issue-denied`, every
+  outcome writes `idp.radius.accept` or `idp.radius.reject` (decision,
+  reason, gate reason, client, environment, transport, peer, user name,
+  entity). An Accept whose event cannot be recorded is sent as a Reject.
+  Drops before a NAS record is read (unknown source, rate limited, busy)
+  are audited at most 30 times a minute in all, so a flood cannot flood the
+  audit log.
+
+Decisions taken where this spec was open (Phase 4): passcode rather than
+password pass-through (above; rejected: router-direct userpass login);
+one NAS serves one environment (rejected: a NAS-supplied environment
+attribute, which the NAS could choose); the gate is asked with the root
+caller namespace (NAS clients are root-administered); a passcode is burnt
+when presented even if the request is then refused; CHAP, EAP,
+Access-Challenge and Status-Server are not supported.
+
+Caveats (Phase 4): **no real FortiGate or other NAS was run**, and no
+FreeRADIUS, `radtest` or `pyrad` was available locally for interop; the
+codec, both listeners and FortiGate's VSA layout are verified only by this
+crate's own client code (unit tests over real UDP and RadSec sockets, and a
+whole-vault test). Listen addresses are cluster-wide settings: a node that
+cannot bind the configured address reports `last_error`; not run on a
+multi-node cluster, and a client added on another node is admitted after
+the next 30 s refresh. The NAS's login prompt must accept a 32-character
+passcode. RFC 6614's legacy cipher suites are not offered (rustls only).
 
 ## Concepts and Terminology
 
@@ -550,7 +620,7 @@ nav like the PKI/SSH pages):
 | **1 — POSIX identity core** | `idp/posix/` store + Raft-serialized UID/GID allocator (range, high-water, free bitmap, tombstone/no-reuse), `v2/idp/identities` CRUD + state machine, `idp/config`. Import mode for seeding existing UIDs. | **Complete, with caveats** — `crates/bv-engine-idp`; opt-in `idp` mount; not run on a multi-node cluster; no CLI/GUI (see Current State) |
 | **2 — Entitlements + gate** | `entitlement.rs` store, environment↔namespace mapping, role↔policy mapping, the fail-closed issue gate + `idp.issue`/`idp.issue-denied` audit events. | **Complete, with caveats** — `crates/bv-engine-idp/src/entitlement/`; `v2/idp/environments` + `v2/idp/entitlements`; the gate is a Rust API with no caller until Phase 3; policy existence unchecked; not run on a multi-node cluster (see Current State) |
 | **3 — SSH identity issue + revocation** | `provider/ssh.rs` identity-bound `sign` wrapping the SSH engine (principals=login, key-id attribution, uid/gid extensions), `GET /v2/idp/ssh/krl`, the signed/versioned `deny-feed`, and the reference `AuthorizedPrincipalsCommand` + NSS helper for Linux. | **Complete, with caveats** — `crates/bv-engine-idp/src/{provider/ssh,revoke}/`, `bin/bv-idp-host`; KRL checked with `ssh-keygen`; no real sshd/Linux host run; NSS helper generates entries from a certificate, no on-login materialization; PQC CA unsupported; feed key not rotated (see Current State) |
-| **4 — RADIUS provider** | `provider/radius.rs` (RadSec + opt-in UDP), per-vendor attribute templates (FortiGate first), entitlement-gated, Access-Reject for non-active. Live-tested against a FortiGate (or `freeradius`/`pyrad` harness). | Pending |
+| **4 — RADIUS provider** | `provider/radius.rs` (RadSec + opt-in UDP), per-vendor attribute templates (FortiGate first), entitlement-gated, Access-Reject for non-active. Live-tested against a FortiGate (or `freeradius`/`pyrad` harness). | **Complete, with caveats** — `crates/bv-engine-idp/src/provider/radius/`; one-time passcodes minted through the vault; RadSec with pinned NAS certificates, UDP opt-in; verified by the crate's own client over real sockets only: **no FortiGate, FreeRADIUS or pyrad run**; not run on a multi-node cluster (see Current State) |
 | **5 — SAML IdP + OIDC OP** | `provider/saml_idp.rs` (reusing the SAML-auth signing core) + `provider/oidc_op.rs` (discovery/JWKS/authz/token), both entitlement-gated, UID + role-set in assertions/claims. | Pending |
 | **6 — LDAP-compat directory** | `provider/ldap_dir.rs` read-only bind+search serving `posixAccount`/`posixGroup`; bind = live active-state check. | Pending |
 | **7 — GUI** | Identity Provider admin page (Identities / Entitlements / Providers / Revocations tabs) + Tauri commands + API wrappers. | Pending |
