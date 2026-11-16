@@ -108,6 +108,11 @@ All three phases shipped. SP-initiated SAML 2.0 SSO works end-to-end
 under `src/modules/credential/saml/` using a pure-Rust stack — no
 libxml2 / libxmlsec1 / samael C-dependency footprint.
 
+Signature wrapping (T492): a Response is accepted only with exactly one
+`Assertion` element, a signed `ID` that identifies exactly one element, and
+an enveloped `Signature` that is a direct child of the element it references.
+Anything else is refused before any attribute is used.
+
 Modules:
 - `authn_request.rs` — AuthnRequest XML builder, DEFLATE + base64
   encoding for the HTTP-Redirect binding, SAML-conformant ISO-8601

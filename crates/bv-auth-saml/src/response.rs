@@ -85,6 +85,11 @@ pub fn parse_response(xml: &[u8]) -> Result<ParsedResponse, RvError> {
     // stitched here and flushed when the capture element closes.
     let mut text_buf = String::new();
     let mut assertion = ParsedAssertion::default();
+    // Exactly one `<Assertion>` element may exist anywhere in the
+    // document (nested ones, e.g. inside `Advice`, included). Folding
+    // several into one projection let an unsigned forged assertion's
+    // attributes ride along with the signed one (signature wrapping).
+    let mut assertion_count = 0usize;
 
     loop {
         // quick_xml advances its byte position as events are parsed.
@@ -141,6 +146,13 @@ pub fn parse_response(xml: &[u8]) -> Result<ParsedResponse, RvError> {
                         }
                     }
                 } else if local == "Assertion" {
+                    assertion_count += 1;
+                    if assertion_count > 1 {
+                        return Err(RvError::ErrString(
+                            "saml: Response contains more than one Assertion element — rejecting (signature wrapping)"
+                                .into(),
+                        ));
+                    }
                     // Record the byte position where `<Assertion`
                     // begins. Scanning forward from the pre-event
                     // buffer position skips over any whitespace

@@ -95,6 +95,12 @@ pub fn verify_signed_assertion(parsed: &ParsedResponse, idp_public_key: &RsaPubl
     let assertion =
         parsed.assertion.as_ref().ok_or_else(|| RvError::ErrString("saml: no Assertion to verify".into()))?;
 
+    // The signature's Reference must resolve to exactly one element of the
+    // document. `parse_response` already refuses a second `<Assertion>`;
+    // this closes the same door for any other element carrying the ID.
+    ensure_unique_id(&parsed.raw_xml, &assertion.id)?;
+    ensure_unique_id(&parsed.raw_xml, &parsed.response_id)?;
+
     // Try assertion-level first.
     if let Some((start, end)) = assertion.xml_span {
         let element = &parsed.raw_xml[start..end];
@@ -199,6 +205,14 @@ fn verify_one(
         )));
     }
 
+    // 1b. The enveloped signature must be a direct child of the element it
+    //     covers; one parked deeper (Advice, Extensions) is not enveloped.
+    if !is_direct_child(signed_element, sig.span.0) {
+        return Err(RvError::ErrString(
+            "saml: signature is not a direct child of the element it references — rejecting".into(),
+        ));
+    }
+
     // 2. Transforms must include enveloped-signature + exclusive-c14n
     //    (in either order; the spec doesn't mandate an ordering but
     //    in practice enveloped comes first).
@@ -275,6 +289,56 @@ fn verify_one(
     }
 
     Ok(())
+}
+
+/// Require exactly one element in `xml` whose `ID` attribute equals `id`.
+/// Fails closed on a parse error, zero matches or a duplicate.
+fn ensure_unique_id(xml: &[u8], id: &str) -> Result<(), RvError> {
+    use quick_xml::events::Event;
+    let mut reader = quick_xml::Reader::from_reader(xml);
+    let mut hits = 0usize;
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
+                for attr in e.attributes().flatten() {
+                    if attr.key.as_ref() == b"ID"
+                        && attr
+                            .decoded_and_normalized_value(quick_xml::XmlVersion::Implicit1_0, reader.decoder())
+                            .map(|v| v == id)
+                            .unwrap_or(false)
+                    {
+                        hits += 1;
+                    }
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(RvError::ErrString(format!("saml: response XML parse error: {e}"))),
+            _ => {}
+        }
+    }
+    if hits != 1 {
+        return Err(RvError::ErrString(format!(
+            "saml: signed element ID `{id}` must identify exactly one element, found {hits} — rejecting"
+        )));
+    }
+    Ok(())
+}
+
+/// True when the tag starting at byte `at` of `element` sits exactly one
+/// level below `element`'s root (i.e. is a direct child of it).
+fn is_direct_child(element: &[u8], at: usize) -> bool {
+    use quick_xml::events::Event;
+    let mut reader = quick_xml::Reader::from_reader(&element[..at.min(element.len())]);
+    let mut depth = 0usize;
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(_)) => depth += 1,
+            Ok(Event::End(_)) => depth = depth.saturating_sub(1),
+            Ok(Event::Eof) => return depth == 1,
+            Err(_) => return false,
+            _ => {}
+        }
+    }
 }
 
 /// Apply the enveloped-signature transform by dropping the
@@ -913,5 +977,164 @@ mod tests {
 
         // Silence unused warning on `Keypair` import.
         let _ = signing_key.verifying_key();
+    }
+
+    // ── Signature-wrapping regression tests ────────────────────────
+    //
+    // Each shape below used to verify (or could be reasoned to) while
+    // letting attributes from an assertion the signature does not cover
+    // reach `path_callback`. The helpers sign real XML with a real key,
+    // then run the same parse → verify sequence the login callback does.
+
+    use rsa::pkcs1v15::SigningKey;
+    use rsa::signature::{RandomizedSigner, SignatureEncoding};
+    use rsa::RsaPrivateKey;
+    use std::sync::OnceLock;
+
+    fn test_key() -> &'static RsaPrivateKey {
+        static KEY: OnceLock<RsaPrivateKey> = OnceLock::new();
+        KEY.get_or_init(|| RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 1024).expect("gen key"))
+    }
+
+    const SAML_NS: &str = "urn:oasis:names:tc:SAML:2.0:assertion";
+    const SAMLP_NS: &str = "urn:oasis:names:tc:SAML:2.0:protocol";
+
+    fn assertion(id: &str, role: &str, extra: &str) -> String {
+        format!(
+            r#"<saml:Assertion xmlns:saml="{SAML_NS}" ID="{id}"><saml:Issuer>https://idp.test/</saml:Issuer><saml:Subject><saml:NameID>alice</saml:NameID></saml:Subject><saml:AttributeStatement><saml:Attribute Name="roles"><saml:AttributeValue>{role}</saml:AttributeValue></saml:Attribute></saml:AttributeStatement>{extra}</saml:Assertion>"#
+        )
+    }
+
+    /// Build the `<ds:Signature>` a signer would emit over `element`
+    /// (which must carry no signature yet), referencing `ref_uri`.
+    fn signature_block(element: &str, ref_uri: &str) -> String {
+        let digest = Sha256::digest(canonicalise_exclusive(element.as_bytes()).unwrap());
+        let signed_info = format!(
+            r##"<ds:SignedInfo xmlns:ds="{XML_DSIG_NS}"><ds:CanonicalizationMethod Algorithm="{EXC_C14N}"></ds:CanonicalizationMethod><ds:SignatureMethod Algorithm="{RSA_SHA256}"></ds:SignatureMethod><ds:Reference URI="{ref_uri}"><ds:Transforms><ds:Transform Algorithm="{ENVELOPED_SIG}"></ds:Transform><ds:Transform Algorithm="{EXC_C14N}"></ds:Transform></ds:Transforms><ds:DigestMethod Algorithm="{SHA256_DIGEST}"></ds:DigestMethod><ds:DigestValue>{}</ds:DigestValue></ds:Reference></ds:SignedInfo>"##,
+            general_purpose::STANDARD.encode(digest)
+        );
+        let canon = canonicalise_exclusive(signed_info.as_bytes()).unwrap();
+        let signer: SigningKey<Sha256> = SigningKey::new(test_key().clone());
+        let sig = signer.sign_with_rng(&mut rsa::rand_core::OsRng, &canon);
+        format!(
+            r#"<ds:Signature xmlns:ds="{XML_DSIG_NS}">{signed_info}<ds:SignatureValue>{}</ds:SignatureValue></ds:Signature>"#,
+            general_purpose::STANDARD.encode(sig.to_bytes())
+        )
+    }
+
+    /// A validly signed assertion (signature is the last child).
+    fn signed_assertion(id: &str, role: &str) -> String {
+        let plain = assertion(id, role, "");
+        plain.replace("</saml:Assertion>", &format!("{}</saml:Assertion>", signature_block(&plain, &format!("#{id}"))))
+    }
+
+    fn response(inner: &str) -> String {
+        format!(r#"<samlp:Response xmlns:samlp="{SAMLP_NS}" ID="resp-1">{inner}</samlp:Response>"#)
+    }
+
+    /// The login callback's parse → verify sequence; returns the
+    /// attributes the callback would use, or the refusal.
+    fn parse_and_verify(xml: &str) -> Result<std::collections::HashMap<String, Vec<String>>, RvError> {
+        let parsed = crate::response::parse_response(xml.as_bytes())?;
+        verify_signed_assertion(&parsed, &RsaPublicKey::from(test_key()))?;
+        Ok(parsed.assertion.unwrap().attributes)
+    }
+
+    fn assert_refused(xml: &str) {
+        if let Ok(attrs) = parse_and_verify(xml) {
+            panic!("forged response was accepted, attributes: {attrs:?}");
+        }
+    }
+
+    #[test]
+    fn wrapping_normal_signed_response_still_verifies() {
+        let attrs = parse_and_verify(&response(&signed_assertion("a1", "ops"))).unwrap();
+        assert_eq!(attrs.get("roles"), Some(&vec!["ops".to_string()]));
+    }
+
+    #[test]
+    fn wrapping_response_level_signature_still_verifies() {
+        let plain = response(&assertion("a1", "ops", ""));
+        let sig = signature_block(&plain, "#resp-1");
+        let xml = plain.replace("</samlp:Response>", &format!("{sig}</samlp:Response>"));
+        let attrs = parse_and_verify(&xml).unwrap();
+        assert_eq!(attrs.get("roles"), Some(&vec!["ops".to_string()]));
+    }
+
+    #[test]
+    fn wrapping_unsigned_forged_assertion_before_signed_is_refused() {
+        // The original probe: roles became ["ops","superuser","ops","readonly"].
+        let xml = response(&format!("{}{}", assertion("evil", "superuser", ""), signed_assertion("a1", "readonly")));
+        assert_refused(&xml);
+    }
+
+    #[test]
+    fn wrapping_unsigned_forged_assertion_after_signed_is_refused() {
+        let xml = response(&format!("{}{}", signed_assertion("a1", "readonly"), assertion("evil", "superuser", "")));
+        assert_refused(&xml);
+    }
+
+    #[test]
+    fn wrapping_forged_assertion_with_duplicate_id_is_refused() {
+        let xml = response(&format!("{}{}", assertion("a1", "superuser", ""), signed_assertion("a1", "readonly")));
+        assert_refused(&xml);
+    }
+
+    #[test]
+    fn wrapping_non_assertion_element_with_signed_id_is_refused() {
+        // An extra element reusing the referenced ID makes the Reference
+        // ambiguous: "the element with this ID" is no longer unique.
+        let xml =
+            response(&format!(r#"<saml:Extensions xmlns:saml="{SAML_NS}" ID="a1"/>{}"#, signed_assertion("a1", "ops")));
+        assert_refused(&xml);
+    }
+
+    #[test]
+    fn wrapping_assertion_nested_in_signed_advice_is_refused() {
+        // Even if the signature covers it, a second assertion is never
+        // accepted: the parser must not merge or pick between them.
+        let inner = assertion("evil", "superuser", "");
+        let outer_plain = assertion("a1", "readonly", &format!("<saml:Advice>{inner}</saml:Advice>"));
+        let outer = outer_plain
+            .replace("</saml:Assertion>", &format!("{}</saml:Assertion>", signature_block(&outer_plain, "#a1")));
+        assert_refused(&response(&outer));
+    }
+
+    #[test]
+    fn wrapping_reference_to_other_id_is_refused() {
+        let plain = assertion("a1", "ops", "");
+        let signed =
+            plain.replace("</saml:Assertion>", &format!("{}</saml:Assertion>", signature_block(&plain, "#other")));
+        assert_refused(&response(&signed));
+    }
+
+    #[test]
+    fn wrapping_missing_reference_uri_is_refused() {
+        let plain = assertion("a1", "ops", "");
+        let signed = plain.replace("</saml:Assertion>", &format!("{}</saml:Assertion>", signature_block(&plain, "")));
+        assert_refused(&response(&signed));
+    }
+
+    #[test]
+    fn wrapping_signature_over_another_element_is_refused() {
+        // A genuine signed assertion's signature, transplanted into a
+        // forged assertion with different attributes: digest mismatch.
+        let genuine = signed_assertion("a1", "readonly");
+        let start = genuine.find("<ds:Signature").unwrap();
+        let end = genuine.find("</ds:Signature>").unwrap() + "</ds:Signature>".len();
+        let sig = &genuine[start..end];
+        let forged = assertion("a1", "superuser", "").replace("</saml:Assertion>", &format!("{sig}</saml:Assertion>"));
+        assert_refused(&response(&forged));
+    }
+
+    #[test]
+    fn wrapping_signature_nested_below_the_signed_element_is_refused() {
+        // A signature that is not a direct child of the element it
+        // claims to envelop (here parked inside Advice) is refused even
+        // though the digest and signature value are internally valid.
+        let plain = assertion("a1", "ops", "<saml:Advice></saml:Advice>");
+        let sig = signature_block(&plain, "#a1");
+        let signed = plain.replace("<saml:Advice></saml:Advice>", &format!("<saml:Advice>{sig}</saml:Advice>"));
+        assert_refused(&response(&signed));
     }
 }

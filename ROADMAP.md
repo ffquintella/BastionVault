@@ -357,6 +357,9 @@ Next-up list recorded before the migration, in its order:
   - source: roadmap.md feature row "Auth: SAML 2.0", status `[x]` Done
   - initiative: [SAML 2.0 Authentication](features/saml-auth.md) — pure-Rust SP-initiated SSO; AuthnRequest, streaming `quick-xml` parsing, RSA-SHA256/SHA1 verify, hand-rolled Exclusive C14N. Zero libxml2 / xmlsec / OpenSSL footprint. 46 tests.
   - old-notes: [spec](features/saml-auth.md) — pure-Rust SP-initiated SSO, no libxml2 / xmlsec.
+- [x] T492 Close the SAML response signature-wrapping hole (S52)
+  - source: found while writing the T52 SAML IdP — an unsigned forged `Assertion` before the signed one verified and its attributes were merged into `groups` metadata and bound-attribute checks
+  - note: `crates/bv-auth-saml` now rejects any Response with more than one Assertion, a non-unique signed ID, or a signature that is not a direct child of the referenced element; regression tests in `verify.rs`
 - [x] T48 Authenticate with FIDO2, WebAuthn and YubiKey (S75, S82)
   - source: roadmap.md feature row "Auth: FIDO2 / WebAuthn / YubiKey", status `[x]` Done
   - old-notes: [roadmap](roadmaps/tauri-gui-fido2.md) — server uses an in-tree pure-Rust RP (`fido2/rp/`); no `openssl` in the server crate. ES256 + Ed25519, attestation `none` only.
