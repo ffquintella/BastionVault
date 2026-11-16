@@ -75,7 +75,7 @@ impl CommandExecutor for Enable {
         let client = self.client()?;
         let sys = client.sys();
 
-        let path = util::ensure_trailing_slash(&self.options.path);
+        let path = util::ensure_trailing_slash(default_path(&self.options.path, &self.method));
         let auth_input = AuthInput {
             logical_type: self.method.clone(),
             description: self.options.description.clone(),
@@ -93,5 +93,30 @@ impl CommandExecutor for Enable {
             Err(e) => eprintln!("Error: {e}"),
         }
         Ok(())
+    }
+}
+
+/// The mount path defaults to the auth method type, as the help text promises.
+fn default_path<'a>(path: &'a str, method: &'a str) -> &'a str {
+    if path.trim().is_empty() {
+        method
+    } else {
+        path
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::default_path;
+
+    #[test]
+    fn empty_path_defaults_to_method_type() {
+        assert_eq!(default_path("", "saml"), "saml");
+        assert_eq!(default_path("  ", "saml"), "saml");
+    }
+
+    #[test]
+    fn explicit_path_is_kept() {
+        assert_eq!(default_path("cert-prod", "cert"), "cert-prod");
     }
 }
