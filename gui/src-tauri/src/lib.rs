@@ -701,6 +701,8 @@ pub fn run() {
             commands::connect::session_rustion_info,
             // Session Workspace (T38): layout preference, attachment
             // registry and liveness.
+            commands::oidc::get_oidc_callback_prefs,
+            commands::oidc::set_oidc_callback_prefs,
             commands::session_workspace::get_session_workspace_prefs,
             commands::session_workspace::set_session_workspace_prefs,
             commands::session_workspace::session_list_open,

@@ -24,6 +24,7 @@ import { RustionBastionsTab } from "../components/RustionBastionsTab";
 import { RustionPolicyPanel } from "../components/RustionPolicyPanel";
 import { DosProtectionPanel } from "../components/DosProtectionPanel";
 import { SessionLayoutCard } from "../components/SessionLayoutCard";
+import { OidcCallbackCard } from "../components/OidcCallbackCard";
 import { SessionKeyboardCard } from "../components/SessionKeyboardCard";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
@@ -450,6 +451,7 @@ export function SettingsPage() {
         </Card>
 
         {/* Session layout, chords and paste guard (T38) */}
+        <OidcCallbackCard />
         <SessionLayoutCard />
         <SessionKeyboardCard />
 

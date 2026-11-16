@@ -81,6 +81,61 @@ impl Default for SessionWorkspacePrefs {
     }
 }
 
+/// Where the GUI listens for the OIDC login callback. A UX/networking
+/// preference in the local file (not in the vault): it decides which
+/// loopback `redirect_uri` the GUI sends, never whether a login is allowed.
+///
+/// * `fixed` (default): listen on the first free port of `ports` (1 to 3,
+///   tried in order). Every port in the list must be registered as
+///   `http://127.0.0.1:<port>/callback` at the identity provider and in the
+///   mount's `allowed_redirect_uris`.
+/// * `dynamic`: let the OS pick a free port each login, for providers that
+///   accept any loopback port (RFC 8252 §7.3). `ports` is ignored.
+///
+/// Strings on disk and strict validation, like `SessionWorkspacePrefs`: a
+/// value this build does not know is an error naming it, never a guess.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct OidcCallbackPrefs {
+    pub mode: String,
+    pub ports: Vec<u16>,
+}
+
+pub const OIDC_CALLBACK_DEFAULT_PORT: u16 = 8473;
+pub const OIDC_CALLBACK_MAX_PORTS: usize = 3;
+
+impl Default for OidcCallbackPrefs {
+    fn default() -> Self {
+        Self { mode: "fixed".to_string(), ports: vec![OIDC_CALLBACK_DEFAULT_PORT] }
+    }
+}
+
+impl OidcCallbackPrefs {
+    pub fn is_dynamic(&self) -> bool {
+        self.mode == "dynamic"
+    }
+
+    /// Rejects anything an open could not honour. `ports` is validated even
+    /// in dynamic mode so switching back never resurrects a bad list.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.mode != "fixed" && self.mode != "dynamic" {
+            return Err(format!("oidc callback mode `{}` is not one of `fixed`, `dynamic`", self.mode));
+        }
+        if self.ports.is_empty() || self.ports.len() > OIDC_CALLBACK_MAX_PORTS {
+            return Err(format!("oidc callback needs 1 to {OIDC_CALLBACK_MAX_PORTS} ports, got {}", self.ports.len()));
+        }
+        for (i, port) in self.ports.iter().enumerate() {
+            if *port < 1024 {
+                return Err(format!("oidc callback port {port} is privileged; use 1024-65535"));
+            }
+            if self.ports[..i].contains(port) {
+                return Err(format!("oidc callback port {port} is listed twice"));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Configuration for a cloud-backed embedded vault. When present on
 /// a `VaultProfile` of kind `Cloud`, `embedded::build_backend`
 /// constructs storage as a `FileBackend` wrapped around the named
@@ -165,6 +220,9 @@ pub struct Preferences {
     /// the Session Workspace; those load as the defaults.
     #[serde(default)]
     pub session_workspace: SessionWorkspacePrefs,
+    /// OIDC login callback port(s). Absent in older files: fixed 8473.
+    #[serde(default)]
+    pub oidc_callback: OidcCallbackPrefs,
     /// The local MCP server's switch (T131). Absent in older files: off.
     #[serde(default)]
     pub mcp_local_server: McpLocalServerPrefs,
@@ -374,5 +432,32 @@ mod session_workspace_prefs_tests {
         prefs.session_workspace.chord_overrides.insert("splitRight".into(), "Ctrl+Shift+R".into());
         let back: Preferences = serde_json::from_str(&serde_json::to_string(&prefs).unwrap()).unwrap();
         assert_eq!(back.session_workspace, prefs.session_workspace);
+    }
+}
+
+#[cfg(test)]
+mod oidc_callback_prefs_tests {
+    use super::{OidcCallbackPrefs, Preferences};
+
+    #[test]
+    fn file_without_the_key_loads_fixed_8473() {
+        let prefs: Preferences = serde_json::from_str("{}").unwrap();
+        assert_eq!(prefs.oidc_callback, OidcCallbackPrefs::default());
+        assert_eq!(prefs.oidc_callback.ports, vec![8473]);
+        assert!(!prefs.oidc_callback.is_dynamic());
+    }
+
+    #[test]
+    fn validation_rules() {
+        let ok = |mode: &str, ports: &[u16]| OidcCallbackPrefs { mode: mode.into(), ports: ports.to_vec() }.validate();
+        assert!(ok("fixed", &[8473]).is_ok());
+        assert!(ok("fixed", &[8473, 8474, 8475]).is_ok());
+        assert!(ok("dynamic", &[8473]).is_ok());
+        assert!(ok("random", &[8473]).is_err());
+        assert!(ok("fixed", &[]).is_err());
+        assert!(ok("fixed", &[8473, 8474, 8475, 8476]).is_err());
+        assert!(ok("fixed", &[0]).is_err());
+        assert!(ok("fixed", &[443]).is_err());
+        assert!(ok("fixed", &[8473, 8473]).is_err());
     }
 }
