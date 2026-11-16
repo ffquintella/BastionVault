@@ -3,12 +3,12 @@
 
 ##@ Clean & maintenance
 
-.PHONY: prune-stale clean gui-clean docs-clean deep-clean target-size prune
+.PHONY: prune-stale clean-cargo gui-clean docs-clean deep-clean target-size prune
 
 prune-stale: ## Trim rustc incremental caches to the last KEEP sessions (default 3). Auto-runs before every compiling target.
 	@KEEP=$(KEEP) bash scripts/prune-incremental.sh
 
-clean: ## Remove Cargo build artefacts (target/) across the workspace
+clean-cargo: ## Remove Cargo build artefacts (target/) across the workspace
 	cargo clean
 	@echo "clean complete."
 
@@ -23,7 +23,7 @@ gui-clean: ## Remove GUI frontend build artefacts (node_modules, dist, vite cach
 docs-clean: ## Docsify has no build step — this target is a no-op kept for compatibility.
 	@echo "docs-clean: Docsify is build-step-free; nothing to remove."
 
-deep-clean: clean gui-clean docs-clean ## Run every clean target + drop cargo lockfiles so the next build resolves from scratch
+deep-clean: clean-cargo gui-clean docs-clean ## Run every clean target + drop cargo lockfiles so the next build resolves from scratch
 	rm -f Cargo.lock
 	rm -f gui/package-lock.json
 	@echo "deep-clean complete."

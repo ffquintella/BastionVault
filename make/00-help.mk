@@ -1,22 +1,39 @@
-# Help — self-documenting target list, grouped by the `##@ Section` headers
-# at the top of each make/*.mk module. Included by the top-level Makefile.
+# Help — the command taxonomy, rendered from the map in make/02-groups.mk.
+# Included by the top-level Makefile.
+#
+#   make help            the groups, one line each
+#   make help <group>    that group's subcommands, with descriptions
+#   make help-<word>     grep every documented target for <word> (legacy filter)
 
 ##@ Help
 
 .PHONY: help
-help: ## List available commands, grouped by function
+_HELP_ARG := $(if $(filter help,$(firstword $(MAKECMDGOALS))),$(word 2,$(MAKECMDGOALS)))
+
+help: ## List the command groups; `make help <group>` lists a group's subcommands
+ifeq ($(_HELP_ARG),)
 	@echo "BastionVault v$(VERSION)  [host: $(OS_FAMILY)/$(HOST_ARCH)]"
 	@echo ""
-	@echo "Usage: make <target>      (make help-<word> to filter, e.g. make help-plugins)"
-ifeq ($(OS),Windows_NT)
-	@powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-Content '$(MAKEFILE_LIST)'.Split(' ') | ForEach-Object { if (\$$_ -match '^##@\s*(.*)') { '' ; \$$matches[1] } elseif (\$$_ -match '^([a-zA-Z0-9_.-]+):.*##\s*(.*)') { '  {0,-28} {1}' -f \$$matches[1], \$$matches[2] } }"
+	@echo "Usage: make <group> [<subcommand>...]      make help <group> for subcommands"
+	@echo ""
+	@$(foreach g,$(GROUPS),printf '  \033[36m%-10s\033[0m %-62s %s\n' '$(g)' '$($(g).desc)' '$(if $($(g).default),[default: $($(g).default)],[explicit subcommand])';)
+	@echo ""
+	@echo "Examples: make test changed   |   make gui dev   |   make crates plan   |   make help test"
 else
-	@awk 'BEGIN {FS = ":.*## "} \
-		/^##@/ {printf "\n\033[1m%s\033[0m\n", substr($$0, 5); next} \
-		/^[a-zA-Z0-9_.-]+:.*## / {printf "  \033[36m%-28s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+ifeq ($(filter $(_HELP_ARG),$(GROUPS)),)
+	$(error Unknown group '$(_HELP_ARG)'. Groups: $(GROUPS))
+endif
+	@echo "make $(_HELP_ARG) <subcommand>   — $($(_HELP_ARG).desc)"
+	@echo "$(if $($(_HELP_ARG).default),Default (bare 'make $(_HELP_ARG)'): $($(_HELP_ARG).default),Bare 'make $(_HELP_ARG)' shows this list; pick a subcommand.)"
+	@echo ""
+ifeq ($(OS),Windows_NT)
+	@$(foreach e,$($(_HELP_ARG).subs),printf '  %-28s -> %s\n' '$(firstword $(subst :, ,$(e)))' '$(lastword $(subst :, ,$(e)))';)
+else
+	@$(foreach e,$($(_HELP_ARG).subs),printf '  \033[36m%-28s\033[0m %s\n' '$(firstword $(subst :, ,$(e)))' "$$(grep -h '^$(lastword $(subst :, ,$(e))):.*## ' $(MAKEFILE_LIST) | head -1 | sed 's/^[^#]*## //')";)
+endif
 endif
 
-# `make help-<word>` lists only the targets whose name or description matches.
+# `make help-<word>` lists only the documented targets whose name or description matches.
 .PHONY: help-%
 help-%:
 	@grep -hE '^[a-zA-Z0-9_.-]+:.*## .*$*' $(MAKEFILE_LIST) \

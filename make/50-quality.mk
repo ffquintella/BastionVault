@@ -3,9 +3,9 @@
 
 ##@ Docs, quality & benchmarks
 
-.PHONY: docs bench-build bench-build-quick deps-unused deps-unused-warn build-timings
+.PHONY: run-docs bench-build bench-build-quick deps-unused deps-unused-warn build-timings
 
-docs: ## Serve the Docsify-powered documentation site locally on http://localhost:3000
+run-docs: ## Serve the Docsify-powered documentation site locally on http://localhost:3000
 	@command -v docsify >/dev/null 2>&1 || npm i -g docsify-cli
 	docsify serve docs
 

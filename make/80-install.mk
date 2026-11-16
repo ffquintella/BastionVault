@@ -3,7 +3,7 @@
 
 ##@ Install
 
-.PHONY: install uninstall macos-client-install
+.PHONY: install-bin uninstall macos-client-install
 
 # ── Install from source onto this machine ─────────────────────────────
 #
@@ -42,7 +42,7 @@ INSTALL_BASH_DST := $(DESTDIR)$(PREFIX)/etc/bash_completion.d/bvault
 INSTALL_ZSH_DST  := $(DESTDIR)$(PREFIX)/share/zsh/site-functions/_bvault
 INSTALL_FISH_DST := $(DESTDIR)$(PREFIX)/share/fish/vendor_completions.d/bvault.fish
 
-install: ## Build and install bvault + manpage + completions under $(PREFIX) (default /usr/local)
+install-bin: ## Build and install bvault + manpage + completions under $(PREFIX) (default /usr/local)
 ifeq ($(OS),Windows_NT)
 	@echo "ERROR: 'make install' is Unix-only (it writes a POSIX file layout)."; \
 	 echo "       On Windows build an installer instead: make windows-cli-packages"; exit 1

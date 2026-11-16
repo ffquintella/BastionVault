@@ -280,6 +280,10 @@ EXAMPLE ENTRY:
 
 ### Changed
 
+#### Build: the Makefile is organised as command groups with subcommands
+
+- **`make <group> [<subcommand>...]` replaces ~150 flat targets as the documented interface** (T488, S77) -- 15 groups (`run`, `build`, `test`, `check`, `verify`, `gui`, `bump`, `crates`, `container`, `package`, `install`, `release`, `plugins`, `clean`, `setup`), e.g. `make test changed`, `make gui dev`, `make crates plan`; `make help` lists the groups and `make help <group>` its subcommands. A group's bare form runs its default (`make test` = `make test unit`); `clean`, `release`, `bump`, `crates`, `check` and `gui` have none and print their help instead, so `make clean` and `make release` no longer act by omission (use `make clean cargo`, `make release cut`). Every historical target name (`test-changed`, `gui-build`, `crates-bump`, ...) still works, so CI and scripts are unaffected; `make taxonomy-check` verifies the map. The map lives in `make/02-groups.mk`.
+
 #### Storage: hiqlite 0.16.0
 
 - **Move the embedded Raft and SQLite engine from hiqlite 0.15.3 to 0.16.0** (T480, S118) -- Taken from the fork's `main-local`: upstream 0.16.0 plus the stream pool and a one-line fix of the 0.16.0 merge, which did not compile (`stored.as_bytes()` on an `Option`). It brings SQLite up with `rusqlite` 0.41, `rustls` 0.23.46 and `aws-lc-sys` 0.47, and drops the `cryptr` and S3 dependencies the backup feature pulled in. The `rustls`, `aws-lc-rs` and `aws-lc-sys` feature sets are the same as before (`prefer-post-quantum` stays on; neither `unstable` nor `fips` is enabled), and the ML-KEM, ML-DSA, composite PKI, SSH, FerroGate, Rustion, mTLS and TLS-helper test suites pass. Not yet exercised: a rolling upgrade of a 0.15.3 pair, and 0.16.0 on an existing 0.15.3 data directory

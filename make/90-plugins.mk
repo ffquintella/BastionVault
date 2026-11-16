@@ -3,7 +3,7 @@
 
 ##@ Plugins
 
-.PHONY: plugins-init plugins-target plugins-process-target plugins-pack-build plugins-wasm plugins-pack plugins-keygen plugins-sign plugins-process plugins plugin-bump plugins-clean plugins-test test-dbms dynamic-plugins-test dynamic-plugins-live
+.PHONY: plugins-init plugins-target plugins-process-target plugins-pack-build plugins-wasm plugins-pack plugins-keygen plugins-sign plugins-process plugins-all plugin-bump plugins-clean plugins-test test-dbms dynamic-plugins-test dynamic-plugins-live
 
 # ── Reference plugins (plugins-ext/ submodule) ──────────────────────────
 # Build the BastionVault-Plugins reference plugins. WASM plugins compile
@@ -379,7 +379,7 @@ plugins-process: plugins-init plugins-process-target ## Compile the process-runt
 	@echo "==> Process plugins ready in $(PLUGINS_OUT)/"
 	@ls -lh $(PLUGINS_OUT)/bastion-plugin-postgres* $(PLUGINS_OUT)/bastion-plugin-xca* $(PLUGINS_OUT)/bastion-plugin-pmp* $(PLUGINS_OUT)/bastion-plugin-email* $(PLUGINS_OUT)/bastion-plugin-dbms-management* 2>/dev/null || true
 
-plugins: plugins-pack plugins-process ## Build every reference plugin (WASM + .bvplugin bundle + process). Cross-compile with PLUGINS_PROCESS_TARGET=<triple>
+plugins-all: plugins-pack plugins-process ## Build every reference plugin (WASM + .bvplugin bundle + process). Cross-compile with PLUGINS_PROCESS_TARGET=<triple>
 	@echo ""
 	@echo "==> All reference plugins built$(if $(PLUGINS_PROCESS_TARGET), for $(PLUGINS_PROCESS_TARGET),). Upload the artefacts via the GUI"
 	@echo "   Plugins page (Admin → Plugins → Register plugin → Select file…),"

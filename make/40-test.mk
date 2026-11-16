@@ -3,7 +3,7 @@
 
 ##@ Tests
 
-.PHONY: require-nextest test-bin test test-changed test-plan ci-plan check-isolated check-hsm test-pki-composite test-pki-composite-lib test-pki-composite-integration test-integration test-doc test-cucumber test-hiqlite test-all test-release
+.PHONY: require-nextest test-bin test-unit test-changed test-plan ci-plan check-isolated check-hsm test-pki-composite test-pki-composite-lib test-pki-composite-integration test-integration test-doc test-cucumber test-hiqlite test-all test-release
 
 # ── Test runner: cargo-nextest ────────────────────────────────────
 #
@@ -98,7 +98,7 @@ test-bin: prune-stale ## Build the bvault executable that the cli::command::* te
 TEST_SCOPE := --workspace \
 	--exclude bastion-vault-gui
 
-test: require-nextest test-bin ## Run the unit test suite (lib + bins) with nextest
+test-unit: require-nextest test-bin ## Run the unit test suite (lib + bins) with nextest
 	cargo nextest run $(TEST_SCOPE) --lib --bins
 
 # ── Inner loop: only what the change can have broken ──────────────
@@ -265,7 +265,7 @@ test-hiqlite: prune-stale ## Run the hiqlite storage + HA fault-injection suites
 	CARGO_TEST_HIQLITE=1 cargo test -p bv-storage --lib --features storage_hiqlite hiqlite::test:: -- --test-threads=1
 	CARGO_TEST_HIQLITE=1 cargo test --test hiqlite_ha_fault_injection -- --test-threads=1
 
-test-all: test test-integration test-doc ## Run unit + integration + doctests (excludes the port-bound hiqlite suites; see test-hiqlite)
+test-all: test-unit test-integration test-doc ## Run unit + integration + doctests (excludes the port-bound hiqlite suites; see test-hiqlite)
 	@echo ""
 	@echo "==> test-all complete. Port-bound suites are not included here:"
 	@echo "    make test-hiqlite   # hiqlite storage + HA fault injection"
@@ -292,7 +292,7 @@ test-all: test test-integration test-doc ## Run unit + integration + doctests (e
 # `tests/e2e/rustion-ssh` (needs real remote hosts, cannot be hermetic).
 # `tests/test_pki_composite.rs` compiles to nothing in step 2; step 8 runs it.
 test-release: require-nextest ## Every suite, for a release or a high-risk merge (slow: tens of minutes)
-	@echo "==> [1/9] unit tests (lib + bins)"      && $(MAKE) --no-print-directory test
+	@echo "==> [1/9] unit tests (lib + bins)"      && $(MAKE) --no-print-directory test-unit
 	@echo "==> [2/9] integration tests (tests/)"   && $(MAKE) --no-print-directory test-integration
 	@echo "==> [3/9] doctests"                     && $(MAKE) --no-print-directory test-doc
 	@echo "==> [4/9] hiqlite storage + HA"         && $(MAKE) --no-print-directory test-hiqlite

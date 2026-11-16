@@ -3,7 +3,7 @@
 
 ##@ Standalone release
 
-.PHONY: release-version-check release release-dispatch release-linux-appimage release-macos-pkg release-windows-msi release-local release-checksums
+.PHONY: release-version-check release-cut release-dispatch release-linux-appimage release-macos-pkg release-windows-msi release-local release-checksums
 
 # ── Standalone desktop release (one tag -> three installers) ───────────
 #
@@ -87,7 +87,7 @@ release-version-check: ## Check Cargo.toml and tauri.conf.json agree on $(VERSIO
 	 fi; \
 	 echo "==> versions agree on $(VERSION)"
 
-release: release-version-check ## Cut the standalone desktop release: tag releases/$(VERSION) and push (CI builds + publishes)
+release-cut: release-version-check ## Cut the standalone desktop release: tag releases/$(VERSION) and push (CI builds + publishes)
 	@set -eu; \
 	 if [ "$${ALLOW_DIRTY:-0}" != "1" ] && [ -n "$$(git status --porcelain)" ]; then \
 		echo "ERROR: the worktree is dirty. A release tag must name a committed tree,"; \

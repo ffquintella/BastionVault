@@ -1,11 +1,14 @@
 # BastionVault build system — thin entry point.
 #
-# The targets live in make/*.mk, one module per function, included in
-# numeric order. `make help` lists them grouped by function; `make help-<word>`
-# filters (e.g. `make help-plugins`). The host OS is detected automatically
-# (make/10-platform.mk -> $(OS_FAMILY)); `make package` / `make release-local`
-# pick the right installer for it.
+# The interface is `make <group> [<subcommand>...]` (make test changed,
+# make gui dev, make crates plan). `make help` lists the groups and
+# `make help <group>` the subcommands. The map is make/02-groups.mk; each
+# subcommand points at an implementation target in a make/*.mk module (those
+# keep their historical names and still work, e.g. `make test-changed`).
+# The host OS is detected automatically (make/10-platform.mk -> $(OS_FAMILY));
+# `make package` / `make release local` pick the right installer for it.
 #
+#   make/02-groups.mk     command taxonomy + dispatch
 #   make/00-help.mk       help
 #   make/10-platform.mk   OS + toolchain detection
 #   make/20-build.mk      build, run-dev
@@ -43,6 +46,7 @@ endif
 .NOTPARALLEL:
 
 # Modules, in dependency order (platform first; later ones read its variables).
+include make/02-groups.mk
 include make/00-help.mk
 include make/10-platform.mk
 include make/20-build.mk

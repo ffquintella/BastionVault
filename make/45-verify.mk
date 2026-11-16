@@ -3,7 +3,7 @@
 
 ##@ Verification tiers
 
-.PHONY: verify-gates verify-routes verify-fast verify-kani verify-differential verify verify-full verification-report
+.PHONY: verify-gates verify-routes verify-fast verify-kani verify-differential verify-pr verify-full verification-report
 
 # ── Verification tiers (T31 Phase 4) ──────────────────────────────
 #
@@ -87,9 +87,9 @@ verify-differential: require-nextest prune-stale ## The ACL differential suite (
 
 # Target-specific values reach the prerequisites, so `make verify` runs the
 # fast harness set and 10k cases; `make verify CASES=100000` still overrides.
-verify: KANI_SET = fast
-verify: CASES = $(VERIFY_PR_CASES)
-verify: verify-fast verify-kani verify-differential ## Tier 1 — every PR touching the ACL: tier 0 + Kani fast set + differential at 10k cases
+verify-pr: KANI_SET = fast
+verify-pr: CASES = $(VERIFY_PR_CASES)
+verify-pr: verify-fast verify-kani verify-differential ## Tier 1 — every PR touching the ACL: tier 0 + Kani fast set + differential at 10k cases
 
 verify-full: KANI_SET = full
 verify-full: CASES = $(VERIFY_FULL_CASES)

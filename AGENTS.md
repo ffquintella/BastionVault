@@ -344,6 +344,18 @@ widths today (of 41 packages `test-plan` considers): one engine → 5,
 
 ## 4. Validation levels
 
+### Make command taxonomy
+
+The Makefile is `make <group> [<subcommand>...]`; `make help` lists the groups
+and `make help <group>` their subcommands (the map is `make/02-groups.mk`).
+The `make <target>` names used throughout this file are the historical
+implementation targets and all still work; each has a grouped form:
+`test-changed` = `make test changed`, `test-plan` = `make test plan`,
+`ci-plan` = `make check ci`, `check-hsm` = `make check hsm`,
+`crates-bump` = `make crates bump`, `bump-patch` = `make bump patch`,
+`gui-test` = `make test gui`, `run-dev-gui` = `make gui dev`. `make clean` and
+`make release` need an explicit subcommand (`clean cargo`, `release cut`).
+
 ### L1 — fast, while editing (seconds on a warm tree)
 
 ```bash

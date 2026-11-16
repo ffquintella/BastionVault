@@ -3,7 +3,7 @@
 
 ##@ Build & run (dev)
 
-.PHONY: build run-dev
+.PHONY: build-release run-dev
 
 # ── Dev build speed: parallel rustc front-end ─────────────────────
 #
@@ -78,7 +78,7 @@ KEEP ?= 3
 DEV_BUILD_JOBS ?=
 _DEV_JOBS_ENV := $(if $(strip $(DEV_BUILD_JOBS)),CARGO_BUILD_JOBS=$(strip $(DEV_BUILD_JOBS)) ,)
 
-build: prune-stale ## Build the project in release mode
+build-release: prune-stale ## Build the project in release mode
 	cargo build --release
 
 run-dev: prune-stale ## Run the development server
