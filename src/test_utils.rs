@@ -401,12 +401,34 @@ pub fn get_project_binary_path() -> String {
     }
 
     let build_profile = env::var("CARGO_PROFILE_RELEASE_DEBUG").unwrap_or("debug".into());
-    let mut binary_path = PathBuf::from(manifest_dir);
-    if build_profile == "release" {
-        binary_path.push("target/release/");
-    } else {
-        binary_path.push("target/debug/");
+    let profile_subdir = if build_profile == "release" { "release" } else { "debug" };
+
+    // Second choice: `current_exe` did not lead to the binary (a test runner
+    // may execute a relocated copy of the test executable, so its parent
+    // directories are not the cargo profile directory). Look in the shared
+    // target directory instead: `CARGO_TARGET_DIR` if set, otherwise
+    // `target/` in each ancestor of the package under test, which reaches the
+    // workspace root from `crates/<pkg>`. CI builds `bvault` there with
+    // `cargo build -p bvault-cli --bin bvault`.
+    let mut target_dirs: Vec<PathBuf> = Vec::new();
+    if let Some(dir) = env::var_os("CARGO_TARGET_DIR") {
+        target_dirs.push(PathBuf::from(dir));
     }
+    for ancestor in PathBuf::from(&manifest_dir).ancestors() {
+        target_dirs.push(ancestor.join("target"));
+    }
+    for target_dir in target_dirs {
+        let candidate = target_dir.join(profile_subdir).join(&bin_name);
+        if candidate.exists() {
+            return candidate.into_os_string().into_string().unwrap_or_default();
+        }
+    }
+
+    // Nothing found: keep the per-package path so the error message names a
+    // concrete location.
+    let mut binary_path = PathBuf::from(manifest_dir);
+    binary_path.push("target");
+    binary_path.push(profile_subdir);
     binary_path.push(bin_name);
 
     binary_path.into_os_string().into_string().unwrap_or_default()
