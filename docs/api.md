@@ -2717,6 +2717,87 @@ GET    /v2/idp/saml/metadata                     # no token
   browser-facing relay (the GUI, Phase 7 / T107) or an HTTP adapter has to
   carry these. Nothing has been run against a real SP or RP.
 
+### Identity Provider: LDAP directory (`v2` only, root namespace)
+
+Phase 6 of [`features/identity-provider.md`](../features/identity-provider.md).
+Same mount, guard and error mapping as above. The directory itself is a
+read-only LDAPv3 server on its own sockets (LDAPS, and a cleartext port for
+StartTLS), not the HTTP API.
+
+~~~
+GET    /v2/idp/ldap/config                    # {"enabled": false, "listening": {...}} until written
+POST   /v2/idp/ldap/config                    # see below
+LIST   /v2/idp/ldap/clients                   # keys + key_info {transport, environment}
+POST   /v2/idp/ldap/clients/{name}            # {"transport", "environment", "cert_sha256", "address", "description"}
+GET    /v2/idp/ldap/clients/{name}
+DELETE /v2/idp/ldap/clients/{name}
+POST   /v2/idp/ldap/passcode/{environment}    # {"ttl"}  (self-service)
+~~~
+
+- **Config** fields: `enabled` (default false), `ldaps_listen` (`IP:port`,
+  implicit TLS), `ldap_listen` (`IP:port`, cleartext port offering StartTLS),
+  `tls_cert_pem`, `tls_key_pem` (write-only; reads show `tls_key_set`),
+  `client_ca_pem` (client certificates must chain to it; a certificate is
+  always required), `plaintext_enabled` (default **false**),
+  `allow_unspecified_bind` (default false), `base_dn` (default
+  `dc=bastionvault`, stored normalised to lower case), `home_directory_base`
+  (`/home`), `login_shell` (`/bin/bash`), `size_limit` (entries per search,
+  default 1000, at most 10000), `time_limit` (default 10s, at most 60s),
+  `rate_limit_per_minute` (connections and operations per source address,
+  default 600), `passcode_default_ttl` (2m) and `passcode_max_ttl` (5m, at
+  most 15m). `ldaps_listen` needs the three PEMs; `ldap_listen` needs them
+  (StartTLS) or `plaintext_enabled`. **Cleartext LDAP sends directory data
+  and bind passcodes unencrypted: enable it on a trusted segment only** (the
+  write returns a warning). Reads add `listening: {ldaps, ldap,
+  last_error}`.
+- **Clients** (one host or service each, bound to one environment;
+  `transport` and `environment` fixed at creation): `tls` clients are
+  identified by `cert_sha256`, the lower-case hex SHA-256 of their
+  certificate (DER), on LDAPS or after StartTLS; `plain` clients by their
+  source `address`, over cleartext only while `plaintext_enabled` holds. A
+  client sees only identities the issue gate would issue to in its
+  environment (active, unexpired entitlement, environment and namespace
+  intact); a retired environment serves nothing (`insufficientAccessRights`).
+  The client record, its pin and the config are re-read on every operation.
+- **Passcode**: the caller's own entity (a token without one is `403`),
+  gated as provider `ldap-passcode`. Response: `passcode` (32 hex
+  characters, returned once, stored only as a SHA-256), `login`, `bind_dn`,
+  `environment`, `expires_at`, `ttl`. At most 8 unexpired passcodes per
+  identity (`429`). `400` while the directory is not enabled.
+- **Entries**: `uid=<login>,ou=people,<base_dn>` (`top`, `account`,
+  `posixAccount`: `uid`, `cn` = display name or login, `uidNumber`,
+  `gidNumber`, `homeDirectory`, `loginShell`, `gecos` when a display name
+  is set); `cn=<login>,ou=groups,<base_dn>` (`posixGroup`, the user-private
+  group, no members); `cn=gid.<n>,ou=groups,<base_dn>` (`posixGroup`, one
+  per supplementary gid, `memberUid` = the visible holders). No password or
+  credential attribute exists. The root DSE names the base DN.
+- **On the wire**: Bind, Search, Unbind, Abandon and StartTLS only. A
+  simple bind as `uid=<login>,ou=people,<base_dn>` with a passcode succeeds
+  only when the passcode is the login's, unexpired, minted for the client's
+  environment (consumed on first presentation) and the issue gate (provider
+  `ldap`) allows now. SASL `EXTERNAL` binds a TLS client as itself. An
+  anonymous bind is `inappropriateAuthentication`, a bind with a DN and no
+  password `unwillingToPerform`, every other refused bind
+  `invalidCredentials`. Searches need no bind: what a session sees is
+  decided by its client. Add, Modify, Delete, ModifyDN and Compare are
+  `unwillingToPerform`; other extended operations `protocolError`; critical
+  controls `unavailableCriticalExtension`. Cleartext operations without the
+  opt-in are `confidentialityRequired`. PDUs above 64 KiB, indefinite
+  lengths, filters deeper than 16 or with more than 128 elements and other
+  malformed input get a notice of disconnection; 128 connections at most,
+  idle ones closed after 5 minutes.
+- **Audit**: `idp.ldap.bind` (`decision`, `reason`, `gate_reason`,
+  `method`, `login`, `entity_id`, `uid`), `idp.ldap.search` (`decision`,
+  `result`, `base`, `scope`, `entries`, `hidden`) and `idp.ldap.refused`
+  (`reason`, e.g. `write_refused`, `unknown_client`, `tls_required`,
+  `malformed_pdu:*`, `rate_limited`), each with `client`, `environment`,
+  `transport` and `peer`; never a password or passcode. A bind or a search
+  whose event cannot be recorded is refused. Refusals before a client is
+  known are audited at most 30 times a minute in all.
+- **Hosts** (sssd, nslcd) must not cache credentials (sssd
+  `cache_credentials = false`): with the directory unreachable, an offline
+  cache would accept an already-used passcode outside the live check.
+
 ## Authentication Endpoints
 
 ### Token Login

@@ -1,11 +1,13 @@
 //! The `v2/idp/...` logical surface: identities CRUD, the lifecycle state
 //! endpoint, `idp/config`, (Phase 2, [`authz`]) environments and
 //! entitlements, (Phase 3, [`ssh`]) SSH sign, the KRL and the deny feed,
-//! (Phase 4, [`radius`]) RADIUS, and (Phase 5, [`oidc`], [`saml`]) the
-//! OIDC OP and SAML IdP. Every handler runs [`IdpBackendInner::guard`]
-//! first: v2 only, root namespace only, root-table mount only.
+//! (Phase 4, [`radius`]) RADIUS, (Phase 5, [`oidc`], [`saml`]) the OIDC
+//! OP and SAML IdP, and (Phase 6, [`ldap`]) the LDAP directory. Every
+//! handler runs [`IdpBackendInner::guard`] first: v2 only, root namespace
+//! only, root-table mount only.
 
 mod authz;
+mod ldap;
 mod oidc;
 mod radius;
 mod saml;
@@ -36,7 +38,7 @@ use crate::{
         model::{parse_id, parse_id_list, IdKind, IdentityState, PosixConfig, PosixError, UidSource},
         store::{ConfigUpdate, IdentityWrite, PosixStore},
     },
-    provider::radius::RadiusRuntime,
+    provider::{ldap_dir::LdapRuntime, radius::RadiusRuntime},
     IssuanceSlot, PosixStoreSlot, IDP_LOGICAL_TYPE,
 };
 
@@ -52,7 +54,10 @@ RADIUS Access-Requests from registered NAS clients (RadSec by default, UDP
 opt-in) with per-role vendor attributes, against one-time passcodes the
 human mints here. It is a SAML 2.0 IdP and an OpenID Provider (code flow
 with PKCE) for registered service providers and clients, each bound to one
-environment. Served under /v2 only, from the root namespace only.
+environment. It serves a read-only LDAP directory (posixAccount and
+posixGroup over LDAPS or StartTLS) to registered clients, each bound to one
+environment, with binds checked live against one-time passcodes. Served
+under /v2 only, from the root namespace only.
 "#;
 
 pub struct IdpBackendInner {
@@ -61,6 +66,14 @@ pub struct IdpBackendInner {
     pub authz: Arc<EntitlementStoreSlot>,
     pub issuance: Arc<IssuanceSlot>,
     pub radius: Arc<RadiusRuntime>,
+    pub ldap: Arc<LdapRuntime>,
+}
+
+/// The protocol listeners' supervisor handles the backend reports on and
+/// nudges after a write.
+pub struct Runtimes {
+    pub radius: Arc<RadiusRuntime>,
+    pub ldap: Arc<LdapRuntime>,
 }
 
 #[derive(Deref)]
@@ -75,9 +88,10 @@ impl IdpBackend {
         store: Arc<PosixStoreSlot>,
         authz: Arc<EntitlementStoreSlot>,
         issuance: Arc<IssuanceSlot>,
-        radius: Arc<RadiusRuntime>,
+        runtimes: Runtimes,
     ) -> Self {
-        Self { inner: Arc::new(IdpBackendInner { core, store, authz, issuance, radius }) }
+        let Runtimes { radius, ldap } = runtimes;
+        Self { inner: Arc::new(IdpBackendInner { core, store, authz, issuance, radius, ldap }) }
     }
 
     pub fn new_backend(&self) -> LogicalBackend {
@@ -136,6 +150,13 @@ impl IdpBackend {
         let h_saml_sso = self.inner.clone();
         let h_saml_initiate = self.inner.clone();
         let h_saml_metadata = self.inner.clone();
+        let h_ldap_config_read = self.inner.clone();
+        let h_ldap_config_write = self.inner.clone();
+        let h_ldap_client_list = self.inner.clone();
+        let h_ldap_client_read = self.inner.clone();
+        let h_ldap_client_write = self.inner.clone();
+        let h_ldap_client_delete = self.inner.clone();
+        let h_ldap_passcode = self.inner.clone();
 
         let mut backend = new_logical_backend!({
             paths: [
@@ -558,6 +579,67 @@ impl IdpBackend {
                         {op: Operation::Read, handler: h_saml_metadata.handle_saml_metadata}
                     ],
                     help: "The IdP metadata XML (no vault token)."
+                },
+                {
+                    pattern: r"ldap/config$",
+                    fields: {
+                        "enabled": { field_type: FieldType::Bool, required: false, description: "Run the listeners (default false)." },
+                        "ldaps_listen": { field_type: FieldType::Str, required: false, description: "LDAPS IP:port (\"\" clears)." },
+                        "ldap_listen": { field_type: FieldType::Str, required: false, description: "Cleartext port IP:port for StartTLS (\"\" clears)." },
+                        "plaintext_enabled": { field_type: FieldType::Bool, required: false, description: "Serve plain clients without TLS on ldap_listen (default false; trusted segments only)." },
+                        "allow_unspecified_bind": { field_type: FieldType::Bool, required: false, description: "Permit 0.0.0.0 / :: listen addresses (default false)." },
+                        "tls_cert_pem": { field_type: FieldType::Str, required: false, description: "Server certificate chain (PEM)." },
+                        "tls_key_pem": { field_type: FieldType::SecretStr, required: false, description: "Server private key (PEM); never returned." },
+                        "client_ca_pem": { field_type: FieldType::Str, required: false, description: "CA that client certificates must chain to (PEM)." },
+                        "base_dn": { field_type: FieldType::Str, required: false, description: "Naming context (default dc=bastionvault)." },
+                        "home_directory_base": { field_type: FieldType::Str, required: false, description: "homeDirectory prefix (default /home)." },
+                        "login_shell": { field_type: FieldType::Str, required: false, description: "loginShell (default /bin/bash)." },
+                        "size_limit": { field_type: FieldType::Int, required: false, description: "Most entries per search (default 1000, at most 10000)." },
+                        "time_limit": { field_type: FieldType::Str, required: false, description: "Longest search (default 10s, at most 60s)." },
+                        "rate_limit_per_minute": { field_type: FieldType::Int, required: false, description: "Connections and operations per source address per minute (default 600)." },
+                        "passcode_default_ttl": { field_type: FieldType::Str, required: false, description: "Default bind passcode lifetime (default 2m)." },
+                        "passcode_max_ttl": { field_type: FieldType::Str, required: false, description: "Longest bind passcode lifetime (default 5m, at most 15m)." }
+                    },
+                    operations: [
+                        {op: Operation::Read, handler: h_ldap_config_read.handle_ldap_config_read},
+                        {op: Operation::Write, handler: h_ldap_config_write.handle_ldap_config_write}
+                    ],
+                    help: "LDAP directory settings and listener status. Until enabled, nothing listens and no passcode is minted."
+                },
+                {
+                    pattern: r"ldap/clients/?$",
+                    operations: [
+                        {op: Operation::List, handler: h_ldap_client_list.handle_ldap_client_list}
+                    ],
+                    help: "List LDAP directory clients."
+                },
+                {
+                    pattern: r"ldap/clients/(?P<name>[^/]+)$",
+                    fields: {
+                        "name": { field_type: FieldType::Str, required: false, description: "Client name." },
+                        "transport": { field_type: FieldType::Str, required: false, description: "tls | plain; fixed at creation." },
+                        "environment": { field_type: FieldType::Str, required: false, description: "The one environment this client sees; fixed at creation." },
+                        "cert_sha256": { field_type: FieldType::Str, required: false, description: "tls: SHA-256 (hex) of the client certificate." },
+                        "address": { field_type: FieldType::Str, required: false, description: "plain: the client's source IP address." },
+                        "description": { field_type: FieldType::Str, required: false, description: "Free-text note." }
+                    },
+                    operations: [
+                        {op: Operation::Read, handler: h_ldap_client_read.handle_ldap_client_read},
+                        {op: Operation::Write, handler: h_ldap_client_write.handle_ldap_client_write},
+                        {op: Operation::Delete, handler: h_ldap_client_delete.handle_ldap_client_delete}
+                    ],
+                    help: "Register, read, update or remove a directory client (a host or service)."
+                },
+                {
+                    pattern: r"ldap/passcode/(?P<environment>[^/]+)$",
+                    fields: {
+                        "environment": { field_type: FieldType::Str, required: false, description: "Environment name." },
+                        "ttl": { field_type: FieldType::Str, required: false, description: "Lifetime; at most passcode_max_ttl." }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_ldap_passcode.handle_ldap_passcode}
+                    ],
+                    help: "Mint a one-time LDAP bind passcode for the caller's own identity in one environment (self-service, gated)."
                 }
             ],
             help: IDP_BACKEND_HELP,

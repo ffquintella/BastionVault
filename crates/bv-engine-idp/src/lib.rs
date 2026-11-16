@@ -5,6 +5,7 @@
 //! entitlements and the fail-closed issue gate. Phase 3: identity-bound SSH
 //! certificates, the KRL and the signed deny feed. Phase 4: the RADIUS
 //! provider (RadSec, opt-in UDP). Phase 5: the SAML IdP and the OIDC OP.
+//! Phase 6: the read-only LDAP-compatible directory (LDAPS, StartTLS).
 //! Served under `v2/idp/` only and from the root namespace only.
 
 #![deny(unsafe_code)]
@@ -28,6 +29,7 @@ use crate::{
     logical::Backend,
     posix::store::PosixStore,
     provider::{
+        ldap_dir::{store::LdapStore, LdapRuntime},
         oidc_op::store::OidcStore,
         radius::{store::RadiusStore, RadiusRuntime},
         saml_idp::store::SamlStore,
@@ -72,17 +74,21 @@ const OIDC_SUBVIEW: &str = "idp/oidc/";
 /// Phase 5: SAML IdP configuration, service providers, replay cache, keys.
 const SAML_SUBVIEW: &str = "idp/saml/";
 
+/// Phase 6: LDAP directory configuration, clients and bind passcodes.
+const LDAP_SUBVIEW: &str = "idp/ldap/";
+
 /// Late-bound handle to the store: the backend is built at mount time, the
 /// store only once the barrier is unsealed.
 pub type PosixStoreSlot = arc_swap::ArcSwap<Option<Arc<PosixStore>>>;
 
-/// The Phase 3, 4 and 5 stores, set together at unseal.
+/// The Phase 3 to 6 stores, set together at unseal.
 pub struct IssuanceStores {
     pub ssh: SshStore,
     pub feed: FeedStore,
     pub radius: RadiusStore,
     pub oidc: OidcStore,
     pub saml: SamlStore,
+    pub ldap: LdapStore,
 }
 
 pub type IssuanceSlot = arc_swap::ArcSwap<Option<Arc<IssuanceStores>>>;
@@ -95,6 +101,8 @@ pub struct IdpModule {
     pub issuance: Arc<IssuanceSlot>,
     /// Phase 4: the RADIUS listeners' supervisor handle.
     pub radius: Arc<RadiusRuntime>,
+    /// Phase 6: the LDAP listeners' supervisor handle.
+    pub ldap: Arc<LdapRuntime>,
 }
 
 impl IdpModule {
@@ -106,6 +114,7 @@ impl IdpModule {
             authz: Arc::new(arc_swap::ArcSwap::new(Arc::new(None))),
             issuance: Arc::new(arc_swap::ArcSwap::new(Arc::new(None))),
             radius: Arc::new(RadiusRuntime::default()),
+            ldap: Arc::new(LdapRuntime::default()),
         }
     }
 
@@ -149,8 +158,10 @@ impl Module for IdpModule {
         let authz = self.authz.clone();
         let issuance = self.issuance.clone();
         let radius = self.radius.clone();
+        let ldap = self.ldap.clone();
         let backend_new_func = move |ctx: Arc<dyn VaultCtx>| -> Result<Arc<dyn Backend>, RvError> {
-            let b = backend::IdpBackend::new(ctx, store.clone(), authz.clone(), issuance.clone(), radius.clone());
+            let runtimes = backend::Runtimes { radius: radius.clone(), ldap: ldap.clone() };
+            let b = backend::IdpBackend::new(ctx, store.clone(), authz.clone(), issuance.clone(), runtimes);
             let mut b = b.new_backend();
             b.init()?;
             Ok(Arc::new(b))
@@ -171,27 +182,37 @@ impl Module for IdpModule {
         let radius_view: Arc<dyn Storage> = Arc::new(system_view.new_sub_view(RADIUS_SUBVIEW));
         let oidc_view: Arc<dyn Storage> = Arc::new(system_view.new_sub_view(OIDC_SUBVIEW));
         let saml_view: Arc<dyn Storage> = Arc::new(system_view.new_sub_view(SAML_SUBVIEW));
+        let ldap_view: Arc<dyn Storage> = Arc::new(system_view.new_sub_view(LDAP_SUBVIEW));
         let issuance = IssuanceStores {
             ssh: SshStore::new(ssh_view),
             feed: FeedStore::new(revoke_view),
             radius: RadiusStore::new(radius_view),
             oidc: OidcStore::new(oidc_view),
             saml: SamlStore::new(saml_view),
+            ldap: LdapStore::new(ldap_view),
         };
         self.issuance.store(Arc::new(Some(Arc::new(issuance))));
         Ok(())
     }
 
-    /// The RADIUS supervisor: started once, it binds only what
-    /// `idp/radius/config` asks for (nothing until an operator writes it).
+    /// The RADIUS and LDAP supervisors: started once, each binds only what
+    /// its `idp/<provider>/config` asks for (nothing until it is written).
     fn start_background(&self, core: Arc<dyn VaultCtx>) {
         #[cfg(not(feature = "sync_handler"))]
-        self.radius.start(Arc::new(provider::radius::server::VaultSource {
-            ctx: Arc::downgrade(&core),
-            posix: self.store.clone(),
-            authz: self.authz.clone(),
-            issuance: self.issuance.clone(),
-        }));
+        {
+            self.radius.start(Arc::new(provider::radius::server::VaultSource {
+                ctx: Arc::downgrade(&core),
+                posix: self.store.clone(),
+                authz: self.authz.clone(),
+                issuance: self.issuance.clone(),
+            }));
+            self.ldap.start(Arc::new(provider::ldap_dir::server::VaultSource {
+                ctx: Arc::downgrade(&core),
+                posix: self.store.clone(),
+                authz: self.authz.clone(),
+                issuance: self.issuance.clone(),
+            }));
+        }
         #[cfg(feature = "sync_handler")]
         drop(core);
     }
@@ -200,8 +221,9 @@ impl Module for IdpModule {
         self.store.store(Arc::new(None));
         self.authz.store(Arc::new(None));
         self.issuance.store(Arc::new(None));
-        // Sealed: the supervisor stops the listeners now, not at its tick.
+        // Sealed: the supervisors stop the listeners now, not at their tick.
         self.radius.reconcile_soon();
+        self.ldap.reconcile_soon();
         core.delete_logical_backend(IDP_LOGICAL_TYPE)
     }
 }

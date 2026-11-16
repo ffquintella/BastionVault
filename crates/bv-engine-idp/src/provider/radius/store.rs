@@ -478,7 +478,8 @@ fn passcode_key(entity_id: &str, code: &[u8]) -> String {
     format!("{}{}", passcode_dir(entity_id), hex(&Sha256::digest(code)))
 }
 
-fn generate_passcode() -> Zeroizing<String> {
+/// Also the LDAP directory's bind passcodes (Phase 6).
+pub(crate) fn generate_passcode() -> Zeroizing<String> {
     use rand::RngExt;
 
     let mut bytes = Zeroizing::new([0u8; PASSCODE_BYTES]);

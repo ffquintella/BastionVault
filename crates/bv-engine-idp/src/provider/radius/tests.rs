@@ -254,6 +254,7 @@ async fn fixture() -> Fx {
         radius: RadiusStore::new(MemStorage::new_arc() as Arc<dyn Storage>),
         oidc: crate::provider::oidc_op::store::OidcStore::new(MemStorage::new_arc() as Arc<dyn Storage>),
         saml: crate::provider::saml_idp::store::SamlStore::new(MemStorage::new_arc() as Arc<dyn Storage>),
+        ldap: crate::provider::ldap_dir::store::LdapStore::new(MemStorage::new_arc() as Arc<dyn Storage>),
     });
     let radius = &stores.radius;
     let prod_roles = attrs(json!({

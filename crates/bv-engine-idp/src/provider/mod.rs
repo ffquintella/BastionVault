@@ -1,8 +1,10 @@
 //! Downstream providers (features/identity-provider.md §3). Each calls the
 //! issue gate before it issues anything; Phase 3 ships SSH, Phase 4 RADIUS,
-//! Phase 5 the SAML IdP and the OIDC OP (sharing `federation`).
+//! Phase 5 the SAML IdP and the OIDC OP (sharing `federation`), Phase 6 the
+//! read-only LDAP directory.
 
 pub mod federation;
+pub mod ldap_dir;
 pub mod oidc_op;
 pub mod radius;
 pub mod saml_idp;

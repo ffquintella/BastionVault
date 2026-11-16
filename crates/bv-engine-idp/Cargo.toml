@@ -13,7 +13,7 @@ publish = ["uox-bastionvault"]
 # identity core; Phase 2: environments, entitlements and the issue gate;
 # Phase 3: SSH identity certificates, the KRL and the signed deny feed.
 # Phase 4: the RADIUS provider. Phase 5: SAML IdP and OIDC OP (aws-lc signs,
-# bv-auth-saml canonicalises). No primitive is implemented here.
+# bv-auth-saml canonicalises). Phase 6: the LDAP directory. No primitive here.
 
 [dependencies]
 bv-errors = { path = "../bv-errors", version = "0.41.0", registry = "uox-bastionvault" }
@@ -105,6 +105,11 @@ rcgen = "0.14"
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync"] }
 # The unit tests' stand-in for the SSH engine signs with an in-memory CA.
 ssh-key = { version = "0.6", default-features = false, features = ["alloc", "ed25519", "ecdsa", "getrandom"] }
+# Phase 6: an independent LDAP client checks the directory's listeners
+# (LDAPS, StartTLS, cleartext, binds, searches, refused writes) against a
+# codec the server does not share. Same declaration as bv-engine-ldap's
+# dependency, so no new crate or feature enters the graph.
+ldap3 = { version = "0.12", default-features = false, features = ["sync", "tls-rustls-aws-lc-rs"] }
 
 [features]
 default = []

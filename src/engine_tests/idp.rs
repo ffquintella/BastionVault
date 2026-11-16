@@ -840,6 +840,172 @@ mod idp_tests {
         let _ = std::fs::remove_dir_all(audit_dir);
     }
 
+    /// Phase 6 end to end: a client registered through v2, a bind passcode
+    /// minted by a userpass login, a bind and searches over the vault's own
+    /// (opted-in cleartext) listener, a refused write, then a disable.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn idp_ldap_directory_through_the_vault() {
+        use std::time::Duration;
+
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::TcpStream,
+        };
+
+        use crate::modules::idp::provider::ldap_dir::{
+            ber::pdu_len,
+            filter::Filter,
+            proto::{client, tag, Scope, WriteOp},
+        };
+
+        let (_bvault, core, root) = new_unseal_test_bastion_vault("idp_ldap").await;
+        let ctx: &dyn VaultCtx = core.as_ref();
+        test_mount_api(ctx, &root, "idp", "idp").await;
+        let (audit_dir, audit_log) = enable_audit_file(ctx, "ldap").await;
+        test_mount_auth_api_with(
+            ctx,
+            &root,
+            "idp-ldap",
+            r#"path "idp/ldap/passcode/*" { capabilities = ["create", "update"] }"#,
+        )
+        .await;
+        let mut login = Request::new("auth/userpass/login/alice");
+        login.operation = Operation::Write;
+        login.body = json!({"password": "pw-123456"}).as_object().cloned();
+        let auth = ctx.handle_request(&mut login).await.unwrap().unwrap().auth.unwrap();
+        let (token, alice) = (auth.client_token.clone(), auth.metadata["entity_id"].clone());
+        let ident = data(
+            v2(ctx, &root, Operation::Write, &format!("idp/identities/{alice}"), Some(json!({"login": "alice"}))).await,
+        );
+        let uid = ident["uid"].as_u64().unwrap();
+        let env = json!({"namespace": "", "roles": {"ops": ["ops-policy"]}});
+        data(v2(ctx, &root, Operation::Write, "idp/environments/hosts", Some(env)).await);
+        let grant = json!({"roles": ["ops"]});
+        data(v2(ctx, &root, Operation::Write, &format!("idp/entitlements/{alice}/hosts"), Some(grant)).await);
+
+        // Off by default: no passcode, nothing listening.
+        let passcode = || v2(ctx, &token, Operation::Write, "idp/ldap/passcode/hosts", Some(json!({})));
+        assert_eq!(status(passcode().await), 400);
+        let cfg = data(v2(ctx, &root, Operation::Read, "idp/ldap/config", None).await);
+        assert_eq!(cfg["enabled"].as_bool(), Some(false));
+        assert_eq!(cfg["listening"]["ldap"], Value::Null);
+
+        let host = json!({"transport": "plain", "environment": "hosts", "address": "127.0.0.1"});
+        let c = data(v2(ctx, &root, Operation::Write, "idp/ldap/clients/host1", Some(host)).await);
+        assert_eq!((c["transport"].as_str(), c["environment"].as_str()), (Some("plain"), Some("hosts")));
+        let fixed = json!({"environment": "other"});
+        assert_eq!(status(v2(ctx, &root, Operation::Write, "idp/ldap/clients/host1", Some(fixed)).await), 400);
+
+        // Cleartext must be asked for explicitly; then the listener comes up.
+        let half = json!({"enabled": true, "ldap_listen": "127.0.0.1:0"});
+        assert_eq!(status(v2(ctx, &root, Operation::Write, "idp/ldap/config", Some(half)).await), 400);
+        let on =
+            json!({"enabled": true, "ldap_listen": "127.0.0.1:0", "plaintext_enabled": true, "base_dn": "dc=corp"});
+        let written = v2(ctx, &root, Operation::Write, "idp/ldap/config", Some(on)).await.unwrap().unwrap();
+        assert!(written.warnings.iter().any(|w| w.contains("cleartext")));
+        let mut listening = None;
+        for _ in 0..250 {
+            let cfg = data(v2(ctx, &root, Operation::Read, "idp/ldap/config", None).await);
+            if let Some(addr) = cfg["listening"]["ldap"].as_str() {
+                listening = Some(addr.parse::<std::net::SocketAddr>().unwrap());
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let server = listening.expect("the LDAP listener never came up");
+
+        // v2 only; self-service only (the root token has no entity).
+        assert_eq!(status(call(ctx, &token, Operation::Write, "idp/ldap/passcode/hosts", None, 1, None).await), 400);
+        assert_eq!(status(v2(ctx, &root, Operation::Write, "idp/ldap/passcode/hosts", Some(json!({}))).await), 403);
+        let minted = data(passcode().await);
+        let (code_a, bind_dn) = (minted["passcode"].as_str().unwrap().to_string(), minted["bind_dn"].as_str().unwrap());
+        assert_eq!(bind_dn, "uid=alice,ou=people,dc=corp");
+        let code_b = data(passcode().await)["passcode"].as_str().unwrap().to_string();
+
+        let mut tcp = TcpStream::connect(server).await.unwrap();
+        async fn exchange(tcp: &mut TcpStream, pdu: Vec<u8>) -> Vec<client::Reply> {
+            tcp.write_all(&pdu).await.unwrap();
+            let mut replies = Vec::new();
+            loop {
+                let mut head = Vec::new();
+                let total = loop {
+                    if let Some(n) = pdu_len(&head).unwrap() {
+                        break n;
+                    }
+                    let mut b = [0u8; 1];
+                    tokio::time::timeout(Duration::from_secs(5), tcp.read_exact(&mut b)).await.unwrap().unwrap();
+                    head.push(b[0]);
+                };
+                let mut body = vec![0u8; total];
+                body[..head.len()].copy_from_slice(&head);
+                tcp.read_exact(&mut body[head.len()..]).await.unwrap();
+                let reply = client::read_reply(&body).unwrap();
+                let done = reply.tag != tag::SEARCH_RESULT_ENTRY;
+                replies.push(reply);
+                if done {
+                    return replies;
+                }
+            }
+        }
+        let search = |f: Filter| client::search(2, "dc=corp", Scope::Sub, 0, &f, &["uid", "uidNumber"]);
+        let found = exchange(&mut tcp, search(Filter::eq("uid", "alice"))).await;
+        assert_eq!((found.len(), found[0].dn.as_str()), (2, bind_dn));
+        assert_eq!(found[0].values("uidNumber"), [uid.to_string()]);
+        assert_eq!(exchange(&mut tcp, client::bind_simple(3, bind_dn, &code_a)).await[0].code, Some(0));
+        assert_eq!(exchange(&mut tcp, client::bind_simple(4, bind_dn, &code_a)).await[0].code, Some(49), "single use");
+        assert_eq!(exchange(&mut tcp, client::bind_simple(5, bind_dn, "")).await[0].code, Some(53), "unauthenticated");
+        assert_eq!(exchange(&mut tcp, client::write(6, WriteOp::Add, bind_dn)).await[0].code, Some(53), "read-only");
+
+        // Disabled after the passcode was minted: refused at once, and gone
+        // from the directory.
+        let state = format!("idp/identities/{alice}/state");
+        data(v2(ctx, &root, Operation::Write, &state, Some(json!({"state": "disabled"}))).await);
+        assert_eq!(exchange(&mut tcp, client::bind_simple(7, bind_dn, &code_b)).await[0].code, Some(49));
+        assert_eq!(exchange(&mut tcp, search(Filter::eq("uid", "alice"))).await.len(), 1, "only the done");
+
+        // The gate's events and the directory's, with no passcode in them.
+        let issued: Vec<Value> = audit_events(&audit_log, "idp.issue").iter().map(|e| e["provider"].clone()).collect();
+        assert_eq!(issued, [json!("ldap-passcode"), json!("ldap-passcode"), json!("ldap")]);
+        let denied = audit_events(&audit_log, "idp.issue-denied");
+        let reasons: Vec<(Value, Value)> =
+            denied.iter().map(|e| (e["provider"].clone(), e["reason"].clone())).collect();
+        assert_eq!(reasons, [(json!("ldap"), json!("identity_disabled"))]);
+        let binds: Vec<(Value, Value)> = audit_events(&audit_log, "idp.ldap.bind")
+            .iter()
+            .map(|e| (e["decision"].clone(), e["reason"].clone()))
+            .collect();
+        assert_eq!(
+            binds,
+            [
+                (json!("success"), Value::Null),
+                (json!("refused"), json!("bad_passcode")),
+                (json!("refused"), json!("unauthenticated_bind")),
+                (json!("refused"), json!("issue_denied")),
+            ]
+        );
+        let searches = audit_events(&audit_log, "idp.ldap.search");
+        let entries: Vec<Value> = searches.iter().map(|e| e["entries"].clone()).collect();
+        assert_eq!(entries, [json!(1), json!(0)]);
+        assert_eq!(searches[0]["client"].as_str(), Some("host1"));
+        let refused = audit_events(&audit_log, "idp.ldap.refused");
+        assert_eq!(refused[0]["reason"].as_str(), Some("write_refused"));
+        let log = std::fs::read_to_string(&audit_log).unwrap();
+        for secret in [code_a.as_str(), code_b.as_str()] {
+            assert!(!log.contains(secret), "the audit log never holds a passcode");
+        }
+        data(v2(ctx, &root, Operation::Write, "idp/ldap/config", Some(json!({"enabled": false}))).await);
+        let _ = std::fs::remove_dir_all(audit_dir);
+    }
+
+    /// userpass with alice, whose policy allows one path only.
+    async fn test_mount_auth_api_with(ctx: &dyn VaultCtx, root: &str, name: &str, policy: &str) {
+        crate::test_utils::test_mount_auth_api(ctx, root, "userpass", "userpass").await;
+        let body = json!({"policy": policy}).as_object().cloned();
+        test_write_api(ctx, root, &format!("sys/policy/{name}"), true, body).await.unwrap();
+        let user = json!({"password": "pw-123456", "policies": name});
+        test_write_api(ctx, root, "auth/userpass/users/alice", true, user.as_object().cloned()).await.unwrap();
+    }
+
     /// userpass with alice, whose policy allows the passcode path only.
     async fn test_mount_auth_api_for_radius(ctx: &dyn VaultCtx, root: &str) {
         crate::test_utils::test_mount_auth_api(ctx, root, "userpass", "userpass").await;

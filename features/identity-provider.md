@@ -88,9 +88,10 @@ targets are heterogeneous:
 ## Current State
 
 **Phase 1 (POSIX identity core), Phase 2 (entitlements + gate), Phase 3
-(SSH identity issue + revocation), Phase 4 (RADIUS) and Phase 5 (SAML IdP +
-OIDC OP) are implemented, with caveats; Phases 6–7 are Pending.** Phases
-2–5 are described after Phase 1's caveats below.
+(SSH identity issue + revocation), Phase 4 (RADIUS), Phase 5 (SAML IdP +
+OIDC OP) and Phase 6 (LDAP-compat directory) are implemented, with caveats;
+Phase 7 (GUI) is Pending.** Phases 2–6 are described after Phase 1's
+caveats below.
 The code lives in the Tier 3 crate `crates/bv-engine-idp` (not
 `src/modules/idp/`: engines are separate crates since the workspace
 decomposition), registered in the facade's `default_modules()` as the `idp`
@@ -281,8 +282,9 @@ Caveats (Phase 3): no real sshd or Linux host was run; the helper's
 `principals` and `install-feed` logic is unit-tested, its CLI and sshd
 wiring are not. The NSS side is a line generator from a verified
 certificate: sshd looks the user up before authentication, so an account
-must exist first (provisioned with `nss-entry`, or the Phase 6
-LDAP-compat front); on-login materialization is not delivered. An ML-DSA-65
+must exist first (provisioned with `nss-entry`, or resolved through the
+Phase 6 directory by sssd/nslcd, which no real host has run yet); on-login
+materialization is not delivered. An ML-DSA-65
 (PQC) SSH CA is unsupported (certificates are refused at read-back). The
 feed key is not rotated and not HSM-backed. Certificate records of expired
 certificates are pruned 24h after expiry, at that identity's next issue.
@@ -437,6 +439,70 @@ and assertions expire on their own (5 min). Signing keys are not
 HSM-backed. Not run on a multi-node cluster. Testing this phase showed
 that `bv-auth-saml`'s inbound parser merges the attributes of an unsigned
 assertion placed before a signed one; that is a separate SP-side fix.
+
+**Phase 6 (LDAP-compat directory).** `src/provider/ldap_dir/` (`ber.rs`
+bounded codec, `proto.rs` messages, `filter.rs`, `dn.rs`, `directory.rs`
+entries, `store.rs` on `idp/ldap/`, `server.rs` listeners, `mod.rs`
+decisions) and `src/backend/ldap.rs`. Routes in [docs/api.md](../docs/api.md).
+
+- **Who the client is.** A client record binds one host or service, for
+  life, to one environment (as a RADIUS NAS): `tls` clients are pinned by
+  the SHA-256 of a certificate that must also chain to `client_ca_pem`
+  (LDAPS, or StartTLS on the cleartext port); `plain` clients by source
+  address, served in cleartext only while `plaintext_enabled` (off by
+  default, warned) holds. Record, pin and config are re-read per operation.
+- **What it sees.** Only identities the gate would issue to in that
+  environment, decided per entry by the gate's own decision run unrecorded
+  (`IssueGate::evaluate_unrecorded`, crate-private); each search is one
+  `idp.ldap.search` event instead. Entries: `posixAccount` under
+  `ou=people`, the user-private `posixGroup` (no members) and one
+  `posixGroup` `gid.<n>` per supplementary gid with its visible holders
+  under `ou=groups`. No credential attribute exists.
+- **Who the human is.** As for RADIUS: the person mints a single-use bind
+  passcode for one environment (`v2/idp/ldap/passcode/<environment>`, gated
+  as `ldap-passcode`) and binds as `uid=<login>,ou=people,<base_dn>` with
+  it. The bind consumes it and asks the gate (provider `ldap`) live, so a
+  disable or removal refuses the next bind and hides the entries at once.
+  SASL `EXTERNAL` binds a TLS client as itself. Anonymous and
+  unauthenticated binds are refused; every other refused bind is
+  `invalidCredentials`, including storage errors, so a client never falls
+  back to cached credentials on a refusal.
+- **Protocol.** Bind, Search, Unbind, Abandon, StartTLS; every write and
+  Compare is `unwillingToPerform`. BER is hand-written and bounded: definite
+  lengths, single-octet tags, PDUs at most 64 KiB checked from the header,
+  filters at most 16 deep and 128 elements, no recursion outside the
+  depth-bounded filter decoder, no regular expressions. 128 connections,
+  per-source rate limit (600/min), 5 min idle timeout, size (1000) and time
+  (10 s) limits.
+- **Audit.** `idp.ldap.bind`, `idp.ldap.search`, `idp.ldap.refused`, plus
+  the gate's events for binds and passcodes; never a passcode. A bind or a
+  search whose event cannot be recorded is refused.
+
+Decisions taken where this spec was open (Phase 6): the bind credential is
+a one-time passcode, not a userpass password (rejected: router-direct
+password checks, which bypass the login pipeline, and any stored reusable
+password); one client serves one environment (rejected: a per-environment
+base DN a client could choose); searches need no bind because the client
+identity decides visibility (rejected: requiring a bind, which sssd and
+nslcd only offer as a stored password); supplementary groups are named
+`gid.<n>` because Phase 1 stores them as numbers only; the BER codec is
+in-crate (rejected: ldap3's `lber`, which recurses without a depth bound
+and reads an indefinite length as zero; no LDAP server crate is in the
+graph).
+
+Caveats (Phase 6): **no sssd, nslcd or pam_ldap was run.** Verified by
+the crate's unit tests, the ldap3 client over real LDAPS, StartTLS and
+cleartext sockets, a whole-vault test, and one run of OpenLDAP's
+`ldapsearch` (macOS build) over cleartext (passcode bind and search); the
+same `ldapsearch` failed the LDAPS handshake in macOS's TLS stack with PEM
+files, so TLS interop with a non-rustls client is unverified. Each search
+scans the identity store (sized for hundreds to low thousands of
+identities); search timing can reveal whether a login exists outside the
+client's environment. Hosts must not cache credentials (sssd
+`cache_credentials = false`): with the directory unreachable, sssd would
+accept an already-used passcode from its offline cache, outside the live
+check; the server cannot enforce this. Not run on a multi-node cluster; a
+client added on another node is admitted after the next 30 s refresh.
 
 ## Concepts and Terminology
 
@@ -702,7 +768,7 @@ nav like the PKI/SSH pages):
 | **3 — SSH identity issue + revocation** | `provider/ssh.rs` identity-bound `sign` wrapping the SSH engine (principals=login, key-id attribution, uid/gid extensions), `GET /v2/idp/ssh/krl`, the signed/versioned `deny-feed`, and the reference `AuthorizedPrincipalsCommand` + NSS helper for Linux. | **Complete, with caveats** — `crates/bv-engine-idp/src/{provider/ssh,revoke}/`, `bin/bv-idp-host`; KRL checked with `ssh-keygen`; no real sshd/Linux host run; NSS helper generates entries from a certificate, no on-login materialization; PQC CA unsupported; feed key not rotated (see Current State) |
 | **4 — RADIUS provider** | `provider/radius.rs` (RadSec + opt-in UDP), per-vendor attribute templates (FortiGate first), entitlement-gated, Access-Reject for non-active. Live-tested against a FortiGate (or `freeradius`/`pyrad` harness). | **Complete, with caveats** — `crates/bv-engine-idp/src/provider/radius/`; one-time passcodes minted through the vault; RadSec with pinned NAS certificates, UDP opt-in; verified by the crate's own client over real sockets only: **no FortiGate, FreeRADIUS or pyrad run**; not run on a multi-node cluster (see Current State) |
 | **5 — SAML IdP + OIDC OP** | `provider/saml_idp.rs` (reusing the SAML-auth signing core) + `provider/oidc_op.rs` (discovery/JWKS/authz/token), both entitlement-gated, UID + role-set in assertions/claims. | **Complete, with caveats** — `crates/bv-engine-idp/src/provider/{saml_idp,oidc_op,federation}/`; aws-lc RS256 signing over `bv-auth-saml`'s C14N; verified with an RP library and the SAML auth verifier only: **no real SP, RP or browser run**; JSON envelope only, so standard RPs need a relay or HTTP adapter; not run on a multi-node cluster (see Current State) |
-| **6 — LDAP-compat directory** | `provider/ldap_dir.rs` read-only bind+search serving `posixAccount`/`posixGroup`; bind = live active-state check. | Pending |
+| **6 — LDAP-compat directory** | `provider/ldap_dir.rs` read-only bind+search serving `posixAccount`/`posixGroup`; bind = live active-state check. | **Complete, with caveats** — `crates/bv-engine-idp/src/provider/ldap_dir/`; LDAPS with pinned client certificates, StartTLS, cleartext opt-in; one-time bind passcodes, gate-scoped visibility; verified with the ldap3 client over real sockets and OpenLDAP `ldapsearch` over cleartext only: **no sssd/nslcd/pam_ldap run**, no non-rustls TLS client; not run on a multi-node cluster (see Current State) |
 | **7 — GUI** | Identity Provider admin page (Identities / Entitlements / Providers / Revocations tabs) + Tauri commands + API wrappers. | Pending |
 
 Phases 1–3 are the minimum viable slice: stable UID + entitlement gate + SSH

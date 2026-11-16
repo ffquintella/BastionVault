@@ -339,6 +339,14 @@ impl IssueGate {
         Err(denied)
     }
 
+    /// The same decision, not recorded and issuing nothing (Phase 6): the
+    /// LDAP directory asks it per entry to decide what a client may see,
+    /// and audits the search as one event. A bind still uses `authorize`.
+    pub(crate) async fn evaluate_unrecorded(&self, req: &IssueRequest) -> Result<IssueGrant, IssueDenied> {
+        let mut event = IssueEvent::for_request(req);
+        self.decide(req, Utc::now(), &mut event).await
+    }
+
     /// The decision itself. Returns early with a deny at the first
     /// precondition that is not proven; there is no default allow.
     async fn decide(
