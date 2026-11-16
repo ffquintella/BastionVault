@@ -353,6 +353,9 @@ Next-up list recorded before the migration, in its order:
   - source: roadmap.md feature row "Auth: OIDC", status `[x]` Done
   - initiative: [OIDC Authentication](features/oidc-auth.md) — server module + GUI admin lifecycle. PKCE + CSRF + nonce, JWKS verification, claim-to-policy mapping, mode-aware redirect-URI hints (server-stable vs. RFC 8252 loopback).
   - old-notes: [spec](features/oidc-auth.md) — server module + GUI lifecycle, PKCE / nonce / JWKS.
+- [x] T493 Trust extra CA certificates for an OIDC provider's discovery, JWKS and token calls (S29)
+  - source: production report — `auth/oidc/auth_url` returned 500 `oidc: discovery: Request failed` against an IdP that serves only its leaf certificate; the OIDC HTTP client trusts only the built-in webpki roots, not the host's store
+  - note: `oidc_discovery_ca_pem` on `auth/<mount>/config` (Vault's field name), added to the built-in roots of the mount's discovery / JWKS / token-exchange client, never replacing them. Validated on write (1–8 CERTIFICATE blocks, 64 KiB, no private key or other PEM block), stored normalised, returned on read; omitted keeps, empty clears, old configs load with none. Discovery errors now carry their cause chain. Proven by loopback TLS handshakes and a whole-vault test; not run against the production IdP; the GUI SSO dialog does not expose the field yet. Spec Phase 5.
 - [x] T47 Authenticate with SAML 2.0 (S52)
   - source: roadmap.md feature row "Auth: SAML 2.0", status `[x]` Done
   - initiative: [SAML 2.0 Authentication](features/saml-auth.md) — pure-Rust SP-initiated SSO; AuthnRequest, streaming `quick-xml` parsing, RSA-SHA256/SHA1 verify, hand-rolled Exclusive C14N. Zero libxml2 / xmlsec / OpenSSL footprint. 46 tests.

@@ -64,6 +64,7 @@ use crate::{
 };
 use bv_kernel_api::{Module, VaultCtx};
 
+mod http_client;
 pub mod path_auth_url;
 pub mod path_callback;
 pub mod path_config;

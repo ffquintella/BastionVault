@@ -28,6 +28,16 @@ serde = { version = "^1.0", features = ["derive", "rc", "alloc"] }
 serde_json = "^1.0"
 openidconnect = { version = "4", default-features = false, features = ["reqwest", "rustls-tls"] }
 
+[dev-dependencies]
+# `http_client`'s tests mint a throwaway CA chain and terminate TLS on
+# loopback, so the `oidc_discovery_ca_pem` trust path is proven by a real
+# handshake rather than by inspecting the client builder. All three are
+# already in the graph (same pins as bv-engine-resource's test server); the
+# server's provider is aws-lc-rs, which bv-errors' rustls already enables.
+rcgen = "0.14"
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "net", "io-util"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs"] }
+
 [features]
 default = []
 sync_handler = [

@@ -1690,8 +1690,11 @@ dependencies = [
  "log",
  "maybe-async",
  "openidconnect",
+ "rcgen",
  "serde",
  "serde_json",
+ "tokio",
+ "tokio-rustls",
 ]
 
 [[package]]

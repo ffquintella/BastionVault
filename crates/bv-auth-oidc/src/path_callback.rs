@@ -28,7 +28,8 @@ use openidconnect::{
 use serde_json::{Map, Value};
 
 use super::{
-    path_auth_url::{reqwest_http_client, OidcAuthState, STATE_PREFIX},
+    http_client::{error_chain, reqwest_http_client},
+    path_auth_url::{OidcAuthState, STATE_PREFIX},
     path_config::OidcConfig,
     path_roles::OidcRoleEntry,
     OidcBackend, OidcBackendInner,
@@ -126,12 +127,12 @@ impl OidcBackendInner {
         // rediscover every callback so an IdP-side key rotation
         // between `auth_url` and `callback` is picked up without a
         // vault restart.
-        let http = reqwest_http_client()?;
+        let http = reqwest_http_client(&cfg.oidc_discovery_ca_pem)?;
         let issuer = IssuerUrl::new(cfg.oidc_discovery_url.clone())
             .map_err(|e| RvError::ErrString(format!("oidc: bad discovery URL: {e}")))?;
         let provider_metadata = CoreProviderMetadata::discover_async(issuer, &http)
             .await
-            .map_err(|e| RvError::ErrString(format!("oidc: discovery: {e}")))?;
+            .map_err(|e| RvError::ErrString(format!("oidc: discovery: {}", error_chain(&e))))?;
 
         let mut client = CoreClient::from_provider_metadata(
             provider_metadata,

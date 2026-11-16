@@ -2970,6 +2970,38 @@ GET /v1/auth/{mount}/role/{role_name}/role-id
 POST /v1/auth/{mount}/role/{role_name}/secret-id
 ~~~
 
+### OIDC Provider Configuration
+
+~~~
+GET  /v1/auth/{mount}/config
+POST /v1/auth/{mount}/config
+~~~
+
+| Field | Notes |
+|---|---|
+| `oidc_discovery_url` | Issuer URL; required (on the first write, or already stored) |
+| `oidc_client_id` | Required, like `oidc_discovery_url` |
+| `oidc_client_secret` | Write-only; a read returns `oidc_client_secret_set` instead |
+| `default_role` | Role used when `auth_url` names none |
+| `allowed_redirect_uris` | Comma list or array |
+| `oidc_scopes` | Defaults to `openid,profile,email` |
+| `oidc_discovery_ca_pem` | Extra CA certificate(s), PEM, trusted **in addition to** the built-in roots for discovery, JWKS and the token exchange |
+
+A write merges onto the stored config: an omitted field keeps its value.
+`oidc_discovery_ca_pem` takes 1 to 8 `CERTIFICATE` blocks (at most 64 KiB),
+each a parseable X.509 certificate; a private key or any other PEM block is
+refused and nothing is stored. It is stored as the certificate blocks alone
+(text around them dropped) and returned as stored on read. An empty string
+clears it. Use it when discovery fails with `invalid peer certificate:
+UnknownIssuer` because the IdP does not send its intermediate, or chains to a
+private CA — see `features/oidc-auth.md`.
+
+~~~json
+{
+  "oidc_discovery_ca_pem": "-----BEGIN CERTIFICATE-----\nMIIE...\n-----END CERTIFICATE-----\n"
+}
+~~~
+
 ## MCP Endpoints
 
 MCP Access (see [`mcp.md`](mcp.md)). All of these are `v2` only and require the

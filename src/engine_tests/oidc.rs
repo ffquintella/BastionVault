@@ -126,6 +126,65 @@ mod integration_tests {
         assert!(format!("{err}").contains("user_claim"), "{err}");
     }
 
+    /// `oidc_discovery_ca_pem` through the real routing/field path: stored
+    /// normalised and read back, kept by a write that omits it (the GUI's
+    /// SSO dialog does not send it), refused when it carries a private key
+    /// (nothing changes), and cleared by an empty string.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn oidc_config_discovery_ca_pem_lifecycle() {
+        let (_bvault, core, root_token) = new_unseal_test_bastion_vault("test_oidc_discovery_ca").await;
+        test_mount_auth_api(&core, &root_token, "oidc", "oidc").await;
+
+        let ca_key = rcgen::KeyPair::generate().unwrap();
+        let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        ca_params.distinguished_name.push(rcgen::DnType::CommonName, "OIDC discovery test CA");
+        let ca_pem = ca_params.self_signed(&ca_key).unwrap().pem().replace("\r\n", "\n");
+
+        let read_pem = |data: &serde_json::Map<String, serde_json::Value>| {
+            data.get("oidc_discovery_ca_pem").and_then(|v| v.as_str()).map(str::to_string)
+        };
+
+        let body = json!({
+            "oidc_discovery_url": "https://issuer.example.com",
+            "oidc_client_id": "cid",
+            "oidc_client_secret": "sekret",
+            "oidc_discovery_ca_pem": format!("# issuer of the IdP's leaf\n{ca_pem}"),
+        })
+        .as_object()
+        .cloned();
+        test_write_api(&core, &root_token, "auth/oidc/config", true, body).await.unwrap();
+        let data = test_read_api(&core, &root_token, "auth/oidc/config", true).await.unwrap().unwrap().data.unwrap();
+        assert_eq!(read_pem(&data).as_deref(), Some(ca_pem.as_str()));
+        assert!(data.get("oidc_client_secret").is_none());
+
+        // Omitted: kept.
+        let body = json!({ "oidc_client_id": "cid2" }).as_object().cloned();
+        test_write_api(&core, &root_token, "auth/oidc/config", true, body).await.unwrap();
+        let data = test_read_api(&core, &root_token, "auth/oidc/config", true).await.unwrap().unwrap().data.unwrap();
+        assert_eq!(data.get("oidc_client_id").and_then(|v| v.as_str()), Some("cid2"));
+        assert_eq!(read_pem(&data).as_deref(), Some(ca_pem.as_str()));
+
+        // A private key: refused, and the stored config is untouched.
+        let body =
+            json!({ "oidc_client_id": "cid3", "oidc_discovery_ca_pem": ca_key.serialize_pem() }).as_object().cloned();
+        let err = test_write_api(&core, &root_token, "auth/oidc/config", false, body).await.unwrap_err();
+        assert!(format!("{err}").contains("private key"), "{err}");
+        let data = test_read_api(&core, &root_token, "auth/oidc/config", true).await.unwrap().unwrap().data.unwrap();
+        assert_eq!(data.get("oidc_client_id").and_then(|v| v.as_str()), Some("cid2"));
+        assert_eq!(read_pem(&data).as_deref(), Some(ca_pem.as_str()));
+
+        // Malformed: refused.
+        let body = json!({ "oidc_discovery_ca_pem": "-----BEGIN CERTIFICATE-----\nAAAA\n" }).as_object().cloned();
+        test_write_api(&core, &root_token, "auth/oidc/config", false, body).await.unwrap_err();
+
+        // Empty string: cleared.
+        let body = json!({ "oidc_discovery_ca_pem": "" }).as_object().cloned();
+        test_write_api(&core, &root_token, "auth/oidc/config", true, body).await.unwrap();
+        let data = test_read_api(&core, &root_token, "auth/oidc/config", true).await.unwrap().unwrap().data.unwrap();
+        assert_eq!(read_pem(&data).as_deref(), Some(""));
+    }
+
     /// Auth-URL generation requires a reachable discovery endpoint,
     /// which we don't have in CI. Marked `#[ignore]`; run explicitly
     /// against a live IdP (Keycloak / Auth0 / etc.) with the

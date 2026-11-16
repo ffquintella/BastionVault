@@ -17,6 +17,7 @@ use super::{OidcBackend, OidcBackendInner};
 use crate::{
     context::Context,
     errors::RvError,
+    http_client::normalize_discovery_ca_pem,
     logical::{Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
     new_fields, new_fields_internal, new_path, new_path_internal,
     storage::StorageEntry,
@@ -54,6 +55,13 @@ pub struct OidcConfig {
     /// `["openid","profile","email"]` when empty on write.
     #[serde(default)]
     pub oidc_scopes: Vec<String>,
+    /// Extra trust anchors (one or more PEM CERTIFICATE blocks) for the
+    /// HTTPS calls to the IdP: discovery, JWKS and the token exchange.
+    /// Added to the built-in roots, never in place of them. Empty means
+    /// none. Stored normalised (certificate blocks only); public, so
+    /// returned on read. Absent in configs written before it existed.
+    #[serde(default)]
+    pub oidc_discovery_ca_pem: String,
 }
 
 impl OidcConfig {
@@ -80,6 +88,8 @@ impl OidcConfig {
             Value::Array(self.allowed_redirect_uris.iter().cloned().map(Value::String).collect()),
         );
         m.insert("oidc_scopes".into(), Value::Array(self.oidc_scopes.iter().cloned().map(Value::String).collect()));
+        // Public CA certificates, not a secret: returned as stored.
+        m.insert("oidc_discovery_ca_pem".into(), Value::String(self.oidc_discovery_ca_pem.clone()));
         m
     }
 }
@@ -115,6 +125,10 @@ impl OidcBackend {
                 "oidc_scopes": {
                     field_type: FieldType::CommaStringSlice,
                     description: "Scopes requested at auth time; defaults to openid,profile,email when empty."
+                },
+                "oidc_discovery_ca_pem": {
+                    field_type: FieldType::Str,
+                    description: "Extra CA certificate(s), PEM, trusted in addition to the built-in roots for discovery, JWKS and token exchange (e.g. the intermediate an IdP does not send). At most 8 certificates and 64 KiB; no private keys. Empty clears; omit to keep."
                 }
             },
             operations: [
@@ -163,6 +177,16 @@ impl OidcBackendInner {
                 cfg.oidc_scopes = scopes;
             }
         }
+        // Unlike the fields above, a value of the wrong type is an error
+        // rather than ignored: silently keeping the old anchors would hide
+        // a rejected trust change from the operator.
+        let ca_pem_input = match req.get_data("oidc_discovery_ca_pem") {
+            Ok(v) => Some(v),
+            Err(RvError::ErrRequestFieldNotFound) | Err(RvError::ErrRequestNoData) => None,
+            Err(RvError::ErrRequestFieldInvalid) => return Err(discovery_ca_pem_not_a_string()),
+            Err(e) => return Err(e),
+        };
+        cfg.oidc_discovery_ca_pem = merge_discovery_ca_pem(&cfg.oidc_discovery_ca_pem, ca_pem_input.as_ref())?;
 
         // Minimum-viable validation: discovery URL and client id
         // are both required for the backend to function at all.
@@ -187,6 +211,21 @@ impl OidcBackendInner {
     }
 }
 
+/// New value of `oidc_discovery_ca_pem` after a write: `None` (field
+/// absent) keeps `current`, a blank string clears it, anything else must
+/// pass `normalize_discovery_ca_pem` or the whole write is refused.
+fn merge_discovery_ca_pem(current: &str, input: Option<&Value>) -> Result<String, RvError> {
+    match input {
+        None => Ok(current.to_string()),
+        Some(Value::String(pem)) => normalize_discovery_ca_pem(pem),
+        Some(_) => Err(discovery_ca_pem_not_a_string()),
+    }
+}
+
+fn discovery_ca_pem_not_a_string() -> RvError {
+    RvError::ErrString("oidc: `oidc_discovery_ca_pem` must be a string of PEM text".into())
+}
+
 /// Accept either a CommaStringSlice (`Value::Array(...)`) or a plain
 /// comma-separated `Value::String` at the field layer — the logical-
 /// layer's CommaStringSlice normaliser sometimes passes one form,
@@ -204,6 +243,7 @@ fn parse_string_list(v: &Value) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::http_client::test_pki;
 
     #[test]
     fn to_public_map_redacts_secret() {
@@ -214,12 +254,84 @@ mod tests {
             default_role: "user".into(),
             allowed_redirect_uris: vec!["http://localhost/cb".into()],
             oidc_scopes: vec!["openid".into()],
+            oidc_discovery_ca_pem: String::new(),
         };
         let m = cfg.to_public_map();
         // The secret must never appear in the serialized output.
         assert_eq!(m.get("oidc_client_secret_set").and_then(Value::as_bool), Some(true));
         let rendered = serde_json::to_string(&m).unwrap();
         assert!(!rendered.contains("highly-sensitive"), "client secret leaked into serialized output");
+    }
+
+    #[test]
+    fn to_public_map_returns_discovery_ca_pem_and_still_redacts_secret() {
+        let pem = normalize_discovery_ca_pem(&test_pki::ca_pem()).unwrap();
+        let cfg = OidcConfig {
+            oidc_client_secret: "highly-sensitive".into(),
+            oidc_discovery_ca_pem: pem.clone(),
+            ..Default::default()
+        };
+        let m = cfg.to_public_map();
+        assert_eq!(m.get("oidc_discovery_ca_pem").and_then(Value::as_str), Some(pem.as_str()));
+        assert!(m.get("oidc_client_secret").is_none());
+        assert!(!serde_json::to_string(&m).unwrap().contains("highly-sensitive"));
+
+        let empty = OidcConfig::default().to_public_map();
+        assert_eq!(empty.get("oidc_discovery_ca_pem").and_then(Value::as_str), Some(""));
+    }
+
+    /// A config persisted before `oidc_discovery_ca_pem` existed loads with
+    /// it empty, and is written back with the field present.
+    #[test]
+    fn config_written_before_the_ca_field_loads_with_it_empty() {
+        let old = br#"{"oidc_discovery_url":"https://idp.example.com","oidc_client_id":"cid",
+            "oidc_client_secret":"s","default_role":"user","allowed_redirect_uris":["http://localhost/cb"],
+            "oidc_scopes":["openid","profile","email"]}"#;
+        let cfg: OidcConfig = serde_json::from_slice(old).unwrap();
+        assert_eq!(cfg.oidc_discovery_url, "https://idp.example.com");
+        assert_eq!(cfg.oidc_client_secret, "s");
+        assert_eq!(cfg.oidc_discovery_ca_pem, "");
+
+        let rewritten: Value = serde_json::from_slice(&serde_json::to_vec(&cfg).unwrap()).unwrap();
+        assert_eq!(rewritten.get("oidc_discovery_ca_pem").and_then(Value::as_str), Some(""));
+    }
+
+    #[test]
+    fn config_round_trips_the_ca_pem() {
+        let pem = normalize_discovery_ca_pem(&test_pki::ca_pem()).unwrap();
+        let cfg = OidcConfig { oidc_discovery_ca_pem: pem.clone(), ..Default::default() };
+        let back: OidcConfig = serde_json::from_slice(&serde_json::to_vec(&cfg).unwrap()).unwrap();
+        assert_eq!(back.oidc_discovery_ca_pem, pem);
+    }
+
+    #[test]
+    fn absent_ca_pem_keeps_the_stored_value() {
+        let stored = normalize_discovery_ca_pem(&test_pki::ca_pem()).unwrap();
+        assert_eq!(merge_discovery_ca_pem(&stored, None).unwrap(), stored);
+        assert_eq!(merge_discovery_ca_pem("", None).unwrap(), "");
+    }
+
+    #[test]
+    fn empty_ca_pem_clears_the_stored_value() {
+        let stored = normalize_discovery_ca_pem(&test_pki::ca_pem()).unwrap();
+        assert_eq!(merge_discovery_ca_pem(&stored, Some(&Value::String(String::new()))).unwrap(), "");
+        assert_eq!(merge_discovery_ca_pem(&stored, Some(&Value::String(" \n".into()))).unwrap(), "");
+    }
+
+    #[test]
+    fn written_ca_pem_is_validated_and_normalised() {
+        let input = format!("# issuer of the IdP's leaf\n{}", test_pki::ca_pem());
+        let merged = merge_discovery_ca_pem("", Some(&Value::String(input.clone()))).unwrap();
+        assert_eq!(merged, normalize_discovery_ca_pem(&input).unwrap());
+        assert!(merged.starts_with("-----BEGIN CERTIFICATE-----"));
+
+        let stored = merged;
+        let chain = test_pki::chain(&["idp.test"]);
+        for bad in ["garbage".to_string(), chain.leaf_key_pem.clone()] {
+            assert!(merge_discovery_ca_pem(&stored, Some(&Value::String(bad))).is_err());
+        }
+        assert!(merge_discovery_ca_pem(&stored, Some(&Value::from(5))).is_err());
+        assert!(merge_discovery_ca_pem(&stored, Some(&Value::Null)).is_err());
     }
 
     #[test]

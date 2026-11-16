@@ -14,11 +14,11 @@
 //! callback needs is keyed off the opaque `state` parameter that
 //! rides with the redirect.
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc};
 
 use openidconnect::{
     core::{CoreAuthenticationFlow, CoreClient, CoreProviderMetadata},
-    reqwest, ClientId, ClientSecret, CsrfToken, IssuerUrl, Nonce, PkceCodeChallenge, RedirectUrl, Scope,
+    ClientId, ClientSecret, CsrfToken, IssuerUrl, Nonce, PkceCodeChallenge, RedirectUrl, Scope,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -27,6 +27,7 @@ use super::{path_config::OidcConfig, path_roles::OidcRoleEntry, OidcBackend, Oid
 use crate::{
     context::Context,
     errors::RvError,
+    http_client::{error_chain, reqwest_http_client},
     logical::{Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
     new_fields, new_fields_internal, new_path, new_path_internal,
     storage::StorageEntry,
@@ -128,12 +129,14 @@ impl OidcBackendInner {
         // discovery document + JWKS on every `auth_url` call is
         // wasteful but correct; a cache belongs behind the backend
         // state, not here. First-cut keeps the flow understandable.
-        let http = reqwest_http_client()?;
+        let http = reqwest_http_client(&cfg.oidc_discovery_ca_pem)?;
         let issuer = IssuerUrl::new(cfg.oidc_discovery_url.clone())
             .map_err(|e| RvError::ErrString(format!("oidc: bad discovery URL: {e}")))?;
+        // The cause chain names a TLS failure ("invalid peer certificate:
+        // UnknownIssuer") where `{e}` alone said "Request failed".
         let provider_metadata = CoreProviderMetadata::discover_async(issuer, &http)
             .await
-            .map_err(|e| RvError::ErrString(format!("oidc: discovery: {e}")))?;
+            .map_err(|e| RvError::ErrString(format!("oidc: discovery: {}", error_chain(&e))))?;
 
         let mut client = CoreClient::from_provider_metadata(
             provider_metadata,
@@ -184,21 +187,6 @@ impl OidcBackendInner {
         data.insert("auth_url".into(), Value::String(auth_url.to_string()));
         Ok(Some(Response::data_response(Some(data))))
     }
-}
-
-/// Shared reqwest client used for discovery / JWKS / token
-/// exchange. Uses the standard `openidconnect` builder defaults
-/// with a reasonable timeout so a slow IdP doesn't hang the vault.
-pub(crate) fn reqwest_http_client() -> Result<reqwest::Client, RvError> {
-    reqwest::ClientBuilder::new()
-        // OIDC redirects on the IdP side are expected; disabling
-        // redirects on our side follows the openidconnect crate's
-        // explicit recommendation in the library docs to avoid
-        // leaking bearer tokens through a misconfigured IdP.
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|e| RvError::ErrString(format!("oidc: http client: {e}")))
 }
 
 pub(crate) fn unix_now() -> u64 {
