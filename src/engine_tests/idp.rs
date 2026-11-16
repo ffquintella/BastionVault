@@ -53,6 +53,7 @@ mod idp_tests {
             Ok(_) => 200,
             Err(RvError::ErrResponseStatus(s, _)) => s,
             Err(RvError::ErrPermissionDenied) => 403,
+            Err(RvError::ErrRequestClientTokenMissing) => 401,
             Err(e) => panic!("unexpected error {e:?}"),
         }
     }
@@ -661,6 +662,181 @@ mod idp_tests {
             assert!(!log.contains(secret), "the audit log never holds a secret or a passcode");
         }
         data(v2(ctx, &root, Operation::Write, "idp/radius/config", Some(json!({"enabled": false}))).await);
+        let _ = std::fs::remove_dir_all(audit_dir);
+    }
+
+    /// Phase 5 end to end: the OIDC code flow and SAML SSO through the
+    /// logical backend, with the relying-party endpoints called without a
+    /// vault token, then a disable.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn idp_oidc_and_saml_through_the_vault() {
+        use base64::{engine::general_purpose::STANDARD as B64, Engine};
+
+        use crate::modules::idp::provider::oidc_op::{jwt::verify_rs256, s256};
+
+        const ISSUER: &str = "https://vault.example.com/v2/idp/oidc";
+        const REDIRECT: &str = "https://app.example.com/cb";
+        const SP: &str = "https://sp.example.com/metadata";
+        const ACS: &str = "https://sp.example.com/acs";
+        const VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+
+        let (_bvault, core, root) = new_unseal_test_bastion_vault("idp_federation").await;
+        let ctx: &dyn VaultCtx = core.as_ref();
+        test_mount_api(ctx, &root, "idp", "idp").await;
+        let (audit_dir, audit_log) = enable_audit_file(ctx, "federation").await;
+
+        crate::test_utils::test_mount_auth_api(ctx, &root, "userpass", "userpass").await;
+        let policy = r#"
+            path "idp/oidc/authorize" { capabilities = ["create", "update"] }
+            path "idp/saml/sso" { capabilities = ["create", "update"] }
+        "#;
+        test_write_api(ctx, &root, "sys/policy/idp-sso", true, json!({"policy": policy}).as_object().cloned())
+            .await
+            .unwrap();
+        let user = json!({"password": "pw-123456", "policies": "idp-sso"});
+        test_write_api(ctx, &root, "auth/userpass/users/alice", true, user.as_object().cloned()).await.unwrap();
+        let mut login = Request::new("auth/userpass/login/alice");
+        login.operation = Operation::Write;
+        login.body = json!({"password": "pw-123456"}).as_object().cloned();
+        let auth = ctx.handle_request(&mut login).await.unwrap().unwrap().auth.unwrap();
+        let (token, alice) = (auth.client_token.clone(), auth.metadata["entity_id"].clone());
+        data(
+            v2(ctx, &root, Operation::Write, &format!("idp/identities/{alice}"), Some(json!({"login": "alice"}))).await,
+        );
+        let env = json!({"namespace": "", "roles": {"ops": ["ops"], "audit": ["audit"]}});
+        data(v2(ctx, &root, Operation::Write, "idp/environments/apps", Some(env)).await);
+        let grant = json!({"roles": ["ops"]});
+        data(v2(ctx, &root, Operation::Write, &format!("idp/entitlements/{alice}/apps"), Some(grant)).await);
+        // Relying-party calls carry no vault token.
+        let anon = |op: Operation, path: &'static str, body: Option<Value>| v2(ctx, "", op, path, body);
+
+        // ── OIDC ──
+        assert_eq!(status(anon(Operation::Read, "idp/oidc/.well-known/openid-configuration", None).await), 404);
+        assert_eq!(status(anon(Operation::Read, "idp/oidc/config", None).await), 401, "admin paths need a token");
+        let cfg = json!({"enabled": true, "issuer": ISSUER});
+        data(v2(ctx, &root, Operation::Write, "idp/oidc/config", Some(cfg)).await);
+        let client = json!({"environment": "apps", "redirect_uris": [REDIRECT]});
+        let created = data(v2(ctx, &root, Operation::Write, "idp/oidc/clients/app", Some(client)).await);
+        let secret = created["client_secret"].as_str().unwrap().to_string();
+        let read = data(v2(ctx, &root, Operation::Read, "idp/oidc/clients/app", None).await);
+        assert!(read.get("client_secret").is_none() && !Value::Object(read).to_string().contains(&secret));
+
+        let disco = data(anon(Operation::Read, "idp/oidc/.well-known/openid-configuration", None).await);
+        assert_eq!(
+            (disco["issuer"].as_str(), disco["jwks_uri"].as_str()),
+            (Some(ISSUER), Some(&*format!("{ISSUER}/jwks")))
+        );
+        let jwks = Value::Object(data(anon(Operation::Read, "idp/oidc/jwks", None).await));
+        assert_eq!(jwks["keys"].as_array().unwrap().len(), 1);
+
+        let authorize = json!({"client_id": "app", "redirect_uri": REDIRECT, "response_type": "code",
+            "scope": "openid", "state": "s1", "nonce": "n1",
+            "code_challenge": s256(VERIFIER), "code_challenge_method": "S256"});
+        assert_eq!(
+            status(v2(ctx, &root, Operation::Write, "idp/oidc/authorize", Some(authorize.clone())).await),
+            403,
+            "self-service: root has no entity"
+        );
+        let v1 = call(ctx, &token, Operation::Write, "idp/oidc/authorize", Some(authorize.clone()), 1, None);
+        assert_eq!(status(v1.await), 400);
+        let mut bad = authorize.clone();
+        bad["redirect_uri"] = json!("https://evil.example.com/cb");
+        assert_eq!(status(v2(ctx, &token, Operation::Write, "idp/oidc/authorize", Some(bad)).await), 400);
+        let minted = data(v2(ctx, &token, Operation::Write, "idp/oidc/authorize", Some(authorize.clone())).await);
+        let code = minted["code"].as_str().unwrap().to_string();
+        assert!(minted["redirect_to"].as_str().unwrap().starts_with(&format!("{REDIRECT}?code=")));
+
+        let redeem = |code: &str, secret: &str| {
+            json!({"grant_type": "authorization_code", "code": code, "redirect_uri": REDIRECT,
+                "client_id": "app", "client_secret": secret, "code_verifier": VERIFIER})
+        };
+        assert_eq!(status(anon(Operation::Write, "idp/oidc/token", Some(redeem(&code, "wrong"))).await), 401);
+        let issued = data(anon(Operation::Write, "idp/oidc/token", Some(redeem(&code, &secret))).await);
+        let id_token = issued["id_token"].as_str().unwrap().to_string();
+        let (_, claims) = verify_rs256(&id_token, &jwks).unwrap();
+        assert_eq!(
+            (claims["sub"].as_str(), claims["preferred_username"].as_str()),
+            (Some(alice.as_str()), Some("alice"))
+        );
+        assert_eq!((claims["uid"].as_u64(), claims["roles"].clone()), (Some(80_000), json!(["ops"])));
+        assert_eq!(
+            (claims["iss"].as_str(), claims["aud"].as_str(), claims["nonce"].as_str()),
+            (Some(ISSUER), Some("app"), Some("n1"))
+        );
+        assert_eq!(status(anon(Operation::Write, "idp/oidc/token", Some(redeem(&code, &secret))).await), 400, "replay");
+
+        // ── SAML ──
+        let cfg = json!({"enabled": true, "entity_id": "https://vault.example.com/saml", "sso_url": "https://vault.example.com/ui/sso"});
+        data(v2(ctx, &root, Operation::Write, "idp/saml/config", Some(cfg)).await);
+        let sp = json!({"entity_id": SP, "acs_urls": [ACS], "environment": "apps"});
+        data(v2(ctx, &root, Operation::Write, "idp/saml/sps/app", Some(sp)).await);
+        let md = data(anon(Operation::Read, "idp/saml/metadata", None).await);
+        assert!(md["metadata"].as_str().unwrap().contains("<md:IDPSSODescriptor"));
+        let cert = md["certificate"].as_str().unwrap().to_string();
+        let request = |id: &str| {
+            let xml = format!(
+                r#"<samlp:AuthnRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="{id}" Version="2.0" IssueInstant="{}" AssertionConsumerServiceURL="{ACS}"><saml:Issuer>{SP}</saml:Issuer></samlp:AuthnRequest>"#,
+                chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ")
+            );
+            json!({"saml_request": B64.encode(xml), "binding": "post", "relay_state": "rs"})
+        };
+        assert_eq!(
+            status(v2(ctx, &root, Operation::Write, "idp/saml/sso", Some(request("_r0"))).await),
+            403,
+            "self-service: root has no entity"
+        );
+        let resp = data(v2(ctx, &token, Operation::Write, "idp/saml/sso", Some(request("_r1"))).await);
+        assert_eq!((resp["acs_url"].as_str(), resp["relay_state"].as_str()), (Some(ACS), Some("rs")));
+        let xml = B64.decode(resp["saml_response"].as_str().unwrap()).unwrap();
+        let parsed = bv_auth_saml::response::parse_response(&xml).unwrap();
+        let key = bv_auth_saml::verify::parse_rsa_public_key_from_pem(&cert).unwrap();
+        bv_auth_saml::verify::verify_signed_assertion(&parsed, &key).unwrap();
+        let assertion = parsed.assertion.as_ref().unwrap();
+        assert_eq!(
+            (assertion.name_id.as_str(), assertion.attributes["uid"].clone()),
+            ("alice", vec!["80000".to_string()])
+        );
+        assert_eq!(parsed.in_response_to, "_r1");
+        assert_eq!(
+            status(v2(ctx, &token, Operation::Write, "idp/saml/sso", Some(request("_r1"))).await),
+            400,
+            "replayed AuthnRequest"
+        );
+
+        // A tenant cannot reach the unauthenticated endpoints either.
+        test_write_api(ctx, &root, "sys/namespaces/tenant", true, json!({}).as_object().cloned()).await.unwrap();
+        call(ctx, &root, Operation::Write, "sys/mounts/idp/", Some(json!({"type": "idp"})), 1, Some("tenant"))
+            .await
+            .unwrap();
+        assert_eq!(status(v2(ctx, "", Operation::Read, "tenant/idp/oidc/jwks", None).await), 403);
+        assert_eq!(status(call(ctx, "", Operation::Read, "idp/saml/metadata", None, 2, Some("tenant")).await), 403);
+
+        // Disable: both providers refuse at once.
+        let state = format!("idp/identities/{alice}/state");
+        data(v2(ctx, &root, Operation::Write, &state, Some(json!({"state": "disabled"}))).await);
+        assert_eq!(status(v2(ctx, &token, Operation::Write, "idp/oidc/authorize", Some(authorize.clone())).await), 403);
+        assert_eq!(status(v2(ctx, &token, Operation::Write, "idp/saml/sso", Some(request("_r2"))).await), 403);
+
+        let providers: Vec<Value> =
+            audit_events(&audit_log, "idp.issue").iter().map(|e| e["provider"].clone()).collect();
+        assert_eq!(providers, [json!("oidc-authorize"), json!("oidc"), json!("saml")]);
+        let denied: Vec<(Value, Value)> = audit_events(&audit_log, "idp.issue-denied")
+            .iter()
+            .map(|e| (e["provider"].clone(), e["reason"].clone()))
+            .collect();
+        assert_eq!(
+            denied,
+            [(json!("oidc-authorize"), json!("identity_disabled")), (json!("saml"), json!("identity_disabled"))]
+        );
+        assert_eq!(audit_events(&audit_log, "idp.oidc.token").len(), 1);
+        assert_eq!(audit_events(&audit_log, "idp.saml.response").len(), 1);
+        let refused: Vec<Value> =
+            audit_events(&audit_log, "idp.oidc.refused").iter().map(|e| e["reason"].clone()).collect();
+        assert!(refused.contains(&json!("redirect_uri_mismatch")) && refused.contains(&json!("invalid_client")));
+        let log = std::fs::read_to_string(&audit_log).unwrap();
+        for secret in [secret.as_str(), id_token.as_str(), code.as_str(), resp["saml_response"].as_str().unwrap()] {
+            assert!(!log.contains(secret), "the audit log never holds a secret, code, token or assertion");
+        }
         let _ = std::fs::remove_dir_all(audit_dir);
     }
 

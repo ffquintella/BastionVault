@@ -1903,8 +1903,10 @@ version = "0.41.0"
 dependencies = [
  "arc-swap",
  "async-trait",
+ "aws-lc-rs",
  "base64 0.22.1",
  "bv-audit",
+ "bv-auth-saml",
  "bv-context",
  "bv-errors",
  "bv-kernel-api",
@@ -1914,11 +1916,14 @@ dependencies = [
  "chrono",
  "derive_more 2.1.1",
  "ed25519-dalek 2.2.0",
+ "flate2",
  "hmac 0.13.0",
  "humantime",
  "log",
  "maybe-async",
  "md-5 0.11.0",
+ "openidconnect",
+ "quick-xml",
  "rand 0.10.2",
  "rcgen",
  "rustls",
@@ -1928,6 +1933,7 @@ dependencies = [
  "ssh-key 0.6.7",
  "tokio",
  "tokio-rustls",
+ "url",
  "zeroize",
 ]
 

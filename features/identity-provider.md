@@ -88,9 +88,9 @@ targets are heterogeneous:
 ## Current State
 
 **Phase 1 (POSIX identity core), Phase 2 (entitlements + gate), Phase 3
-(SSH identity issue + revocation) and Phase 4 (RADIUS) are implemented, with
-caveats; Phases 5–7 are Pending.** Phases 2–4 are described after Phase 1's
-caveats below.
+(SSH identity issue + revocation), Phase 4 (RADIUS) and Phase 5 (SAML IdP +
+OIDC OP) are implemented, with caveats; Phases 6–7 are Pending.** Phases
+2–5 are described after Phase 1's caveats below.
 The code lives in the Tier 3 crate `crates/bv-engine-idp` (not
 `src/modules/idp/`: engines are separate crates since the workspace
 decomposition), registered in the facade's `default_modules()` as the `idp`
@@ -358,6 +358,86 @@ multi-node cluster, and a client added on another node is admitted after
 the next 30 s refresh. The NAS's login prompt must accept a 32-character
 passcode. RFC 6614's legacy cipher suites are not offered (rustls only).
 
+**Phase 5 (SAML IdP + OIDC OP).** `src/provider/oidc_op/` (`mod.rs`
+flows, `store.rs` on `idp/oidc/`, `jwt.rs`), `src/provider/saml_idp/`
+(`mod.rs` flows, `store.rs` on `idp/saml/`, `request.rs` AuthnRequest
+decode and parse, `xml.rs` response, signature and metadata),
+`src/provider/federation/` (key ring, audit sink, URL rules) and
+`src/backend/{oidc,saml}.rs`. Routes in [docs/api.md](../docs/api.md).
+
+- **Who the human is.** As for RADIUS, the person has already logged in to
+  the vault with any backend: `v2/idp/oidc/authorize`, `v2/idp/saml/sso`
+  and `v2/idp/saml/initiate/<sp>` are self-service with that token (root
+  refused). The provider asserts only that identity, gated: OIDC as
+  `oidc-authorize` when the code is minted and `oidc` when it is redeemed
+  (so a disable or a revoked role in between denies), SAML as `saml`.
+- **Who the relying party is.** An OIDC client or a SAML SP is bound at
+  creation, for life, to exactly one active environment (as a RADIUS NAS),
+  and its registered `https` URLs are matched byte for byte. Client secrets
+  are minted by the vault, shown once, stored as SHA-256; an SP entity ID
+  maps to one SP (index checked against the record).
+- **OIDC.** Code flow only, PKCE `S256` required, `client_secret_post`,
+  codes of 256 random bits stored hashed, single use, 60 s by default,
+  consumed after client authentication whatever the outcome. ID tokens are
+  RS256 (`sub` = entity id, `preferred_username` = login, `uid`, `gid`,
+  `roles`, `groups`, `environment`, `nonce`), 5 min by default. Discovery,
+  JWKS and the token endpoint are the mount's `unauth_paths` (the router
+  hook the PKI ACME endpoints use; no kernel change).
+- **SAML.** HTTP-Redirect (bounded inflate) or HTTP-POST AuthnRequests,
+  parsed namespace-aware with DTDs and custom entities refused; the
+  `Issuer` must be a registered SP, the ACS URL one of its own, the request
+  younger than `request_max_age` and not seen before (replay cache keyed
+  on the request alone). One assertion per response, signed enveloped
+  RSA-SHA256 with exclusive C14N, `NotOnOrAfter` 5 min, audience-restricted,
+  bearer subject confirmation with `Recipient` and `InResponseTo`.
+  IdP-initiated responses only for SPs with `allow_idp_initiated`.
+  Metadata is an unauthenticated path.
+- **Keys.** One RSA-3072 key ring per protocol in the barrier, generated
+  with aws-lc on first use under the storage lock, never replaced on a
+  read error; `kid` = RFC 7638 thumbprint; `keys/rotate` keeps the retired
+  key in the JWKS and metadata for an overlap (default 24h). Not HSM-backed.
+- **Audit.** `idp.oidc.token`, `idp.saml.response`, `idp.oidc.refused`,
+  `idp.saml.refused` besides the gate's events; IDs only, never a code,
+  secret, token or assertion. A token or response whose event cannot be
+  recorded is not returned.
+
+Decisions taken where this spec was open (Phase 5):
+
+- *Hosting*: the logical surface with `unauth_paths`, JSON envelope, no
+  bv-server change. Rejected for now: a bv-server adapter serving raw
+  discovery/JWKS/metadata, form-encoded token requests and redirects (a
+  Tier 4 change; needed before a standard RP can talk to the OP directly).
+- *Signing*: the spec's "SAML-auth signing core" is verify-only; the IdP
+  signs with aws-lc (constant time, already linked by rustls) over bytes
+  canonicalised by `bv-auth-saml`'s exclusive C14N, made public for this.
+  The assertion is emitted already in canonical form (a test pins it as a
+  C14N fixed point), so a different conformant canonicaliser at the SP
+  reproduces the signed bytes. Rejected: RustCrypto `rsa` for signing
+  (RUSTSEC-2023-0071, no constant-time release) and a second canonicaliser.
+- *Algorithm*: RS256 / RSA-SHA256 only (OIDC's mandatory algorithm and what
+  SAML SPs and `bv-auth-saml` verify). Rejected for now: the spec's
+  EdDSA / ML-DSA-65 composite JWKS, which few RPs accept.
+- *Clients*: confidential only, PKCE required for all; no implicit or
+  hybrid flow, no refresh token, no userinfo, `prompt`/`max_age` ignored.
+- *SAML*: AuthnRequest signatures not verified (nothing in a request is
+  trusted beyond naming a registered SP and one of its ACS URLs); the
+  Response element is not signed, nothing is encrypted, `ForceAuthn` and
+  `AssertionConsumerServiceIndex` are refused; `NameID` format
+  `unspecified` = login.
+
+Caveats (Phase 5): **no real SP, RP or browser was run.** The OIDC side is
+checked with the `openidconnect` RP library (RustCrypto RSA, independent of
+aws-lc) and the SAML side with `bv-auth-saml`'s parser, validator and
+verifier (whose C14N also signs, so a shared C14N bug would cancel out; the
+fixed-point test is the guard). Because the HTTP layer only speaks the JSON
+envelope, a standard RP cannot fetch discovery or metadata, POST a
+form-encoded token request or be redirected without a relay (the GUI,
+T107) or a bv-server adapter. No back-channel logout; outstanding ID tokens
+and assertions expire on their own (5 min). Signing keys are not
+HSM-backed. Not run on a multi-node cluster. Testing this phase showed
+that `bv-auth-saml`'s inbound parser merges the attributes of an unsigned
+assertion placed before a signed one; that is a separate SP-side fix.
+
 ## Concepts and Terminology
 
 | Term | Meaning |
@@ -621,7 +701,7 @@ nav like the PKI/SSH pages):
 | **2 — Entitlements + gate** | `entitlement.rs` store, environment↔namespace mapping, role↔policy mapping, the fail-closed issue gate + `idp.issue`/`idp.issue-denied` audit events. | **Complete, with caveats** — `crates/bv-engine-idp/src/entitlement/`; `v2/idp/environments` + `v2/idp/entitlements`; the gate is a Rust API with no caller until Phase 3; policy existence unchecked; not run on a multi-node cluster (see Current State) |
 | **3 — SSH identity issue + revocation** | `provider/ssh.rs` identity-bound `sign` wrapping the SSH engine (principals=login, key-id attribution, uid/gid extensions), `GET /v2/idp/ssh/krl`, the signed/versioned `deny-feed`, and the reference `AuthorizedPrincipalsCommand` + NSS helper for Linux. | **Complete, with caveats** — `crates/bv-engine-idp/src/{provider/ssh,revoke}/`, `bin/bv-idp-host`; KRL checked with `ssh-keygen`; no real sshd/Linux host run; NSS helper generates entries from a certificate, no on-login materialization; PQC CA unsupported; feed key not rotated (see Current State) |
 | **4 — RADIUS provider** | `provider/radius.rs` (RadSec + opt-in UDP), per-vendor attribute templates (FortiGate first), entitlement-gated, Access-Reject for non-active. Live-tested against a FortiGate (or `freeradius`/`pyrad` harness). | **Complete, with caveats** — `crates/bv-engine-idp/src/provider/radius/`; one-time passcodes minted through the vault; RadSec with pinned NAS certificates, UDP opt-in; verified by the crate's own client over real sockets only: **no FortiGate, FreeRADIUS or pyrad run**; not run on a multi-node cluster (see Current State) |
-| **5 — SAML IdP + OIDC OP** | `provider/saml_idp.rs` (reusing the SAML-auth signing core) + `provider/oidc_op.rs` (discovery/JWKS/authz/token), both entitlement-gated, UID + role-set in assertions/claims. | Pending |
+| **5 — SAML IdP + OIDC OP** | `provider/saml_idp.rs` (reusing the SAML-auth signing core) + `provider/oidc_op.rs` (discovery/JWKS/authz/token), both entitlement-gated, UID + role-set in assertions/claims. | **Complete, with caveats** — `crates/bv-engine-idp/src/provider/{saml_idp,oidc_op,federation}/`; aws-lc RS256 signing over `bv-auth-saml`'s C14N; verified with an RP library and the SAML auth verifier only: **no real SP, RP or browser run**; JSON envelope only, so standard RPs need a relay or HTTP adapter; not run on a multi-node cluster (see Current State) |
 | **6 — LDAP-compat directory** | `provider/ldap_dir.rs` read-only bind+search serving `posixAccount`/`posixGroup`; bind = live active-state check. | Pending |
 | **7 — GUI** | Identity Provider admin page (Identities / Entitlements / Providers / Revocations tabs) + Tauri commands + API wrappers. | Pending |
 

@@ -472,7 +472,10 @@ fn parse_attr(tag: &str, name: &str) -> Option<String> {
 // The pragmatic limits (see module-level doc) produce wrong output
 // for inputs that use features no real IdP emits on signed regions.
 
-fn canonicalise_exclusive(xml: &[u8]) -> Result<Vec<u8>, RvError> {
+/// Exclusive XML C14N 1.0 of one element, as the verifier computes it.
+/// Public so the identity provider (`bv-engine-idp`, SAML IdP) signs with
+/// the same canonicaliser this crate verifies with, instead of a second one.
+pub fn canonicalise_exclusive(xml: &[u8]) -> Result<Vec<u8>, RvError> {
     use quick_xml::events::Event;
     use quick_xml::{Reader, XmlVersion};
 

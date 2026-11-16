@@ -29,7 +29,7 @@ use crate::{
     IssuanceStores,
 };
 
-fn bool_field(req: &Request, key: &str) -> Result<Option<bool>, RvError> {
+pub(super) fn bool_field(req: &Request, key: &str) -> Result<Option<bool>, RvError> {
     match field(req, key)? {
         None => Ok(None),
         Some(Value::Bool(b)) => Ok(Some(b)),

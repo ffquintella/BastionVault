@@ -1,7 +1,11 @@
 //! Downstream providers (features/identity-provider.md §3). Each calls the
-//! issue gate before it issues anything; Phase 3 ships SSH, Phase 4 RADIUS.
+//! issue gate before it issues anything; Phase 3 ships SSH, Phase 4 RADIUS,
+//! Phase 5 the SAML IdP and the OIDC OP (sharing `federation`).
 
+pub mod federation;
+pub mod oidc_op;
 pub mod radius;
+pub mod saml_idp;
 pub mod ssh;
 
 use crate::{
