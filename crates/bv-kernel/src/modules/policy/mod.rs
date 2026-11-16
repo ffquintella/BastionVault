@@ -196,7 +196,7 @@ impl PolicyModule {
         if policy.policy_type == PolicyType::Acl {
             let referenced = collect_referenced_groups(&policy);
             if !referenced.is_empty() {
-                if let Some(known) = self.known_asset_groups().await {
+                if let Some(known) = self.known_asset_groups(&writer_ns).await {
                     let unknown: Vec<String> =
                         referenced.into_iter().filter(|g| !known.iter().any(|k| k == g)).collect();
                     if !unknown.is_empty() {
@@ -232,13 +232,14 @@ impl PolicyModule {
         }
     }
 
-    /// Snapshot the current asset-group names. Returns `None` when the
-    /// subsystem isn't loaded — caller treats that as "can't validate,
-    /// don't warn".
-    async fn known_asset_groups(&self) -> Option<Vec<String>> {
+    /// Snapshot the asset-group names of namespace `ns_path` itself — the
+    /// only groups a `groups = [...]` clause in that namespace's policies can
+    /// match, so an ancestor's group is correctly reported unknown. Returns
+    /// `None` when the subsystem isn't loaded ("can't validate, don't warn").
+    async fn known_asset_groups(&self, ns_path: &str) -> Option<Vec<String>> {
         let module = self.core.module_manager().get_module::<ResourceGroupModule>("resource-group")?;
         let store = module.store()?;
-        store.list_groups().await.ok()
+        store.list_groups(ns_path).await.ok()
     }
 
     pub async fn handle_policy_delete(

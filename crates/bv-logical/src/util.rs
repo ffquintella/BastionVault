@@ -26,7 +26,10 @@ use serde_json::{Map, Number, Value};
 /// subscribe), so its parameters cannot travel in a body.
 /// `objects` is the `catalog/schema/object` list `resources/v2/sql/privileges`
 /// reports per object, a read for the same reason (features/sql-browser.md).
-const ALLOWED_QUERY_KEYS: &[&str] = &["env", "version", "after", "limit", "topics", "objects"];
+/// `shape` and `since` select the projection and the revalidation token of
+/// `resource-group/v2/groups/batch`, a read for the same reason
+/// (features/resource-groups.md). No other endpoint declares either field.
+const ALLOWED_QUERY_KEYS: &[&str] = &["env", "version", "after", "limit", "topics", "objects", "shape", "since"];
 
 /// Allowlisted keys whose value is parsed as an unsigned integer. A
 /// non-numeric value is dropped rather than passed through as a string, so a
@@ -172,6 +175,17 @@ mod tests {
     fn the_sql_privileges_object_list_is_lifted_once_decoded() {
         let data = parse_query_allowlist("objects=netrisk%2Fpublic%2Fusers%2Cdef%2Fx%2Fa%252Fb").unwrap();
         assert_eq!(data.get("objects").unwrap(), "netrisk/public/users,def/x/a%2Fb");
+    }
+
+    #[test]
+    fn the_asset_group_batch_selectors_are_lifted_as_strings() {
+        let (path, data) = split_path_query("resource-group/v2/groups/batch?shape=slim&since=0a1b&token=x");
+        assert_eq!(path, "resource-group/v2/groups/batch");
+        let data = data.unwrap();
+        assert_eq!(data.get("shape").unwrap(), "slim");
+        // A version is opaque text, never coerced to a number.
+        assert_eq!(data.get("since").unwrap(), "0a1b");
+        assert!(data.get("token").is_none(), "anything not allowlisted is still dropped");
     }
 
     #[test]

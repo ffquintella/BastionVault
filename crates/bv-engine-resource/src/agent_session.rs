@@ -464,7 +464,7 @@ mod executor {
         }
         let groups = match backend.core.resource_groups() {
             Some(index) => index
-                .groups_for_resource(resource)
+                .groups_for_resource(resource, req.namespace_path.as_deref())
                 .await
                 .map_err(|e| bastion(format!("the resource's asset groups could not be read: {e}")))?,
             None => Vec::new(),

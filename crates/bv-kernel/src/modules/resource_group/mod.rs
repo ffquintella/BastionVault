@@ -14,7 +14,12 @@
 //!
 //! See `features/resource-groups.md` for the design document.
 
-use std::{any::Any, collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    any::Any,
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use arc_swap::ArcSwap;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -39,12 +44,48 @@ use crate::{
 
 pub mod group_store;
 pub mod kernel_service;
+use group_store::scope_of;
 pub use group_store::{ResourceGroupEntry, ResourceGroupHistoryEntry, ResourceGroupStore};
 
 /// Sentinel returned in the `members` / `secrets` list when the caller
 /// has group-read access but not read access on an individual member.
 /// Keeps group cardinality truthful without leaking paths.
 pub const REDACTED_MEMBER: &str = "<hidden>";
+
+/// Mount path of the backend in every namespace (root and tenants alike).
+const RESOURCE_GROUP_MOUNT: &str = "resource-group/";
+
+/// `None` for the root scope, else `Some(scope)`: the form the policy
+/// store's probes and the owner/share key helpers take.
+fn ns_opt(scope: &str) -> Option<&str> {
+    if scope.is_empty() {
+        None
+    } else {
+        Some(scope)
+    }
+}
+
+/// The scope a *header-scoped* request (`sys/asset-group-owner/transfer`)
+/// acts in. On those paths the router leaves an unknown namespace header as
+/// root; acting on root's same-name group then would be a silent fallback,
+/// so a header that named a namespace which did not resolve is refused.
+pub fn header_scope(req: &Request) -> Result<String, RvError> {
+    let scope = scope_of(req.namespace_path.as_deref());
+    let header = crate::kernel_api::namespace::namespace_header_from_map(req.headers.as_ref()).unwrap_or_default();
+    let named = header.trim().trim_matches('/');
+    if scope.is_empty() && !named.is_empty() {
+        return Err(bv_error_response_status!(404, &format!("no such namespace: {named:?}")));
+    }
+    Ok(scope)
+}
+
+/// A scope as an operator reads it in a message.
+fn describe_scope(scope: &str) -> String {
+    match ns_opt(scope) {
+        Some(ns) => format!("namespace '{ns}'"),
+        None => "the root namespace".to_string(),
+    }
+}
 
 static RESOURCE_GROUP_BACKEND_HELP: &str = r#"
 The resource-group backend manages named collections of resources. Each
@@ -84,6 +125,7 @@ impl ResourceGroupBackend {
         let h_by_res = self.inner.clone();
         let h_by_secret = self.inner.clone();
         let h_reindex = self.inner.clone();
+        let h_batch = self.inner.clone();
         let h_noop1 = self.inner.clone();
         let h_noop2 = self.inner.clone();
 
@@ -95,6 +137,30 @@ impl ResourceGroupBackend {
                         {op: Operation::List, handler: h_list.handle_list}
                     ],
                     help: "List resource-group names."
+                },
+                {
+                    // v2 only (v1 is frozen): every group the caller may list
+                    // and read, in one request. See `handle_batch`.
+                    pattern: r"v2/groups/batch$",
+                    fields: {
+                        "shape": {
+                            field_type: FieldType::Str,
+                            required: false,
+                            description: "`full` (default): every group as GET groups/<name> returns it. `slim`: \
+                                          only by_resource / by_secret / by_file maps of group names."
+                        },
+                        "since": {
+                            field_type: FieldType::Str,
+                            required: false,
+                            description: "A `version` from an earlier response. When nothing visible from this \
+                                          namespace changed since, the response is {unchanged: true, version}."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Read, handler: h_batch.handle_batch}
+                    ],
+                    help: "Read every asset group visible to the caller in one request, with a change version \
+                           for cheap revalidation."
                 },
                 {
                     pattern: r"groups/(?P<name>[^/]+)/history/?$",
@@ -351,6 +417,154 @@ fn kv_v2_data_form(canonical: &str) -> String {
     }
 }
 
+/// One group a caller is shown when listing from a scope.
+struct VisibleGroup {
+    name: String,
+    /// The scope the record lives in; the nearest scope wins a name.
+    home: String,
+    /// The record, when the visibility decision had to read it.
+    entry: Option<ResourceGroupEntry>,
+}
+
+/// What `v2/groups/batch` returns per group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BatchShape {
+    /// Every group as `GET groups/<name>` returns it.
+    Full,
+    /// Only `member -> [group names]` maps.
+    Slim,
+}
+
+impl BatchShape {
+    fn parse(raw: Option<&str>) -> Result<Self, RvError> {
+        match raw.map(str::trim).unwrap_or("") {
+            "" | "full" => Ok(Self::Full),
+            "slim" => Ok(Self::Slim),
+            other => {
+                Err(bv_error_response_status!(400, &format!("unknown shape {other:?}; expected `full` or `slim`")))
+            }
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Slim => "slim",
+        }
+    }
+}
+
+/// An optional string field: absent is `None`, any other type a 400.
+fn optional_str(req: &Request, key: &str) -> Result<Option<String>, RvError> {
+    match req.get_data(key) {
+        Ok(Value::String(s)) => Ok(Some(s)),
+        Ok(Value::Null) => Ok(None),
+        Err(RvError::ErrRequestNoData | RvError::ErrRequestFieldNotFound) => Ok(None),
+        Ok(_) | Err(RvError::ErrRequestFieldInvalid) => {
+            Err(bv_error_response_status!(400, &format!("`{key}` must be a string")))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// `member -> [group names]` for the resources, secrets and files of `groups`,
+/// leaving redacted members out. Keys and name lists are sorted.
+fn reverse_maps<'a>(groups: impl Iterator<Item = &'a ResourceGroupEntry>) -> (Value, Value, Value) {
+    type Index = BTreeMap<String, BTreeSet<String>>;
+    let (mut by_resource, mut by_secret, mut by_file) = (Index::new(), Index::new(), Index::new());
+    for g in groups {
+        for (index, members) in [(&mut by_resource, &g.members), (&mut by_secret, &g.secrets), (&mut by_file, &g.files)]
+        {
+            for m in members.iter().filter(|m| m.as_str() != REDACTED_MEMBER) {
+                index.entry(m.clone()).or_default().insert(g.name.clone());
+            }
+        }
+    }
+    let to_value = |index: Index| {
+        Value::Object(
+            index.into_iter().map(|(k, v)| (k, Value::Array(v.into_iter().map(Value::String).collect()))).collect(),
+        )
+    };
+    (to_value(by_resource), to_value(by_secret), to_value(by_file))
+}
+
+/// [`redact_inaccessible_members`] over many groups, with the same verdict per
+/// member as `handle_read`: root/admin callers and a group's owner see it whole;
+/// every other member is probed in its group's home namespace. Each distinct
+/// member is probed once, with one ACL build per namespace.
+async fn redact_members_of_many(
+    store: &crate::modules::policy::PolicyStore,
+    auth: &crate::logical::Auth,
+    groups: &mut [(String, ResourceGroupEntry)],
+) {
+    if auth.policies.iter().any(|p| p == "root" || p == "admin") {
+        return;
+    }
+    let caller_id = auth.metadata.get("entity_id").cloned().unwrap_or_default();
+    let owned = |g: &ResourceGroupEntry| !g.owner_entity_id.is_empty() && g.owner_entity_id == caller_id;
+
+    // Home scope -> (resource members, secret members) still to decide.
+    let mut wanted: BTreeMap<String, (BTreeSet<String>, BTreeSet<String>)> = BTreeMap::new();
+    for (home, g) in groups.iter() {
+        if owned(g) {
+            continue;
+        }
+        let slot = wanted.entry(home.clone()).or_default();
+        slot.0.extend(g.members.iter().filter(|m| m.as_str() != REDACTED_MEMBER).cloned());
+        slot.1.extend(g.secrets.iter().filter(|s| s.as_str() != REDACTED_MEMBER).cloned());
+    }
+
+    let mut readable_resources: HashSet<(String, String)> = HashSet::new();
+    let mut readable_secrets: HashSet<(String, String)> = HashSet::new();
+    for (home, (resources, secrets)) in wanted {
+        let ns = ns_opt(&home);
+        let resources: Vec<String> = resources.into_iter().collect();
+        let paths: Vec<String> =
+            resources.iter().map(|m| namespaced_probe_path(ns, &format!("resources/resources/{m}"))).collect();
+        for (m, ok) in resources.into_iter().zip(store.can_operate_many(auth, &paths, Operation::Read, ns).await) {
+            if ok {
+                readable_resources.insert((home.clone(), m));
+            }
+        }
+
+        // As `secret_member_readable`: the canonical form, then the KV-v2
+        // `data/` form for whatever the first probe refused.
+        let secrets: Vec<String> = secrets.into_iter().collect();
+        let paths: Vec<String> = secrets.iter().map(|s| namespaced_probe_path(ns, s)).collect();
+        let first = store.can_operate_many(auth, &paths, Operation::Read, ns).await;
+        let mut retry: Vec<String> = Vec::new();
+        for (s, ok) in secrets.into_iter().zip(first) {
+            if ok {
+                readable_secrets.insert((home.clone(), s));
+            } else {
+                retry.push(s);
+            }
+        }
+        let paths: Vec<String> = retry.iter().map(|s| namespaced_probe_path(ns, &kv_v2_data_form(s))).collect();
+        for (s, ok) in retry.into_iter().zip(store.can_operate_many(auth, &paths, Operation::Read, ns).await) {
+            if ok {
+                readable_secrets.insert((home.clone(), s));
+            }
+        }
+    }
+
+    for (home, g) in groups.iter_mut() {
+        if owned(g) {
+            continue;
+        }
+        for m in g.members.iter_mut() {
+            if m != REDACTED_MEMBER && !readable_resources.contains(&(home.clone(), m.clone())) {
+                *m = REDACTED_MEMBER.to_string();
+            }
+        }
+        for s in g.secrets.iter_mut() {
+            if s != REDACTED_MEMBER && !readable_secrets.contains(&(home.clone(), s.clone())) {
+                *s = REDACTED_MEMBER.to_string();
+            }
+        }
+    }
+}
+
 fn now_iso() -> String {
     Utc::now().to_rfc3339()
 }
@@ -439,8 +653,18 @@ fn same_set(a: &[String], b: &[String]) -> bool {
     a.iter().all(|x| b.contains(x))
 }
 
-fn group_to_response(entry: &ResourceGroupEntry) -> Response {
+/// `home` is the namespace the record lives in; `inherited` is true when that
+/// is an ancestor of the requesting namespace (the group is read-only there).
+fn group_to_response(entry: &ResourceGroupEntry, home: &str, inherited: bool) -> Response {
+    Response::data_response(Some(group_data(entry, home, inherited)))
+}
+
+/// The body of `GET groups/<name>`, shared with the batch read's full shape so
+/// the two cannot drift.
+fn group_data(entry: &ResourceGroupEntry, home: &str, inherited: bool) -> Map<String, Value> {
     let mut data: Map<String, Value> = Map::new();
+    data.insert("namespace".into(), Value::String(home.to_string()));
+    data.insert("inherited".into(), Value::Bool(inherited));
     data.insert("name".into(), Value::String(entry.name.clone()));
     data.insert("description".into(), Value::String(entry.description.clone()));
     data.insert("members".into(), Value::Array(entry.members.iter().cloned().map(Value::String).collect()));
@@ -449,7 +673,7 @@ fn group_to_response(entry: &ResourceGroupEntry) -> Response {
     data.insert("owner_entity_id".into(), Value::String(entry.owner_entity_id.clone()));
     data.insert("created_at".into(), Value::String(entry.created_at.clone()));
     data.insert("updated_at".into(), Value::String(entry.updated_at.clone()));
-    Response::data_response(Some(data))
+    data
 }
 
 fn parse_write_payload(req: &Request) -> Result<WritePayload, RvError> {
@@ -496,9 +720,55 @@ impl ResourceGroupBackendInner {
             .ok_or_else(|| bv_error_string!("resource-group store unavailable"))
     }
 
+    /// The scope a request acts in: `req.namespace_path`, once checked that the
+    /// request was routed to that namespace's own `resource-group/` mount. The
+    /// path-prefix form (`<ns>/resource-group/…`, no namespace header) reaches a
+    /// tenant mount with no namespace on the request; acting on root there
+    /// would let a tenant write root's groups, so it is refused.
+    fn request_scope(&self, req: &Request) -> Result<String, RvError> {
+        let scope = scope_of(req.namespace_path.as_deref());
+        let mount = match ns_opt(&scope) {
+            Some(ns) => format!("{ns}/{RESOURCE_GROUP_MOUNT}"),
+            None => RESOURCE_GROUP_MOUNT.to_string(),
+        };
+        let expected = self.core.router().matching_view(&mount)?;
+        // Same allocation: the router hands its mount view to the request.
+        let routed_here = match (expected.as_ref(), req.storage.as_ref()) {
+            (Some(view), Some(storage)) => std::ptr::addr_eq(Arc::as_ptr(view), Arc::as_ptr(storage)),
+            _ => false,
+        };
+        if !routed_here {
+            return Err(bv_error_response_status!(
+                400,
+                "this asset-group request does not match its namespace; address a namespace's asset groups \
+                 with the X-BastionVault-Namespace header"
+            ));
+        }
+        Ok(scope)
+    }
+
     pub async fn handle_list(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let store = self.resolve_store()?;
-        let keys = store.list_groups().await?;
+        let scope = self.request_scope(req)?;
+        let keys: Vec<String> = self.visible_groups(req, &store, &scope).await?.into_iter().map(|g| g.name).collect();
+        Ok(Some(Response::list_response(&keys)))
+    }
+
+    /// The groups `req`'s caller is shown when listing from `scope`, sorted by
+    /// name. The one visibility rule, shared by `LIST groups` and the v2 batch
+    /// read so the two cannot disagree.
+    async fn visible_groups(
+        &self,
+        req: &Request,
+        store: &ResourceGroupStore,
+        scope: &str,
+    ) -> Result<Vec<VisibleGroup>, RvError> {
+        // The scope's own groups plus every ancestor's, each with its home
+        // scope; a nearer scope shadows a farther one of the same name.
+        let visible_groups = store.list_visible_groups(scope).await?;
+        let everything = |groups: Vec<(String, String)>| -> Vec<VisibleGroup> {
+            groups.into_iter().map(|(name, home)| VisibleGroup { name, home, entry: None }).collect()
+        };
 
         // Admins and root see every group. Non-admin callers see only
         // groups they own or have an active share on (direct entity
@@ -508,12 +778,12 @@ impl ResourceGroupBackendInner {
         // pollute the GUI's group picker with un-openable rows.
         let auth = match req.auth.as_ref() {
             Some(a) => a.clone(),
-            None => return Ok(Some(Response::list_response(&keys))),
+            None => return Ok(everything(visible_groups)),
         };
         let is_admin =
             auth.policies.iter().any(|p| p == "root" || p == "admin" || p == "administrator" || p == "super-admin");
         if is_admin {
-            return Ok(Some(Response::list_response(&keys)));
+            return Ok(everything(visible_groups));
         }
 
         let caller_id = auth.metadata.get("entity_id").cloned().unwrap_or_default();
@@ -525,7 +795,10 @@ impl ResourceGroupBackendInner {
         let group_store = id_module.as_ref().and_then(|m| m.group_store());
 
         // Identity groups the caller belongs to (used to resolve
-        // group-grantee shares against the asset group).
+        // group-grantee shares against the asset group). They are
+        // namespace-scoped and read from the token's binding namespace, as
+        // login and `resolve_target_shared_caps` read them.
+        let binding_ns = crate::modules::namespace::token_binding::binding_from_metadata(&auth.metadata).0;
         let mut caller_groups: Vec<(crate::modules::identity::ShareGranteeKind, String)> = Vec::new();
         if let Some(gs) = &group_store {
             for (kind, member, gk) in [
@@ -544,9 +817,9 @@ impl ResourceGroupBackendInner {
                     continue;
                 }
                 let m_lc = member.trim().to_lowercase();
-                if let Ok(names) = gs.list_groups(kind).await {
+                if let Ok(names) = gs.list_groups_ns(kind, &binding_ns).await {
                     for g_name in names {
-                        if let Ok(Some(g)) = gs.get_group(kind, &g_name).await {
+                        if let Ok(Some(g)) = gs.get_group_ns(kind, &g_name, &binding_ns).await {
                             if g.members.iter().any(|m| m.trim().to_lowercase() == m_lc) {
                                 caller_groups.push((gk, g_name));
                             }
@@ -556,26 +829,28 @@ impl ResourceGroupBackendInner {
             }
         }
 
-        let mut visible: Vec<String> = Vec::new();
-        for name in keys {
+        let mut visible: Vec<VisibleGroup> = Vec::new();
+        for (name, home) in visible_groups {
             // Owner pass: cheap, single read against the group entry.
-            let entry = store.get_group(&name).await.ok().flatten();
+            let entry = store.get_group(&name, &home).await.ok().flatten();
             let owned = entry
                 .as_ref()
                 .map(|g| !g.owner_entity_id.is_empty() && g.owner_entity_id == caller_id)
                 .unwrap_or(false);
             if owned {
-                visible.push(name);
+                visible.push(VisibleGroup { name, home, entry });
                 continue;
             }
 
             // Share pass: direct entity share OR share to any of the
-            // caller's identity groups.
+            // caller's identity groups. Keyed on the group's *home*
+            // namespace (`<ns>/<name>`, bare at root), as the share was.
             let mut has_share = false;
-            if let Some(ss) = &share_store {
+            let share_key = crate::modules::identity::OwnerStore::scope_target_name(&name, ns_opt(&home));
+            if let (Some(ss), Some(share_key)) = (&share_store, share_key.as_deref()) {
                 if !caller_id.is_empty() {
                     if let Ok(Some(s)) =
-                        ss.get_share(crate::modules::identity::ShareTargetKind::AssetGroup, &name, &caller_id).await
+                        ss.get_share(crate::modules::identity::ShareTargetKind::AssetGroup, share_key, &caller_id).await
                     {
                         if !s.is_expired() {
                             has_share = true;
@@ -585,7 +860,7 @@ impl ResourceGroupBackendInner {
                 if !has_share {
                     for (_gk, g_name) in &caller_groups {
                         if let Ok(Some(s)) =
-                            ss.get_share(crate::modules::identity::ShareTargetKind::AssetGroup, &name, g_name).await
+                            ss.get_share(crate::modules::identity::ShareTargetKind::AssetGroup, share_key, g_name).await
                         {
                             if !s.is_expired() {
                                 has_share = true;
@@ -596,29 +871,136 @@ impl ResourceGroupBackendInner {
                 }
             }
             if has_share {
-                visible.push(name);
+                visible.push(VisibleGroup { name, home, entry });
                 continue;
             }
 
             // Member pass: a caller whose policy reads any member of the group
             // sees the group, the same rule `handle_read` uses to decide which
-            // members to redact. Without it a tenant user with read access to
-            // the resources, but neither owner nor grantee, gets an empty list.
-            if let Some(entry) = &entry {
-                if caller_reads_any_member(&self.core, &auth, req.namespace_path.as_deref(), entry).await {
-                    visible.push(name);
+            // members to redact. Members are the home namespace's objects, so
+            // they are probed there, never as the requester's same-name ones.
+            if let Some(record) = &entry {
+                if caller_reads_any_member(&self.core, &auth, ns_opt(&home), record).await {
+                    visible.push(VisibleGroup { name, home, entry });
                 }
             }
         }
 
-        Ok(Some(Response::list_response(&visible)))
+        Ok(visible)
+    }
+
+    /// `GET v2/groups/batch[?shape=full|slim][&since=<version>]`: every group the
+    /// caller may both list and read on its own, in one request (one audit
+    /// entry). `full` is each group as `GET groups/<name>` returns it; `slim` is
+    /// name maps over this namespace's own groups with the same member
+    /// redaction (a hidden member is left out). `since` equal to the current
+    /// `version` answers `{unchanged: true}` without reading a group.
+    pub async fn handle_batch(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let store = self.resolve_store()?;
+        let scope = self.request_scope(req)?;
+        let shape = BatchShape::parse(optional_str(req, "shape")?.as_deref())?;
+        let since = optional_str(req, "since")?.filter(|s| !s.is_empty());
+        if let Some(s) = &since {
+            if s.len() > 128 || !s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+                return Err(bv_error_response_status!(400, "`since` must be a version from an earlier response"));
+            }
+        }
+        let Some(auth) = req.auth.clone() else {
+            return Err(bv_error_response_status!(403, "the asset-group batch read requires an authenticated caller"));
+        };
+
+        // The version is read before any group: a write landing in between
+        // pairs the old version with newer data (one extra refetch later),
+        // never a new version with old data. `None` (an unreadable record)
+        // never answers "unchanged".
+        let version = store.chain_version(&scope).await;
+        if let (Some(since), Some(current)) = (since.as_deref(), version.as_deref()) {
+            if since == current {
+                let mut data = Map::new();
+                data.insert("unchanged".into(), Value::Bool(true));
+                data.insert("version".into(), Value::String(current.to_string()));
+                data.insert("shape".into(), Value::String(shape.as_str().to_string()));
+                data.insert("namespace".into(), Value::String(scope));
+                return Ok(Some(Response::data_response(Some(data))));
+            }
+        }
+
+        let mut warnings: Vec<String> = Vec::new();
+        let mut groups: Vec<(String, ResourceGroupEntry)> = Vec::new();
+        for g in self.visible_groups(req, &store, &scope).await? {
+            let entry = match g.entry {
+                Some(e) => e,
+                None => match store.get_group(&g.name, &g.home).await {
+                    Ok(Some(e)) => e,
+                    // Deleted since it was listed.
+                    Ok(None) => continue,
+                    Err(e) => {
+                        warnings.push(format!("asset group '{}' could not be read and is omitted: {e}", g.name));
+                        continue;
+                    }
+                },
+            };
+            groups.push((g.home, entry));
+        }
+
+        // The policy store answers both checks below. Without it nothing can be
+        // shown safely, so refuse rather than return unredacted members.
+        let policy_store = {
+            use crate::modules::policy::PolicyModule;
+            let Some(module) = self.core.module_manager().get_module::<PolicyModule>("policy") else {
+                return Err(bv_error_response_status!(500, "policy subsystem unavailable"));
+            };
+            module.policy_store.load_full()
+        };
+
+        // Per-group read check: the decision `GET groups/<name>` gets in this
+        // namespace (owner and share scopes resolve against the group's home).
+        let gate_paths: Vec<String> = groups
+            .iter()
+            .map(|(_, g)| namespaced_probe_path(ns_opt(&scope), &format!("resource-group/groups/{}", g.name)))
+            .collect();
+        let readable = policy_store.can_operate_many(&auth, &gate_paths, Operation::Read, ns_opt(&scope)).await;
+        let mut groups: Vec<(String, ResourceGroupEntry)> =
+            groups.into_iter().zip(readable).filter_map(|(g, ok)| ok.then_some(g)).collect();
+
+        redact_members_of_many(&policy_store, &auth, &mut groups).await;
+
+        let mut data = Map::new();
+        data.insert("unchanged".into(), Value::Bool(false));
+        data.insert("version".into(), version.map(Value::String).unwrap_or(Value::Null));
+        data.insert("shape".into(), Value::String(shape.as_str().to_string()));
+        data.insert("namespace".into(), Value::String(scope.clone()));
+        match shape {
+            BatchShape::Full => {
+                let rows = groups.iter().map(|(home, g)| Value::Object(group_data(g, home, *home != scope))).collect();
+                data.insert("groups".into(), Value::Array(rows));
+            }
+            BatchShape::Slim => {
+                let names: Vec<String> = groups.iter().map(|(_, g)| g.name.clone()).collect();
+                data.insert("groups".into(), string_array(&names));
+                // This namespace's own groups only: an inherited group's members
+                // are its ancestor's objects, and keying them here would pin the
+                // group on this namespace's same-name objects. The reverse index
+                // and the ACL qualifier never inherit for the same reason.
+                let own = groups.iter().filter(|(home, _)| *home == scope).map(|(_, g)| g);
+                let (by_resource, by_secret, by_file) = reverse_maps(own);
+                data.insert("by_resource".into(), by_resource);
+                data.insert("by_secret".into(), by_secret);
+                data.insert("by_file".into(), by_file);
+            }
+        }
+        let mut resp = Response::data_response(Some(data));
+        resp.warnings = warnings;
+        Ok(Some(resp))
     }
 
     pub async fn handle_read(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let store = self.resolve_store()?;
+        let scope = self.request_scope(req)?;
         let name = req.get_data("name")?.as_str().unwrap_or("").to_string();
-        match store.get_group(&name).await? {
-            Some(mut entry) => {
+        // Own scope first, then ancestors: a parent's group is readable here.
+        match store.resolve_group(&name, &scope).await? {
+            Some((home, mut entry)) => {
                 // Member redaction: callers with read access on the
                 // group but not on a specific member see the member
                 // replaced by `<hidden>` rather than the path, so
@@ -639,11 +1021,12 @@ impl ResourceGroupBackendInner {
 
                 if !caller_is_owner && !caller_is_admin {
                     if let Some(auth) = req.auth.clone() {
-                        redact_inaccessible_members(&self.core, &auth, req.namespace_path.as_deref(), &mut entry).await;
+                        // Probe the members where they live: the home namespace.
+                        redact_inaccessible_members(&self.core, &auth, ns_opt(&home), &mut entry).await;
                     }
                 }
 
-                Ok(Some(group_to_response(&entry)))
+                Ok(Some(group_to_response(&entry, &home, home != scope)))
             }
             None => Err(bv_error_response_status!(404, &format!("no resource group named: {}", name))),
         }
@@ -651,6 +1034,7 @@ impl ResourceGroupBackendInner {
 
     pub async fn handle_write(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let store = self.resolve_store()?;
+        let scope = self.request_scope(req)?;
         let name = req.get_data("name")?.as_str().unwrap_or("").to_string();
         if name.trim().is_empty() {
             return Err(bv_error_string!("group name missing"));
@@ -658,7 +1042,14 @@ impl ResourceGroupBackendInner {
 
         let payload = parse_write_payload(req)?;
 
-        let existing = store.get_group(&name).await?;
+        // Writes act on this scope only. A name only an ancestor holds is
+        // created here as a new group that shadows the inherited one, which
+        // itself is never modified; the response says so.
+        let existing = store.get_group(&name, &scope).await?;
+        let shadows = match existing {
+            Some(_) => None,
+            None => store.resolve_group(&name, &scope).await?.map(|(home, _)| home),
+        };
         let mut entry = existing.clone().unwrap_or_default();
         entry.name = name.clone();
 
@@ -689,7 +1080,7 @@ impl ResourceGroupBackendInner {
         // `set_group` canonicalizes members and persists the record. Use
         // the returned entry (with normalized membership) for the history
         // diff so `before`/`after` match what is actually stored.
-        let stored = store.set_group(entry).await?;
+        let stored = store.set_group(entry, &scope).await?;
 
         let op = if existing.is_some() { "update" } else { "create" };
         let (changed_fields, before, after) = diff_with_values(existing.as_ref(), Some(&stored));
@@ -704,17 +1095,43 @@ impl ResourceGroupBackendInner {
                 after,
             };
             // History failures must not fail the write.
-            let _ = store.append_history(&name, hist).await;
+            let _ = store.append_history(&name, hist, &scope).await;
         }
 
-        Ok(None)
+        match shadows {
+            Some(home) => Ok(Some(Response {
+                warnings: vec![format!(
+                    "asset group '{}' was created in this namespace and now shadows the group of the same name \
+                     inherited from {}; the inherited group is unchanged",
+                    stored.name,
+                    describe_scope(&home)
+                )],
+                ..Response::default()
+            })),
+            None => Ok(None),
+        }
     }
 
     pub async fn handle_delete(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let store = self.resolve_store()?;
+        let scope = self.request_scope(req)?;
         let name = req.get_data("name")?.as_str().unwrap_or("").to_string();
 
-        let previous = store.get_group(&name).await?;
+        let previous = store.get_group(&name, &scope).await?;
+        // An inherited group is read-only here: refuse rather than report a
+        // delete that removed nothing while the group stays listed.
+        if previous.is_none() {
+            if let Some((home, _)) = store.resolve_group(&name, &scope).await? {
+                return Err(bv_error_response_status!(
+                    403,
+                    &format!(
+                        "asset group '{}' is inherited from {} and is read-only in this namespace",
+                        name.trim().to_lowercase(),
+                        describe_scope(&home)
+                    )
+                ));
+            }
+        }
         let (changed_fields, before, _after) = diff_with_values(previous.as_ref(), None);
         let hist = ResourceGroupHistoryEntry {
             ts: now_iso(),
@@ -724,16 +1141,20 @@ impl ResourceGroupBackendInner {
             before,
             after: Map::new(),
         };
-        let _ = store.append_history(&name, hist).await;
+        let _ = store.append_history(&name, hist, &scope).await;
 
-        store.delete_group(&name).await?;
+        store.delete_group(&name, &scope).await?;
         Ok(None)
     }
 
     pub async fn handle_history(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let store = self.resolve_store()?;
+        let scope = self.request_scope(req)?;
         let name = req.get_data("name")?.as_str().unwrap_or("").to_string();
-        let entries = store.list_history(&name).await?;
+        // The history of the group a read here resolves to; this scope's own
+        // history when no group of that name is visible (it outlives deletes).
+        let home = store.resolve_group(&name, &scope).await?.map(|(home, _)| home).unwrap_or(scope);
+        let entries = store.list_history(&name, &home).await?;
 
         let arr = Value::Array(
             entries
@@ -764,8 +1185,9 @@ impl ResourceGroupBackendInner {
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let store = self.resolve_store()?;
+        let scope = self.request_scope(req)?;
         let name = req.get_data("resource")?.as_str().unwrap_or("").to_string();
-        let groups = store.groups_for_resource(&name).await?;
+        let groups = store.groups_for_resource(&name, &scope).await?;
         let mut data = Map::new();
         data.insert("resource".into(), Value::String(name));
         data.insert("groups".into(), string_array(&groups));
@@ -778,26 +1200,24 @@ impl ResourceGroupBackendInner {
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let store = self.resolve_store()?;
+        let scope = self.request_scope(req)?;
         let encoded = req.get_data("path")?.as_str().unwrap_or("").to_string();
         let decoded_bytes = URL_SAFE_NO_PAD
             .decode(encoded.as_bytes())
             .map_err(|e| bv_error_string!(format!("invalid base64url path: {e}")))?;
         let path = String::from_utf8(decoded_bytes)
             .map_err(|e| bv_error_string!(format!("invalid utf-8 in decoded path: {e}")))?;
-        let groups = store.groups_for_secret(&path).await?;
+        let groups = store.groups_for_secret(&path, &scope).await?;
         let mut data = Map::new();
         data.insert("path".into(), Value::String(path));
         data.insert("groups".into(), string_array(&groups));
         Ok(Some(Response::data_response(Some(data))))
     }
 
-    pub async fn handle_reindex(
-        &self,
-        _backend: &dyn Backend,
-        _req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_reindex(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let store = self.resolve_store()?;
-        let touched = store.reindex().await?;
+        let scope = self.request_scope(req)?;
+        let touched = store.reindex(&scope).await?;
         let mut data = Map::new();
         data.insert("indexed_members".into(), Value::Number(serde_json::Number::from(touched)));
         Ok(Some(Response::data_response(Some(data))))
@@ -850,6 +1270,7 @@ impl Module for ResourceGroupModule {
     }
 
     async fn init(&self, _core: &dyn VaultCtx) -> Result<(), RvError> {
+        // One store serves every namespace; each call names its scope.
         let store = ResourceGroupStore::new(&self.core).await?;
         self.store.store(Arc::new(Some(store)));
         Ok(())

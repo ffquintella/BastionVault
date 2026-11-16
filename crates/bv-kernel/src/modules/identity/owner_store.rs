@@ -112,6 +112,21 @@ impl OwnerStore {
         })
     }
 
+    /// Inverse of [`scope_target_name`](Self::scope_target_name) for a key
+    /// expected to belong to `ns_path`: the bare name, or `None` when the key
+    /// is another namespace's (or malformed). Never falls back to root.
+    pub fn unscope_target_name(key: &str, ns_path: Option<&str>) -> Option<String> {
+        let raw = key.trim().to_lowercase();
+        let bare = match ns_path.map(|n| n.trim().trim_matches('/')).filter(|n| !n.is_empty()) {
+            Some(n) => raw.strip_prefix(&format!("{}/", n.to_lowercase()))?.to_string(),
+            None => raw,
+        };
+        if bare.is_empty() || bare.contains('/') || bare.contains("..") {
+            return None;
+        }
+        Some(bare)
+    }
+
     /// Split a (possibly namespace-scoped) target key into the view that holds
     /// it and the key within that view. Root keys keep the legacy bare-name
     /// layout; namespaced keys are base64url'd into the `ns-*` views so the
@@ -488,6 +503,20 @@ mod scoped_key_tests {
                 "scoped(None) must equal legacy for {raw:?}",
             );
         }
+    }
+
+    // `unscope_target_name` inverts `scope_target_name` for the namespace the
+    // key belongs to, and refuses another namespace's key instead of guessing.
+    #[test]
+    fn unscope_inverts_scope_and_refuses_foreign_keys() {
+        for ns in [None, Some("dti/esi"), Some("Dti/Esi")] {
+            let key = OwnerStore::scope_target_name("Prod", ns).unwrap();
+            assert_eq!(OwnerStore::unscope_target_name(&key, ns).as_deref(), Some("prod"), "{ns:?}");
+        }
+        assert_eq!(OwnerStore::unscope_target_name("dti/esi/prod", None), None);
+        assert_eq!(OwnerStore::unscope_target_name("prod", Some("dti/esi")), None);
+        assert_eq!(OwnerStore::unscope_target_name("dti/other/prod", Some("dti/esi")), None);
+        assert_eq!(OwnerStore::unscope_target_name("dti/esi/a/b", Some("dti/esi")), None);
     }
 
     // The two path forms that reach the owner store in a child namespace

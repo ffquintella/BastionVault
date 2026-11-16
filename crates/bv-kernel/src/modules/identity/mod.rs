@@ -1054,11 +1054,17 @@ impl IdentityBackendInner {
                     .get_module::<crate::modules::resource_group::ResourceGroupModule>("resource-group")
                     .ok_or_else(|| bv_error_string!("resource-group module unavailable"))?;
                 let rg_store = rg_module.store().ok_or_else(|| bv_error_string!("resource-group store unavailable"))?;
-                rg_store
-                    .get_group(target_path)
-                    .await?
-                    .filter(|entry| !entry.owner_entity_id.is_empty())
-                    .map(|entry| OwnerRecord { entity_id: entry.owner_entity_id, created_at: String::new() })
+                // `scope_share_target` keyed the group on the request's
+                // namespace; read exactly that scope, never an ancestor's.
+                let ns = req.namespace_path.as_deref();
+                match OwnerStore::unscope_target_name(target_path, ns) {
+                    Some(name) => rg_store
+                        .get_group(&name, &crate::modules::resource_group::group_store::scope_of(ns))
+                        .await?
+                        .filter(|entry| !entry.owner_entity_id.is_empty())
+                        .map(|entry| OwnerRecord { entity_id: entry.owner_entity_id, created_at: String::new() }),
+                    None => None,
+                }
             }
         };
 
@@ -1066,6 +1072,21 @@ impl IdentityBackendInner {
             Some(rec) if rec.entity_id == entity_id => Ok(()),
             _ => Err(bv_error_response_status!(403, "only the target's owner can manage its shares")),
         }
+    }
+
+    /// `(home scope, bare name)` of a stored asset-group share key. The key's
+    /// namespace part was lowercased by `scope_target_name`, so it is matched
+    /// against the caller's namespace `active`, else resolved in the registry;
+    /// a key that maps to no namespace is skipped, never read from another.
+    async fn asset_group_share_home(&self, key: &str, active: &str) -> Option<(String, String)> {
+        let Some((ns_part, name)) = key.rsplit_once('/') else {
+            return Some((String::new(), key.to_string()));
+        };
+        if !active.is_empty() && active.to_lowercase() == ns_part {
+            return Some((active.to_string(), name.to_string()));
+        }
+        let ns = self.core.namespaces()?.resolve(ns_part).await.ok()??;
+        (!ns.path.is_empty() && ns.path.to_lowercase() == ns_part).then(|| (ns.path, name.to_string()))
     }
 
     pub async fn handle_share_by_grantee_list(
@@ -1227,33 +1248,53 @@ impl IdentityBackendInner {
                 .get_module::<crate::modules::resource_group::ResourceGroupModule>("resource-group")
             {
                 if let Some(rg_store) = rg_module.store() {
+                    let active = crate::modules::resource_group::group_store::scope_of(req.namespace_path.as_deref());
                     let mut expanded: Vec<ShareByGranteePointer> = Vec::with_capacity(ptrs.len());
                     for p in ptrs.drain(..) {
                         if p.target_kind != "asset-group" {
                             expanded.push(p);
                             continue;
                         }
-                        let Some(g) = rg_store.get_group(&p.target_path).await? else {
+                        let Some((home, name)) = self.asset_group_share_home(&p.target_path, &active).await else {
                             continue;
                         };
+                        let Some(g) = rg_store.get_group(&name, &home).await? else {
+                            continue;
+                        };
+                        // Members are the home namespace's objects: bare when
+                        // that is the caller's namespace, otherwise keyed like
+                        // any other share target from there (`<ns>/<name>`).
+                        let elsewhere = (home != active).then_some(home.as_str());
                         for r in g.members {
+                            let target_path = match elsewhere {
+                                Some(ns) => OwnerStore::scope_target_name(&r, Some(ns)).unwrap_or(r),
+                                None => r,
+                            };
                             expanded.push(ShareByGranteePointer {
                                 target_kind: "resource".to_string(),
-                                target_path: r,
+                                target_path,
                                 grantee_kind: p.grantee_kind.clone(),
                             });
                         }
                         for s in g.secrets {
+                            let target_path = match elsewhere {
+                                Some(ns) => OwnerStore::canonicalize_kv_path_scoped(&s, Some(ns)).unwrap_or(s),
+                                None => s,
+                            };
                             expanded.push(ShareByGranteePointer {
                                 target_kind: "kv-secret".to_string(),
-                                target_path: s,
+                                target_path,
                                 grantee_kind: p.grantee_kind.clone(),
                             });
                         }
                         for f in g.files {
+                            let target_path = match elsewhere {
+                                Some(ns) => OwnerStore::scope_target_name(&f, Some(ns)).unwrap_or(f),
+                                None => f,
+                            };
                             expanded.push(ShareByGranteePointer {
                                 target_kind: "file".to_string(),
-                                target_path: f,
+                                target_path,
                                 grantee_kind: p.grantee_kind.clone(),
                             });
                         }

@@ -20,11 +20,13 @@ pub trait ResourceGroupIndex: Send + Sync {
     /// Called after the resource is deleted. A failure leaves a dangling
     /// membership, which the `resource-group/reindex` endpoint repairs — so
     /// callers log and continue rather than failing the delete.
-    async fn prune_resource(&self, resource: &str) -> Result<(), RvError>;
+    async fn prune_resource(&self, resource: &str, ns_path: Option<&str>) -> Result<(), RvError>;
 
     /// Re-key every membership record from `old` to `new`.
-    async fn rename_resource(&self, old: &str, new: &str) -> Result<(), RvError>;
+    async fn rename_resource(&self, old: &str, new: &str, ns_path: Option<&str>) -> Result<(), RvError>;
 
-    /// The asset groups `resource` belongs to.
-    async fn groups_for_resource(&self, resource: &str) -> Result<Vec<String>, RvError>;
+    /// The asset groups of namespace `ns_path` that `resource` belongs to.
+    /// Groups are namespace-scoped, so every method here takes the resource's
+    /// namespace (`req.namespace_path`; `None` = root) and has no default.
+    async fn groups_for_resource(&self, resource: &str, ns_path: Option<&str>) -> Result<Vec<String>, RvError>;
 }

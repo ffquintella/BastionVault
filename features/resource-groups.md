@@ -88,8 +88,14 @@ Primary record plus two parallel reverse indexes plus change history:
 sys/resource-group/group/<name>                    -> ResourceGroupEntry (JSON)
 sys/resource-group/member-index/<resource>         -> Vec<String>  (group names)
 sys/resource-group/secret-index/<b64url(path)>     -> Vec<String>  (group names)
+sys/resource-group/file-index/<file-id>            -> Vec<String>  (group names)
 sys/resource-group/history/<name>/<20-nanos>       -> ResourceGroupHistoryEntry
 ```
+
+That is the **root** scope. Every other namespace has its own scope with
+the same five keyspaces under
+`sys/resource-group/ns/<b64url(namespace path)>/` — see
+[Namespace scoping](#namespace-scoping).
 
 The **member-index** handles resource membership keyed by the bare
 resource name. The **secret-index** handles KV-secret membership keyed
@@ -241,6 +247,132 @@ Path-shape extraction in `resolve_asset_groups` (policy_store.rs):
   A single policy rule's `groups = [...]` filter passes as long as the
   target matches through either path.
 
+### Namespace scoping
+
+Asset groups belong to the namespace they were created in. Before this,
+the store was one root-global keyspace keyed on the bare name, so every
+namespace listed every group (a group created in `dti/importacao/test02`
+showed everywhere) and a tenant's `db1` and root's `db1` shared one
+`member-index/db1` row, feeding each other's `groups = [...]` qualifier.
+
+**Storage.** Each namespace is a *scope* with its own group records,
+member / secret / file indexes and history. Root keeps the original keys,
+so every record written before scopes existed reads as a root group with
+no migration. A namespace scope lives under
+`sys/resource-group/ns/<b64url(path)>/{group,member-index,secret-index,file-index,history}/`
+(the identity store's `identity-ns/` convention). The two cannot collide:
+group names may not contain `/`, and the namespace is one base64url key
+segment.
+
+**Visibility.** A group created in namespace `a` is visible in `a` and in
+every descendant (`a/b`, `a/b/c`), never in a sibling or a parent. Root's
+groups are therefore visible everywhere.
+
+| Operation | Scope it acts on |
+|-----------|------------------|
+| `LIST groups` | own scope plus every ancestor; a nearer scope shadows a farther one of the same name |
+| `GET groups/<name>`, `…/history` | own scope, then ancestors nearest first; the response carries `namespace` (the home scope, `""` = root) and `inherited` |
+| `PUT groups/<name>` | own scope only. A name only an ancestor holds creates a new group here that shadows it; the response carries a warning and the inherited group is untouched |
+| `DELETE groups/<name>` | own scope only; deleting a group that exists only in an ancestor is refused with 403 |
+| `by-resource`, `by-secret`, `reindex` | own scope only |
+| `groups = [...]` ACL qualifier, list filter, KV/file/resource prune, rename | own scope only, keyed by the target's mount-relative name |
+| `sys/asset-group-owner/transfer` | own scope only (a header naming an unknown namespace is refused, not read as root) |
+
+The reverse indexes are never inherited: an inherited group's members are
+the ancestor's objects, not the child's objects of the same name. For the
+same reason, member redaction and the list's member pass probe an inherited
+group's members in its **home** namespace, so a tenant user who can read
+the tenant's `web1` does not see root's `web1` through root's group.
+
+**Owner and shares.** The owner lives on the record, so it is the home
+scope's. Asset-group share targets are keyed `<home ns>/<name>` (bare at
+root) as before; a read of an inherited group consults the shares of its
+home namespace, a write consults the requesting namespace's. A share key
+that resolves to no namespace is skipped, never read from another scope.
+
+**Addressing.** Handlers check that the request was routed to its own
+namespace's `resource-group/` mount. The path-prefix form
+(`/v1/<ns>/resource-group/…` without the namespace header) reaches a tenant
+mount with no namespace on the request and is refused with 400 rather than
+acting on root's groups. Only the default `resource-group/` mount path is
+served.
+
+**Exchange (`.bvx`).** A namespace bundle exports and imports exactly its
+own scope's group records (`MountIndex::resource_group_prefix`); inherited
+groups belong to the ancestor's export. Group ids are refused unless they
+are a single key segment. Imports write the primary records only, so run
+`resource-group/reindex` in that namespace afterwards (unchanged).
+
+### Batch read, change version and caches
+
+The GUI's Resources and Secrets pages used to LIST the groups and then GET
+each one (~150 requests per page view, each probing every member for
+redaction and writing its own audit entry). Phase 15 replaces that with one
+request and a cheap revalidation.
+
+**Batch read** — `GET resource-group/v2/groups/batch[?shape=full|slim][&since=]`
+(v2 only; v1 is frozen). It returns every group the caller may both list and
+read on its own, so it is exactly "LIST, then GET each, keep the successes":
+
+1. The `LIST groups` visibility rule (admin, owner, share, member pass), via
+   one helper shared with `handle_list` so the two cannot drift.
+2. Per group, the ACL decision `GET groups/<name>` gets in the request's
+   namespace (owner and share scopes resolve against the group's home). A
+   group the caller may list but not read is withheld, so the batch is not a
+   way around `groups/+`.
+3. Member redaction identical to `handle_read`: root/admin callers and a
+   group's owner see it whole; every other member is probed in the group's
+   home namespace. `PolicyStore::can_operate_many` gives the same verdict as
+   `can_operate` (which now delegates to it) from one ACL build per namespace,
+   and each distinct member is probed once per call.
+
+`shape=full` returns each group as `GET groups/<name>` does. `shape=slim`
+returns names plus `by_resource` / `by_secret` / `by_file` maps over the
+namespace's **own** groups only (an inherited group's members are its
+ancestor's objects; keying them would pin the group on this namespace's
+same-name objects, the reason the reverse index never inherits), with hidden
+members left out. Slim still redacts: skipping the probes would put the names
+of members the caller cannot read into the map keys. One request is one audit
+entry; the per-group work happens inside the handler. The `shape` and `since`
+query keys are on `bv_logical`'s query allowlist, since the endpoint is a read.
+
+**Change version** — each scope stores `resource-group/meta/version` (root) or
+`resource-group/ns/<b64url(ns)>/meta/version`: `{format: 1, counter, stamp}`,
+in vault storage so HA nodes agree. Every mutation bumps it after its data
+writes — `set_group`, `delete_group` (of a group that existed), `set_owner`,
+`rename_resource`, the three prunes (when they removed something) and
+`reindex` — and the `.bvx` importer bumps it after writing group records. A
+read never does. A scope with no record (every scope before phase 15) reads as
+counter 0; the first mutation writes format 1. `counter` rises by one per bump
+for writers that do not race; racing bumps (two nodes) can write the same
+counter, so change detection compares the whole record, and `stamp` is unique
+per bump. The batch's `version` is a BLAKE3 digest over the records of the
+request's scope and every ancestor, so a child sees a change in any ancestor
+and never a sibling's. The handler reads the version before any group: a
+write in between pairs the old version with newer data (one extra refetch),
+never a new version with old data. An unreadable record makes `version` `null`
+(fail closed: never "unchanged"); the next mutation replaces it with a warning.
+
+**Client cache** — `gui/src/lib/assetGroupCache.ts` holds one batch answer per
+shape, keyed by namespace and a token fingerprint, served for 45 s and then
+revalidated with `since` (also on window focus, on mount when stale and on a
+45 s tick while a page is open), stale-while-revalidate. A full read happens at
+least every 5 minutes, because `version` covers group data, not the caller's
+grants (a new share or policy does not move it). This client's own group
+writes, deletes and owner transfers (the `lib/api` wrappers, so the asset-group
+page and the PMP import are covered), logout, session expiry and a namespace
+switch drop it and notify open pages at once. Against a server without the
+route it falls back to LIST + GET each.
+
+**No server-side reverse-index cache.** The `groups = [...]` qualifier reads the
+reverse index per request, and caching it was considered and rejected: a cache
+that is never stale must re-read the version record per lookup, which is the
+same single storage read the uncached lookup costs, so it saves nothing; a
+TTL-bounded one would let another HA node keep granting access through a
+membership that was removed, and raw writers (`.bvx` import, backup restore)
+bypass in-process invalidation. The batch read already reads each group record
+once per call.
+
 ### Implementation notes
 
 - Group names are case-insensitive (lowercased on write); member names
@@ -248,10 +380,8 @@ Path-shape extraction in `resolve_asset_groups` (policy_store.rs):
 - A write that fails to update the reverse index surfaces as a
   top-level error and the caller must retry. The reindex endpoint is
   the recovery path for any divergence.
-- The store is persisted — no cache layer in v1. Authorization checks
-  will read the reverse index per request once the ACL grammar
-  extension lands; a bounded LRU keyed by `resource_name -> groups` can
-  be added then if needed.
+- The store is persisted and uncached; see "No server-side reverse-index
+  cache" above for why the per-request qualifier lookup stays that way.
 
 ## Phases
 
@@ -270,6 +400,8 @@ Path-shape extraction in `resolve_asset_groups` (policy_store.rs):
 | 11 | Policy-compile warning when `groups = [...]` references a non-existent asset group | Done |
 | 12 | GUI: Asset Groups page, group chips on objects, sidebar filter | Done |
 | 13 | Ownership, admin transfer, sharing (depends on per-user-scoping) | Done (`OwnerStore` integration; `POST /v2/sys/asset-group-owner/transfer`; `ShareTargetKind::AssetGroup` with indirect member-expansion at authorize time; member redaction for non-owner / non-admin readers) |
+| 14 | Namespace scoping: per-namespace store, ancestor inheritance (read-only), per-namespace reverse indexes and `groups` qualifier, `.bvx` per-namespace groups | Done |
+| 15 | v2 batch read (`full` / `slim`), persisted per-scope change version with `since` revalidation, shared GUI cache; server-side reverse-index cache rejected | Done |
 
 ## Testing
 
@@ -352,9 +484,39 @@ single-tenant, non-ownership model:
   a breadcrumb-style path indicator, chips on individual resources
   and secrets, collapsible Admin section with persisted state.
 
-Remaining: phase 13 (ownership / admin transfer / sharing), blocked
-on [per-user-scoping](per-user-scoping.md) landing the entity-ID
-plumbing and the `SecretShare` type the sharing layer will hang off.
+Phases 13 (ownership / admin transfer / sharing) and 14 (namespace
+scoping, see [Namespace scoping](#namespace-scoping)) are done. Tests for
+14 live in `src/engine_tests/kernel_resource_group.rs`
+(`test_asset_group_visible_in_own_namespace_and_descendants_only`,
+`test_asset_group_member_index_is_per_namespace`,
+`test_legacy_bare_key_asset_group_reads_as_root`,
+`test_child_cannot_modify_or_delete_inherited_asset_group`,
+`test_inherited_asset_group_members_are_probed_in_their_home_namespace`)
+and in `group_store.rs`'s unit tests.
+
+Phase 15 (see [Batch read, change version and caches](#batch-read-change-version-and-caches))
+is done. Tests: `group_store.rs` unit tests (every mutation kind bumps, no read
+does, scopes are independent, a child's token follows its ancestors, an
+unreadable record fails closed), `src/engine_tests/kernel_resource_group.rs`
+(`test_asset_group_batch_*`: batch = LIST + GET each for admin and non-admin
+callers, redaction, a listable-but-unreadable group withheld, `since`,
+namespaces and inheritance, one audit entry), the `.bvx` import bump in
+`src/exchange/scope.rs`, and `gui/src/test/assetGroupCache.test.ts`.
+
+Still open after phase 14:
+
+- Groups created inside a namespace *before* phase 14 sit in the root
+  keyspace and therefore read as root groups, visible everywhere. Nothing
+  in a legacy record names its namespace, so they are not moved
+  automatically; a root operator re-creates them in the right namespace and
+  deletes the root copy.
+- The audit page's asset-group source reads the root scope only, like the
+  policy and identity-group sources beside it.
+- Rustion and ssh-broker policy tiers are keyed on bare asset-group names
+  (`rustion/policy/asset-group/<id>`), so a tenant group with the same
+  name as a root group matches the same tier record.
+- Deleting a namespace does not purge its `resource-group/ns/<b64>/`
+  sub-tree (the same as `identity-ns/` and `policy-ns/`).
 
 Resource groups compose cleanly with identity groups: an identity
 group can attach a policy with `groups = [...]`, giving "this team

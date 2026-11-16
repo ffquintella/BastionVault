@@ -296,6 +296,10 @@ EXAMPLE ENTRY:
 
 ### Changed
 
+#### Asset groups: one batch call, a version signal and a client cache
+
+- **The Resources and Secrets pages load asset groups with one request instead of one per group** (T491, S47) -- `GET resource-group/v2/groups/batch?shape=full|slim&since=<version>` returns what listing and then reading each group would return (same visibility and member redaction, one audit entry), the slim shape giving only the resource, secret and file to group-name maps. Every namespace keeps a stored version that rises on each group change, on prune and rename, on reindex and on `.bvx` import, and never on reads; a child namespace's version also moves with its ancestors', and `since=<version>` answers `unchanged` with no group data. The desktop app caches the result for 45 seconds, revalidates on focus, navigation and the timer, clears it on any group change it makes, namespace switch or logout, and falls back to list-and-read on older servers. A change to your own shares or policies reaches the page within five minutes, at the next full re-read.
+
 #### GUI: asset-group cards stay compact and searchable
 
 - **The Groups section on the Resources and Secrets pages no longer takes over the screen when there are many asset groups** (T489, S47) -- each group is a one-line chip (avatar, truncated name, item count) instead of a tall card, the grid is capped at a quarter of the viewport height and scrolls beyond that, and a "Search groups" box appears once there are more than 8 groups (the selected group stays visible while filtering); the heading shows the group count.
@@ -360,6 +364,10 @@ EXAMPLE ENTRY:
 - Store lease records as format version 1, which adds the lease's max_ttl and its revoke state: records written by earlier versions load unchanged and are rewritten on their next update, and an older server reading a new record ignores the new fields. (T62, S13)
 
 ### Fixed
+
+#### Asset groups: scoped to the namespace that created them
+
+- **A group created in a namespace is now visible only in that namespace and its children, no longer in every namespace** (T490, S47) -- the asset-group store (records, member/secret/file indexes, history, owner and share keys) is kept per namespace, so siblings and parents no longer see a tenant's groups and a tenant's `db1` no longer shares group membership with root's `db1`. Root keeps its existing keys, so groups already stored read as root groups (visible everywhere) and need no migration; groups made inside a namespace before this release are still root groups and must be re-created in the right namespace. A child sees ancestors' groups read-only (delete answers 403; writing the same name creates the child's own group, which shadows the parent's), reads return `namespace` and `inherited`, and requests addressed as `<ns>/resource-group/...` without the namespace header are refused with 400. `.bvx` export and import carry each namespace's own groups only, and import refuses group ids containing `/` or `..`. The `ResourceGroupIndex` trait methods now take the namespace.
 
 #### PKI: set the subject country, OU, province and locality of a role from the GUI
 

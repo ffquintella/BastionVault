@@ -2222,7 +2222,10 @@ impl SystemBackend {
         let store =
             module.store().ok_or_else(|| bv_error_response_status!(500, "resource-group store not initialized"))?;
 
-        store.set_owner(&name, &new_owner).await?;
+        // The namespace's own group only; an inherited one is transferred
+        // from its home namespace.
+        let scope = crate::modules::resource_group::header_scope(req)?;
+        store.set_owner(&name, &new_owner, &scope).await?;
 
         let mut data = Map::new();
         data.insert("name".into(), Value::String(name));
@@ -2795,7 +2798,8 @@ impl SystemBackend {
 
     /// Asset-group (resource-group) change-history. One bulk subtree scan
     /// rather than a `list_history` per group; see
-    /// [`Self::collect_policy_events`].
+    /// [`Self::collect_policy_events`]. Root scope only, like the policy and
+    /// identity-group sources beside it.
     async fn collect_asset_group_events(&self, cutoff: &str) -> AuditSourceResult {
         use crate::modules::resource_group::ResourceGroupModule;
         use std::collections::HashMap;
@@ -2804,10 +2808,10 @@ impl SystemBackend {
         let Some(store) = self.get_module::<ResourceGroupModule>("resource-group").ok().and_then(|m| m.store()) else {
             return Ok(events);
         };
-        let names = store.list_groups().await.map_err(|e| format!("the asset-group list could not be read: {e}"))?;
+        let names = store.list_groups("").await.map_err(|e| format!("the asset-group list could not be read: {e}"))?;
         let live: HashMap<String, String> = names.into_iter().map(|n| (n.to_lowercase(), n)).collect();
         let entries =
-            store.list_history_all().await.map_err(|e| format!("the asset-group history could not be read: {e}"))?;
+            store.list_history_all("").await.map_err(|e| format!("the asset-group history could not be read: {e}"))?;
         for (key_name, e) in entries {
             let Some(target) = live.get(&key_name) else { continue };
             if e.ts.as_str() >= cutoff {

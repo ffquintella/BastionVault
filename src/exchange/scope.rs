@@ -30,7 +30,7 @@ use crate::{
 /// pairs so the resource / group selectors can find the right per-mount
 /// barrier prefix without re-scanning the table on every call.
 ///
-/// `logical_prefix` / `system_prefix` carry the **active root-tenant storage
+/// `logical_prefix` / `root_system_prefix` carry the **active root-tenant storage
 /// prefixes** so the resolver addresses keys at the same place the live vault
 /// does. Re-root activation is the default for every install, so in
 /// production these are `namespaces/<root_uuid>/logical/` and
@@ -42,15 +42,14 @@ use crate::{
 pub struct MountIndex {
     by_type: HashMap<String, Vec<(String, String)>>,
     logical_prefix: String,
-    system_prefix: String,
     /// The **root tenant's** system prefix, which is where the policy store
     /// keeps every namespace's ACL policies (a tenant's live under
     /// `policy-ns/<b64url(path)>/…` inside the root system view, not inside the
-    /// tenant's own `sys/`). Equal to `system_prefix` for a root index.
+    /// tenant's own `sys/`). Asset groups are keyed the same way.
     root_system_prefix: String,
     /// Canonical namespace path this index addresses; `""` for the root
-    /// namespace. Only the policy keyspace depends on it — mounts are already
-    /// addressed by uuid.
+    /// namespace. The policy and asset-group keyspaces depend on it — mounts
+    /// are already addressed by uuid.
     ns_path: String,
 }
 
@@ -61,7 +60,6 @@ impl Default for MountIndex {
         Self {
             by_type: HashMap::new(),
             logical_prefix: LOGICAL_BARRIER_PREFIX.to_string(),
-            system_prefix: SYSTEM_BARRIER_PREFIX.to_string(),
             root_system_prefix: SYSTEM_BARRIER_PREFIX.to_string(),
             ns_path: String::new(),
         }
@@ -80,7 +78,6 @@ impl MountIndex {
         Ok(Self {
             by_type,
             logical_prefix: core.root_logical_prefix(),
-            system_prefix: core.root_system_prefix(),
             root_system_prefix: core.root_system_prefix(),
             ns_path: String::new(),
         })
@@ -110,7 +107,6 @@ impl MountIndex {
         Ok(Self {
             by_type,
             logical_prefix: crate::modules::namespace::router::namespace_logical_prefix(ns_uuid),
-            system_prefix: crate::modules::namespace::router::namespace_system_prefix(ns_uuid),
             root_system_prefix: core.root_system_prefix(),
             ns_path: ns_path.to_string(),
         })
@@ -137,12 +133,6 @@ impl MountIndex {
         format!("{}{uuid}/", self.logical_prefix)
     }
 
-    /// Barrier-storage prefix for the root tenant's system view, e.g.
-    /// `namespaces/<root_uuid>/sys/`.
-    fn system_prefix(&self) -> &str {
-        &self.system_prefix
-    }
-
     /// Barrier-storage prefix holding this namespace's ACL policy documents,
     /// e.g. `namespaces/<root_uuid>/sys/policy/` for the root namespace and
     /// `namespaces/<root_uuid>/sys/policy-ns/<b64url(path)>/acl/` for a tenant.
@@ -150,6 +140,29 @@ impl MountIndex {
     /// live vault can never drift apart.
     pub fn policy_prefix(&self) -> String {
         format!("{}{}", self.root_system_prefix, crate::modules::policy::policy_store::acl_keyspace(&self.ns_path))
+    }
+
+    /// Barrier-storage prefix holding this namespace's asset-group records.
+    /// Like policies, every namespace's groups live in the root system view
+    /// (`resource-group/ns/<b64url(path)>/group/` for a tenant), so a bundle
+    /// exports and imports exactly its own namespace's groups.
+    pub fn resource_group_prefix(&self) -> String {
+        format!(
+            "{}{}",
+            self.root_system_prefix,
+            crate::modules::resource_group::group_store::group_keyspace(&self.ns_path)
+        )
+    }
+
+    /// Barrier-storage key of this namespace's asset-group change version,
+    /// which an import that writes group records must bump (the store bumps it
+    /// on its own writes; an import writes around the store).
+    pub fn resource_group_version_key(&self) -> String {
+        format!(
+            "{}{}",
+            self.root_system_prefix,
+            crate::modules::resource_group::group_store::version_key(&self.ns_path)
+        )
     }
 
     /// Barrier-storage prefix holding this namespace's saved policy effectivity
@@ -233,7 +246,6 @@ impl MountIndex {
         Self {
             by_type,
             logical_prefix: logical_prefix.to_string(),
-            system_prefix: system_prefix.to_string(),
             root_system_prefix: system_prefix.to_string(),
             ns_path: String::new(),
         }
@@ -491,8 +503,9 @@ async fn resolve_full(
     // Resource / asset groups share one store keyed by name. They differ
     // only in GUI labelling, so a full export records each as a resource
     // group; the member resources / secrets / files come along via
-    // `resolve_group`.
-    let groups = storage.list(&format!("{}resource-group/group/", mounts.system_prefix())).await.unwrap_or_default();
+    // `resolve_group`. Only this namespace's own groups: inherited ones
+    // belong to the ancestor's export.
+    let groups = storage.list(&mounts.resource_group_prefix()).await.unwrap_or_default();
     for name in groups {
         if name.ends_with('/') {
             continue;
@@ -681,7 +694,7 @@ async fn collect_resource_secrets(
     Ok(out)
 }
 
-/// Read a resource-group / asset-group record from `sys/resource-group/group/<id>`
+/// Read a resource-group / asset-group record from this namespace's group keyspace
 /// and emit it. If the record references resources, KV-secrets, or files,
 /// drag those in too (best-effort — silently skip ones the actor cannot
 /// read; the resource resolver itself emits per-id warnings).
@@ -694,7 +707,11 @@ async fn resolve_group(
     warnings: &mut Vec<String>,
 ) -> Result<(), RvError> {
     let canonical = id.trim().to_lowercase();
-    let group_key = format!("{}resource-group/group/{canonical}", mounts.system_prefix());
+    if !group_id_is_safe(&canonical) {
+        warnings.push(format!("group id={id} skipped: unsafe group name"));
+        return Ok(());
+    }
+    let group_key = format!("{}{canonical}", mounts.resource_group_prefix());
     let entry = match storage.get(&group_key).await? {
         Some(e) => e,
         None => {
@@ -944,6 +961,12 @@ fn policy_name_is_safe(name: &str) -> bool {
         && name.split('/').all(|seg| !seg.is_empty() && seg != "." && seg != "..")
 }
 
+/// An asset-group id is one key segment, as the live store's `sanitize_name`
+/// enforces; anything else would address keys outside the group keyspace.
+fn group_id_is_safe(canonical: &str) -> bool {
+    !canonical.is_empty() && !canonical.contains('/') && !canonical.contains('\\') && !canonical.contains("..")
+}
+
 /// Does a kv-v2 / kv-v1 barrier-relative key fall under the logical secret
 /// path `lp`? Strips the kv-v2 `data/` or `metadata/` tree prefix before
 /// comparing; kv-v1 keys are compared directly.
@@ -1109,20 +1132,40 @@ pub(crate) async fn apply_items(
         }
     }
 
-    // Resource / asset groups — both kinds are `{id, data}` records that share
-    // the one `sys/` group store, mirroring how `resolve_group` reads them.
+    // Resource / asset groups — both kinds are `{id, data}` records written
+    // into this namespace's group keyspace, mirroring how `resolve_group`
+    // reads them. Raw writes: run `resource-group/reindex` afterwards.
     let groups = items
         .resource_groups
         .iter()
         .map(|g| (&g.id, &g.data))
         .chain(items.asset_groups.iter().map(|g| (&g.id, &g.data)));
+    let mut group_items = 0usize;
     for (id, data) in groups {
         let canonical = id.trim().to_lowercase();
-        let full_path = format!("{}resource-group/group/{canonical}", mounts.system_prefix());
+        if !group_id_is_safe(&canonical) {
+            result.warnings.push(format!("asset group {id:?} skipped: unsafe group name"));
+            continue;
+        }
+        let full_path = format!("{}{canonical}", mounts.resource_group_prefix());
         let bytes = json_value_to_storage_bytes(data)?;
         let display_path = format!("group/{canonical}");
         apply_entry(storage, &full_path, bytes, policy, dry_run, &qualify("resource-group/"), &display_path, result)
             .await?;
+        group_items += 1;
+    }
+    // Clients revalidate their asset-group caches against this version, so a
+    // write that bypassed the store must move it too. Bumped whenever a group
+    // item was applied, even one the conflict policy skipped: a spare refetch
+    // is harmless, a missed one serves stale groups.
+    if group_items > 0 && !dry_run {
+        let scope = mounts.ns_path.trim().trim_matches('/');
+        crate::modules::resource_group::group_store::bump_version_at(
+            storage,
+            &mounts.resource_group_version_key(),
+            scope,
+        )
+        .await?;
     }
 
     // ACL policies (plus each one's saved effectivity tests) — written into the
@@ -1568,6 +1611,43 @@ mod tests {
         assert_eq!(result.written, 0);
         let after = store.get("secret/x/y").await.unwrap().unwrap();
         assert_eq!(after.value, serde_json::to_vec(&original).unwrap());
+    }
+
+    /// An import writes group records around the store, so it must move the
+    /// asset-group change version itself or clients keep serving stale groups.
+    /// A dry run writes nothing, the version included.
+    #[tokio::test]
+    async fn importing_groups_bumps_the_asset_group_version() {
+        let doc = ExchangeDocument::new(
+            ExporterInfo::default(),
+            ScopeSpec { kind: ScopeKind::Full, include: vec![] },
+            ExchangeItems {
+                resource_groups: vec![ResourceGroupItem {
+                    id: "grp".to_string(),
+                    data: serde_json::json!({"name": "grp", "members": ["web1"]}),
+                }],
+                ..Default::default()
+            },
+        );
+        let mounts = MountIndex::empty();
+        let key = mounts.resource_group_version_key();
+        assert_eq!(key, format!("{SYSTEM_BARRIER_PREFIX}resource-group/meta/version"));
+
+        let store = MemStorage::default();
+        import_from_document(&store, &mounts, &doc, ConflictPolicy::Skip, true).await.unwrap();
+        assert!(store.get(&key).await.unwrap().is_none(), "a dry run bumps nothing");
+
+        import_from_document(&store, &mounts, &doc, ConflictPolicy::Skip, false).await.unwrap();
+        let v: crate::modules::resource_group::group_store::ScopeVersion =
+            serde_json::from_slice(&store.get(&key).await.unwrap().expect("bumped").value).unwrap();
+        assert_eq!(v.counter, 1);
+        assert!(!v.stamp.is_empty());
+
+        // A re-import the conflict policy skips still moves it (over-invalidate).
+        import_from_document(&store, &mounts, &doc, ConflictPolicy::Skip, false).await.unwrap();
+        let again: crate::modules::resource_group::group_store::ScopeVersion =
+            serde_json::from_slice(&store.get(&key).await.unwrap().unwrap().value).unwrap();
+        assert_eq!(again.counter, 2);
     }
 
     #[tokio::test]

@@ -310,7 +310,7 @@ async fn test_resource_group_rename_resource() {
         .and_then(|m| m.store())
         .expect("resource-group store");
 
-    let groups = store.rename_resource("old01", "new01").await.unwrap();
+    let groups = store.rename_resource("old01", "new01", "").await.unwrap();
     assert_eq!(groups.len(), 2, "old01 belonged to two groups");
 
     // Reverse index moved: new01 in both groups, old01 in none.
@@ -992,4 +992,596 @@ async fn test_asset_group_member_redaction_honors_namespace_prefix() {
         keys.map(|k| k.as_array().map(|a| a.is_empty()).unwrap_or(true)).unwrap_or(true),
         "a caller who reads no member must not see the group",
     );
+}
+
+// ── namespace-scoped asset groups ──────────────────────────────────────────
+
+/// One request in namespace `ns` (`""` = root, no header).
+#[maybe_async::maybe_async]
+async fn ns_call(
+    core: &dyn VaultCtx,
+    token: &str,
+    op: Operation,
+    path: &str,
+    ns: &str,
+    body: Option<serde_json::Map<String, Value>>,
+) -> Result<Option<crate::logical::Response>, RvError> {
+    let mut req = Request::new(path);
+    req.operation = op;
+    req.client_token = token.to_string();
+    req.body = body;
+    if !ns.is_empty() {
+        req.headers = Some(HashMap::from([("x-bastionvault-namespace".to_string(), ns.to_string())]));
+    }
+    core.handle_request(&mut req).await
+}
+
+/// The group names a LIST in `ns` returns (empty on a denied or empty list).
+#[maybe_async::maybe_async]
+async fn listed_groups(core: &dyn VaultCtx, token: &str, ns: &str) -> Vec<String> {
+    let resp = ns_call(core, token, Operation::List, "resource-group/groups/", ns, None).await;
+    let keys = resp.ok().flatten().and_then(|r| r.data).and_then(|d| d.get("keys").cloned());
+    keys.and_then(|k| k.as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect()
+}
+
+/// `by-resource/<name>` in `ns`, as a list of group names.
+#[maybe_async::maybe_async]
+async fn groups_of_resource(core: &dyn VaultCtx, token: &str, ns: &str, resource: &str) -> Vec<String> {
+    let path = format!("resource-group/by-resource/{resource}");
+    let data = ns_call(core, token, Operation::Read, &path, ns, None).await.unwrap().unwrap().data.unwrap();
+    data["groups"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect()
+}
+
+#[maybe_async::maybe_async]
+async fn read_in(
+    core: &dyn VaultCtx,
+    token: &str,
+    ns: &str,
+    path: &str,
+) -> Result<Option<crate::logical::Response>, RvError> {
+    ns_call(core, token, Operation::Read, path, ns, None).await
+}
+
+#[maybe_async::maybe_async]
+async fn make_namespaces(core: &dyn VaultCtx, root: &str, paths: &[&str]) {
+    for p in paths {
+        test_write_api(core, root, &format!("sys/namespaces/{p}"), true, json!({}).as_object().cloned()).await.unwrap();
+    }
+}
+
+#[maybe_async::maybe_async]
+async fn put_group(core: &dyn VaultCtx, token: &str, ns: &str, name: &str, members: &str) {
+    let body = json!({ "description": name, "members": members }).as_object().cloned();
+    ns_call(core, token, Operation::Write, &format!("resource-group/groups/{name}"), ns, body).await.unwrap();
+}
+
+/// The reported leak: a group created in `dti/importacao/test02` showed in
+/// every namespace. A group is visible in its namespace and descendants only;
+/// root's groups are visible everywhere (root is every namespace's ancestor).
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn test_asset_group_visible_in_own_namespace_and_descendants_only() {
+    let (_bvault, core, root) =
+        new_unseal_test_bastion_vault("test_asset_group_visible_in_own_namespace_and_descendants_only").await;
+    make_namespaces(&core, &root, &["tenant-a", "tenant-a/child", "tenant-b"]).await;
+
+    put_group(&core, &root, "tenant-a", "ga", "web1").await;
+    put_group(&core, &root, "", "rootg", "web1").await;
+
+    assert_eq!(listed_groups(&core, &root, "tenant-a").await, vec!["ga", "rootg"]);
+    assert_eq!(listed_groups(&core, &root, "tenant-a/child").await, vec!["ga", "rootg"]);
+    assert_eq!(listed_groups(&core, &root, "tenant-b").await, vec!["rootg"], "sibling must not see ga");
+    assert_eq!(listed_groups(&core, &root, "").await, vec!["rootg"], "parent (root) must not see ga");
+
+    let (ga, rootg) = ("resource-group/groups/ga", "resource-group/groups/rootg");
+    let own = read_in(&core, &root, "tenant-a", ga).await.unwrap().unwrap().data.unwrap();
+    assert_eq!((own["namespace"].as_str(), own["inherited"].as_bool()), (Some("tenant-a"), Some(false)));
+    let child = read_in(&core, &root, "tenant-a/child", ga).await.unwrap().unwrap().data.unwrap();
+    assert_eq!((child["namespace"].as_str(), child["inherited"].as_bool()), (Some("tenant-a"), Some(true)));
+    assert!(read_in(&core, &root, "tenant-b", ga).await.is_err(), "a sibling's group must not be readable");
+    assert!(read_in(&core, &root, "", ga).await.is_err(), "a child's group must not be readable from root");
+    let inherited_root = read_in(&core, &root, "tenant-b", rootg).await.unwrap().unwrap().data.unwrap();
+    assert_eq!((inherited_root["namespace"].as_str(), inherited_root["inherited"].as_bool()), (Some(""), Some(true)));
+
+    // The path-prefix form reaches tenant-a's mount without a namespace on
+    // the request; it must be refused, not silently act on root's groups.
+    let prefixed = test_write_api(
+        &core,
+        &root,
+        "tenant-a/resource-group/groups/sneaky",
+        false,
+        json!({ "members": "web1" }).as_object().cloned(),
+    )
+    .await;
+    assert!(prefixed.is_err());
+    assert_eq!(listed_groups(&core, &root, "").await, vec!["rootg"], "no root group may appear");
+}
+
+/// The same resource name in root and in a namespace must not collide in the
+/// member index, nor in the ACL `groups` qualifier built from it.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn test_asset_group_member_index_is_per_namespace() {
+    use crate::test_utils::test_mount_auth_api;
+
+    let (_bvault, core, root) = new_unseal_test_bastion_vault("test_asset_group_member_index_is_per_namespace").await;
+    make_namespaces(&core, &root, &["tenant-a"]).await;
+    for ns in ["", "tenant-a"] {
+        for name in ["db1", "db2"] {
+            let body = json!({ "name": name, "type": "server", "hostname": "h.example" }).as_object().cloned();
+            ns_call(&core, &root, Operation::Write, &format!("resources/resources/{name}"), ns, body).await.unwrap();
+        }
+    }
+    // One group name, two namespaces, different members.
+    put_group(&core, &root, "", "g", "db1").await;
+    put_group(&core, &root, "tenant-a", "g", "db2").await;
+
+    assert_eq!(groups_of_resource(&core, &root, "", "db1").await, vec!["g"]);
+    assert!(groups_of_resource(&core, &root, "", "db2").await.is_empty());
+    assert!(groups_of_resource(&core, &root, "tenant-a", "db1").await.is_empty(), "root's g holds root's db1");
+    assert_eq!(groups_of_resource(&core, &root, "tenant-a", "db2").await, vec!["g"]);
+
+    // A tenant user whose only read grant is gated by `groups = ["g"]`.
+    ns_call(
+        &core,
+        &root,
+        Operation::Write,
+        "sys/policy/g-reader",
+        "tenant-a",
+        json!({ "policy": r#"
+            path "tenant-a/resources/resources/*" {
+                capabilities = ["read"]
+                groups = ["g"]
+            }
+        "# })
+        .as_object()
+        .cloned(),
+    )
+    .await
+    .unwrap();
+    test_mount_auth_api(&core, &root, "userpass", "userpass").await;
+    let user = json!({ "password": "pw-123456" }).as_object().cloned();
+    test_write_api(&core, &root, "auth/userpass/users/gina", true, user).await.unwrap();
+    let grp = json!({ "members": ["gina"], "policies": ["g-reader"] }).as_object().cloned();
+    ns_call(&core, &root, Operation::Write, "identity/group/user/readers", "tenant-a", grp).await.unwrap();
+    let login_body = json!({ "password": "pw-123456" }).as_object().cloned();
+    let login = ns_call(&core, "", Operation::Write, "auth/userpass/login/gina", "tenant-a", login_body).await;
+    let gina = login.unwrap().unwrap().auth.unwrap().client_token;
+
+    let db2 = read_in(&core, &gina, "tenant-a", "resources/resources/db2").await;
+    assert!(db2.is_ok(), "tenant db2 is in tenant-a's g: {db2:?}");
+    let db1 = read_in(&core, &gina, "tenant-a", "resources/resources/db1").await;
+    assert!(db1.is_err(), "tenant db1 is only named by root's g, which is not tenant-a's g");
+
+    // Reindexing one scope leaves the other's index intact.
+    ns_call(&core, &root, Operation::Write, "resource-group/reindex", "tenant-a", None).await.unwrap();
+    assert_eq!(groups_of_resource(&core, &root, "", "db1").await, vec!["g"]);
+    assert_eq!(groups_of_resource(&core, &root, "tenant-a", "db2").await, vec!["g"]);
+}
+
+/// Records written before scopes existed sit at the bare legacy keys and must
+/// read as root groups, with no migration.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn test_legacy_bare_key_asset_group_reads_as_root() {
+    use crate::storage::Storage;
+
+    let (_bvault, core, root) = new_unseal_test_bastion_vault("test_legacy_bare_key_asset_group_reads_as_root").await;
+    make_namespaces(&core, &root, &["tenant-a"]).await;
+    let legacy = json!({ "name": "old-g", "members": ["web9"], "secrets": [], "owner_entity_id": "" });
+    let system_view = core.system_view().expect("unsealed");
+    let entry = StorageEntry { key: "resource-group/group/old-g".into(), value: serde_json::to_vec(&legacy).unwrap() };
+    system_view.put(&entry).await.unwrap();
+
+    let data = test_read_api(&core, &root, "resource-group/groups/old-g", true).await.unwrap().unwrap().data.unwrap();
+    assert_eq!((data["namespace"].as_str(), data["inherited"].as_bool()), (Some(""), Some(false)));
+    assert_eq!(data["members"], json!(["web9"]));
+    assert_eq!(listed_groups(&core, &root, "").await, vec!["old-g"]);
+    assert_eq!(listed_groups(&core, &root, "tenant-a").await, vec!["old-g"], "root groups are inherited");
+
+    // The legacy root index rebuilds in place.
+    test_write_api(&core, &root, "resource-group/reindex", true, None).await.unwrap();
+    assert_eq!(groups_of_resource(&core, &root, "", "web9").await, vec!["old-g"]);
+    assert!(groups_of_resource(&core, &root, "tenant-a", "web9").await.is_empty());
+}
+
+/// An inherited group is read-only in the child: delete is refused, a write
+/// creates the child's own group, and the parent's record never changes.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn test_child_cannot_modify_or_delete_inherited_asset_group() {
+    let (_bvault, core, root) =
+        new_unseal_test_bastion_vault("test_child_cannot_modify_or_delete_inherited_asset_group").await;
+    make_namespaces(&core, &root, &["tenant-a", "tenant-a/child"]).await;
+    put_group(&core, &root, "tenant-a", "ga", "web1").await;
+    let path = "resource-group/groups/ga";
+
+    let delete = ns_call(&core, &root, Operation::Delete, path, "tenant-a/child", None).await;
+    assert!(delete.is_err(), "deleting an inherited group from the child must be refused");
+
+    let body = json!({ "members": "web2" }).as_object().cloned();
+    let write = ns_call(&core, &root, Operation::Write, path, "tenant-a/child", body).await.unwrap();
+    assert!(!write.expect("shadowing write carries a warning").warnings.is_empty());
+
+    let parent = read_in(&core, &root, "tenant-a", path).await.unwrap().unwrap().data.unwrap();
+    assert_eq!(parent["members"], json!(["web1"]), "the inherited group is unchanged");
+    let child = read_in(&core, &root, "tenant-a/child", path).await.unwrap().unwrap().data.unwrap();
+    assert_eq!((child["members"].clone(), child["inherited"].as_bool()), (json!(["web2"]), Some(false)));
+
+    // Deleting the child's own group re-exposes the inherited one.
+    ns_call(&core, &root, Operation::Delete, path, "tenant-a/child", None).await.unwrap();
+    let after = read_in(&core, &root, "tenant-a/child", path).await.unwrap().unwrap().data.unwrap();
+    assert_eq!((after["members"].clone(), after["inherited"].as_bool()), (json!(["web1"]), Some(true)));
+    assert_eq!(listed_groups(&core, &root, "tenant-a").await, vec!["ga"]);
+}
+
+/// An inherited group's members are the ancestor's objects. A tenant user who
+/// reads the tenant's own `web1` must not see root's `web1` through root's
+/// group, nor be shown that group in a listing.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn test_inherited_asset_group_members_are_probed_in_their_home_namespace() {
+    use crate::test_utils::test_mount_auth_api;
+
+    let (_bvault, core, root) =
+        new_unseal_test_bastion_vault("test_inherited_asset_group_members_are_probed_in_their_home_namespace").await;
+    make_namespaces(&core, &root, &["tenant-a"]).await;
+    let body = json!({ "name": "web1", "type": "server", "hostname": "h.example" }).as_object().cloned();
+    ns_call(&core, &root, Operation::Write, "resources/resources/web1", "tenant-a", body).await.unwrap();
+    put_group(&core, &root, "", "rootg", "web1").await;
+
+    ns_call(
+        &core,
+        &root,
+        Operation::Write,
+        "sys/policy/t-reader",
+        "tenant-a",
+        json!({ "policy": r#"
+            path "tenant-a/resource-group/groups/*" { capabilities = ["read", "list"] }
+            path "tenant-a/resources/resources/web1" { capabilities = ["read"] }
+        "# })
+        .as_object()
+        .cloned(),
+    )
+    .await
+    .unwrap();
+    test_mount_auth_api(&core, &root, "userpass", "userpass").await;
+    let user = json!({ "password": "pw-123456" }).as_object().cloned();
+    test_write_api(&core, &root, "auth/userpass/users/tom", true, user).await.unwrap();
+    let grp = json!({ "members": ["tom"], "policies": ["t-reader"] }).as_object().cloned();
+    ns_call(&core, &root, Operation::Write, "identity/group/user/t", "tenant-a", grp).await.unwrap();
+    let login_body = json!({ "password": "pw-123456" }).as_object().cloned();
+    let login = ns_call(&core, "", Operation::Write, "auth/userpass/login/tom", "tenant-a", login_body).await;
+    let tom = login.unwrap().unwrap().auth.unwrap().client_token;
+
+    let data = read_in(&core, &tom, "tenant-a", "resource-group/groups/rootg").await.unwrap().unwrap().data.unwrap();
+    assert_eq!(data["members"], json!([REDACTED_MEMBER]), "root's web1 is not tenant-a's web1");
+    assert!(listed_groups(&core, &tom, "tenant-a").await.is_empty(), "tom reads no member of rootg");
+}
+
+// ── v2 batch read + change version ─────────────────────────────────────────
+
+/// `GET resource-group/v2/groups/batch` in `ns`, the selectors on the query
+/// string exactly as the GUI and the HTTP API send them (so this also covers
+/// the logical query allowlist lifting `shape` and `since`).
+#[maybe_async::maybe_async]
+async fn batch_call(
+    core: &dyn VaultCtx,
+    token: &str,
+    ns: &str,
+    shape: &str,
+    since: Option<&str>,
+) -> Result<serde_json::Map<String, Value>, RvError> {
+    let mut raw = format!("resource-group/v2/groups/batch?shape={shape}");
+    if let Some(s) = since {
+        raw.push_str(&format!("&since={s}"));
+    }
+    let (path, data) = crate::logical::split_path_query(&raw);
+    let mut req = Request::new(&path);
+    req.operation = Operation::Read;
+    req.client_token = token.to_string();
+    req.data = data;
+    if !ns.is_empty() {
+        req.headers = Some(HashMap::from([("x-bastionvault-namespace".to_string(), ns.to_string())]));
+    }
+    Ok(core.handle_request(&mut req).await?.and_then(|r| r.data).unwrap_or_default())
+}
+
+/// What the N+1 the batch replaces returned: LIST, then GET each listed group,
+/// keeping the reads that succeed.
+#[maybe_async::maybe_async]
+async fn reads_of_listed(core: &dyn VaultCtx, token: &str, ns: &str) -> Vec<Value> {
+    let mut out = Vec::new();
+    for name in listed_groups(core, token, ns).await {
+        if let Ok(Some(r)) = read_in(core, token, ns, &format!("resource-group/groups/{name}")).await {
+            out.push(Value::Object(r.data.unwrap_or_default()));
+        }
+    }
+    out
+}
+
+/// `by_resource` / `by_secret` built from individual reads the way the slim
+/// shape must: this namespace's own groups, hidden members left out.
+fn slim_from_reads(reads: &[Value], ns: &str) -> (Value, Value) {
+    let mut by_resource: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    let mut by_secret: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for g in reads.iter().filter(|g| g["namespace"] == ns) {
+        let name = g["name"].as_str().unwrap().to_string();
+        for (index, key) in [(&mut by_resource, "members"), (&mut by_secret, "secrets")] {
+            for m in g[key].as_array().unwrap().iter().filter_map(|m| m.as_str()).filter(|m| *m != REDACTED_MEMBER) {
+                index.entry(m.to_string()).or_default().push(name.clone());
+            }
+        }
+    }
+    (json!(by_resource), json!(by_secret))
+}
+
+/// A root-namespace userpass user (on `mount`) holding a policy from `hcl`.
+#[maybe_async::maybe_async]
+async fn root_user(core: &dyn VaultCtx, root: &str, mount: &str, user: &str, hcl: &str) -> String {
+    let policy = json!({ "policy": hcl }).as_object().cloned();
+    test_write_api(core, root, &format!("sys/policies/acl/{user}-p"), true, policy).await.unwrap();
+    let body = json!({ "password": "pw-123456XX!", "token_policies": format!("{user}-p"), "ttl": 0 });
+    test_write_api(core, root, &format!("auth/{mount}/users/{user}"), true, body.as_object().cloned()).await.unwrap();
+    let login = json!({ "password": "pw-123456XX!" }).as_object().cloned();
+    let resp = ns_call(core, "", Operation::Write, &format!("auth/{mount}/login/{user}"), "", login).await;
+    resp.unwrap().unwrap().auth.unwrap().client_token
+}
+
+/// The batch returns exactly what LIST-then-GET-each returns, redaction
+/// included, for an admin and for non-admins; and a group the caller may list
+/// but not read on its own is withheld, as its GET would be.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn test_asset_group_batch_equals_the_union_of_individual_reads() {
+    let (_bvault, core, root) =
+        new_unseal_test_bastion_vault("test_asset_group_batch_equals_the_union_of_individual_reads").await;
+    test_write_api(&core, &root, "sys/auth/batchpass", true, json!({ "type": "userpass" }).as_object().cloned())
+        .await
+        .unwrap();
+    let uma = root_user(
+        &core,
+        &root,
+        "batchpass",
+        "uma",
+        r#"
+            path "resource-group/groups/*"  { capabilities = ["create", "read", "update", "list"] }
+            path "resources/resources/web1" { capabilities = ["read"] }
+            path "secret/data/ok/*"          { capabilities = ["read"] }
+        "#,
+    )
+    .await;
+    // Lists through the member pass, but holds no read on `groups/+` beyond
+    // `default`'s share-scoped one.
+    let vic = root_user(
+        &core,
+        &root,
+        "batchpass",
+        "vic",
+        r#"
+            path "resource-group/groups"    { capabilities = ["list"] }
+            path "resources/resources/web1" { capabilities = ["read"] }
+        "#,
+    )
+    .await;
+
+    let body = json!({ "description": "mixed", "members": "web1,web2", "secrets": "secret/ok/a,secret/no/b" });
+    ns_call(&core, &root, Operation::Write, "resource-group/groups/mixed", "", body.as_object().cloned())
+        .await
+        .unwrap();
+    put_group(&core, &root, "", "dark", "web3").await;
+    put_group(&core, &uma, "", "mine", "web1,web2").await;
+
+    // Root: everything, unredacted.
+    let reads = reads_of_listed(&core, &root, "").await;
+    assert_eq!(reads.len(), 3);
+    let batch = batch_call(&core, &root, "", "full", None).await.unwrap();
+    assert_eq!(batch["groups"], Value::Array(reads.clone()), "admin: batch = LIST + GET each");
+    assert_eq!(batch["unchanged"], json!(false));
+    assert!(batch["version"].is_string());
+    let slim = batch_call(&core, &root, "", "slim", None).await.unwrap();
+    let (by_resource, by_secret) = slim_from_reads(&reads, "");
+    assert_eq!((slim["by_resource"].clone(), slim["by_secret"].clone()), (by_resource, by_secret));
+    assert_eq!(slim["groups"], json!(["dark", "mine", "mixed"]));
+
+    // Uma: `dark` is not listed (she reads no member of it), `mixed` is
+    // redacted exactly as her GET redacts it.
+    let reads = reads_of_listed(&core, &uma, "").await;
+    let batch = batch_call(&core, &uma, "", "full", None).await.unwrap();
+    assert_eq!(batch["groups"], Value::Array(reads.clone()), "non-admin: batch = LIST + GET each");
+    let names: Vec<&str> = reads.iter().map(|g| g["name"].as_str().unwrap()).collect();
+    assert_eq!(names, vec!["mine", "mixed"]);
+    let mixed = &reads[1];
+    assert_eq!(mixed["members"], json!(["web1", REDACTED_MEMBER]));
+    assert_eq!(mixed["secrets"], json!([REDACTED_MEMBER, "secret/ok/a"]));
+    let slim = batch_call(&core, &uma, "", "slim", None).await.unwrap();
+    let (by_resource, by_secret) = slim_from_reads(&reads, "");
+    assert_eq!((slim["by_resource"].clone(), slim["by_secret"].clone()), (by_resource, by_secret));
+    let leaked = serde_json::to_string(&slim).unwrap();
+    assert!(!leaked.contains("secret/no/b") && !leaked.contains("web3"), "no hidden member in the maps: {leaked}");
+
+    // Vic lists two groups but may read neither on its own: the batch must
+    // not become a way around `groups/+`.
+    assert_eq!(listed_groups(&core, &vic, "").await, vec!["mine", "mixed"]);
+    assert!(reads_of_listed(&core, &vic, "").await.is_empty());
+    let batch = batch_call(&core, &vic, "", "full", None).await.unwrap();
+    assert_eq!(batch["groups"], json!([]));
+    let slim = batch_call(&core, &vic, "", "slim", None).await.unwrap();
+    assert_eq!((slim["groups"].clone(), slim["by_resource"].clone()), (json!([]), json!({})));
+}
+
+/// `since` equal to the current version answers "unchanged" with no group
+/// data; a write (including a prune from another engine) moves the version,
+/// a read never does; malformed selectors are refused.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn test_asset_group_batch_since_returns_unchanged_until_a_write() {
+    let (_bvault, core, root) =
+        new_unseal_test_bastion_vault("test_asset_group_batch_since_returns_unchanged_until_a_write").await;
+    let body = json!({ "name": "web1", "type": "server", "hostname": "h.example" }).as_object().cloned();
+    ns_call(&core, &root, Operation::Write, "resources/resources/web1", "", body).await.unwrap();
+    put_group(&core, &root, "", "alpha", "web1").await;
+
+    let first = batch_call(&core, &root, "", "slim", None).await.unwrap();
+    let v1 = first["version"].as_str().unwrap().to_string();
+    assert_eq!(first["by_resource"], json!({ "web1": ["alpha"] }));
+
+    let same = batch_call(&core, &root, "", "slim", Some(&v1)).await.unwrap();
+    assert_eq!(same["unchanged"], json!(true));
+    assert_eq!(same["version"], json!(v1));
+    for absent in ["groups", "by_resource", "by_secret", "by_file"] {
+        assert!(same.get(absent).is_none(), "an unchanged answer carries no {absent}");
+    }
+
+    // Reads of every kind leave it alone.
+    listed_groups(&core, &root, "").await;
+    read_in(&core, &root, "", "resource-group/groups/alpha").await.unwrap();
+    groups_of_resource(&core, &root, "", "web1").await;
+    read_in(&core, &root, "", "resource-group/groups/alpha/history").await.unwrap();
+    batch_call(&core, &root, "", "full", None).await.unwrap();
+    assert_eq!(batch_call(&core, &root, "", "full", Some(&v1)).await.unwrap()["unchanged"], json!(true));
+
+    // A write moves it, and the answer carries the new data.
+    put_group(&core, &root, "", "beta", "web2").await;
+    let after = batch_call(&core, &root, "", "slim", Some(&v1)).await.unwrap();
+    assert_eq!(after["unchanged"], json!(false));
+    let v2 = after["version"].as_str().unwrap().to_string();
+    assert_ne!(v2, v1);
+    assert_eq!(after["by_resource"], json!({ "web1": ["alpha"], "web2": ["beta"] }));
+
+    // Deleting the resource prunes it from `alpha` through the resource
+    // engine's lifecycle hook, which must move the version too.
+    ns_call(&core, &root, Operation::Delete, "resources/resources/web1", "", None).await.unwrap();
+    let pruned = batch_call(&core, &root, "", "slim", Some(&v2)).await.unwrap();
+    assert_eq!(pruned["unchanged"], json!(false));
+    assert_eq!(pruned["by_resource"], json!({ "web2": ["beta"] }));
+
+    assert!(batch_call(&core, &root, "", "slim", Some("not%20a%20version")).await.is_err());
+    assert!(batch_call(&core, &root, "", "everything", None).await.is_err());
+}
+
+/// Namespaces: own groups plus ancestors' (flagged `inherited`), never a
+/// sibling's; the slim maps key only this namespace's own groups; a version
+/// moves with the namespace and its ancestors only; and a tenant user sees in
+/// the batch exactly what LIST + GET show them.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn test_asset_group_batch_follows_namespace_visibility() {
+    use crate::test_utils::test_mount_auth_api;
+
+    let (_bvault, core, root) =
+        new_unseal_test_bastion_vault("test_asset_group_batch_follows_namespace_visibility").await;
+    make_namespaces(&core, &root, &["tenant-a", "tenant-a/child", "tenant-b"]).await;
+    let body = json!({ "name": "web1", "type": "server", "hostname": "h.example" }).as_object().cloned();
+    ns_call(&core, &root, Operation::Write, "resources/resources/web1", "tenant-a", body).await.unwrap();
+    put_group(&core, &root, "tenant-a", "ga", "web1").await;
+    put_group(&core, &root, "", "rootg", "web1").await;
+    put_group(&core, &root, "tenant-b", "gb", "web1").await;
+
+    let names = |b: &serde_json::Map<String, Value>| -> Vec<(String, String, bool)> {
+        b["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|g| {
+                let (n, ns) = (g["name"].as_str().unwrap(), g["namespace"].as_str().unwrap());
+                (n.to_string(), ns.to_string(), g["inherited"].as_bool().unwrap())
+            })
+            .collect()
+    };
+    let child = batch_call(&core, &root, "tenant-a/child", "full", None).await.unwrap();
+    assert_eq!(
+        names(&child),
+        vec![("ga".into(), "tenant-a".into(), true), ("rootg".into(), String::new(), true)],
+        "own scope plus ancestors, never a sibling"
+    );
+    assert_eq!(child["groups"], Value::Array(reads_of_listed(&core, &root, "tenant-a/child").await));
+    let sibling = batch_call(&core, &root, "tenant-b", "full", None).await.unwrap();
+    assert_eq!(names(&sibling), vec![("gb".into(), "tenant-b".into(), false), ("rootg".into(), String::new(), true)]);
+
+    // Root's `rootg` lists root's web1; it must not be keyed as tenant-a's.
+    let slim = batch_call(&core, &root, "tenant-a", "slim", None).await.unwrap();
+    assert_eq!(slim["groups"], json!(["ga", "rootg"]));
+    assert_eq!(slim["by_resource"], json!({ "web1": ["ga"] }));
+
+    let (v_child, v_sibling) =
+        (child["version"].as_str().unwrap().to_string(), sibling["version"].as_str().unwrap().to_string());
+    put_group(&core, &root, "tenant-a", "ga2", "web2").await;
+    let unchanged = batch_call(&core, &root, "tenant-b", "full", Some(&v_sibling)).await.unwrap();
+    assert_eq!(unchanged["unchanged"], json!(true), "a sibling's write does not move tenant-b's version");
+    let moved = batch_call(&core, &root, "tenant-a/child", "full", Some(&v_child)).await.unwrap();
+    assert_eq!(moved["unchanged"], json!(false), "an ancestor's write moves the child's version");
+    put_group(&core, &root, "", "rootg2", "web2").await;
+    let moved = batch_call(&core, &root, "tenant-b", "full", Some(&v_sibling)).await.unwrap();
+    assert_eq!(moved["unchanged"], json!(false), "root is every namespace's ancestor");
+
+    // A tenant user: reads tenant-a's web1, nothing of root's.
+    ns_call(
+        &core,
+        &root,
+        Operation::Write,
+        "sys/policy/t-batch",
+        "tenant-a",
+        json!({ "policy": r#"
+            path "tenant-a/resource-group/groups/*"         { capabilities = ["read", "list"] }
+            path "tenant-a/resource-group/v2/groups/batch" { capabilities = ["read"] }
+            path "tenant-a/resources/resources/web1"        { capabilities = ["read"] }
+        "# })
+        .as_object()
+        .cloned(),
+    )
+    .await
+    .unwrap();
+    test_mount_auth_api(&core, &root, "userpass", "userpass").await;
+    let user = json!({ "password": "pw-123456" }).as_object().cloned();
+    test_write_api(&core, &root, "auth/userpass/users/tess", true, user).await.unwrap();
+    let grp = json!({ "members": ["tess"], "policies": ["t-batch"] }).as_object().cloned();
+    ns_call(&core, &root, Operation::Write, "identity/group/user/t", "tenant-a", grp).await.unwrap();
+    let login_body = json!({ "password": "pw-123456" }).as_object().cloned();
+    let login = ns_call(&core, "", Operation::Write, "auth/userpass/login/tess", "tenant-a", login_body).await;
+    let tess = login.unwrap().unwrap().auth.unwrap().client_token;
+
+    let mine = batch_call(&core, &tess, "tenant-a", "full", None).await.unwrap();
+    assert_eq!(mine["groups"], Value::Array(reads_of_listed(&core, &tess, "tenant-a").await));
+    let seen: Vec<String> = names(&mine).into_iter().map(|(n, _, _)| n).collect();
+    assert_eq!(seen, vec!["ga"], "root's rootg (root's web1) and tenant-b's gb stay hidden");
+    assert_eq!(mine["groups"][0]["members"], json!(["web1"]));
+    if let Ok(other) = batch_call(&core, &tess, "tenant-b", "full", None).await {
+        let leaked = serde_json::to_string(&other).unwrap();
+        assert!(!leaked.contains("\"gb\""), "a sibling's group must not leak: {leaked}");
+    }
+}
+
+/// One batch call is one audit entry: the per-group work happens inside the
+/// handler, not as requests of its own.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn test_asset_group_batch_is_one_audit_entry() {
+    let (_bvault, core, root) = new_unseal_test_bastion_vault("test_asset_group_batch_is_one_audit_entry").await;
+    for (name, members) in [("a1", "web1"), ("a2", "web2"), ("a3", "web1,web3")] {
+        put_group(&core, &root, "", name, members).await;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "bv-asset-group-batch-audit-{}",
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = dir.join("audit.log");
+    let device = json!({ "type": "file", "options": { "file_path": log.display().to_string() } });
+    test_write_api(&core, &root, "sys/audit/batch", true, device.as_object().cloned()).await.unwrap();
+
+    let batch = batch_call(&core, &root, "", "full", None).await.unwrap();
+    assert_eq!(batch["groups"].as_array().unwrap().len(), 3);
+
+    // The broker writes one entry per request (`response` today; a
+    // pre-dispatch `request` entry is planned). Either way: one per type, all
+    // for the batch path, none for a per-group read.
+    let entries: Vec<Value> = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|e| e["request"]["path"].as_str().is_some_and(|p| p.contains("resource-group/")))
+        .collect();
+    assert!(!entries.is_empty(), "the batch must be audited");
+    for kind in ["request", "response"] {
+        let n = entries.iter().filter(|e| e["type"] == kind).count();
+        assert!(n <= 1, "{n} {kind} entries for one batch call: {entries:?}");
+    }
+    assert!(entries.iter().all(|e| e["request"]["path"] == "resource-group/v2/groups/batch"), "{entries:?}");
+    let _ = std::fs::remove_dir_all(&dir);
 }

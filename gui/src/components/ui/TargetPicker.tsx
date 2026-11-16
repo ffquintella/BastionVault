@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ShareTargetKind } from "../../lib/types";
 import * as api from "../../lib/api";
+import { currentAssetGroupContext, loadAssetGroups } from "../../lib/assetGroupCache";
 
 interface TargetPickerProps {
   /** Which kind is being picked. Determines the dropdown source and
@@ -20,7 +21,7 @@ interface TargetPickerProps {
  * - `resource`: loads resource names via `listResources` on first
  *   focus and filters client-side.
  * - `kv-secret`: loads the set of KV paths already carried by asset
- *   groups (via `listAssetGroups` → `read_asset_group`), which is the
+ *   groups (the shared batch cache's `bySecret` keys), which is the
  *   only cheap enumeration of "known" secret paths we have without
  *   recursively walking the KV mount. Operators can also type any
  *   path directly; the input is free-form.
@@ -80,21 +81,11 @@ export function TargetPicker({
           }),
         );
       } else if (kind === "kv-secret") {
-        // Enumerate paths already referenced by asset groups — cheap
-        // and covers the "known secrets" set. Operators can still type
-        // any path not present in a group.
-        const groups = await api.listAssetGroups();
-        const names = await Promise.all(
-          (groups.groups ?? []).map((g) =>
-            api.readAssetGroup(g).catch(() => null),
-          ),
-        );
-        const paths = new Set<string>();
-        for (const g of names) {
-          if (!g) continue;
-          for (const s of g.secrets ?? []) paths.add(s);
-        }
-        setOptions(plain(Array.from(paths).sort()));
+        // Paths already referenced by this namespace's asset groups, from
+        // the shared batch cache (one request, none when cached). Operators
+        // can still type any path not present in a group.
+        const snap = await loadAssetGroups(currentAssetGroupContext(), "slim");
+        setOptions(plain(Object.keys(snap.index.bySecret).sort()));
       } else if (kind === "asset-group") {
         const r = await api.listAssetGroups();
         setOptions(plain(r.groups ?? []));

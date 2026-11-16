@@ -272,7 +272,8 @@ impl super::RustionBackendInner {
         // it is never sealed for an SSH login to a brokered resource, whose
         // every SSH login the SSH engine mints. Before the MFA gate, like
         // every check here.
-        require_not_brokered_for(self.core.as_ref(), resource_name, &meta, protocol).await?;
+        let ns_path = Some(ns_prefix.trim_end_matches('/')).filter(|ns| !ns.is_empty());
+        require_not_brokered_for(self.core.as_ref(), resource_name, &meta, protocol, ns_path).await?;
 
         let resource = provider_resource(&meta).map_err(invalid_profile)?;
         let target = host_target(&profile, &meta, protocol).map_err(invalid_profile)?;

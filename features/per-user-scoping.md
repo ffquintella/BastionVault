@@ -689,16 +689,31 @@ A version marker under the namespace registry makes it idempotent, and
 each record is written-new-then-deleted-old so an interrupted run leaves
 a resolvable duplicate rather than an orphan.
 
-#### Still open: the asset-group store
+#### The asset-group store is namespace-scoped
 
-`ResourceGroupStore` (group records, member index, secret index, file
-index) remains a single root-global keyspace keyed on the bare name, so
-asset groups are not yet per-namespace. Asset-group *share targets* are
-scoped by this release, which means a tenant's group-mediated access now
-fails closed instead of resolving against a root group of the same name.
-`PolicyStore::can_operate` is likewise namespace-blind — it is a
-cross-target preview that does not carry the triggering request's
-namespace, and a miss only narrows the preview.
+`ResourceGroupStore` now keeps one scope per namespace (records, member,
+secret and file indexes, history); root keeps the legacy keys, a namespace
+scope lives under `resource-group/ns/<b64url(path)>/`. A group is visible
+in its namespace and its descendants and read-only there; the reverse
+indexes and the `groups` qualifier use the request namespace's own scope
+with mount-relative names, so tenant group-mediated access now works
+instead of failing closed. Asset-group share keys resolve with the group's
+*home* namespace (`<ns>/<name>`, bare at root): a read of an inherited
+group consults its home's shares and owner, a write the requester's. See
+[resource-groups.md § Namespace scoping](resource-groups.md#namespace-scoping).
+
+`PolicyStore::can_operate` takes the target's namespace; the asset-group
+member-redaction previews pass the group's home namespace.
+
+#### Still open
+
+- Groups created inside a namespace before the store was scoped live in
+  the root keyspace and read as root groups (visible everywhere). Nothing
+  in a legacy record names its namespace, so they are not migrated.
+- The path-prefix addressing form (`/v1/<ns>/…` with no namespace header)
+  leaves `req.namespace_path` unset, so owner/share keying of resources,
+  files and KV still treats such requests as root. The asset-group
+  handlers refuse that form outright; the other stores do not yet.
 
 ### Integration tests
 

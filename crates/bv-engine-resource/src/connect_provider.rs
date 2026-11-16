@@ -372,7 +372,7 @@ impl super::ResourceBackendInner {
         audit.protocol = protocol.into();
         // A brokered resource's SSH logins are minted by the SSH engine: no
         // provider account is offered for them (the release refuses too).
-        require_not_brokered_for(self.core.as_ref(), &resource, &meta, protocol).await?;
+        require_not_brokered_for(self.core.as_ref(), &resource, &meta, protocol, req.namespace_path.as_deref()).await?;
 
         let (resource_desc, target) = self.provider_query_parts(&profile, &meta, protocol)?;
         let launch = self.provider_launch(req, &provider, protocol, resource_desc, target).await?;
@@ -492,7 +492,7 @@ impl super::ResourceBackendInner {
         // A provider account is a static credential: it never logs in over SSH
         // to a brokered resource, whose every SSH login the SSH engine mints.
         // Refused before the ticket is redeemed.
-        require_not_brokered_for(self.core.as_ref(), &resource, meta, protocol).await?;
+        require_not_brokered_for(self.core.as_ref(), &resource, meta, protocol, req.namespace_path.as_deref()).await?;
 
         // Connect-time MFA. `mfa_verified` is attested to the provider only
         // when a ticket was redeemed for this call.

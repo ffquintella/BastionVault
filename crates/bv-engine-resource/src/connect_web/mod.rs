@@ -1019,7 +1019,7 @@ impl super::ResourceBackendInner {
         // asset-group tier can be the one that requires Rustion.
         let asset_groups = match self.core.resource_groups() {
             Some(index) => index
-                .groups_for_resource(resource)
+                .groups_for_resource(resource, req.namespace_path.as_deref())
                 .await
                 .map_err(|e| transport::unavailable(format!("asset-group lookup failed: {e}")))?,
             None => Vec::new(),

@@ -174,6 +174,12 @@ Next-up list recorded before the migration, in its order:
   - old-notes: [spec](features/resource-groups.md) — 13 phases incl. ownership, sharing, member redaction.
 - [x] T489 Keep the asset-group cards compact and searchable on Resources and Secrets (S47)
   - source: operator request — with 140+ groups the cards filled the screen; now one-line chips in a grid capped at 25% of the viewport height with scroll, plus a search box above 8 groups (`gui/src/components/ui/GroupsSection.tsx`)
+- [x] T490 Scope asset groups to the namespace that created them (S47, S2)
+  - source: operator report — asset groups were one root-global list, so every namespace saw every group
+  - note: visible in the creating namespace and its children; root groups visible everywhere; legacy records read as root, no migration; groups made in a namespace before the change stay root groups until re-created. Residual: Rustion/ssh-broker policy tiers are still keyed on bare group names; GUI does not yet hide Delete on inherited groups; `make test-release` not run
+- [x] T491 Load asset groups in one batch call with a version signal and client cache (S47)
+  - source: operator report — the Resources page read every group one by one (~150 requests plus per-member policy probes per visit)
+  - note: server-side reverse-index cache deliberately skipped (stale-grant risk across HA nodes)
 - [x] T29 Record a tamper-evident, hash-chained audit log (S3)
   - source: roadmap.md feature row "Audit Logging (tamper-evident, HMAC chain)", status `[x]` Done
   - old-notes: Phase 1 file device shipped; syslog / HTTP devices [deferred](#deferred-sub-initiatives). Request denials (403s) persisted + surfaced on the Audit page as op `denied`; FIDO2 `begin` failures audited (`stage=begin`). Dashboard `denied` / `failed_logins_1h` counters now range-scan the replicated `sys/denial-audit/` + `sys/login-audit/` stores instead of the per-node in-memory ring, so every HA node reports identical totals. **Successful requests now surface too** (op `read`/`write`/`list` under an `access` category), closing the "denied read shows but successful read doesn't" asymmetry: a per-node reconciler (`access_audit_reconciler`, 60s) tails each node's local `audit.log` and ingests successful non-`/login` lines into a replicated store (`sys/access-audit/`), keyed `(nanos, line-digest)` so ingest is idempotent and cluster-unique — the union of every node's ingest is what the page reads, no leader election needed.

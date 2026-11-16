@@ -1,24 +1,25 @@
 import { useEffect, useState } from "react";
-import * as api from "../lib/api";
+import {
+  ASSET_GROUP_TTL_MS,
+  assetGroupContextKey,
+  loadAssetGroups,
+  peekAssetGroups,
+  subscribeAssetGroups,
+  type AssetGroupSnapshot,
+} from "../lib/assetGroupCache";
+import { useAuthStore } from "../stores/authStore";
+import { useNamespaceStore } from "../stores/namespaceStore";
 
 /**
- * Reverse-map view of asset-group membership, computed by pulling every
- * asset group once and indexing its `members` (resources) and `secrets`
- * lists. Used by object-list pages (Resources, Secrets) to render
- * per-row membership chips without paying a round-trip per row.
- *
- * Keys:
- *   - `byResource[resource_name]` -> group names containing that resource
- *   - `bySecret[canonical_path]`  -> group names containing that KV path
- *
- * `bySecret` keys are stored canonicalized the same way the backend
- * stores them (KV-v2 `data/` / `metadata/` segments stripped), so a
- * caller passing either the v1 or v2 form must canonicalize with
- * `canonicalizeSecretPath` below before indexing in.
+ * Reverse-map view of asset-group membership for object-list pages (Resources,
+ * Secrets): which of the active namespace's groups each object is in.
+ * `bySecret` keys are canonical KV paths; canonicalize with
+ * `canonicalizeSecretPath` before indexing in.
  */
 export interface AssetGroupMap {
   byResource: Record<string, string[]>;
   bySecret: Record<string, string[]>;
+  byFile: Record<string, string[]>;
 }
 
 /** Strip the KV-v2 `data/` or `metadata/` segment in the second path
@@ -38,90 +39,60 @@ export function canonicalizeSecretPath(raw: string): string {
 interface State {
   map: AssetGroupMap;
   loading: boolean;
-  /** `null` on first load, `true` once at least one fetch has succeeded. */
+  /** `null` until the first answer; `false` when groups cannot be read here
+   *  (no `resource-group/` mount, or no grant): render no chips then. */
   available: boolean | null;
 }
 
+const EMPTY: AssetGroupMap = { byResource: {}, bySecret: {}, byFile: {} };
+const UNAVAILABLE: State = { map: EMPTY, loading: false, available: false };
+
+function stateFrom(snap: AssetGroupSnapshot | null): State {
+  if (!snap) return { map: EMPTY, loading: true, available: null };
+  const { byResource, bySecret, byFile } = snap.index;
+  return { map: { byResource, bySecret, byFile }, loading: false, available: true };
+}
+
 /**
- * Load every asset group and build reverse maps. `available` is `false`
- * when the `resource-group/` mount is not enabled on this deployment;
- * callers should render no chips in that case rather than treat it as
- * an error.
- *
- * Single-shot fetch: O(groups) requests on mount, independent of the
- * number of resources/secrets on the calling page.
+ * The asset-group maps for the active namespace and session, from the shared
+ * cache (`lib/assetGroupCache`): one `slim` batch read for every mounted page,
+ * shown stale while it revalidates on mount, window focus and every TTL tick,
+ * and reloaded at once after this client changes a group.
  */
 export function useAssetGroupMap(): State {
-  const [state, setState] = useState<State>({
-    map: { byResource: {}, bySecret: {} },
-    loading: true,
-    available: null,
-  });
+  const namespace = useNamespaceStore((s) => s.active);
+  const token = useAuthStore((s) => s.token);
+  const ctx = assetGroupContextKey(namespace, token);
+  const [state, setState] = useState<State>(() => stateFrom(peekAssetGroups(ctx, "slim")));
 
   useEffect(() => {
     let cancelled = false;
-    (async () => {
-      try {
-        const mounts = await api.listMounts();
-        const enabled = mounts.some((m) => m.path === "resource-group/");
-        if (!enabled) {
-          if (!cancelled) {
-            setState({
-              map: { byResource: {}, bySecret: {} },
-              loading: false,
-              available: false,
-            });
-          }
-          return;
-        }
+    const revalidate = (maxAgeMs: number) => {
+      loadAssetGroups(ctx, "slim", { maxAgeMs })
+        .then((snap) => {
+          if (!cancelled) setState(stateFrom(snap));
+        })
+        .catch(() => {
+          // Keep showing what this context already had; a failed first load
+          // means groups are not readable here.
+          if (!cancelled) setState((prev) => (prev.available ? prev : UNAVAILABLE));
+        });
+    };
 
-        const list = await api.listAssetGroups();
-        const byResource: Record<string, string[]> = {};
-        const bySecret: Record<string, string[]> = {};
-
-        // Parallel reads; swallow individual failures so one bad group
-        // doesn't wipe the whole map.
-        const reads = await Promise.all(
-          list.groups.map((name) =>
-            api.readAssetGroup(name).catch(() => null),
-          ),
-        );
-        for (const info of reads) {
-          if (!info) continue;
-          for (const m of info.members) {
-            (byResource[m] ||= []).push(info.name);
-          }
-          for (const s of info.secrets) {
-            const canonical = canonicalizeSecretPath(s);
-            if (!canonical) continue;
-            (bySecret[canonical] ||= []).push(info.name);
-          }
-        }
-        // Keep the per-key group lists in a stable, sorted order.
-        for (const k of Object.keys(byResource)) byResource[k].sort();
-        for (const k of Object.keys(bySecret)) bySecret[k].sort();
-
-        if (!cancelled) {
-          setState({
-            map: { byResource, bySecret },
-            loading: false,
-            available: true,
-          });
-        }
-      } catch {
-        if (!cancelled) {
-          setState({
-            map: { byResource: {}, bySecret: {} },
-            loading: false,
-            available: false,
-          });
-        }
-      }
-    })();
+    // Stale-while-revalidate: paint this context's cached maps right away.
+    setState(stateFrom(peekAssetGroups(ctx, "slim")));
+    revalidate(ASSET_GROUP_TTL_MS);
+    const unsubscribe = subscribeAssetGroups(() => revalidate(0));
+    const onFocus = () => revalidate(0);
+    window.addEventListener("focus", onFocus);
+    const tick = setInterval(() => revalidate(0), ASSET_GROUP_TTL_MS);
     return () => {
       cancelled = true;
+      unsubscribe();
+      window.removeEventListener("focus", onFocus);
+      clearInterval(tick);
     };
-  }, []);
+  }, [ctx]);
 
   return state;
 }

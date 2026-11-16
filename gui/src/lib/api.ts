@@ -2,6 +2,7 @@
 // than Tauri's `invoke` directly, so no page can fan out fast enough to
 // trip the server's IP abuse guard. See lib/invoke.ts.
 import { invoke } from "./invoke";
+import { emitAssetGroupsChanged } from "./assetGroupEvents";
 import type { RustionSessionKillResult, RustionSessionRenewResult } from "./rustion";
 import type {
   ConnectProfileHint,
@@ -72,6 +73,8 @@ import type {
   AssetGroupInfo,
   AssetGroupHistoryResult,
   AssetGroupLookupResult,
+  AssetGroupBatchShape,
+  AssetGroupBatchResult,
   EntitySelf,
   EntityAliasInfo,
   AuditEvent,
@@ -1225,19 +1228,32 @@ export const listGroupHistory = (kind: GroupKind, name: string) =>
   invoke<GroupHistoryResult>("list_group_history", { kind, name });
 
 // Asset groups (resources + KV secrets)
+
+/** Settle a group mutation, then tell open pages (also on failure: a refused
+ *  write may still have applied part of its change). */
+function afterAssetGroupWrite<T>(p: Promise<T>): Promise<T> {
+  return p.finally(() => emitAssetGroupsChanged());
+}
+
 export const listAssetGroups = () =>
   invoke<AssetGroupListResult>("list_asset_groups");
 export const readAssetGroup = (name: string) =>
   invoke<AssetGroupInfo>("read_asset_group", { name });
+/** Every group the caller may list and read, in one request. Prefer
+ *  `lib/assetGroupCache`, which revalidates with `since`. */
+export const assetGroupsBatch = (shape: AssetGroupBatchShape, since?: string | null) =>
+  invoke<AssetGroupBatchResult>("asset_groups_batch", { shape, since: since ?? null });
 export const writeAssetGroup = (
   name: string,
   description: string,
   members: string,
   secrets: string,
 ) =>
-  invoke<void>("write_asset_group", { name, description, members, secrets });
+  afterAssetGroupWrite(
+    invoke<void>("write_asset_group", { name, description, members, secrets }),
+  );
 export const deleteAssetGroup = (name: string) =>
-  invoke<void>("delete_asset_group", { name });
+  afterAssetGroupWrite(invoke<void>("delete_asset_group", { name }));
 export const listAssetGroupHistory = (name: string) =>
   invoke<AssetGroupHistoryResult>("list_asset_group_history", { name });
 export const assetGroupsForResource = (resource: string) =>
@@ -1300,7 +1316,9 @@ export const transferResourceOwner = (resource: string, newOwnerEntityId: string
 export const transferFileOwner = (id: string, newOwnerEntityId: string) =>
   invoke<void>("transfer_file_owner", { id, newOwnerEntityId });
 export const transferAssetGroupOwner = (name: string, newOwnerEntityId: string) =>
-  invoke<void>("transfer_asset_group_owner", { name, newOwnerEntityId });
+  afterAssetGroupWrite(
+    invoke<void>("transfer_asset_group_owner", { name, newOwnerEntityId }),
+  );
 
 // FIDO2
 export const fido2ConfigRead = () => invoke<Fido2Config | null>("fido2_config_read");

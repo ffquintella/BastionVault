@@ -5,6 +5,8 @@
 //! `members` (resource names) *and* `secrets` (KV paths) but no
 //! policies of their own.
 
+use std::collections::BTreeMap;
+
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use bv_client::Operation;
 use serde::Serialize;
@@ -177,6 +179,119 @@ pub async fn asset_groups_for_resource(
     let resp = make_request(&state, Operation::Read, format!("resource-group/by-resource/{resource}"), None).await?;
 
     Ok(AssetGroupLookupResult { groups: data_string_list(resp.as_ref().and_then(|r| r.data.as_ref()), "groups") })
+}
+
+/// One group of the batch read's `full` shape: `read_asset_group`'s fields
+/// plus `files`, the group's home `namespace` and `inherited`.
+#[derive(Serialize, Default)]
+pub struct AssetGroupBatchEntry {
+    pub name: String,
+    pub description: String,
+    pub members: Vec<String>,
+    pub secrets: Vec<String>,
+    pub files: Vec<String>,
+    pub owner_entity_id: String,
+    pub namespace: String,
+    pub inherited: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// `resource-group/v2/groups/batch`, normalized. `unchanged` answers a `since`
+/// that still matches, and then carries no group data. `version` is `None`
+/// when the server could not read its change record (never revalidate on it).
+#[derive(Serialize, Default)]
+pub struct AssetGroupBatchResult {
+    pub unchanged: bool,
+    pub version: Option<String>,
+    pub shape: String,
+    pub namespace: String,
+    /// `full`: every group, as `read_asset_group` would return it.
+    pub groups: Vec<AssetGroupBatchEntry>,
+    /// Names of every returned group (both shapes).
+    pub names: Vec<String>,
+    /// `slim`: member -> group names, over the namespace's own groups.
+    pub by_resource: BTreeMap<String, Vec<String>>,
+    pub by_secret: BTreeMap<String, Vec<String>>,
+    pub by_file: BTreeMap<String, Vec<String>>,
+    pub warnings: Vec<String>,
+}
+
+fn str_field(o: &Map<String, Value>, key: &str) -> String {
+    o.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string()
+}
+
+fn name_map(data: &Map<String, Value>, key: &str) -> BTreeMap<String, Vec<String>> {
+    data.get(key)
+        .and_then(|v| v.as_object())
+        .map(|m| m.keys().map(|k| (k.clone(), data_string_list(Some(m), k))).collect())
+        .unwrap_or_default()
+}
+
+/// Every asset group the caller may list and read, in one request
+/// (`resource-group/v2/groups/batch`). `shape` is `full` (default) or `slim`;
+/// `since` is a `version` from an earlier answer.
+#[tauri::command]
+pub async fn asset_groups_batch(
+    state: State<'_, AppState>,
+    shape: Option<String>,
+    since: Option<String>,
+) -> CmdResult<AssetGroupBatchResult> {
+    let shape = match shape.as_deref().map(str::trim).unwrap_or("full") {
+        "" | "full" => "full",
+        "slim" => "slim",
+        _ => return Err("asset-group batch shape must be `full` or `slim`".into()),
+    };
+    let mut path = format!("resource-group/v2/groups/batch?shape={shape}");
+    if let Some(v) = since.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        // An opaque server token; refuse anything that could change the query.
+        if v.len() > 128 || !v.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+            return Err("invalid asset-group version".into());
+        }
+        path.push_str("&since=");
+        path.push_str(v);
+    }
+    let resp = make_request(&state, Operation::Read, path, None).await?;
+    let Some(r) = resp else {
+        return Err("the asset-group batch read returned no data".into());
+    };
+    let data = r.data.unwrap_or_default();
+    let mut out = AssetGroupBatchResult {
+        unchanged: data.get("unchanged").and_then(|v| v.as_bool()).unwrap_or(false),
+        version: data.get("version").and_then(|v| v.as_str()).map(String::from),
+        shape: str_field(&data, "shape"),
+        namespace: str_field(&data, "namespace"),
+        warnings: r.warnings,
+        ..Default::default()
+    };
+    if out.unchanged {
+        return Ok(out);
+    }
+    for g in data.get("groups").and_then(|v| v.as_array()).into_iter().flatten() {
+        match g {
+            Value::String(name) => out.names.push(name.clone()),
+            Value::Object(o) => {
+                out.names.push(str_field(o, "name"));
+                out.groups.push(AssetGroupBatchEntry {
+                    name: str_field(o, "name"),
+                    description: str_field(o, "description"),
+                    members: data_string_list(Some(o), "members"),
+                    secrets: data_string_list(Some(o), "secrets"),
+                    files: data_string_list(Some(o), "files"),
+                    owner_entity_id: str_field(o, "owner_entity_id"),
+                    namespace: str_field(o, "namespace"),
+                    inherited: o.get("inherited").and_then(|v| v.as_bool()).unwrap_or(false),
+                    created_at: str_field(o, "created_at"),
+                    updated_at: str_field(o, "updated_at"),
+                });
+            }
+            _ => {}
+        }
+    }
+    out.by_resource = name_map(&data, "by_resource");
+    out.by_secret = name_map(&data, "by_secret");
+    out.by_file = name_map(&data, "by_file");
+    Ok(out)
 }
 
 /// List asset-groups that contain a given KV-secret path. The path is

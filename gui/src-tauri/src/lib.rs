@@ -746,6 +746,7 @@ pub fn run() {
             commands::asset_groups::list_asset_group_history,
             commands::asset_groups::asset_groups_for_resource,
             commands::asset_groups::asset_groups_for_secret,
+            commands::asset_groups::asset_groups_batch,
             // Rustion bastion integration (Phase 1: registry, health,
             // master-cert config slot)
             commands::rustion::rustion_target_list,

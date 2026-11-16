@@ -1265,6 +1265,38 @@ export interface AssetGroupLookupResult {
   groups: string[];
 }
 
+/** Projection of `resource-group/v2/groups/batch`. */
+export type AssetGroupBatchShape = "full" | "slim";
+
+/** One group of the batch read's `full` shape. */
+export interface AssetGroupBatchEntry extends AssetGroupInfo {
+  /** File-resource ids in the group. */
+  files: string[];
+  /** The namespace the group lives in (`""` = root). */
+  namespace: string;
+  /** True when that is an ancestor of the active namespace (read-only here). */
+  inherited: boolean;
+}
+
+/** `asset_groups_batch`: every group the caller may list and read. */
+export interface AssetGroupBatchResult {
+  /** The `since` sent still matches: no group data in this answer. */
+  unchanged: boolean;
+  /** Revalidation token; `null` when the server could not read it. */
+  version: string | null;
+  shape: string;
+  namespace: string;
+  /** `full` only. */
+  groups: AssetGroupBatchEntry[];
+  /** Names of every returned group (both shapes). */
+  names: string[];
+  /** `slim` only: member -> group names, over the namespace's own groups. */
+  by_resource: Record<string, string[]>;
+  by_secret: Record<string, string[]>;
+  by_file: Record<string, string[]>;
+  warnings: string[];
+}
+
 // Per-user scoping: entity, owner, sharing.
 
 export interface EntitySelf {

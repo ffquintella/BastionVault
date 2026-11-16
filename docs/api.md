@@ -1828,6 +1828,33 @@ PUT    /v1/resource-group/reindex
 `PUT /v1/resource-group/reindex` rebuilds both reverse indexes
 from primary records — recovery path for torn writes.
 
+Asset groups are namespace-scoped. A group created in a namespace is
+listed and readable there and in its descendants; root's groups are
+visible everywhere. `GET …/groups/{name}` returns `namespace` (the
+group's home namespace, `""` for root) and `inherited`. An inherited
+group is read-only: `DELETE` returns 403, and `PUT` creates the
+namespace's own group of that name (shadowing the inherited one, with a
+response warning). `by-resource`, `by-secret` and `reindex` act on the
+request's namespace only. Address a namespace with the
+`X-BastionVault-Namespace` header; the path-prefix form is refused with
+400. See [features/resource-groups.md](../features/resource-groups.md#namespace-scoping).
+
+`GET /v2/resource-group/v2/groups/batch[?shape=full|slim][&since=<version>]`
+returns, in one request and one audit entry, every group the caller may both
+list (the `LIST` rule above) and read on its own (the decision
+`GET …/groups/{name}` gets). `shape=full` (default) returns `groups`, each
+exactly as `GET …/groups/{name}` returns it, member redaction included;
+`shape=slim` returns `groups` (names) plus `by_resource`, `by_secret` and
+`by_file` maps (member → group names) over the namespace's own groups, with
+hidden members left out. Every answer carries `version`, a token over the
+change counters of the request's namespace and its ancestors; send it back as
+`since` and, if nothing those namespaces hold was written since, the answer is
+`{"unchanged": true, "version": …}` with no group data. `version` is `null`
+when the server cannot read a counter, and never matches then. `read` on the
+path is in the `default`, `namespace-shared` and `shared-access` baselines
+(ungated, like the list); a malformed `shape` or `since` is a `400`. See
+[features/resource-groups.md](../features/resource-groups.md#batch-read-change-version-and-caches).
+
 ### SSH Login Brokering Policy
 
 Four-tier `login_class` policy (`shared-credential` | `brokered`) on the

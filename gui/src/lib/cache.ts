@@ -139,6 +139,21 @@ export function applyEpochs(snapshot: Record<string, number>): string[] {
   return changed;
 }
 
+/** Caches kept outside this module that must be dropped with it. */
+const clearListeners = new Set<() => void>();
+
+/**
+ * Run `listener` whenever {@link clearCache} runs, so a cache kept elsewhere
+ * (the asset-group cache) follows the same logout / namespace-switch / vault
+ * switch rule. Returns the unsubscribe function.
+ */
+export function onCacheCleared(listener: () => void): () => void {
+  clearListeners.add(listener);
+  return () => {
+    clearListeners.delete(listener);
+  };
+}
+
 /**
  * Drop everything. Used on logout, on a namespace switch, and on connecting
  * to a different vault — in each case the cached answers belong to a
@@ -148,6 +163,7 @@ export function clearCache(): void {
   entries.clear();
   inflight.clear();
   epochs.clear();
+  for (const listener of [...clearListeners]) listener();
 }
 
 /** Test hook: entry count, for asserting hits and invalidation. */

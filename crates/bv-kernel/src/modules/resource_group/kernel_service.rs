@@ -8,29 +8,29 @@ use std::sync::Arc;
 
 use crate::{errors::RvError, kernel_api::resource_group::ResourceGroupIndex};
 
-use super::ResourceGroupModule;
+use super::{group_store::scope_of, ResourceGroupModule};
 
 #[maybe_async::maybe_async]
 impl ResourceGroupIndex for ResourceGroupModule {
-    async fn prune_resource(&self, resource: &str) -> Result<(), RvError> {
+    async fn prune_resource(&self, resource: &str, ns_path: Option<&str>) -> Result<(), RvError> {
         let Some(store) = self.store() else {
             return Ok(());
         };
-        store.prune_resource(resource).await.map(|_| ())
+        store.prune_resource(resource, &scope_of(ns_path)).await.map(|_| ())
     }
 
-    async fn rename_resource(&self, old: &str, new: &str) -> Result<(), RvError> {
+    async fn rename_resource(&self, old: &str, new: &str, ns_path: Option<&str>) -> Result<(), RvError> {
         let Some(store) = self.store() else {
             return Ok(());
         };
-        store.rename_resource(old, new).await.map(|_| ())
+        store.rename_resource(old, new, &scope_of(ns_path)).await.map(|_| ())
     }
 
-    async fn groups_for_resource(&self, resource: &str) -> Result<Vec<String>, RvError> {
+    async fn groups_for_resource(&self, resource: &str, ns_path: Option<&str>) -> Result<Vec<String>, RvError> {
         let Some(store) = self.store() else {
             return Ok(Vec::new());
         };
-        store.groups_for_resource(resource).await
+        store.groups_for_resource(resource, &scope_of(ns_path)).await
     }
 }
 

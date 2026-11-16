@@ -64,7 +64,12 @@ async fn resource_mount_view(core: &dyn VaultCtx, namespace: &str) -> Result<Arc
 /// The resource's effective Connect transport and the tier that set it,
 /// from Rustion's stored policy tiers and its own resolver (§6.6). A lock
 /// violation refuses; an unreadable tier refuses (never "direct").
-async fn effective_transport(core: &dyn VaultCtx, rec: &SqlResourceRecord) -> Result<(String, String), RvError> {
+/// `namespace` (canonical, `""` = root) scopes the resource's asset groups.
+async fn effective_transport(
+    core: &dyn VaultCtx,
+    namespace: &str,
+    rec: &SqlResourceRecord,
+) -> Result<(String, String), RvError> {
     use bv_engine_rustion::policy::{resolve, PolicyStore};
     let unavailable = |e: RvError| {
         SqlRefusal::new(
@@ -77,7 +82,7 @@ async fn effective_transport(core: &dyn VaultCtx, rec: &SqlResourceRecord) -> Re
         .into_rv()
     };
     let groups = match core.resource_groups() {
-        Some(index) => index.groups_for_resource(&rec.name).await.map_err(unavailable)?,
+        Some(index) => index.groups_for_resource(&rec.name, Some(namespace)).await.map_err(unavailable)?,
         None => Vec::new(),
     };
     let store = PolicyStore::new(core).await.map_err(unavailable)?;
@@ -117,7 +122,7 @@ impl SqlResourceSource for ResourceEngineSqlSource {
         Box::pin(async move {
             let (_, rec) = load(core, namespace, resource).await?;
             let mut view = engine::target_view(&rec);
-            let (transport, source) = effective_transport(core, &rec).await?;
+            let (transport, source) = effective_transport(core, namespace, &rec).await?;
             view.insert("transport".into(), json!(transport));
             view.insert("transport_source".into(), json!(source));
             Ok(Value::Object(view))
@@ -134,7 +139,7 @@ impl SqlResourceSource for ResourceEngineSqlSource {
         Box::pin(async move {
             let (view, rec) = load(core, namespace, resource).await?;
             let release = engine::read_release(view.as_ref(), &rec, profile).await?;
-            let (transport, transport_source) = effective_transport(core, &rec).await?;
+            let (transport, transport_source) = effective_transport(core, namespace, &rec).await?;
             let engine::SqlRelease { profile, endpoint, secret_id, login } = release;
             Ok(SqlReleaseMaterial {
                 protocol: crate::modules::resource::sql_profile::SQL_PROTOCOL.to_string(),

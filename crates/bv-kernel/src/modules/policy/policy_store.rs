@@ -46,7 +46,7 @@ use crate::{
     logical::{auth::PolicyResults, Operation, Request, Response},
     modules::{
         identity::{GroupKind, IdentityModule, OwnerStore, ShareStore, ShareTargetKind},
-        resource_group::{ResourceGroupModule, ResourceGroupStore},
+        resource_group::{group_store::scope_of, ResourceGroupEntry, ResourceGroupModule, ResourceGroupStore},
     },
     router::Router,
     storage::{barrier_view::BarrierView, Storage, StorageEntry},
@@ -361,6 +361,12 @@ path "resource-group/groups" {
 path "resource-group/groups/+" {
     capabilities = ["read"]
     scopes       = ["shared"]
+}
+# The v2 batch read: every listed group the caller may also read on its own,
+# in one request. Ungated like the list; the handler applies the list's
+# visibility and the `groups/+` read check to each group before returning it.
+path "resource-group/v2/groups/batch" {
+    capabilities = ["read"]
 }
 
 # --- Rustion transport visibility (read-only resolvers) --------------------
@@ -701,6 +707,10 @@ path "{{namespace.path}}/resource-group/groups/+" {
     capabilities = ["read"]
     scopes       = ["shared"]
 }
+# The v2 batch read, ungated like the list: the handler checks each group.
+path "{{namespace.path}}/resource-group/v2/groups/batch" {
+    capabilities = ["read"]
+}
 
 # Connect-time gates, tenant side. The mirror of the block at the end of
 # `default`, and the second ungated exception in this policy (the first being
@@ -822,6 +832,10 @@ path "{{request.namespace}}/resource-group/groups/+" {
     capabilities = ["read"]
     scopes       = ["shared"]
 }
+# The v2 batch read, ungated like the list: the handler checks each group.
+path "{{request.namespace}}/resource-group/v2/groups/batch" {
+    capabilities = ["read"]
+}
 
 # Connect-time gates. Endpoint-level, so scoping them to a share would be
 # checking the wrong object -- there is no per-target share on
@@ -917,6 +931,7 @@ path "sys/tools/hash"                     { capabilities = ["create", "read", "u
 path "sys/tools/hash/*"                   { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
 path "sys/control-group/request"          { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
 path "resource-group/groups"              { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
+path "resource-group/v2/groups/batch"     { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
 path "rustion/policy/effective"           { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
 path "rustion/dispatcher/preview"         { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
 path "rustion/targets/+"                  { capabilities = ["create", "read", "update", "delete", "list", "sudo"] }
@@ -2364,7 +2379,7 @@ impl PolicyStore {
             }
 
             probe.asset_groups = resolve_asset_groups(&self.core, target, ns).await;
-            probe.asset_owner = resolve_asset_owner(&self.core, target, ns).await;
+            probe.asset_owner = resolve_asset_owner(&self.core, target, ns, Operation::Read).await;
             probe.target_shared_caps = resolve_target_shared_caps(&self.core, &probe).await;
             out[i] = match acl.allow_operation(&probe, false) {
                 Ok(r) => r.allowed || r.root_privs,
@@ -2436,7 +2451,7 @@ impl PolicyStore {
         probe.namespace_path = req.namespace_path.clone();
         probe.api_version = req.api_version;
         probe.asset_groups = resolve_asset_groups(&self.core, secret_prefix, ns).await;
-        probe.asset_owner = resolve_asset_owner(&self.core, secret_prefix, ns).await;
+        probe.asset_owner = resolve_asset_owner(&self.core, secret_prefix, ns, Operation::Read).await;
         probe.target_shared_caps = resolve_target_shared_caps(&self.core, &probe).await;
         let read = acl.explain_capability_for_request(&probe, Capability::Read);
         // Read op, `connect` capability: the probe rides on Read because
@@ -3061,11 +3076,17 @@ fn mount_relative_path<'a>(req_path: &'a str, ns_path: Option<&str>) -> &'a str 
 /// rules apply to SQL checks exactly as to the record (features/sql-browser.md
 /// §3.4; pinned by `sql_paths_resolve_to_their_resource`).
 fn resource_name_from_path(req_path: &str, ns_path: Option<&str>) -> Option<String> {
+    OwnerStore::scope_target_name(&resource_member_from_path(req_path, ns_path)?, ns_path)
+}
+
+/// As [`resource_name_from_path`], but the bare mount-relative name: the key
+/// the namespace's own asset-group member index uses.
+fn resource_member_from_path(req_path: &str, ns_path: Option<&str>) -> Option<String> {
     let p = mount_relative_path(req_path, ns_path);
     let rest = p.strip_prefix("resources/")?;
     let rest = rest.strip_prefix("resources/").or_else(|| rest.strip_prefix("secrets/"))?;
     let name = rest.split('/').next()?;
-    OwnerStore::scope_target_name(name, ns_path)
+    OwnerStore::scope_target_name(name, None)
 }
 
 /// Extract a file id from `request_path` if it targets the files
@@ -3078,18 +3099,29 @@ fn resource_name_from_path(req_path: &str, ns_path: Option<&str>) -> Option<Stri
 /// only fire on the metadata endpoint; `/content` and `/history`
 /// should not restamp ownership).
 fn file_id_from_path(req_path: &str, ns_path: Option<&str>) -> Option<String> {
+    OwnerStore::scope_target_name(&file_member_from_path(req_path, ns_path)?, ns_path)
+}
+
+/// As [`file_id_from_path`], but the bare id the namespace's asset-group
+/// file index uses.
+fn file_member_from_path(req_path: &str, ns_path: Option<&str>) -> Option<String> {
     let p = mount_relative_path(req_path, ns_path);
     let rest = p.strip_prefix("files/")?;
     let rest = rest.strip_prefix("files/")?;
     let mut parts = rest.splitn(2, '/');
     let id = parts.next()?;
-    OwnerStore::scope_target_name(id, ns_path)
+    OwnerStore::scope_target_name(id, None)
 }
 
 /// As `file_id_from_path`, but only returns the id when the remainder
 /// of the path is empty — i.e. the request targets the file metadata
 /// directly and not a sub-endpoint like `/content` or `/history`.
 fn file_id_from_metadata_path(req_path: &str, ns_path: Option<&str>) -> Option<String> {
+    OwnerStore::scope_target_name(&file_member_from_metadata_path(req_path, ns_path)?, ns_path)
+}
+
+/// As [`file_id_from_metadata_path`], but the bare id (asset-group key).
+fn file_member_from_metadata_path(req_path: &str, ns_path: Option<&str>) -> Option<String> {
     let p = mount_relative_path(req_path, ns_path);
     let rest = p.strip_prefix("files/")?;
     let rest = rest.strip_prefix("files/")?;
@@ -3097,15 +3129,14 @@ fn file_id_from_metadata_path(req_path: &str, ns_path: Option<&str>) -> Option<S
     if rest.contains('/') {
         return None;
     }
-    OwnerStore::scope_target_name(rest, ns_path)
+    OwnerStore::scope_target_name(rest, None)
 }
 
-/// Extract an asset-group name from a `resource-group/groups/<name>`
-/// path, namespace-scoped for owner/share lookup. Returns `None` for the list
-/// path itself, the history sub-path, or any non-matching shape. Names are
-/// lowercased to match `ResourceGroupStore::sanitize_name` so the lookup key
-/// matches what the store persists.
-fn asset_group_name_from_path(req_path: &str, ns_path: Option<&str>) -> Option<String> {
+/// Extract the bare asset-group name from a `resource-group/groups/<name>`
+/// path. Returns `None` for the list path itself, the history sub-path, or
+/// any non-matching shape. Lowercased like `ResourceGroupStore::sanitize_name`.
+/// Which namespace the name belongs to is [`asset_group_target`]'s question.
+fn asset_group_member_from_path(req_path: &str, ns_path: Option<&str>) -> Option<String> {
     let p = mount_relative_path(req_path, ns_path);
     let rest = p.strip_prefix("resource-group/groups/")?;
     // Reject the trailing slash list form and the per-group sub-paths
@@ -3113,7 +3144,43 @@ fn asset_group_name_from_path(req_path: &str, ns_path: Option<&str>) -> Option<S
     if rest.contains('/') {
         return None;
     }
-    OwnerStore::scope_target_name(rest, ns_path)
+    OwnerStore::scope_target_name(rest, None)
+}
+
+/// The asset group an `op` on `resource-group/groups/<name>` acts on, as
+/// `(home scope, record)`. A read resolves like `handle_read` (own namespace,
+/// then ancestors), so the owner and shares consulted are those of the group
+/// the caller is shown; any other op acts on the request's namespace only.
+/// `Ok(None)`: no such group there (or no store); `Err`: the store failed.
+async fn asset_group_target(
+    core: &Core,
+    name: &str,
+    ns_path: Option<&str>,
+    op: Operation,
+) -> Result<Option<(String, ResourceGroupEntry)>, RvError> {
+    let Some(store) = core.module_manager().get_module::<ResourceGroupModule>("resource-group").and_then(|m| m.store())
+    else {
+        return Ok(None);
+    };
+    let scope = scope_of(ns_path);
+    if op == Operation::Read {
+        store.resolve_group(name, &scope).await
+    } else {
+        Ok(store.get_group(name, &scope).await?.map(|g| (scope, g)))
+    }
+}
+
+/// The share key (`<home ns>/<name>`, bare at root) of the asset group an
+/// `op` on `req_path` targets. A missing group keys on the request's own
+/// namespace, where a write would create it. `None` on a store error: no
+/// share is consulted rather than one from a guessed namespace.
+async fn asset_group_share_key(core: &Core, req_path: &str, ns_path: Option<&str>, op: Operation) -> Option<String> {
+    let name = asset_group_member_from_path(req_path, ns_path)?;
+    match asset_group_target(core, &name, ns_path, op).await {
+        Ok(Some((home, _))) => OwnerStore::scope_target_name(&name, Some(home.as_str())),
+        Ok(None) => OwnerStore::scope_target_name(&name, ns_path),
+        Err(_) => None,
+    }
 }
 
 /// Does `request_path` look like a KV (v1 or v2) request? The routing
@@ -3141,7 +3208,12 @@ fn looks_like_kv_path(req_path: &str, ns_path: Option<&str>) -> bool {
 /// record, path shape we don't recognize). `scope_passes` treats an
 /// empty `asset_owner` as "no owner match", so a resolution miss can
 /// only narrow access for owner-scoped rules.
-pub(super) async fn resolve_asset_owner(core: &Weak<Core>, req_path: &str, ns_path: Option<&str>) -> String {
+pub(super) async fn resolve_asset_owner(
+    core: &Weak<Core>,
+    req_path: &str,
+    ns_path: Option<&str>,
+    op: Operation,
+) -> String {
     let Some(core) = core.upgrade() else {
         return String::new();
     };
@@ -3171,21 +3243,12 @@ pub(super) async fn resolve_asset_owner(core: &Weak<Core>, req_path: &str, ns_pa
         }
     }
     // Asset group: the owner is captured on first write to
-    // `resource-group/groups/<name>` and lives on the group entry
-    // (not the identity OwnerStore). Pull from the resource-group
-    // store directly.
-    // The group record itself is still keyed on the bare name in a global
-    // store, so a namespaced lookup (`<ns>/<group>`) simply misses and the
-    // owner scope fails closed — the same outcome as before this path became
-    // namespace-aware, and deliberately not a silent fall back to root's group
-    // of the same name. Namespacing `ResourceGroupStore` is the follow-up.
-    if let Some(name) = asset_group_name_from_path(req_path, ns_path) {
-        if let Some(rg_module) = core.module_manager().get_module::<ResourceGroupModule>("resource-group") {
-            if let Some(rg_store) = rg_module.store() {
-                if let Ok(Some(g)) = rg_store.get_group(&name).await {
-                    return g.owner_entity_id;
-                }
-            }
+    // `resource-group/groups/<name>` and lives on the group entry (not the
+    // identity OwnerStore). The store is namespace-scoped; `asset_group_target`
+    // picks the group this op acts on (read: own namespace, then ancestors).
+    if let Some(name) = asset_group_member_from_path(req_path, ns_path) {
+        if let Ok(Some((_, g))) = asset_group_target(&core, &name, ns_path, op).await {
+            return g.owner_entity_id;
         }
     }
     String::new()
@@ -3250,9 +3313,10 @@ pub(super) async fn resolve_target_shared_caps(core: &Weak<Core>, req: &Request)
     }
     // Direct: the request targets an asset-group path itself
     // (`resource-group/groups/<name>`). Look up any asset-group share
-    // addressed to the caller entity for this group.
-    if let Some(name) = asset_group_name_from_path(&req.path, ns) {
-        if let Ok(v) = store.shared_capabilities(ShareTargetKind::AssetGroup, &name, &caller_id).await {
+    // addressed to the caller entity, keyed on the group's home namespace.
+    let target_group_key = asset_group_share_key(&core, &req.path, ns, req.operation).await;
+    if let Some(key) = &target_group_key {
+        if let Ok(v) = store.shared_capabilities(ShareTargetKind::AssetGroup, key, &caller_id).await {
             merge(v);
         }
     }
@@ -3260,13 +3324,13 @@ pub(super) async fn resolve_target_shared_caps(core: &Weak<Core>, req: &Request)
     // Indirect: walk the caller's asset-group memberships for this
     // target and union any asset-group shares addressed to them. We
     // already have the list on `req.asset_groups` — `post_auth`
-    // populated it before this helper runs, so no extra lookup is
-    // needed against the reverse index. Silent on any failure.
-    if !req.asset_groups.is_empty() {
-        for group in &req.asset_groups {
-            if let Ok(v) = store.shared_capabilities(ShareTargetKind::AssetGroup, group, &caller_id).await {
-                merge(v);
-            }
+    // populated it before this helper runs. They are bare names of the
+    // request namespace's own groups, so the share keys carry that namespace.
+    let member_group_keys: Vec<String> =
+        req.asset_groups.iter().filter_map(|g| OwnerStore::scope_target_name(g, ns)).collect();
+    for key in &member_group_keys {
+        if let Ok(v) = store.shared_capabilities(ShareTargetKind::AssetGroup, key, &caller_id).await {
+            merge(v);
         }
     }
 
@@ -3333,7 +3397,7 @@ pub(super) async fn resolve_target_shared_caps(core: &Weak<Core>, req: &Request)
 
                     // Asset-group shares granted to this group, where
                     // the target is a member of the asset group.
-                    for ag in &req.asset_groups {
+                    for ag in &member_group_keys {
                         if let Ok(v) = store.shared_capabilities(ShareTargetKind::AssetGroup, ag, &g_name).await {
                             merge(v);
                         }
@@ -3344,8 +3408,8 @@ pub(super) async fn resolve_target_shared_caps(core: &Weak<Core>, req: &Request)
                     // grantee is this identity group. Lets a member
                     // of grp-teste read the do-tic-esi group metadata
                     // when the share grants it.
-                    if let Some(ag_name) = asset_group_name_from_path(&req.path, ns) {
-                        if let Ok(v) = store.shared_capabilities(ShareTargetKind::AssetGroup, &ag_name, &g_name).await {
+                    if let Some(ag_key) = &target_group_key {
+                        if let Ok(v) = store.shared_capabilities(ShareTargetKind::AssetGroup, ag_key, &g_name).await {
                             merge(v);
                         }
                     }
@@ -3417,9 +3481,13 @@ pub(super) async fn resolve_asset_groups(core: &Weak<Core>, req_path: &str, ns_p
     };
 
     let mut out: Vec<String> = Vec::new();
+    // The request namespace's own groups only, looked up by the target's
+    // mount-relative name: an ancestor's group lists the ancestor's objects,
+    // never this namespace's objects of the same name.
+    let scope = scope_of(ns_path);
 
-    if let Some(name) = resource_name_from_path(req_path, ns_path) {
-        if let Ok(groups) = store.groups_for_resource(&name).await {
+    if let Some(name) = resource_member_from_path(req_path, ns_path) {
+        if let Ok(groups) = store.groups_for_resource(&name, &scope).await {
             for g in groups {
                 if !out.iter().any(|x| x == &g) {
                     out.push(g);
@@ -3429,7 +3497,7 @@ pub(super) async fn resolve_asset_groups(core: &Weak<Core>, req_path: &str, ns_p
     }
 
     if looks_like_kv_path(req_path, ns_path) {
-        if let Ok(groups) = store.groups_for_secret(req_path).await {
+        if let Ok(groups) = store.groups_for_secret(mount_relative_path(req_path, ns_path), &scope).await {
             for g in groups {
                 if !out.iter().any(|x| x == &g) {
                     out.push(g);
@@ -3438,8 +3506,8 @@ pub(super) async fn resolve_asset_groups(core: &Weak<Core>, req_path: &str, ns_p
         }
     }
 
-    if let Some(id) = file_id_from_path(req_path, ns_path) {
-        if let Ok(groups) = store.groups_for_file(&id).await {
+    if let Some(id) = file_member_from_path(req_path, ns_path) {
+        if let Ok(groups) = store.groups_for_file(&id, &scope).await {
             for g in groups {
                 if !out.iter().any(|x| x == &g) {
                     out.push(g);
@@ -3664,7 +3732,8 @@ impl AuthHandler for PolicyStore {
             // `scopes = ["owner"]` check. Same shape as asset_groups:
             // empty on any failure, which is fail-closed for
             // owner-scoped rules.
-            req.asset_owner = resolve_asset_owner(&self.core, &req.path, req.namespace_path.as_deref()).await;
+            req.asset_owner =
+                resolve_asset_owner(&self.core, &req.path, req.namespace_path.as_deref(), req.operation).await;
             // Resolve any active `SecretShare` capabilities the caller
             // has on this target so `scopes = ["shared"]` rules can be
             // evaluated synchronously downstream. Empty when the
@@ -4202,9 +4271,12 @@ impl Handler for PolicyStore {
         }
 
         // --- KV-delete prune from asset-groups ---
+        // Only the request namespace's groups can hold this secret: members
+        // are mount-relative paths inside the group's own namespace.
+        let rg_scope = scope_of(ns);
         if let Some(store) = rg_store.as_ref() {
             if req.operation == Operation::Delete && looks_like_kv_path(&req.path, ns) {
-                if let Err(e) = store.prune_secret(&req.path).await {
+                if let Err(e) = store.prune_secret(&rel, &rg_scope).await {
                     log::warn!(
                         "resource-group prune failed for deleted KV secret '{}': {e}. \
                          Use the resource-group/reindex endpoint to clean up.",
@@ -4217,8 +4289,8 @@ impl Handler for PolicyStore {
         // --- File-delete prune from asset-groups ---
         if let Some(store) = rg_store.as_ref() {
             if req.operation == Operation::Delete {
-                if let Some(id) = file_id_from_metadata_path(&req.path, ns) {
-                    if let Err(e) = store.prune_file(&id).await {
+                if let Some(id) = file_member_from_metadata_path(&req.path, ns) {
+                    if let Err(e) = store.prune_file(&id, &rg_scope).await {
                         log::warn!(
                             "resource-group prune failed for deleted file '{}': {e}. \
                              Use the resource-group/reindex endpoint to clean up.",
@@ -4273,8 +4345,24 @@ impl PolicyStore {
         op: Operation,
         ns_path: Option<&str>,
     ) -> bool {
-        if auth.policies.is_empty() {
-            return false;
+        let verdicts = self.can_operate_many(auth, std::slice::from_ref(&path.to_string()), op, ns_path).await;
+        verdicts.first().copied().unwrap_or(false)
+    }
+
+    /// [`Self::can_operate`] for many paths of one namespace: the same verdict
+    /// per path, from one ACL build instead of one per path. Used where a
+    /// handler previews a set of targets (the asset-group batch read). The
+    /// verdicts are parallel to `paths`; any failure reads as `false`.
+    pub async fn can_operate_many(
+        &self,
+        auth: &crate::logical::Auth,
+        paths: &[String],
+        op: Operation,
+        ns_path: Option<&str>,
+    ) -> Vec<bool> {
+        let mut out = vec![false; paths.len()];
+        if auth.policies.is_empty() || paths.is_empty() {
+            return out;
         }
 
         // `ns_path` is the namespace `path` belongs to, when the caller knows
@@ -4286,30 +4374,41 @@ impl PolicyStore {
         // That is exactly how `capabilities-self` came to under-report
         // share-derived `update` for tenants.
         //
-        // `None` remains correct for a root-scoped target, and for the
-        // asset-group member-redaction previews that pass mount-relative paths
-        // — those stay namespace-blind, which can only narrow a preview, never
-        // widen it (tracked as the asset-group follow-up).
-        let asset_groups = resolve_asset_groups(&self.core, path, ns_path).await;
-        let asset_owner = resolve_asset_owner(&self.core, path, ns_path).await;
-
-        let mut req = Request::default();
-        req.path = path.to_string();
-        req.operation = op;
-        req.auth = Some(auth.clone());
-        req.namespace_path = ns_path.filter(|p| !p.is_empty()).map(|p| p.to_string());
-        req.asset_groups = asset_groups;
-        req.asset_owner = asset_owner;
-        req.target_shared_caps = resolve_target_shared_caps(&self.core, &req).await;
-
+        // `None` remains correct for a root-scoped target. The asset-group
+        // member-redaction previews pass the group's home namespace with a
+        // path carrying that namespace's prefix, so they resolve like this too.
+        //
+        // The ACL depends only on the caller and `ns_path`, never on the
+        // target, so one build serves every path.
         let acl = match self.new_acl_for_request(&auth.policies, None, auth, ns_path).await {
             Ok(a) => a,
-            Err(_) => return false,
+            Err(_) => return out,
         };
-        // `check_only=false` is required — with `true`, `Permissions::check`
-        // short-circuits without setting `allowed`, always returning
-        // `allowed=false`. The full gate is cheap for a read probe.
-        acl.allow_operation(&req, false).map(|r| r.allowed).unwrap_or(false)
+        for (verdict, path) in out.iter_mut().zip(paths) {
+            // A root ACL allows every target whatever its qualifiers, so they
+            // are not resolved for it.
+            if acl.root {
+                *verdict = true;
+                continue;
+            }
+            let asset_groups = resolve_asset_groups(&self.core, path, ns_path).await;
+            let asset_owner = resolve_asset_owner(&self.core, path, ns_path, op).await;
+
+            let mut req = Request::default();
+            req.path = path.to_string();
+            req.operation = op;
+            req.auth = Some(auth.clone());
+            req.namespace_path = ns_path.filter(|p| !p.is_empty()).map(|p| p.to_string());
+            req.asset_groups = asset_groups;
+            req.asset_owner = asset_owner;
+            req.target_shared_caps = resolve_target_shared_caps(&self.core, &req).await;
+
+            // `check_only=false` is required — with `true`, `Permissions::check`
+            // short-circuits without setting `allowed`, always returning
+            // `allowed=false`. The full gate is cheap for a read probe.
+            *verdict = acl.allow_operation(&req, false).map(|r| r.allowed).unwrap_or(false);
+        }
+        out
     }
 
     /// Upgrade the weak Core reference and fetch the share store from
@@ -4494,8 +4593,9 @@ async fn filter_list_by_ownership(
 /// `resolve_asset_groups`.
 async fn resolve_groups_for_any(store: &Arc<ResourceGroupStore>, path: &str, ns_path: Option<&str>) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    if let Some(name) = resource_name_from_path(path, ns_path) {
-        if let Ok(groups) = store.groups_for_resource(&name).await {
+    let scope = scope_of(ns_path);
+    if let Some(name) = resource_member_from_path(path, ns_path) {
+        if let Ok(groups) = store.groups_for_resource(&name, &scope).await {
             for g in groups {
                 if !out.iter().any(|x| x == &g) {
                     out.push(g);
@@ -4504,7 +4604,7 @@ async fn resolve_groups_for_any(store: &Arc<ResourceGroupStore>, path: &str, ns_
         }
     }
     if looks_like_kv_path(path, ns_path) {
-        if let Ok(groups) = store.groups_for_secret(path).await {
+        if let Ok(groups) = store.groups_for_secret(mount_relative_path(path, ns_path), &scope).await {
             for g in groups {
                 if !out.iter().any(|x| x == &g) {
                     out.push(g);
@@ -4827,6 +4927,9 @@ mod implicit_rustion_grant_tests {
 
         let ungated_by_design = [
             "{{request.namespace}}/resource-group/groups",
+            // The batch read: the handler narrows to groups the caller may
+            // list *and* read one at a time, like the list above.
+            "{{request.namespace}}/resource-group/v2/groups/batch",
             "{{request.namespace}}/resources/v2/connect/mfa/begin",
             "{{request.namespace}}/resources/v2/connect/mfa/verify",
             "{{request.namespace}}/resources/v2/connect/authorize",
@@ -5647,7 +5750,8 @@ mod sql_privilege_substrate_tests {
                 assert_eq!(resource_name_from_path(&path, ns_opt).as_deref(), Some(want), "{path}");
                 assert!(!looks_like_kv_path(&path, ns_opt), "{path}");
                 assert_eq!(file_id_from_path(&path, ns_opt), None, "{path}");
-                assert_eq!(asset_group_name_from_path(&path, ns_opt), None, "{path}");
+                assert_eq!(asset_group_member_from_path(&path, ns_opt), None, "{path}");
+                assert_eq!(resource_member_from_path(&path, ns_opt).as_deref(), Some("netrisk-db"), "{path}");
             }
         }
     }

@@ -1461,7 +1461,7 @@ impl ResourceBackendInner {
         // group member will be cleaned up on the next group write or by
         // the `resource-group/reindex` endpoint.
         if let Some(groups) = self.core.resource_groups() {
-            if let Err(e) = groups.prune_resource(&name).await {
+            if let Err(e) = groups.prune_resource(&name, req.namespace_path.as_deref()).await {
                 log::warn!(
                     "resource-group prune failed for deleted resource '{name}': {e}. \
                      Use the resource-group/reindex endpoint to clean up.",
@@ -1632,7 +1632,7 @@ impl ResourceBackendInner {
         // ── 4. Cross-module references (best-effort, like delete) ──────
         // Asset-group membership + reverse index.
         if let Some(groups) = self.core.resource_groups() {
-            if let Err(e) = groups.rename_resource(&old, &new).await {
+            if let Err(e) = groups.rename_resource(&old, &new, req.namespace_path.as_deref()).await {
                 log::warn!(
                     "resource-group rename failed for '{old}' -> '{new}': {e}. \
                      Use the resource-group/reindex endpoint to clean up.",
@@ -1782,7 +1782,9 @@ impl ResourceBackendInner {
 
         // Asset-group memberships from the resource-group reverse index.
         let asset_groups = match self.core.resource_groups() {
-            Some(groups) => groups.groups_for_resource(resource).await.unwrap_or_default(),
+            Some(groups) => {
+                groups.groups_for_resource(resource, req.namespace_path.as_deref()).await.unwrap_or_default()
+            }
             None => Vec::new(),
         };
 

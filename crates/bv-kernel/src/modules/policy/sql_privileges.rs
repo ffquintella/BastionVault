@@ -76,7 +76,7 @@ impl PolicyStore {
         // rule exists to read them, exactly as `may_connect_target` does.
         if !(acl.grouped_rules.is_empty() && acl.scoped_rules.is_empty()) {
             probe.asset_groups = resolve_asset_groups(&self.core, &server_path, ns_opt).await;
-            probe.asset_owner = resolve_asset_owner(&self.core, &server_path, ns_opt).await;
+            probe.asset_owner = resolve_asset_owner(&self.core, &server_path, ns_opt, Operation::Read).await;
             probe.target_shared_caps = resolve_target_shared_caps(&self.core, &probe).await;
         }
 

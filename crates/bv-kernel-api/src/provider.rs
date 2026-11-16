@@ -185,12 +185,15 @@ pub fn require_not_brokered(protocol: &str, verdict: &LoginClassVerdict) -> Resu
 /// engine's attach-time guard resolves it. Only SSH is resolved. Fails closed:
 /// an error resolving the class or the groups refuses rather than releases.
 /// A server without the ssh-broker module has no brokered resources.
+/// `ns_path` is the namespace the resource lives in, which scopes its asset
+/// groups (`None` = root).
 #[maybe_async::maybe_async]
 pub async fn require_not_brokered_for(
     ctx: &dyn super::ctx::VaultCtx,
     resource: &str,
     meta: &Map<String, Value>,
     protocol: &str,
+    ns_path: Option<&str>,
 ) -> Result<(), RvError> {
     if protocol != "ssh" {
         return Ok(());
@@ -200,7 +203,7 @@ pub async fn require_not_brokered_for(
     };
     let resource_type = meta.get("type").and_then(Value::as_str).unwrap_or_default();
     let groups = match ctx.resource_groups() {
-        Some(index) => index.groups_for_resource(resource).await?,
+        Some(index) => index.groups_for_resource(resource, ns_path).await?,
         None => Vec::new(),
     };
     let verdict = policy.resolve_for(resource_type, &groups, resource).await?;
