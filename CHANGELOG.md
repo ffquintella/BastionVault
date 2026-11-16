@@ -280,6 +280,10 @@ EXAMPLE ENTRY:
 
 ### Changed
 
+#### GUI: asset-group cards stay compact and searchable
+
+- **The Groups section on the Resources and Secrets pages no longer takes over the screen when there are many asset groups** (T489, S47) -- each group is a one-line chip (avatar, truncated name, item count) instead of a tall card, the grid is capped at a quarter of the viewport height and scrolls beyond that, and a "Search groups" box appears once there are more than 8 groups (the selected group stays visible while filtering); the heading shows the group count.
+
 #### Build: the Makefile is organised as command groups with subcommands
 
 - **`make <group> [<subcommand>...]` replaces ~150 flat targets as the documented interface** (T488, S77) -- 15 groups (`run`, `build`, `test`, `check`, `verify`, `gui`, `bump`, `crates`, `container`, `package`, `install`, `release`, `plugins`, `clean`, `setup`), e.g. `make test changed`, `make gui dev`, `make crates plan`; `make help` lists the groups and `make help <group>` its subcommands. A group's bare form runs its default (`make test` = `make test unit`); `clean`, `release`, `bump`, `crates`, `check` and `gui` have none and print their help instead, so `make clean` and `make release` no longer act by omission (use `make clean cargo`, `make release cut`). Every historical target name (`test-changed`, `gui-build`, `crates-bump`, ...) still works, so CI and scripts are unaffected; `make taxonomy-check` verifies the map. The map lives in `make/02-groups.mk`.
