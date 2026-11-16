@@ -1,10 +1,13 @@
 //! The `v2/idp/...` logical surface: identities CRUD, the lifecycle state
 //! endpoint, `idp/config`, (Phase 2, [`authz`]) environments and
-//! entitlements, and (Phase 3, [`ssh`]) SSH sign, the KRL and the deny feed.
+//! entitlements, (Phase 3, [`ssh`]) SSH sign, the KRL and the deny feed,
+//! and (Phase 4, [`radius`]) the RADIUS provider's configuration, NAS
+//! clients, attribute profiles and self-service passcodes.
 //! Every handler runs [`IdpBackendInner::guard`] first: v2 only, root
 //! namespace only, root-table mount only.
 
 mod authz;
+mod radius;
 mod ssh;
 
 use std::{collections::HashMap, sync::Arc};
@@ -27,6 +30,7 @@ use crate::{
         model::{parse_id, parse_id_list, IdKind, IdentityState, PosixConfig, PosixError, UidSource},
         store::{ConfigUpdate, IdentityWrite, PosixStore},
     },
+    provider::radius::RadiusRuntime,
     IssuanceSlot, PosixStoreSlot, IDP_LOGICAL_TYPE,
 };
 
@@ -37,8 +41,10 @@ entity, never reused, with an active -> disabled -> removed lifecycle), the
 environments they may enter (each bound to one namespace, mapping role names
 to that namespace's policies) and the entitlements that grant them. It signs
 identity-bound SSH certificates through the SSH engine and publishes their
-revocation as an OpenSSH KRL and a signed, versioned deny feed. Served under
-/v2 only, from the root namespace only.
+revocation as an OpenSSH KRL and a signed, versioned deny feed. It answers
+RADIUS Access-Requests from registered NAS clients (RadSec by default, UDP
+opt-in) with per-role vendor attributes, against one-time passcodes the
+human mints here. Served under /v2 only, from the root namespace only.
 "#;
 
 pub struct IdpBackendInner {
@@ -46,6 +52,7 @@ pub struct IdpBackendInner {
     pub store: Arc<PosixStoreSlot>,
     pub authz: Arc<EntitlementStoreSlot>,
     pub issuance: Arc<IssuanceSlot>,
+    pub radius: Arc<RadiusRuntime>,
 }
 
 #[derive(Deref)]
@@ -60,8 +67,9 @@ impl IdpBackend {
         store: Arc<PosixStoreSlot>,
         authz: Arc<EntitlementStoreSlot>,
         issuance: Arc<IssuanceSlot>,
+        radius: Arc<RadiusRuntime>,
     ) -> Self {
-        Self { inner: Arc::new(IdpBackendInner { core, store, authz, issuance }) }
+        Self { inner: Arc::new(IdpBackendInner { core, store, authz, issuance, radius }) }
     }
 
     pub fn new_backend(&self) -> LogicalBackend {
@@ -86,6 +94,17 @@ impl IdpBackend {
         let h_ssh_krl = self.inner.clone();
         let h_feed = self.inner.clone();
         let h_feed_key = self.inner.clone();
+        let h_radius_config_read = self.inner.clone();
+        let h_radius_config_write = self.inner.clone();
+        let h_radius_client_list = self.inner.clone();
+        let h_radius_client_read = self.inner.clone();
+        let h_radius_client_write = self.inner.clone();
+        let h_radius_client_delete = self.inner.clone();
+        let h_radius_profile_list = self.inner.clone();
+        let h_radius_profile_read = self.inner.clone();
+        let h_radius_profile_write = self.inner.clone();
+        let h_radius_profile_delete = self.inner.clone();
+        let h_radius_passcode = self.inner.clone();
 
         new_logical_backend!({
             paths: [
@@ -236,6 +255,87 @@ impl IdpBackend {
                         {op: Operation::Read, handler: h_feed.handle_deny_feed}
                     ],
                     help: "The signed, versioned deny feed: identities that are not active and revoked certificate serials."
+                },
+                {
+                    pattern: r"radius/config$",
+                    fields: {
+                        "enabled": { field_type: FieldType::Bool, required: false, description: "Run the listeners (default false)." },
+                        "radsec_listen": { field_type: FieldType::Str, required: false, description: "RadSec IP:port (\"\" clears)." },
+                        "udp_enabled": { field_type: FieldType::Bool, required: false, description: "Allow classic UDP RADIUS (default false; trusted segments only)." },
+                        "udp_listen": { field_type: FieldType::Str, required: false, description: "UDP IP:port; needs udp_enabled (\"\" clears)." },
+                        "allow_unspecified_bind": { field_type: FieldType::Bool, required: false, description: "Permit 0.0.0.0 / :: listen addresses (default false)." },
+                        "tls_cert_pem": { field_type: FieldType::Str, required: false, description: "RadSec server certificate chain (PEM)." },
+                        "tls_key_pem": { field_type: FieldType::SecretStr, required: false, description: "RadSec server private key (PEM); never returned." },
+                        "client_ca_pem": { field_type: FieldType::Str, required: false, description: "CA that NAS client certificates must chain to (PEM)." },
+                        "rate_limit_per_minute": { field_type: FieldType::Int, required: false, description: "Requests per source address per minute (default 120)." },
+                        "passcode_default_ttl": { field_type: FieldType::Str, required: false, description: "Default passcode lifetime (default 2m)." },
+                        "passcode_max_ttl": { field_type: FieldType::Str, required: false, description: "Longest passcode lifetime (default 5m, at most 15m)." }
+                    },
+                    operations: [
+                        {op: Operation::Read, handler: h_radius_config_read.handle_radius_config_read},
+                        {op: Operation::Write, handler: h_radius_config_write.handle_radius_config_write}
+                    ],
+                    help: "RADIUS provider settings and listener status. Until enabled, nothing listens and no passcode is minted."
+                },
+                {
+                    pattern: r"radius/clients/?$",
+                    operations: [
+                        {op: Operation::List, handler: h_radius_client_list.handle_radius_client_list}
+                    ],
+                    help: "List RADIUS NAS clients."
+                },
+                {
+                    pattern: r"radius/clients/(?P<name>[^/]+)$",
+                    fields: {
+                        "name": { field_type: FieldType::Str, required: false, description: "Client name." },
+                        "transport": { field_type: FieldType::Str, required: false, description: "radsec | udp; fixed at creation." },
+                        "environment": { field_type: FieldType::Str, required: false, description: "The one environment this NAS serves; fixed at creation." },
+                        "profile": { field_type: FieldType::Str, required: false, description: "Attribute profile of that environment." },
+                        "address": { field_type: FieldType::Str, required: false, description: "udp: the NAS source IP address." },
+                        "secret": { field_type: FieldType::SecretStr, required: false, description: "udp: shared secret, 16-128 printable characters; never returned." },
+                        "cert_sha256": { field_type: FieldType::Str, required: false, description: "radsec: SHA-256 (hex) of the NAS certificate." },
+                        "description": { field_type: FieldType::Str, required: false, description: "Free-text note." }
+                    },
+                    operations: [
+                        {op: Operation::Read, handler: h_radius_client_read.handle_radius_client_read},
+                        {op: Operation::Write, handler: h_radius_client_write.handle_radius_client_write},
+                        {op: Operation::Delete, handler: h_radius_client_delete.handle_radius_client_delete}
+                    ],
+                    help: "Register, read, update or remove a NAS client."
+                },
+                {
+                    pattern: r"radius/profiles/?$",
+                    operations: [
+                        {op: Operation::List, handler: h_radius_profile_list.handle_radius_profile_list}
+                    ],
+                    help: "List RADIUS attribute profiles."
+                },
+                {
+                    pattern: r"radius/profiles/(?P<name>[^/]+)$",
+                    fields: {
+                        "name": { field_type: FieldType::Str, required: false, description: "Profile name." },
+                        "environment": { field_type: FieldType::Str, required: false, description: "Environment; fixed at creation." },
+                        "roles": { field_type: FieldType::Map, required: false, description: "Role -> array of attributes ({attribute, value} or {attribute: vsa, vendor_id, vendor_type, value})." },
+                        "description": { field_type: FieldType::Str, required: false, description: "Free-text note." }
+                    },
+                    operations: [
+                        {op: Operation::Read, handler: h_radius_profile_read.handle_radius_profile_read},
+                        {op: Operation::Write, handler: h_radius_profile_write.handle_radius_profile_write},
+                        {op: Operation::Delete, handler: h_radius_profile_delete.handle_radius_profile_delete}
+                    ],
+                    help: "Vendor attributes an Access-Accept carries per environment role (fortinet-group-name, ...)."
+                },
+                {
+                    pattern: r"radius/passcode/(?P<environment>[^/]+)$",
+                    fields: {
+                        "environment": { field_type: FieldType::Str, required: false, description: "Environment name." },
+                        "roles": { field_type: FieldType::Array, required: false, description: "Subset of the entitled roles; default all." },
+                        "ttl": { field_type: FieldType::Str, required: false, description: "Lifetime; at most passcode_max_ttl." }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_radius_passcode.handle_radius_passcode}
+                    ],
+                    help: "Mint a one-time RADIUS passcode for the caller's own identity in one environment (self-service, gated)."
                 }
             ],
             help: IDP_BACKEND_HELP,

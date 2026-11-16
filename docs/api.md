@@ -2503,6 +2503,76 @@ GET  /v2/idp/deny-feed/key                    # {"algorithm", "key_id", "ed25519
 - Hosts need a token with `read` on `idp/ssh/krl` and `idp/deny-feed`. The
   reference host helper is described in the feature file.
 
+### Identity Provider: RADIUS (`v2` only, root namespace)
+
+Phase 4 of [`features/identity-provider.md`](../features/identity-provider.md).
+Same mount, guard and error mapping as above. The RADIUS protocol itself is
+served on its own sockets (RadSec TCP, opt-in UDP), not the HTTP API.
+
+~~~
+GET    /v2/idp/radius/config                  # {"enabled": false, "listening": {...}} until written
+POST   /v2/idp/radius/config                  # see below
+LIST   /v2/idp/radius/clients                 # keys + key_info {transport, environment, profile}
+POST   /v2/idp/radius/clients/{name}          # {"transport", "environment", "profile", "address", "secret", "cert_sha256", "description"}
+GET    /v2/idp/radius/clients/{name}          # never returns the secret ("secret_set": true)
+DELETE /v2/idp/radius/clients/{name}
+LIST   /v2/idp/radius/profiles                # keys + key_info {environment, roles}
+POST   /v2/idp/radius/profiles/{name}         # {"environment", "roles": {role: [attribute, ...]}, "description"}
+GET    /v2/idp/radius/profiles/{name}
+DELETE /v2/idp/radius/profiles/{name}         # 409 while a client uses it
+POST   /v2/idp/radius/passcode/{environment}  # {"roles", "ttl"}  (self-service)
+~~~
+
+- **Config** fields: `enabled` (default false), `radsec_listen`
+  (`IP:port`), `tls_cert_pem`, `tls_key_pem` (write-only; reads show
+  `tls_key_set`), `client_ca_pem` (NAS certificates must chain to it),
+  `udp_enabled` (default **false**) and `udp_listen`, `allow_unspecified_bind`
+  (default false: `0.0.0.0` / `::` are refused), `rate_limit_per_minute`
+  (per source address, default 120), `passcode_default_ttl` (2m) and
+  `passcode_max_ttl` (5m, at most 15m). An empty string clears a listen
+  address. RadSec needs all three PEMs; they are checked by building the TLS
+  configuration at write time (TLS 1.2 and 1.3, client certificate
+  required). `udp_listen` without `udp_enabled: true` is refused. **Classic
+  UDP RADIUS protects the password only with an MD5 construction keyed by
+  the shared secret: enable it on a trusted segment only.** Reads add
+  `listening: {radsec, udp, last_error}`, the addresses actually bound; the
+  listeners follow a write within moments.
+- **Clients** (one NAS each, bound to one environment and one profile of
+  it; `transport` and `environment` fixed at creation): `udp` clients are
+  identified by their source `address` and need a `secret` (16–128
+  printable characters, write-only); `radsec` clients by `cert_sha256`, the
+  lower-case hex SHA-256 of the NAS certificate (DER), and use the RFC 6614
+  shared secret `radsec`. An address or certificate maps to one client.
+- **Profiles** map environment roles to the vendor attributes an
+  Access-Accept carries: `{"attribute": "fortinet-group-name", "value":
+  "..."}` (also `fortinet-vdom-name`, `fortinet-access-profile`,
+  `cisco-avpair`) or `{"attribute": "vsa", "vendor_id": n, "vendor_type": n,
+  "value": "..."}`. Values are 1–247 bytes without control characters; each
+  role must exist on the environment; 1–8 attributes per role.
+- **Passcode**: the caller's own entity (a token without one is `403`),
+  gated as provider `radius-passcode` (`roles`: a subset of the entitled
+  roles, default all). Response: `passcode` (32 hex characters, returned
+  once, stored only as a SHA-256), `login`, `environment`, `roles`,
+  `expires_at`, `ttl`. At most 8 unexpired passcodes per identity (`429`).
+  `400` while the provider is not enabled.
+- **On the wire** the NAS sends `User-Name` = the login and `User-Password`
+  = the passcode (PAP), with a Message-Authenticator. An Access-Accept
+  needs a registered NAS, a valid Message-Authenticator, the login's
+  unexpired passcode for the NAS's environment (consumed on first
+  presentation), an allow from the issue gate (provider `radius`), and at
+  least one profile attribute for the granted roles. Unknown NAS, a
+  missing or wrong Message-Authenticator and a malformed packet are
+  discarded silently (RFC 2865 §3, RFC 3579 §3.2); every other refusal is
+  an Access-Reject carrying only a Message-Authenticator. CHAP, EAP and
+  Access-Challenge are not supported (Access-Reject). A retransmission
+  (same NAS, source, identifier and authenticator, within 30 s) gets the
+  cached reply. Each outcome is an `idp.radius.accept` or
+  `idp.radius.reject` audit event (`decision`, `reason`, `gate_reason`,
+  `client`, `environment`, `transport`, `peer`, `user_name`, `entity_id`;
+  never a password, passcode or secret). Drops before a NAS record is read
+  (unknown source, `rate_limited`, `busy`) are audited at most 30 times a
+  minute in all.
+
 ## Authentication Endpoints
 
 ### Token Login

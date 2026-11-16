@@ -532,4 +532,145 @@ mod idp_tests {
         assert_eq!(denies, [json!("identity_disabled")]);
         let _ = std::fs::remove_dir_all(audit_dir);
     }
+
+    /// Phase 4 end to end: a passcode minted through v2 by a userpass login,
+    /// sent by a NAS over the vault's own UDP listener, then a disable.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn idp_radius_access_requests_through_the_vault() {
+        use std::time::Duration;
+
+        use crate::modules::idp::provider::radius::packet::{
+            attr, code, encode_request, hide_password, parse, verify_response,
+        };
+
+        const SECRET: &str = "fortigate-shared-secret-01";
+        let (_bvault, core, root) = new_unseal_test_bastion_vault("idp_radius").await;
+        let ctx: &dyn VaultCtx = core.as_ref();
+        test_mount_api(ctx, &root, "idp", "idp").await;
+        let (audit_dir, audit_log) = enable_audit_file(ctx, "radius").await;
+
+        test_mount_auth_api_for_radius(ctx, &root).await;
+        let mut login = Request::new("auth/userpass/login/alice");
+        login.operation = Operation::Write;
+        login.body = json!({"password": "pw-123456"}).as_object().cloned();
+        let auth = ctx.handle_request(&mut login).await.unwrap().unwrap().auth.unwrap();
+        let (token, alice) = (auth.client_token.clone(), auth.metadata["entity_id"].clone());
+        data(
+            v2(ctx, &root, Operation::Write, &format!("idp/identities/{alice}"), Some(json!({"login": "alice"}))).await,
+        );
+        let env = json!({"namespace": "", "roles": {"netadmin": ["net-admin"], "readonly": ["net-ro"]}});
+        data(v2(ctx, &root, Operation::Write, "idp/environments/net", Some(env)).await);
+        let grant = json!({"roles": ["netadmin"]});
+        data(v2(ctx, &root, Operation::Write, &format!("idp/entitlements/{alice}/net"), Some(grant)).await);
+
+        // Off by default: no passcode, nothing listening.
+        let passcode = |body: Value| v2(ctx, &token, Operation::Write, "idp/radius/passcode/net", Some(body));
+        assert_eq!(status(passcode(json!({})).await), 400);
+        let cfg = data(v2(ctx, &root, Operation::Read, "idp/radius/config", None).await);
+        assert_eq!((cfg["enabled"].as_bool(), cfg["listening"]["udp"].clone()), (Some(false), Value::Null));
+
+        let profile = json!({"environment": "net", "roles": {
+            "netadmin": [{"attribute": "fortinet-group-name", "value": "bv-super"}]}});
+        data(v2(ctx, &root, Operation::Write, "idp/radius/profiles/fgt", Some(profile)).await);
+        let bad = json!({"environment": "net", "roles": {"dba": [{"attribute": "fortinet-group-name", "value": "x"}]}});
+        assert_eq!(status(v2(ctx, &root, Operation::Write, "idp/radius/profiles/bad", Some(bad)).await), 400);
+        let nas = json!({"transport": "udp", "environment": "net", "profile": "fgt",
+            "address": "127.0.0.1", "secret": SECRET});
+        let client = data(v2(ctx, &root, Operation::Write, "idp/radius/clients/fgt1", Some(nas)).await);
+        assert_eq!((client["secret_set"].as_bool(), client.get("secret")), (Some(true), None));
+        let read = data(v2(ctx, &root, Operation::Read, "idp/radius/clients/fgt1", None).await);
+        assert!(!Value::Object(read).to_string().contains(SECRET));
+
+        // UDP must be asked for explicitly; then the listener comes up.
+        let half = json!({"enabled": true, "udp_listen": "127.0.0.1:0"});
+        assert_eq!(status(v2(ctx, &root, Operation::Write, "idp/radius/config", Some(half)).await), 400);
+        let on = json!({"enabled": true, "udp_enabled": true, "udp_listen": "127.0.0.1:0"});
+        data(v2(ctx, &root, Operation::Write, "idp/radius/config", Some(on)).await);
+        let mut listening = None;
+        for _ in 0..250 {
+            let cfg = data(v2(ctx, &root, Operation::Read, "idp/radius/config", None).await);
+            if let Some(addr) = cfg["listening"]["udp"].as_str() {
+                listening = Some(addr.parse::<std::net::SocketAddr>().unwrap());
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let server = listening.expect("the UDP listener never came up");
+
+        // v2 only; self-service only (the root token has no entity).
+        assert_eq!(status(call(ctx, &token, Operation::Write, "idp/radius/passcode/net", None, 1, None).await), 400);
+        assert_eq!(status(v2(ctx, &root, Operation::Write, "idp/radius/passcode/net", Some(json!({}))).await), 403);
+        let minted = data(passcode(json!({"ttl": "1m"})).await);
+        let code_a = minted["passcode"].as_str().unwrap().to_string();
+        assert_eq!((minted["login"].as_str(), minted["ttl"].as_u64()), (Some("alice"), Some(60)));
+        assert_eq!(status(passcode(json!({"roles": ["readonly"]})).await), 403, "not entitled to readonly");
+        let code_b = data(passcode(json!({})).await)["passcode"].as_str().unwrap().to_string();
+
+        let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let exchange = |id: u8, user: &str, password: &str| {
+            let auth = [id; 16];
+            let hidden = hide_password(password.as_bytes(), SECRET.as_bytes(), &auth).unwrap();
+            let attrs = vec![(attr::USER_NAME, user.as_bytes().to_vec()), (attr::USER_PASSWORD, hidden)];
+            (encode_request(id, &auth, &attrs, SECRET.as_bytes()).unwrap(), auth)
+        };
+        let send = |pkt: Vec<u8>| {
+            let sock = &sock;
+            async move {
+                sock.send_to(&pkt, server).await.unwrap();
+                let mut buf = vec![0u8; 4096];
+                let got = tokio::time::timeout(Duration::from_secs(5), sock.recv_from(&mut buf)).await;
+                let (n, _) = got.expect("no reply").unwrap();
+                buf.truncate(n);
+                buf
+            }
+        };
+        let (pkt, auth) = exchange(1, "alice", &code_a);
+        let reply = send(pkt).await;
+        assert_eq!(reply[0], code::ACCESS_ACCEPT);
+        assert!(verify_response(&reply, &auth, SECRET.as_bytes()));
+        let p = parse(&reply).unwrap();
+        let vsa = p.attributes.iter().find(|a| a.kind == attr::VENDOR_SPECIFIC).unwrap();
+        assert_eq!(vsa.value, [&[0, 0, 0x30, 0x44, 1, 10][..], b"bv-super"].concat(), "Fortinet-Group-Name");
+
+        // Disabled after the passcode was minted: rejected at once.
+        let state = format!("idp/identities/{alice}/state");
+        data(v2(ctx, &root, Operation::Write, &state, Some(json!({"state": "disabled"}))).await);
+        let (pkt, auth) = exchange(2, "alice", &code_b);
+        let reply = send(pkt).await;
+        assert_eq!(reply[0], code::ACCESS_REJECT);
+        assert!(verify_response(&reply, &auth, SECRET.as_bytes()));
+
+        // The gate's events and the RADIUS events, with no secret in them.
+        let issued: Vec<Value> = audit_events(&audit_log, "idp.issue").iter().map(|e| e["provider"].clone()).collect();
+        assert_eq!(issued, [json!("radius-passcode"), json!("radius-passcode"), json!("radius")]);
+        let denied = audit_events(&audit_log, "idp.issue-denied");
+        let reasons: Vec<(Value, Value)> =
+            denied.iter().map(|e| (e["provider"].clone(), e["reason"].clone())).collect();
+        assert_eq!(
+            reasons,
+            [(json!("radius-passcode"), json!("role_not_entitled")), (json!("radius"), json!("identity_disabled"))]
+        );
+        let accepted = audit_events(&audit_log, "idp.radius.accept");
+        assert_eq!(accepted.len(), 1);
+        assert_eq!((accepted[0]["client"].as_str(), accepted[0]["user_name"].as_str()), (Some("fgt1"), Some("alice")));
+        let rejected = audit_events(&audit_log, "idp.radius.reject");
+        assert_eq!(rejected.len(), 1);
+        assert_eq!(rejected[0]["gate_reason"].as_str(), Some("identity_disabled"));
+        let log = std::fs::read_to_string(&audit_log).unwrap();
+        for secret in [SECRET, code_a.as_str(), code_b.as_str()] {
+            assert!(!log.contains(secret), "the audit log never holds a secret or a passcode");
+        }
+        data(v2(ctx, &root, Operation::Write, "idp/radius/config", Some(json!({"enabled": false}))).await);
+        let _ = std::fs::remove_dir_all(audit_dir);
+    }
+
+    /// userpass with alice, whose policy allows the passcode path only.
+    async fn test_mount_auth_api_for_radius(ctx: &dyn VaultCtx, root: &str) {
+        crate::test_utils::test_mount_auth_api(ctx, root, "userpass", "userpass").await;
+        let policy = r#"path "idp/radius/passcode/*" { capabilities = ["create", "update"] }"#;
+        let body = json!({"policy": policy}).as_object().cloned();
+        test_write_api(ctx, root, "sys/policy/idp-radius", true, body).await.unwrap();
+        let user = json!({"password": "pw-123456", "policies": "idp-radius"});
+        test_write_api(ctx, root, "auth/userpass/users/alice", true, user.as_object().cloned()).await.unwrap();
+    }
 }

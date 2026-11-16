@@ -164,6 +164,16 @@ impl PosixStore {
         Ok(out)
     }
 
+    /// The entity a login belongs to, by exact match. The login index is
+    /// never deleted, so a removed identity's login still resolves (and the
+    /// gate then denies it); an invalid login resolves to nothing.
+    pub async fn entity_for_login(&self, login: &str) -> Result<Option<String>, RvError> {
+        if validate_login(login).is_err() {
+            return Ok(None);
+        }
+        self.index_owner(LOGIN_INDEX, login).await
+    }
+
     // ─── Writes ─────────────────────────────────────────────────
 
     pub async fn put_config(&self, update: ConfigUpdate) -> Result<PosixConfig, RvError> {
