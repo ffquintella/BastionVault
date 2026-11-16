@@ -2573,6 +2573,123 @@ POST   /v2/idp/radius/passcode/{environment}  # {"roles", "ttl"}  (self-service)
   (unknown source, `rate_limited`, `busy`) are audited at most 30 times a
   minute in all.
 
+### Identity Provider: OIDC OP and SAML IdP (`v2` only, root namespace)
+
+Phase 5 of [`features/identity-provider.md`](../features/identity-provider.md).
+Same mount, guard and error mapping as above. The four relying-party paths
+marked *no token* are the mount's unauthenticated paths; everything else
+needs a token. Responses use the normal `data` envelope: no raw JSON or XML
+body, no redirect, and request bodies are JSON (see the caveat below).
+
+~~~
+GET    /v2/idp/oidc/config                       # {"enabled": false} until written
+POST   /v2/idp/oidc/config                       # {"enabled", "issuer", "authorization_endpoint", "id_token_ttl", "code_ttl"}
+GET    /v2/idp/oidc/keys                         # kid, current, published, certificate; never the private key
+POST   /v2/idp/oidc/keys/rotate                  # {"overlap"} (default 24h, 1h-30d)
+LIST   /v2/idp/oidc/clients                      # keys + key_info {environment, redirect_uris}
+POST   /v2/idp/oidc/clients/{client_id}          # {"environment", "redirect_uris", "initiate_login_uri", "description", "rotate_secret"}
+GET    /v2/idp/oidc/clients/{client_id}          # never returns the secret
+DELETE /v2/idp/oidc/clients/{client_id}
+POST   /v2/idp/oidc/authorize                    # self-service, see below
+POST   /v2/idp/oidc/token                        # no token
+GET    /v2/idp/oidc/jwks                         # no token
+GET    /v2/idp/oidc/.well-known/openid-configuration   # no token
+GET    /v2/idp/saml/config                       # {"enabled": false} until written
+POST   /v2/idp/saml/config                       # {"enabled", "entity_id", "sso_url", "assertion_ttl", "request_max_age"}
+GET    /v2/idp/saml/keys
+POST   /v2/idp/saml/keys/rotate                  # {"overlap"}
+LIST   /v2/idp/saml/sps                          # keys + key_info {entity_id, environment}
+POST   /v2/idp/saml/sps/{name}                   # {"entity_id", "acs_urls", "environment", "allow_idp_initiated", "description"}
+GET    /v2/idp/saml/sps/{name}
+DELETE /v2/idp/saml/sps/{name}
+POST   /v2/idp/saml/sso                          # self-service: {"saml_request", "binding", "relay_state", "roles"}
+POST   /v2/idp/saml/initiate/{name}              # self-service: {"relay_state", "roles"}
+GET    /v2/idp/saml/metadata                     # no token
+~~~
+
+- **Mapping.** An OIDC client and a SAML service provider are each bound at
+  creation, for life, to exactly one environment (an active one); its
+  entitlements decide who may sign in to it. Registered URLs
+  (`redirect_uris`, `acs_urls`, `sso_url`, `initiate_login_uri`) must be
+  `https`, printable ASCII without fragment or user info, and are matched
+  byte for byte, never normalised. An SP `entity_id` maps to one SP.
+- **OIDC config**: `issuer` is an `https` URL without trailing slash or
+  query, the `iss` of every token; the discovery document lists
+  `<issuer>/token` and `<issuer>/jwks`, so the issuer to configure is
+  `https://<vault>/v2/idp/oidc`. `authorization_endpoint` names the
+  browser-facing page that relays to `authorize` (default
+  `<issuer>/authorize`). `id_token_ttl` 5m (1m–1h), `code_ttl` 60s
+  (10s–10m). Off until `enabled: true` (discovery and JWKS answer `404`).
+- **Clients**: creating one, or `rotate_secret: true`, returns
+  `client_secret` once (256 random bits); only its SHA-256 is stored.
+- **Authorize** (the caller's own entity; a token without one is `403`):
+  `client_id`, `redirect_uri` (exactly one registered for that client),
+  `response_type` `code` (nothing else), `scope` containing `openid`
+  (unknown scopes dropped), `code_challenge` + `code_challenge_method`
+  `S256` (required; `plain` refused), optional `state`, `nonce` and `roles`
+  (subset of the entitled roles). Gated as provider `oidc-authorize`.
+  Returns `code` (single use), `redirect_to` (the registered URI plus
+  `code` and `state`), `expires_at`. A refusal is an error to the caller,
+  never a redirect: `invalid_client` `401`, others `400`, a gate denial
+  `403` (`access_denied`).
+- **Token** (no token; `client_secret_post` only): `grant_type`
+  `authorization_code`, `code`, `redirect_uri`, `client_id`,
+  `client_secret`, `code_verifier`. The client authenticates first; the code
+  is then consumed whatever happens. The gate is asked again (provider
+  `oidc`) with the roles granted at authorization, so a disable, removal or
+  revoked role in between denies. Returns `id_token` (RS256, `kid` = RFC
+  7638 thumbprint; claims `iss`, `sub` = entity id, `aud` = `azp` =
+  client id, `iat`, `exp`, `jti`, `nonce`, `preferred_username` = login,
+  `name`, `uid`, `gid`, `roles`, `groups`, `environment`), `access_token`
+  (an `at+jwt` no endpoint here accepts), `token_type` `Bearer`,
+  `expires_in`, `scope`. No refresh token, no userinfo endpoint.
+- **JWKS**: the current RSA-3072 key, plus retired keys until their
+  rotation overlap ends.
+- **SAML config**: `entity_id` (absolute URI, the `Issuer`), `sso_url` (the
+  browser-facing page that relays to `sso`; an AuthnRequest `Destination`,
+  if present, must equal it), `assertion_ttl` 5m (1m–10m),
+  `request_max_age` 5m (1m–15m).
+- **SSO**: `saml_request` as the SP sent it, `binding` `redirect` (DEFLATE +
+  base64, default) or `post` (base64), `relay_state` (at most 80 bytes,
+  echoed). The request must be a SAML 2.0 `AuthnRequest` from a registered
+  SP `Issuer`, issued within `request_max_age` (60 s skew), naming one of
+  its ACS URLs or none (the first is used); `AssertionConsumerServiceIndex`,
+  a binding other than HTTP-POST, `ForceAuthn`, a DTD and custom entities
+  are refused; a request ID is answered once. Request signatures are not
+  checked (metadata says `WantAuthnRequestsSigned="false"`). Gated as
+  provider `saml`. Returns `saml_response` (base64 Response, POST it with
+  `RelayState` to `acs_url`), `acs_url`, `binding`, `relay_state`,
+  `response_id`, `assertion_id`, `not_on_or_after`.
+- **Initiate**: an unsolicited response (no `InResponseTo`) to the SP's
+  first ACS URL, only when the SP has `allow_idp_initiated: true` (`403`
+  otherwise).
+- **Assertions**: one per response, signed (enveloped XML-DSig, exclusive
+  C14N, SHA-256, RSA-SHA256, `KeyInfo` with the certificate); the Response
+  itself is not signed and nothing is encrypted. `NameID` (format
+  `unspecified`) = login; `Audience` = SP entity ID; bearer
+  `SubjectConfirmationData` with `Recipient` and, SP-initiated,
+  `InResponseTo`; attributes `login`, `uid`, `gid`, `roles`, `groups`,
+  `environment`, `display_name`.
+- **Metadata** (no token): `metadata` (the EntityDescriptor XML, unsigned;
+  every published signing certificate, Redirect and POST SSO services on
+  `sso_url`), `entity_id`, `sso_url`, `certificate` (current, PEM).
+- **Keys** are created on first use, behind the barrier; an unreadable key
+  ring is an error, never replaced. `rotate` makes a new key current and
+  keeps the old one published (JWKS, metadata) for `overlap`.
+- **Audit**: besides the gate's `idp.issue` / `idp.issue-denied`, a token is
+  `idp.oidc.token` (`client_id`, `entity_id`, `login`, `uid`,
+  `environment`, `roles`, `kid`, `jti`, `expires_at`), a response
+  `idp.saml.response` (`service_provider`, `acs_url`, `initiated_by`,
+  `response_id`, `assertion_id`, `in_response_to`, `kid`, ...), and every
+  refusal `idp.oidc.refused` / `idp.saml.refused` (`stage`, `reason`,
+  `gate_reason`). No event carries a code, secret, token or assertion. A
+  token or response whose event cannot be recorded is not returned.
+- **Caveat**: the vault's HTTP layer only speaks the JSON envelope, so a
+  standard relying party cannot yet fetch discovery, the JWKS or metadata
+  directly, POST a form-encoded token request, or be redirected; a
+  browser-facing relay (the GUI, Phase 7 / T107) or an HTTP adapter has to
+  carry these. Nothing has been run against a real SP or RP.
+
 ## Authentication Endpoints
 
 ### Token Login

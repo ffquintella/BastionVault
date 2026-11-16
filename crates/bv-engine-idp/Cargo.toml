@@ -8,13 +8,12 @@ repository = "https://github.com/ffquintella/BastionVault"
 
 publish = ["uox-bastionvault"]
 
-# Tier 3 (roadmaps/workspace-decomposition.md § Phase 3): bv-kernel-api +
-# Tier 0 only. features/identity-provider.md (T52, S19), Phase 1: the POSIX
+# Tier 3 (roadmaps/workspace-decomposition.md § Phase 3): bv-kernel-api, Tier 0
+# and sibling bv-auth-saml. features/identity-provider.md (T52, S19), Phase 1: the POSIX
 # identity core; Phase 2: environments, entitlements and the issue gate;
 # Phase 3: SSH identity certificates, the KRL and the signed deny feed.
-# Phase 4: the RADIUS provider. No primitive is implemented here: the SSH
-# engine signs certificates, bv_crypto the feed, rustls does TLS, and
-# RADIUS's MD5 constructions use RustCrypto's md-5 and hmac.
+# Phase 4: the RADIUS provider. Phase 5: SAML IdP and OIDC OP (aws-lc signs,
+# bv-auth-saml canonicalises). No primitive is implemented here.
 
 [dependencies]
 bv-errors = { path = "../bv-errors", version = "0.41.0", registry = "uox-bastionvault" }
@@ -75,7 +74,31 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc
 # One-time RADIUS passcodes: the same CSPRNG source the SSH engine's OTPs use.
 rand = "0.10"
 
+# Phase 5 (SAML IdP + OIDC OP). Every crate below is already in the lockfile;
+# no new C dependency.
+# The SAML auth backend's exclusive XML C14N (`verify::canonicalise_exclusive`)
+# and, in tests, its Response parser and signature verifier: the IdP signs
+# with the canonicaliser the SP side verifies with, never a second one.
+bv-auth-saml = { path = "../bv-auth-saml", version = "0.41.5", registry = "uox-bastionvault" }
+# RSA-3072 key generation and RSASSA-PKCS1-v1_5 SHA-256 signing (XML-DSig
+# rsa-sha256, JWS RS256). The constant-time aws-lc backend rustls already
+# links here, instead of RustCrypto `rsa` (RUSTSEC-2023-0071, no fix).
+aws-lc-rs = "1"
+# Self-signed X.509 certificate around the SAML signing key, for metadata.
+# Default (ring) features, as the root and the dev-dependency declare it, so
+# no other crate's rcgen or x509-parser feature set changes.
+rcgen = "0.14"
+# HTTP-Redirect binding: raw DEFLATE of an inbound AuthnRequest.
+flate2 = "1"
+# AuthnRequest parsing (namespace-aware), as bv-auth-saml.
+quick-xml = "0.41"
+# Validates registered ACS and redirect URIs and builds the code redirect.
+url = "2"
+
 [dev-dependencies]
+# An independent OpenID relying-party library checks the OP's discovery
+# document, JWKS and ID tokens (RustCrypto RSA, not aws-lc). No HTTP client.
+openidconnect = { version = "4", default-features = false }
 # Throwaway CA, server and NAS certificates for the RadSec listener test.
 # Same declaration as bv-hsm-link's dev-dependency.
 rcgen = "0.14"

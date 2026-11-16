@@ -1,14 +1,20 @@
 //! The `v2/idp/...` logical surface: identities CRUD, the lifecycle state
 //! endpoint, `idp/config`, (Phase 2, [`authz`]) environments and
 //! entitlements, (Phase 3, [`ssh`]) SSH sign, the KRL and the deny feed,
-//! and (Phase 4, [`radius`]) the RADIUS provider's configuration, NAS
-//! clients, attribute profiles and self-service passcodes.
-//! Every handler runs [`IdpBackendInner::guard`] first: v2 only, root
-//! namespace only, root-table mount only.
+//! (Phase 4, [`radius`]) RADIUS, and (Phase 5, [`oidc`], [`saml`]) the
+//! OIDC OP and SAML IdP. Every handler runs [`IdpBackendInner::guard`]
+//! first: v2 only, root namespace only, root-table mount only.
 
 mod authz;
+mod oidc;
 mod radius;
+mod saml;
 mod ssh;
+
+/// Served without a vault token: discovery, JWKS and metadata are public,
+/// and the token endpoint authenticates the client by secret and PKCE.
+pub const UNAUTH_PATHS: &[&str] =
+    &["oidc/.well-known/openid-configuration", "oidc/jwks", "oidc/token", "saml/metadata"];
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -44,7 +50,9 @@ identity-bound SSH certificates through the SSH engine and publishes their
 revocation as an OpenSSH KRL and a signed, versioned deny feed. It answers
 RADIUS Access-Requests from registered NAS clients (RadSec by default, UDP
 opt-in) with per-role vendor attributes, against one-time passcodes the
-human mints here. Served under /v2 only, from the root namespace only.
+human mints here. It is a SAML 2.0 IdP and an OpenID Provider (code flow
+with PKCE) for registered service providers and clients, each bound to one
+environment. Served under /v2 only, from the root namespace only.
 "#;
 
 pub struct IdpBackendInner {
@@ -105,8 +113,31 @@ impl IdpBackend {
         let h_radius_profile_write = self.inner.clone();
         let h_radius_profile_delete = self.inner.clone();
         let h_radius_passcode = self.inner.clone();
+        let h_oidc_config_read = self.inner.clone();
+        let h_oidc_config_write = self.inner.clone();
+        let h_oidc_keys_read = self.inner.clone();
+        let h_oidc_keys_rotate = self.inner.clone();
+        let h_oidc_client_list = self.inner.clone();
+        let h_oidc_client_read = self.inner.clone();
+        let h_oidc_client_write = self.inner.clone();
+        let h_oidc_client_delete = self.inner.clone();
+        let h_oidc_authorize = self.inner.clone();
+        let h_oidc_token = self.inner.clone();
+        let h_oidc_jwks = self.inner.clone();
+        let h_oidc_discovery = self.inner.clone();
+        let h_saml_config_read = self.inner.clone();
+        let h_saml_config_write = self.inner.clone();
+        let h_saml_keys_read = self.inner.clone();
+        let h_saml_keys_rotate = self.inner.clone();
+        let h_saml_sp_list = self.inner.clone();
+        let h_saml_sp_read = self.inner.clone();
+        let h_saml_sp_write = self.inner.clone();
+        let h_saml_sp_delete = self.inner.clone();
+        let h_saml_sso = self.inner.clone();
+        let h_saml_initiate = self.inner.clone();
+        let h_saml_metadata = self.inner.clone();
 
-        new_logical_backend!({
+        let mut backend = new_logical_backend!({
             paths: [
                 {
                     pattern: r"config$",
@@ -336,10 +367,203 @@ impl IdpBackend {
                         {op: Operation::Write, handler: h_radius_passcode.handle_radius_passcode}
                     ],
                     help: "Mint a one-time RADIUS passcode for the caller's own identity in one environment (self-service, gated)."
+                },
+                {
+                    pattern: r"oidc/config$",
+                    fields: {
+                        "enabled": { field_type: FieldType::Bool, required: false, description: "Issue codes and tokens (default false)." },
+                        "issuer": { field_type: FieldType::Str, required: false, description: "https issuer URL, no trailing slash; discovery is served under it." },
+                        "authorization_endpoint": { field_type: FieldType::Str, required: false, description: "Browser-facing page that relays to v2/idp/oidc/authorize (default <issuer>/authorize; \"\" clears)." },
+                        "id_token_ttl": { field_type: FieldType::Str, required: false, description: "ID token lifetime (default 5m, 1m-1h)." },
+                        "code_ttl": { field_type: FieldType::Str, required: false, description: "Authorization code lifetime (default 60s, 10s-10m)." }
+                    },
+                    operations: [
+                        {op: Operation::Read, handler: h_oidc_config_read.handle_oidc_config_read},
+                        {op: Operation::Write, handler: h_oidc_config_write.handle_oidc_config_write}
+                    ],
+                    help: "OpenID Provider settings. Until enabled, no code or token is issued."
+                },
+                {
+                    pattern: r"oidc/keys$",
+                    operations: [
+                        {op: Operation::Read, handler: h_oidc_keys_read.handle_oidc_keys_read}
+                    ],
+                    help: "The OP's signing keys (kid, state, certificate; never the private key)."
+                },
+                {
+                    pattern: r"oidc/keys/rotate$",
+                    fields: {
+                        "overlap": { field_type: FieldType::Str, required: false, description: "How long the retired key stays in the JWKS (default 24h, 1h-30d)." }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_oidc_keys_rotate.handle_oidc_keys_rotate}
+                    ],
+                    help: "Make a new signing key current; the old one stays published for the overlap."
+                },
+                {
+                    pattern: r"oidc/clients/?$",
+                    operations: [
+                        {op: Operation::List, handler: h_oidc_client_list.handle_oidc_client_list}
+                    ],
+                    help: "List OIDC clients."
+                },
+                {
+                    pattern: r"oidc/clients/(?P<name>[^/]+)$",
+                    fields: {
+                        "name": { field_type: FieldType::Str, required: false, description: "Client id." },
+                        "environment": { field_type: FieldType::Str, required: false, description: "The one environment this client serves; fixed at creation." },
+                        "redirect_uris": { field_type: FieldType::Array, required: false, description: "https redirect URIs, matched exactly." },
+                        "initiate_login_uri": { field_type: FieldType::Str, required: false, description: "The RP's third-party-initiated login URI (\"\" clears)." },
+                        "description": { field_type: FieldType::Str, required: false, description: "Free-text note." },
+                        "rotate_secret": { field_type: FieldType::Bool, required: false, description: "Mint a new client secret (returned once)." }
+                    },
+                    operations: [
+                        {op: Operation::Read, handler: h_oidc_client_read.handle_oidc_client_read},
+                        {op: Operation::Write, handler: h_oidc_client_write.handle_oidc_client_write},
+                        {op: Operation::Delete, handler: h_oidc_client_delete.handle_oidc_client_delete}
+                    ],
+                    help: "Register, read, update or remove a relying party. Creating one returns its secret once."
+                },
+                {
+                    pattern: r"oidc/authorize$",
+                    fields: {
+                        "client_id": { field_type: FieldType::Str, required: false, description: "Registered client." },
+                        "redirect_uri": { field_type: FieldType::Str, required: false, description: "One of the client's redirect_uris, exactly." },
+                        "response_type": { field_type: FieldType::Str, required: false, description: "code (the only one)." },
+                        "scope": { field_type: FieldType::Str, required: false, description: "Must include openid." },
+                        "state": { field_type: FieldType::Str, required: false, description: "Echoed to the redirect." },
+                        "nonce": { field_type: FieldType::Str, required: false, description: "Echoed into the ID token." },
+                        "code_challenge": { field_type: FieldType::Str, required: false, description: "PKCE challenge (required)." },
+                        "code_challenge_method": { field_type: FieldType::Str, required: false, description: "S256 (required)." },
+                        "roles": { field_type: FieldType::Array, required: false, description: "Subset of the entitled roles; default all." }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_oidc_authorize.handle_oidc_authorize}
+                    ],
+                    help: "Mint a single-use authorization code for the caller's own identity (self-service, gated)."
+                },
+                {
+                    pattern: r"oidc/token$",
+                    fields: {
+                        "grant_type": { field_type: FieldType::Str, required: false, description: "authorization_code (the only one)." },
+                        "code": { field_type: FieldType::SecretStr, required: false, description: "The authorization code." },
+                        "redirect_uri": { field_type: FieldType::Str, required: false, description: "The redirect_uri the code was minted for." },
+                        "client_id": { field_type: FieldType::Str, required: false, description: "Client id." },
+                        "client_secret": { field_type: FieldType::SecretStr, required: false, description: "Client secret (client_secret_post)." },
+                        "code_verifier": { field_type: FieldType::SecretStr, required: false, description: "PKCE verifier." }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_oidc_token.handle_oidc_token}
+                    ],
+                    help: "Token endpoint (no vault token): redeem a code for an RS256 ID token."
+                },
+                {
+                    pattern: r"oidc/jwks$",
+                    operations: [
+                        {op: Operation::Read, handler: h_oidc_jwks.handle_oidc_jwks}
+                    ],
+                    help: "The OP's public signing keys (no vault token)."
+                },
+                {
+                    pattern: r"oidc/\.well-known/openid-configuration$",
+                    operations: [
+                        {op: Operation::Read, handler: h_oidc_discovery.handle_oidc_discovery}
+                    ],
+                    help: "OpenID Connect discovery document (no vault token)."
+                },
+                {
+                    pattern: r"saml/config$",
+                    fields: {
+                        "enabled": { field_type: FieldType::Bool, required: false, description: "Issue assertions (default false)." },
+                        "entity_id": { field_type: FieldType::Str, required: false, description: "The IdP's entity ID (absolute URI)." },
+                        "sso_url": { field_type: FieldType::Str, required: false, description: "Browser-facing SSO page that relays to v2/idp/saml/sso (https)." },
+                        "assertion_ttl": { field_type: FieldType::Str, required: false, description: "Assertion lifetime (default 5m, 1m-10m)." },
+                        "request_max_age": { field_type: FieldType::Str, required: false, description: "Oldest AuthnRequest accepted (default 5m, 1m-15m)." }
+                    },
+                    operations: [
+                        {op: Operation::Read, handler: h_saml_config_read.handle_saml_config_read},
+                        {op: Operation::Write, handler: h_saml_config_write.handle_saml_config_write}
+                    ],
+                    help: "SAML IdP settings. Until enabled, no assertion is issued."
+                },
+                {
+                    pattern: r"saml/keys$",
+                    operations: [
+                        {op: Operation::Read, handler: h_saml_keys_read.handle_saml_keys_read}
+                    ],
+                    help: "The IdP's signing keys (kid, state, certificate; never the private key)."
+                },
+                {
+                    pattern: r"saml/keys/rotate$",
+                    fields: {
+                        "overlap": { field_type: FieldType::Str, required: false, description: "How long the retired certificate stays in metadata (default 24h, 1h-30d)." }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_saml_keys_rotate.handle_saml_keys_rotate}
+                    ],
+                    help: "Make a new signing key current; the old certificate stays in metadata for the overlap."
+                },
+                {
+                    pattern: r"saml/sps/?$",
+                    operations: [
+                        {op: Operation::List, handler: h_saml_sp_list.handle_saml_sp_list}
+                    ],
+                    help: "List SAML service providers."
+                },
+                {
+                    pattern: r"saml/sps/(?P<name>[^/]+)$",
+                    fields: {
+                        "name": { field_type: FieldType::Str, required: false, description: "Service provider name." },
+                        "entity_id": { field_type: FieldType::Str, required: false, description: "The SP's entity ID (AuthnRequest Issuer); fixed at creation." },
+                        "acs_urls": { field_type: FieldType::Array, required: false, description: "https ACS URLs, matched exactly; the first is the default." },
+                        "environment": { field_type: FieldType::Str, required: false, description: "The one environment this SP serves; fixed at creation." },
+                        "allow_idp_initiated": { field_type: FieldType::Bool, required: false, description: "Allow unsolicited responses (default false)." },
+                        "description": { field_type: FieldType::Str, required: false, description: "Free-text note." }
+                    },
+                    operations: [
+                        {op: Operation::Read, handler: h_saml_sp_read.handle_saml_sp_read},
+                        {op: Operation::Write, handler: h_saml_sp_write.handle_saml_sp_write},
+                        {op: Operation::Delete, handler: h_saml_sp_delete.handle_saml_sp_delete}
+                    ],
+                    help: "Register, read, update or remove a service provider."
+                },
+                {
+                    pattern: r"saml/sso$",
+                    fields: {
+                        "saml_request": { field_type: FieldType::Str, required: false, description: "The SAMLRequest value as the SP sent it." },
+                        "binding": { field_type: FieldType::Str, required: false, description: "redirect (DEFLATE + base64, default) | post (base64)." },
+                        "relay_state": { field_type: FieldType::Str, required: false, description: "RelayState to echo, at most 80 bytes." },
+                        "roles": { field_type: FieldType::Array, required: false, description: "Subset of the entitled roles; default all." }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_saml_sso.handle_saml_sso}
+                    ],
+                    help: "Answer an SP's AuthnRequest with a signed response for the caller's own identity (self-service, gated)."
+                },
+                {
+                    pattern: r"saml/initiate/(?P<name>[^/]+)$",
+                    fields: {
+                        "name": { field_type: FieldType::Str, required: false, description: "Service provider name." },
+                        "relay_state": { field_type: FieldType::Str, required: false, description: "RelayState to send, at most 80 bytes." },
+                        "roles": { field_type: FieldType::Array, required: false, description: "Subset of the entitled roles; default all." }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_saml_initiate.handle_saml_initiate}
+                    ],
+                    help: "An IdP-initiated signed response for an SP that allows it (self-service, gated)."
+                },
+                {
+                    pattern: r"saml/metadata$",
+                    operations: [
+                        {op: Operation::Read, handler: h_saml_metadata.handle_saml_metadata}
+                    ],
+                    help: "The IdP metadata XML (no vault token)."
                 }
             ],
             help: IDP_BACKEND_HELP,
-        })
+        });
+        backend.unauth_paths = Arc::new(UNAUTH_PATHS.iter().map(|p| p.to_string()).collect());
+        backend
     }
 }
 
