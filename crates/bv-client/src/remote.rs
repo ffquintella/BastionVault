@@ -89,6 +89,17 @@ const QUERY_COMPONENT: &AsciiSet = &CONTROLS
     .add(b'[')
     .add(b']');
 
+/// True for an auth-method login endpoint (`auth/<mount>/login`, optionally
+/// namespace-prefixed), which is called without a token. A bare `ends_with
+/// ("/login")` test also matched data paths whose last segment is the user's
+/// own name, e.g. a resource secret called `login`
+/// (`resource/secrets/<res>/login`), and silently dropped the token on them.
+fn is_auth_login_path(path: &str) -> bool {
+    let segs: Vec<&str> = path.trim_matches('/').split('/').collect();
+    let n = segs.len();
+    n >= 3 && segs[n - 1] == "login" && segs[n - 3] == "auth"
+}
+
 /// Percent-encode a raw query string pair-wise, keeping `&` and `=` as
 /// structure and encoding whatever sits inside each key and value. Callers
 /// glue selectors onto a logical path unencoded (`secret/data/app?env=us
@@ -625,7 +636,7 @@ impl RemoteBackend {
         let response_result = tokio::task::spawn_blocking(move || {
             let mut builder = Request::builder().method(method).uri(&url).header("Accept", "application/json");
 
-            if !path_owned.ends_with("/login") && !token.is_empty() {
+            if !is_auth_login_path(&path_owned) && !token.is_empty() {
                 builder = builder.header("X-BastionVault-Token", &token);
             }
             if let Some(ns) = &namespace {
@@ -1026,6 +1037,25 @@ impl RemoteBackend {
             )));
         }
         Ok(Some(body))
+    }
+}
+
+#[cfg(test)]
+mod login_path_tests {
+    use super::is_auth_login_path;
+
+    #[test]
+    fn auth_logins_are_tokenless() {
+        assert!(is_auth_login_path("auth/approle/login"));
+        assert!(is_auth_login_path("ns1/auth/cert/login"));
+        assert!(is_auth_login_path("v1/auth/oidc/login"));
+    }
+
+    #[test]
+    fn data_paths_named_login_keep_their_token() {
+        assert!(!is_auth_login_path("resource/secrets/BD-SQL-1/login"));
+        assert!(!is_auth_login_path("secret/data/login"));
+        assert!(!is_auth_login_path("auth/userpass/login/bob"));
     }
 }
 
