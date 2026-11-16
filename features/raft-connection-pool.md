@@ -2,7 +2,7 @@
 
 > Status: **in the product build since the `Cargo.lock` pin to fork commit `6bcb940`
 > (2026-11-11), with an HA test that fails without it; hiqlite's cluster suite passes; not yet
-> validated on a staging pair or a real cluster (T480, T481, S118)**. 0.46.0 shipped without it,
+> validated on a staging pair or a real cluster; T480 declared done by the operator on 2026-11-16 without that validation (T480, T481, S118)**. 0.46.0 shipped without it,
 > see "What went wrong with 0.46.0". The pool and its unit tests are in
 > `third_party/hiqlite/hiqlite/src/network/raft_client.rs`. Extends
 > [Raft Timeout Tuning](raft-timeout-tuning.md) (S117), which it completes.
