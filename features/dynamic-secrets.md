@@ -21,7 +21,7 @@ The framework itself is built on the existing pure-Rust stack — no OpenSSL any
 
 ## Current State
 
-**Status: in progress (T62).** Slices 1 to 6 are done, the GUI included.
+**Status: done (T62), closed 2026-11-16.** Slices 1 to 6 are done, the GUI included. Closed without a CI job for the two container tests and without host connectors for the other four DBMSs (see "Not yet" below).
 
 | Slice | Scope | State |
 |---|---|---|
