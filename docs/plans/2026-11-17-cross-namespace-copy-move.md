@@ -5,10 +5,11 @@
 > - **Task 2b added (ACL on the real path).** Review found that an import route is its own ACL path, so deny rules, owner and share scopes and per-secret paths for the real item did not apply. A policy-layer mapping now authorises `<mount>/v2/transfer/import/<p>` against the path a normal write is checked on.
 > - **Task 4 split into 4a and 4b.** 4a is the orchestrator (reads, rights probes, `dry_run`, collisions, import, caller ownership, verified move, route); 4b is shares, asset-group membership and attached files.
 > - **`overwrite` and `rename` are orchestrator-level.** The two import endpoints accept `on_conflict` `refuse` only. The orchestrator implements `rename` as `refuse` imports at `<name>-<n>` (so the ACL checks every name) and `overwrite` as an ordinary DELETE of the destination followed by an import, so it is not atomic. This supersedes the plan's `on_conflict` text for the endpoints and its "write on the import path allows overwrite" notes.
-> - **Per-resource cap of 1000 secrets** on the import, and the KV import is reachable over HTTP only under `/v1/` (internal use).
+> - **Per-resource cap of 1000 secrets** on the import.
+> - **Import routes internal-only (final review).** Both import routes answer 404 to any request the orchestrator did not mark in-process, over HTTP or not, so no client can supply history, origins or version authors; this replaced an earlier acceptance of the KV import being reachable under `/v1/`.
 > - **Scope trimmed in Task 6.** The GUI action shipped on the Resources page only; the KV secrets page is a follow-up (T496).
 >
-> The result is recorded in `features/cross-namespace-copy-move.md` (see "Known limits") and `ROADMAP.md` (T494, follow-ups T496-T501).
+> The result is recorded in `features/cross-namespace-copy-move.md` (see "Known limits") and `ROADMAP.md` (T494, follow-ups T496-T505).
 
 > For agents: use `subagent-driven-development` (recommended) or `executing-plans` to
 > implement this plan task by task. Steps use checkbox (`- [ ]`) syntax for tracking.

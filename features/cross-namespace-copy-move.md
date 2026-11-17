@@ -34,7 +34,7 @@ membership, from three surfaces:
 
 Not done: the KV secrets page has no action yet (the modal and the command
 are reusable), and the GUI was proven only in jsdom, not in a live window.
-Follow-ups are tracked in `ROADMAP.md` (T496-T501). What the feature cannot
+Follow-ups are tracked in `ROADMAP.md` (T496-T505). What the feature cannot
 carry is under "Known limits".
 
 Closest existing behaviour before this feature, reused as the pattern, not
@@ -141,8 +141,9 @@ value.
 `rename` and `overwrite` are the orchestrator's doing. The two import routes
 it writes through accept `refuse` only: rename tries `refuse` imports at
 `<name>-2` ... `<name>-100` so the ACL checks every name it attempts, and
-overwrite is an ordinary DELETE of the destination (which cleans up its
-owner, shares and groups) followed by an import.
+overwrite tries the import first and, if the name is taken, runs an ordinary
+DELETE of the destination (which cleans up its owner, shares and groups) and
+imports again.
 
 ## Security notes
 
@@ -161,11 +162,16 @@ owner, shares and groups) followed by an import.
   (operation, kind, user, both paths, counts), never a value.
 - Versioning data written to the destination keeps version numbers and
   timestamps from the source; the history entry marks the arrival.
-- The two import routes are authorised against the **real** item path (the
+- The two import routes are **internal-only**: the orchestrator marks its own
+  import sub-requests in-process (`Request::ctx`, which HTTP cannot set), and
+  any other request to them, over HTTP or in-process, is answered as an
+  unknown route (404) by the policy layer and again by the handler, before
+  its body is read or anything is looked up. A client therefore cannot write
+  history, origins or version authors of its choosing. As defence in depth,
+  the marked imports are authorised against the **real** item path (the
   policy layer maps `<mount>/v2/transfer/import/<p>` to the path a normal
   write is checked on), so deny rules, owner and share scopes and per-secret
-  paths apply, and a grant on the import route alone allows nothing. One
-  transfer carries at most 1000 secrets per resource.
+  paths apply. One transfer carries at most 1000 secrets per resource.
 - No persisted-format change is expected; if one is needed, apply the
   read-old / write-new rule before building.
 
@@ -192,39 +198,48 @@ owner, shares and groups) followed by an import.
   every other case the blobs stay where they are, attached to the source name,
   and `files-not-transferred` says so. Each namespace has its own files
   engine.
-- **Overwrite is a delete and then an import, so it is not atomic**: if the
-  import fails, the destination stays deleted (the error says so). It cannot
+- **Overwrite is not atomic**: it tries the import first; if the name is
+  taken it deletes the destination and imports again, and if that import
+  fails the destination stays deleted (the error says so). It cannot
   pre-check the brokered-resource and agent-access gates, which depend on the
   asset groups the delete prunes.
 - **At most 1000 secrets per resource** (400 above that).
 - **Soft-deleted KV versions** are copied as destroyed, with a
-  `deleted-version-not-recoverable` warning.
+  `deleted-version-not-recoverable` warning. A move then deletes the only
+  copy `undelete` could still recover, and its warning says so.
 - **KV environment overrides** are rebuilt from per-environment reads, so an
   override equal to its base value is normalised away
   (`kv-environment-overrides-normalized`).
 - **Group membership updates are read-modify-write**: a concurrent edit to
   that asset group between the read and the write can be lost.
-- **Tokens bound to a CIDR are refused**: the steps are internal sub-requests
-  with no client address, so the binding fails closed.
+- **Tokens bound to a CIDR are refused** before any step (403 naming the
+  binding): the steps are internal sub-requests with no client address, so
+  the binding could not be checked on them.
+- **Use-limited tokens** (`num_uses`) spend one use per sub-request (each
+  read, rights check, import, share write and delete), so a transfer can
+  exhaust the token partway. That is data-safe: what was copied stands and the
+  source is untouched until the copy is complete, when a move deletes it.
+  The exception is an overwrite whose token runs out between its delete and
+  its import, which leaves the destination deleted like any failed overwrite.
 - **Rights.** The route is evaluated in the request's active namespace and
   needs `update` on `sys/namespace-transfer/*` plus `sys/capabilities-self`
   there; no built-in policy grants the former. `bvault transfer` has no flag
   for the namespace header (planned).
 - **Policies naming the source path are not rewritten** (always warned as
   `policies-not-carried`).
-- **The import routes are internal building blocks.**
+- **The import routes are internal-only.**
   `resources/v2/transfer/import/<name>` and `<kv-mount>/v2/transfer/import/<p>`
-  exist for the orchestrator; they are refuse-only and ACL-checked against the
-  real path. The KV one is reachable over HTTP only under `/v1/`, in tension
-  with the frozen-`v1` rule in `AGENTS.md` section 7. Do not call them
-  directly.
+  exist for the orchestrator and cannot be called directly: any request the
+  orchestrator did not mark is answered 404, as an unknown route, whatever
+  the caller's rights and whether or not the item exists. The orchestrator's
+  own imports are refuse-only and ACL-checked against the real path.
 
 ## Phases
 
 | Phase | Content | Status |
 |---|---|---|
 | 1 | Engine-side import of a resource and a KV secret with versions and history, collision handling | Done |
-| 2 | Import routes authorised against the real item path (ACL, owner and share scopes) | Done |
+| 2 | Import routes authorised against the real item path (ACL, owner and share scopes) and internal-only (404 unless the orchestrator marked the request) | Done |
 | 3 | Share planner, `dry_run`, warnings | Done |
 | 4 | Orchestrator and `POST /v2/sys/namespace-transfer/{copy\|move}`: rights checks, refuse / rename / overwrite, verified move, shares, asset-group membership, files | Done |
 | 5 | `bvault transfer copy\|move` | Done |

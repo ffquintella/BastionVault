@@ -949,9 +949,15 @@ POST /v2/sys/namespace-transfer/move
 - The route itself is evaluated in the request's **active namespace** (the
   `X-Vault-Namespace` header, root when absent), so the caller's policy must
   grant `update` on `sys/namespace-transfer/*` and `sys/capabilities-self`
-  there. A token bound to CIDRs (`token_bound_cidrs`) cannot run a transfer:
-  the steps are internal sub-requests that carry no client address, so the
-  binding fails closed.
+  there. A token bound to CIDRs (`token_bound_cidrs`) is refused before any
+  step (403, `tokens bound to CIDRs cannot run namespace transfers`): the
+  steps are internal sub-requests that carry no client address, so the
+  binding could not be checked on them. A use-limited token (`num_uses`)
+  spends one use per step (every read, rights check, import, share write
+  and delete), so a transfer can run out partway. That is data-safe: what
+  was copied stands, and a move deletes the source only once the copy is complete.
+  The exception is an overwrite whose token runs out between its delete and
+  its import, which leaves the destination deleted like any failed overwrite.
 - Every step is an ordinary request made with the **caller's token** in the
   namespace it touches. The caller needs:
   - `update` on `sys/namespace-transfer/*` (this route; no built-in policy
@@ -988,6 +994,8 @@ POST /v2/sys/namespace-transfer/move
   the origin and the origin owner. At most 1000 secrets per resource (400).
 - A soft-deleted KV version cannot be read, so it arrives destroyed with a
   `deleted-version-not-recoverable` warning; the source is never undeleted.
+  On a `move` the warning says that the move deletes the only recoverable
+  copy of that version: once the source is deleted, it cannot be undeleted.
 - **Shares.** The source's shares are read through
   `identity/sharing/by-target/...` (only the item's owner or an
   administrator may list them; otherwise `shares-unreadable`). Each is
@@ -1051,19 +1059,24 @@ satisfies by making the caller the owner.
 an overwrite; the server does not return that code.
 
 **Internal import routes.** The transfer writes through two building-block
-routes that exist for it: `POST resources/v2/transfer/import/<name>` and
-`POST <kv-mount>/v2/transfer/import/<path>`. Do not call them directly. They
-take the item as the transfer read it (versions with their numbers and
-timestamps, history, settings), refuse a name that is taken (`on_conflict`
-accepts `refuse` only; rename and overwrite are the transfer's own doing, see
-above), carry at most 1000 secrets per resource (400), and are authorised as
-a write of the **real** item (`<mount><path>` for KV, `resources/resources/<name>`
-for a resource, and each `resources/secrets/<name>/<key>`): deny rules, owner
-and share scopes and per-secret paths apply as for a normal write, and a grant
-on the import route alone allows nothing. The KV route is reachable over HTTP
-only under `/v1/` (at `v2` the router reads the path as a secret named
-`v2/transfer/import/<path>`), which sits uneasily with the frozen-`v1` rule;
-it is an internal surface and may change.
+routes, `resources/v2/transfer/import/<name>` and
+`<kv-mount>/v2/transfer/import/<path>`. They are **internal-only**: the
+transfer marks its own import sub-requests in-process, and any other request
+to either path, over HTTP (`/v1` or `/v2`) or in-process, is answered as an
+unknown route (404) before its body is read or anything is looked up,
+whatever the caller's rights and whether or not the item exists. A client
+therefore cannot write an item with a history, origin or version author of
+its choosing. The transfer's own imports take the item as the transfer read
+it (versions with their numbers and timestamps, history, settings), refuse
+a name that is taken (`on_conflict` accepts `refuse` only; rename and
+overwrite are the transfer's own doing, see above) and carry at most 1000
+secrets per resource (400). As defence in depth they are also authorised as
+a write of the **real** item (`<mount><path>` for KV,
+`resources/resources/<name>` for a resource, and each
+`resources/secrets/<name>/<key>`), so deny rules, owner and share scopes and
+per-secret paths apply as for a normal write. `sys/capabilities-self` on an
+import path reports the real item's capabilities, which is how the transfer
+checks its rights before a move, an overwrite or a dry run.
 
 ### Caller introspection
 
