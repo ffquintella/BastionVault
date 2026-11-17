@@ -394,7 +394,7 @@ every step with your token, so you need the rights listed there.
 
 ~~~bash
 bvault transfer copy|move --kind resource|kv-secret \
-    [--source-namespace NS] [--destination-namespace NS] \
+    [--source-namespace NS] [--destination-namespace NS] [--namespace NS] \
     [--on-conflict refuse|rename|overwrite] [--dry-run] \
     <MOUNT>/<PATH> <MOUNT>/<PATH>
 
@@ -427,6 +427,7 @@ bvault transfer copy --kind kv-secret --source-mount team/kv \
 | `--kind` | Required: `resource` or `kv-secret` |
 | `--source-namespace` | Namespace of the source (default: the root namespace) |
 | `--destination-namespace` | Namespace of the destination (default: the root namespace) |
+| `--namespace` | Namespace the request itself runs in (default: the root namespace); sets the `X-BastionVault-Namespace` header |
 | `--source-mount` / `--destination-mount` | Mount of that side, for a slash-named mount; its positional is then the path |
 | `--on-conflict` | When the destination exists: `refuse` (default), `rename` or `overwrite` |
 | `--dry-run` | Run every read and check, write nothing, and print the plan and warnings |
@@ -442,11 +443,21 @@ atomic: if that import fails, the destination stays deleted. The command prints
 `warning[overwrite-not-atomic]: <destination>: ...` to stderr before it sends the
 request. Secret values are never printed.
 
-The request itself runs in the root namespace: `bvault transfer` has no flag
-for the namespace header, so the token must be valid there and its policy must
-grant `update` on `sys/namespace-transfer/*` and `sys/capabilities-self`. A
-token bound to CIDRs cannot run a transfer. Use the API with the
-namespace header when your token lives in another namespace.
+The request itself runs in the root namespace unless you pass `--namespace`,
+which sets the `X-BastionVault-Namespace` header: the route is then evaluated
+in that namespace, as the API does with the header. `--namespace` is the
+namespace of the request, not of the source or the destination, which
+`--source-namespace` and `--destination-namespace` name in the body. The token
+must be valid in the namespace the request runs in and its policy must grant
+`update` on `sys/namespace-transfer/*` and `sys/capabilities-self` there. A
+token bound to CIDRs cannot run a transfer.
+
+~~~bash
+# The request runs in team-a (the header), moving a resource out of it to team-b.
+bvault transfer move --kind resource --namespace team-a \
+    --source-namespace team-a --destination-namespace team-b \
+    resources/db1 resources/db1
+~~~
 
 ## mcp
 

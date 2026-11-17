@@ -245,8 +245,9 @@ cleans up its owner, shares and groups) and imports again.
   its import, which leaves the destination deleted like any failed overwrite.
 - **Rights.** The route is evaluated in the request's active namespace and
   needs `update` on `sys/namespace-transfer/*` plus `sys/capabilities-self`
-  there; no built-in policy grants the former. `bvault transfer` has no flag
-  for the namespace header (planned).
+  there; no built-in policy grants the former. `bvault transfer --namespace
+  <path>` sets the namespace header (T497); without it the request runs in
+  the root namespace.
 - **Policies naming the source path are not rewritten** (always warned as
   `policies-not-carried`).
 - **The import routes are internal-only.**

@@ -7,8 +7,10 @@ use serde_json::{json, Map, Value};
 use sysexits::ExitCode;
 
 use crate::{
+    api::Client,
     command::{self, CommandExecutor},
     errors::RvError,
+    kernel_api::namespace::NAMESPACE_HEADER,
     EXIT_CODE_INSUFFICIENT_PARAMS,
 };
 
@@ -60,6 +62,11 @@ first slash is the mount, the rest is the item's path. The namespace is
 never part of them; name it with --source-namespace and
 --destination-namespace (default: the root namespace, "").
 
+The request itself runs in the root namespace unless you pass
+--namespace <path>, which sets the X-BastionVault-Namespace header: use
+it when your token lives in, or your grant on sys/namespace-transfer is
+given in, another namespace (see docs/cli-reference.md).
+
 For a mount whose name has a slash, name the mount with --source-mount /
 --destination-mount; the positional on that side is then the whole path
 (--source-mount team/kv, positional app/db: mount team/kv, path app/db).
@@ -110,6 +117,14 @@ pub struct TransferArgs {
 
     #[arg(long, value_name = "NAMESPACE", default_value = "", help = "Namespace of the destination (default: root).")]
     destination_namespace: String,
+
+    #[arg(
+        long,
+        value_name = "NAMESPACE",
+        default_value = "",
+        help = "Namespace the request runs in (default: root); sets the X-BastionVault-Namespace header."
+    )]
+    namespace: String,
 
     #[arg(
         long,
@@ -226,7 +241,7 @@ fn run(op: Op, args: &TransferArgs) -> Result<(), RvError> {
         eprintln!("{notice}");
     }
 
-    let client = args.client()?;
+    let client = transfer_client(args)?;
     let resp = client.request_write(format!("/v2/sys/namespace-transfer/{}", op.route()), Some(body))?;
     let data = resp.response_data.unwrap_or(Value::Null);
     if let Some(err) = status_error(op, args.kind, resp.response_status, &data) {
@@ -239,6 +254,24 @@ fn run(op: Op, args: &TransferArgs) -> Result<(), RvError> {
         eprintln!("{line}");
     }
     Ok(())
+}
+
+/// The headers the transfer request adds: the namespace the request itself
+/// runs in (not the source's or destination's); none for the root namespace.
+fn request_headers(namespace: &str) -> Vec<(&'static str, String)> {
+    match namespace.trim_matches('/') {
+        "" => Vec::new(),
+        ns => vec![(NAMESPACE_HEADER, ns.to_string())],
+    }
+}
+
+/// The HTTP client for the transfer, with [`request_headers`] applied.
+fn transfer_client(args: &TransferArgs) -> Result<Client, RvError> {
+    let mut client = args.client()?;
+    for (name, value) in request_headers(&args.namespace) {
+        client = client.add_header(name, &value);
+    }
+    Ok(client)
 }
 
 /// Trim the slashes around a positional and split it at the first one: the
@@ -315,10 +348,17 @@ fn overwrite_notice(on_conflict: OnConflict, dry_run: bool, destination: &str) -
     })
 }
 
-/// Server text is shown on one line with control characters replaced, so a
-/// message cannot move the cursor or forge a second `warning[...]` line.
+/// Server text is shown on one line with control characters replaced, and the
+/// invisible Unicode format and bidi characters removed, so a message cannot
+/// move the cursor, forge a second `warning[...]` line or reorder what follows.
 fn one_line(text: &str) -> String {
-    text.chars().map(|c| if c.is_control() { ' ' } else { c }).collect()
+    text.chars().filter(|c| !is_invisible_format(*c)).map(|c| if c.is_control() { ' ' } else { c }).collect()
+}
+
+/// Zero-width and directional marks (U+200B-200F), bidi embeddings and
+/// overrides (U+202A-202E), bidi isolates (U+2066-2069) and the BOM (U+FEFF).
+fn is_invisible_format(c: char) -> bool {
+    matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
 }
 
 fn show_place(namespace: &str, mount: &str, path: &str) -> String {
@@ -498,7 +538,7 @@ mod test {
     }
 
     #[test]
-    fn prints_warnings_and_exits_zero() {
+    fn renders_counts_on_stdout_and_warnings_on_stderr() {
         let c = parse_copy(&["--kind", "resource", "--source-namespace", "team-a", "resources/db1", "resources/db1"]);
         let out = render(Op::Copy, &c, &sample_response(false));
         assert!(
@@ -591,5 +631,131 @@ mod test {
         let e = err(400, json!({ "error": "bad\nwarning[x]: forged\u{1b}[2J" })).unwrap();
         assert!(!e.contains('\n') && !e.contains('\u{1b}'), "{e:?}");
         assert!(!e.contains("secret-value"), "only the server's text is shown");
+    }
+    #[test]
+    fn namespace_flag_is_parsed_and_defaults_to_root() {
+        assert_eq!(parse_copy(&["--kind", "resource", "a/b", "a/c"]).namespace, "");
+        let c = parse_copy(&["--kind", "resource", "--namespace", "team-a/sub", "a/b", "a/c"]);
+        assert_eq!(c.namespace, "team-a/sub");
+        let m = Move::try_parse_from(["move", "--kind", "resource", "--namespace", "t", "a/b", "a/c"]).unwrap();
+        assert_eq!(m.namespace, "t");
+        // It is the request's namespace, apart from the two it names in the body.
+        let c = parse_copy(&["--kind", "resource", "--namespace", "ops", "--source-namespace", "a", "x/y", "x/z"]);
+        let body = Value::Object(build_body(&c).unwrap());
+        assert_eq!(body["source"]["namespace"], "a");
+        assert_eq!(body["destination"]["namespace"], "");
+        assert!(body.get("namespace").is_none(), "the header, never the body, carries it: {body}");
+    }
+
+    #[test]
+    fn request_headers_name_the_namespace_or_nothing() {
+        assert!(request_headers("").is_empty(), "the default sends no header");
+        assert!(request_headers("/").is_empty());
+        assert_eq!(request_headers("team-a"), vec![(NAMESPACE_HEADER, "team-a".to_string())]);
+        assert_eq!(request_headers("/team-a/sub/"), vec![(NAMESPACE_HEADER, "team-a/sub".to_string())]);
+        assert_eq!(NAMESPACE_HEADER, "x-bastionvault-namespace");
+    }
+
+    /// A one-request HTTP server answering `status` with `reply` as JSON; the
+    /// request head it received (header names lower-cased) arrives on the channel.
+    fn fake_vault(status: u16, reply: Value) -> (String, std::sync::mpsc::Receiver<String>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut received = Vec::new();
+            let mut chunk = [0u8; 4096];
+            let end = |bytes: &[u8]| bytes.windows(4).position(|w| w == b"\r\n\r\n");
+            let (head_end, length) = loop {
+                let n = stream.read(&mut chunk).unwrap_or(0);
+                received.extend_from_slice(&chunk[..n]);
+                if let Some(at) = end(&received) {
+                    let head = String::from_utf8_lossy(&received[..at]).to_lowercase();
+                    let length = head.lines().find_map(|l| l.strip_prefix("content-length:")?.trim().parse().ok());
+                    break (at + 4, length.unwrap_or(0usize));
+                }
+                if n == 0 {
+                    return;
+                }
+            };
+            while received.len() < head_end + length {
+                match stream.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => received.extend_from_slice(&chunk[..n]),
+                }
+            }
+            let head = String::from_utf8_lossy(&received[..head_end]).to_lowercase();
+            let _ = tx.send(head);
+            let body = serde_json::to_vec(&reply).unwrap();
+            let reply_head = format!(
+                "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(reply_head.as_bytes());
+            let _ = stream.write_all(&body);
+        });
+        (format!("http://{addr}"), rx)
+    }
+
+    fn copy_against(address: &str, extra: &[&str]) -> Copy {
+        let mut argv = vec!["--address", address, "--token", "a-test-token", "--kind", "resource"];
+        argv.extend_from_slice(extra);
+        argv.extend_from_slice(&["resources/db1", "resources/db1"]);
+        parse_copy(&argv)
+    }
+
+    #[test]
+    fn the_namespace_header_is_sent_on_the_transfer_request() {
+        let (addr, seen) = fake_vault(200, json!({ "data": {} }));
+        let c = copy_against(&addr, &["--namespace", "team-a", "--destination-namespace", "team-b"]);
+        let body = build_body(&c).unwrap();
+        let resp = transfer_client(&c.args).unwrap().request_write("/v2/sys/namespace-transfer/copy", Some(body));
+        assert_eq!(resp.unwrap().response_status, 200);
+        let head = seen.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert!(head.starts_with("post /v2/sys/namespace-transfer/copy "), "{head}");
+        assert!(head.contains("\r\nx-bastionvault-namespace: team-a\r\n"), "{head}");
+        assert!(head.contains("x-bastionvault-token: a-test-token"), "{head}");
+    }
+
+    #[test]
+    fn no_namespace_header_is_sent_by_default() {
+        let (addr, seen) = fake_vault(200, json!({ "data": {} }));
+        let c = copy_against(&addr, &["--destination-namespace", "team-b"]);
+        let body = build_body(&c).unwrap();
+        transfer_client(&c.args).unwrap().request_write("/v2/sys/namespace-transfer/copy", Some(body)).unwrap();
+        let head = seen.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert!(!head.contains("x-bastionvault-namespace"), "{head}");
+    }
+
+    #[test]
+    fn invisible_format_characters_are_removed_from_server_text() {
+        assert_eq!(one_line("a\u{202E}b\u{200B}c\u{2066}d\u{FEFF}e\u{200F}f\u{2069}g"), "abcdefg");
+        assert_eq!(one_line("x\u{200B}\u{200C}\u{200D}\u{200E}y\u{202A}\u{202B}\u{202C}\u{202D}z"), "xyz");
+        assert_eq!(one_line("tab\there\nnl\u{1b}[2J"), "tab here nl [2J", "control characters still become spaces");
+        assert_eq!(one_line("plain ünïcode 日本"), "plain ünïcode 日本", "visible text is untouched");
+
+        let mut response = sample_response(false);
+        response["warnings"][0]["message"] = json!("safe\u{202E}desrever\u{2066}");
+        let c = parse_copy(&["--kind", "resource", "resources/db1", "resources/db1"]);
+        let out = render(Op::Copy, &c, &response);
+        assert_eq!(out.stderr[0], "warning[policies-not-carried]: team-a/resources/db1: safedesrever");
+        let e = status_error(Op::Copy, Kind::Resource, 400, &json!({ "error": "no\u{202E}pe" })).unwrap().to_string();
+        assert!(e.ends_with("(HTTP 400): nope"), "{e}");
+    }
+
+    /// The exit path: `execute` maps `main()`'s `Ok` to exit 0 and any `Err`
+    /// to exit 1, so a transfer that succeeded with warnings is `Ok`, and a
+    /// refused one is an `Err` carrying the server's message.
+    #[test]
+    fn warnings_do_not_fail_the_command_and_a_refusal_does() {
+        let (addr, _seen) = fake_vault(200, sample_response(false));
+        let ok = copy_against(&addr, &["--namespace", "ops"]).main();
+        assert!(ok.is_ok(), "a 200 with warnings is a success: {ok:?}");
+
+        let (addr, _seen) = fake_vault(409, json!({ "error": "resources/db1: a resource already exists" }));
+        let err = copy_against(&addr, &[]).main().unwrap_err().to_string();
+        assert!(err.contains("copy of resource failed (HTTP 409): resources/db1: a resource already exists"), "{err}");
     }
 }
