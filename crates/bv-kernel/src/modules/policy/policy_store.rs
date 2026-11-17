@@ -3705,15 +3705,21 @@ impl AuthHandler for PolicyStore {
     }
 
     /// Handle authentication for a given request: see [`PolicyStore::authorize_request`].
-    /// A transfer import is internal-only: unmarked, it is an unknown route
-    /// before any lookup. Marked, it is authorized as what it writes
-    /// (`transfer_target`): the item first, then each secret a resource
-    /// carries. Each path stands in for the route's while the ACL runs.
+    /// A transfer import is internal-only: unmarked, it is answered as an
+    /// unknown route there (ACL and namespace binding on the literal path, then
+    /// 404), never looking at the item. Marked, it is authorized as what it
+    /// writes (`transfer_target`): the item, then each secret a resource carries.
     async fn post_auth(&self, req: &mut Request) -> Result<(), RvError> {
         let Some(target) = self.transfer_import_target(&req.path, req.api_version)? else {
             return self.authorize_request(req, None).await;
         };
         if !req.is_internal_transfer_import() {
+            // The two refusals `Core::handle_request` gives any route before
+            // dispatch, so the answer never depends on the mount or the item.
+            self.authorize_request(req, None).await?;
+            if let Some(core) = self.core.upgrade() {
+                crate::modules::namespace::token_binding::enforce_request_token_binding(&core, req).await?;
+            }
             log::warn!(
                 target: "security",
                 "refused a direct call to the internal transfer import route '{}' by '{}'",

@@ -714,3 +714,132 @@ async fn the_import_routes_are_not_reachable_over_http() {
         server.request_with_headers("GET", "resources/resources/srv1", None, None, None, &header).unwrap();
     assert_eq!(status, 200, "the copy arrived: {resp}");
 }
+
+/// A direct write's whole answer, `<status>: <error text>`, so two compare.
+fn answer(r: Result<Option<Response>, RvError>) -> String {
+    match r {
+        Ok(_) => "200: written".to_string(),
+        Err(RvError::ErrResponseStatus(status, message)) => format!("{status}: {message}"),
+        Err(e) => format!("{}: {e}", e.response_status()),
+    }
+}
+
+/// The import route under `mount` answers `token` exactly as an unknown route
+/// beside it in the same mount and namespace does, with status `expected`.
+async fn import_answers_like_an_unknown_route(
+    core: &Arc<Core>,
+    (who, token): (&str, &str),
+    ns: Option<&str>,
+    mount: &str,
+    name: &str,
+    expected: u16,
+) {
+    let body = if mount.ends_with("resources") { forged_resource_bundle() } else { kv_bundle() };
+    let import = format!("{mount}/v2/transfer/import/{name}");
+    let import = answer(send(core, token, Operation::Write, &import, ns, body.clone()).await);
+    let unknown = format!("{mount}/no-such-route/{name}");
+    let unknown = answer(send(core, token, Operation::Write, &unknown, ns, body).await);
+    let what = format!("{who}: {mount}/.../{name} in {ns:?}");
+    assert_eq!(import, unknown, "{what}: the import answers like an unknown route");
+    assert!(import.starts_with(&format!("{expected}:")), "{what}: expected {expected}, {import}");
+}
+
+/// Regression (T494 final review, Ruling P): a token with no grant on the
+/// import path gets the 403 any unknown route there gives it, whether the
+/// mount is a kv-v2 or resource mount or does not exist and whether the item
+/// exists, so the answer tells it nothing about mounts or items.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn a_direct_import_without_a_grant_is_refused_alike_on_any_mount() {
+    let (_bvault, core, root) = new_unseal_test_bastion_vault("direct_import_no_grant_alike").await;
+    write(&core, &root, "sys/auth/pass", json!({ "type": "userpass" })).await;
+    write_policy(&core, &root, "elsewhere", "path \"other/*\" { capabilities = [\"create\", \"update\"] }\n").await;
+    let (nobody, _) = login(&core, &root, "nobody", "elsewhere").await;
+    write(&core, &root, "secret/data/taken", json!({ "data": { "v": "root's" } })).await;
+    write(&core, &root, "resources/resources/taken", json!({ "type": "server", "hostname": "h.example" })).await;
+
+    for mount in ["secret", "resources", "nomount"] {
+        for name in ["taken", "free"] {
+            import_answers_like_an_unknown_route(&core, ("nobody", &nobody), None, mount, name, 403).await;
+            let path = format!("{mount}/v2/transfer/import/{name}");
+            denied(direct(&core, &nobody, &path, 2, forged_resource_bundle()).await, &format!("{path} at v2"));
+        }
+    }
+    assert_eq!(kv_value(&core, &root, "free").await, None, "nothing written");
+    assert_eq!(kv_value(&core, &root, "taken").await, Some(json!("root's")), "untouched");
+    assert!(test_read_api(core.as_ref(), &root, "resources/resources/free", true).await.unwrap().is_none());
+    assert_eq!(history_len(&core, &root, "taken").await, 1, "only root's own create");
+}
+
+/// Regression (T494 final review, Ruling P): a token bound elsewhere, whether
+/// to a sibling namespace or to root without the right to operate in the
+/// target namespace (though its policy names paths there), is refused there
+/// as on any unknown route, for existing and missing mounts alike.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn a_token_bound_elsewhere_is_refused_alike_on_any_mount_of_a_namespace() {
+    let (_bvault, core, root) = new_unseal_test_bastion_vault("direct_import_bound_elsewhere").await;
+    for ns in ["tenant-a", "tenant-b"] {
+        write(&core, &root, &format!("sys/namespaces/{ns}"), json!({})).await;
+    }
+    let a = Some("tenant-a");
+    send(&core, &root, Operation::Write, "secret/data/taken", a, json!({ "data": { "v": "a's" } })).await.unwrap();
+    let meta = json!({ "type": "server", "hostname": "h.example" });
+    send(&core, &root, Operation::Write, "resources/resources/taken", a, meta).await.unwrap();
+
+    let wide = json!({ "policy": "path \"tenant-b/*\" { capabilities = [\"create\", \"read\", \"update\"] }" });
+    let b = Some("tenant-b");
+    send(&core, &root, Operation::Write, "sys/policy/b-wide", b, wide).await.unwrap();
+    let body = json!({ "policies": ["b-wide"], "child_visible": false, "ttl": "1h" });
+    let created = send(&core, &root, Operation::Write, "auth/token/create", b, body).await.unwrap().unwrap();
+    let sibling = created.auth.unwrap().client_token;
+
+    write(&core, &root, "sys/auth/pass", json!({ "type": "userpass" })).await;
+    let into_a = "path \"tenant-a/*\" { capabilities = [\"create\", \"read\", \"update\"] }\n";
+    write_policy(&core, &root, "names-tenant-a", into_a).await;
+    let (outsider, _) = login(&core, &root, "outsider", "names-tenant-a").await;
+
+    for token in [("sibling", sibling.as_str()), ("outsider", outsider.as_str())] {
+        for mount in ["secret", "resources", "nomount"] {
+            for name in ["taken", "free"] {
+                import_answers_like_an_unknown_route(&core, token, a, mount, name, 403).await;
+            }
+        }
+    }
+    let read = send(&core, &root, Operation::Read, "secret/data/free", a, json!({})).await.unwrap();
+    assert!(read.is_none(), "nothing written");
+    let read = send(&core, &root, Operation::Read, "resources/resources/free", a, json!({})).await.unwrap();
+    assert!(read.is_none(), "nothing written");
+}
+
+/// Regression (T494 final review, Ruling P): a token allowed to write there
+/// gets the unknown-route 404 on existing and missing mounts alike (as on any
+/// unknown route there), writes nothing and stamps no owner or history; the
+/// transfer's own import of the same names then succeeds.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn a_direct_import_with_a_grant_is_an_unknown_route_on_any_mount() {
+    let (_bvault, core, root) = new_unseal_test_bastion_vault("direct_import_with_grant_alike").await;
+    write(&core, &root, "sys/auth/pass", json!({ "type": "userpass" })).await;
+    write_policy(&core, &root, "kv-writer", KV_WRITER).await;
+    write_policy(&core, &root, "res-writer", RESOURCE_WRITER).await;
+    write_policy(&core, &root, "nomount", "path \"nomount/*\" { capabilities = [\"create\", \"update\"] }\n").await;
+    let (writer, _) = login(&core, &root, "writer", "kv-writer,res-writer,nomount").await;
+    write(&core, &root, "secret/data/taken", json!({ "data": { "v": "root's" } })).await;
+    write(&core, &root, "resources/resources/taken", json!({ "type": "server", "hostname": "h.example" })).await;
+
+    for mount in ["secret", "resources", "nomount"] {
+        for name in ["taken", "free"] {
+            import_answers_like_an_unknown_route(&core, ("writer", &writer), None, mount, name, 404).await;
+        }
+    }
+    assert_eq!(kv_value(&core, &root, "free").await, None, "nothing written");
+    assert_eq!(kv_owner(&core, "secret/free").await, None, "no owner stamped");
+    assert_eq!(kv_value(&core, &root, "taken").await, Some(json!("root's")), "untouched");
+    assert!(test_read_api(core.as_ref(), &root, "resources/resources/free", true).await.unwrap().is_none());
+    assert_eq!(resource_owner(&core, "free").await, None, "no owner stamped");
+    assert_eq!(history_len(&core, &root, "free").await, 0, "no history entry");
+    assert_eq!(history_len(&core, &root, "taken").await, 1, "only root's own create");
+
+    import(&core, &writer, "secret/v2/transfer/import/free", kv_bundle()).await.unwrap();
+    import(&core, &writer, "resources/v2/transfer/import/free", resource_bundle(&[])).await.unwrap();
+    assert_eq!(kv_value(&core, &root, "free").await, Some(json!("imported")));
+    assert_eq!(history_len(&core, &root, "free").await, 1, "only the transfer-in entry");
+}
