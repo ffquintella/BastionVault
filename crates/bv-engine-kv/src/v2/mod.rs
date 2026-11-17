@@ -455,14 +455,14 @@ fn is_rfc3339(value: &str) -> bool {
 }
 
 /// A destination path that stays one secret under `metadata/` and
-/// `versions/`: no empty, `.` or `..` segment and no control characters.
-/// Dots inside a segment (`a..b`) are an ordinary name.
+/// `versions/`: no empty or `.` segment, no control characters, and no `..`
+/// anywhere, which `BarrierView::sanity_check` refuses in any key.
 fn validate_kv_path(path: &str) -> Result<(), RvError> {
     if path.is_empty() {
         return Err(bad_import("path is required"));
     }
-    if path.split('/').any(|s| s.is_empty() || s == "." || s == "..") {
-        return Err(bad_import("path must not contain empty, '.' or '..' segments, or start or end with '/'"));
+    if path.contains("..") || path.split('/').any(|s| s.is_empty() || s == ".") {
+        return Err(bad_import("path must not contain '..', '.' or empty segments, or start or end with '/'"));
     }
     if path.chars().any(char::is_control) {
         return Err(bad_import("path must not contain control characters"));
@@ -1616,15 +1616,20 @@ mod transfer_import_tests {
     }
 
     #[test]
-    fn import_accepts_dots_inside_a_segment() {
-        // Only a whole `.` or `..` segment climbs; `a..b` is an ordinary name.
+    fn import_refuses_dot_dot_anywhere_and_accepts_single_dots() {
+        // `BarrierView::sanity_check` refuses any key containing `..` (a 500
+        // in production), so no such secret can exist: refuse it with a 400.
         let mem = Arc::new(MemStorage::default());
-        for path in ["a..b", "team/v1..v2", ".env"] {
+        for path in ["a..b", "a/../b", "...", "team/v1..v2"] {
+            assert_eq!(status(import(&mem, path, bundle())), 400, "path {path:?}");
+        }
+        assert!(mem.snapshot().is_empty(), "a refused import writes nothing");
+
+        // A single dot inside a segment is an ordinary name.
+        for path in ["v1.2", "team/v1.2", ".env"] {
             assert_eq!(import(&mem, path, bundle()).unwrap().path, path);
             assert_eq!(metadata(&mem, path).current_version, 3, "{path}");
         }
-        assert_eq!(status(import(&mem, "a/../b", bundle())), 400);
-        assert!(!mem.has("metadata/b") && !mem.has("metadata/a/../b"));
     }
 
     #[test]
