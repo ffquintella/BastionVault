@@ -985,6 +985,12 @@ async fn import(
     }
 }
 
+/// An import body is never empty (it names `on_conflict`): an empty one was
+/// lost on an earlier attempt, and is not sent, for a check or the import.
+fn lost_body(dest: &Place) -> RvError {
+    crate::bv_error_string!(format!("the import into {} has no body to send", dest.display()))
+}
+
 /// `body` to `dest`'s import route, marked as the transfer's own; the answer's
 /// data. The body is handed back, uncopied, whatever the outcome.
 #[maybe_async::maybe_async]
@@ -994,10 +1000,8 @@ async fn send_import(
     dest: &Place,
     body: &mut Map<String, Value>,
 ) -> Result<Map<String, Value>, RvError> {
-    // An import body is never empty (it names `on_conflict`): an empty one was
-    // lost on an earlier attempt, and is not sent.
     if body.is_empty() {
-        return Err(crate::bv_error_string!(format!("the import into {} has no body to send", dest.display())));
+        return Err(lost_body(dest));
     }
     let what = format!("the caller may not write {} in {}", dest.display(), namespace_label(&dest.ns));
     let mut req = as_caller(caller, &dest.ns, Operation::Write, dest.import(), Some(std::mem::take(body)));
@@ -1022,6 +1026,10 @@ async fn check_import(
 ) -> Result<(), RvError> {
     if kind != Kind::Resource {
         return Ok(());
+    }
+    // Before `check_only` is added, or the lost body would pass send_import's guard.
+    if body.is_empty() {
+        return Err(lost_body(dest));
     }
     body.insert("check_only".into(), Value::Bool(true));
     let answer = send_import(core, caller, dest, body).await;
@@ -1438,6 +1446,29 @@ mod tests {
         assert!(matches!(import_refused(RvError::ErrRouterMountNotFound, "w", &dest), RvError::ErrRouterMountNotFound));
         let conflict = RvError::ErrResponseStatus(409, "taken".into());
         assert!(matches!(import_refused(conflict, "w", &dest), RvError::ErrResponseStatus(409, ref m) if m == "taken"));
+    }
+
+    /// Regression (T498 review): a body lost on an earlier attempt must not be
+    /// sent as `{check_only: true}`. That would come back as a parse 400 ending
+    /// in "nothing was deleted", hiding the transfer's own fault.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn a_check_without_a_body_is_not_sent() {
+        let (_bv, core, root) = crate::test_utils::new_unseal_test_bastion_vault("ns_transfer_check_no_body").await;
+        let mut make_ns = Request::new("sys/namespaces/dst");
+        make_ns.operation = Operation::Write;
+        make_ns.client_token = root.clone();
+        make_ns.body = Some(Map::new());
+        core.handle_request(&mut make_ns).await.unwrap();
+        let mut caller = Request::new("sys/namespace-transfer/copy");
+        caller.client_token = root;
+        let dest = Place { ns: "dst".into(), mount: "resources/".into(), path: "srv1".into() };
+
+        let mut body = Map::new();
+        let e = check_import(core.as_ref(), &caller, Kind::Resource, &dest, &mut body).await.unwrap_err();
+        let message = e.to_string();
+        assert!(message.contains("has no body to send"), "{message}");
+        assert!(!message.contains("nothing was deleted"), "the check was sent: {message}");
+        assert!(body.is_empty(), "the body is handed back as it came: {body:?}");
     }
 
     #[test]
