@@ -3705,15 +3705,24 @@ impl AuthHandler for PolicyStore {
     }
 
     /// Handle authentication for a given request: see [`PolicyStore::authorize_request`].
-    /// A transfer import is authorized as the item it writes (`transfer_target`):
-    /// that item's path stands in for the route's while every lookup and the ACL
-    /// run, and the route's is put back for routing, audit and the denial trail.
+    /// A transfer import is authorized as what it writes (`transfer_target`): the
+    /// item and each secret a resource carries. Each path in turn stands in for
+    /// the route's while every lookup and the ACL run; all must pass, and the
+    /// route's is put back for routing, audit and the denial trail.
     async fn post_auth(&self, req: &mut Request) -> Result<(), RvError> {
         let Some(target) = self.transfer_import_target(&req.path, req.api_version)? else {
             return self.authorize_request(req, None).await;
         };
-        let route = std::mem::replace(&mut req.path, target.acl_path());
-        let result = self.authorize_request(req, Some(&route)).await;
+        let paths = target.authorization_paths(req.body.as_ref())?;
+        let route = std::mem::take(&mut req.path);
+        let mut result = Ok(());
+        for path in paths {
+            req.path = path;
+            result = self.authorize_request(req, Some(&route)).await;
+            if result.is_err() {
+                break;
+            }
+        }
         req.path = route;
         result
     }

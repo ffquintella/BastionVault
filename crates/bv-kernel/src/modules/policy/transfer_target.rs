@@ -1,10 +1,12 @@
 //! Transfer import routes are authorized as the item they write (T494).
 //!
 //! `<kv-v2 mount>/v2/transfer/import/<path>` and `<resource mount>/v2/transfer/import/<name>`
-//! each write one whole secret or resource. `post_auth` (ACL, owner, share and
-//! asset-group lookups), `post_route` (owner stamp) and `sys/capabilities-self`
-//! therefore use the path a normal write of that item is authorized on, never
-//! the route's own path. Every other path is left alone.
+//! write one whole secret or resource. `post_auth` (ACL, owner, share and group
+//! lookups, plus each secret a resource carries), `post_route` (owner stamp) and
+//! `sys/capabilities-self` use the paths normal writes are authorized on, never
+//! the route's own. Every other path is left alone.
+
+use serde_json::{Map, Value};
 
 use crate::{errors::RvError, logical::Response, router::Router};
 
@@ -52,10 +54,34 @@ impl ImportTarget {
         Some(Self { kind, mount: mount.to_string(), name })
     }
 
-    /// The path `post_auth` authorizes the import on: the one a normal write of
-    /// the requested item is authorized on.
+    /// The path a normal write of the requested item is authorized on.
     pub(crate) fn acl_path(&self) -> String {
         self.path_of(&self.name)
+    }
+
+    /// Every path `post_auth` must authorize: the item's, then for a resource
+    /// `<mount>secrets/<name>/<key>` per `secrets[].key` in `body`, the key
+    /// verbatim as `handle_secret_write` stores it. A `secrets` value that is
+    /// not a list of objects with a string `key` is a 400 naming the field,
+    /// never a value, so no secret reaches the engine unchecked.
+    pub(crate) fn authorization_paths(&self, body: Option<&Map<String, Value>>) -> Result<Vec<String>, RvError> {
+        let mut paths = vec![self.acl_path()];
+        let Some(secrets) = body.and_then(|b| b.get("secrets")).filter(|_| self.kind == Kind::Resource) else {
+            return Ok(paths);
+        };
+        let malformed = |what: String| RvError::ErrResponseStatus(400, format!("invalid resource import: {what}"));
+        let Value::Array(secrets) = secrets else {
+            return Err(malformed("secrets must be a list of {key, versions, current}".to_string()));
+        };
+        for (i, secret) in secrets.iter().enumerate() {
+            let key = secret.get("key").and_then(Value::as_str);
+            let key = key.ok_or_else(|| malformed(format!("secrets[{i}].key must be a string")))?;
+            let path = format!("{}secrets/{}/{key}", self.mount, self.name);
+            if !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+        Ok(paths)
     }
 
     /// The real path of the item the import wrote, when the handler's answer
@@ -148,6 +174,37 @@ mod tests {
             assert_eq!(got, Some(format!("secret/data/{name}")), "{name}");
         }
         assert_eq!(target("secret/", "kv-v2", "v2/transfer/import/destroyer/x").as_deref(), Some("secret/destroyer/x"));
+    }
+
+    #[test]
+    fn a_resource_import_is_authorized_on_each_secret_it_carries() {
+        let body = |secrets: Value| json!({ "meta": {}, "secrets": secrets }).as_object().cloned();
+        let res = ImportTarget::from_route("tenant/resources/", "resource", 1, "v2/transfer/import/ SRV1").unwrap();
+        let paths =
+            res.authorization_paths(body(json!([{ "key": "Login" }, { "key": "api" }, { "key": "api" }])).as_ref());
+        assert_eq!(
+            paths.unwrap(),
+            [
+                "tenant/resources/resources/srv1",
+                "tenant/resources/secrets/srv1/Login",
+                "tenant/resources/secrets/srv1/api"
+            ],
+            "the name as stored, the key verbatim, duplicates once"
+        );
+        assert_eq!(res.authorization_paths(body(json!([])).as_ref()).unwrap(), ["tenant/resources/resources/srv1"]);
+        assert_eq!(res.authorization_paths(None).unwrap(), ["tenant/resources/resources/srv1"]);
+
+        // Unreadable lists are refused, naming the field and never a value.
+        for secrets in [json!("S3CRET"), json!(null), json!(["S3CRET"]), json!([{ "key": 7 }]), json!([{}])] {
+            match res.authorization_paths(body(secrets.clone()).as_ref()) {
+                Err(RvError::ErrResponseStatus(400, m)) => assert!(!m.contains("S3CRET"), "{secrets}: {m}"),
+                other => panic!("{secrets}: expected 400, got {other:?}"),
+            }
+        }
+
+        // A KV import writes one secret: its body is never read for paths.
+        let kv = ImportTarget::from_route("secret/", "kv-v2", 1, "v2/transfer/import/x").unwrap();
+        assert_eq!(kv.authorization_paths(body(json!("S3CRET")).as_ref()).unwrap(), ["secret/x"]);
     }
 
     #[test]

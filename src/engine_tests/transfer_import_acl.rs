@@ -238,9 +238,87 @@ async fn resource_import_under_owner_scopes_checks_and_stamps_the_real_item() {
     let read = test_read_api(core.as_ref(), &root, "resources/resources/alice-srv", true).await.unwrap().unwrap();
     assert_eq!(read.data.unwrap()["hostname"], json!("alice.example"), "untouched");
 
-    import(&core, &bob, "resources/v2/transfer/import/bob-srv", resource_bundle(&[])).await.unwrap();
+    import(&core, &bob, "resources/v2/transfer/import/bob-srv", resource_bundle(&["login"])).await.unwrap();
     assert_eq!(resource_owner(&core, "bob-srv").await, Some(bob_id));
     send(&core, &bob, Operation::Read, "resources/resources/bob-srv", None, json!({})).await.unwrap();
+    send(&core, &bob, Operation::Read, "resources/secrets/bob-srv/login", None, json!({})).await.unwrap();
+}
+
+/// Each secret a resource import carries is authorized as its normal write,
+/// `resources/secrets/<name>/<key>`: a deny there blocks the import, while a
+/// bundle with no secrets is unaffected.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn resource_import_honours_a_deny_on_its_secret_paths() {
+    let (_bvault, core, root) = new_unseal_test_bastion_vault("resource_import_secret_deny").await;
+    write(&core, &root, "sys/auth/pass", json!({ "type": "userpass" })).await;
+    let policy = r#"
+        path "resources/*" { capabilities = ["create", "read", "update", "list"] }
+        path "resources/secrets/*" { capabilities = ["deny"] }
+    "#;
+    write_policy(&core, &root, "no-secrets", policy).await;
+    let (token, _) = login(&core, &root, "inventory", "no-secrets").await;
+
+    let r = import(&core, &token, "resources/v2/transfer/import/srv-a", resource_bundle(&["login"])).await;
+    denied(r, "a resource carrying a secret under a secrets deny");
+    assert!(test_read_api(core.as_ref(), &root, "resources/resources/srv-a", true).await.unwrap().is_none());
+    assert!(test_read_api(core.as_ref(), &root, "resources/secrets/srv-a/login", true).await.unwrap().is_none());
+
+    import(&core, &token, "resources/v2/transfer/import/srv-b", resource_bundle(&[])).await.unwrap();
+}
+
+/// Write on the resource record alone does not cover its secrets: every key
+/// needs a grant on `resources/secrets/<name>/<key>`, the name normalized as
+/// the engine stores it.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn resource_import_needs_write_on_every_secret_path() {
+    let (_bvault, core, root) = new_unseal_test_bastion_vault("resource_import_secret_grant").await;
+    write(&core, &root, "sys/auth/pass", json!({ "type": "userpass" })).await;
+    let policy = r#"
+        path "resources/resources/*" { capabilities = ["create", "read", "update"] }
+        path "resources/secrets/srv-ok/*" { capabilities = ["create", "update"] }
+    "#;
+    write_policy(&core, &root, "records", policy).await;
+    let (token, _) = login(&core, &root, "records", "records").await;
+
+    for name in ["srv-ko", " SRV-KO"] {
+        let r =
+            import(&core, &token, &format!("resources/v2/transfer/import/{name}"), resource_bundle(&["login"])).await;
+        denied(r, &format!("{name:?}: secrets with no grant"));
+    }
+    assert!(test_read_api(core.as_ref(), &root, "resources/resources/srv-ko", true).await.unwrap().is_none());
+
+    let r = import(&core, &token, "resources/v2/transfer/import/SRV-OK", resource_bundle(&["login", "api"])).await;
+    r.unwrap();
+    let read = test_read_api(core.as_ref(), &root, "resources/secrets/srv-ok/api", true).await.unwrap().unwrap();
+    assert_eq!(read.data.unwrap()["token"], json!("t-S3CRET"));
+    import(&core, &token, "resources/v2/transfer/import/srv-plain", resource_bundle(&[])).await.unwrap();
+}
+
+/// A `secrets` list the policy layer cannot read is refused with a 400 that
+/// names the field and never echoes a value; nothing is written.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn resource_import_with_a_malformed_secret_list_fails_closed() {
+    let (_bvault, core, root) = new_unseal_test_bastion_vault("resource_import_malformed_secrets").await;
+    write(&core, &root, "sys/auth/pass", json!({ "type": "userpass" })).await;
+    write_policy(&core, &root, "res-writer", RESOURCE_WRITER).await;
+    let (token, _) = login(&core, &root, "writer", "res-writer").await;
+
+    let version = json!({ "version": 1, "created_time": "2025-01-01T00:00:00Z", "data": { "p": "S3CRET-v" } });
+    for secrets in [
+        json!("S3CRET-not-a-list"),
+        json!(null),
+        json!(["S3CRET-not-an-object"]),
+        json!([{ "key": 42, "current": 1, "versions": [version] }]),
+        json!([{ "current": 1, "versions": [version] }]),
+    ] {
+        let mut body = resource_bundle(&[]);
+        body["secrets"] = secrets.clone();
+        match import(&core, &token, "resources/v2/transfer/import/srv-m", body).await {
+            Err(RvError::ErrResponseStatus(400, m)) => assert!(!m.contains("S3CRET"), "{secrets}: {m}"),
+            other => panic!("{secrets}: expected 400, got {other:?}"),
+        }
+    }
+    assert!(test_read_api(core.as_ref(), &root, "resources/resources/srv-m", true).await.unwrap().is_none());
 }
 
 /// A policy limited to one prefix imports there and nowhere else.

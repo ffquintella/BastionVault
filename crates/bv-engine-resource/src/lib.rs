@@ -524,7 +524,8 @@ impl ResourceBackend {
                     help: "Import a resource bundle (metadata, every secret with all its versions, change history) \
                            under a free name, keeping version numbers and timestamps. Body: meta, secrets, \
                            history, on_conflict (refuse only), origin, origin_owner. Authorized as a write of \
-                           resources/<name>; the caller becomes its owner. Shares are not written."
+                           resources/<name> and of secrets/<name>/<key> per secret; the caller becomes its \
+                           owner. Shares are not written."
                 },
                 {
                     // CRUD a single resource
@@ -2076,11 +2077,10 @@ impl ResourceBackendInner {
 
     /// `resources/v2/transfer/import/<name>`: destination side of a
     /// cross-namespace copy or move; writes a [`ResourceBundle`], `meta/` last.
-    /// Security: ONE ACL check, on `resources/resources/<name>` (the policy
-    /// layer's `transfer_target`), covers every secret, version and history
-    /// entry; per-secret ACLs are not consulted, so the orchestrator probes them.
-    /// `on_conflict` is `refuse` only. Content gates apply (`check_import_write_gates`);
-    /// `post_route` stamps the owner, and shares are not touched.
+    /// Security: the policy layer (`transfer_target`) authorizes a write of
+    /// `resources/resources/<name>` and of `resources/secrets/<name>/<key>` per
+    /// secret before this runs. `on_conflict` is `refuse` only. Content gates
+    /// apply (`check_import_write_gates`); `post_route` stamps the owner.
     pub async fn handle_resource_import(
         &self,
         _backend: &dyn Backend,
