@@ -942,8 +942,16 @@ POST /v2/sys/namespace-transfer/move
   `namespace`, never as `{ "namespace": "", "mount": "team-a/secret" }`
   (400). A mount that starts with its own namespace's path
   (`{ "namespace": "team-a", "mount": "team-a/secret" }`) is refused too
-  (400), because the router reads such a path as already qualified. Two
-  spellings of the same item are refused as one (400).
+  (400), because the router reads such a path as already qualified. A
+  mount that lives only in the root table (`sys/`, `identity/`, ...) is no
+  mount inside a namespace and is refused (400). Two spellings of the same
+  item are refused as one (400).
+- The route itself is evaluated in the request's **active namespace** (the
+  `X-Vault-Namespace` header, root when absent), so the caller's policy must
+  grant `update` on `sys/namespace-transfer/*` and `sys/capabilities-self`
+  there. A token bound to CIDRs (`token_bound_cidrs`) cannot run a transfer:
+  the steps are internal sub-requests that carry no client address, so the
+  binding fails closed.
 - Every step is an ordinary request made with the **caller's token** in the
   namespace it touches. The caller needs:
   - `update` on `sys/namespace-transfer/*` (this route; no built-in policy
@@ -963,9 +971,14 @@ POST /v2/sys/namespace-transfer/move
 - `on_conflict`: `refuse` (default, 409 naming the path), `rename` (the
   path if free, else the first free `<path>-2` … `<path>-100`, each tried as
   a refused-on-conflict import so the ACL checks every name; it stops at the
-  first other refusal), `overwrite` (an ordinary DELETE of the destination
-  item, then the import; not atomic: if the import then fails, the error
-  says the destination was deleted). A destination content refusal (a
+  first other refusal), `overwrite` (the import is tried first and, if the name is free, that is
+  all; if the name is taken, an ordinary DELETE of the destination item
+  runs, which also revokes its owner, shares and asset-group membership,
+  and then the import; not atomic: if the import then fails, the error
+  says the destination was deleted). The gate that refuses a brokered
+  resource a static credential, and the agent-access gate, depend on the
+  asset groups the delete prunes, so they cannot be checked before it: an
+  overwrite can delete a destination for an import that is then refused. A destination content refusal (a
   brokered resource receiving a static SSH credential) is returned as is and
   never treated as a taken name.
 - `dry_run`: every read, rights check and collision check, nothing written.
@@ -1033,6 +1046,24 @@ destination refused a planned share), `all-shares-dropped` and
 `files-not-transferred`. A dry run reports the same warnings without
 writing; it cannot check the share route's owner rule, which the import
 satisfies by making the caller the owner.
+
+`bvault transfer` prints its own `overwrite-not-atomic` notice before it sends
+an overwrite; the server does not return that code.
+
+**Internal import routes.** The transfer writes through two building-block
+routes that exist for it: `POST resources/v2/transfer/import/<name>` and
+`POST <kv-mount>/v2/transfer/import/<path>`. Do not call them directly. They
+take the item as the transfer read it (versions with their numbers and
+timestamps, history, settings), refuse a name that is taken (`on_conflict`
+accepts `refuse` only; rename and overwrite are the transfer's own doing, see
+above), carry at most 1000 secrets per resource (400), and are authorised as
+a write of the **real** item (`<mount><path>` for KV, `resources/resources/<name>`
+for a resource, and each `resources/secrets/<name>/<key>`): deny rules, owner
+and share scopes and per-secret paths apply as for a normal write, and a grant
+on the import route alone allows nothing. The KV route is reachable over HTTP
+only under `/v1/` (at `v2` the router reads the path as a secret named
+`v2/transfer/import/<path>`), which sits uneasily with the frozen-`v1` rule;
+it is an internal surface and may change.
 
 ### Caller introspection
 

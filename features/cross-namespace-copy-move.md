@@ -18,16 +18,24 @@ and lose the version history, the change history and the shares.
 
 ## Current State
 
-**In progress (2026-11-17).** Implemented: the import endpoints
-(`resources/v2/transfer/import/<name>`, `<kv-mount>/v2/transfer/import/<path>`,
-refuse-only, authorized as a write of the real item), the share planner, and
-`POST /v2/sys/namespace-transfer/{copy|move}` (`docs/api.md`): reads, rights
-checks, `dry_run`, refuse/rename/overwrite, caller ownership, verified move,
-warnings, and the relations: shares written through the share API as the
-caller (history op `copy` / `move`), membership of same-named destination
-asset groups, and attached files re-pointed by a move within one namespace
-(otherwise `files-not-transferred`: blobs are never copied between
-namespaces). Not yet: CLI, Tauri command, GUI.
+**Done (2026-11-17).** One resource, or one KV v2 secret, can be copied or
+moved to another namespace (or inside one) with its record, every secret and
+version, the change history of a resource, its shares and its asset-group
+membership, from three surfaces:
+
+- `POST /v2/sys/namespace-transfer/{copy|move}` (`docs/api.md`): reads, rights
+  checks, `dry_run`, refuse / rename / overwrite, caller ownership, a verified
+  move, warnings and the relations below.
+- `bvault transfer copy|move` (`docs/cli-reference.md`), with
+  `--source-mount` / `--destination-mount`, `--on-conflict` and `--dry-run`.
+- The Resources page of the desktop app: a Copy or move action on a
+  resource's Info tab that checks first (dry run) and shows the warnings
+  before anything is written. It calls the Tauri command `transfer_object`.
+
+Not done: the KV secrets page has no action yet (the modal and the command
+are reusable), and the GUI was proven only in jsdom, not in a live window.
+Follow-ups are tracked in `ROADMAP.md` (T496-T501). What the feature cannot
+carry is under "Known limits".
 
 Closest existing behaviour before this feature, reused as the pattern, not
 called as-is:
@@ -60,7 +68,8 @@ called as-is:
   membership, attached file resources.
 - **KV secret**: the secret, all its versions and metadata, explicit shares.
 - Entry points: `v2/` HTTP API (AGENTS.md §7 — new routes go under `v2/`),
-  `bvault` CLI, Tauri command, GUI action on the resource and KV pages.
+  `bvault` CLI, Tauri command, GUI action on the Resources page (the KV
+  secrets page is a follow-up).
 - A move is **copy, verify, then delete the source**. A mid-failure leaves the
   source intact and at most a recoverable partial destination, never a gap, the
   same ordering rename already uses. Copy never touches the source.
@@ -89,34 +98,51 @@ called as-is:
 A share is `(target, grantee, capabilities)` (`share_store.rs`). Per share,
 the destination check is:
 
-1. **Entity grantee**: kept only if the entity exists and is usable in the
-   destination namespace (its `namespace` is the destination or an ancestor
-   whose aliases the destination can see, as the grantee picker already
-   allows). Otherwise dropped.
+1. **Entity grantee**: kept only if the entity exists and lives in the
+   destination namespace or in the root namespace (the rule the grantee picker
+   uses, `grantee_namespaces`). An entity of any other namespace is dropped
+   with `grantee-not-in-destination`; the grantee is never guessed from its
+   login across namespaces.
 2. **Group grantee** (`group_user` / `group_app`): kept only if a group of that
    name exists in the destination namespace. Otherwise dropped.
 3. **Asset-group targets** are not shares of the moved object; asset-group
    membership is re-created only if a group of the same name exists in the
-   destination, otherwise reported.
+   destination itself (not merely inherited), the caller can see all its
+   members and may modify it. A group is never created. Otherwise it is
+   reported as `group-membership-dropped`.
 4. **Capabilities** are carried unchanged; the vocabulary is the store's
    existing one (including `connect`).
 5. Dropped shares are listed individually (grantee, capabilities, reason). If
    every share is dropped the warning says so. Carried shares are re-keyed to
    `<dest-ns>/<name>` and logged in the share history as a `copy` / `move` op.
 6. The caller needs the right to grant shares in the destination for the
-   carried shares to be written; without it all shares are dropped with that
-   reason (the object itself is still copied).
+   carried shares to be written; without it all shares are dropped with
+   `cannot-grant` (the object itself is still copied). Shares are written
+   through the share API as the caller, so its owner-or-administrator check
+   applies; only the item's owner or an administrator may list the source's
+   shares (otherwise `shares-unreadable`). Expired shares and unknown grantee
+   kinds are dropped with their own codes.
 
-## API and result shape (proposal, builder may refine)
+## API and result shape
 
 `POST v2/sys/namespace-transfer/{copy|move}` with body
-`{ kind: "resource"|"kv-secret", source: {namespace, path}, destination:
-{namespace, path}, on_conflict: "refuse"|"rename"|"overwrite", dry_run: bool }`.
+`{ kind: "resource"|"kv-secret", source: {namespace, mount, path},
+destination: {namespace, mount, path}, on_conflict: "refuse"|"rename"|
+"overwrite", dry_run: bool }`. `docs/api.md` is the reference for the fields,
+the rights, the collision modes and every warning code.
 
-`dry_run: true` runs every permission and share check and returns the plan and
-the warnings without writing anything, so the GUI can show the warnings before
-the user confirms. The response lists what was transferred (counts of secrets,
-versions, history entries, shares) and `warnings: [{code, subject, message}]`.
+`dry_run: true` runs every read, rights check and collision check and returns
+the plan and the warnings without writing anything, so the GUI can show the
+warnings before the user confirms. The response is
+`{ transferred: {secrets, versions, history, shares}, warnings: [{code,
+subject, message}], dry_run, destination }`: counts and warnings, never a
+value.
+
+`rename` and `overwrite` are the orchestrator's doing. The two import routes
+it writes through accept `refuse` only: rename tries `refuse` imports at
+`<name>-2` ... `<name>-100` so the ACL checks every name it attempts, and
+overwrite is an ordinary DELETE of the destination (which cleans up its
+owner, shares and groups) followed by an import.
 
 ## Security notes
 
@@ -125,35 +151,82 @@ versions, history entries, shares) and `warnings: [{code, subject, message}]`.
   elevated privileges. This is high-risk (authz, secret handling): any
   implementation goes to `architect` and review runs on Opus (AGENTS.md §1).
 - Secret values are read and written inside the server and never logged or put
-  in audit entries; audit records the operation, the two paths and counts.
-- Audit entries are emitted in **both** namespaces (the origin sees the read /
-  delete, the destination sees the write), consistent with the cross-namespace
-  audit rules in `namespaces-multitenancy.md`.
+  in audit entries.
+- Every step is an ordinary request made with the caller's token, so each one
+  is audited by the normal request pipeline (the reads and the delete at the
+  origin, the writes at the destination, no secret value in an entry). Entries
+  are attributed to the token's namespace, as for every request, so a root
+  token's transfer reaches only root audit devices; this feature does not
+  change that. The orchestrator adds one server-log line per transfer
+  (operation, kind, user, both paths, counts), never a value.
 - Versioning data written to the destination keeps version numbers and
   timestamps from the source; the history entry marks the arrival.
+- The two import routes are authorised against the **real** item path (the
+  policy layer maps `<mount>/v2/transfer/import/<p>` to the path a normal
+  write is checked on), so deny rules, owner and share scopes and per-secret
+  paths apply, and a grant on the import route alone allows nothing. One
+  transfer carries at most 1000 secrets per resource.
 - No persisted-format change is expected; if one is needed, apply the
   read-old / write-new rule before building.
 
-## Left to the builder
+## Decisions taken while building
 
-Where the orchestration lives (the facade, since it spans the resource engine,
-KV engine and `ShareStore`), how the destination namespace's barrier view is
-reached with the caller's token, exact error codes, the file-resource
-re-point step, GUI wording, and concurrency behaviour when the source changes
-during the copy (recommended: re-read versions after copy and fail the move,
-leaving the source, if they differ).
+- The orchestration lives in the kernel `sys/` module
+  (`crates/bv-kernel/src/modules/system/transfer/`), driving ordinary requests
+  through `Core::handle_request` with the caller's token, once per namespace.
+- Concurrency: a move re-reads the source after the copy and deletes it only
+  if nothing changed; otherwise it answers 409, keeps both and says what was
+  written.
+- One object per call; `dry_run` is on the API. A soft-deleted KV version
+  arrives destroyed (its value cannot be read), and the source is never
+  undeleted.
 
-## Open points for the maintainer
+## Known limits
 
-None blocking. Calls made by the author, not confirmed: one object per call;
-`dry_run` on the API; file resources travel with their resource; asset-group
-membership is re-created only when a same-named group exists in the destination.
+- **Entity shares.** An entity grantee is carried only if its entity lives in
+  the destination namespace or in the root namespace, so entity shares
+  survive a root to namespace transfer; an entity of another namespace is
+  dropped with a warning. Group shares carry wherever a group of the same
+  name exists in the destination.
+- **Attached files** are re-pointed only by a move within one namespace; in
+  every other case the blobs stay where they are, attached to the source name,
+  and `files-not-transferred` says so. Each namespace has its own files
+  engine.
+- **Overwrite is a delete and then an import, so it is not atomic**: if the
+  import fails, the destination stays deleted (the error says so). It cannot
+  pre-check the brokered-resource and agent-access gates, which depend on the
+  asset groups the delete prunes.
+- **At most 1000 secrets per resource** (400 above that).
+- **Soft-deleted KV versions** are copied as destroyed, with a
+  `deleted-version-not-recoverable` warning.
+- **KV environment overrides** are rebuilt from per-environment reads, so an
+  override equal to its base value is normalised away
+  (`kv-environment-overrides-normalized`).
+- **Group membership updates are read-modify-write**: a concurrent edit to
+  that asset group between the read and the write can be lost.
+- **Tokens bound to a CIDR are refused**: the steps are internal sub-requests
+  with no client address, so the binding fails closed.
+- **Rights.** The route is evaluated in the request's active namespace and
+  needs `update` on `sys/namespace-transfer/*` plus `sys/capabilities-self`
+  there; no built-in policy grants the former. `bvault transfer` has no flag
+  for the namespace header (planned).
+- **Policies naming the source path are not rewritten** (always warned as
+  `policies-not-carried`).
+- **The import routes are internal building blocks.**
+  `resources/v2/transfer/import/<name>` and `<kv-mount>/v2/transfer/import/<p>`
+  exist for the orchestrator; they are refuse-only and ACL-checked against the
+  real path. The KV one is reachable over HTTP only under `/v1/`, in tension
+  with the frozen-`v1` rule in `AGENTS.md` section 7. Do not call them
+  directly.
 
 ## Phases
 
 | Phase | Content | Status |
 |---|---|---|
-| 1 | Engine-side copy/move of a resource and a KV secret with versions and history, collision handling, permission checks | Done |
-| 2 | Share validation, warnings, `dry_run` | Done (shares, asset-group membership and files carried or reported) |
-| 3 | CLI, Tauri command, GUI action with warning dialog | Planned |
-| 4 | Tests: permission matrix, collision, partial failure, shares kept/dropped, audit in both namespaces | Planned |
+| 1 | Engine-side import of a resource and a KV secret with versions and history, collision handling | Done |
+| 2 | Import routes authorised against the real item path (ACL, owner and share scopes) | Done |
+| 3 | Share planner, `dry_run`, warnings | Done |
+| 4 | Orchestrator and `POST /v2/sys/namespace-transfer/{copy\|move}`: rights checks, refuse / rename / overwrite, verified move, shares, asset-group membership, files | Done |
+| 5 | `bvault transfer copy\|move` | Done |
+| 6 | Tauri command `transfer_object` and the Resources page action with the dry-run warning preview | Done |
+| 7 | Tests: permission matrix, collision, partial failure, shares kept / dropped, aliasing of one item, in-crate, facade and GUI | Done |

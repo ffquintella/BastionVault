@@ -441,6 +441,12 @@ item first and is not atomic: if the import then fails, the destination stays
 deleted, and the command prints `warning[overwrite-not-atomic]: <destination>: ...`
 to stderr before it sends the request. Secret values are never printed.
 
+The request itself runs in the root namespace: `bvault transfer` has no flag
+for the namespace header, so the token must be valid there and its policy must
+grant `update` on `sys/namespace-transfer/*` and `sys/capabilities-self`. A
+token bound to CIDRs cannot run a transfer. Use the API with the
+namespace header when your token lives in another namespace.
+
 ## mcp
 
 Give AI assistants scoped, audited access to BastionVault over the Model Context

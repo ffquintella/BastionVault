@@ -58,6 +58,11 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### Namespaces: copy or move a resource or KV secret to another namespace
+
+- **Copy or move one resource or KV secret to another namespace with every secret, every version, its change history and the shares that are still valid there** (T494, S120)
+  -- `POST /v2/sys/namespace-transfer/{copy|move}` (`kind` `resource` or `kv-secret`, `source` and `destination` as `{namespace, mount, path}`, `on_conflict` `refuse` (default), `rename` or `overwrite`, `dry_run`), `bvault transfer copy|move --kind ... [--source-namespace NS] [--destination-namespace NS] [--source-mount M] [--destination-mount M] [--on-conflict refuse|rename|overwrite] [--dry-run] SOURCE DESTINATION`, and a **Copy or move** action on a resource's Info tab in the desktop app, which runs a dry run first and lists every warning before it writes. Every step runs with your own token in the namespace it touches: you need read on everything read at the origin, write on the destination, `delete` on the origin for a move and `delete` on the destination for an overwrite, plus `update` on `sys/namespace-transfer/*` and `sys/capabilities-self` (no built-in policy grants the first). You own the copy; a resource's history records the origin and the origin owner. A move deletes the source only after re-reading it and finding it unchanged, and otherwise keeps both. Whatever cannot be carried is returned as a warning, never dropped silently: shares whose grantee does not exist in the destination, asset-group membership with no same-named group there, attached files (re-pointed only by a move within one namespace), soft-deleted KV versions (arrive destroyed), policies that name the old path. Nothing is written on a dry run. Limits are listed in `features/cross-namespace-copy-move.md`. The KV secrets page has no action yet.
+
 #### OIDC auth: test a provider and set its CA trust from the GUI
 
 - **Test an OIDC provider's sign-in from Settings → SSO providers without signing out** (T495, S29) -- the new **Test** button opens the provider's real login in your browser and then lists each step (discovery, redirect back, token exchange and role checks, subject, user claim, policies, groups) with the fields the provider sent and a verdict on whether the login would work. The token the test creates is revoked immediately and you stay signed in as before. OIDC only; SAML has no test yet.
@@ -525,6 +530,11 @@ EXAMPLE ENTRY:
 - Keep the expiration register-and-restore benchmark's leases alive for the whole test: their 400 s TTL was shorter than the 10 000-lease registration loop on Windows (453 s alone, ~960 s in a full run), so leases expired before the count.
 
 ### Security
+
+#### Namespace transfer: import routes authorised against the real path
+
+- **Authorise the transfer's import routes against the item they write, cap them at 1000 secrets per resource and perform an overwrite as a normal delete plus import** (T494, S120)
+  -- `resources/v2/transfer/import/<name>` and `<kv-mount>/v2/transfer/import/<path>` are evaluated on the real target path (`resources/resources/<name>` and each `resources/secrets/<name>/<key>`, or `<mount><path>`), so deny rules, owner and share scopes and per-secret paths apply exactly as for a normal write and a grant on the import route alone allows nothing. They accept `on_conflict` `refuse` only, so a name the policy never checked cannot be written; `rename` tries each name as its own checked import, and `overwrite` is an ordinary `DELETE` of the destination (which revokes its owner, shares and asset-group membership) followed by an import, so it needs `delete` on the destination. One resource import carries at most 1000 secrets (400 above that).
 
 #### Namespace policies stay inside their namespace (T471)
 
