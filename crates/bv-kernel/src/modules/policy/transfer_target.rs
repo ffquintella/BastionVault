@@ -58,23 +58,16 @@ impl ImportTarget {
         self.path_of(&self.name)
     }
 
-    /// The real path of the item the import wrote, from the handler's response
-    /// (`path` for KV, `name` for a resource): the requested name, or the
-    /// `<name>-<n>` that `on_conflict = rename` picks, which the ACL never saw.
-    /// That sibling shares the parent a prefix rule authorized, but an exact-name
-    /// rule, a deny on the sibling, or a share or group of the requested item
-    /// does not cover it. `None` for any other answer: nothing is stamped then.
+    /// The real path of the item the import wrote, when the handler's answer
+    /// (`path` for KV, `name` for a resource) is exactly the requested name the
+    /// ACL checked. `None` for any other answer: nothing is stamped then.
     pub(crate) fn written_path(&self, resp: Option<&Response>) -> Option<String> {
         let field = match self.kind {
             Kind::KvSecret => "path",
             Kind::Resource => "name",
         };
         let written = resp?.data.as_ref()?.get(field)?.as_str()?;
-        let renamed = written
-            .strip_prefix(self.name.as_str())
-            .and_then(|rest| rest.strip_prefix('-'))
-            .is_some_and(|n| !n.is_empty() && !n.starts_with('0') && n.bytes().all(|b| b.is_ascii_digit()));
-        (written == self.name || renamed).then(|| self.path_of(written))
+        (written == self.name).then(|| self.acl_path())
     }
 
     /// The path a normal write of `name` under this mount is authorized on. KV:
@@ -158,20 +151,19 @@ mod tests {
     }
 
     #[test]
-    fn the_written_path_is_the_requested_name_or_its_rename() {
+    fn the_written_path_is_only_the_requested_name() {
         let resp = |field: &str, value: &str| Response::data_response(json!({ field: value }).as_object().cloned());
         let kv = ImportTarget::from_route("secret/", "kv-v2", 1, "v2/transfer/import/team/db").unwrap();
         assert_eq!(kv.written_path(Some(&resp("path", "team/db"))).as_deref(), Some("secret/team/db"));
-        assert_eq!(kv.written_path(Some(&resp("path", "team/db-2"))).as_deref(), Some("secret/team/db-2"));
-        assert_eq!(kv.written_path(Some(&resp("path", "team/db-1000"))).as_deref(), Some("secret/team/db-1000"));
-        for other in ["team/other", "team/db-", "team/db-02", "team/db-x", "team/db-2/x", "team/db2", "db"] {
+        for other in ["team/db-2", "team/other", "team/db/x", "db", ""] {
             assert_eq!(kv.written_path(Some(&resp("path", other))), None, "{other}");
         }
         assert_eq!(kv.written_path(Some(&resp("name", "team/db"))), None, "KV answers with `path`");
         assert_eq!(kv.written_path(None), None);
 
         let res = ImportTarget::from_route("resources/", "resource", 1, "v2/transfer/import/SRV1").unwrap();
-        assert_eq!(res.written_path(Some(&resp("name", "srv1-3"))).as_deref(), Some("resources/resources/srv1-3"));
+        assert_eq!(res.written_path(Some(&resp("name", "srv1"))).as_deref(), Some("resources/resources/srv1"));
+        assert_eq!(res.written_path(Some(&resp("name", "srv1-2"))), None, "no rename");
         assert_eq!(res.written_path(Some(&resp("name", "SRV1"))), None, "the engine answers lower-cased");
     }
 }

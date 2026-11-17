@@ -63,22 +63,28 @@ async fn import(core: &Arc<Core>, token: &str, path: &str, body: Value) -> Resul
     send(core, token, Operation::Write, path, None, body).await
 }
 
-fn kv_bundle(on_conflict: &str) -> Value {
+fn kv_bundle() -> Value {
     json!({
         "versions": [{ "version": 1, "created_time": "2025-01-01T00:00:00Z", "data": { "v": "imported" } }],
-        "current": 1,
-        "on_conflict": on_conflict
+        "current": 1
     })
 }
 
-fn resource_bundle(on_conflict: &str) -> Value {
+/// A resource bundle carrying one version of a secret under each of `keys`.
+fn resource_bundle(keys: &[&str]) -> Value {
+    let version = json!({ "version": 1, "created_time": "2025-01-01T00:00:00Z", "data": { "token": "t-S3CRET" } });
+    let secrets: Vec<Value> = keys.iter().map(|k| json!({ "key": k, "current": 1, "versions": [version] })).collect();
     json!({
         "meta": { "type": "server", "hostname": "h.example" },
-        "secrets": [],
+        "secrets": secrets,
         "history": [],
-        "on_conflict": on_conflict,
         "origin": "elsewhere/resources/x"
     })
+}
+
+fn with_conflict(mut body: Value, mode: &str) -> Value {
+    body["on_conflict"] = json!(mode);
+    body
 }
 
 fn denied(r: Result<Option<Response>, RvError>, what: &str) {
@@ -123,11 +129,11 @@ async fn kv_import_honours_a_deny_on_the_real_path() {
     write_policy(&core, &root, "kv-writer", KV_WRITER).await;
     let (token, _) = login(&core, &root, "writer", "kv-writer").await;
 
-    let r = import(&core, &token, "secret/v2/transfer/import/restricted/x", kv_bundle("")).await;
+    let r = import(&core, &token, "secret/v2/transfer/import/restricted/x", kv_bundle()).await;
     denied(r, "import under a denied prefix");
     assert_eq!(kv_value(&core, &root, "restricted/x").await, None, "nothing written");
 
-    import(&core, &token, "secret/v2/transfer/import/open/x", kv_bundle("")).await.unwrap();
+    import(&core, &token, "secret/v2/transfer/import/open/x", kv_bundle()).await.unwrap();
     assert_eq!(kv_value(&core, &root, "open/x").await, Some(json!("imported")));
 }
 
@@ -141,12 +147,12 @@ async fn resource_import_honours_a_deny_on_the_real_path() {
     let (token, entity) = login(&core, &root, "writer", "res-writer").await;
 
     for name in ["locked", "LOCKED", " locked", "Locked "] {
-        let r = import(&core, &token, &format!("resources/v2/transfer/import/{name}"), resource_bundle("")).await;
+        let r = import(&core, &token, &format!("resources/v2/transfer/import/{name}"), resource_bundle(&[])).await;
         denied(r, &format!("import as {name:?}"));
     }
     assert!(test_read_api(core.as_ref(), &root, "resources/resources/locked", true).await.unwrap().is_none());
 
-    import(&core, &token, "resources/v2/transfer/import/free", resource_bundle("")).await.unwrap();
+    import(&core, &token, "resources/v2/transfer/import/free", resource_bundle(&[])).await.unwrap();
     assert_eq!(resource_owner(&core, "free").await, Some(entity), "the importer owns the real item");
 }
 
@@ -164,14 +170,11 @@ async fn kv_import_under_owner_scopes_checks_and_stamps_the_real_item() {
     send(&core, &alice, Operation::Write, "secret/data/team/a-secret", None, body).await.unwrap();
     assert_eq!(kv_owner(&core, "secret/team/a-secret").await, Some(alice_id.clone()));
 
-    for mode in ["", "rename"] {
-        let r = import(&core, &bob, "secret/v2/transfer/import/team/a-secret", kv_bundle(mode)).await;
-        denied(r, &format!("bob importing onto alice's secret (on_conflict={mode:?})"));
-    }
+    let r = import(&core, &bob, "secret/v2/transfer/import/team/a-secret", kv_bundle()).await;
+    denied(r, "bob importing onto alice's secret");
     assert_eq!(kv_value(&core, &root, "team/a-secret").await, Some(json!("alice's")), "untouched");
-    assert_eq!(kv_value(&core, &root, "team/a-secret-2").await, None, "no rename either");
 
-    import(&core, &bob, "secret/v2/transfer/import/team/b-new", kv_bundle("")).await.unwrap();
+    import(&core, &bob, "secret/v2/transfer/import/team/b-new", kv_bundle()).await.unwrap();
     assert_eq!(kv_owner(&core, "secret/team/b-new").await, Some(bob_id), "bob owns the real item");
     assert_eq!(kv_owner(&core, "secret/v2/transfer/import/team/b-new").await, None, "no stray record");
     let read = |token: String| {
@@ -182,29 +185,37 @@ async fn kv_import_under_owner_scopes_checks_and_stamps_the_real_item() {
     denied(read(alice.clone()).await, "alice reading bob's import");
 }
 
-/// `rename` writes a name the ACL did not see: only that name is stamped,
-/// never the requested one (an unowned legacy secret must stay unowned).
+/// `rename` and `overwrite` are refused with a 400 on both import routes, for
+/// an occupied and a free name alike, and nothing is written or stamped.
 #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
-async fn kv_rename_import_stamps_only_the_name_it_wrote() {
-    let (_bvault, core, root) = new_unseal_test_bastion_vault("kv_rename_import_stamps").await;
-    write(&core, &root, "sys/auth/pass", json!({ "type": "userpass" })).await;
-    let (bob, bob_id) = login(&core, &root, "bob", "standard-user").await;
+async fn rename_and_overwrite_are_refused_on_both_import_routes() {
+    let (_bvault, core, root) = new_unseal_test_bastion_vault("import_refuses_rename").await;
+    write(&core, &root, "secret/data/team/taken", json!({ "data": { "v": "kept" } })).await;
+    write(&core, &root, "resources/resources/taken", json!({ "type": "server", "hostname": "kept" })).await;
 
-    // A legacy secret with no owner record.
-    write(&core, &root, "secret/data/team/legacy", json!({ "data": { "v": "legacy" } })).await;
-    let module = core.module_manager().get_module::<IdentityModule>("identity").unwrap();
-    module.owner_store().unwrap().forget_kv_owner("secret/team/legacy").await.unwrap();
-
-    let resp = import(&core, &bob, "secret/v2/transfer/import/team/legacy", kv_bundle("rename")).await.unwrap();
-    assert_eq!(resp.unwrap().data.unwrap()["path"], json!("team/legacy-2"));
-    assert_eq!(kv_owner(&core, "secret/team/legacy").await, None, "the requested name is not claimed");
-    assert_eq!(kv_owner(&core, "secret/team/legacy-2").await, Some(bob_id.clone()));
-    assert_eq!(kv_value(&core, &root, "team/legacy").await, Some(json!("legacy")));
-
-    // Renaming next to the caller's own secret stays under the same parent.
-    let resp = import(&core, &bob, "secret/v2/transfer/import/team/legacy-2", kv_bundle("rename")).await.unwrap();
-    assert_eq!(resp.unwrap().data.unwrap()["path"], json!("team/legacy-2-2"));
-    assert_eq!(kv_owner(&core, "secret/team/legacy-2-2").await, Some(bob_id));
+    for mode in ["rename", "overwrite"] {
+        for (path, body) in [
+            ("secret/v2/transfer/import/team/taken", kv_bundle()),
+            ("secret/v2/transfer/import/team/free", kv_bundle()),
+            ("resources/v2/transfer/import/taken", resource_bundle(&["login"])),
+            ("resources/v2/transfer/import/free", resource_bundle(&["login"])),
+        ] {
+            match import(&core, &root, path, with_conflict(body, mode)).await {
+                Err(RvError::ErrResponseStatus(400, m)) => assert!(m.contains("on_conflict must be refuse"), "{m}"),
+                other => panic!("{mode} {path}: expected 400, got {other:?}"),
+            }
+        }
+    }
+    assert_eq!(kv_value(&core, &root, "team/taken").await, Some(json!("kept")));
+    for path in ["team/taken-2", "team/free"] {
+        assert_eq!(kv_value(&core, &root, path).await, None, "{path}");
+    }
+    for name in ["taken-2", "free"] {
+        let read = test_read_api(core.as_ref(), &root, &format!("resources/resources/{name}"), true).await.unwrap();
+        assert!(read.is_none(), "{name}");
+        assert_eq!(resource_owner(&core, name).await, None, "{name}");
+    }
+    assert_eq!(kv_owner(&core, "secret/team/free").await, None);
 }
 
 /// `standard-user` on resources: refused onto another user's resource,
@@ -221,13 +232,13 @@ async fn resource_import_under_owner_scopes_checks_and_stamps_the_real_item() {
     assert_eq!(resource_owner(&core, "alice-srv").await, Some(alice_id));
 
     for name in ["alice-srv", "ALICE-SRV"] {
-        let r = import(&core, &bob, &format!("resources/v2/transfer/import/{name}"), resource_bundle("rename")).await;
+        let r = import(&core, &bob, &format!("resources/v2/transfer/import/{name}"), resource_bundle(&[])).await;
         denied(r, &format!("bob importing onto alice's resource as {name:?}"));
     }
     let read = test_read_api(core.as_ref(), &root, "resources/resources/alice-srv", true).await.unwrap().unwrap();
     assert_eq!(read.data.unwrap()["hostname"], json!("alice.example"), "untouched");
 
-    import(&core, &bob, "resources/v2/transfer/import/bob-srv", resource_bundle("")).await.unwrap();
+    import(&core, &bob, "resources/v2/transfer/import/bob-srv", resource_bundle(&[])).await.unwrap();
     assert_eq!(resource_owner(&core, "bob-srv").await, Some(bob_id));
     send(&core, &bob, Operation::Read, "resources/resources/bob-srv", None, json!({})).await.unwrap();
 }
@@ -241,10 +252,10 @@ async fn kv_import_follows_a_path_limited_policy() {
         .await;
     let (token, _) = login(&core, &root, "teamer", "team-a").await;
 
-    import(&core, &token, "secret/v2/transfer/import/team-a/db", kv_bundle("")).await.unwrap();
+    import(&core, &token, "secret/v2/transfer/import/team-a/db", kv_bundle()).await.unwrap();
     assert_eq!(kv_value(&core, &root, "team-a/db").await, Some(json!("imported")));
 
-    denied(import(&core, &token, "secret/v2/transfer/import/team-b/db", kv_bundle("")).await, "team-b");
+    denied(import(&core, &token, "secret/v2/transfer/import/team-b/db", kv_bundle()).await, "team-b");
     assert_eq!(kv_value(&core, &root, "team-b/db").await, None);
 }
 
@@ -271,9 +282,9 @@ async fn kv_import_resolves_shares_on_the_real_item() {
     };
     shares.set_share(share).await.unwrap();
 
-    import(&core, &bob, "secret/v2/transfer/import/team/planned", kv_bundle("")).await.unwrap();
+    import(&core, &bob, "secret/v2/transfer/import/team/planned", kv_bundle()).await.unwrap();
     assert_eq!(kv_owner(&core, "secret/team/planned").await, Some(bob_id));
-    denied(import(&core, &bob, "secret/v2/transfer/import/team/other", kv_bundle("")).await, "no share there");
+    denied(import(&core, &bob, "secret/v2/transfer/import/team/other", kv_bundle()).await, "no share there");
 }
 
 /// A `groups`-gated grant is resolved on the real item's asset-group
@@ -287,9 +298,9 @@ async fn kv_import_resolves_asset_groups_on_the_real_item() {
     write_policy(&core, &root, "club-writer", policy).await;
     let (token, _) = login(&core, &root, "member", "club-writer").await;
 
-    import(&core, &token, "secret/v2/transfer/import/team/in-club", kv_bundle("")).await.unwrap();
+    import(&core, &token, "secret/v2/transfer/import/team/in-club", kv_bundle()).await.unwrap();
     assert_eq!(kv_value(&core, &root, "team/in-club").await, Some(json!("imported")));
-    denied(import(&core, &token, "secret/v2/transfer/import/team/outside", kv_bundle("")).await, "not in club");
+    denied(import(&core, &token, "secret/v2/transfer/import/team/outside", kv_bundle()).await, "not in club");
 }
 
 /// A KV name that reads as a sub-command (`data/x`) is checked through
@@ -308,7 +319,7 @@ async fn kv_import_of_a_sub_command_shaped_name_uses_its_data_path() {
     let (token, _) = login(&core, &root, "nested", "nested").await;
     let (other, _) = login(&core, &root, "other", "nested").await;
 
-    import(&core, &token, "secret/v2/transfer/import/data/x", kv_bundle("")).await.unwrap();
+    import(&core, &token, "secret/v2/transfer/import/data/x", kv_bundle()).await.unwrap();
     assert_eq!(kv_value(&core, &root, "data/x").await, Some(json!("imported")));
     send(&core, &token, Operation::Read, "secret/data/data/x", None, json!({})).await.unwrap();
     denied(send(&core, &other, Operation::Read, "secret/data/data/x", None, json!({})).await, "not the owner");
@@ -366,10 +377,10 @@ async fn kv_import_in_a_namespace_uses_the_namespaced_real_path() {
     let created = send(&core, &root, Operation::Write, "auth/token/create", ns, body).await.unwrap().unwrap();
     let token = created.auth.unwrap().client_token;
 
-    let r = send(&core, &token, Operation::Write, "secret/v2/transfer/import/restricted/x", ns, kv_bundle("")).await;
+    let r = send(&core, &token, Operation::Write, "secret/v2/transfer/import/restricted/x", ns, kv_bundle()).await;
     denied(r, "namespaced import under a denied prefix");
 
-    send(&core, &token, Operation::Write, "secret/v2/transfer/import/open/x", ns, kv_bundle("")).await.unwrap();
+    send(&core, &token, Operation::Write, "secret/v2/transfer/import/open/x", ns, kv_bundle()).await.unwrap();
     let read = send(&core, &root, Operation::Read, "secret/data/open/x", ns, json!({})).await.unwrap().unwrap();
     assert_eq!(read.data.unwrap()["data"]["v"], json!("imported"));
     assert!(kv_owner(&core, "tenant-a/secret/open/x").await.is_some(), "owner keyed on the namespaced real path");

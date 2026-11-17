@@ -339,7 +339,7 @@ pub struct ResourceBundle {
     /// the order the entries arrive in does not matter.
     #[serde(default)]
     pub history: Vec<ResourceHistoryEntry>,
-    /// `refuse` (default, also when empty) | `rename`. There is no overwrite:
+    /// `refuse` (the default, also when empty) is the only mode. To overwrite,
     /// the caller deletes the destination first (`DELETE resources/resources/<name>`).
     #[serde(default)]
     pub on_conflict: String,
@@ -352,9 +352,9 @@ pub struct ResourceBundle {
     pub origin: String,
 }
 
-/// What an import wrote: the final name (differs from the requested one
-/// under `rename`) and how many secrets, versions and origin history entries
-/// arrived. `history` does not count the `transfer-in` entry.
+/// What an import wrote: the stored name and how many secrets, versions and
+/// origin history entries arrived. `history` does not count the
+/// `transfer-in` entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ResourceImportSummary {
     pub name: String,
@@ -522,10 +522,9 @@ impl ResourceBackend {
                         {op: Operation::Write, handler: h_res_import.handle_resource_import}
                     ],
                     help: "Import a resource bundle (metadata, every secret with all its versions, change history) \
-                           under a name, keeping version numbers and timestamps. Body: meta, secrets, history, \
-                           on_conflict (refuse|rename), origin, origin_owner. Authorized as a write of \
-                           resources/<name>; the caller becomes the owner of the resource written. Shares are \
-                           not written."
+                           under a free name, keeping version numbers and timestamps. Body: meta, secrets, \
+                           history, on_conflict (refuse only), origin, origin_owner. Authorized as a write of \
+                           resources/<name>; the caller becomes its owner. Shares are not written."
                 },
                 {
                     // CRUD a single resource
@@ -1236,29 +1235,17 @@ async fn existing_resource_key_in(view: &dyn storage::Storage, name: &str) -> Re
 // rather than a request so they are testable in-crate; the handler adds the
 // write-time gates that need the vault (`check_import_write_gates`).
 
-/// Upper bound on the `<name>-<n>` candidates `on_conflict = rename` tries.
-const IMPORT_RENAME_MAX_SUFFIX: u32 = 1000;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ImportConflict {
-    Refuse,
-    Rename,
-}
-
-impl ImportConflict {
-    /// An unknown mode is refused, never read as the default. `overwrite` is
-    /// refused too: through this route it would skip the delete ACL and the
-    /// owner, share and asset-group cleanup a real delete runs.
-    fn parse(raw: &str) -> Result<Self, RvError> {
-        match raw.trim() {
-            "" | "refuse" => Ok(Self::Refuse),
-            "rename" => Ok(Self::Rename),
-            "overwrite" => Err(bad_import(
-                "on_conflict must be refuse or rename; to overwrite, DELETE resources/resources/<name> first, \
-                 then import",
-            )),
-            other => Err(bad_import(format!("on_conflict must be refuse or rename, not '{other}'"))),
-        }
+/// `on_conflict` may only be `refuse` (or absent). An overwrite here would skip
+/// the delete ACL and a real delete's cleanup; a rename would write a name the
+/// ACL never checked. Any other value is refused, never read as the default.
+fn check_on_conflict(raw: &str) -> Result<(), RvError> {
+    match raw.trim() {
+        "" | "refuse" => Ok(()),
+        "overwrite" => Err(bad_import(
+            "on_conflict must be refuse; to overwrite, DELETE resources/resources/<name> first, then import",
+        )),
+        "rename" => Err(bad_import("on_conflict must be refuse; to use another name, import under that name")),
+        other => Err(bad_import(format!("on_conflict must be refuse, not '{other}'"))),
     }
 }
 
@@ -1272,8 +1259,7 @@ fn import_conflict(message: impl Into<String>) -> RvError {
 
 /// A validated import, ready to write.
 struct ResourceImportPlan {
-    /// The destination name: the requested one, lower-cased, or under
-    /// `rename` the first free `<name>-<n>`.
+    /// The destination name: the requested one, trimmed and lower-cased.
     name: String,
     /// History keys (nanoseconds), one per `bundle.history` entry.
     history_seq: Vec<u128>,
@@ -1378,47 +1364,27 @@ async fn has_secret_data_in(view: &dyn storage::Storage, name: &str) -> Result<b
     Ok(false)
 }
 
-/// The first `<base>-<n>` (n from 2) with neither a record, in any case,
-/// nor secret data under it.
-#[maybe_async::maybe_async]
-async fn free_resource_name_in(view: &dyn storage::Storage, base: &str) -> Result<String, RvError> {
-    let taken: HashSet<String> = view.list(META_PREFIX).await?.into_iter().map(|k| k.to_ascii_lowercase()).collect();
-    for n in 2..=IMPORT_RENAME_MAX_SUFFIX {
-        let candidate = format!("{base}-{n}");
-        if !taken.contains(&candidate) && !has_secret_data_in(view, &candidate).await? {
-            return Ok(candidate);
-        }
-    }
-    Err(import_conflict(format!("no free name for '{base}' up to '{base}-{IMPORT_RENAME_MAX_SUFFIX}'")))
-}
-
-/// Validate a bundle and settle the destination name. Writes nothing.
+/// Validate a bundle and check the name is free. Writes nothing.
 #[maybe_async::maybe_async]
 async fn plan_resource_import(
     view: &dyn storage::Storage,
     raw_name: &str,
     bundle: ResourceBundle,
 ) -> Result<ResourceImportPlan, RvError> {
-    let mode = ImportConflict::parse(&bundle.on_conflict)?;
-    let requested = raw_name.trim().to_ascii_lowercase();
-    validate_name_segment("name", &requested).map_err(bad_import)?;
+    check_on_conflict(&bundle.on_conflict)?;
+    let name = raw_name.trim().to_ascii_lowercase();
+    validate_name_segment("name", &name).map_err(bad_import)?;
     let history_seq = validate_resource_bundle(&bundle)?;
 
-    let existing = existing_resource_key_in(view, &requested).await?;
-    let leftovers = has_secret_data_in(view, &requested).await?;
-    let name = match (mode, existing) {
-        (_, None) if !leftovers => requested,
-        (ImportConflict::Refuse, Some(key)) => {
-            return Err(import_conflict(format!("a resource named '{key}' already exists")));
-        }
-        (ImportConflict::Refuse, None) => {
-            return Err(import_conflict(format!(
-                "secret data with no resource record is stored under '{requested}' (an interrupted \
-                 operation?); import with on_conflict=rename to use another name"
-            )));
-        }
-        (ImportConflict::Rename, _) => free_resource_name_in(view, &requested).await?,
-    };
+    if let Some(key) = existing_resource_key_in(view, &name).await? {
+        return Err(import_conflict(format!("a resource named '{key}' already exists")));
+    }
+    if has_secret_data_in(view, &name).await? {
+        return Err(import_conflict(format!(
+            "secret data with no resource record is stored under '{name}' (an interrupted \
+             operation?); import under another name"
+        )));
+    }
     Ok(ResourceImportPlan { name, history_seq, bundle })
 }
 
@@ -2113,7 +2079,7 @@ impl ResourceBackendInner {
     /// Security: ONE ACL check, on `resources/resources/<name>` (the policy
     /// layer's `transfer_target`), covers every secret, version and history
     /// entry; per-secret ACLs are not consulted, so the orchestrator probes them.
-    /// Only `refuse` or `rename`. Content gates apply (`check_import_write_gates`);
+    /// `on_conflict` is `refuse` only. Content gates apply (`check_import_write_gates`);
     /// `post_route` stamps the owner, and shares are not touched.
     pub async fn handle_resource_import(
         &self,
@@ -2813,41 +2779,29 @@ mod tests {
     }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
-    async fn import_refuses_overwrite_and_rename_picks_free_name() {
+    async fn import_refuses_overwrite_and_rename() {
         let mem = MemStorage::default();
         mem.seed("meta/srv1", json!({"name": "srv1", "hostname": "old"}));
         mem.seed("secret/srv1/old-key", json!({"password": "old"}));
         mem.seed("smeta/srv1/old-key", json!({"current_version": 1, "versions": {}}));
         mem.seed("sver/srv1/old-key/1", json!({"data": {"password": "old"}, "version": 1}));
         mem.seed("hist/srv1/00000000000000000001", json!({"ts": "t", "user": "u", "op": "create"}));
+        mem.seed("secret/leftover/k", json!({"password": "left-behind"}));
         let existing = mem.snapshot();
 
-        // Overwrite is not a mode of this route: it would skip the delete ACL
-        // and the owner, share and asset-group cleanup a real delete runs. It
-        // is refused before storage is read, whatever is at the name.
-        for name in ["srv1", "fresh", ""] {
-            let r = import(&mem, name, with(bundle(), "/on_conflict", json!("overwrite"))).await;
-            let Err(RvError::ErrResponseStatus(400, message)) = r else {
-                panic!("{name:?}: expected a 400, got {r:?}")
-            };
-            assert!(message.contains("refuse or rename"), "{name:?}: {message}");
+        // Overwrite would skip the delete ACL and a real delete's cleanup;
+        // rename would write a name the ACL never checked. Both are refused
+        // before storage is read, whatever is at the name.
+        for mode in ["overwrite", "rename"] {
+            for name in ["srv1", "fresh", "leftover", ""] {
+                let r = import(&mem, name, with(bundle(), "/on_conflict", json!(mode))).await;
+                let Err(RvError::ErrResponseStatus(400, message)) = r else {
+                    panic!("{mode} {name:?}: expected a 400, got {r:?}")
+                };
+                assert!(message.contains("on_conflict must be refuse"), "{mode} {name:?}: {message}");
+            }
         }
-        assert_eq!(mem.snapshot(), existing, "a refused overwrite writes nothing");
-
-        // Rename: the first free `<name>-<n>`, the existing record untouched.
-        let renamed = import(&mem, "srv1", with(bundle(), "/on_conflict", json!("rename"))).await.unwrap();
-        assert_eq!(renamed.name, "srv1-2");
-        assert_eq!(mem.json("meta/srv1-2")["name"], "srv1-2");
-        assert_eq!(mem.json("secret/srv1-2/admin"), json!({"password": "v2-S3CRET"}));
-        for (k, v) in &existing {
-            assert_eq!(mem.snapshot().get(k), Some(v), "{k} changed under a rename import");
-        }
-        let again = import(&mem, "srv1", with(bundle(), "/on_conflict", json!("rename"))).await.unwrap();
-        assert_eq!(again.name, "srv1-3");
-
-        // Rename with nothing in the way keeps the requested name.
-        let fresh = import(&mem, "fresh", with(bundle(), "/on_conflict", json!("rename"))).await.unwrap();
-        assert_eq!(fresh.name, "fresh");
+        assert_eq!(mem.snapshot(), existing, "a refused import writes nothing");
     }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]

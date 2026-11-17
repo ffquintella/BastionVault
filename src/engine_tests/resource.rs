@@ -988,11 +988,11 @@ mod transfer_import_tests {
         assert!(test_read_api(&core, &root, "resources/secrets/db01/login", true).await.unwrap().is_none());
     }
 
-    /// Overwrite is refused through the whole vault (400 naming the two modes):
-    /// the existing resource, its secrets and its asset-group membership stay.
-    /// `refuse` still answers 409 and `rename` picks the first free name.
+    /// Overwrite and rename are refused through the whole vault (400 naming
+    /// `refuse`): the existing resource, its secrets and its asset-group
+    /// membership stay, and no `-2` is created. `refuse` still answers 409.
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
-    async fn test_import_refuses_overwrite_and_keeps_the_existing_resource() {
+    async fn test_import_refuses_overwrite_and_rename_and_keeps_the_existing_resource() {
         let (_bvault, core, root) = new_unseal_test_bastion_vault("test_import_refuses_overwrite").await;
         let meta = json!({ "name": "srv1", "type": "server", "hostname": "old" }).as_object().cloned();
         test_write_api(&core, &root, "resources/resources/srv1", true, meta).await.unwrap();
@@ -1001,10 +1001,13 @@ mod transfer_import_tests {
         let group = json!({ "members": "srv1" }).as_object().cloned();
         test_write_api(&core, &root, "resource-group/groups/alpha", true, group).await.unwrap();
 
-        let body = bundle("server", vec![version(1, json!({ "password": "new" }))], "overwrite");
-        let err = test_write_api(&core, &root, "resources/v2/transfer/import/srv1", false, body).await.unwrap_err();
-        let RvError::ErrResponseStatus(400, message) = &err else { panic!("expected 400, got {err:?}") };
-        assert!(message.contains("refuse or rename"), "{message}");
+        for mode in ["overwrite", "rename"] {
+            let body = bundle("server", vec![version(1, json!({ "password": "new" }))], mode);
+            let err = test_write_api(&core, &root, "resources/v2/transfer/import/srv1", false, body).await.unwrap_err();
+            let RvError::ErrResponseStatus(400, message) = &err else { panic!("{mode}: expected 400, got {err:?}") };
+            assert!(message.contains("on_conflict must be refuse"), "{mode}: {message}");
+        }
+        assert!(test_read_api(&core, &root, "resources/resources/srv1-2", true).await.unwrap().is_none());
 
         let resp = test_read_api(&core, &root, "resources/resources/srv1", true).await.unwrap().unwrap();
         assert_eq!(resp.data.unwrap()["hostname"], json!("old"));
@@ -1016,8 +1019,5 @@ mod transfer_import_tests {
         let body = bundle("server", vec![version(1, json!({ "password": "new" }))], "refuse");
         let err = test_write_api(&core, &root, "resources/v2/transfer/import/srv1", false, body).await.unwrap_err();
         assert!(matches!(err, RvError::ErrResponseStatus(409, _)), "{err:?}");
-        let body = bundle("server", vec![version(1, json!({ "password": "new" }))], "rename");
-        let resp = test_write_api(&core, &root, "resources/v2/transfer/import/srv1", true, body).await.unwrap();
-        assert_eq!(resp.unwrap().data.unwrap()["name"], json!("srv1-2"));
     }
 }
