@@ -56,9 +56,13 @@ impl Transfer {
 }
 
 const LOCATION_HELP: &str = r#"SOURCE and DESTINATION are written <mount>/<path>: the text before the
-first slash is the mount (one segment), the rest is the item's path. The
-namespace is never part of them; name it with --source-namespace and
+first slash is the mount, the rest is the item's path. The namespace is
+never part of them; name it with --source-namespace and
 --destination-namespace (default: the root namespace, "").
+
+For a mount whose name has a slash, name the mount with --source-mount /
+--destination-mount; the positional on that side is then the whole path
+(--source-mount team/kv, positional app/db: mount team/kv, path app/db).
 
 Copy the resource db1 (mount "resources", the path is the resource name)
 from namespace team-a to team-b:
@@ -106,6 +110,20 @@ pub struct TransferArgs {
 
     #[arg(long, value_name = "NAMESPACE", default_value = "", help = "Namespace of the destination (default: root).")]
     destination_namespace: String,
+
+    #[arg(
+        long,
+        value_name = "MOUNT",
+        help = "Mount of the source, for a slash-named mount (SOURCE is then the path)."
+    )]
+    source_mount: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "MOUNT",
+        help = "Mount of the destination, for a slash-named mount (DESTINATION is then the path)."
+    )]
+    destination_mount: Option<String>,
 
     #[arg(
         long,
@@ -201,22 +219,17 @@ impl Op {
 fn run(op: Op, args: &TransferArgs) -> Result<(), RvError> {
     // Validate and build the body before anything is sent or printed.
     let body = build_body(args)?;
-    if let Some(notice) = overwrite_notice(args.on_conflict, args.dry_run) {
+    let (destination_mount, destination_path) = display_parts(args.destination_mount.as_deref(), &args.destination);
+    let destination = show_place(&args.destination_namespace, &destination_mount, &destination_path);
+    if let Some(notice) = overwrite_notice(args.on_conflict, args.dry_run, &destination) {
         eprintln!("{notice}");
     }
 
     let client = args.client()?;
     let resp = client.request_write(format!("/v2/sys/namespace-transfer/{}", op.route()), Some(body))?;
     let data = resp.response_data.unwrap_or(Value::Null);
-    if resp.response_status != 200 {
-        let detail = data.get("error").and_then(Value::as_str).unwrap_or("no error message in the response");
-        return Err(RvError::ErrString(format!(
-            "{} of {} failed (HTTP {}): {}",
-            op.route(),
-            args.kind.as_str(),
-            resp.response_status,
-            one_line(detail)
-        )));
+    if let Some(err) = status_error(op, args.kind, resp.response_status, &data) {
+        return Err(err);
     }
 
     let out = render(op, args, &data);
@@ -228,40 +241,76 @@ fn run(op: Op, args: &TransferArgs) -> Result<(), RvError> {
 }
 
 /// Trim the slashes around a positional and split it at the first one: the
-/// mount is one segment, the item's path is everything after it.
+/// mount is the first segment, the item's path is everything after it.
 fn split_location(location: &str) -> Result<(String, String), RvError> {
     match location.trim_matches('/').split_once('/') {
         Some((mount, path)) if !mount.is_empty() && !path.trim_matches('/').is_empty() => {
             Ok((mount.to_string(), path.trim_matches('/').to_string()))
         }
         _ => Err(RvError::ErrString(format!(
-            "'{location}' is not a location: write it as <mount>/<path> (the namespace goes in --source-namespace / \
+            "'{location}' is not a location: write it as <mount>/<path>, or name the mount with --source-mount / \
+             --destination-mount and give only the path (the namespace goes in --source-namespace / \
              --destination-namespace)"
         ))),
     }
 }
 
-fn place(namespace: &str, location: &str) -> Result<Value, RvError> {
-    let (mount, path) = split_location(location)?;
+/// The mount and path of one side: with a mount override the whole positional is
+/// the path, otherwise [`split_location`] splits it.
+fn resolve_location(mount: Option<&str>, location: &str) -> Result<(String, String), RvError> {
+    let Some(mount) = mount else {
+        return split_location(location);
+    };
+    let (mount, path) = (mount.trim_matches('/'), location.trim_matches('/'));
+    if mount.is_empty() || path.is_empty() {
+        return Err(RvError::ErrString(format!(
+            "'{location}' with mount '{mount}': both a mount and a path are required"
+        )));
+    }
+    Ok((mount.to_string(), path.to_string()))
+}
+
+fn place(namespace: &str, mount: Option<&str>, location: &str) -> Result<Value, RvError> {
+    let (mount, path) = resolve_location(mount, location)?;
     Ok(json!({ "namespace": namespace.trim_matches('/'), "mount": mount, "path": path }))
+}
+
+/// The error for a non-200 answer, with the server's own text (`error`, or
+/// the first of `errors`) on one line; `None` for a 200.
+fn status_error(op: Op, kind: Kind, status: u16, data: &Value) -> Option<RvError> {
+    if status == 200 {
+        return None;
+    }
+    let detail = data
+        .get("error")
+        .and_then(Value::as_str)
+        .or_else(|| data.pointer("/errors/0").and_then(Value::as_str))
+        .map_or_else(|| "no error message in the response".to_string(), one_line);
+    Some(RvError::ErrString(format!("{} of {} failed (HTTP {status}): {detail}", op.route(), kind.as_str())))
 }
 
 /// The request body of `POST /v2/sys/namespace-transfer/{copy|move}` (docs/api.md).
 fn build_body(args: &TransferArgs) -> Result<Map<String, Value>, RvError> {
     let mut body = Map::new();
     body.insert("kind".into(), json!(args.kind.as_str()));
-    body.insert("source".into(), place(&args.source_namespace, &args.source)?);
-    body.insert("destination".into(), place(&args.destination_namespace, &args.destination)?);
+    body.insert("source".into(), place(&args.source_namespace, args.source_mount.as_deref(), &args.source)?);
+    body.insert(
+        "destination".into(),
+        place(&args.destination_namespace, args.destination_mount.as_deref(), &args.destination)?,
+    );
     body.insert("on_conflict".into(), json!(args.on_conflict.as_str()));
     body.insert("dry_run".into(), json!(args.dry_run));
     Ok(body)
 }
 
-fn overwrite_notice(on_conflict: OnConflict, dry_run: bool) -> Option<&'static str> {
-    (on_conflict == OnConflict::Overwrite && !dry_run).then_some(
-        "warning: --on-conflict overwrite deletes the destination item first and is not atomic; \
-         if the import then fails, the destination stays deleted",
-    )
+fn overwrite_notice(on_conflict: OnConflict, dry_run: bool, destination: &str) -> Option<String> {
+    (on_conflict == OnConflict::Overwrite && !dry_run).then(|| {
+        format!(
+            "warning[overwrite-not-atomic]: {}: overwrite deletes the destination first and is not atomic; \
+             if the import then fails, the destination stays deleted",
+            one_line(destination)
+        )
+    })
 }
 
 /// Server text is shown on one line with control characters replaced, so a
@@ -285,11 +334,11 @@ fn show_response_place(place: &Value) -> Option<String> {
 
 /// Counts for stdout, then one `warning[<code>]: <subject>: <message>` per warning for stderr.
 fn render(op: Op, args: &TransferArgs, response: &Value) -> Rendered {
-    let (source_mount, source_path) = split_or_raw(&args.source);
-    let source = show_place(&args.source_namespace, source_mount, source_path);
+    let (source_mount, source_path) = display_parts(args.source_mount.as_deref(), &args.source);
+    let source = show_place(&args.source_namespace, &source_mount, &source_path);
     let destination = response.get("destination").and_then(show_response_place).unwrap_or_else(|| {
-        let (mount, path) = split_or_raw(&args.destination);
-        show_place(&args.destination_namespace, mount, path)
+        let (mount, path) = display_parts(args.destination_mount.as_deref(), &args.destination);
+        show_place(&args.destination_namespace, &mount, &path)
     });
     let kind = args.kind.as_str();
     let (verb, past) = match op {
@@ -327,10 +376,10 @@ fn render(op: Op, args: &TransferArgs, response: &Value) -> Rendered {
     Rendered { stdout, stderr }
 }
 
-/// `<mount>` and `<path>` of a location already checked by [`build_body`]; the
-/// raw text when it was not splittable (never reached on the success path).
-fn split_or_raw(location: &str) -> (&str, &str) {
-    location.trim_matches('/').split_once('/').unwrap_or((location, ""))
+/// Mount and path for display, from a location [`build_body`] already
+/// accepted; the raw text when it cannot be resolved (not reached on success).
+fn display_parts(mount: Option<&str>, location: &str) -> (String, String) {
+    resolve_location(mount, location).unwrap_or_else(|_| (String::new(), location.to_string()))
 }
 
 #[cfg(test)]
@@ -483,10 +532,60 @@ mod test {
 
     #[test]
     fn overwrite_prints_non_atomic_notice() {
-        let notice = overwrite_notice(OnConflict::Overwrite, false).expect("overwrite warns");
+        let notice = overwrite_notice(OnConflict::Overwrite, false, "team-b/resources/db1").expect("overwrite warns");
+        assert!(notice.starts_with("warning[overwrite-not-atomic]: team-b/resources/db1: "), "{notice}");
         assert!(notice.contains("deletes the destination") && notice.contains("not atomic"), "{notice}");
-        assert!(overwrite_notice(OnConflict::Overwrite, true).is_none(), "a dry run deletes nothing");
-        assert!(overwrite_notice(OnConflict::Refuse, false).is_none());
-        assert!(overwrite_notice(OnConflict::Rename, false).is_none());
+        assert!(overwrite_notice(OnConflict::Overwrite, true, "x/y").is_none(), "a dry run deletes nothing");
+        assert!(overwrite_notice(OnConflict::Refuse, false, "x/y").is_none());
+        assert!(overwrite_notice(OnConflict::Rename, false, "x/y").is_none());
+    }
+
+    #[test]
+    fn mount_overrides_make_the_positional_the_path() {
+        let body = |extra: &[&str]| {
+            let mut argv = vec!["--kind", "kv-secret"];
+            argv.extend_from_slice(extra);
+            Value::Object(build_body(&parse_copy(&argv)).unwrap())
+        };
+        let b = body(&["--source-mount", "team/kv", "app/db", "secret/app/db"]);
+        assert_eq!(b["source"]["mount"], "team/kv");
+        assert_eq!(b["source"]["path"], "app/db");
+        assert_eq!(b["destination"]["mount"], "secret", "the other side still splits");
+        assert_eq!(b["destination"]["path"], "app/db");
+
+        let b = body(&["--destination-mount", "/team/kv/", "secret/app/db", "app/db"]);
+        assert_eq!(b["source"]["mount"], "secret");
+        assert_eq!(b["destination"]["mount"], "team/kv");
+        assert_eq!(b["destination"]["path"], "app/db");
+
+        let b = body(&["--source-mount", "a/b", "--destination-mount", "c/d", "x/y/z", "p"]);
+        assert_eq!(b["source"], json!({ "namespace": "", "mount": "a/b", "path": "x/y/z" }));
+        assert_eq!(b["destination"], json!({ "namespace": "", "mount": "c/d", "path": "p" }));
+
+        let c = parse_copy(&["--kind", "kv-secret", "--source-mount", "kv", "", "secret/a"]);
+        assert!(build_body(&c).is_err(), "an override needs a path");
+        let c = parse_copy(&["--kind", "kv-secret", "--source-mount", "/", "a", "secret/a"]);
+        assert!(build_body(&c).is_err(), "an override needs a mount");
+        let c = parse_copy(&["--kind", "kv-secret", "app", "secret/a"]);
+        assert!(build_body(&c).is_err(), "no override: a positional without a path is still refused");
+        assert!(split_location("secret").unwrap_err().to_string().contains("--source-mount"));
+    }
+
+    #[test]
+    fn failures_carry_the_servers_message_on_one_line() {
+        let err =
+            |status: u16, data: Value| status_error(Op::Move, Kind::KvSecret, status, &data).map(|e| e.to_string());
+        assert_eq!(err(200, json!({ "error": "ignored" })), None);
+        let e = err(409, json!({ "error": "secret/a: a secret already exists" })).unwrap();
+        assert!(e.contains("move of kv-secret failed (HTTP 409): secret/a: a secret already exists"), "{e}");
+        let e = err(429, json!({ "errors": ["rate limit exceeded"] })).unwrap();
+        assert!(e.contains("(HTTP 429): rate limit exceeded"), "{e}");
+        let e = err(500, json!({ "other": 1 })).unwrap();
+        assert!(e.contains("(HTTP 500): no error message in the response"), "{e}");
+        let e = err(502, Value::Null).unwrap();
+        assert!(e.contains("(HTTP 502)"), "{e}");
+        let e = err(400, json!({ "error": "bad\nwarning[x]: forged\u{1b}[2J" })).unwrap();
+        assert!(!e.contains('\n') && !e.contains('\u{1b}'), "{e:?}");
+        assert!(!e.contains("secret-value"), "only the server's text is shown");
     }
 }

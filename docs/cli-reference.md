@@ -410,15 +410,24 @@ bvault transfer move --kind kv-secret --on-conflict rename \
 ~~~
 
 `SOURCE` and `DESTINATION` are `<mount>/<path>`: the text before the first
-slash is the mount (one segment) and the rest is the item's path. Mounts and
-namespaces are both slash paths, so the namespace is never part of the
-positional; name it with the flags.
+slash is the mount and the rest is the item's path. Mounts and namespaces are
+both slash paths, so the namespace is never part of the positional; name it
+with the flags. For a slash-named mount use `--source-mount` /
+`--destination-mount`: the positional on that side is then the whole path.
+
+~~~bash
+# Mount "team/kv", secret path app/db.
+bvault transfer copy --kind kv-secret --source-mount team/kv \
+    --source-namespace team-a --destination-namespace team-b \
+    app/db secret/app/db
+~~~
 
 | Option | Description |
 |--------|-------------|
 | `--kind` | Required: `resource` or `kv-secret` |
 | `--source-namespace` | Namespace of the source (default: the root namespace) |
 | `--destination-namespace` | Namespace of the destination (default: the root namespace) |
+| `--source-mount` / `--destination-mount` | Mount of that side, for a slash-named mount; its positional is then the path |
 | `--on-conflict` | When the destination exists: `refuse` (default), `rename` or `overwrite` |
 | `--dry-run` | Run every read and check, write nothing, and print the plan and warnings |
 
@@ -429,8 +438,8 @@ reference. A dry run says `Dry run: nothing was written.` first. The exit code
 is 0 when the transfer succeeded, even with warnings, and 1 with the server's
 error message when it failed. `--on-conflict overwrite` deletes the destination
 item first and is not atomic: if the import then fails, the destination stays
-deleted, and the command prints a warning to that effect before it sends the
-request. Secret values are never printed.
+deleted, and the command prints `warning[overwrite-not-atomic]: <destination>: ...`
+to stderr before it sends the request. Secret values are never printed.
 
 ## mcp
 
