@@ -6,12 +6,19 @@
 //! `sys/capabilities-self` use the paths normal writes are authorized on, never
 //! the route's own. Every other path is left alone.
 
+use std::collections::HashSet;
+
 use serde_json::{Map, Value};
 
 use crate::{errors::RvError, logical::Response, router::Router};
 
 /// The mount-relative prefix both engines serve the import under.
 const IMPORT_ROUTE: &str = "v2/transfer/import/";
+
+/// Most secrets one resource import may carry. A copy of the resource engine's
+/// `IMPORT_MAX_SECRETS` (this crate does not depend on it); the facade test
+/// `the_policy_layers_secret_cap_is_the_engines` keeps the two equal.
+pub const IMPORT_MAX_SECRETS: usize = 1000;
 
 /// `Router::handle_request` prepends `data/` to a kv-v2 path at API version 2
 /// unless it starts with one of these. A secret whose name does is written
@@ -59,26 +66,29 @@ impl ImportTarget {
         self.path_of(&self.name)
     }
 
-    /// Every path `post_auth` must authorize: the item's, then for a resource
-    /// `<mount>secrets/<name>/<key>` per `secrets[].key` in `body`, the key
-    /// verbatim as `handle_secret_write` stores it. A `secrets` value that is
-    /// not a list of objects with a string `key` is a 400 naming the field,
-    /// never a value, so no secret reaches the engine unchecked.
-    pub(crate) fn authorization_paths(&self, body: Option<&Map<String, Value>>) -> Result<Vec<String>, RvError> {
-        let mut paths = vec![self.acl_path()];
+    /// The secret paths a resource import writes besides the item, one
+    /// `<mount>secrets/<name>/<key>` per distinct `secrets[].key` in `body`, the
+    /// key verbatim as `handle_secret_write` stores it; none for KV. Read only
+    /// after the item passed. A list over [`IMPORT_MAX_SECRETS`], or one that
+    /// is not objects with a string `key`, is a 400 naming no value.
+    pub(crate) fn secret_paths(&self, body: Option<&Map<String, Value>>) -> Result<Vec<String>, RvError> {
         let Some(secrets) = body.and_then(|b| b.get("secrets")).filter(|_| self.kind == Kind::Resource) else {
-            return Ok(paths);
+            return Ok(Vec::new());
         };
         let malformed = |what: String| RvError::ErrResponseStatus(400, format!("invalid resource import: {what}"));
         let Value::Array(secrets) = secrets else {
             return Err(malformed("secrets must be a list of {key, versions, current}".to_string()));
         };
+        if secrets.len() > IMPORT_MAX_SECRETS {
+            return Err(malformed(format!("secrets carries more than {IMPORT_MAX_SECRETS} entries")));
+        }
+        let mut seen = HashSet::with_capacity(secrets.len());
+        let mut paths = Vec::with_capacity(secrets.len());
         for (i, secret) in secrets.iter().enumerate() {
             let key = secret.get("key").and_then(Value::as_str);
             let key = key.ok_or_else(|| malformed(format!("secrets[{i}].key must be a string")))?;
-            let path = format!("{}secrets/{}/{key}", self.mount, self.name);
-            if !paths.contains(&path) {
-                paths.push(path);
+            if seen.insert(key) {
+                paths.push(format!("{}secrets/{}/{key}", self.mount, self.name));
             }
         }
         Ok(paths)
@@ -180,31 +190,34 @@ mod tests {
     fn a_resource_import_is_authorized_on_each_secret_it_carries() {
         let body = |secrets: Value| json!({ "meta": {}, "secrets": secrets }).as_object().cloned();
         let res = ImportTarget::from_route("tenant/resources/", "resource", 1, "v2/transfer/import/ SRV1").unwrap();
-        let paths =
-            res.authorization_paths(body(json!([{ "key": "Login" }, { "key": "api" }, { "key": "api" }])).as_ref());
+        let paths = res.secret_paths(body(json!([{ "key": "Login" }, { "key": "api" }, { "key": "api" }])).as_ref());
         assert_eq!(
             paths.unwrap(),
-            [
-                "tenant/resources/resources/srv1",
-                "tenant/resources/secrets/srv1/Login",
-                "tenant/resources/secrets/srv1/api"
-            ],
+            ["tenant/resources/secrets/srv1/Login", "tenant/resources/secrets/srv1/api"],
             "the name as stored, the key verbatim, duplicates once"
         );
-        assert_eq!(res.authorization_paths(body(json!([])).as_ref()).unwrap(), ["tenant/resources/resources/srv1"]);
-        assert_eq!(res.authorization_paths(None).unwrap(), ["tenant/resources/resources/srv1"]);
+        assert!(res.secret_paths(body(json!([])).as_ref()).unwrap().is_empty());
+        assert!(res.secret_paths(None).unwrap().is_empty());
 
         // Unreadable lists are refused, naming the field and never a value.
         for secrets in [json!("S3CRET"), json!(null), json!(["S3CRET"]), json!([{ "key": 7 }]), json!([{}])] {
-            match res.authorization_paths(body(secrets.clone()).as_ref()) {
+            match res.secret_paths(body(secrets.clone()).as_ref()) {
                 Err(RvError::ErrResponseStatus(400, m)) => assert!(!m.contains("S3CRET"), "{secrets}: {m}"),
                 other => panic!("{secrets}: expected 400, got {other:?}"),
             }
         }
 
+        // The cap: at it, every key; one over, a 400 naming the limit.
+        let keys = |n: usize| Value::Array((0..n).map(|i| json!({ "key": format!("k{i}") })).collect());
+        assert_eq!(res.secret_paths(body(keys(IMPORT_MAX_SECRETS)).as_ref()).unwrap().len(), IMPORT_MAX_SECRETS);
+        match res.secret_paths(body(keys(IMPORT_MAX_SECRETS + 1)).as_ref()) {
+            Err(RvError::ErrResponseStatus(400, m)) => assert!(m.contains(&IMPORT_MAX_SECRETS.to_string()), "{m}"),
+            other => panic!("expected 400, got {other:?}"),
+        }
+
         // A KV import writes one secret: its body is never read for paths.
         let kv = ImportTarget::from_route("secret/", "kv-v2", 1, "v2/transfer/import/x").unwrap();
-        assert_eq!(kv.authorization_paths(body(json!("S3CRET")).as_ref()).unwrap(), ["secret/x"]);
+        assert!(kv.secret_paths(body(json!("S3CRET")).as_ref()).unwrap().is_empty());
     }
 
     #[test]

@@ -3706,22 +3706,20 @@ impl AuthHandler for PolicyStore {
 
     /// Handle authentication for a given request: see [`PolicyStore::authorize_request`].
     /// A transfer import is authorized as what it writes (`transfer_target`): the
-    /// item and each secret a resource carries. Each path in turn stands in for
-    /// the route's while every lookup and the ACL run; all must pass, and the
-    /// route's is put back for routing, audit and the denial trail.
+    /// item first, and only then each secret a resource carries, so a caller who
+    /// may not write the item never has the list read. Each path stands in for
+    /// the route's while the lookups and the ACL run; the route's is put back.
     async fn post_auth(&self, req: &mut Request) -> Result<(), RvError> {
         let Some(target) = self.transfer_import_target(&req.path, req.api_version)? else {
             return self.authorize_request(req, None).await;
         };
-        let paths = target.authorization_paths(req.body.as_ref())?;
-        let route = std::mem::take(&mut req.path);
-        let mut result = Ok(());
-        for path in paths {
-            req.path = path;
-            result = self.authorize_request(req, Some(&route)).await;
-            if result.is_err() {
-                break;
-            }
+        let route = std::mem::replace(&mut req.path, target.acl_path());
+        let mut result = self.authorize_request(req, Some(&route)).await;
+        if result.is_ok() {
+            result = match target.secret_paths(req.body.as_ref()) {
+                Ok(paths) => self.authorize_each(req, paths, &route).await,
+                Err(e) => Err(e),
+            };
         }
         req.path = route;
         result
@@ -3730,6 +3728,16 @@ impl AuthHandler for PolicyStore {
 
 #[maybe_async::maybe_async]
 impl PolicyStore {
+    /// `authorize_request` on each of `paths` in turn, as `req.path`; the first
+    /// refusal wins. The caller restores `req.path`.
+    async fn authorize_each(&self, req: &mut Request, paths: Vec<String>, route: &str) -> Result<(), RvError> {
+        for path in paths {
+            req.path = path;
+            self.authorize_request(req, Some(route)).await?;
+        }
+        Ok(())
+    }
+
     /// The transfer import a request to `path` reaches, if it is one.
     pub(crate) fn transfer_import_target(
         &self,

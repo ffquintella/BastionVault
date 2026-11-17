@@ -34,6 +34,7 @@ mod sql_privileges;
 pub mod sql_write_gate;
 // Transfer import routes authorized as the item they write (T494).
 pub(crate) mod transfer_target;
+pub use transfer_target::IMPORT_MAX_SECRETS as TRANSFER_IMPORT_MAX_SECRETS;
 // The verified core against a frozen copy of the pre-delegation evaluator
 // (T31 Phase 3.3).
 #[cfg(test)]

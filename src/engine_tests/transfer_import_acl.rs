@@ -321,6 +321,52 @@ async fn resource_import_with_a_malformed_secret_list_fails_closed() {
     assert!(test_read_api(core.as_ref(), &root, "resources/resources/srv-m", true).await.unwrap().is_none());
 }
 
+/// More secrets than the cap are a 400 naming the limit, from the policy
+/// layer before any per-secret check, and nothing is written.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn resource_import_over_the_secret_cap_is_refused() {
+    let (_bvault, core, root) = new_unseal_test_bastion_vault("resource_import_secret_cap").await;
+    write(&core, &root, "sys/auth/pass", json!({ "type": "userpass" })).await;
+    write_policy(&core, &root, "res-writer", RESOURCE_WRITER).await;
+    let (token, _) = login(&core, &root, "writer", "res-writer").await;
+
+    let keys: Vec<String> = (0..1001).map(|i| format!("k{i}")).collect();
+    let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+    for caller in [&token, &root] {
+        match import(&core, caller, "resources/v2/transfer/import/srv-big", resource_bundle(&keys)).await {
+            Err(RvError::ErrResponseStatus(400, m)) => assert!(m.contains("1000"), "{m}"),
+            other => panic!("expected 400, got {other:?}"),
+        }
+    }
+    assert!(test_read_api(core.as_ref(), &root, "resources/resources/srv-big", true).await.unwrap().is_none());
+    assert!(test_read_api(core.as_ref(), &root, "resources/secrets/srv-big/k0", true).await.unwrap().is_none());
+}
+
+/// A caller with no write on the record is refused before its `secrets` list
+/// is read: a malformed or oversized list still answers 403, not 400.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn resource_import_checks_the_record_before_reading_the_secret_list() {
+    let (_bvault, core, root) = new_unseal_test_bastion_vault("resource_import_record_first").await;
+    write(&core, &root, "sys/auth/pass", json!({ "type": "userpass" })).await;
+    let policy = "path \"resources/secrets/*\" { capabilities = [\"create\", \"update\"] }\n";
+    write_policy(&core, &root, "secrets-only", policy).await;
+    let (token, _) = login(&core, &root, "outsider", "secrets-only").await;
+
+    let keys: Vec<String> = (0..1001).map(|i| format!("k{i}")).collect();
+    let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+    for secrets in [json!("S3CRET-not-a-list"), json!([{ "key": 7 }]), resource_bundle(&keys)["secrets"].clone()] {
+        let mut body = resource_bundle(&[]);
+        body["secrets"] = secrets;
+        denied(import(&core, &token, "resources/v2/transfer/import/srv-x", body).await, "no write on the record");
+    }
+}
+
+/// The policy layer's cap is the engine's own, so neither can drift.
+#[test]
+fn the_policy_layers_secret_cap_is_the_engines() {
+    assert_eq!(crate::modules::policy::TRANSFER_IMPORT_MAX_SECRETS, crate::modules::resource::IMPORT_MAX_SECRETS);
+}
+
 /// A policy limited to one prefix imports there and nowhere else.
 #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
 async fn kv_import_follows_a_path_limited_policy() {

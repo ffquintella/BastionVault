@@ -1236,6 +1236,11 @@ async fn existing_resource_key_in(view: &dyn storage::Storage, name: &str) -> Re
 // rather than a request so they are testable in-crate; the handler adds the
 // write-time gates that need the vault (`check_import_write_gates`).
 
+/// Most secrets one import may carry. The policy layer refuses a longer list
+/// before its per-secret ACL checks with its own copy of this number
+/// (`bv_kernel` `TRANSFER_IMPORT_MAX_SECRETS`); a facade test keeps them equal.
+pub const IMPORT_MAX_SECRETS: usize = 1000;
+
 /// `on_conflict` may only be `refuse` (or absent). An overwrite here would skip
 /// the delete ACL and a real delete's cleanup; a rename would write a name the
 /// ACL never checked. Any other value is refused, never read as the default.
@@ -1293,6 +1298,9 @@ fn parse_resource_bundle(body: &Map<String, Value>) -> Result<ResourceBundle, Rv
 fn validate_resource_bundle(bundle: &ResourceBundle) -> Result<Vec<u128>, RvError> {
     if bundle.origin.trim().is_empty() {
         return Err(bad_import("origin is required"));
+    }
+    if bundle.secrets.len() > IMPORT_MAX_SECRETS {
+        return Err(bad_import(format!("secrets carries more than {IMPORT_MAX_SECRETS} entries")));
     }
     let mut keys = HashSet::new();
     for (i, secret) in bundle.secrets.iter().enumerate() {
@@ -2802,6 +2810,23 @@ mod tests {
             }
         }
         assert_eq!(mem.snapshot(), existing, "a refused import writes nothing");
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn import_refuses_more_secrets_than_the_cap() {
+        let secrets = |n: usize| {
+            let one = bundle()["secrets"][0].clone();
+            let list = (0..n).map(|i| with(one.clone(), "/key", json!(format!("k{i}")))).collect();
+            with(bundle(), "/secrets", Value::Array(list))
+        };
+        let mem = MemStorage::default();
+        let r = import(&mem, "srv1", secrets(IMPORT_MAX_SECRETS + 1)).await;
+        let Err(RvError::ErrResponseStatus(400, message)) = r else { panic!("expected a 400, got {r:?}") };
+        assert!(message.contains(&IMPORT_MAX_SECRETS.to_string()), "{message}");
+        assert!(mem.snapshot().is_empty(), "a refused import writes nothing");
+
+        let summary = import(&mem, "srv1", secrets(IMPORT_MAX_SECRETS)).await.unwrap();
+        assert_eq!(summary.secrets, IMPORT_MAX_SECRETS);
     }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
