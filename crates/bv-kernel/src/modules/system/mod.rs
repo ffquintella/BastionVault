@@ -10,6 +10,10 @@ pub mod housekeeping;
 mod leases;
 pub mod mcp;
 pub mod self_profile;
+// T494: the namespace-transfer orchestrator, which calls this planning code,
+// has not landed yet. Drop the allow once it does.
+#[cfg_attr(not(test), allow(dead_code))]
+mod transfer;
 
 use std::{
     any::Any,

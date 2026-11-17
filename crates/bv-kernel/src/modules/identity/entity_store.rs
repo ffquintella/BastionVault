@@ -256,6 +256,18 @@ impl EntityStore {
     }
 }
 
+/// Namespaces a caller in `ns_path` may pick a share grantee's alias from:
+/// its own, then root's (root owns the auth mounts). Siblings and
+/// intermediate ancestors stay isolated. The grantee picker and the
+/// namespace-transfer share planner both decide with this.
+pub fn grantee_namespaces(ns_path: &str) -> Vec<&str> {
+    if ns_path.is_empty() {
+        vec![""]
+    } else {
+        vec![ns_path, ""]
+    }
+}
+
 /// `(mount, principal-name, entity_id)` triple surfaced by
 /// [`EntityStore::list_aliases`]. Safe to serialize and return to
 /// authenticated GUI callers — it lists existing user logins with

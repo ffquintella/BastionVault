@@ -1588,9 +1588,9 @@ impl IdentityBackendInner {
         // a `(mount, name)` that exists in both appears twice, with the
         // two distinct entity_ids visible to whoever picks a grantee.
         let ns = group_ns_from_req(req);
-        let mut aliases = store.list_aliases_ns(&ns).await?;
-        if !ns.is_empty() {
-            aliases.extend(store.list_aliases_ns("").await?);
+        let mut aliases = Vec::new();
+        for visible in entity_store::grantee_namespaces(&ns) {
+            aliases.extend(store.list_aliases_ns(visible).await?);
         }
         let arr = Value::Array(
             aliases
