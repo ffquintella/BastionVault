@@ -35,7 +35,7 @@ use stretto::Cache;
 use super::{
     acl::{ACLResults, ACL},
     policy::SentinelPolicy,
-    Policy, PolicyType,
+    transfer_target, Policy, PolicyType,
 };
 use crate::kernel_api::VaultCtx;
 use crate::{
@@ -3704,10 +3704,39 @@ impl AuthHandler for PolicyStore {
         "policy_store".to_string()
     }
 
-    /// Handle authentication for a given request.
-    /// This function checks the request path, performs capability checks, and updates authentication results.
+    /// Handle authentication for a given request: see [`PolicyStore::authorize_request`].
+    /// A transfer import is authorized as the item it writes (`transfer_target`):
+    /// that item's path stands in for the route's while every lookup and the ACL
+    /// run, and the route's is put back for routing, audit and the denial trail.
     async fn post_auth(&self, req: &mut Request) -> Result<(), RvError> {
-        let is_root_path = self.router.is_root_path(&req.path)?;
+        let Some(target) = self.transfer_import_target(&req.path, req.api_version)? else {
+            return self.authorize_request(req, None).await;
+        };
+        let route = std::mem::replace(&mut req.path, target.acl_path());
+        let result = self.authorize_request(req, Some(&route)).await;
+        req.path = route;
+        result
+    }
+}
+
+#[maybe_async::maybe_async]
+impl PolicyStore {
+    /// The transfer import a request to `path` reaches, if it is one.
+    pub(crate) fn transfer_import_target(
+        &self,
+        path: &str,
+        api_version: u8,
+    ) -> Result<Option<transfer_target::ImportTarget>, RvError> {
+        transfer_target::resolve(&self.router, path, api_version)
+    }
+
+    /// Checks the request path, performs capability checks, and updates
+    /// authentication results. `import_route` is the transfer import route a
+    /// request was addressed to when `req.path` holds the item it writes.
+    async fn authorize_request(&self, req: &mut Request, import_route: Option<&str>) -> Result<(), RvError> {
+        // A root path on either the route or the item demands sudo.
+        let is_root_path = self.router.is_root_path(&req.path)?
+            || import_route.map(|route| self.router.is_root_path(route)).transpose()?.unwrap_or(false);
 
         if req.auth.is_none() && is_root_path {
             return Err(bv_error_string!("cannot access root path in unauthenticated request"));
@@ -3798,6 +3827,9 @@ impl AuthHandler for PolicyStore {
                     auth.policies.join(", "),
                 ));
                 detail.push_str(&describe_resolution(&d.resolution, &d.resolution.unresolved));
+                if let Some(route) = import_route {
+                    detail.push_str(&format!("; authorized as the item the transfer import route \"{route}\" writes"));
+                }
                 if !d.scope_gated.is_empty() {
                     detail.push_str(&format!(
                         "; matched but granted nothing because their scope gate did not pass \
@@ -4112,6 +4144,32 @@ impl Handler for PolicyStore {
     ///    module. Failures are logged but never fail the delete —
     ///    `resource-group/reindex` is the recovery path.
     async fn post_route(&self, req: &mut Request, resp: &mut Option<Response>) -> Result<(), RvError> {
+        let Some(target) = self.transfer_import_target(&req.path, req.api_version)? else {
+            return self.post_route_bookkeeping(req, resp).await;
+        };
+        // An import is bookkept as a normal write of the item it wrote, never of
+        // the route; the route serves nothing but that Write.
+        if req.operation != Operation::Write {
+            return Err(RvError::ErrHandlerDefault);
+        }
+        let Some(written) = target.written_path(resp.as_ref()) else {
+            log::warn!(
+                "transfer import on '{}' answered without the name it wrote; its owner is not recorded",
+                req.path
+            );
+            return Err(RvError::ErrHandlerDefault);
+        };
+        let route = std::mem::replace(&mut req.path, written);
+        let result = self.post_route_bookkeeping(req, resp).await;
+        req.path = route;
+        result
+    }
+}
+
+#[maybe_async::maybe_async]
+impl PolicyStore {
+    /// The post-route pass of `Handler::post_route` for `req.path`.
+    async fn post_route_bookkeeping(&self, req: &mut Request, resp: &mut Option<Response>) -> Result<(), RvError> {
         let rg_store = self.resource_group_store();
         let owner_store = self.owner_store();
         // Active namespace, and the mount-relative view of the request path.

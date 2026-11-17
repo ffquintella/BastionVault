@@ -3727,6 +3727,14 @@ impl SystemBackend {
         let mut capabilities = Map::new();
         for path in &paths {
             let probe = qualify_capability_path(&ns_prefix, path);
+            // A transfer import route answers for the item it writes, as
+            // `post_auth` authorizes it. Version 1 is the API version every
+            // in-process and `/v1/` request carries; at 2 a kv-v2 mount reads
+            // this shape as a secret name instead.
+            let probe = match policy_store.transfer_import_target(&probe, 1)? {
+                Some(target) => target.acl_path(),
+                None => probe,
+            };
             let mut caps = acl.capabilities(probe.clone());
 
             // `acl.capabilities` runs an `Operation::List` dry-run, and the

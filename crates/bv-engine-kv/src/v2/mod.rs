@@ -212,7 +212,8 @@ impl KvV2Backend {
                     ],
                     help: "Import a secret with every version (numbers, timestamps, delete and destroy state, \
                            environments) under a path. Body: versions, current, metadata, on_conflict \
-                           (refuse|rename). Ownership, shares and asset groups are not written."
+                           (refuse|rename). Authorized as a write of <mount>/<path>; the caller becomes \
+                           the owner of the secret written. Shares and asset groups are not written."
                 }
             ],
             secrets: [{
@@ -1209,12 +1210,12 @@ impl KvV2BackendInner {
     }
 
     /// `<mount>/v2/transfer/import/<path>`: destination side of a cross-namespace
-    /// copy or move; writes a [`KvSecretBundle`], `metadata/` last. Every version
-    /// is written under this route's single ACL check. `on_conflict` is `refuse`
-    /// or `rename` only; an overwrite is the caller's `DELETE metadata/<path>`
-    /// first. Ownership, shares and asset groups are not touched (the
-    /// orchestrator sets them). `cas_required` and `max_versions` are ignored
-    /// by design: no CAS check, no pruning; the bundle's values are stored.
+    /// copy or move; writes a [`KvSecretBundle`], `metadata/` last. One ACL check,
+    /// on `<mount>/<path>` (the policy layer's `transfer_target`), covers every
+    /// version; `post_route` stamps the caller as owner of the path written. Only
+    /// `refuse` or `rename`: overwrite is `DELETE metadata/<path>` first. Shares
+    /// and asset groups are untouched; `cas_required` and `max_versions` are
+    /// stored, not applied (no CAS check, no pruning).
     pub async fn handle_transfer_import(
         &self,
         _backend: &dyn Backend,

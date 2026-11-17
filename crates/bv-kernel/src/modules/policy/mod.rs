@@ -32,6 +32,8 @@ mod core_bridge;
 mod sql_privileges;
 // The rolling-upgrade write gate for `sql_*` (features/sql-browser.md §13).
 pub mod sql_write_gate;
+// Transfer import routes authorized as the item they write (T494).
+pub(crate) mod transfer_target;
 // The verified core against a frozen copy of the pre-delegation evaluator
 // (T31 Phase 3.3).
 #[cfg(test)]

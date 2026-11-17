@@ -61,3 +61,5 @@ mod kernel_policy_sql;
 mod kernel_policy_sql_gate;
 mod kernel_resource_group;
 mod kernel_token_binding;
+// The transfer import routes authorized as the item they write (T494).
+mod transfer_import_acl;
