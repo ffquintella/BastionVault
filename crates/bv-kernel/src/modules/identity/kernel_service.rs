@@ -262,6 +262,10 @@ impl crate::kernel_api::pipeline::NsScopeDatafix for IdentityModule {
         // it completes, KV keys keep their pre-T499 form.
         let scope = super::ns_scope_migrate::run_if_needed(&self.core).await;
         let split = super::kv_key_split_migrate::run_if_needed(&self.core).await;
+        // A failed split is retried in the background (T511); the caller logs the error.
+        if split.is_err() {
+            self.kv_split_retry.schedule(Arc::downgrade(&self.core));
+        }
         let mut ran = Vec::new();
         let scope = scope?;
         if !scope.skipped {

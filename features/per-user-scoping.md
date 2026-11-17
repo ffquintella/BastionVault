@@ -595,6 +595,14 @@ another such endpoint:
   lazily, so every node switches when one finishes. Downgrading after it
   ran is unsupported: it overwrote some old keys, and an older release's
   records are never copied again. Pairs that shared a record are logged.
+- **A datafix that fails at unseal is retried in the background (T511).**
+  The unseal hook schedules one task per node (`identity/kv_key_split_retry.rs`)
+  that runs the pass again after 5, 10, 20, 40 and 80 s, never blocking
+  unseal. Each failure logs a `migration` warning; it stops when a pass
+  completes or finds the marker set, the node seals (the task is aborted;
+  the saved plan makes a cut-short pass resume) or the vault is dropped.
+  After the fifth failure a `security` error says the node keeps the
+  pre-T499 keys until the next unseal, which runs the pass again.
 - **First-write carve-out for the `owner` scope.** A strict "target's
   owner must equal caller" check would make it impossible to create a
   new object under an owner-only policy (no owner exists yet). The

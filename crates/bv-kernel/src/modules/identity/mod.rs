@@ -35,6 +35,7 @@ pub mod entity_store;
 pub mod group_store;
 pub mod kernel_service;
 pub mod kv_key_split_migrate;
+pub mod kv_key_split_retry;
 pub mod ns_scope_migrate;
 pub mod owner_store;
 pub mod share_store;
@@ -71,6 +72,8 @@ pub struct IdentityModule {
     pub owner_store: ArcSwap<Option<Arc<OwnerStore>>>,
     pub share_store: ArcSwap<Option<Arc<ShareStore>>>,
     pub user_audit_store: ArcSwap<Option<Arc<UserAuditStore>>>,
+    /// The background retry of a KV key-split datafix that failed at unseal (T511).
+    pub kv_split_retry: kv_key_split_retry::KvSplitRetry,
 }
 
 pub struct IdentityBackendInner {
@@ -1725,6 +1728,7 @@ impl IdentityModule {
             owner_store: ArcSwap::new(Arc::new(None)),
             share_store: ArcSwap::new(Arc::new(None)),
             user_audit_store: ArcSwap::new(Arc::new(None)),
+            kv_split_retry: Default::default(),
         }
     }
 
@@ -1795,6 +1799,8 @@ impl Module for IdentityModule {
     }
 
     fn cleanup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
+        // Seal: the datafix's background retry stops with the barrier.
+        self.kv_split_retry.cancel();
         self.group_store.store(Arc::new(None));
         self.entity_store.store(Arc::new(None));
         self.owner_store.store(Arc::new(None));

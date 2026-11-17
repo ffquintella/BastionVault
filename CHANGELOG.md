@@ -411,6 +411,11 @@ EXAMPLE ENTRY:
 - **Report a KV v2 request that a deny in the other path form refuses as denied in the policy tester, as enforcement does** (T509, S120)
   -- `POST /v2/sys/policies/acl/test` evaluated only the path of each case, so with `path "secret/data/prod/*" { capabilities = ["deny"] }` it reported `secret/prod/x`, `secret/metadata/prod/x` and the other sub-commands as allowed although every real request to them is refused (T504), and a deny on `secret/prod/*` likewise for `secret/data/prod/x`. A case on a kv-v2 secret now goes through the same check enforcement runs, so such a row reads `allowed: false` and `denied_by_deny: true`, names the other form in the new `denied_by_alias` field, and `draft_only_allowed` follows suit; a narrower allow that outranks the deny is still reported allowed. Cases on kv (v1) mounts and other engines are unchanged. Group-gated and scoped denies on the other form are still not resolved by this stateless test.
 
+#### Ownership: the KV key-split datafix retries after a failed unseal pass
+
+- **Retry the KV key-split datafix in the background when it fails at unseal, instead of keeping the old keys until the next unseal** (T511, S47)
+  -- If the datafix that gives every KV secret its own owner and share key failed at unseal (a storage fault, an unreadable namespace mount table), the node kept the pre-T499 keys, under which a secret named `data/x` shares `x`'s owner record, until the next unseal, and only a log line said so. The node now retries the pass in one background task after 5, 10, 20, 40 and 80 seconds, without delaying unseal: each failure is logged as a `migration` warning, a pass that completes or finds the marker set (another node finished) ends it, and a seal aborts it (an interrupted pass resumes from its saved plan). After the fifth failure a `security` error says the node keeps the old keys until the next unseal, which tries again as before.
+
 #### Namespace transfer: a KV secret named `data/...` keeps no stranger's groups
 
 - **Transfer a KV secret named `data/...` or `metadata/...` without asset-group membership, and say so, instead of carrying another secret's groups** (T510, S120)
