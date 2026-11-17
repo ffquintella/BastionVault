@@ -925,3 +925,161 @@ async fn an_import_answering_another_name_fails_and_names_the_unowned_item() {
     }
     assert_eq!(kv_owner(&core, "secret/team/copy").await, None, "no owner stamped");
 }
+
+/// A token born in namespace `ns`, carrying a policy of that namespace that
+/// holds `policy` (its paths are written with the `<ns>/` prefix).
+async fn namespace_token(core: &Arc<Core>, root: &str, ns: &str, policy: &str) -> String {
+    let ns = Some(ns);
+    let body = json!({ "policy": policy });
+    send(core, root, Operation::Write, "sys/policy/ns-caller", ns, body).await.unwrap();
+    let body = json!({ "policies": ["ns-caller"], "child_visible": false, "ttl": "1h" });
+    let created = send(core, root, Operation::Write, "auth/token/create", ns, body).await.unwrap().unwrap();
+    created.auth.unwrap().client_token
+}
+
+/// The data `path` answers as root in `ns`; `None` when there is nothing.
+async fn read_in(core: &Arc<Core>, root: &str, ns: &str, path: &str) -> Option<Value> {
+    let r = send(core, root, Operation::Read, path, Some(ns), json!({})).await;
+    r.ok().flatten().and_then(|r| r.data).map(Value::Object)
+}
+
+/// How many history entries resource `name` of `ns` has.
+async fn history_len_in(core: &Arc<Core>, root: &str, ns: &str, name: &str) -> usize {
+    let data = read_in(core, root, ns, &format!("resources/resources/{name}/history")).await;
+    data.and_then(|d| d["entries"].as_array().map(Vec::len)).unwrap_or(0)
+}
+
+/// Inside a namespace the resource import is checked against
+/// `<ns>/resources/...`, writes into that namespace only, and stamps the owner
+/// of the namespaced item: the record, its secrets, its history (the origin's
+/// entries and the arrival) and the owner arrive, and a sibling sees nothing.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn resource_import_in_a_namespace_writes_the_namespaced_item() {
+    let (_bvault, core, root) = new_unseal_test_bastion_vault("resource_import_in_a_namespace").await;
+    for ns in ["tenant-a", "tenant-b"] {
+        write(&core, &root, &format!("sys/namespaces/{ns}"), json!({})).await;
+    }
+    let policy = r#"
+        path "tenant-a/resources/*" { capabilities = ["create", "read", "update", "list"] }
+        path "tenant-a/resources/resources/locked" { capabilities = ["deny"] }
+    "#;
+    let token = namespace_token(&core, &root, "tenant-a", policy).await;
+    let ns = Some("tenant-a");
+
+    let mut bundle = resource_bundle(&["login", "api"]);
+    bundle["history"] =
+        json!([{ "ts": "2020-01-01T00:00:00Z", "user": "origin-user", "op": "create", "changed_fields": [] }]);
+    let path = "resources/v2/transfer/import/srv1";
+    let out = send_as(&core, &token, Operation::Write, path, ns, bundle.clone(), true).await.unwrap().unwrap();
+    assert_eq!(out.data.unwrap()["name"], json!("srv1"));
+
+    let record = read_in(&core, &root, "tenant-a", "resources/resources/srv1").await.expect("the record arrived");
+    assert_eq!(record["hostname"], json!("h.example"));
+    for key in ["login", "api"] {
+        let secret = read_in(&core, &root, "tenant-a", &format!("resources/secrets/srv1/{key}")).await;
+        assert_eq!(secret.expect("the secret arrived")["token"], json!("t-S3CRET"), "{key}");
+    }
+    let entries = read_in(&core, &root, "tenant-a", "resources/resources/srv1/history").await.unwrap();
+    let entries = entries["entries"].as_array().unwrap().clone();
+    let ops: Vec<&str> = entries.iter().filter_map(|e| e["op"].as_str()).collect();
+    assert_eq!(ops.len(), 2, "the origin's entry and the arrival: {entries:?}");
+    assert!(ops.contains(&"create") && ops.contains(&"transfer-in"), "{entries:?}");
+    let owner = read_in(&core, &root, "tenant-a", "identity/owner/resource/srv1").await;
+    let owner = owner.expect("the owner answers");
+    assert_eq!(owner["owned"], json!(true), "the importer owns it: {owner}");
+    assert!(!owner["entity_id"].as_str().unwrap_or_default().is_empty(), "{owner}");
+
+    // Nothing leaked into root or the sibling namespace, and a deny of the
+    // namespace's own policy still refuses there.
+    assert!(test_read_api(core.as_ref(), &root, "resources/resources/srv1", true).await.unwrap().is_none());
+    assert!(read_in(&core, &root, "tenant-b", "resources/resources/srv1").await.is_none());
+    let locked = "resources/v2/transfer/import/locked";
+    denied(send_as(&core, &token, Operation::Write, locked, ns, bundle.clone(), true).await, "the namespace's deny");
+    assert!(read_in(&core, &root, "tenant-a", "resources/resources/locked").await.is_none(), "nothing written");
+
+    // A second import of the taken name is the engine's own 409, and leaves it.
+    let again = send_as(&core, &token, Operation::Write, path, ns, bundle, true).await;
+    assert!(matches!(again, Err(RvError::ErrResponseStatus(409, _))), "{again:?}");
+    assert_eq!(history_len_in(&core, &root, "tenant-a", "srv1").await, 2, "untouched");
+}
+
+/// A policy limited to a name prefix (`team-a-*`: resource names hold no `/`)
+/// imports a resource there, with its secrets, and is refused on any other
+/// name with nothing written: no record, secret, owner or history.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn resource_import_follows_a_prefix_limited_policy() {
+    let (_bvault, core, root) = new_unseal_test_bastion_vault("resource_import_prefix_limited").await;
+    write(&core, &root, "sys/auth/pass", json!({ "type": "userpass" })).await;
+    let policy = r#"
+        path "resources/resources/team-a-*" { capabilities = ["create", "update"] }
+        path "resources/secrets/team-a-*" { capabilities = ["create", "update"] }
+    "#;
+    write_policy(&core, &root, "team-a", policy).await;
+    let (token, entity) = login(&core, &root, "teamer", "team-a").await;
+
+    import(&core, &token, "resources/v2/transfer/import/team-a-db", resource_bundle(&["login"])).await.unwrap();
+    let record = test_read_api(core.as_ref(), &root, "resources/resources/team-a-db", true).await.unwrap().unwrap();
+    assert_eq!(record.data.unwrap()["hostname"], json!("h.example"));
+    let secret = test_read_api(core.as_ref(), &root, "resources/secrets/team-a-db/login", true).await.unwrap();
+    assert_eq!(secret.unwrap().data.unwrap()["token"], json!("t-S3CRET"));
+    assert_eq!(resource_owner(&core, "team-a-db").await, Some(entity));
+
+    for name in ["team-b-db", "other", "team-a"] {
+        let path = format!("resources/v2/transfer/import/{name}");
+        denied(import(&core, &token, &path, resource_bundle(&["login"])).await, name);
+        let record = test_read_api(core.as_ref(), &root, &format!("resources/resources/{name}"), true).await;
+        assert!(record.unwrap().is_none(), "{name}: no record written");
+        let secret = test_read_api(core.as_ref(), &root, &format!("resources/secrets/{name}/login"), true).await;
+        assert!(secret.unwrap().is_none(), "{name}: no secret written");
+        assert_eq!(resource_owner(&core, name).await, None, "{name}: no owner stamped");
+        assert_eq!(history_len(&core, &root, name).await, 0, "{name}: no history");
+    }
+}
+
+/// Regression (T494 final review): inside a namespace, a token allowed to
+/// write there gets the unknown-route 404 for a direct, unmarked import on
+/// either mount, for a taken and a free name alike, and the call writes
+/// nothing: no record, version, owner or history entry.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn a_direct_import_inside_a_namespace_is_an_unknown_route_for_an_allowed_token() {
+    let (_bvault, core, root) = new_unseal_test_bastion_vault("direct_import_in_namespace_404").await;
+    write(&core, &root, "sys/namespaces/tenant-a", json!({})).await;
+    let ns = Some("tenant-a");
+    send(&core, &root, Operation::Write, "secret/data/taken", ns, json!({ "data": { "v": "a's" } })).await.unwrap();
+    let meta = json!({ "type": "server", "hostname": "h.example" });
+    send(&core, &root, Operation::Write, "resources/resources/taken", ns, meta).await.unwrap();
+    let policy = r#"
+        path "tenant-a/secret/*" { capabilities = ["create", "read", "update"] }
+        path "tenant-a/resources/*" { capabilities = ["create", "read", "update", "list"] }
+    "#;
+    let token = namespace_token(&core, &root, "tenant-a", policy).await;
+    // The grant is live: the same token writes an ordinary item there.
+    let ordinary = json!({ "type": "server", "hostname": "own.example" });
+    send(&core, &token, Operation::Write, "resources/resources/own", ns, ordinary).await.unwrap();
+
+    for mount in ["secret", "resources"] {
+        for name in ["taken", "free"] {
+            import_answers_like_an_unknown_route(&core, ("allowed", &token), ns, mount, name, 404).await;
+            let path = format!("{mount}/v2/transfer/import/{name}");
+            let body = if mount == "resources" { forged_resource_bundle() } else { kv_bundle() };
+            let r = send(&core, &token, Operation::Write, &path, ns, body).await;
+            unknown_route(r, &format!("{path} in tenant-a"));
+        }
+    }
+    let read = send(&core, &root, Operation::Read, "secret/data/free", ns, json!({})).await.unwrap();
+    assert!(read.is_none(), "no secret written");
+    assert!(read_in(&core, &root, "tenant-a", "resources/resources/free").await.is_none(), "no record written");
+    let owner = read_in(&core, &root, "tenant-a", "identity/owner/resource/free").await.unwrap();
+    assert_eq!(owner["owned"], json!(false), "no owner stamped: {owner}");
+    assert_eq!(kv_owner(&core, "tenant-a/secret/free").await, None, "no KV owner stamped");
+    assert_eq!(history_len_in(&core, &root, "tenant-a", "free").await, 0, "no history entry");
+    let taken = read_in(&core, &root, "tenant-a", "resources/resources/taken").await.unwrap();
+    assert_eq!(taken["hostname"], json!("h.example"), "the taken item is untouched");
+    assert_eq!(history_len_in(&core, &root, "tenant-a", "taken").await, 1, "only the create");
+    assert_eq!(history_len_in(&core, &root, "tenant-a", "own").await, 1, "only the ordinary write");
+
+    // The transfer's own import of the same names still succeeds there.
+    let path = "resources/v2/transfer/import/free";
+    send_as(&core, &token, Operation::Write, path, ns, resource_bundle(&[]), true).await.unwrap();
+    assert_eq!(history_len_in(&core, &root, "tenant-a", "free").await, 1, "only the transfer-in entry");
+}

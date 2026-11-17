@@ -246,6 +246,36 @@ mod tests {
         }
     }
 
+    /// A namespace is not its path prefix: `dst-b` shares the string `dst`
+    /// and `dst/child` lies beneath it, and neither one's entities are the
+    /// destination's own, while `dst`'s and root's are.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn entity_in_a_prefix_sibling_or_a_descendant_is_dropped() {
+        let (_bv, core, _root) = new_unseal_test_bastion_vault("transfer_shares_prefix_sibling_descendant").await;
+        let (entities, groups) = stores(&core).await;
+        let sibling = entity_in(&entities, "erin", "dst-b").await;
+        let descendant = entity_in(&entities, "fred", "dst/child").await;
+        let own = entity_in(&entities, "gina", "dst").await;
+        let root_entity = entity_in(&entities, "hank", "").await;
+        let source = vec![
+            share(ShareGranteeKind::Entity, &sibling, &["read"]),
+            share(ShareGranteeKind::Entity, &descendant, &["read", "update"]),
+            share(ShareGranteeKind::Entity, &own, &["read"]),
+            share(ShareGranteeKind::Entity, &root_entity, &["list"]),
+        ];
+
+        let plan = plan_shares(source.clone(), "dst", true, &entities, &groups).await.unwrap();
+        let want = CODE_GRANTEE_NOT_IN_DESTINATION;
+        assert_eq!(codes(&plan), [(want, sibling.as_str()), (want, descendant.as_str())]);
+        assert_eq!(json(&plan.keep), json(&source[2..]), "only the destination's own and root's entities stay");
+
+        // The same entities are the usable ones where they live.
+        let plan = plan_shares(source[..1].to_vec(), "dst-b", true, &entities, &groups).await.unwrap();
+        assert_eq!(json(&plan.keep), json(&source[..1]));
+        let plan = plan_shares(source[1..2].to_vec(), "dst/child", true, &entities, &groups).await.unwrap();
+        assert_eq!(json(&plan.keep), json(&source[1..2]));
+    }
+
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn group_missing_in_destination_is_dropped() {
         let (_bv, core, _root) = new_unseal_test_bastion_vault("transfer_shares_group_missing").await;
@@ -374,7 +404,10 @@ mod tests {
         let plan = plan_shares(source.clone(), "dst", true, &entities, &groups).await.unwrap();
 
         assert_eq!(json(&plan.keep), json(&[source[0].clone(), source[1].clone(), source[3].clone()]));
-        assert_eq!(plan.dropped.len(), 2);
+        assert_eq!(
+            codes(&plan),
+            [(CODE_GRANTEE_NOT_IN_DESTINATION, carol.as_str()), (CODE_GROUP_NOT_IN_DESTINATION, "ops")]
+        );
         assert_eq!(snapshot(&entities, &groups).await, before, "the planner wrote to a store");
         // Keeping root's entity must not pre-provision bob's entity in `dst`:
         // that is the writer's job, not the planner's.

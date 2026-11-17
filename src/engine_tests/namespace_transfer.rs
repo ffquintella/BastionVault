@@ -942,6 +942,127 @@ async fn a_gate_refusal_is_never_read_as_a_collision() {
     assert_eq!(replaced["hostname"], json!("h2.example"));
 }
 
+/// The agent-access type gate through the overwrite's pre-delete check
+/// (T498, `check_only`): the source's type consents to agent sessions and its
+/// profile opts in, the destination's type has not consented. The check
+/// refuses with the gate's own code before the overwrite's delete, so the
+/// destination is untouched; a refuse-mode copy meets the same gate. Once the
+/// destination's type consents the overwrite goes through and the profile
+/// arrives.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn an_agent_access_refusal_is_checked_before_an_overwrite_deletes() {
+    const PIN: &str = "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU";
+    let (_bvault, core, root) = vault("ns_transfer_agent_gate").await;
+    let allow = json!({ "server": { "connect": { "agent_sessions_max": "allow" } } });
+    send(&core, &root, Operation::Write, "resources/config/types", Some("src"), allow.clone()).await.unwrap();
+    let profile = json!({
+        "id": "p_agent", "name": "agent", "protocol": "ssh", "username": "ops", "agent_access": "allow",
+        "credential_source": { "kind": "secret", "secret_id": "login" }, "host_key_pin": PIN,
+    });
+    let agent = json!({ "type": "server", "hostname": "agent.example", "connection_profiles": [profile] });
+    send(&core, &root, Operation::Write, "resources/resources/srv1", Some("src"), agent).await.unwrap();
+    // The destination's `srv1` is a plain record: the type there has not opted in.
+    let plain = json!({ "type": "server", "hostname": "plain.example" });
+    send(&core, &root, Operation::Write, "resources/resources/srv1", Some("dst"), plain).await.unwrap();
+    let secret = json!({ "password": "pw-1" });
+    send(&core, &root, Operation::Write, "resources/secrets/srv1/login", Some("dst"), secret).await.unwrap();
+
+    for dry_run in [false, true] {
+        let extra = json!({ "on_conflict": "overwrite", "dry_run": dry_run });
+        let r = transfer(&core, &root, "copy", resource("srv1", "srv1", extra)).await;
+        assert_eq!(status(&r), 403, "dry_run {dry_run}: {r:?}");
+        let m = message(&r);
+        assert!(m.starts_with("mcp_session_profile_not_agent_enabled"), "dry_run {dry_run}: the gate's own code: {m}");
+        assert!(m.contains("nothing was deleted") && !m.contains("DELETE of") && !m.contains("pw-1"), "{m}");
+        let kept = get(&core, &root, Some("dst"), "resources/resources/srv1").await.expect("the destination stays");
+        assert_eq!(kept["hostname"], json!("plain.example"), "dry_run {dry_run}: untouched");
+        let login = get(&core, &root, Some("dst"), "resources/secrets/srv1/login").await;
+        assert_eq!(login.expect("its secret stays")["password"], json!("pw-1"), "dry_run {dry_run}");
+    }
+    assert!(resource_exists(&core, &root, "src", "srv1").await, "the source is untouched");
+
+    // A name taken nowhere meets the same gate on a plain import: nothing written.
+    let r = transfer(&core, &root, "copy", resource("srv1", "srv2", json!({}))).await;
+    assert_eq!(status(&r), 403, "{r:?}");
+    assert!(message(&r).starts_with("mcp_session_profile_not_agent_enabled"), "{}", message(&r));
+    assert!(!resource_exists(&core, &root, "dst", "srv2").await, "nothing written");
+
+    send(&core, &root, Operation::Write, "resources/config/types", Some("dst"), allow).await.unwrap();
+    let extra = json!({ "on_conflict": "overwrite" });
+    let out = result(transfer(&core, &root, "copy", resource("srv1", "srv1", extra)).await);
+    assert!(codes(&out).contains(&"destination-replaced".to_string()), "{out}");
+    let replaced = get(&core, &root, Some("dst"), "resources/resources/srv1").await.unwrap();
+    assert_eq!(replaced["hostname"], json!("agent.example"), "the overwrite ran once the type consented");
+    assert_eq!(replaced["connection_profiles"][0]["agent_access"], json!("allow"));
+}
+
+/// A root sign-in assigned to the namespaces copies a root resource into one
+/// and moves a namespace's resource out to root: each arrival has its secret
+/// versions, history and the caller as owner; the copy leaves its source and
+/// the move removes it.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn a_root_caller_transfers_into_and_out_of_a_namespace() {
+    let (_bvault, core, root) = vault("ns_transfer_root_in_out").await;
+    seed_resource(&core, &root, None, "srv1").await;
+    seed_resource(&core, &root, Some("src"), "srv2").await;
+    let policy = format!(
+        "{MOVER}\npath \"resources/*\" {{ capabilities = [\"create\", \"read\", \"update\", \"delete\", \"list\"] }}\n"
+    );
+    write_policy(&core, &root, "root-and-ns", &policy).await;
+    let (token, entity) = user(&core, &root, "mover", "root-and-ns", true).await;
+
+    let into = body("resource", "resources", ("", "srv1"), ("dst", "srv1"), json!({}));
+    let out = result(transfer(&core, &token, "copy", into).await);
+    assert_eq!(out["transferred"], json!({ "secrets": 2, "versions": 3, "history": 2, "shares": 0 }), "{out}");
+    let login = get(&core, &root, Some("dst"), "resources/secrets/srv1/login/version/1").await.unwrap();
+    assert_eq!(login["data"]["value"], json!("pw-1"));
+    let arrival = history(&core, &root, "dst", "srv1").await;
+    assert_eq!(arrival.last().unwrap()["op"], json!("transfer-in"), "{arrival:?}");
+    assert_eq!(resource_owner(&core, &root, "dst", "srv1").await, entity, "the caller owns the copy");
+    assert!(get(&core, &root, None, "resources/resources/srv1").await.is_some(), "a copy leaves the root source");
+
+    let out_of = body("resource", "resources", ("src", "srv2"), ("", "srv2"), json!({}));
+    let out = result(transfer(&core, &token, "move", out_of).await);
+    assert_eq!(out["destination"], json!({ "namespace": "", "mount": "resources", "path": "srv2" }), "{out}");
+    let at_root = get(&core, &root, None, "resources/resources/srv2").await.expect("the record arrived at root");
+    assert_eq!(at_root["hostname"], json!("h2.example"));
+    let login = get(&core, &root, None, "resources/secrets/srv2/login").await.unwrap();
+    assert_eq!(login["value"], json!("pw-2"));
+    let owner = get(&core, &root, None, "identity/owner/resource/srv2").await.unwrap();
+    assert_eq!(owner["entity_id"], json!(entity), "the caller owns the moved item");
+    let arrival = get(&core, &root, None, "resources/resources/srv2/history").await.unwrap();
+    assert_eq!(arrival["entries"][0]["op"], json!("transfer-in"), "{arrival}");
+    assert!(!resource_exists(&core, &root, "src", "srv2").await, "a move removes the namespace source");
+    assert!(get(&core, &root, Some("src"), "resources/secrets/srv2/login").await.is_none(), "and its secrets");
+}
+
+/// What `bvault transfer --namespace` sends: the same request with the
+/// namespace header set. A caller assigned to the namespaces whose policy
+/// grants the route runs the transfer in `src`, the header names the active
+/// namespace for the rights check and the result is the usual one.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn the_route_runs_with_the_namespace_header_set() {
+    let (_bvault, core, root) = vault("ns_transfer_header").await;
+    seed_resource(&core, &root, Some("src"), "srv1").await;
+    write_policy(&core, &root, "mover", MOVER).await;
+    let (token, entity) = user(&core, &root, "mover", "mover", true).await;
+
+    let b = resource("srv1", "srv1", json!({}));
+    let r = send(&core, &token, Operation::Write, "sys/namespace-transfer/copy", Some("src"), b).await;
+    let out = result(r);
+    assert_eq!(out["transferred"]["versions"], json!(3), "{out}");
+    assert_eq!(resource_owner(&core, &root, "dst", "srv1").await, entity, "the caller owns the copy");
+    assert!(resource_exists(&core, &root, "src", "srv1").await, "a copy leaves the source");
+
+    // The header is what the rights check follows: the same grant held by a
+    // token that may not operate in `src` is refused there, with nothing written.
+    let (outsider, _) = user(&core, &root, "outsider", "mover", false).await;
+    let b = resource("srv1", "srv1-b", json!({}));
+    let r = send(&core, &outsider, Operation::Write, "sys/namespace-transfer/copy", Some("src"), b).await;
+    assert!(status(&r) >= 400, "{r:?}");
+    assert!(!resource_exists(&core, &root, "dst", "srv1-b").await, "nothing written");
+}
+
 /// Regression (aliasing, ruling J): a mount in namespace `a` named `a/secret/`
 /// is listed as a mount, but the router reads `a/secret/...` as already
 /// qualified and serves it from `a`'s `secret/`. So `{a, a/secret}` and

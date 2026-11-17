@@ -267,6 +267,62 @@ async fn a_repointed_grantee_is_the_same_principal_set_in_the_destination() {
     assert_eq!(grantees(&carried), vec![carol_dst], "the entity carol's own `dst` login resolves to");
 }
 
+/// Log the AppRole `role` in to namespace `ns` (`""` = root) and return the
+/// entity the login resolves to. The role must exist and the machine gate be off.
+async fn approle_entity(core: &Arc<Core>, root: &str, role: &str, ns: &str) -> String {
+    let header = |mut req: Request| {
+        if !ns.is_empty() {
+            req.headers = Some(HashMap::from([("x-bastionvault-namespace".to_string(), ns.to_string())]));
+        }
+        req
+    };
+    let id = send(core, root, Operation::Read, &format!("auth/approle/role/{role}/role-id"), None, json!({})).await;
+    let role_id = id.unwrap().unwrap().data.unwrap()["role_id"].as_str().unwrap().to_string();
+    let secret =
+        send(core, root, Operation::Write, &format!("auth/approle/role/{role}/secret-id"), None, json!({})).await;
+    let secret_id = secret.unwrap().unwrap().data.unwrap()["secret_id"].as_str().unwrap().to_string();
+    let mut login = header(Request::new("auth/approle/login"));
+    login.operation = Operation::Write;
+    login.body = json!({ "role_id": role_id, "secret_id": secret_id }).as_object().cloned();
+    let auth = core.handle_request(&mut login).await.unwrap().unwrap().auth.unwrap();
+    auth.metadata.get("entity_id").cloned().expect("an approle login carries an entity id")
+}
+
+/// The AppRole twin of the guard above: auth mounts are one global table, so a
+/// role written from `dst` is root's same-named role, and an AppRole login
+/// names its entity `("approle/", role, login namespace)`. The re-pointed
+/// share must land on the entity that role's own `dst` login resolves to,
+/// never on another role's.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn a_repointed_approle_grantee_is_the_same_principal_in_the_destination() {
+    let (_bvault, core, root) = vault("ns_transfer_repoint_approle").await;
+    core.approle_require_machine.store(false, std::sync::atomic::Ordering::Relaxed);
+    seed_resource(&core, &root, None, "srv1").await;
+    send(&core, &root, Operation::Write, "sys/auth/approle", None, json!({ "type": "approle" })).await.unwrap();
+    let role = json!({ "policies": "default", "secret_id_num_uses": 0, "secret_id_ttl": 0 });
+    for name in ["ci-bot", "other-bot"] {
+        send(&core, &root, Operation::Write, &format!("auth/approle/role/{name}"), None, role.clone()).await.unwrap();
+    }
+    let ci_root = approle_entity(&core, &root, "ci-bot", "").await;
+
+    // Writing role `ci-bot` from `dst` is root's same record, not a second role.
+    let id_before = send(&core, &root, Operation::Read, "auth/approle/role/ci-bot/role-id", None, json!({})).await;
+    let again = send(&core, &root, Operation::Write, "auth/approle/role/ci-bot", Some("dst"), role.clone()).await;
+    again.unwrap();
+    let id_after = send(&core, &root, Operation::Read, "auth/approle/role/ci-bot/role-id", None, json!({})).await;
+    assert_eq!(id_before.unwrap().unwrap().data, id_after.unwrap().unwrap().data, "one global `ci-bot` role");
+
+    grant(&core, &root, None, ("resource", "srv1"), ("entity", &ci_root), json!(["read"])).await.unwrap();
+    result(transfer(&core, &root, "copy", from_root(json!({}))).await);
+
+    let ci_dst = approle_entity(&core, &root, "ci-bot", "dst").await;
+    let other_dst = approle_entity(&core, &root, "other-bot", "dst").await;
+    assert_ne!(ci_dst, ci_root, "a role is a different entity in each namespace");
+    let carried = shares_on(&core, ShareTargetKind::Resource, "dst/srv1").await;
+    assert_eq!(grantees(&carried), vec![ci_dst], "the entity role `ci-bot`'s own `dst` login resolves to: {carried:?}");
+    assert!(!grantees(&carried).contains(&other_dst), "another role's entity never inherits it");
+}
+
 #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
 async fn share_history_records_copy_and_move_ops() {
     let (_bvault, core, root) = vault("ns_transfer_share_history").await;
