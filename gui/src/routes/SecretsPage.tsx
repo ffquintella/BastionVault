@@ -270,8 +270,9 @@ export function SecretsPage() {
         // prepend `mountBase` again — that would double it
         // (e.g. "secret/secret/tests/...") and the owner lookup would
         // miss, mislabelling every owned secret as "unowned". Mirrors the
-        // path built for the owner/share detail panel.
-        const full = canonicalizeSecretPath(currentPath + k);
+        // path built for the owner/share detail panel. The secret's own
+        // name, never stripped: `secret/data/x` is the secret `data/x` (T508).
+        const full = secretOwnPath(currentPath + k);
         try {
           const o = await api.getKvOwner(full);
           return [k, o?.owned ? o.entity_id : ""] as const;
@@ -985,13 +986,12 @@ export function SecretsPage() {
         >
           {shareTarget && (
             <SecretSharingPanel
-              fullPath={canonicalizeSecretPath(currentPath + shareTarget)}
+              fullPath={secretOwnPath(currentPath + shareTarget)}
               displayPath={(() => {
                 // Display-only: prepend the active namespace so it's clear
                 // which tenant this owner/share record lives under. The API
-                // still receives the mount-relative `fullPath` — the backend
-                // re-prepends the namespace when keying the owner record
-                // (`canonicalize_kv_path_scoped` → `<ns>/<mount>/<key>`).
+                // still receives the mount-relative `fullPath`; the server
+                // keys the record on `<ns>/<mount>/<name>` (T499).
                 const rel = currentPath + shareTarget;
                 const ns = activeNamespace.replace(/^\/+|\/+$/g, "");
                 return ns ? `${ns}/${rel}` : rel;
@@ -1005,24 +1005,19 @@ export function SecretsPage() {
 }
 
 /**
- * Owner card + shares table + grant/revoke + admin transfer, all
- * scoped to a single KV-secret path. `fullPath` is the canonical
- * logical path (`secret/foo/bar`, NOT the KV-v2 `secret/data/foo/bar`
- * form) — `ShareStore::canonicalize_kv_path` accepts either, but we
- * pass the canonical form so UI-side comparisons to the returned
- * share records line up.
+ * Owner card + shares table + grant/revoke + admin transfer, all scoped to
+ * one KV secret. `fullPath` is its own `<mount>/<name>` (`secretOwnPath`),
+ * which the server keys verbatim (T499): `secret/data/x` is the secret
+ * `data/x`, never `x` (T508). Everything else lives in `ObjectSharingCard`,
+ * shared with resources and file resources.
  */
-/**
- * Owner card + shares table + grant/revoke + admin transfer, all
- * scoped to a single KV-secret path. `fullPath` is the canonical
- * logical path (`secret/foo/bar`, NOT the KV-v2 `secret/data/foo/bar`
- * form) — `ShareStore::canonicalize_kv_path` accepts either, but we
- * pass the canonical form so UI-side comparisons to the returned
- * share records line up.
- *
- * Everything but the KV-specific bindings below lives in
- * `ObjectSharingCard`, shared with resources and file resources.
- */
+/** A KV secret's own `<mount>/<name>` for the owner and share endpoints:
+ *  outer slashes trimmed, nothing stripped (T508). The asset-group map is
+ *  still indexed through `canonicalizeSecretPath` (the group store strips, T507). */
+function secretOwnPath(raw: string): string {
+  return raw.replace(/^\/+|\/+$/g, "");
+}
+
 export function SecretSharingPanel({
   fullPath,
   displayPath,

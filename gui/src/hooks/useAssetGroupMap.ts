@@ -23,9 +23,10 @@ export interface AssetGroupMap {
 }
 
 /** Strip the KV-v2 `data/` or `metadata/` segment in the second path
- *  position so `secret/data/foo/bar` and `secret/foo/bar` index to the
- *  same entry. Mirrors `ResourceGroupStore::canonicalize_secret_path`
- *  on the backend. */
+ *  position, as `ResourceGroupStore::canonicalize_secret_path` does on the
+ *  backend, to index the asset-group map only. Never for an owner or share
+ *  call: those key a secret on its own name (`secretOwnPath`, T508), and
+ *  this reads a secret named `data/x` as `x` (the group store too, T507). */
 export function canonicalizeSecretPath(raw: string): string {
   const trimmed = raw.trim().replace(/^\/+|\/+$/g, "");
   if (!trimmed) return trimmed;
