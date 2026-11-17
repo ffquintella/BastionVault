@@ -384,6 +384,54 @@ Move a secrets engine to a different path.
 bvault secrets move secret/ generic/
 ~~~
 
+## transfer copy / transfer move
+
+Copy or move one resource or KV v2 secret to another namespace, with its
+versions, shares, asset-group membership and (for a resource) its change
+history. It calls `POST /v2/sys/namespace-transfer/{copy|move}`
+([API](api.md#namespace-transfer-copy-and-move-v2-only)); the server runs
+every step with your token, so you need the rights listed there.
+
+~~~bash
+bvault transfer copy|move --kind resource|kv-secret \
+    [--source-namespace NS] [--destination-namespace NS] \
+    [--on-conflict refuse|rename|overwrite] [--dry-run] \
+    <MOUNT>/<PATH> <MOUNT>/<PATH>
+
+# A resource: the mount is "resources", the path is the resource name.
+bvault transfer copy --kind resource \
+    --source-namespace team-a --destination-namespace team-b \
+    resources/db1 resources/db1
+
+# A KV v2 secret, renamed if the destination path is taken.
+bvault transfer move --kind kv-secret --on-conflict rename \
+    --source-namespace team-a --destination-namespace team-b \
+    secret/app/db secret/app/db
+~~~
+
+`SOURCE` and `DESTINATION` are `<mount>/<path>`: the text before the first
+slash is the mount (one segment) and the rest is the item's path. Mounts and
+namespaces are both slash paths, so the namespace is never part of the
+positional; name it with the flags.
+
+| Option | Description |
+|--------|-------------|
+| `--kind` | Required: `resource` or `kv-secret` |
+| `--source-namespace` | Namespace of the source (default: the root namespace) |
+| `--destination-namespace` | Namespace of the destination (default: the root namespace) |
+| `--on-conflict` | When the destination exists: `refuse` (default), `rename` or `overwrite` |
+| `--dry-run` | Run every read and check, write nothing, and print the plan and warnings |
+
+Output: a short summary with the counts (secrets, versions, history, shares)
+on stdout. Every warning goes to stderr as
+`warning[<code>]: <subject>: <message>`; the codes are listed in the API
+reference. A dry run says `Dry run: nothing was written.` first. The exit code
+is 0 when the transfer succeeded, even with warnings, and 1 with the server's
+error message when it failed. `--on-conflict overwrite` deletes the destination
+item first and is not atomic: if the import then fails, the destination stays
+deleted, and the command prints a warning to that effect before it sends the
+request. Secret values are never printed.
+
 ## mcp
 
 Give AI assistants scoped, audited access to BastionVault over the Model Context

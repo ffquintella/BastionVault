@@ -37,6 +37,7 @@ pub mod login;
 pub mod login_handlers;
 pub mod mcp;
 pub mod mcp_serve;
+pub mod namespace_transfer;
 pub mod operator;
 #[cfg(not(feature = "sync_handler"))]
 pub mod operator_backup;
