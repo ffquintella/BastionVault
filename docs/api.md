@@ -889,6 +889,12 @@ reachable only with storage tools. If the T499 key-switch marker
 (`identity/sharing/...`, whatever the share's kind) get a 500, root
 included; rewrite the marker as `1`, never delete it
 (`features/per-user-scoping.md`).
+While that marker is unset (the datafix has not completed, T511), a KV
+write or delete, and an owner claim, transfer, backfill stamp or share
+grant or revoke, on a secret whose key changes when it completes (a name
+starting with `data/` or `metadata/`, a namespace whose second segment is
+one of them) is refused with a 503 for every caller; retry once the
+datafix, which retries in the background, has completed.
 
 A KV path that names no secret has no owner, share or asset group
 (T506): a kv-v2 mount's `config`, `data/`, `destroy/` or `undelete/`

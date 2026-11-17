@@ -317,7 +317,8 @@ async fn reindex_asset_groups(core: &crate::core::Core) -> Result<usize, RvError
 /// Run the datafix unless its replicated marker is set; until it is, KV keys
 /// keep their pre-T499 form on every node, so records keep resolving. Called
 /// from `Core::post_unseal` on every node after module init; an error is
-/// logged there and the pass retries on the next unseal, marker unset.
+/// logged there, retried in the background (`kv_key_split_retry`, T511) and
+/// at the next unseal, marker unset.
 pub async fn run_if_needed(core: &crate::core::Core) -> Result<KvKeySplitReport, RvError> {
     let mut report = KvKeySplitReport::default();
     let identity = core.module_manager().get_module::<IdentityModule>("identity");

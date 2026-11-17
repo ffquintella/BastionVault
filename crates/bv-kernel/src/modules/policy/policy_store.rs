@@ -3884,7 +3884,9 @@ impl PolicyStore {
         // list, would be keyed as another secret: it gets no key, and a 400
         // only once the ACL and the token's namespace binding allowed the
         // request, so the answer names no mount to anyone else (T499).
-        let (kv_secret, ambiguous) = kv_path_shape(kv_target::resolve(&self.router, &req.path), req.operation)?;
+        let resolved = kv_target::resolve(&self.router, &req.path);
+        let item = resolved.as_ref().ok().and_then(Option::clone);
+        let (kv_secret, ambiguous) = kv_path_shape(resolved, req.operation)?;
         self.authorize_decision(req, import_route, kv_secret).await?;
         if ambiguous {
             if let Some(core) = self.core.upgrade() {
@@ -3892,7 +3894,36 @@ impl PolicyStore {
             }
             return Err(kv_target::ambiguous());
         }
-        Ok(())
+        match item {
+            Some(item) => self.refuse_moving_key(req, &item).await,
+            None => Ok(()),
+        }
+    }
+
+    /// While the T499 switch is pending, an allowed KV write or delete whose
+    /// owner and share key moves at the switch is refused with a 503 (T511):
+    /// `post_route` would stamp, forget or cascade records under a key the
+    /// datafix may never move, and its background retry runs while the node
+    /// serves. Other paths, and every request once the marker is set, pass.
+    async fn refuse_moving_key(&self, req: &Request, item: &kv_target::KvItem) -> Result<(), RvError> {
+        if !matches!(req.operation, Operation::Write | Operation::Delete) {
+            return Ok(());
+        }
+        let Some(owners) = self.owner_store() else {
+            return Ok(());
+        };
+        if owners.kv_keys_split().await? {
+            return Ok(());
+        }
+        let ns = req.namespace_path.as_deref();
+        let old = kv_target::owner_key(Some(item), &req.path, ns, false);
+        if old == kv_target::owner_key(Some(item), &req.path, ns, true) {
+            return Ok(());
+        }
+        if let Some(core) = self.core.upgrade() {
+            crate::modules::namespace::token_binding::enforce_request_token_binding(&core, req).await?;
+        }
+        Err(OwnerStore::moving_key_refusal())
     }
 
     /// The ACL decision of [`Self::authorize_request`]. `kv_secret`: the path

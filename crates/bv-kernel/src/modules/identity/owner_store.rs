@@ -304,6 +304,28 @@ impl OwnerStore {
         Self::canonicalize_kv_path(&Self::canonicalize_kv_path_scoped(path, ns_path)?)
     }
 
+    /// [`Self::client_kv_key`] for a write (an owner record, a share): while the
+    /// T499 switch is pending (`!split`), a name whose key moves at the switch
+    /// is refused with [`Self::moving_key_refusal`] (T511), since a record
+    /// written under the old key could be left behind or read as another's.
+    pub fn client_kv_key_for_write(path: &str, ns_path: Option<&str>, split: bool) -> Result<Option<String>, RvError> {
+        if !split && Self::client_kv_key(path, ns_path, false) != Self::client_kv_key(path, ns_path, true) {
+            return Err(Self::moving_key_refusal());
+        }
+        Ok(Self::client_kv_key(path, ns_path, split))
+    }
+
+    /// The 503 for an owner or share change to a KV secret whose key moves when
+    /// the pending T499 datafix completes (T511): retriable once it has.
+    pub fn moving_key_refusal() -> RvError {
+        RvError::ErrResponseStatus(
+            503,
+            "this KV secret's owner and share key changes when the pending KV key-split datafix completes, so \
+             writes, deletes, owner changes and shares on it are refused until then; retry later"
+                .to_string(),
+        )
+    }
+
     /// The key of a secret a client names as `<mount>/<name>` (the owner,
     /// share and `sys/kv-owner` endpoints): `<ns>/<mount>/<name>` verbatim once
     /// `split`, so a stored key passed back resolves to itself; the pre-T499

@@ -612,6 +612,19 @@ another such endpoint:
   the saved plan makes a cut-short pass resume) or the vault is dropped.
   After the fifth failure a `security` error says the node keeps the
   pre-T499 keys until the next unseal, which runs the pass again.
+- **While the switch is pending no record lands on a moving key (T511).**
+  The pass now runs while the node serves, so between its plan and its
+  marker a record written under a pre-T499 key that the switch moves
+  would be left behind, or read as another secret's, afterwards. While the
+  marker is unset, an allowed KV write or delete whose old and new keys
+  differ (`kv_target::owner_key` with and without the switch) is refused
+  with a 503 after the ACL and the namespace binding
+  (`PolicyStore::refuse_moving_key`), and so are an owner claim or
+  transfer, a backfill stamp and a share grant or revoke on such a name
+  (`OwnerStore::client_kv_key_for_write`). Root is refused too. This also
+  closes the same gap for a pass resumed from a saved plan. Reads, names
+  whose key does not move and other engines are unaffected;
+  `sys/capabilities-self` still answers as if allowed.
 - **First-write carve-out for the `owner` scope.** A strict "target's
   owner must equal caller" check would make it impossible to create a
   new object under an owner-only policy (no owner exists yet). The

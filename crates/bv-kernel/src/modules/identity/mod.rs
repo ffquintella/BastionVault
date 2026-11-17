@@ -569,7 +569,11 @@ fn decode_b64url_path(segment: &str) -> Option<String> {
 /// Pull `(kind, target_path, grantee)` out of the URL fields on a
 /// share request. Fails with a 400-ish error when any segment is
 /// missing or invalid.
-fn extract_share_identifiers(req: &Request, split: bool) -> Result<(ShareTargetKind, String, String), RvError> {
+fn extract_share_identifiers(
+    req: &Request,
+    split: bool,
+    write: bool,
+) -> Result<(ShareTargetKind, String, String), RvError> {
     let kind_str = req.get_data("kind")?.as_str().unwrap_or("").to_string();
     let target_b64 = req.get_data("target")?.as_str().unwrap_or("").to_string();
     let grantee = req.get_data("grantee")?.as_str().unwrap_or("").to_string();
@@ -577,6 +581,9 @@ fn extract_share_identifiers(req: &Request, split: bool) -> Result<(ShareTargetK
     let kind = ShareTargetKind::parse(&kind_str).ok_or_else(|| bv_error_string!("invalid share kind"))?;
     let target_path = decode_b64url_path(&target_b64)
         .ok_or_else(|| bv_error_string!("invalid target segment (expected base64url)"))?;
+    if write {
+        refuse_moving_kv_share(kind, &target_path, req, split)?;
+    }
     let target_path = scope_share_target(kind, target_path, req, split);
     if grantee.trim().is_empty() {
         return Err(bv_error_string!("grantee is required"));
@@ -634,6 +641,15 @@ fn share_history_op(req: &Request) -> &'static str {
         Some(share_store::SHARE_OP_MOVE) => share_store::SHARE_OP_MOVE,
         _ => share_store::SHARE_OP_GRANT,
     }
+}
+
+/// A share grant or revoke on a KV secret whose key moves at the pending T499
+/// switch is refused (`OwnerStore::client_kv_key_for_write`, T511).
+fn refuse_moving_kv_share(kind: ShareTargetKind, target: &str, req: &Request, split: bool) -> Result<(), RvError> {
+    if kind == ShareTargetKind::KvSecret {
+        OwnerStore::client_kv_key_for_write(target, req.namespace_path.as_deref(), split)?;
+    }
+    Ok(())
 }
 
 fn scope_share_target(kind: ShareTargetKind, target_path: String, req: &Request, split: bool) -> String {
@@ -1391,7 +1407,7 @@ impl IdentityBackendInner {
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let store = self.resolve_share_store()?;
-        let (kind, target_path, grantee) = extract_share_identifiers(req, self.kv_keys_split().await?)?;
+        let (kind, target_path, grantee) = extract_share_identifiers(req, self.kv_keys_split().await?, false)?;
 
         self.require_share_admin(req, kind, &target_path).await?;
 
@@ -1412,7 +1428,7 @@ impl IdentityBackendInner {
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let store = self.resolve_share_store()?;
-        let (url_kind, url_target_path, grantee) = extract_share_identifiers(req, self.kv_keys_split().await?)?;
+        let (url_kind, url_target_path, grantee) = extract_share_identifiers(req, self.kv_keys_split().await?, true)?;
 
         // Body can override kind/path with the raw (non-encoded) form.
         // Grantee is always taken from the URL.
@@ -1435,13 +1451,15 @@ impl IdentityBackendInner {
         // must be namespace-qualified the same way `extract_share_identifiers`
         // qualifies the URL form (which produced `url_target_path`).
         let split = self.kv_keys_split().await?;
-        let target_path = req
+        let body_target = req
             .get_data("target_path")
             .ok()
             .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .filter(|s| !s.trim().is_empty())
-            .map(|p| scope_share_target(kind, p, req, split))
-            .unwrap_or(url_target_path);
+            .filter(|s| !s.trim().is_empty());
+        if let Some(p) = &body_target {
+            refuse_moving_kv_share(kind, p, req, split)?;
+        }
+        let target_path = body_target.map(|p| scope_share_target(kind, p, req, split)).unwrap_or(url_target_path);
 
         let capabilities: Vec<String> =
             req.get_data("capabilities").ok().map(|v| value_to_string_vec(&v)).unwrap_or_default();
@@ -1494,7 +1512,7 @@ impl IdentityBackendInner {
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let store = self.resolve_share_store()?;
-        let (kind, target_path, grantee) = extract_share_identifiers(req, self.kv_keys_split().await?)?;
+        let (kind, target_path, grantee) = extract_share_identifiers(req, self.kv_keys_split().await?, true)?;
 
         self.require_share_admin(req, kind, &target_path).await?;
 

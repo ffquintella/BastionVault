@@ -2103,11 +2103,11 @@ impl SystemBackend {
         // child namespace is active reassigns the same record the owner-read,
         // ACL, and share paths use. The admin GUI sends the mount-relative
         // path with the active namespace in the request header.
-        let key = crate::modules::identity::OwnerStore::client_kv_key(
+        let key = crate::modules::identity::OwnerStore::client_kv_key_for_write(
             &path,
             req.namespace_path.as_deref(),
             store.kv_keys_split().await?,
-        )
+        )?
         .ok_or_else(|| bv_error_response_status!(400, "invalid KV path"))?;
         store.set_kv_owner(&key, &new_owner).await?;
 
@@ -2145,11 +2145,11 @@ impl SystemBackend {
         // Claim under the namespace-qualified key so the "Claim ownership"
         // action captures the record the badge/ACL/share paths read (the GUI
         // sends the mount-relative path with the active namespace header).
-        let key = crate::modules::identity::OwnerStore::client_kv_key(
+        let key = crate::modules::identity::OwnerStore::client_kv_key_for_write(
             &path,
             req.namespace_path.as_deref(),
             store.kv_keys_split().await?,
-        )
+        )?
         .ok_or_else(|| bv_error_response_status!(400, "invalid KV path"))?;
 
         if let Some(existing) = store.get_kv_owner(&key).await? {
@@ -3343,11 +3343,17 @@ impl SystemBackend {
             // `canonicalize_kv_path_scoped` returns None for malformed input
             // (empty segments, `..`, etc.); we surface those separately so the
             // operator sees exactly which paths were skipped.
-            let Some(key) = crate::modules::identity::OwnerStore::client_kv_key(
-                path,
-                req.namespace_path.as_deref(),
-                store.kv_keys_split().await?,
-            ) else {
+            // A real run refuses a name whose key moves at the pending T499 switch (T511).
+            let split = store.kv_keys_split().await?;
+            let key = match dry_run {
+                true => crate::modules::identity::OwnerStore::client_kv_key(path, req.namespace_path.as_deref(), split),
+                false => crate::modules::identity::OwnerStore::client_kv_key_for_write(
+                    path,
+                    req.namespace_path.as_deref(),
+                    split,
+                )?,
+            };
+            let Some(key) = key else {
                 kv_invalid.push(path.clone());
                 continue;
             };

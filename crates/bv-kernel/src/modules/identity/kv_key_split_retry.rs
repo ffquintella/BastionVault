@@ -29,6 +29,8 @@ pub struct KvSplitRetry {
     first_delay_ms: AtomicU64,
     /// Failed background attempts of the current task.
     failures: Arc<AtomicU32>,
+    /// Waits the current task has finished, whatever it then did.
+    wakes: Arc<AtomicU32>,
 }
 
 impl KvSplitRetry {
@@ -51,12 +53,14 @@ impl KvSplitRetry {
             ms => Duration::from_millis(ms),
         };
         self.failures.store(0, Ordering::Relaxed);
+        self.wakes.store(0, Ordering::Relaxed);
         log::warn!(
             target: "migration",
             "kv key split datafix failed at unseal; retrying it in the background up to {MAX_RETRIES} times, \
              first in {first:?}"
         );
-        *task = Some(runtime.spawn(retry(core, first, self.failures.clone())));
+        let counters = (self.failures.clone(), self.wakes.clone());
+        *task = Some(runtime.spawn(retry(core, first, counters)));
     }
 
     /// Abort the task, on seal. A pass cut short resumes from its saved plan.
@@ -84,15 +88,23 @@ impl KvSplitRetry {
     pub fn failures_for_test(&self) -> u32 {
         self.failures.load(Ordering::Relaxed)
     }
+
+    /// Test support: waits the current task has finished (0 if it was
+    /// aborted before its first wait ended).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn wakes_for_test(&self) -> u32 {
+        self.wakes.load(Ordering::Relaxed)
+    }
 }
 
 /// Up to [`MAX_RETRIES`] attempts, each after a doubling wait. Stops when the
 /// vault is gone or sealed, or when a pass completes or finds the marker set.
-async fn retry(core: Weak<Core>, first: Duration, failures: Arc<AtomicU32>) {
+async fn retry(core: Weak<Core>, first: Duration, (failures, wakes): (Arc<AtomicU32>, Arc<AtomicU32>)) {
     let mut delay = first;
     let mut last_error = String::new();
     for attempt in 1..=MAX_RETRIES {
         tokio::time::sleep(delay).await;
+        wakes.fetch_add(1, Ordering::Relaxed);
         delay = delay.saturating_mul(2);
         let Some(core) = core.upgrade() else {
             return;
