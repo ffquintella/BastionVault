@@ -232,4 +232,242 @@ describe("TransferToNamespaceModal", () => {
     expect(screen.getByText(/same as the source/i)).toBeInTheDocument();
     expect(mockInvoke).not.toHaveBeenCalled();
   });
+
+  // ── T501: polish ─────────────────────────────────────────────────
+
+  function answerWithPlan(plan = PLAN_NO_SHARES) {
+    mockInvoke.mockImplementation(async (_cmd: string, args: { dryRun: boolean }) =>
+      args.dryRun ? plan : realOf(plan as typeof PLAN_NO_SHARES),
+    );
+  }
+
+  async function check() {
+    await userEvent.click(screen.getByRole("button", { name: "Check" }));
+  }
+
+  const OVERWRITE_ACK = /destination is deleted if the name is taken/i;
+
+  it("overwrite_run_requires_acknowledgement", async () => {
+    answerWithPlan();
+    const { onTransferred } = setup();
+    await chooseDestination();
+    await userEvent.selectOptions(screen.getByLabelText("If the destination exists"), "overwrite");
+    await check();
+
+    const run = await screen.findByRole("button", { name: "Copy now" });
+    expect(run).toBeDisabled();
+    await userEvent.click(run);
+    expect(mockInvoke).toHaveBeenCalledTimes(1);
+
+    await userEvent.click(screen.getByRole("checkbox", { name: OVERWRITE_ACK }));
+    expect(run).toBeEnabled();
+    await userEvent.click(run);
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledTimes(2));
+    const sent = mockInvoke.mock.calls[1][1] as { onConflict: string; dryRun: boolean };
+    expect(sent.onConflict).toBe("overwrite");
+    expect(sent.dryRun).toBe(false);
+    await waitFor(() => expect(onTransferred).toHaveBeenCalledTimes(1));
+  });
+
+  it("overwrite_and_move_each_need_their_own_acknowledgement", async () => {
+    answerWithPlan();
+    setup();
+    await chooseDestination();
+    await userEvent.click(screen.getByRole("radio", { name: "Move" }));
+    await userEvent.selectOptions(screen.getByLabelText("If the destination exists"), "overwrite");
+    await check();
+    const run = await screen.findByRole("button", { name: "Move now" });
+    await userEvent.click(screen.getByRole("checkbox", { name: /source will be deleted/i }));
+    expect(run).toBeDisabled();
+    await userEvent.click(screen.getByRole("checkbox", { name: OVERWRITE_ACK }));
+    expect(run).toBeEnabled();
+  });
+
+  it("refuse_and_rename_need_no_overwrite_acknowledgement", async () => {
+    answerWithPlan();
+    setup();
+    await chooseDestination();
+    await userEvent.selectOptions(screen.getByLabelText("If the destination exists"), "rename");
+    await check();
+    expect(await screen.findByRole("button", { name: "Copy now" })).toBeEnabled();
+    expect(screen.queryByRole("checkbox", { name: OVERWRITE_ACK })).not.toBeInTheDocument();
+  });
+
+  it("overwrite_note_stays_visible_in_the_checked_phase", async () => {
+    answerWithPlan();
+    setup();
+    await chooseDestination();
+    await userEvent.selectOptions(screen.getByLabelText("If the destination exists"), "overwrite");
+    await check();
+    await screen.findByRole("button", { name: "Copy now" });
+    expect(screen.getByText(/Overwrite tries the import first/)).toBeInTheDocument();
+  });
+
+  // Each edit of the request makes a checked plan stale.
+  const EDITS: [string, () => Promise<void>][] = [
+    ["destination namespace", () => userEvent.selectOptions(screen.getByLabelText("Destination namespace"), "")],
+    ["destination mount", () => userEvent.type(screen.getByLabelText("Destination mount"), "2")],
+    ["destination path", () => userEvent.type(screen.getByLabelText("Destination path"), "2")],
+    ["on_conflict", () => userEvent.selectOptions(screen.getByLabelText("If the destination exists"), "rename")],
+  ];
+
+  it.each(EDITS)("a changed %s hides the run button and clears the acknowledgements", async (_name, edit) => {
+    answerWithPlan();
+    setup();
+    await chooseDestination();
+    await userEvent.click(screen.getByRole("radio", { name: "Move" }));
+    await userEvent.selectOptions(screen.getByLabelText("If the destination exists"), "overwrite");
+    await check();
+    await screen.findByRole("button", { name: "Move now" });
+    await userEvent.click(screen.getByRole("checkbox", { name: /source will be deleted/i }));
+    await userEvent.click(screen.getByRole("checkbox", { name: OVERWRITE_ACK }));
+    expect(screen.getByRole("button", { name: "Move now" })).toBeEnabled();
+
+    await edit();
+    expect(screen.queryByRole("button", { name: "Move now" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+
+    // Back to a Move + overwrite request and a new check: both start unticked.
+    await userEvent.selectOptions(screen.getByLabelText("If the destination exists"), "overwrite");
+    await check();
+    const run = await screen.findByRole("button", { name: "Move now" });
+    expect(run).toBeDisabled();
+    expect(screen.getByRole("checkbox", { name: /source will be deleted/i })).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: OVERWRITE_ACK })).not.toBeChecked();
+  });
+
+  it("switching the operation away and back hides the run button and clears the move acknowledgement", async () => {
+    answerWithPlan();
+    setup();
+    await chooseDestination();
+    await userEvent.click(screen.getByRole("radio", { name: "Move" }));
+    await check();
+    await screen.findByRole("button", { name: "Move now" });
+    await userEvent.click(screen.getByRole("checkbox", { name: /source will be deleted/i }));
+    expect(screen.getByRole("button", { name: "Move now" })).toBeEnabled();
+
+    await userEvent.click(screen.getByRole("radio", { name: "Copy" }));
+    expect(screen.queryByRole("button", { name: "Copy now" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("radio", { name: "Move" }));
+    expect(screen.queryByRole("button", { name: "Move now" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+
+    await check();
+    const run = await screen.findByRole("button", { name: "Move now" });
+    expect(run).toBeDisabled();
+    expect(screen.getByRole("checkbox", { name: /source will be deleted/i })).not.toBeChecked();
+    expect(mockInvoke).toHaveBeenCalledTimes(2);
+  });
+
+  it("a failed real run returns to the form and needs a new check", async () => {
+    mockInvoke
+      .mockResolvedValueOnce(PLAN_NO_SHARES)
+      .mockRejectedValueOnce({ message: "the destination refused the import" })
+      .mockResolvedValueOnce(PLAN_NO_SHARES);
+    const { onTransferred } = setup();
+    await chooseDestination();
+    await userEvent.click(screen.getByRole("radio", { name: "Move" }));
+    await check();
+    await screen.findByRole("button", { name: "Move now" });
+    await userEvent.click(screen.getByRole("checkbox", { name: /source will be deleted/i }));
+    await userEvent.click(screen.getByRole("button", { name: "Move now" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("the destination refused the import");
+    expect(onTransferred).not.toHaveBeenCalled();
+    // Back on the form: no run button, the stale plan is gone.
+    expect(screen.queryByRole("button", { name: "Move now" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/Check result/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Check" })).toBeEnabled();
+    expect(mockInvoke).toHaveBeenCalledTimes(2);
+
+    await check();
+    const run = await screen.findByRole("button", { name: "Move now" });
+    expect(run).toBeDisabled();
+    expect(screen.getByRole("checkbox", { name: /source will be deleted/i })).not.toBeChecked();
+    expect(dryRunOf(mockInvoke.mock.calls[2])).toBe(true);
+  });
+
+  it("uses_a_fixed_title_that_does_not_embed_the_path", () => {
+    const long = "a-very-long-resource-name-".repeat(8);
+    setup({ path: long });
+    expect(screen.getByRole("heading", { level: 2 })).toHaveTextContent(/^Copy or move to another namespace$/);
+    // The From line is the one place the path shows.
+    expect(screen.getAllByText(new RegExp(long)).length).toBe(1);
+  });
+
+  it("compares_resource_names_without_case_to_match_the_server", async () => {
+    setup({ path: "DB1" });
+    await chooseDestination("team-a");
+    const path = screen.getByLabelText("Destination path");
+    await userEvent.clear(path);
+    await userEvent.type(path, "  db1 ");
+    expect(screen.getByText(/same as the source/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Check" })).toBeDisabled();
+    await userEvent.clear(path);
+    await userEvent.type(path, "db2");
+    expect(screen.queryByText(/same as the source/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Check" })).toBeEnabled();
+  });
+
+  it("compares_kv_secret_names_with_case", async () => {
+    setup({ kind: "kv-secret", mount: "secret", path: "Db1" });
+    await chooseDestination("team-a");
+    const path = screen.getByLabelText("Destination path");
+    await userEvent.clear(path);
+    await userEvent.type(path, "db1");
+    expect(screen.queryByText(/same as the source/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Check" })).toBeEnabled();
+    await userEvent.clear(path);
+    await userEvent.type(path, "Db1");
+    expect(screen.getByText(/same as the source/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Check" })).toBeDisabled();
+  });
+
+  it("a future share code still raises the drop banner and is listed", async () => {
+    mockInvoke.mockResolvedValue({
+      ...PLAN_NO_SHARES,
+      warnings: [{ code: "grantee-foo", subject: "entity-zzz", message: "a code this client has never seen" }],
+    });
+    setup();
+    await chooseDestination();
+    await check();
+    await screen.findByText(/Some or all shares will be dropped/);
+    expect(screen.getByText("grantee-foo")).toBeInTheDocument();
+    expect(screen.getByText("entity-zzz")).toBeInTheDocument();
+  });
+
+  it("group_and_file_warnings_do_not_raise_the_share_banner", async () => {
+    mockInvoke.mockResolvedValue({
+      ...PLAN_NO_SHARES,
+      warnings: [
+        { code: "group-membership-dropped", subject: "ops", message: "no group of that name" },
+        { code: "files-not-transferred", subject: "db1", message: "2 files stay" },
+      ],
+    });
+    setup();
+    await chooseDestination();
+    await check();
+    await screen.findByText("group-membership-dropped");
+    expect(screen.getByText("files-not-transferred")).toBeInTheDocument();
+    expect(screen.queryByText(/Some or all shares/)).not.toBeInTheDocument();
+  });
+
+  it("lists_the_kv_specific_warnings", async () => {
+    mockInvoke.mockResolvedValue({
+      ...PLAN_NO_SHARES,
+      warnings: [
+        { code: "deleted-version-not-recoverable", subject: "secret/x v2", message: "arrives destroyed" },
+        { code: "kv-environment-overrides-normalized", subject: "secret/x", message: "an override equal to its base is dropped" },
+      ],
+    });
+    setup({ kind: "kv-secret", mount: "secret", path: "x" });
+    await chooseDestination();
+    await check();
+    await screen.findByText("deleted-version-not-recoverable");
+    expect(screen.getByText("kv-environment-overrides-normalized")).toBeInTheDocument();
+    expect(screen.queryByText(/Some or all shares/)).not.toBeInTheDocument();
+    expect((mockInvoke.mock.calls[0][1] as { kind: string }).kind).toBe("kv-secret");
+  });
 });

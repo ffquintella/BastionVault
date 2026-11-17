@@ -1,4 +1,4 @@
-// Copy or move one object (a resource, later a KV secret) to another
+// Copy or move one object (a resource or a KV secret) to another
 // namespace. Always checks first with a dry run, shows what would be carried
 // and everything that would not, then runs for real on a second click.
 import { useEffect, useState } from "react";
@@ -19,6 +19,15 @@ const SHARE_WARNING_CODES = new Set([
   "all-shares-dropped",
   "shares-unreadable",
 ]);
+
+/**
+ * A share warning raises the drop banner. The explicit set is the codes the
+ * server sends today; the pattern keeps a future share code from slipping
+ * past the banner. Group and file codes name neither word.
+ */
+function isShareWarning(code: string): boolean {
+  return SHARE_WARNING_CODES.has(code) || /share|grantee/.test(code);
+}
 
 const CONFLICT_OPTIONS: { value: TransferOnConflict; label: string }[] = [
   { value: "refuse", label: "Refuse (stop, change nothing)" },
@@ -78,6 +87,7 @@ export function TransferToNamespaceModal({
   const [result, setResult] = useState<TransferResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [ackDelete, setAckDelete] = useState(false);
+  const [ackOverwrite, setAckOverwrite] = useState(false);
 
   // The list may arrive after the first render; keep the destination valid.
   useEffect(() => {
@@ -87,18 +97,24 @@ export function TransferToNamespaceModal({
   }, [namespaces, destNs, namespace]);
 
   const busy = phase === "checking" || phase === "running";
+  // The server reads a resource name without case and a KV path exactly.
+  const samePath = (a: string, b: string) => {
+    const [x, y] = [a, b].map((p) => p.trim().replace(/^\/+|\/+$/g, ""));
+    return kind === "resource" ? x.toLowerCase() === y.toLowerCase() : x === y;
+  };
   const sameAsSource =
     destNs === namespace &&
     destMount.trim().replace(/^\/+|\/+$/g, "") === mount.replace(/^\/+|\/+$/g, "") &&
-    destPath.trim().replace(/^\/+|\/+$/g, "") === path.replace(/^\/+|\/+$/g, "");
+    samePath(destPath, path);
   const incomplete = destMount.trim() === "" || destPath.trim() === "";
 
-  /** Any edit makes a checked plan stale: back to the form, ack cleared. */
+  /** Any edit makes a checked plan stale: back to the form, acks cleared. */
   function edit<T>(set: (v: T) => void) {
     return (v: T) => {
       set(v);
       setPlan(null);
       setAckDelete(false);
+      setAckOverwrite(false);
       setError(null);
       if (phase === "checked") setPhase("form");
     };
@@ -121,6 +137,7 @@ export function TransferToNamespaceModal({
     try {
       setPlan(await request(true));
       setAckDelete(false);
+      setAckOverwrite(false);
       setPhase("checked");
     } catch (err: unknown) {
       setPlan(null);
@@ -141,6 +158,8 @@ export function TransferToNamespaceModal({
       // The error says what was written; the destination may have changed, so
       // the plan is stale and a new check is required.
       setPlan(null);
+      setAckDelete(false);
+      setAckOverwrite(false);
       setError(serverMessage(err));
       setPhase("form");
     }
@@ -148,7 +167,7 @@ export function TransferToNamespaceModal({
 
   const shown = phase === "done" ? result : plan;
   const locked = busy || phase === "done";
-  const moveBlocked = op === "move" && !ackDelete;
+  const runBlocked = (op === "move" && !ackDelete) || (onConflict === "overwrite" && !ackOverwrite);
 
   return (
     <Modal
@@ -156,7 +175,7 @@ export function TransferToNamespaceModal({
       onClose={() => {
         if (!busy) onClose();
       }}
-      title={`Copy or move "${path}" to another namespace`}
+      title="Copy or move to another namespace"
       size="lg"
       actions={
         phase === "done" ? (
@@ -178,7 +197,7 @@ export function TransferToNamespaceModal({
               <Button
                 variant={op === "move" ? "danger" : "primary"}
                 onClick={run}
-                disabled={moveBlocked}
+                disabled={runBlocked}
               >
                 {op === "move" ? "Move now" : "Copy now"}
               </Button>
@@ -288,6 +307,18 @@ export function TransferToNamespaceModal({
             <span>I understand the source will be deleted once the copy is written.</span>
           </label>
         )}
+
+        {phase === "checked" && onConflict === "overwrite" && (
+          <label className="flex items-start gap-2 text-sm">
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              checked={ackOverwrite}
+              onChange={(e) => setAckOverwrite(e.target.checked)}
+            />
+            <span>I understand the destination is deleted if the name is taken; this is not atomic.</span>
+          </label>
+        )}
       </div>
     </Modal>
   );
@@ -295,7 +326,7 @@ export function TransferToNamespaceModal({
 
 function Outcome({ result, done, op }: { result: TransferResult; done: boolean; op: TransferOp }) {
   const t = result.transferred;
-  const dropsShares = result.warnings.some((w) => SHARE_WARNING_CODES.has(w.code));
+  const dropsShares = result.warnings.some((w) => isShareWarning(w.code));
   const counts: [string, string, number][] = [
     ["secrets", "Secrets", t.secrets],
     ["versions", "Versions", t.versions],
@@ -334,7 +365,7 @@ function Outcome({ result, done, op }: { result: TransferResult; done: boolean; 
           {result.warnings.map((w, i) => (
             <li key={`${w.code}-${w.subject}-${i}`} className="flex items-start gap-3">
               <div className="shrink-0 pt-0.5">
-                <Badge label={w.code} variant={SHARE_WARNING_CODES.has(w.code) ? "warning" : "info"} />
+                <Badge label={w.code} variant={isShareWarning(w.code) ? "warning" : "info"} />
               </div>
               <div className="min-w-0">
                 <div className="font-mono text-xs text-[var(--color-text)] truncate" title={w.subject}>

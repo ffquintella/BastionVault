@@ -332,6 +332,11 @@ EXAMPLE ENTRY:
 
 ### Changed
 
+#### Namespaces: a safer copy or move dialog
+
+- **The copy or move dialog asks for an acknowledgement before an overwrite, and never leaves a stale check usable** (T501, S120)
+  -- Choosing "Overwrite" now needs a ticked "I understand the destination is deleted if the name is taken; this is not atomic" before **Copy now** or **Move now** enables, alongside the existing Move acknowledgement; changing the operation, destination or conflict choice, or a failed run, clears both and requires a new Check. The title is fixed ("Copy or move to another namespace") instead of embedding a long path. The same-item check ignores case for a resource, as the server does, and keeps it for a KV secret. The "Some or all shares will be dropped" banner also appears for any future warning code that names a share or grantee, not only the codes known today. On the Resources page the Copy / Move button tells a read-only viewer that moving needs delete rights on the source.
+
 #### Asset groups: one batch call, a version signal and a client cache
 
 - **The Resources and Secrets pages load asset groups with one request instead of one per group** (T491, S47) -- `GET resource-group/v2/groups/batch?shape=full|slim&since=<version>` returns what listing and then reading each group would return (same visibility and member redaction, one audit entry), the slim shape giving only the resource, secret and file to group-name maps. Every namespace keeps a stored version that rises on each group change, on prune and rename, on reindex and on `.bvx` import, and never on reads; a child namespace's version also moves with its ancestors', and `since=<version>` answers `unchanged` with no group data. The desktop app caches the result for 45 seconds, revalidates on focus, navigation and the timer, clears it on any group change it makes, namespace switch or logout, and falls back to list-and-read on older servers. A change to your own shares or policies reaches the page within five minutes, at the next full re-read.
