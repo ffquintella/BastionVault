@@ -969,7 +969,12 @@ POST /v2/sys/namespace-transfer/move
   (400), because the router reads such a path as already qualified. A
   mount that lives only in the root table (`sys/`, `identity/`, ...) is no
   mount inside a namespace and is refused (400). Two spellings of the same
-  item are refused as one (400).
+  item are refused as one (400). A namespace that does not exist, one the
+  token may not operate in, and a mount the caller cannot see there all get
+  the same 400 (`<field>: namespace '<ns>' has no <engine> mount '<mount>/'
+  the caller can see ...`), so the answer tells nothing about a namespace
+  the caller may not use; a child namespace a mount's path starts with is
+  named only to a caller who may operate in it.
 - The route itself is evaluated in the request's **active namespace** (the
   `X-Vault-Namespace` header, root when absent), so the caller's policy must
   grant `update` on `sys/namespace-transfer/*` and `sys/capabilities-self`
@@ -1099,8 +1104,10 @@ as an unknown route fails the transfer with a 500 internal error, never a
 it (versions with their numbers and timestamps, history, settings), refuse
 a name that is taken (`on_conflict` accepts `refuse` only; rename and
 overwrite are the transfer's own doing, see above) and carry at most 1000
-secrets per resource (400). As defence in depth they are also authorised as
-a write of the **real** item (`<mount><path>` for KV,
+secrets per resource (400). An import whose answer names another
+item than the one checked fails with a 500 naming the item, which was
+written without an owner record (logged on the `security` target). As
+defence in depth they are also authorised as a write of the **real** item (`<mount><path>` for KV,
 `resources/resources/<name>` for a resource, and each
 `resources/secrets/<name>/<key>`), so deny rules, owner and share scopes and
 per-secret paths apply as for a normal write. `sys/capabilities-self` on an

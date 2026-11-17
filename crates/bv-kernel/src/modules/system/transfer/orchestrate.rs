@@ -435,10 +435,50 @@ async fn list(core: &dyn VaultCtx, caller: &Request, ns: &str, path: String) -> 
     Ok(keys.unwrap_or_default().iter().filter_map(Value::as_str).map(String::from).collect())
 }
 
-/// Refuse, before anything is read, a location whose namespace does not
-/// exist, whose mount starts with a namespace path (an alias of a mount in
-/// that namespace), or whose mount is not one of the caller-visible mounts of
-/// the kind's engine in its namespace (`sys/internal/ui/mounts`).
+/// The one answer for a location the caller cannot use (T503): a namespace
+/// that does not exist, one the token may not operate in, and a mount the
+/// caller cannot see there read alike, so it tells nothing about a namespace.
+fn unseen(kind: Kind, place: &Place, field: &str) -> RvError {
+    invalid(format!(
+        "{field}: {} has no {} mount '{}' the caller can see (a namespace that does not exist, or that the token \
+         may not operate in, shows none)",
+        namespace_label(&place.ns),
+        kind.mount_type(),
+        place.mount
+    ))
+}
+
+/// Whether namespace `ns` exists and the caller's token may operate in it,
+/// as `sys/capabilities-self` reports it there (root: always). Existence is
+/// never told apart from operability: either way the caller gets `false`.
+#[maybe_async::maybe_async]
+async fn usable(core: &dyn VaultCtx, caller: &Request, ns: &str, probe: &str) -> Result<bool, RvError> {
+    if ns.is_empty() {
+        return Ok(true);
+    }
+    let Some(namespaces) = core.namespaces() else {
+        return Ok(false);
+    };
+    if namespaces.resolve(ns).await?.is_none() {
+        return Ok(false);
+    }
+    let body = json!({ "paths": [probe] }).as_object().cloned();
+    match call(core, caller, ns, Operation::Write, "sys/capabilities-self".to_string(), body).await {
+        Ok(resp) => {
+            let data = resp.and_then(|r| r.data).unwrap_or_default();
+            Ok(data.get("namespace_operable").and_then(Value::as_bool) != Some(false))
+        }
+        // A caller that may not probe, or a namespace deleted meanwhile.
+        Err(e) if matches!(e, RvError::ErrPermissionDenied) || status_of(&e) == 404 => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+/// Refuse, before anything is read, a location the caller cannot use: its
+/// namespace does not exist or the token may not operate in it, its mount
+/// starts with a child namespace's path (an alias of a mount there), or it is
+/// not a caller-visible mount of the kind's engine (`sys/internal/ui/mounts`).
+/// Only a caller who may use the namespace learns which (T503).
 #[maybe_async::maybe_async]
 async fn check_place(
     core: &dyn VaultCtx,
@@ -447,26 +487,34 @@ async fn check_place(
     place: &Place,
     field: &str,
 ) -> Result<(), RvError> {
+    if !usable(core, caller, &place.ns, &place.mount).await? {
+        return Err(unseen(kind, place, field));
+    }
     if let Some(namespaces) = core.namespaces() {
-        if !place.ns.is_empty() && namespaces.resolve(&place.ns).await?.is_none() {
-            let message = format!("{field}.namespace: no such namespace '{}'", place.ns);
-            return Err(RvError::ErrResponseStatus(404, message));
-        }
         let segments: Vec<&str> = place.mount.trim_end_matches('/').split('/').collect();
         for end in 1..=segments.len() {
             let prefix = segments[..end].join("/");
             let candidate = if place.ns.is_empty() { prefix.clone() } else { format!("{}/{prefix}", place.ns) };
             // A segment no namespace may have (`*`, padding) names none.
-            if normalize_path(&candidate).is_ok() && namespaces.resolve(&candidate).await?.is_some() {
-                let message = format!(
-                    "{field}.mount '{}' starts with namespace '{candidate}'; name it in {field}.namespace",
-                    place.mount
-                );
-                return Err(invalid(message));
+            if normalize_path(&candidate).is_err() || namespaces.resolve(&candidate).await?.is_none() {
+                continue;
             }
+            // Only a caller who may use that namespace learns that it exists.
+            if !usable(core, caller, &candidate, &place.mount).await? {
+                return Err(unseen(kind, place, field));
+            }
+            let message = format!(
+                "{field}.mount '{}' starts with namespace '{candidate}'; name it in {field}.namespace",
+                place.mount
+            );
+            return Err(invalid(message));
         }
     }
-    let listing = read(core, caller, &place.ns, "sys/internal/ui/mounts".to_string(), None).await?.unwrap_or_default();
+    let listing = match read(core, caller, &place.ns, "sys/internal/ui/mounts".to_string(), None).await {
+        Ok(listing) => listing.unwrap_or_default(),
+        Err(e) if status_of(&e) == 403 || status_of(&e) == 404 => return Err(unseen(kind, place, field)),
+        Err(e) => return Err(e),
+    };
     let mounts = listing.get("secret").and_then(Value::as_object);
     let entry =
         mounts.and_then(|m| m.iter().find(|(path, _)| path.trim_end_matches('/') == place.mount.trim_end_matches('/')));
@@ -479,11 +527,7 @@ async fn check_place(
             kind.mount_type(),
             kind.as_str()
         ))),
-        None => Err(invalid(format!(
-            "{field}.mount '{}' is not a mount the caller can see in {}",
-            place.mount,
-            namespace_label(&place.ns)
-        ))),
+        None => Err(unseen(kind, place, field)),
     }
 }
 

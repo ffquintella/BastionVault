@@ -14,10 +14,11 @@ use super::kernel_policy_deny::{write, write_policy};
 use crate::{
     core::Core,
     errors::RvError,
-    logical::{Operation, Request, Response},
+    logical::{handler::Handler, Operation, Request, Response},
     modules::{
         identity::{IdentityModule, SecretShare, ShareStore},
         namespace::{NamespaceModule, NamespaceQuotas, NAMESPACE_MODULE_NAME},
+        policy::PolicyModule,
     },
     test_utils::{new_unseal_test_bastion_vault, test_read_api, TestHttpServer},
 };
@@ -842,4 +843,84 @@ async fn a_direct_import_with_a_grant_is_an_unknown_route_on_any_mount() {
     import(&core, &writer, "resources/v2/transfer/import/free", resource_bundle(&[])).await.unwrap();
     assert_eq!(kv_value(&core, &root, "free").await, Some(json!("imported")));
     assert_eq!(history_len(&core, &root, "free").await, 1, "only the transfer-in entry");
+}
+
+/// Seam (T502): appends `-other` to the name a marked import answers with, as
+/// an engine bug would, ahead of the policy store's `post_route`.
+struct AnswerAnotherName;
+
+#[maybe_async::maybe_async]
+impl Handler for AnswerAnotherName {
+    fn name(&self) -> String {
+        "test-answer-another-name".to_string()
+    }
+
+    async fn post_route(&self, req: &mut Request, resp: &mut Option<Response>) -> Result<(), RvError> {
+        let data = resp.as_mut().and_then(|r| r.data.as_mut()).filter(|_| req.is_internal_transfer_import());
+        if let Some(data) = data {
+            for field in ["path", "name"] {
+                if let Some(Value::String(name)) = data.get_mut(field) {
+                    name.push_str("-other");
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Put [`AnswerAnotherName`] in the pipeline right before the policy store.
+async fn answer_another_name(core: &Arc<Core>) {
+    let module = core.module_manager().get_module::<PolicyModule>("policy").expect("policy module");
+    let store: Arc<dyn Handler> = module.policy_store.load_full();
+    core.delete_handler(store.clone()).unwrap();
+    core.add_handler(Arc::new(AnswerAnotherName)).unwrap();
+    core.add_handler(store).unwrap();
+}
+
+/// Regression (T502): an import whose answer names another item than the one
+/// the ACL checked fails with a 500 that names the item and says it was
+/// written without an owner record, and nothing is stamped; the transfer
+/// passes that answer on. Unreachable with today's engines: the seam fakes it.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn an_import_answering_another_name_fails_and_names_the_unowned_item() {
+    let (_bvault, core, root) = new_unseal_test_bastion_vault("import_answers_another_name").await;
+    write(&core, &root, "sys/auth/pass", json!({ "type": "userpass" })).await;
+    write_policy(&core, &root, "kv-writer", KV_WRITER).await;
+    write_policy(&core, &root, "res-writer", RESOURCE_WRITER).await;
+    let (writer, _) = login(&core, &root, "writer", "kv-writer,res-writer").await;
+    answer_another_name(&core).await;
+
+    for (path, item, answered, body) in [
+        ("secret/v2/transfer/import/team/db", "secret/team/db", "team/db-other", kv_bundle()),
+        ("resources/v2/transfer/import/srv1", "resources/resources/srv1", "srv1-other", resource_bundle(&["login"])),
+    ] {
+        match import(&core, &writer, path, body).await {
+            Err(RvError::ErrResponseStatus(500, m)) => {
+                assert!(m.contains(&format!("{item} was written")) && m.contains(answered), "{path}: {m}");
+                assert!(m.contains("no owner record") && !m.contains("S3CRET"), "{path}: {m}");
+            }
+            other => panic!("{path}: expected 500, got {other:?}"),
+        }
+    }
+    assert_eq!(kv_value(&core, &root, "team/db").await, Some(json!("imported")), "the engine wrote it");
+    for key in ["secret/team/db", "secret/team/db-other"] {
+        assert_eq!(kv_owner(&core, key).await, None, "{key}: no owner stamped");
+    }
+    assert!(test_read_api(core.as_ref(), &root, "resources/resources/srv1", true).await.unwrap().is_some());
+    for name in ["srv1", "srv1-other"] {
+        assert_eq!(resource_owner(&core, name).await, None, "{name}: no owner stamped");
+    }
+
+    let copy = json!({
+        "kind": "kv-secret",
+        "source": { "namespace": "", "mount": "secret", "path": "team/db" },
+        "destination": { "namespace": "", "mount": "secret", "path": "team/copy" },
+    });
+    match send(&core, &root, Operation::Write, "sys/namespace-transfer/copy", None, copy).await {
+        Err(RvError::ErrResponseStatus(500, m)) => {
+            assert!(m.contains("secret/team/copy was written") && m.contains("no owner record"), "{m}");
+        }
+        other => panic!("the transfer: expected 500, got {other:?}"),
+    }
+    assert_eq!(kv_owner(&core, "secret/team/copy").await, None, "no owner stamped");
 }

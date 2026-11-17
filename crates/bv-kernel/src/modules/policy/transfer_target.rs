@@ -98,12 +98,18 @@ impl ImportTarget {
     /// (`path` for KV, `name` for a resource) is exactly the requested name the
     /// ACL checked. `None` for any other answer: nothing is stamped then.
     pub(crate) fn written_path(&self, resp: Option<&Response>) -> Option<String> {
+        let written = self.answered_name(resp)?;
+        (written == self.name).then(|| self.acl_path())
+    }
+
+    /// The name the handler's answer gives (`path` for KV, `name` for a
+    /// resource), whatever it is.
+    pub(crate) fn answered_name(&self, resp: Option<&Response>) -> Option<String> {
         let field = match self.kind {
             Kind::KvSecret => "path",
             Kind::Resource => "name",
         };
-        let written = resp?.data.as_ref()?.get(field)?.as_str()?;
-        (written == self.name).then(|| self.acl_path())
+        Some(resp?.data.as_ref()?.get(field)?.as_str()?.to_string())
     }
 
     /// The path a normal write of `name` under this mount is authorized on. KV:
@@ -235,5 +241,7 @@ mod tests {
         assert_eq!(res.written_path(Some(&resp("name", "srv1"))).as_deref(), Some("resources/resources/srv1"));
         assert_eq!(res.written_path(Some(&resp("name", "srv1-2"))), None, "no rename");
         assert_eq!(res.written_path(Some(&resp("name", "SRV1"))), None, "the engine answers lower-cased");
+        assert_eq!(res.answered_name(Some(&resp("name", "srv1-2"))).as_deref(), Some("srv1-2"));
+        assert_eq!(kv.answered_name(Some(&resp("name", "team/db"))), None, "KV answers with `path`");
     }
 }

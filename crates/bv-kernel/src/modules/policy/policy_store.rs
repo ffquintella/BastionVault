@@ -3209,6 +3209,24 @@ fn looks_like_kv_path(req_path: &str, ns_path: Option<&str>) -> bool {
 /// neither matches nor sees an unowned target (fail closed).
 const UNRESOLVED_OWNER: &str = "\u{0}unresolved-owner";
 
+/// The 500 for a transfer import whose answer does not name the item the ACL
+/// checked (T502). The engine wrote it and nothing stamped its owner, and
+/// `post_route` has no way to undo an engine's write, so the request fails
+/// loudly, names the item and logs it (key names only, never a value).
+fn unowned_import(target: &transfer_target::ImportTarget, resp: Option<&Response>) -> RvError {
+    let item = target.acl_path();
+    let answered = target.answered_name(resp).map(|n| format!("'{n}'")).unwrap_or_else(|| "no name".to_string());
+    log::error!(
+        target: "security",
+        "transfer import of '{item}' answered with {answered}, not the name the ACL checked: written without an owner record"
+    );
+    let message = format!(
+        "internal error: {item} was written, but the import answered with {answered}, not the name the ACL \
+         checked, so it has no owner record; review it and set its owner"
+    );
+    RvError::ErrResponseStatus(500, message)
+}
+
 /// [`kv_key`] with the T499 switch already read.
 fn kv_key_with(router: &Router, split: bool, req_path: &str, ns_path: Option<&str>) -> Option<String> {
     let item = kv_target::resolve(router, req_path).ok()?;
@@ -4299,11 +4317,7 @@ impl Handler for PolicyStore {
             return Err(RvError::ErrHandlerDefault);
         }
         let Some(written) = target.written_path(resp.as_ref()) else {
-            log::warn!(
-                "transfer import on '{}' answered without the name it wrote; its owner is not recorded",
-                req.path
-            );
-            return Err(RvError::ErrHandlerDefault);
+            return Err(unowned_import(&target, resp.as_ref()));
         };
         let route = std::mem::replace(&mut req.path, written);
         let result = self.post_route_bookkeeping(req, resp).await;

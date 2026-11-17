@@ -34,7 +34,8 @@ membership, from three surfaces:
 
 Not done: the KV secrets page has no action yet (the modal and the command
 are reusable), and the GUI was proven only in jsdom, not in a live window.
-Follow-ups are tracked in `ROADMAP.md` (T496-T505). What the feature cannot
+Follow-ups are tracked in `ROADMAP.md` (T496-T505; T502 and T503 are
+done). What the feature cannot
 carry is under "Known limits".
 
 Closest existing behaviour before this feature, reused as the pattern, not
@@ -178,6 +179,11 @@ imports again.
   policy layer maps `<mount>/v2/transfer/import/<p>` to the path a normal
   write is checked on), so deny rules, owner and share scopes and per-secret
   paths apply. One transfer carries at most 1000 secrets per resource.
+- A namespace the token may not operate in is answered exactly as one that
+  does not exist, and as a mount the caller cannot see (one 400), so the
+  route tells nothing about namespaces the caller may not use (T503).
+- An import whose answer names another item than the one the ACL checked
+  fails with a 500 naming the item, never leaving it silently unowned (T502).
 - No persisted-format change is expected; if one is needed, apply the
   read-old / write-new rule before building.
 
@@ -212,6 +218,10 @@ imports again.
   fails the destination stays deleted (the error says so). It cannot
   pre-check the brokered-resource and agent-access gates, which depend on the
   asset groups the delete prunes.
+- **Namespace existence.** The transfer route answers a namespace the token
+  may not operate in as one that does not exist (T503), but the request
+  pipeline still answers a namespace header naming a missing namespace with
+  a 404 before authentication (T512).
 - **At most 1000 secrets per resource** (400 above that).
 - **Soft-deleted KV versions** are copied as destroyed, with a
   `deleted-version-not-recoverable` warning. A move then deletes the only

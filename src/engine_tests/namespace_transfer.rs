@@ -65,15 +65,21 @@ async fn vault(name: &str) -> (crate::BastionVault, Arc<Core>, String) {
 /// `assigned` lets it operate in root, `src` and `dst` (a namespace
 /// assignment); without it the token works at root only.
 async fn user(core: &Arc<Core>, root: &str, name: &str, policies: &str, assigned: bool) -> (String, String) {
+    let namespaces: &[&str] = if assigned { &["", "src", "dst"] } else { &[] };
+    user_in(core, root, name, policies, namespaces).await
+}
+
+/// [`user`], assigned to exactly `namespaces` (none: root only).
+async fn user_in(core: &Arc<Core>, root: &str, name: &str, policies: &str, namespaces: &[&str]) -> (String, String) {
     let body = json!({ "password": PASSWORD, "token_policies": format!("{policies},default"), "ttl": 0 });
     write(core, root, &format!("auth/userpass/users/{name}"), body).await;
-    if assigned {
+    if !namespaces.is_empty() {
         let ns_store = core
             .module_manager()
             .get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
             .and_then(|m| m.store())
             .expect("namespace store");
-        let namespaces = vec![String::new(), "src".to_string(), "dst".to_string()];
+        let namespaces = namespaces.iter().map(|n| n.to_string()).collect();
         NsAssignmentStore::new(core.as_ref()).unwrap().set(&ns_store, "userpass/", name, namespaces).await.unwrap();
     }
     let mut req = Request::new(format!("auth/userpass/login/{name}"));
@@ -568,10 +574,13 @@ async fn token_not_valid_in_destination_namespace_refuses() {
     let (token, _) = user(&core, &root, "rooted", "root-bound", false).await;
     get(&core, &token, None, "resources/resources/srv0").await.expect("the caller reads the source at root");
 
+    // Answered as a namespace that does not exist (T503).
     let request = body("resource", "resources", ("", "srv0"), ("dst", "srv0"), json!({}));
     for op in ["copy", "move"] {
         let r = transfer(&core, &token, op, request.clone()).await;
-        assert_eq!(status(&r), 403, "{op}: {r:?}");
+        assert_eq!(status(&r), 400, "{op}: {r:?}");
+        let unseen = "namespace 'dst' has no resource mount 'resources/' the caller can see";
+        assert!(message(&r).contains(unseen), "{op}: {}", message(&r));
     }
     assert!(!resource_exists(&core, &root, "dst", "srv0").await, "nothing is written");
     assert!(get(&core, &root, None, "resources/resources/srv0").await.is_some(), "the source is untouched");
@@ -762,8 +771,8 @@ async fn aliased_locations_are_the_same_item_and_refused() {
 }
 
 /// A mount must be a mount of the kind's engine in its own namespace, and may
-/// not carry a namespace prefix; a missing namespace is a 404. Nothing is
-/// read or written.
+/// not carry a namespace prefix; a missing namespace is answered as a mount
+/// the caller cannot see (400, T503). Nothing is read or written.
 #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
 async fn a_mount_must_be_of_the_kind_and_not_carry_a_namespace() {
     let (_bvault, core, root) = vault("ns_transfer_mount_checks").await;
@@ -775,7 +784,7 @@ async fn a_mount_must_be_of_the_kind_and_not_carry_a_namespace() {
     let cases = [
         (body("resource", "secret", ("src", "srv1"), ("dst", "srv1"), json!({})), 400, "kv-v2 mount"),
         (body("kv-secret", "resources", ("src", "team/db"), ("dst", "team/db"), json!({})), 400, "resource mount"),
-        (body("resource", "nope", ("src", "srv1"), ("dst", "srv1"), json!({})), 400, "not a mount"),
+        (body("resource", "nope", ("src", "srv1"), ("dst", "srv1"), json!({})), 400, "has no resource mount 'nope/'"),
         (
             json!({
                 "kind": "kv-secret",
@@ -794,7 +803,11 @@ async fn a_mount_must_be_of_the_kind_and_not_carry_a_namespace() {
             400,
             "starts with namespace 'dst'",
         ),
-        (body("resource", "resources", ("src", "srv1"), ("missing", "srv1"), json!({})), 404, "no such namespace"),
+        (
+            body("resource", "resources", ("src", "srv1"), ("missing", "srv1"), json!({})),
+            400,
+            "namespace 'missing' has no resource mount 'resources/' the caller can see",
+        ),
     ];
     for (req, code, needle) in cases {
         for op in ["copy", "move"] {
@@ -952,4 +965,73 @@ async fn a_mount_named_after_its_own_namespace_is_refused() {
         }
     }
     assert_eq!(snapshot().await, before, "the source is intact");
+}
+
+/// Regression (T503): a caller allowed on the route whose token may not
+/// operate in a namespace gets one answer whether it exists or not, as source
+/// or destination, whether or not its policy names the namespace's paths. A
+/// caller who may use the namespace (root) still learns about a bad mount.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn a_namespace_without_rights_answers_alike_whether_it_exists() {
+    let (_bvault, core, root) = vault("ns_transfer_namespace_existence").await;
+    seed_resource(&core, &root, None, "srv0").await;
+    let names_tenant = r#"
+        path "sys/namespace-transfer/*" { capabilities = ["update"] }
+        path "resources/*" { capabilities = ["create", "read", "update", "delete", "list"] }
+        path "tenant-x/resources/*" { capabilities = ["create", "read", "update", "delete", "list"] }
+    "#;
+    write_policy(&core, &root, "names-tenant", names_tenant).await;
+    // No assignment: the token works at root only, though its policy names
+    // tenant-x's paths.
+    let (bound_away, _) = user_in(&core, &root, "away", "names-tenant", &[]).await;
+    let ask = |token: String, to_ns: bool, ns: &'static str| {
+        let core = core.clone();
+        async move {
+            let request = match to_ns {
+                true => body("resource", "resources", ("", "srv0"), (ns, "srv0"), json!({})),
+                false => body("resource", "resources", (ns, "srv1"), ("", "srv9"), json!({})),
+            };
+            let r = transfer(&core, &token, "copy", request).await;
+            (status(&r), message(&r))
+        }
+    };
+
+    let mut missing = Vec::new();
+    for to_ns in [true, false] {
+        missing.push(ask(bound_away.clone(), to_ns, "tenant-x").await);
+    }
+    write(&core, &root, "sys/namespaces/tenant-x", json!({})).await;
+    seed_resource(&core, &root, Some("tenant-x"), "srv0").await;
+    seed_resource(&core, &root, Some("tenant-x"), "srv1").await;
+    for (to_ns, missing) in [true, false].into_iter().zip(missing) {
+        let existing = ask(bound_away.clone(), to_ns, "tenant-x").await;
+        assert_eq!(existing, missing, "may not operate there, as destination {to_ns}: existing vs missing");
+        assert_eq!(existing.0, 400, "{existing:?}");
+        assert!(existing.1.contains("namespace 'tenant-x' has no resource mount 'resources/'"), "{existing:?}");
+    }
+
+    // No grant there at all, and no right to operate there; tenant-y never
+    // exists. (A token that may operate in a namespace may learn it exists.)
+    let root_only = r#"
+        path "sys/namespace-transfer/*" { capabilities = ["update"] }
+        path "resources/*" { capabilities = ["create", "read", "update", "delete", "list"] }
+    "#;
+    write_policy(&core, &root, "root-only", root_only).await;
+    let (no_grant, _) = user_in(&core, &root, "nogrant", "root-only", &[]).await;
+    for to_ns in [true, false] {
+        let existing = ask(no_grant.clone(), to_ns, "tenant-x").await;
+        let missing = ask(no_grant.clone(), to_ns, "tenant-y").await;
+        assert_eq!(existing.0, missing.0, "no grant, as destination {to_ns}: {existing:?} vs {missing:?}");
+        assert_eq!(existing.1.replace("tenant-x", "N"), missing.1.replace("tenant-y", "N"), "destination {to_ns}");
+    }
+
+    // Root may use tenant-x: it is told the mount runs another engine.
+    let mut wrong_engine = body("resource", "resources", ("", "srv0"), ("tenant-x", "srv0"), json!({}));
+    wrong_engine["destination"]["mount"] = json!("secret");
+    let r = transfer(&core, &root, "copy", wrong_engine).await;
+    assert_eq!(status(&r), 400, "{r:?}");
+    assert!(message(&r).contains("is a kv-v2 mount, not the resource mount"), "{}", message(&r));
+    assert!(get(&core, &root, None, "resources/resources/srv9").await.is_none(), "nothing is written");
+    let kept = get(&core, &root, Some("tenant-x"), "resources/resources/srv0").await.unwrap();
+    assert_eq!(kept["hostname"], json!("h2.example"), "tenant-x's item is untouched");
 }
