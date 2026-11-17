@@ -11,7 +11,8 @@ use serde_json::{json, Map, Value};
 use super::{
     as_caller, call, held, namespace_label, split, status_of, text, warning, IdentityStores, Kind, Place, Plan, Right,
     TransferOp, TransferWarning, CODE_ALL_SHARES_DROPPED, CODE_FILES_NOT_TRANSFERRED, CODE_GROUP_MEMBERSHIP_DROPPED,
-    CODE_GROUP_MEMBERSHIP_UNREADABLE, CODE_SHARES_UNREADABLE, CODE_SHARE_NOT_WRITTEN,
+    CODE_GROUP_MEMBERSHIP_NOT_CARRIED, CODE_GROUP_MEMBERSHIP_UNREADABLE, CODE_SHARES_UNREADABLE,
+    CODE_SHARE_NOT_WRITTEN,
 };
 use crate::{
     bv_error_string,
@@ -20,7 +21,7 @@ use crate::{
     logical::{Operation, Request},
     modules::{
         identity::{SecretShare, SHARE_HISTORY_OP_CTX},
-        resource_group::REDACTED_MEMBER,
+        resource_group::{ResourceGroupStore, REDACTED_MEMBER},
         system::transfer::shares::{self as planner, plan_shares, SharePlan, CODE_CANNOT_GRANT},
     },
 };
@@ -93,6 +94,14 @@ fn relation_key(kind: Kind, place: &Place) -> String {
         Kind::Resource => place.path.clone(),
         Kind::KvSecret => format!("{}{}", place.mount, place.path),
     }
+}
+
+/// Whether the asset-group store would read the item at `place` as another
+/// one: it strips a `data`/`metadata` second segment from a KV path (T507), so
+/// `secret/data/x` is `x` there. Such membership is not carried (T510).
+fn group_store_misreads(kind: Kind, place: &Place) -> bool {
+    let key = relation_key(kind, place);
+    kind == Kind::KvSecret && ResourceGroupStore::canonicalize_secret_path(&key).as_deref() != Some(key.as_str())
 }
 
 /// `identity/sharing/by-target/<kind>/<b64(key)>` for the item at `place`.
@@ -283,6 +292,16 @@ async fn carry_groups(
     dest: &Place,
 ) -> Result<Vec<TransferWarning>, RvError> {
     let src = &plan.source;
+    if let Some(misread) = [src, dest].into_iter().find(|p| group_store_misreads(plan.kind, p)) {
+        let message = format!(
+            "asset-group membership of {} was not carried: the asset-group store reads the KV path {} as the \
+             secret without its `data/` or `metadata/` segment, so it would carry or grant another secret's groups \
+             (T507)",
+            src.display(),
+            misread.display(),
+        );
+        return Ok(vec![warning(CODE_GROUP_MEMBERSHIP_NOT_CARRIED, src.display(), message)]);
+    }
     let Some(groups) = source_groups(core, caller, plan).await? else {
         let message =
             format!("the caller may not read which asset groups list {}, so no membership was carried", src.display());
@@ -491,6 +510,16 @@ mod tests {
         let srv_target = URL_SAFE_NO_PAD.encode("srv1");
         let grant = format!("identity/sharing/by-target/resource/{srv_target}/ops");
         assert_eq!(grant_path(Kind::Resource, &srv, " ops "), grant);
+    }
+
+    #[test]
+    fn the_group_store_misreads_a_kv_name_with_a_data_or_metadata_segment() {
+        for (path, misread) in [("x", false), ("team/x", false), ("data/x", true), ("metadata/x", true)] {
+            assert_eq!(group_store_misreads(Kind::KvSecret, &place("dst", "secret/", path)), misread, "{path}");
+        }
+        assert!(!group_store_misreads(Kind::KvSecret, &place("", "a/b/", "data/x")), "its second segment is b");
+        assert!(group_store_misreads(Kind::KvSecret, &place("", "a/data/", "x")), "a mount named data");
+        assert!(!group_store_misreads(Kind::Resource, &place("", "resources/", "data")), "resources are not KV");
     }
 
     #[test]

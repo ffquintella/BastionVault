@@ -52,6 +52,10 @@ pub const CODE_SHARE_NOT_WRITTEN: &str = "share-not-written";
 pub const CODE_GROUP_MEMBERSHIP_DROPPED: &str = "group-membership-dropped";
 /// The caller may not read the source's asset-group membership.
 pub const CODE_GROUP_MEMBERSHIP_UNREADABLE: &str = "group-membership-unreadable";
+/// A KV secret named `data/...` or `metadata/...` (source or destination):
+/// the asset-group store reads that path as another secret's, so no
+/// membership is carried (T510, subject: the source item).
+pub const CODE_GROUP_MEMBERSHIP_NOT_CARRIED: &str = "group-membership-not-carried";
 /// Files attached to the source resource stay where they are (subject: the
 /// source resource name).
 pub const CODE_FILES_NOT_TRANSFERRED: &str = "files-not-transferred";

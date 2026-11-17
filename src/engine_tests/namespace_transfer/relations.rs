@@ -563,3 +563,41 @@ async fn nothing_to_carry_adds_no_relation_warning() {
     let out = result(transfer(&core, &root, "copy", resource("srv1", "srv1", json!({}))).await);
     assert_eq!(codes(&out), vec!["policies-not-carried".to_string()], "{out}");
 }
+
+/// A KV secret whose name starts with `data/` or `metadata/` is transferred
+/// without asset-group membership, with a warning (T510): the group store
+/// strips that segment, so `data/x` would carry `x`'s groups, and the member
+/// it adds in the destination would be the destination's `x`.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn a_kv_secret_named_data_x_is_transferred_without_group_membership() {
+    let (_bvault, core, root) = vault("ns_transfer_kv_data_x_groups").await;
+    for name in ["x", "data/x", "metadata/y"] {
+        let path = format!("secret/data/{name}");
+        send(&core, &root, Operation::Write, &path, None, json!({ "data": { "v": "kv" } })).await.unwrap();
+    }
+    asset_group(&core, &root, None, "kvg", &[], &["secret/x"]).await;
+    asset_group(&core, &root, Some("dst"), "kvg", &[], &[]).await;
+    let not_carried = "group-membership-not-carried";
+    let dst_secrets = |core: Arc<Core>, root: String| async move {
+        group_list(&core, &root, Some("dst"), "kvg", "secrets").await.unwrap()
+    };
+
+    for (from, to) in [("data/x", "data/x"), ("metadata/y", "metadata/y"), ("x", "data/z")] {
+        let subject = format!("secret/{from}");
+        let dry = body("kv-secret", "secret", ("", from), ("dst", to), json!({ "dry_run": true }));
+        let dry = result(transfer(&core, &root, "copy", dry).await);
+        let w = warning(&dry, not_carried, &subject).unwrap_or_else(|| panic!("dry run {from} -> {to}: {dry}"));
+        assert!(w["message"].as_str().unwrap().contains("data/"), "{w}");
+        assert!(!codes(&dry).contains(&"group-membership-dropped".to_string()), "{dry}");
+
+        let request = body("kv-secret", "secret", ("", from), ("dst", to), json!({}));
+        let out = result(transfer(&core, &root, "copy", request).await);
+        assert!(warning(&out, not_carried, &subject).is_some(), "{from} -> {to}: {out}");
+        assert_eq!(dst_secrets(core.clone(), root.clone()).await, Vec::<String>::new(), "{from} -> {to}: {out}");
+    }
+
+    let request = body("kv-secret", "secret", ("", "x"), ("dst", "x"), json!({}));
+    let out = result(transfer(&core, &root, "copy", request).await);
+    assert!(!codes(&out).contains(&not_carried.to_string()), "{out}");
+    assert_eq!(dst_secrets(core.clone(), root.clone()).await, vec!["secret/x".to_string()], "x carries kvg: {out}");
+}

@@ -239,6 +239,15 @@ cleans up its owner, shares and groups) and imports again.
   (`kv-environment-overrides-normalized`).
 - **Group membership updates are read-modify-write**: a concurrent edit to
   that asset group between the read and the write can be lost.
+- **A KV secret named `data/...` or `metadata/...` loses its asset-group
+  membership** (T510): the asset-group store strips a `data`/`metadata`
+  second segment from a KV path, so it reads `secret/data/x` as the secret
+  `x`; carrying it would give the destination `x`'s groups and make the
+  destination's `x` a member. When the source or the destination name starts
+  with either segment, no membership is read or written and
+  `group-membership-not-carried` (subject: the source item) says so, on a dry
+  run too. Lifted only when the group store keys KV members by their own name
+  (T507).
 - **Tokens bound to a CIDR are refused** before any step (403 naming the
   binding): the steps are internal sub-requests with no client address, so
   the binding could not be checked on them.

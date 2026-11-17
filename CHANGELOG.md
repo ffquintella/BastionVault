@@ -411,6 +411,11 @@ EXAMPLE ENTRY:
 - **Report a KV v2 request that a deny in the other path form refuses as denied in the policy tester, as enforcement does** (T509, S120)
   -- `POST /v2/sys/policies/acl/test` evaluated only the path of each case, so with `path "secret/data/prod/*" { capabilities = ["deny"] }` it reported `secret/prod/x`, `secret/metadata/prod/x` and the other sub-commands as allowed although every real request to them is refused (T504), and a deny on `secret/prod/*` likewise for `secret/data/prod/x`. A case on a kv-v2 secret now goes through the same check enforcement runs, so such a row reads `allowed: false` and `denied_by_deny: true`, names the other form in the new `denied_by_alias` field, and `draft_only_allowed` follows suit; a narrower allow that outranks the deny is still reported allowed. Cases on kv (v1) mounts and other engines are unchanged. Group-gated and scoped denies on the other form are still not resolved by this stateless test.
 
+#### Namespace transfer: a KV secret named `data/...` keeps no stranger's groups
+
+- **Transfer a KV secret named `data/...` or `metadata/...` without asset-group membership, and say so, instead of carrying another secret's groups** (T510, S120)
+  -- The transfer read the source's groups through `resource-group/by-secret`, and the asset-group store strips a `data`/`metadata` second segment from a KV path, so a secret named `data/x` was carried with `x`'s groups, and the member it added in the destination was the destination's `x`, which then passed that group's group-gated rules. When the source or the destination name starts with `data/` or `metadata/`, no membership is read or written, and a `group-membership-not-carried` warning (subject: the source item) says why, on a dry run too. Other secrets carry their groups as before. Add such a secret to its groups by hand only once the asset-group store keys KV members by their own name (T507).
+
 #### Namespace transfer: an overwrite the destination would refuse deletes nothing
 
 - **Refuse a resource overwrite before it deletes the destination when the destination would refuse the import itself** (T498, S120)
