@@ -212,7 +212,7 @@ impl KvV2Backend {
                     ],
                     help: "Import a secret with every version (numbers, timestamps, delete and destroy state, \
                            environments) under a path. Body: versions, current, metadata, on_conflict \
-                           (refuse|rename|overwrite). Ownership and shares are not written."
+                           (refuse|rename). Ownership, shares and asset groups are not written."
                 }
             ],
             secrets: [{
@@ -399,7 +399,8 @@ pub struct KvSecretBundle {
     pub current: u64,
     #[serde(default)]
     pub metadata: KvSecretSettings,
-    /// `refuse` (default, also when empty) | `rename` | `overwrite`.
+    /// `refuse` (default, also when empty) | `rename`. There is no overwrite:
+    /// the caller deletes the destination first (`DELETE metadata/<path>`).
     #[serde(default)]
     pub on_conflict: String,
 }
@@ -423,17 +424,20 @@ const IMPORT_MAX_VERSION: u64 = (1 << 53) - 1;
 enum ImportConflict {
     Refuse,
     Rename,
-    Overwrite,
 }
 
 impl ImportConflict {
-    /// An unknown mode is refused, never read as the default.
+    /// An unknown mode is refused, never read as the default. `overwrite` is
+    /// refused too: through this route it would skip the delete ACL and the
+    /// owner, share and asset-group cleanup a real delete runs.
     fn parse(raw: &str) -> Result<Self, RvError> {
         match raw.trim() {
             "" | "refuse" => Ok(Self::Refuse),
             "rename" => Ok(Self::Rename),
-            "overwrite" => Ok(Self::Overwrite),
-            other => Err(bad_import(format!("on_conflict must be refuse, rename or overwrite, not '{other}'"))),
+            "overwrite" => Err(bad_import(
+                "on_conflict must be refuse or rename; to overwrite, DELETE metadata/<path> first, then import",
+            )),
+            other => Err(bad_import(format!("on_conflict must be refuse or rename, not '{other}'"))),
         }
     }
 }
@@ -451,14 +455,14 @@ fn is_rfc3339(value: &str) -> bool {
 }
 
 /// A destination path that stays one secret under `metadata/` and
-/// `versions/`: no empty, `.` or `..` segment, no `..` anywhere, no control
-/// characters.
+/// `versions/`: no empty, `.` or `..` segment and no control characters.
+/// Dots inside a segment (`a..b`) are an ordinary name.
 fn validate_kv_path(path: &str) -> Result<(), RvError> {
     if path.is_empty() {
         return Err(bad_import("path is required"));
     }
-    if path.contains("..") || path.split('/').any(|s| s.is_empty() || s == ".") {
-        return Err(bad_import("path must not contain '..', '.' or empty segments, or start or end with '/'"));
+    if path.split('/').any(|s| s.is_empty() || s == "." || s == "..") {
+        return Err(bad_import("path must not contain empty, '.' or '..' segments, or start or end with '/'"));
     }
     if path.chars().any(char::is_control) {
         return Err(bad_import("path must not contain control characters"));
@@ -551,11 +555,9 @@ fn validate_kv_bundle(bundle: &KvSecretBundle) -> Result<(), RvError> {
 
 /// A validated import, ready to write.
 struct KvImportPlan {
-    /// The destination: the requested path, or under `rename` the first
-    /// free `<path>-<n>`.
+    /// The destination, free of any secret: the requested path, or under
+    /// `rename` the first free `<path>-<n>`.
     path: String,
-    /// `overwrite` over something stored at `path`: purge it first.
-    replace: bool,
     bundle: KvSecretBundle,
 }
 
@@ -595,51 +597,29 @@ async fn plan_kv_import(view: &dyn Storage, path: &str, bundle: KvSecretBundle) 
     let path = path.to_string();
     let existing = view.get(&format!("metadata/{path}")).await?.is_some();
     let leftovers = has_version_data_in(view, &path).await?;
-    let (path, replace) = match mode {
-        _ if !existing && !leftovers => (path, false),
+    let path = match mode {
+        _ if !existing && !leftovers => path,
         ImportConflict::Refuse if existing => {
             return Err(import_conflict(format!("a secret already exists at '{path}'")));
         }
         ImportConflict::Refuse => {
             return Err(import_conflict(format!(
-                "version data with no metadata record is stored at '{path}' (an interrupted operation?); \
-                 import with on_conflict=overwrite to replace it"
+                "version data with no metadata record is stored at '{path}' (an interrupted import?); \
+                 import with on_conflict=rename to use another path"
             )));
         }
-        ImportConflict::Overwrite => (path, true),
-        ImportConflict::Rename => (free_kv_path_in(view, &path).await?, false),
+        ImportConflict::Rename => free_kv_path_in(view, &path).await?,
     };
-    Ok(KvImportPlan { path, replace, bundle })
+    Ok(KvImportPlan { path, bundle })
 }
 
-/// Delete what `handle_metadata_delete` deletes at `path`, the record first
-/// so the secret leaves reads and listings before its data does, plus any
-/// payload no record lists (an interrupted import's). Nested secrets stay.
-#[maybe_async::maybe_async]
-async fn purge_kv_secret_in(view: &dyn Storage, path: &str) -> Result<(), RvError> {
-    let meta_key = format!("metadata/{path}");
-    if view.get(&meta_key).await?.is_some() {
-        view.delete(&meta_key).await?;
-    }
-    let prefix = format!("versions/{path}/");
-    for k in view.list(&prefix).await? {
-        if !k.ends_with('/') {
-            view.delete(&format!("{prefix}{k}")).await?;
-        }
-    }
-    Ok(())
-}
-
-/// Write a planned import: the replaced secret out (`overwrite`), then every
-/// version payload, then `metadata/` last. An import that fails partway thus
-/// leaves no record, and a retry sees the payloads as a collision.
+/// Write a planned import: every version payload, then `metadata/` last. An
+/// import that fails partway thus leaves no record, and a retry sees the
+/// payloads as a collision.
 #[maybe_async::maybe_async]
 async fn apply_kv_import(view: &dyn Storage, plan: KvImportPlan) -> Result<KvImportSummary, RvError> {
-    let KvImportPlan { path, replace, bundle } = plan;
+    let KvImportPlan { path, bundle } = plan;
     let KvSecretBundle { mut versions, current, metadata: settings, .. } = bundle;
-    if replace {
-        purge_kv_secret_in(view, &path).await?;
-    }
 
     versions.sort_by_key(|v| v.version);
     // `validate_kv_bundle` refused an empty list.
@@ -1229,10 +1209,12 @@ impl KvV2BackendInner {
     }
 
     /// `<mount>/v2/transfer/import/<path>`: destination side of a cross-namespace
-    /// copy or move; writes a [`KvSecretBundle`], `metadata/` last. Security:
-    /// ONE ACL check (write on this path) covers every version, and overwrite
-    /// does not consult delete, so the transfer orchestrator probes those
-    /// capabilities separately. Ownership and shares are not touched.
+    /// copy or move; writes a [`KvSecretBundle`], `metadata/` last. Every version
+    /// is written under this route's single ACL check. `on_conflict` is `refuse`
+    /// or `rename` only; an overwrite is the caller's `DELETE metadata/<path>`
+    /// first. Ownership, shares and asset groups are not touched (the
+    /// orchestrator sets them). `cas_required` and `max_versions` are ignored
+    /// by design: no CAS check, no pruning; the bundle's values are stored.
     pub async fn handle_transfer_import(
         &self,
         _backend: &dyn Backend,
@@ -1562,34 +1544,30 @@ mod transfer_import_tests {
     }
 
     #[test]
-    fn import_overwrite_replaces_all_versions() {
+    fn import_refuses_overwrite() {
+        // Through this route an overwrite would skip the delete ACL and the
+        // owner, share and asset-group cleanup of a real delete: the caller
+        // deletes the destination first, then imports with `refuse`.
+        let body = || with(bundle(), "/on_conflict", json!("overwrite"));
+        let refusal = |r: Result<KvImportSummary, RvError>| match r {
+            Err(RvError::ErrResponseStatus(400, m)) => m,
+            other => panic!("expected a 400, got {other:?}"),
+        };
+
         let mem = Arc::new(MemStorage::default());
         seed_secret(&mem, "team/db", 6);
-        // A secret nested below the path is a different secret.
-        seed_secret(&mem, "team/db/child", 1);
-        let child = (mem.json("metadata/team/db/child"), mem.json("versions/team/db/child/1"));
+        let before = mem.snapshot();
+        let message = refusal(import(&mem, "team/db", body()));
+        assert!(message.contains("refuse or rename"), "{message}");
+        assert_eq!(mem.snapshot(), before, "a refused import writes nothing");
 
-        let summary = import(&mem, "team/db", with(bundle(), "/on_conflict", json!("overwrite"))).unwrap();
-        assert_eq!(summary, KvImportSummary { path: "team/db".into(), versions: 3 });
-        let meta = metadata(&mem, "team/db");
-        assert_eq!(meta.current_version, 3);
-        let mut kept: Vec<&str> = meta.versions.keys().map(String::as_str).collect();
-        kept.sort();
-        assert_eq!(kept, ["1", "2", "3"]);
-        for gone in [1, 4, 5, 6] {
-            // v1 is destroyed in the bundle: the replaced secret's v1 must not survive under it.
-            assert!(!mem.has(&format!("versions/team/db/{gone}")), "version {gone} survived the overwrite");
-        }
-        assert_eq!(payload(&mem, "team/db", 2).data["password"], "v2-S3CRET");
-        assert_eq!(mem.last_put().as_deref(), Some("metadata/team/db"));
-        assert_eq!((mem.json("metadata/team/db/child"), mem.json("versions/team/db/child/1")), child);
-
-        // Leftover version data with no record is replaced as well.
+        // Refused as a mode, not only on a collision: an empty path too.
         let mem = Arc::new(MemStorage::default());
+        refusal(import(&mem, "team/db", body()));
+        assert!(mem.snapshot().is_empty());
         mem.seed("versions/team/db/9", json!({"data": {"password": "left-behind"}, "version": 9}));
-        import(&mem, "team/db", with(bundle(), "/on_conflict", json!("overwrite"))).unwrap();
-        assert!(!mem.has("versions/team/db/9"));
-        assert_eq!(metadata(&mem, "team/db").current_version, 3);
+        refusal(import(&mem, "team/db", body()));
+        assert!(mem.has("versions/team/db/9") && !mem.has("metadata/team/db"));
     }
 
     #[test]
@@ -1630,11 +1608,23 @@ mod transfer_import_tests {
     fn import_rejects_unsafe_paths() {
         let mem = Arc::new(MemStorage::default());
         for path in
-            ["", "/a", "a/", "a//b", "..", "../x", "a/../b", "a..b", ".", "./a", "a/./b", "a/.", "a\u{7}b", "a\nb"]
+            ["", "/a", "a/", "a//b", "..", "../x", "a/../b", "a/..", ".", "./a", "a/./b", "a/.", "a\u{7}b", "a\nb"]
         {
             assert_eq!(status(import(&mem, path, bundle())), 400, "path {path:?}");
         }
         assert!(mem.snapshot().is_empty(), "a refused import writes nothing");
+    }
+
+    #[test]
+    fn import_accepts_dots_inside_a_segment() {
+        // Only a whole `.` or `..` segment climbs; `a..b` is an ordinary name.
+        let mem = Arc::new(MemStorage::default());
+        for path in ["a..b", "team/v1..v2", ".env"] {
+            assert_eq!(import(&mem, path, bundle()).unwrap().path, path);
+            assert_eq!(metadata(&mem, path).current_version, 3, "{path}");
+        }
+        assert_eq!(status(import(&mem, "a/../b", bundle())), 400);
+        assert!(!mem.has("metadata/b") && !mem.has("metadata/a/../b"));
     }
 
     #[test]
