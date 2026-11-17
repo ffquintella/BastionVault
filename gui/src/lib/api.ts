@@ -1550,6 +1550,39 @@ export const oidcLoginComplete = (args: {
 export const oidcLoginCancel = (sessionId: string) =>
   invoke<void>("oidc_login_cancel", { sessionId });
 
+// ── SSO test login ────────────────────────────────────────────────
+//
+// Same start call as a real login (`oidcLoginStart`), but completed with
+// `oidcTestComplete`: the vault runs its real callback, the token it mints
+// is revoked at once and the GUI is NOT signed in. Failures arrive inside
+// the report (`ok: false` plus the failing step), not as a rejection.
+
+export type SsoTestStatus = "ok" | "warn" | "fail" | "info";
+
+export interface SsoTestStep {
+  name: string;
+  status: SsoTestStatus;
+  detail: string;
+}
+
+export interface SsoTestReport {
+  ok: boolean;
+  steps: SsoTestStep[];
+  display_name: string;
+  role: string;
+  subject: string;
+  groups: string[];
+  policies: string[];
+  ttl_secs: number | null;
+  metadata: Record<string, string>;
+  token_revoked: boolean;
+}
+
+export const oidcTestComplete = (args: {
+  sessionId: string;
+  timeoutSecs?: number;
+}) => invoke<SsoTestReport>("oidc_test_complete", args);
+
 // ── SSO discovery + admin toggle ───────────────────────────────────
 //
 // The login page calls `listSsoProviders` unauthenticated — the
@@ -1592,6 +1625,8 @@ export interface OidcAdminConfig {
   client_secret_set: boolean;
   scopes: string[];
   allowed_redirect_uris: string[];
+  /** Extra CA certificate(s) (PEM) trusted for this IdP (T493). */
+  discovery_ca_pem: string;
 }
 
 export interface OidcAdminRole {
@@ -1612,6 +1647,8 @@ export interface OidcAdminInputConfig {
   client_secret: string;
   scopes: string[];
   allowed_redirect_uris: string[];
+  /** Sent on every save; an empty string clears the stored value. */
+  discovery_ca_pem: string;
 }
 
 // ── SAML shapes ─────────────────────────────────────────────────────

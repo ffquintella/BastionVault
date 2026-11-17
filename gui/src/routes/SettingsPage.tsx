@@ -25,6 +25,7 @@ import { RustionPolicyPanel } from "../components/RustionPolicyPanel";
 import { DosProtectionPanel } from "../components/DosProtectionPanel";
 import { SessionLayoutCard } from "../components/SessionLayoutCard";
 import { OidcCallbackCard } from "../components/OidcCallbackCard";
+import { SsoTestModal } from "../components/SsoTestModal";
 import { SessionKeyboardCard } from "../components/SessionKeyboardCard";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
@@ -96,6 +97,7 @@ export function SettingsPage() {
   const [ssoSaving, setSsoSaving] = useState(false);
   const [ssoProviders, setSsoProviders] = useState<SsoAdminProvider[]>([]);
   const [editingProvider, setEditingProvider] = useState<SsoAdminProvider | null>(null);
+  const [testingProvider, setTestingProvider] = useState<SsoAdminProvider | null>(null);
   const [showAddProvider, setShowAddProvider] = useState(false);
   const [deletingMount, setDeletingMount] = useState<string | null>(null);
 
@@ -724,6 +726,21 @@ export function SettingsPage() {
                       </div>
                     </div>
                     <div className="flex gap-1 shrink-0 ml-3">
+                      {p.kind === "oidc" && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          disabled={p.role === null}
+                          title={
+                            p.role === null
+                              ? "Add a role first"
+                              : "Sign in through this provider to check it works"
+                          }
+                          onClick={() => setTestingProvider(p)}
+                        >
+                          Test
+                        </Button>
+                      )}
                       <Button
                         size="sm"
                         variant="ghost"
@@ -759,6 +776,14 @@ export function SettingsPage() {
           </div>
         </Card>
         </>)}
+
+        {testingProvider && (
+          <SsoTestModal
+            mount={testingProvider.mount}
+            displayName={testingProvider.display_name}
+            onClose={() => setTestingProvider(null)}
+          />
+        )}
 
         {(editingProvider || showAddProvider) && (
           <SsoProviderModal
@@ -1169,6 +1194,9 @@ function SsoProviderModal({
   const [discoveryUrl, setDiscoveryUrl] = useState(oidcCfg?.discovery_url ?? "");
   const [clientId, setClientId] = useState(oidcCfg?.client_id ?? "");
   const [clientSecret, setClientSecret] = useState("");
+  const [discoveryCaPem, setDiscoveryCaPem] = useState(
+    oidcCfg?.discovery_ca_pem ?? "",
+  );
   const [scopes, setScopes] = useState(
     (oidcCfg?.scopes ?? COMMON_OIDC_SCOPES.slice(0, 3)).join(", "),
   );
@@ -1293,6 +1321,7 @@ function SsoProviderModal({
               client_secret: clientSecret,
               scopes: splitList(scopes),
               allowed_redirect_uris: splitList(allowedRedirectUris),
+              discovery_ca_pem: discoveryCaPem.trim(),
             },
             role: {
               kind: "oidc",
@@ -1459,6 +1488,24 @@ function SsoProviderModal({
             placeholder="openid, profile, email"
             hint={`Comma-separated. Common: ${COMMON_OIDC_SCOPES.join(", ")}.`}
           />
+          <label className="block text-sm text-[var(--color-text-muted)]">
+            <span className="block mb-1">Extra CA Certificates (PEM)</span>
+            <textarea
+              value={discoveryCaPem}
+              onChange={(e) => setDiscoveryCaPem(e.target.value)}
+              placeholder={"-----BEGIN CERTIFICATE-----\n…\n-----END CERTIFICATE-----"}
+              rows={4}
+              spellCheck={false}
+              className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg px-3 py-2 text-xs font-mono focus:outline-none focus:border-[var(--color-primary)]"
+            />
+            <span className="text-xs">
+              Optional. Trusted <em>in addition to</em> the built-in roots when the
+              vault talks to this IdP (discovery, signing keys, token exchange).
+              Use it when the IdP does not send its intermediate certificate or
+              uses a private CA. Certificates only, at most 8; no private keys.
+              Empty removes them.
+            </span>
+          </label>
         </section>
         )}
 

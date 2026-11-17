@@ -58,6 +58,11 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### OIDC auth: test a provider and set its CA trust from the GUI
+
+- **Test an OIDC provider's sign-in from Settings → SSO providers without signing out** (T495, S29) -- the new **Test** button opens the provider's real login in your browser and then lists each step (discovery, redirect back, token exchange and role checks, subject, user claim, policies, groups) with the fields the provider sent and a verdict on whether the login would work. The token the test creates is revoked immediately and you stay signed in as before. OIDC only; SAML has no test yet.
+- **Set the extra CA certificates for an OIDC provider in the Add/Edit SSO Provider dialog** (T495, S29) -- the dialog now shows `oidc_discovery_ca_pem` as "Extra CA Certificates (PEM)"; leaving it unchanged keeps the stored value and emptying it removes the certificates.
+
 #### OIDC auth: trust the CA an identity provider does not send
 
 - **Trust extra CA certificates for an OIDC provider's discovery, JWKS and token calls with `oidc_discovery_ca_pem`** (T493, S29)

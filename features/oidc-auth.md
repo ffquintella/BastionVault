@@ -8,7 +8,7 @@ Add an OIDC authentication backend that allows users to authenticate with Bastio
 
 **Done (core feature).** All four phases shipped: `src/modules/credential/oidc/` module registered as `oidc` auth kind, provider config + role CRUD, `auth_url` with PKCE + state storage, `callback` with ID-token verification + claim validation + metadata mapping, token renewal. 17 unit tests + 1 end-to-end core-integration test green; live-IdP test `#[ignore]`d behind `BVAULT_TEST_OIDC_DISCOVERY` + `BVAULT_TEST_OIDC_CLIENT_ID` env vars. GUI wire-up (a login option + post-callback token reception) is a separate follow-up deliverable.
 
-**Phase 5 (IdP trust anchors, T493) — done with caveats.** `oidc_discovery_ca_pem` on `config` adds operator-supplied CA certificates to the built-in roots of the client used for discovery, JWKS and the token exchange (now in `crates/bv-auth-oidc/src/http_client.rs`). Validated on write, stored normalised, returned on read; proven by a loopback TLS handshake that fails without the missing intermediate and passes with it, plus a whole-vault write/read/clear test. Not yet run against the production IdP that prompted it. The GUI's Add/Edit SSO Provider dialog does not expose the field yet (it does not send it either, so a GUI edit keeps a value set through the API or CLI).
+**Phase 5 (IdP trust anchors, T493) — done with caveats.** `oidc_discovery_ca_pem` on `config` adds operator-supplied CA certificates to the built-in roots of the client used for discovery, JWKS and the token exchange (now in `crates/bv-auth-oidc/src/http_client.rs`). Validated on write, stored normalised, returned on read; proven by a loopback TLS handshake that fails without the missing intermediate and passes with it, plus a whole-vault write/read/clear test. Not yet run against the production IdP that prompted it. The GUI dialog exposes the field since Phase 6 (T495).
 
 ## Motivation
 
@@ -191,7 +191,26 @@ The Add/Edit SSO Provider dialog surfaces the callback URL(s) to register with t
   real loopback TLS handshakes (missing intermediate refused without the field
   and accepted with it; hostname mismatch still refused), whole-vault
   write/read/keep/clear.
-- Not done: the GUI SSO dialog field; a run against the production IdP.
+- Not done: a run against the production IdP.
+
+### Phase 6: GUI CA field and SSO test sign-in (T495) — done
+- Add/Edit SSO Provider dialog: "Extra CA Certificates (PEM)" textarea, loaded
+  from the stored value and always sent on save (unchanged keeps, emptied clears;
+  the backend still validates and refuses the whole write on a bad PEM).
+- Settings → SSO providers → **Test** (OIDC providers that have a role): reuses
+  `oidc_login_start`, opens the IdP in the system browser, then
+  `oidc_test_complete` waits for the redirect, lets the vault run its real
+  `callback`, and returns a step report plus the received fields. The minted
+  token is revoked with `auth/token/revoke-self` and is never stored in
+  `AppState`; a revoke failure is reported as a warning.
+- Uses the provider's saved configuration, not unsaved dialog edits. The report
+  shows what the vault put on the token (subject, user claim, role, groups,
+  mapped claims, policies, TTL), not the raw ID-token claims.
+- Tests: report extraction and hidden bookkeeping keys, groups and TTL shapes,
+  failing and warning checks (Rust); start failure, browser failure, failing
+  vault step and success path (vitest).
+- Not done: SAML test; cancelling a waiting test frees the callback port only
+  when the 2-minute wait ends; a run against a real IdP.
 
 ## Key Reference Files
 

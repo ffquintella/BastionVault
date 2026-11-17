@@ -68,6 +68,9 @@ pub struct OidcAdminConfig {
     pub client_secret_set: bool,
     pub scopes: Vec<String>,
     pub allowed_redirect_uris: Vec<String>,
+    /// Extra CA certificate(s), PEM, the vault trusts for this IdP (T493).
+    /// Public material, so it is returned as stored.
+    pub discovery_ca_pem: String,
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
@@ -148,6 +151,11 @@ pub struct OidcAdminInputConfig {
     pub client_secret: String,
     pub scopes: Vec<String>,
     pub allowed_redirect_uris: Vec<String>,
+    /// Always sent by the editor: the stored value is loaded into the field,
+    /// so writing it back keeps it and an emptied field clears it. `None`
+    /// (an older caller) leaves the stored value alone.
+    #[serde(default)]
+    pub discovery_ca_pem: Option<String>,
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -466,6 +474,7 @@ async fn load_oidc_detail(
         client_secret_set: cfg_data.get("oidc_client_secret_set").and_then(|v| v.as_bool()).unwrap_or(false),
         scopes: string_list(&cfg_data, "oidc_scopes"),
         allowed_redirect_uris: string_list(&cfg_data, "allowed_redirect_uris"),
+        discovery_ca_pem: str_field(&cfg_data, "oidc_discovery_ca_pem"),
     };
     let default_role = str_field(&cfg_data, "default_role");
     let role = if !default_role.is_empty() {
@@ -625,6 +634,11 @@ async fn write_provider_config(
                     "oidc_scopes".into(),
                     Value::Array(cfg.scopes.iter().cloned().map(Value::String).collect()),
                 );
+            }
+            // The backend validates the PEM (certificates only, size caps)
+            // and refuses the whole write on a bad value.
+            if let Some(pem) = &cfg.discovery_ca_pem {
+                body.insert("oidc_discovery_ca_pem".into(), Value::String(pem.clone()));
             }
             sys_write(state, &format!("auth/{}/config", input.mount), body).await?;
         }

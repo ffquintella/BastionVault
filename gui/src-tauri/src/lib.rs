@@ -242,6 +242,7 @@ pub fn run() {
             commands::oidc::oidc_login_start,
             commands::oidc::oidc_login_complete,
             commands::oidc::oidc_login_cancel,
+            commands::oidc::oidc_test_complete,
             // Saved vault profiles (multi-vault chooser)
             commands::vaults::list_vault_profiles,
             commands::vaults::add_vault_profile,

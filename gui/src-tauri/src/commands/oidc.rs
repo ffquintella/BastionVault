@@ -148,6 +148,57 @@ pub async fn oidc_login_start(
     Ok(OidcLoginStartResult { session_id, auth_url })
 }
 
+/// Take the pending session out of the map and wait (up to `timeout`) for
+/// the IdP to redirect back to the loopback listener. Returns the mount the
+/// session was started for and the `code` / `state` the IdP sent.
+///
+/// The session is removed before blocking: holding the map lock across the
+/// accept loop would deadlock every other Tauri command.
+async fn wait_for_idp_redirect(
+    state: &State<'_, AppState>,
+    session_id: &str,
+    timeout: Duration,
+) -> Result<(String, OidcCallback), String> {
+    let OidcLoginSession { listener, redirect_uri: _, mount } = state
+        .oidc_sessions
+        .lock()
+        .map_err(|e| format!("oidc session map poisoned: {e}"))?
+        .remove(session_id)
+        .ok_or_else(|| "oidc: no such session (it may have timed out or been cancelled)".to_string())?;
+
+    // Wait for the callback on a worker so the tokio runtime isn't
+    // parked on the accept loop.
+    let params = async_runtime::spawn_blocking(move || -> Result<OidcCallback, String> {
+        wait_for_callback(listener, timeout).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("oidc worker: {e}"))??;
+    Ok((mount, params))
+}
+
+/// POST `{code, state}` to the vault's `callback` and return the `auth`
+/// object it answers with.
+async fn vault_callback(
+    state: &State<'_, AppState>,
+    mount: &str,
+    params: &OidcCallback,
+) -> Result<Map<String, Value>, String> {
+    let mut body = Map::new();
+    body.insert("state".into(), Value::String(params.state.clone()));
+    body.insert("code".into(), Value::String(params.code.clone()));
+    let path = format!("auth/{mount}/callback");
+    let resp = dispatch_vault_write(state, &path, body).await.map_err(|e| format!("oidc: {path}: {e}"))?;
+
+    // The vault's `callback` handler returns an `Auth` embedded in
+    // the response envelope. In the logical layer that's
+    // `{auth: {client_token, policies, ...}}`. Over HTTP it's
+    // `{auth: {...}}` with `data` possibly null. Accept either.
+    resp.get("auth")
+        .and_then(|v| v.as_object())
+        .cloned()
+        .ok_or_else(|| "oidc: vault response missing `auth` — callback may have failed".to_string())
+}
+
 /// Block (up to `timeout_secs`) waiting for the IdP to redirect
 /// back to our loopback, then POST `{code, state}` to the vault's
 /// `callback`. On success, the vault returns an `Auth` with a
@@ -160,41 +211,8 @@ pub async fn oidc_login_complete(
     timeout_secs: Option<u64>,
 ) -> Result<LoginResponse, String> {
     let timeout = Duration::from_secs(timeout_secs.unwrap_or(300));
-
-    // Take the session out of the map — we're about to block on it.
-    // Holding the map lock across the accept loop would deadlock
-    // every other Tauri command.
-    let OidcLoginSession { listener, redirect_uri: _, mount } = state
-        .oidc_sessions
-        .lock()
-        .map_err(|e| format!("oidc session map poisoned: {e}"))?
-        .remove(&session_id)
-        .ok_or_else(|| "oidc: no such session (it may have timed out or been cancelled)".to_string())?;
-
-    // Wait for the callback on a worker so the tokio runtime isn't
-    // parked on the accept loop.
-    let params = async_runtime::spawn_blocking(move || -> Result<OidcCallback, String> {
-        wait_for_callback(listener, timeout).map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| format!("oidc worker: {e}"))??;
-
-    // Call the vault's `callback` with the returned code + state.
-    let mut body = Map::new();
-    body.insert("state".into(), Value::String(params.state.clone()));
-    body.insert("code".into(), Value::String(params.code.clone()));
-    let path = format!("auth/{mount}/callback");
-    let resp = dispatch_vault_write(&state, &path, body).await.map_err(|e| format!("oidc: {path}: {e}"))?;
-
-    // The vault's `callback` handler returns an `Auth` embedded in
-    // the response envelope. In the logical layer that's
-    // `{auth: {client_token, policies, ...}}`. Over HTTP it's
-    // `{auth: {...}}` with `data` possibly null. Accept either.
-    let auth_obj = resp
-        .get("auth")
-        .and_then(|v| v.as_object())
-        .cloned()
-        .ok_or_else(|| "oidc: vault response missing `auth` — callback may have failed".to_string())?;
+    let (mount, params) = wait_for_idp_redirect(&state, &session_id, timeout).await?;
+    let auth_obj = vault_callback(&state, &mount, &params).await?;
     let client_token = auth_obj
         .get("client_token")
         .and_then(|v| v.as_str())
@@ -210,6 +228,210 @@ pub async fn oidc_login_complete(
     *state.token.lock().await = Some(client_token.clone());
 
     Ok(LoginResponse { token: client_token, policies })
+}
+
+// ── SSO test login (Settings → SSO providers → Test) ───────────────
+
+/// One line of the test report. `status` is `ok`, `warn`, `fail` or `info`.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct SsoTestStep {
+    pub name: String,
+    pub status: &'static str,
+    pub detail: String,
+}
+
+/// What a test sign-in received from the provider and whether it would work.
+/// No secret is carried: the vault token the test minted is revoked before
+/// this is returned and is never put in `AppState` or in the report.
+#[derive(Debug, Serialize, Default)]
+pub struct SsoTestReport {
+    /// `true` only when the IdP redirected back and the vault accepted the
+    /// login (ID token verified, role bindings satisfied).
+    pub ok: bool,
+    pub steps: Vec<SsoTestStep>,
+    pub display_name: String,
+    pub role: String,
+    pub subject: String,
+    pub groups: Vec<String>,
+    pub policies: Vec<String>,
+    pub ttl_secs: Option<u64>,
+    /// Token metadata the role projected from the ID token (claim mappings,
+    /// groups), without the backend-owned bookkeeping keys.
+    pub metadata: std::collections::BTreeMap<String, String>,
+    pub token_revoked: bool,
+}
+
+/// Backend-owned token metadata that says nothing about the IdP.
+const HIDDEN_METADATA: &[&str] =
+    &["mount_path", "namespace_path", "namespace_id", "child_visible", "auth_method", "role", "subject", "username"];
+
+fn step(name: &str, status: &'static str, detail: impl Into<String>) -> SsoTestStep {
+    SsoTestStep { name: name.to_string(), status, detail: detail.into() }
+}
+
+fn auth_ttl_secs(auth: &Map<String, Value>) -> Option<u64> {
+    // HTTP shape: `lease_duration` (seconds). Embedded shape: serde `Duration`.
+    if let Some(n) = auth.get("lease_duration").and_then(Value::as_u64) {
+        return Some(n);
+    }
+    match auth.get("lease")? {
+        Value::Number(n) => n.as_u64(),
+        Value::Object(o) => o.get("secs").and_then(Value::as_u64),
+        _ => None,
+    }
+}
+
+/// Turn the `auth` object a successful login produced into the report body
+/// (everything except revocation, which the caller adds).
+fn report_from_auth(auth: &Map<String, Value>) -> SsoTestReport {
+    let meta: std::collections::BTreeMap<String, String> = auth
+        .get("metadata")
+        .and_then(Value::as_object)
+        .map(|m| m.iter().filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string()))).collect())
+        .unwrap_or_default();
+    let get = |k: &str| meta.get(k).cloned().unwrap_or_default();
+    let policies: Vec<String> = auth
+        .get("policies")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(|p| p.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    // `groups` is stored as one string by the backend: a JSON array when the
+    // claim was a list, plain text otherwise.
+    let groups: Vec<String> = match meta.get("groups") {
+        Some(raw) => serde_json::from_str::<Vec<String>>(raw)
+            .unwrap_or_else(|_| raw.split(',').map(|g| g.trim().to_string()).filter(|g| !g.is_empty()).collect()),
+        None => Vec::new(),
+    };
+    let display_name = auth.get("display_name").and_then(Value::as_str).unwrap_or_default().to_string();
+    let metadata = meta
+        .iter()
+        .filter(|(k, _)| !HIDDEN_METADATA.contains(&k.as_str()))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
+    SsoTestReport {
+        ok: true,
+        display_name,
+        role: get("role"),
+        subject: get("subject"),
+        groups,
+        policies,
+        ttl_secs: auth_ttl_secs(auth),
+        metadata,
+        ..Default::default()
+    }
+}
+
+/// The checks that follow a vault-accepted login.
+fn post_login_steps(report: &SsoTestReport) -> Vec<SsoTestStep> {
+    let mut steps = vec![step(
+        "Provider verified and role accepted the login",
+        "ok",
+        format!("Role `{}` matched the ID token (audience and bound claims).", report.role),
+    )];
+    if report.subject.is_empty() {
+        steps.push(step("Subject (`sub`) received", "warn", "The ID token carried no subject."));
+    } else {
+        steps.push(step("Subject (`sub`) received", "ok", report.subject.clone()));
+    }
+    if report.display_name.is_empty() {
+        steps.push(step(
+            "User claim resolved",
+            "warn",
+            "The role's `user_claim` produced no name; audit entries will not identify this user.",
+        ));
+    } else {
+        steps.push(step("User claim resolved", "ok", report.display_name.clone()));
+    }
+    if report.policies.is_empty() {
+        steps.push(step("Vault policies granted", "fail", "The role grants no policy: the user could do nothing."));
+    } else {
+        steps.push(step("Vault policies granted", "ok", report.policies.join(", ")));
+    }
+    if report.groups.is_empty() {
+        steps.push(step(
+            "Groups received",
+            "info",
+            "No groups in the token. Fine unless the role's `groups_claim` is expected to carry some.",
+        ));
+    } else {
+        steps.push(step("Groups received", "ok", report.groups.join(", ")));
+    }
+    steps
+}
+
+/// Complete a test sign-in started with `oidc_login_start`: wait for the IdP
+/// redirect, let the vault run its real callback (token exchange, ID-token
+/// and role checks), and report what came back. Unlike
+/// `oidc_login_complete` this never signs the GUI in: the token the vault
+/// mints is revoked immediately and is not stored. A failure is reported in
+/// the returned report, not as an `Err`, so the UI can show which step broke.
+#[tauri::command]
+pub async fn oidc_test_complete(
+    state: State<'_, AppState>,
+    session_id: String,
+    timeout_secs: Option<u64>,
+) -> Result<SsoTestReport, String> {
+    let timeout = Duration::from_secs(timeout_secs.unwrap_or(300));
+    let failed = |steps: Vec<SsoTestStep>| SsoTestReport { ok: false, steps, ..Default::default() };
+
+    let (mount, params) = match wait_for_idp_redirect(&state, &session_id, timeout).await {
+        Ok(v) => v,
+        Err(e) => return Ok(failed(vec![step("Browser sign-in and redirect back", "fail", e)])),
+    };
+    let mut steps = vec![step(
+        "Browser sign-in and redirect back",
+        "ok",
+        "The provider redirected back with an authorization code.",
+    )];
+
+    let auth = match vault_callback(&state, &mount, &params).await {
+        Ok(a) => a,
+        Err(e) => {
+            steps.push(step("Token exchange, ID-token and role checks", "fail", e));
+            return Ok(failed(steps));
+        }
+    };
+
+    let mut report = report_from_auth(&auth);
+    steps.extend(post_login_steps(&report));
+    if report.policies.is_empty() {
+        report.ok = false;
+    }
+
+    // Never leave the test token alive, and never adopt it as the session.
+    match auth.get("client_token").and_then(Value::as_str).filter(|t| !t.is_empty()) {
+        Some(token) => {
+            use bv_client::Operation;
+            match crate::commands::dispatch_with_token(
+                &state,
+                Operation::Write,
+                "auth/token/revoke-self".to_string(),
+                None,
+                token,
+            )
+            .await
+            {
+                Ok(_) => {
+                    report.token_revoked = true;
+                    steps.push(step(
+                        "Test token revoked",
+                        "ok",
+                        "The token minted for this test was revoked; you were not signed in.",
+                    ));
+                }
+                Err(e) => steps.push(step(
+                    "Test token revoked",
+                    "warn",
+                    format!("Could not revoke the test token ({e}); it stays valid until its TTL ends."),
+                )),
+            }
+        }
+        None => steps.push(step("Test token revoked", "warn", "The vault returned no token to revoke.")),
+    }
+
+    report.steps = steps;
+    Ok(report)
 }
 
 #[tauri::command]
@@ -458,6 +680,58 @@ mod tests {
         let err = bind_callback(&p).unwrap_err();
         assert!(err.contains(&a.to_string()) && err.contains(&b.to_string()), "{err}");
         drop((first, second));
+    }
+
+    fn auth(v: Value) -> Map<String, Value> {
+        v.as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn report_extracts_idp_fields_and_hides_backend_keys() {
+        let a = auth(serde_json::json!({
+            "client_token": "s.secret",
+            "display_name": "alice",
+            "policies": ["default", "readonly"],
+            "lease_duration": 3600,
+            "metadata": {
+                "role": "staff", "subject": "sub-1", "username": "alice", "auth_method": "oidc",
+                "mount_path": "oidc/", "namespace_path": "", "namespace_id": "", "child_visible": "false",
+                "groups": "[\"admins\",\"dev\"]", "email": "alice@example.com"
+            }
+        }));
+        let r = report_from_auth(&a);
+        assert_eq!(r.display_name, "alice");
+        assert_eq!(r.role, "staff");
+        assert_eq!(r.subject, "sub-1");
+        assert_eq!(r.groups, vec!["admins", "dev"]);
+        assert_eq!(r.policies, vec!["default", "readonly"]);
+        assert_eq!(r.ttl_secs, Some(3600));
+        assert_eq!(r.metadata.keys().collect::<Vec<_>>(), vec!["email", "groups"]);
+        // The token itself must never reach the report.
+        assert!(!serde_json::to_string(&r).unwrap().contains("s.secret"));
+    }
+
+    #[test]
+    fn groups_fall_back_to_comma_split_and_embedded_ttl_shapes_parse() {
+        let a = auth(serde_json::json!({
+            "policies": ["default"], "lease": { "secs": 60, "nanos": 0 },
+            "metadata": { "groups": "a, b" }
+        }));
+        let r = report_from_auth(&a);
+        assert_eq!(r.groups, vec!["a", "b"]);
+        assert_eq!(r.ttl_secs, Some(60));
+        assert_eq!(auth_ttl_secs(&auth(serde_json::json!({ "lease": 30 }))), Some(30));
+        assert_eq!(auth_ttl_secs(&auth(serde_json::json!({}))), None);
+    }
+
+    #[test]
+    fn no_policies_is_a_failed_check_and_missing_user_claim_a_warning() {
+        let r = report_from_auth(&auth(serde_json::json!({ "metadata": { "role": "r" } })));
+        let steps = post_login_steps(&r);
+        let status = |n: &str| steps.iter().find(|s| s.name == n).unwrap().status;
+        assert_eq!(status("Vault policies granted"), "fail");
+        assert_eq!(status("User claim resolved"), "warn");
+        assert_eq!(status("Groups received"), "info");
     }
 
     #[test]
