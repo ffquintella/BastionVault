@@ -293,15 +293,19 @@ async fn a_grant_only_through_a_gated_or_scoped_rule_yields_to_an_alias_deny() {
     assert_eq!(status(&r), 403, "an owner-scoped grant against a data-form deny: {r:?}");
 }
 
-/// The policy tester's verdict for each `(path, capability)` against `draft`
-/// alone: `(allowed, denied_by_deny, draft_only_allowed)`.
-async fn tester(core: &Arc<Core>, root: &str, draft: &str, cases: &[(&str, &str)]) -> Vec<(bool, bool, bool)> {
+/// The policy tester's rows for each `(path, capability)` against `draft` alone.
+async fn tester_rows(core: &Arc<Core>, root: &str, draft: &str, cases: &[(&str, &str)]) -> Vec<Value> {
     let cases: Vec<Value> = cases.iter().map(|(p, c)| json!({ "path": p, "capability": c, "policies": [] })).collect();
     let body = json!({ "policy": draft, "cases": cases });
     let resp = send(core, root, 2, Operation::Write, "sys/policies/acl/test", None, body).await.unwrap().unwrap();
-    let results = resp.data.unwrap()["results"].as_array().cloned().unwrap();
+    resp.data.unwrap()["results"].as_array().cloned().unwrap()
+}
+
+/// [`tester_rows`] as `(allowed, denied_by_deny, draft_only_allowed)`.
+async fn tester(core: &Arc<Core>, root: &str, draft: &str, cases: &[(&str, &str)]) -> Vec<(bool, bool, bool)> {
     let flag = |row: &Value, k: &str| row[k].as_bool().unwrap_or_else(|| panic!("{k} in {row}"));
-    results.iter().map(|r| (flag(r, "allowed"), flag(r, "denied_by_deny"), flag(r, "draft_only_allowed"))).collect()
+    let rows = tester_rows(core, root, draft, cases).await;
+    rows.iter().map(|r| (flag(r, "allowed"), flag(r, "denied_by_deny"), flag(r, "draft_only_allowed"))).collect()
 }
 
 /// The policy tester applies the same path-form deny as enforcement (T509): a
@@ -333,6 +337,13 @@ async fn the_policy_tester_applies_the_path_form_deny() {
     let cases = [("secret/data/prod/x", "read"), ("secret/data/prod/x", "delete"), ("secret/data/dev/x", "read")];
     let got = tester(&core, &root, &logical, &cases).await;
     assert_eq!(got, vec![refused, refused, allowed], "deny in the logical form");
+
+    // A refused row names the other form that refused it; others name none.
+    let rows = tester_rows(&core, &root, &data_form, &[("secret/prod/x", "read"), ("secret/dev/x", "read")]).await;
+    assert_eq!(rows[0]["denied_by_alias"], json!("secret/data/prod/x"), "{rows:?}");
+    assert_eq!(rows[1]["denied_by_alias"], Value::Null, "{rows:?}");
+    let rows = tester_rows(&core, &root, &logical, &[("secret/data/prod/x", "read")]).await;
+    assert_eq!(rows[0]["denied_by_alias"], json!("secret/prod/x"), "{rows:?}");
 
     // A narrower allow outranks a broader deny in the other form, as enforced.
     let narrower = r#"

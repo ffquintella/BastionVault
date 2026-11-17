@@ -514,7 +514,8 @@ mod tests {
 
     #[test]
     fn the_group_store_misreads_a_kv_name_with_a_data_or_metadata_segment() {
-        for (path, misread) in [("x", false), ("team/x", false), ("data/x", true), ("metadata/x", true)] {
+        let cases = [("x", false), ("team/x", false), ("data/x", true), ("metadata/x", true), ("data", true)];
+        for (path, misread) in cases.into_iter().chain([("metadata", true), ("database", false)]) {
             assert_eq!(group_store_misreads(Kind::KvSecret, &place("dst", "secret/", path)), misread, "{path}");
         }
         assert!(!group_store_misreads(Kind::KvSecret, &place("", "a/b/", "data/x")), "its second segment is b");

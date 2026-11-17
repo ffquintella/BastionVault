@@ -1073,8 +1073,10 @@ POST /v2/sys/namespace-transfer/move
   only when that group exists there (not merely inherited), the caller can
   see all of its members, and may modify it. A group is never created;
   otherwise `group-membership-dropped` (subject: the group name). A KV
-  secret whose source or destination name starts with `data/` or
-  `metadata/` carries no membership at all, with one
+  secret whose source or destination `<mount><name>` has `data` or
+  `metadata` as its second segment (on `secret/`, a name that is `data` or
+  `metadata` or starts with `data/` or `metadata/`; on a mount such as
+  `team/data/`, every secret) carries no membership at all, with one
   `group-membership-not-carried` warning (subject: the source item): the
   asset-group store reads `secret/data/x` as the secret `x`, so it would
   carry `x`'s groups and add the destination's `x` (T510, until T507).
@@ -1115,8 +1117,8 @@ group name) as `subject` and list the capability names:
 destination refused a planned share), `all-shares-dropped` and
 `shares-unreadable` (subject: the source item). Groups and files:
 `group-membership-dropped`, `group-membership-unreadable`,
-`group-membership-not-carried` (a KV name starting with `data/` or
-`metadata/`), `files-not-transferred`. A dry run reports the same warnings without
+`group-membership-not-carried` (a KV `<mount><name>` whose second
+segment is `data` or `metadata`), `files-not-transferred`. A dry run reports the same warnings without
 writing; it cannot check the share route's owner rule, which the import
 satisfies by making the caller the owner.
 
