@@ -34,9 +34,17 @@ pub const CODE_DESTINATION_REPLACED: &str = "destination-replaced";
 pub const CODE_RENAMED: &str = "renamed";
 /// Policies naming the source path are not rewritten for the destination.
 pub const CODE_POLICIES_NOT_CARRIED: &str = "policies-not-carried";
+/// KV environment overrides are rebuilt from per-environment reads, so an
+/// override equal to its base value is not carried (there is no raw read).
+pub const CODE_KV_ENV_OVERRIDES_NORMALIZED: &str = "kv-environment-overrides-normalized";
 
 /// `on_conflict = rename` tries the name, then `<name>-2` up to this suffix.
 const RENAME_MAX_SUFFIX: usize = 100;
+
+/// The resource import's 409 for a destination-side content gate, not a name
+/// collision (`check_import_write_gates` in bv-engine-resource; pinned by the
+/// facade test `a_gate_refusal_is_never_read_as_a_collision`).
+const BROKERED_GATE_CODE: &str = "brokered_resource_no_static_credential";
 
 /// `copy` keeps the source; `move` deletes it after a verified copy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,6 +130,14 @@ impl Kind {
             Self::KvSecret => "kv-secret",
         }
     }
+
+    /// The engine type a mount of this kind has.
+    fn mount_type(self) -> &'static str {
+        match self {
+            Self::Resource => "resource",
+            Self::KvSecret => "kv-v2",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,6 +170,16 @@ impl Place {
 
     fn import(&self) -> String {
         format!("{}v2/transfer/import/{}", self.mount, self.path)
+    }
+
+    /// `<ns>/<mount>` as the router sees it: a namespace written into the mount
+    /// (`{ns: "", mount: "a/secret"}`) reaches the same mount as `{ns: "a"}`.
+    fn scope(&self) -> String {
+        let mount = self.mount.trim_end_matches('/');
+        match self.ns.is_empty() {
+            true => mount.to_string(),
+            false => format!("{}/{mount}", self.ns),
+        }
     }
 
     /// `<ns>/<mount><path>`, the form logs, messages and `origin` use.
@@ -210,7 +236,9 @@ impl Plan {
             Kind::Resource => source.path.eq_ignore_ascii_case(&destination.path),
             Kind::KvSecret => source.path == destination.path,
         };
-        if source.ns == destination.ns && source.mount == destination.mount && same_name {
+        // Compared on the effective scope, so no aliased spelling of one item
+        // passes (an overwrite or move onto itself would delete it).
+        if source.scope() == destination.scope() && same_name {
             return Err(invalid("source and destination are the same item"));
         }
         Ok(Self { op, kind, conflict, dry_run: t.dry_run, source, destination })
@@ -277,6 +305,12 @@ fn split(e: RvError) -> (u16, String) {
     }
 }
 
+/// An import 409 that means "the name is taken" (an item or leftover data),
+/// not a destination content gate, whose refusal must reach the caller as is.
+fn is_name_conflict(e: &RvError) -> bool {
+    matches!(e, RvError::ErrResponseStatus(409, message) if !message.starts_with(BROKERED_GATE_CODE))
+}
+
 /// A denied sub-request as a 403 that says which step was refused.
 fn refused(e: RvError, what: &str) -> RvError {
     match e {
@@ -330,6 +364,58 @@ async fn list(core: &dyn VaultCtx, caller: &Request, ns: &str, path: String) -> 
     let resp = call(core, caller, ns, Operation::List, path, None).await.map_err(|e| refused(e, &what))?;
     let keys = resp.and_then(|r| r.data).and_then(|d| d.get("keys").and_then(Value::as_array).cloned());
     Ok(keys.unwrap_or_default().iter().filter_map(Value::as_str).map(String::from).collect())
+}
+
+/// Refuse, before anything is read, a location whose namespace does not
+/// exist, whose mount starts with a namespace path (an alias of a mount in
+/// that namespace), or whose mount is not one of the caller-visible mounts of
+/// the kind's engine in its namespace (`sys/internal/ui/mounts`).
+#[maybe_async::maybe_async]
+async fn check_place(
+    core: &dyn VaultCtx,
+    caller: &Request,
+    kind: Kind,
+    place: &Place,
+    field: &str,
+) -> Result<(), RvError> {
+    if let Some(namespaces) = core.namespaces() {
+        if !place.ns.is_empty() && namespaces.resolve(&place.ns).await?.is_none() {
+            let message = format!("{field}.namespace: no such namespace '{}'", place.ns);
+            return Err(RvError::ErrResponseStatus(404, message));
+        }
+        let segments: Vec<&str> = place.mount.trim_end_matches('/').split('/').collect();
+        for end in 1..=segments.len() {
+            let prefix = segments[..end].join("/");
+            let candidate = if place.ns.is_empty() { prefix.clone() } else { format!("{}/{prefix}", place.ns) };
+            // A segment no namespace may have (`*`, padding) names none.
+            if normalize_path(&candidate).is_ok() && namespaces.resolve(&candidate).await?.is_some() {
+                let message = format!(
+                    "{field}.mount '{}' starts with namespace '{candidate}'; name it in {field}.namespace",
+                    place.mount
+                );
+                return Err(invalid(message));
+            }
+        }
+    }
+    let listing = read(core, caller, &place.ns, "sys/internal/ui/mounts".to_string(), None).await?.unwrap_or_default();
+    let mounts = listing.get("secret").and_then(Value::as_object);
+    let entry =
+        mounts.and_then(|m| m.iter().find(|(path, _)| path.trim_end_matches('/') == place.mount.trim_end_matches('/')));
+    let found = entry.and_then(|(_, info)| info.get("type").and_then(Value::as_str));
+    match found {
+        Some(engine) if engine == kind.mount_type() => Ok(()),
+        Some(engine) => Err(invalid(format!(
+            "{field}.mount '{}' is a {engine} mount, not the {} mount a {} transfer needs",
+            place.mount,
+            kind.mount_type(),
+            kind.as_str()
+        ))),
+        None => Err(invalid(format!(
+            "{field}.mount '{}' is not a mount the caller can see in {}",
+            place.mount,
+            namespace_label(&place.ns)
+        ))),
+    }
 }
 
 fn text(map: &Map<String, Value>, field: &str) -> String {
@@ -445,6 +531,7 @@ async fn read_kv(core: &dyn VaultCtx, caller: &Request, src: &Place) -> Result<S
 
     let data_path = format!("{}data/{}", src.mount, src.path);
     let (mut versions, mut warnings) = (Vec::with_capacity(numbered.len()), Vec::new());
+    let mut env_names = std::collections::BTreeSet::new();
     for (n, vm) in &numbered {
         let mut entry = json!({
             "version": n,
@@ -477,12 +564,22 @@ async fn read_kv(core: &dyn VaultCtx, caller: &Request, src: &Place) -> Result<S
             let resolved = read(core, caller, ns, data_path.clone(), Some(at(Some(env)))).await?;
             let merged = resolved.and_then(|d| d.get("data").and_then(Value::as_object).cloned());
             envs.insert(env.to_string(), Value::Object(env_overrides(&base, &merged.ok_or_else(|| changed(src))?)));
+            env_names.insert(env.to_string());
         }
         entry["data"] = Value::Object(base);
         if !envs.is_empty() {
             entry["envs"] = Value::Object(envs);
         }
         versions.push(entry);
+    }
+    if !env_names.is_empty() {
+        let names = env_names.into_iter().collect::<Vec<_>>().join(", ");
+        let message = format!(
+            "environments {names} of {} are rebuilt from per-environment reads: every environment reads the same, but \
+             an override equal to its base value is not carried and follows the base after the next write",
+            src.display()
+        );
+        warnings.push(warning(CODE_KV_ENV_OVERRIDES_NORMALIZED, src.display(), message));
     }
 
     let settings = json!({
@@ -638,7 +735,7 @@ fn renamed(kind: Kind, wanted: &Place, written: &Place) -> Option<TransferWarnin
 fn replaced(dest: &Place, dry_run: bool) -> TransferWarning {
     let message = match dry_run {
         true => format!("{} exists and would be deleted before the import", dest.display()),
-        false => format!("{} was deleted and replaced by the transferred item", dest.display()),
+        false => format!("the overwrite deleted what was at {} and wrote the transferred item", dest.display()),
     };
     warning(CODE_DESTINATION_REPLACED, dest.display(), message)
 }
@@ -757,7 +854,7 @@ async fn write_destination(
                         warnings.extend(renamed(kind, dest, &written));
                         return Ok(written);
                     }
-                    Err(e) if status_of(&e) == 409 => continue,
+                    Err(e) if is_name_conflict(&e) => continue,
                     Err(e) => return Err(e),
                 }
             }
@@ -769,9 +866,18 @@ async fn write_destination(
             require(core, caller, &dest.ns, &checks, "an overwrite").await?;
             match import(core, caller, kind, dest, body).await {
                 Ok(written) => return Ok(written),
-                Err(e) if status_of(&e) == 409 => {}
+                Err(e) if is_name_conflict(&e) => {
+                    // Delete only what a read shows is there (or cannot show): a
+                    // 409 on a name the caller sees free is leftover data.
+                    if exists(core, caller, kind, dest).await? == Some(false) {
+                        return Err(e);
+                    }
+                }
                 Err(e) => return Err(e),
             }
+            // The destination gates (brokered credential, agent access) depend on
+            // the replaced item's asset groups, which this delete prunes, so they
+            // cannot be checked before it: a failure below reports the deletion.
             let what = format!("the caller may not delete {} in {}", dest.display(), namespace_label(&dest.ns));
             call(core, caller, &dest.ns, Operation::Delete, dest.item(kind), None)
                 .await
@@ -789,12 +895,13 @@ async fn write_destination(
                         status_of(&e)
                     );
                     let (status, detail) = split(e);
-                    let hint = match status {
-                        409 => "; leftover data from an interrupted import cannot be cleared through the API, use on_conflict rename",
-                        _ => "",
+                    let hint = match status == 409 && !detail.starts_with(BROKERED_GATE_CODE) {
+                        true => "; leftover data from an interrupted import cannot be cleared through the API, use on_conflict rename",
+                        false => "",
                     };
                     let message = format!(
-                        "{} was deleted for the overwrite, but the import then failed: {detail}{hint}; the source is untouched",
+                        "the overwrite ran an ordinary DELETE of {}, which removed what was there, but the import then \
+                         failed: {detail}{hint}; the source is untouched",
                         dest.display()
                     );
                     Err(RvError::ErrResponseStatus(status, message))
@@ -871,6 +978,8 @@ pub async fn run_transfer(
     t: TransferRequest,
 ) -> Result<TransferResult, RvError> {
     let plan = Plan::new(op, t)?;
+    check_place(core, caller, plan.kind, &plan.source, "source").await?;
+    check_place(core, caller, plan.kind, &plan.destination, "destination").await?;
     let snapshot = read_source(core, caller, plan.kind, &plan.source).await?;
     let mut warnings = snapshot.warnings.clone();
     let origin_owner = match plan.kind {
@@ -968,6 +1077,39 @@ mod tests {
         assert_eq!(status(modes("merge")), 400);
         let kv_case = Plan::new(TransferOp::Copy, request("kv-secret", loc("", "s", "X"), loc("", "s", "x"), ""));
         assert!(kv_case.is_ok(), "KV names are exact keys");
+    }
+
+    /// Regression: a namespace written into the mount reaches the same mount
+    /// as the namespace field, so an aliased pair is one item, refused in
+    /// either direction and whatever the conflict mode.
+    #[test]
+    fn an_aliased_spelling_of_the_same_item_is_refused() {
+        let aliases = [
+            ("kv-secret", loc("src", "secret", "team/db"), loc("", "src/secret", "team/db")),
+            ("kv-secret", loc("src", "sub/secret", "team/db"), loc("src/sub", "secret/", "team/db")),
+            ("resource", loc("src", "resources", "srv1"), loc("", "/src/resources/", "SRV1")),
+            ("resource", loc("src", "sub/resources", "srv1"), loc("src/sub/", "resources", "srv1")),
+        ];
+        for (kind, a, b) in aliases {
+            for (from, to) in [(a.clone(), b.clone()), (b, a)] {
+                for (op, mode) in [(TransferOp::Copy, ""), (TransferOp::Move, ""), (TransferOp::Move, "overwrite")] {
+                    let r = Plan::new(op, request(kind, from.clone(), to.clone(), mode));
+                    assert_eq!(status(r), 400, "{kind} {op:?} {mode} {from:?} -> {to:?}");
+                }
+            }
+        }
+        let other_root =
+            Plan::new(TransferOp::Move, request("kv-secret", loc("", "secret", "x"), loc("src", "secret", "x"), ""));
+        assert!(other_root.is_ok(), "the same path in another namespace is another item");
+    }
+
+    #[test]
+    fn only_a_taken_name_is_a_name_conflict() {
+        assert!(is_name_conflict(&RvError::ErrResponseStatus(409, "a resource named 'srv1' already exists".into())));
+        let gate = format!("{BROKERED_GATE_CODE}: resource `srv1` is brokered in this namespace");
+        assert!(!is_name_conflict(&RvError::ErrResponseStatus(409, gate)));
+        assert!(!is_name_conflict(&RvError::ErrResponseStatus(403, "permission denied".into())));
+        assert!(!is_name_conflict(&RvError::ErrPermissionDenied));
     }
 
     #[test]

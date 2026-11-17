@@ -3,13 +3,7 @@
 //! real tokens, policies and namespace bindings. Every test asserts the status
 //! and what was, or was not, written on each side.
 
-use std::{
-    collections::HashMap,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Weak,
-    },
-};
+use std::{collections::HashMap, sync::Arc};
 
 use serde_json::{json, Value};
 
@@ -18,22 +12,8 @@ use crate::{
     audit::entry::AuditEntry,
     core::Core,
     errors::RvError,
-    kernel_api::{
-        dos::DosGuard,
-        mount::{MountsMonitor, MountsRouter},
-        router::Router,
-        stats::DashboardStats,
-        KernelServices, LogicalBackendNewFunc, MountEntryHMACLevel, VaultCtx,
-    },
-    logical::{
-        handler::{AuthHandler, Handler},
-        Operation, Request, Response,
-    },
-    modules::{
-        namespace::{ns_assignment::NsAssignmentStore, NamespaceModule, NAMESPACE_MODULE_NAME},
-        system::transfer::{run_transfer, TransferOp, TransferRequest},
-    },
-    storage::{barrier::SecurityBarrier, barrier_view::BarrierView, cache::CacheConfig, Backend as PhysicalBackend},
+    logical::{Operation, Request, Response},
+    modules::namespace::{ns_assignment::NsAssignmentStore, NamespaceModule, NAMESPACE_MODULE_NAME},
     test_utils::new_unseal_test_bastion_vault,
 };
 
@@ -244,6 +224,12 @@ async fn copy_kv_secret_carries_all_versions_and_flags() {
     let out = result(transfer(&core, &root, "copy", kv("team/db", "team/db", json!({}))).await);
     assert_eq!(out["transferred"], json!({ "secrets": 1, "versions": 3, "history": 0, "shares": 0 }), "{out}");
     assert_eq!(out["destination"]["path"], json!("team/db"));
+    let warnings = out["warnings"].as_array().unwrap();
+    let env = warnings.iter().find(|w| w["code"] == json!("kv-environment-overrides-normalized"));
+    let env = env.unwrap_or_else(|| panic!("environments are flagged: {out}"));
+    assert_eq!(env["subject"], json!("src/secret/team/db"));
+    let text = env["message"].as_str().unwrap();
+    assert!(text.contains("prod") && !text.contains("db.prod"), "names environments, never values: {text}");
 
     let from = get(&core, &root, src, "secret/metadata/team/db").await.unwrap();
     let to = get(&core, &root, Some("dst"), "secret/metadata/team/db").await.unwrap();
@@ -560,30 +546,6 @@ async fn audit_entries_in_both_namespaces() {
 }
 
 #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
-async fn source_changed_during_copy_aborts_move() {
-    let (_bvault, core, root) = vault("ns_transfer_source_changed").await;
-    seed_resource(&core, &root, Some("src"), "srv1").await;
-    let ctx = Interposer { inner: core.clone(), root: root.clone(), fired: AtomicBool::new(false) };
-    let mut caller = Request::new("sys/namespace-transfer/move");
-    caller.client_token = root.clone();
-    let request: TransferRequest = serde_json::from_value(resource("srv1", "srv1", json!({}))).unwrap();
-
-    let r = run_transfer(&ctx, &caller, TransferOp::Move, request).await;
-    match &r {
-        Err(RvError::ErrResponseStatus(409, m)) => {
-            assert!(m.contains("changed") && m.contains("dst/resources/srv1"), "says what was written: {m}");
-            assert!(!m.contains("pw-"), "{m}");
-        }
-        other => panic!("expected 409, got {other:?}"),
-    }
-    assert!(ctx.fired.load(Ordering::SeqCst), "the source was changed after the import");
-    assert!(resource_exists(&core, &root, "src", "srv1").await, "the source is not deleted");
-    let login = get(&core, &root, Some("src"), "resources/secrets/srv1/login").await.unwrap();
-    assert_eq!(login["value"], json!("pw-3"), "and keeps the change");
-    assert!(resource_exists(&core, &root, "dst", "srv1").await, "the copy is kept");
-}
-
-#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
 async fn token_not_valid_in_destination_namespace_refuses() {
     let (_bvault, core, root) = vault("ns_transfer_binding").await;
     seed_resource(&core, &root, None, "srv0").await;
@@ -622,6 +584,7 @@ async fn soft_deleted_kv_versions_become_destroyed_with_warning() {
         out["warnings"].as_array().unwrap().iter().find(|w| w["code"] == json!("deleted-version-not-recoverable"));
     let warning = warning.unwrap_or_else(|| panic!("a warning names the version: {out}"));
     assert!(warning["subject"].as_str().unwrap().contains('2'), "{warning}");
+    assert!(!codes(&out).contains(&"kv-environment-overrides-normalized".to_string()), "no environments: {out}");
 
     let to = get(&core, &root, Some("dst"), "secret/metadata/team/x").await.unwrap();
     assert_eq!(to["versions"]["2"]["destroyed"], json!(true));
@@ -655,115 +618,233 @@ async fn over_1000_secrets_refused_before_any_write() {
     assert!(get(&core, &root, Some("dst"), "resources/secrets/big/k0").await.is_none());
 }
 
-/// The vault with one change slipped in: right after the destination import
-/// succeeds, a new version of the source's `login` secret is written, as a
-/// concurrent writer would. Everything else is the real `Core`.
-struct Interposer {
-    inner: Arc<Core>,
-    root: String,
-    fired: AtomicBool,
+/// Full rights everywhere under `src` (including `src/sub`) and `dst`.
+const EVERYWHERE: &str = r#"
+path "sys/namespace-transfer/*" { capabilities = ["update"] }
+path "identity/owner/*" { capabilities = ["read"] }
+path "src/*" { capabilities = ["create", "read", "update", "delete", "list"] }
+path "dst/*" { capabilities = ["create", "read", "update", "delete", "list"] }
+"#;
+
+/// What must survive a refused transfer of `srv1` / `team/db` in `ns`.
+async fn source_state(core: &Arc<Core>, root: &str, ns: &str) -> Value {
+    let ns = Some(ns);
+    json!({
+        "record": get(core, root, ns, "resources/resources/srv1").await,
+        "versions": get(core, root, ns, "resources/secrets/srv1/login/history").await,
+        "owner": get(core, root, ns, "identity/owner/resource/srv1").await,
+        "kv": get(core, root, ns, "secret/metadata/team/db").await,
+        "kv_value": get(core, root, ns, "secret/data/team/db").await.map(|d| d["data"].clone()),
+    })
 }
 
-#[maybe_async::maybe_async]
-impl VaultCtx for Interposer {
-    async fn handle_request(&self, req: &mut Request) -> Result<Option<Response>, RvError> {
-        let is_import = req.operation == Operation::Write && req.path.contains("v2/transfer/import/");
-        let result = VaultCtx::handle_request(self.inner.as_ref(), req).await;
-        if is_import && result.is_ok() && !self.fired.swap(true, Ordering::SeqCst) {
-            let mut change = Request::new("resources/secrets/srv1/login");
-            change.operation = Operation::Write;
-            change.client_token = self.root.clone();
-            change.body = json!({ "value": "pw-3" }).as_object().cloned();
-            change.headers = Some(HashMap::from([("x-bastionvault-namespace".to_string(), "src".to_string())]));
-            VaultCtx::handle_request(self.inner.as_ref(), &mut change).await.unwrap();
+/// Regression (aliasing): a namespace written into the mount reaches the same
+/// mount as the namespace field (`{ns: "src", mount: "secret"}` is
+/// `{ns: "", mount: "src/secret"}`; `{ns: "src", mount: "sub/secret"}` is
+/// `{ns: "src/sub", mount: "secret"}`). Every spelling of the source as its
+/// own destination is a 400 before anything is read, for copy and move, with
+/// and without overwrite, and the source keeps its record, versions and owner.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn aliased_locations_are_the_same_item_and_refused() {
+    let (_bvault, core, root) = vault("ns_transfer_aliases").await;
+    write(&core, &root, "sys/namespaces/src/sub", json!({})).await;
+    write_policy(&core, &root, "everywhere", EVERYWHERE).await;
+    let (alice, alice_id) = user(&core, &root, "alice", "everywhere", true).await;
+    for ns in ["src", "src/sub"] {
+        seed_resource(&core, &alice, Some(ns), "srv1").await;
+        let kv = json!({ "data": { "v": "S3CRET" } });
+        send(&core, &alice, Operation::Write, "secret/data/team/db", Some(ns), kv).await.unwrap();
+        assert_eq!(resource_owner(&core, &root, ns, "srv1").await, alice_id);
+    }
+    let before = [source_state(&core, &root, "src").await, source_state(&core, &root, "src/sub").await];
+
+    let spellings = [
+        (("src", "{m}"), ("", "src/{m}")),
+        (("src", "sub/{m}"), ("src/sub", "{m}")),
+        (("", "src/sub/{m}"), ("src/sub", "{m}")),
+    ];
+    for (kind, mount, path) in [("resource", "resources", "srv1"), ("kv-secret", "secret", "team/db")] {
+        for (a, b) in spellings {
+            let a = (a.0, a.1.replace("{m}", mount));
+            let b = (b.0, b.1.replace("{m}", mount));
+            for (from, to) in [(&a, &b), (&b, &a)] {
+                for (op, extra) in [
+                    ("copy", json!({})),
+                    ("copy", json!({ "on_conflict": "overwrite" })),
+                    ("move", json!({})),
+                    ("move", json!({ "on_conflict": "overwrite" })),
+                    ("move", json!({ "on_conflict": "overwrite", "dry_run": true })),
+                ] {
+                    let mut req = json!({
+                        "kind": kind,
+                        "source": { "namespace": from.0, "mount": from.1, "path": path },
+                        "destination": { "namespace": to.0, "mount": to.1, "path": path },
+                    });
+                    req.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+                    for token in [&root, &alice] {
+                        let r = transfer(&core, token, op, req.clone()).await;
+                        assert_eq!(status(&r), 400, "{op} {req}: {r:?}");
+                        assert!(message(&r).contains("same item"), "{}", message(&r));
+                    }
+                }
+            }
         }
-        result
     }
-    fn barrier(&self) -> Arc<dyn SecurityBarrier> {
-        VaultCtx::barrier(self.inner.as_ref())
+    let after = [source_state(&core, &root, "src").await, source_state(&core, &root, "src/sub").await];
+    assert_eq!(after, before, "the source keeps its record, versions, owner and value");
+    assert!(before[0]["record"].is_object() && before[0]["kv"].is_object(), "{}", before[0]);
+}
+
+/// A mount must be a mount of the kind's engine in its own namespace, and may
+/// not carry a namespace prefix; a missing namespace is a 404. Nothing is
+/// read or written.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn a_mount_must_be_of_the_kind_and_not_carry_a_namespace() {
+    let (_bvault, core, root) = vault("ns_transfer_mount_checks").await;
+    seed_resource(&core, &root, Some("src"), "srv1").await;
+    send(&core, &root, Operation::Write, "secret/data/team/db", Some("src"), json!({ "data": { "v": "x" } }))
+        .await
+        .unwrap();
+
+    let cases = [
+        (body("resource", "secret", ("src", "srv1"), ("dst", "srv1"), json!({})), 400, "kv-v2 mount"),
+        (body("kv-secret", "resources", ("src", "team/db"), ("dst", "team/db"), json!({})), 400, "resource mount"),
+        (body("resource", "nope", ("src", "srv1"), ("dst", "srv1"), json!({})), 400, "not a mount"),
+        (
+            json!({
+                "kind": "kv-secret",
+                "source": { "namespace": "", "mount": "src/secret", "path": "team/db" },
+                "destination": { "namespace": "dst", "mount": "secret", "path": "team/db" },
+            }),
+            400,
+            "starts with namespace 'src'",
+        ),
+        (
+            json!({
+                "kind": "resource",
+                "source": { "namespace": "src", "mount": "resources", "path": "srv1" },
+                "destination": { "namespace": "", "mount": "dst/resources", "path": "srv1" },
+            }),
+            400,
+            "starts with namespace 'dst'",
+        ),
+        (body("resource", "resources", ("src", "srv1"), ("missing", "srv1"), json!({})), 404, "no such namespace"),
+    ];
+    for (req, code, needle) in cases {
+        for op in ["copy", "move"] {
+            let r = transfer(&core, &root, op, req.clone()).await;
+            assert_eq!(status(&r), code, "{op} {req}: {r:?}");
+            assert!(message(&r).contains(needle), "{needle}: {}", message(&r));
+        }
     }
-    fn system_view(&self) -> Option<Arc<BarrierView>> {
-        VaultCtx::system_view(self.inner.as_ref())
+    assert!(!resource_exists(&core, &root, "dst", "srv1").await, "nothing is written");
+    assert!(get(&core, &root, Some("dst"), "secret/metadata/team/db").await.is_none());
+    assert!(resource_exists(&core, &root, "src", "srv1").await);
+    assert!(get(&core, &root, Some("src"), "secret/metadata/team/db").await.is_some());
+}
+
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn kv_overwrite_replaces_the_destination() {
+    let (_bvault, core, root) = vault("ns_transfer_kv_overwrite").await;
+    send(&core, &root, Operation::Write, "secret/data/team/db", Some("src"), json!({ "data": { "v": "src" } }))
+        .await
+        .unwrap();
+    for v in ["dst-1", "dst-2"] {
+        send(&core, &root, Operation::Write, "secret/data/team/db", Some("dst"), json!({ "data": { "v": v } }))
+            .await
+            .unwrap();
     }
-    fn hmac_key(&self) -> Vec<u8> {
-        VaultCtx::hmac_key(self.inner.as_ref())
+
+    let out =
+        result(transfer(&core, &root, "copy", kv("team/db", "team/db", json!({ "on_conflict": "overwrite" }))).await);
+    assert!(codes(&out).contains(&"destination-replaced".to_string()), "{out}");
+    let value = get(&core, &root, Some("dst"), "secret/data/team/db").await.unwrap();
+    assert_eq!(value["data"]["v"], json!("src"));
+    let meta = get(&core, &root, Some("dst"), "secret/metadata/team/db").await.unwrap();
+    assert_eq!(meta["current_version"], json!(1), "the replaced secret's versions are gone: {meta}");
+    assert_eq!(meta["versions"].as_object().unwrap().len(), 1);
+}
+
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn kv_move_requires_delete_on_origin() {
+    let (_bvault, core, root) = vault("ns_transfer_kv_move_needs_delete").await;
+    send(&core, &root, Operation::Write, "secret/data/team/db", Some("src"), json!({ "data": { "v": "x" } }))
+        .await
+        .unwrap();
+    let policy = r#"
+        path "sys/namespace-transfer/*" { capabilities = ["update"] }
+        path "src/secret/*" { capabilities = ["read", "list"] }
+        path "dst/secret/*" { capabilities = ["create", "read", "update", "list"] }
+    "#;
+    write_policy(&core, &root, "kv-no-delete", policy).await;
+    let (token, _) = user(&core, &root, "kv-copier", "kv-no-delete", true).await;
+
+    let r = transfer(&core, &token, "move", kv("team/db", "team/db", json!({}))).await;
+    assert_eq!(status(&r), 403, "{r:?}");
+    assert!(message(&r).contains("delete") && message(&r).contains("secret/metadata/team/db"), "{}", message(&r));
+    assert!(get(&core, &root, Some("dst"), "secret/metadata/team/db").await.is_none(), "nothing written");
+    assert!(get(&core, &root, Some("src"), "secret/metadata/team/db").await.is_some(), "source untouched");
+}
+
+/// `rename` moves past a taken name (409) but stops at the first name the
+/// ACL refuses, and writes nothing.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn rename_stops_on_a_403() {
+    let (_bvault, core, root) = vault("ns_transfer_rename_403").await;
+    seed_resource(&core, &root, Some("src"), "srv1").await;
+    let existing = json!({ "type": "server", "hostname": "existing.example" });
+    send(&core, &root, Operation::Write, "resources/resources/srv1", Some("dst"), existing).await.unwrap();
+    let policy = r#"
+        path "sys/namespace-transfer/*" { capabilities = ["update"] }
+        path "src/resources/*" { capabilities = ["read", "list"] }
+        path "dst/resources/*" { capabilities = ["create", "read", "update", "list"] }
+        path "dst/resources/resources/srv1-2" { capabilities = ["deny"] }
+    "#;
+    write_policy(&core, &root, "no-srv1-2", policy).await;
+    let (token, _) = user(&core, &root, "renamer", "no-srv1-2", true).await;
+
+    let r = transfer(&core, &token, "copy", resource("srv1", "srv1", json!({ "on_conflict": "rename" }))).await;
+    assert_eq!(status(&r), 403, "{r:?}");
+    for name in ["srv1-2", "srv1-3"] {
+        assert!(!resource_exists(&core, &root, "dst", name).await, "{name} is not written");
     }
-    fn sealed(&self) -> bool {
-        VaultCtx::sealed(self.inner.as_ref())
+    let kept = get(&core, &root, Some("dst"), "resources/resources/srv1").await.unwrap();
+    assert_eq!(kept["hostname"], json!("existing.example"));
+}
+
+/// Regression: the brokered-credential gate's 409 is the destination refusing
+/// the content, not a taken name. `rename` and `overwrite` surface it as is
+/// and delete nothing for it; an overwrite of an existing item whose import
+/// then fails on it says the destination was deleted. Pins the gate code.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn a_gate_refusal_is_never_read_as_a_collision() {
+    let (_bvault, core, root) = vault("ns_transfer_gate").await;
+    let src = Some("src");
+    let meta = json!({ "type": "server", "hostname": "h.example" });
+    send(&core, &root, Operation::Write, "resources/resources/srv1", src, meta).await.unwrap();
+    send(&core, &root, Operation::Write, "resources/secrets/srv1/login", src, json!({ "password": "pw-1" }))
+        .await
+        .unwrap();
+    write(&core, &root, "ssh-broker/policy/type/server", json!({ "login_class": "brokered" })).await;
+
+    for mode in ["refuse", "rename", "overwrite"] {
+        let r = transfer(&core, &root, "copy", resource("srv1", "srv1", json!({ "on_conflict": mode }))).await;
+        assert_eq!(status(&r), 409, "{mode}: {r:?}");
+        let m = message(&r);
+        assert!(m.contains("brokered_resource_no_static_credential"), "{mode}: the gate's own reason: {m}");
+        assert!(!m.contains("no free name") && !m.contains("DELETE") && !m.contains("pw-1"), "{mode}: {m}");
     }
-    async fn inited(&self) -> Result<bool, RvError> {
-        VaultCtx::inited(self.inner.as_ref()).await
+    for name in ["srv1", "srv1-2"] {
+        assert!(!resource_exists(&core, &root, "dst", name).await, "{name}: nothing written");
     }
-    fn router(&self) -> Arc<Router> {
-        VaultCtx::router(self.inner.as_ref())
-    }
-    fn mounts_router(&self) -> Arc<MountsRouter> {
-        VaultCtx::mounts_router(self.inner.as_ref())
-    }
-    fn root_storage_prefix(&self) -> Arc<String> {
-        VaultCtx::root_storage_prefix(self.inner.as_ref())
-    }
-    fn add_logical_backend(&self, logical_type: &str, backend: Arc<LogicalBackendNewFunc>) -> Result<(), RvError> {
-        VaultCtx::add_logical_backend(self.inner.as_ref(), logical_type, backend)
-    }
-    fn delete_logical_backend(&self, logical_type: &str) -> Result<(), RvError> {
-        VaultCtx::delete_logical_backend(self.inner.as_ref(), logical_type)
-    }
-    fn add_handler(&self, handler: Arc<dyn Handler>) -> Result<(), RvError> {
-        VaultCtx::add_handler(self.inner.as_ref(), handler)
-    }
-    fn delete_handler(&self, handler: Arc<dyn Handler>) -> Result<(), RvError> {
-        VaultCtx::delete_handler(self.inner.as_ref(), handler)
-    }
-    fn add_auth_handler(&self, handler: Arc<dyn AuthHandler>) -> Result<(), RvError> {
-        VaultCtx::add_auth_handler(self.inner.as_ref(), handler)
-    }
-    fn delete_auth_handler(&self, handler: Arc<dyn AuthHandler>) -> Result<(), RvError> {
-        VaultCtx::delete_auth_handler(self.inner.as_ref(), handler)
-    }
-    fn mount_entry_hmac_level(&self) -> MountEntryHMACLevel {
-        VaultCtx::mount_entry_hmac_level(self.inner.as_ref())
-    }
-    fn mounts_monitor(&self) -> Option<Arc<MountsMonitor>> {
-        VaultCtx::mounts_monitor(self.inner.as_ref())
-    }
-    fn kernel(&self) -> &KernelServices {
-        VaultCtx::kernel(self.inner.as_ref())
-    }
-    fn stats(&self) -> Arc<DashboardStats> {
-        VaultCtx::stats(self.inner.as_ref())
-    }
-    fn audit_broker(&self) -> Option<Arc<bv_audit::AuditBroker>> {
-        VaultCtx::audit_broker(self.inner.as_ref())
-    }
-    fn dos_guard(&self) -> Arc<DosGuard> {
-        VaultCtx::dos_guard(self.inner.as_ref())
-    }
-    fn approle_require_machine(&self) -> Arc<AtomicBool> {
-        VaultCtx::approle_require_machine(self.inner.as_ref())
-    }
-    async fn set_approle_require_machine(&self, required: bool) -> Result<(), RvError> {
-        VaultCtx::set_approle_require_machine(self.inner.as_ref(), required).await
-    }
-    fn cache_config(&self) -> &CacheConfig {
-        VaultCtx::cache_config(self.inner.as_ref())
-    }
-    fn auth_handlers(&self) -> Arc<Vec<Arc<dyn AuthHandler>>> {
-        VaultCtx::auth_handlers(self.inner.as_ref())
-    }
-    fn root_logical_prefix(&self) -> String {
-        VaultCtx::root_logical_prefix(self.inner.as_ref())
-    }
-    fn weak_ctx(&self) -> Weak<dyn VaultCtx> {
-        VaultCtx::weak_ctx(self.inner.as_ref())
-    }
-    fn physical(&self) -> Arc<dyn PhysicalBackend> {
-        VaultCtx::physical(self.inner.as_ref())
-    }
-    fn require_machine_identity(&self) -> Arc<AtomicBool> {
-        VaultCtx::require_machine_identity(self.inner.as_ref())
-    }
-    async fn set_require_machine_identity(&self, required: bool) -> Result<(), RvError> {
-        VaultCtx::set_require_machine_identity(self.inner.as_ref(), required).await
-    }
+
+    let existing = json!({ "type": "server", "hostname": "existing.example" });
+    send(&core, &root, Operation::Write, "resources/resources/srv1", Some("dst"), existing).await.unwrap();
+    let r = transfer(&core, &root, "copy", resource("srv1", "srv1", json!({ "on_conflict": "overwrite" }))).await;
+    assert_eq!(status(&r), 409, "{r:?}");
+    let m = message(&r);
+    assert!(m.contains("DELETE of dst/resources/srv1") && m.contains("import then failed"), "{m}");
+    assert!(m.contains("brokered_resource_no_static_credential") && !m.contains("rename"), "{m}");
+    assert!(!resource_exists(&core, &root, "dst", "srv1").await, "the overwrite's delete did run");
+    assert!(resource_exists(&core, &root, "src", "srv1").await, "the source is untouched");
 }

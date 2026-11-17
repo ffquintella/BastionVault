@@ -935,20 +935,35 @@ POST /v2/sys/namespace-transfer/move
 ~~~
 
 - `kind`: `resource` | `kv-secret` (a KV v2 mount; `path` is the secret path).
-  `namespace` `""` is the root namespace.
+  `namespace` `""` is the root namespace. `mount` must be a mount of that
+  kind's engine (`resource` or `kv-v2`) in that namespace that the caller
+  can see, and must not carry a namespace prefix: name the namespace in
+  `namespace`, never as `{ "namespace": "", "mount": "team-a/secret" }`
+  (400). Two spellings of the same item are refused as one (400).
 - Every step is an ordinary request made with the **caller's token** in the
-  namespace it touches, so it needs: `update` on this route; read (and list
-  on `resources/secrets/<name>`) on everything read at the source; write on
-  the destination item and, for a resource, on each
-  `resources/secrets/<name>/<key>`; `delete` on the source item for `move`
-  and on the destination item for `overwrite`; `update` on
-  `sys/capabilities-self`, which checks those rights before anything is
-  written. The token must be valid in both namespaces. A missing right is a
-  403 naming it; the first denied read refuses the whole transfer.
+  namespace it touches. The caller needs:
+  - `update` on `sys/namespace-transfer/*` (this route; no built-in policy
+    grants it) and on `sys/capabilities-self` (granted by `default`);
+  - read (and list on `resources/secrets/<name>`) on everything read at the
+    source;
+  - write on the destination item and, for a resource, on each
+    `resources/secrets/<name>/<key>`;
+  - `delete` on the source item for `move` and on the destination item for
+    `overwrite`.
+
+  The token must be valid in both namespaces. A plain copy relies on the
+  destination import's own ACL check. A `move`, an `overwrite` or a
+  `dry_run` first checks the rights it needs through `sys/capabilities-self`,
+  before anything is written. A missing right is a 403 naming it; the first
+  denied read refuses the whole transfer.
 - `on_conflict`: `refuse` (default, 409 naming the path), `rename` (the
   path if free, else the first free `<path>-2` … `<path>-100`, each tried as
-  a refused-on-conflict import so the ACL checks every name), `overwrite` (an
-  ordinary DELETE of the destination item, then the import; not atomic).
+  a refused-on-conflict import so the ACL checks every name; it stops at the
+  first other refusal), `overwrite` (an ordinary DELETE of the destination
+  item, then the import; not atomic: if the import then fails, the error
+  says the destination was deleted). A destination content refusal (a
+  brokered resource receiving a static SSH credential) is returned as is and
+  never treated as a taken name.
 - `dry_run`: every read, rights check and collision check, nothing written.
 - `move` re-reads the source after the copy and deletes it only if nothing
   changed; otherwise it answers 409 and keeps both, saying what was written.
@@ -970,7 +985,11 @@ Response (counts and warnings only, never a value):
 
 Warning codes: `deleted-version-not-recoverable`, `unversioned-secret`,
 `origin-owner-unreadable`, `collision-not-checked` (dry run without read on
-the destination), `destination-replaced`, `renamed`, `policies-not-carried`.
+the destination), `destination-replaced`, `renamed`, `policies-not-carried`,
+`kv-environment-overrides-normalized`. That last one appears when KV
+versions carry environments. Overrides are rebuilt from per-environment
+reads, so every environment reads the same in the destination, but an
+override equal to its base value is not carried.
 
 ### Caller introspection
 

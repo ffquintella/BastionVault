@@ -10,7 +10,7 @@ pub mod housekeeping;
 mod leases;
 pub mod mcp;
 pub mod self_profile;
-pub mod transfer;
+mod transfer;
 
 use std::{
     any::Any,
