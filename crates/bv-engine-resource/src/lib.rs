@@ -1353,6 +1353,15 @@ fn validate_resource_bundle(bundle: &ResourceBundle) -> Result<Vec<u128>, RvErro
     Ok(seq)
 }
 
+/// The first secret version in `bundle`, live or not, that carries a static
+/// SSH credential, as `(key, version)`. Every version counts: an old one is
+/// readable at `secrets/<name>/<key>/version/<n>` once imported.
+fn first_static_credential(bundle: &ResourceBundle) -> Option<(&str, u64)> {
+    bundle.secrets.iter().find_map(|s| {
+        s.versions.iter().find(|v| static_ssh_credential_shape(&v.data)).map(|v| (s.key.as_str(), v.version))
+    })
+}
+
 /// True when secret data is stored under `name`, record or not. Without a
 /// record it is what an interrupted import leaves behind (it writes `meta/`
 /// last), or a secret written before its resource; an import never merges
@@ -1418,14 +1427,15 @@ async fn plan_resource_import(
     Ok(ResourceImportPlan { name, replaces, history_seq, bundle })
 }
 
-/// Delete everything this mount stores under `name`: the record first, so
-/// the resource leaves listings before its data does, then secrets, version
-/// indexes and payloads, and history. Ownership, shares and asset-group
-/// membership live elsewhere and are not touched.
+/// Delete what `handle_resource_delete` deletes under `name`: the record
+/// first, so the resource leaves listings before its data does, then
+/// secrets, version indexes and payloads. History is kept for audit, as
+/// delete keeps it. Ownership, shares and asset-group membership live
+/// elsewhere (`prune_replaced_memberships`).
 #[maybe_async::maybe_async]
 async fn purge_resource_in(view: &dyn storage::Storage, name: &str) -> Result<(), RvError> {
     view.delete(&format!("{META_PREFIX}{name}")).await?;
-    for prefix in [SECRET_PREFIX, SMETA_PREFIX, HIST_PREFIX] {
+    for prefix in [SECRET_PREFIX, SMETA_PREFIX] {
         let prefix = format!("{prefix}{name}/");
         for k in view.list(&prefix).await? {
             view.delete(&format!("{prefix}{k}")).await?;
@@ -1447,6 +1457,32 @@ async fn purge_resource_in(view: &dyn storage::Storage, name: &str) -> Result<()
     Ok(())
 }
 
+/// Write a history entry at `seq`, or the next free key after it, and
+/// return the key used. History is an audit trail: an existing entry is
+/// never overwritten, and an identical one (the same origin entry imported
+/// before) is left as it is.
+#[maybe_async::maybe_async]
+async fn put_history_entry(
+    view: &dyn storage::Storage,
+    name: &str,
+    seq: u128,
+    entry: &ResourceHistoryEntry,
+) -> Result<u128, RvError> {
+    let value = serde_json::to_vec(entry)?;
+    let mut seq = seq;
+    loop {
+        let key = format!("{HIST_PREFIX}{name}/{seq:020}");
+        match view.get(&key).await? {
+            None => {
+                view.put(&StorageEntry { key, value }).await?;
+                return Ok(seq);
+            }
+            Some(existing) if existing.value == value => return Ok(seq),
+            Some(_) => seq += 1,
+        }
+    }
+}
+
 /// `put` a value that carries secret material, then scrub this process's
 /// copy of the serialised bytes.
 #[maybe_async::maybe_async]
@@ -1457,7 +1493,8 @@ async fn put_scrubbed(view: &dyn storage::Storage, key: String, value: Vec<u8>) 
     result
 }
 
-/// Write a planned import: replaced data out, then every secret with all
+/// Write a planned import: replaced data out (after a `delete` history
+/// entry, as delete writes one), then every secret with all
 /// its versions, then the origin's history and a `transfer-in` entry, and
 /// `meta/` last. An import that fails partway therefore leaves no record (a
 /// listing never shows a half-written resource), and a retry sees the
@@ -1471,7 +1508,16 @@ async fn apply_resource_import(
     let ResourceImportPlan { name, replaces, history_seq, bundle } = plan;
     let ResourceBundle { mut meta, secrets, history, origin, origin_owner, .. } = bundle;
 
+    // An overwrite is a delete first: its history entry, then the data.
+    let mut last_seq = 0;
     for old in &replaces {
+        let delete = ResourceHistoryEntry {
+            ts: now_rfc3339(),
+            user: user.to_string(),
+            op: "delete".to_string(),
+            changed_fields: Vec::new(),
+        };
+        last_seq = last_seq.max(put_history_entry(view, old, now_nanos(), &delete).await?);
         purge_resource_in(view, old).await?;
     }
 
@@ -1512,8 +1558,7 @@ async fn apply_resource_import(
     }
 
     for (seq, entry) in history_seq.iter().zip(&history) {
-        let key = format!("{HIST_PREFIX}{name}/{seq:020}");
-        view.put(&StorageEntry { key, value: serde_json::to_vec(entry)? }).await?;
+        last_seq = last_seq.max(put_history_entry(view, &name, *seq, entry).await?);
     }
     let mut changed_fields = vec![format!("origin: {origin}"), format!("origin_owner: {origin_owner}")];
     changed_fields.extend(replaces.iter().map(|r| format!("replaced: {r}")));
@@ -1523,9 +1568,7 @@ async fn apply_resource_import(
         op: "transfer-in".to_string(),
         changed_fields,
     };
-    let arrival_seq = history_seq.iter().max().map_or(0, |m| m + 1).max(now_nanos());
-    let key = format!("{HIST_PREFIX}{name}/{arrival_seq:020}");
-    view.put(&StorageEntry { key, value: serde_json::to_vec(&arrival)? }).await?;
+    put_history_entry(view, &name, (last_seq + 1).max(now_nanos()), &arrival).await?;
 
     meta.insert("name".to_string(), Value::String(name.clone()));
     view.put(&StorageEntry { key: format!("{META_PREFIX}{name}"), value: serde_json::to_vec(&meta)? }).await?;
@@ -2132,6 +2175,7 @@ impl ResourceBackendInner {
 
         let plan = plan_resource_import(storage.as_ref(), &raw, bundle).await?;
         self.check_import_write_gates(req, &plan).await?;
+        self.prune_replaced_memberships(req, &plan).await?;
 
         // Names, counts and the origin path only: never a secret value.
         let origin = plan.bundle.origin.clone();
@@ -2178,22 +2222,49 @@ impl ResourceBackendInner {
                 .map_err(agent_refusal_error)?;
         }
 
-        let static_credential =
-            plan.bundle.secrets.iter().find(|s| s.current_data().is_some_and(static_ssh_credential_shape));
-        if let Some(secret) = static_credential {
-            let eff = self.resolve_login_class_for_type(req, &plan.name, type_id).await?;
+        if let Some((key, version)) = first_static_credential(&plan.bundle) {
+            let eff = if plan.replaces.is_empty() {
+                self.resolve_login_class_for_type(req, &plan.name, type_id).await?
+            } else {
+                // Overwrite prunes the replaced name's asset-group
+                // memberships before writing, so judge without them.
+                match self.core.login_class() {
+                    Some(policy) => policy.resolve_for(type_id, &[], &plan.name).await?,
+                    None => LoginClassVerdict::default(),
+                }
+            };
             if eff.brokered {
                 return Err(bv_error_response_status!(
                     409,
                     &format!(
                         "brokered_resource_no_static_credential: resource `{}` is brokered in this \
-                         namespace (login_class via tier `{}`); secret `{}` carries a static SSH \
-                         credential, which may not be attached. Bind an `ssh-engine` credential \
-                         source instead.",
-                        plan.name, eff.source, secret.key
+                         namespace (login_class via tier `{}`); secret `{key}` version {version} carries \
+                         a static SSH credential, which may not be attached. Bind an `ssh-engine` \
+                         credential source instead.",
+                        plan.name, eff.source
                     )
                 ));
             }
+        }
+        Ok(())
+    }
+
+    /// Drop every asset-group membership of the names an overwrite replaces,
+    /// as `handle_resource_delete` does, so the imported content does not
+    /// inherit the old resource's group-based access. Unlike delete, a
+    /// failure refuses the import: the content would otherwise go live
+    /// under the stale memberships.
+    async fn prune_replaced_memberships(&self, req: &Request, plan: &ResourceImportPlan) -> Result<(), RvError> {
+        let Some(groups) = self.core.resource_groups() else {
+            return Ok(());
+        };
+        for old in &plan.replaces {
+            groups.prune_resource(old, req.namespace_path.as_deref()).await.map_err(|e| {
+                bv_error_response_status!(
+                    500,
+                    &format!("overwrite refused: could not remove '{old}' from its asset groups: {e}")
+                )
+            })?;
         }
         Ok(())
     }
@@ -2833,19 +2904,22 @@ mod tests {
         mem.seed("sver/srv1/old-key/1", json!({"data": {"password": "old"}, "version": 1}));
         mem.seed("hist/srv1/00000000000000000001", json!({"ts": "t", "user": "u", "op": "create"}));
 
-        // Overwrite: nothing of the replaced resource survives under the name.
+        // Overwrite: none of the replaced resource's data survives under the
+        // name, but its history does, as after a delete, closed by a
+        // `delete` entry.
         let summary = import(&mem, "srv1", with(bundle(), "/on_conflict", json!("overwrite"))).await.unwrap();
         assert_eq!(summary.name, "srv1");
-        for gone in
-            ["secret/srv1/old-key", "smeta/srv1/old-key", "sver/srv1/old-key/1", "hist/srv1/00000000000000000001"]
-        {
+        for gone in ["secret/srv1/old-key", "smeta/srv1/old-key", "sver/srv1/old-key/1"] {
             assert!(!mem.has(gone), "{gone} survived the overwrite");
         }
         assert_eq!(mem.json("meta/srv1")["hostname"], "h1");
         assert_eq!(mem.json("secret/srv1/admin"), json!({"password": "v2-S3CRET"}));
         let hist = timeline(&mem, "srv1");
-        assert_eq!(hist.len(), 3);
-        assert_eq!(hist[2].op, "transfer-in");
+        let ops: Vec<&str> = hist.iter().map(|h| h.op.as_str()).collect();
+        assert_eq!(ops, ["create", "create", "update", "delete", "transfer-in"], "{hist:?}");
+        assert_eq!((hist[0].user.as_str(), hist[0].ts.as_str()), ("u", "t"), "the replaced resource's entry is kept");
+        assert_eq!(hist[3].user, "carol", "the delete is the importer's");
+        assert!(hist[4].changed_fields.contains(&"replaced: srv1".to_string()), "{:?}", hist[4]);
         let replaced = mem.snapshot();
 
         // Rename: the first free `<name>-<n>`, the existing record untouched.
@@ -2901,6 +2975,31 @@ mod tests {
             assert_eq!(status(import(&mem, "srv1", body).await), 400, "{what}");
             assert!(mem.snapshot().is_empty(), "{what}: a refused import writes nothing");
         }
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn import_never_overwrites_an_existing_history_entry() {
+        // An entry already stored at the key an imported entry would take
+        // (2025-01-01T00:00:00Z in nanoseconds) is an audit record: kept, and
+        // the imported entry moves to the next free key.
+        let mem = MemStorage::default();
+        let taken = "hist/srv1/01735689600000000000";
+        mem.seed(taken, json!({"ts": "x", "user": "earlier", "op": "delete", "changed_fields": []}));
+        import(&mem, "srv1", bundle()).await.unwrap();
+        assert_eq!(mem.json(taken)["user"], "earlier");
+        assert_eq!(mem.json("hist/srv1/01735689600000000001")["user"], "alice");
+    }
+
+    #[test]
+    fn import_finds_static_credential_in_any_version() {
+        // Only the first version holds a password; the live one does not.
+        let body = with(bundle(), "/secrets/0/versions/1/data", json!({"token": "t"}));
+        let bundle = parse_resource_bundle(body.as_object().unwrap()).ok().unwrap();
+        assert_eq!(first_static_credential(&bundle), Some(("admin", 1)));
+
+        let body = with(body, "/secrets/0/versions/0/data", json!({"username": "u"}));
+        let bundle = parse_resource_bundle(body.as_object().unwrap()).ok().unwrap();
+        assert_eq!(first_static_credential(&bundle), None);
     }
 
     #[test]

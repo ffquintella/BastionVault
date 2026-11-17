@@ -936,3 +936,79 @@ mod type_config_namespace_fallback_tests {
         assert_eq!(e["types"], json!({}));
     }
 }
+
+/// `resources/v2/transfer/import/<name>` through the whole vault: the
+/// write-time gates that need the ssh-broker and resource-group modules.
+/// The bundle handling itself is tested in the engine crate.
+mod transfer_import_tests {
+    use serde_json::{json, Map, Value};
+
+    use crate::{
+        errors::RvError,
+        test_utils::{new_unseal_test_bastion_vault, test_read_api, test_write_api},
+    };
+
+    fn version(n: u64, data: Value) -> Value {
+        json!({ "version": n, "created_time": "2025-01-01T00:00:00Z", "deleted": false, "data": data })
+    }
+
+    fn bundle(resource_type: &str, versions: Vec<Value>, on_conflict: &str) -> Option<Map<String, Value>> {
+        json!({
+            "meta": { "type": resource_type, "hostname": "h.example" },
+            "secrets": [{ "key": "login", "current": versions.len(), "versions": versions }],
+            "history": [],
+            "on_conflict": on_conflict,
+            "origin": "origin-ns/resources/x",
+            "origin_owner": ""
+        })
+        .as_object()
+        .cloned()
+    }
+
+    /// A brokered resource may not carry a static SSH credential in *any*
+    /// version: an old one stays readable at
+    /// `secrets/<name>/<key>/version/<n>`.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_import_refuses_static_credential_in_older_version_on_brokered_type() {
+        let (_bvault, core, root) = new_unseal_test_bastion_vault("test_import_refuses_static_old_version").await;
+        let policy = json!({ "login_class": "brokered" }).as_object().cloned();
+        test_write_api(&core, &root, "ssh-broker/policy/type/database", true, policy).await.unwrap();
+
+        // Only v1 holds a password; the live v2 is clean.
+        let versions = vec![version(1, json!({ "password": "old-S3CRET" })), version(2, json!({ "username": "u" }))];
+        let body = bundle("database", versions, "");
+        let err = test_write_api(&core, &root, "resources/v2/transfer/import/db01", false, body).await.unwrap_err();
+        let RvError::ErrResponseStatus(409, message) = &err else { panic!("expected 409, got {err:?}") };
+        assert!(message.contains("brokered_resource_no_static_credential"), "{message}");
+        assert!(message.contains("`login`") && message.contains("version 1"), "names key and version: {message}");
+        assert!(!message.contains("old-S3CRET"), "never the value: {message}");
+
+        // Refused before anything was written.
+        assert!(test_read_api(&core, &root, "resources/resources/db01", true).await.unwrap().is_none());
+        assert!(test_read_api(&core, &root, "resources/secrets/db01/login", true).await.unwrap().is_none());
+    }
+
+    /// Overwrite drops the replaced resource's asset-group membership, as a
+    /// delete does, and judges the imported content without it: the old
+    /// membership's brokered policy neither carries over nor blocks it.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_import_overwrite_prunes_asset_group_membership() {
+        let (_bvault, core, root) = new_unseal_test_bastion_vault("test_import_overwrite_prunes_groups").await;
+        let meta = json!({ "name": "srv1", "type": "server" }).as_object().cloned();
+        test_write_api(&core, &root, "resources/resources/srv1", true, meta).await.unwrap();
+        let group = json!({ "members": "srv1" }).as_object().cloned();
+        test_write_api(&core, &root, "resource-group/groups/alpha", true, group).await.unwrap();
+        let policy = json!({ "login_class": "brokered" }).as_object().cloned();
+        test_write_api(&core, &root, "ssh-broker/policy/asset-group/alpha", true, policy).await.unwrap();
+        let resp = test_read_api(&core, &root, "resource-group/by-resource/srv1", true).await.unwrap().unwrap();
+        assert_eq!(resp.data.unwrap()["groups"], json!(["alpha"]), "precondition: srv1 is in alpha");
+
+        let body = bundle("server", vec![version(1, json!({ "password": "p" }))], "overwrite");
+        test_write_api(&core, &root, "resources/v2/transfer/import/srv1", true, body).await.unwrap();
+
+        let resp = test_read_api(&core, &root, "resource-group/by-resource/srv1", true).await.unwrap().unwrap();
+        assert_eq!(resp.data.unwrap()["groups"], json!([] as [String; 0]), "membership pruned");
+        let resp = test_read_api(&core, &root, "resources/secrets/srv1/login", true).await.unwrap().unwrap();
+        assert_eq!(resp.data.unwrap()["password"], json!("p"));
+    }
+}
