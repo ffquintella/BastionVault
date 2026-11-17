@@ -90,9 +90,11 @@ export function TransferToNamespaceModal({
   const [ackOverwrite, setAckOverwrite] = useState(false);
 
   // The list may arrive after the first render; keep the destination valid.
+  // A destination that moves under a checked plan makes that plan stale.
   useEffect(() => {
     if (namespaces.length > 0 && !namespaces.includes(destNs)) {
       setDestNs(namespaces.find((n) => n !== namespace) ?? namespaces[0]);
+      invalidate();
     }
   }, [namespaces, destNs, namespace]);
 
@@ -108,15 +110,20 @@ export function TransferToNamespaceModal({
     samePath(destPath, path);
   const incomplete = destMount.trim() === "" || destPath.trim() === "";
 
-  /** Any edit makes a checked plan stale: back to the form, acks cleared. */
+  /** A checked plan is stale: back to the form, acks cleared. */
+  function invalidate() {
+    setPlan(null);
+    setAckDelete(false);
+    setAckOverwrite(false);
+    setError(null);
+    setPhase((p) => (p === "checked" ? "form" : p));
+  }
+
+  /** Any edit of the request invalidates a checked plan. */
   function edit<T>(set: (v: T) => void) {
     return (v: T) => {
       set(v);
-      setPlan(null);
-      setAckDelete(false);
-      setAckOverwrite(false);
-      setError(null);
-      if (phase === "checked") setPhase("form");
+      invalidate();
     };
   }
 

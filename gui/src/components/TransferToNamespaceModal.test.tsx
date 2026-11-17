@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 const mockInvoke = vi.fn();
@@ -387,6 +387,55 @@ describe("TransferToNamespaceModal", () => {
     expect(run).toBeDisabled();
     expect(screen.getByRole("checkbox", { name: /source will be deleted/i })).not.toBeChecked();
     expect(dryRunOf(mockInvoke.mock.calls[2])).toBe(true);
+  });
+
+  it("a namespace list change that drops the destination invalidates the checked plan", async () => {
+    answerWithPlan();
+    setup();
+    await chooseDestination("team-b");
+    await userEvent.click(screen.getByRole("radio", { name: "Move" }));
+    await userEvent.selectOptions(screen.getByLabelText("If the destination exists"), "overwrite");
+    await check();
+    await screen.findByRole("button", { name: "Move now" });
+    await userEvent.click(screen.getByRole("checkbox", { name: /source will be deleted/i }));
+    await userEvent.click(screen.getByRole("checkbox", { name: OVERWRITE_ACK }));
+    expect(screen.getByRole("button", { name: "Move now" })).toBeEnabled();
+
+    // team-b disappears from the session's namespaces: the destination moves.
+    act(() => {
+      useNamespaceStore.setState({ namespaces: ["", "team-a"] });
+    });
+    await waitFor(() => expect(screen.getByLabelText("Destination namespace")).toHaveValue(""));
+    expect(screen.queryByRole("button", { name: "Move now" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Check result/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Check" })).toBeEnabled();
+
+    await check();
+    await screen.findByRole("button", { name: "Move now" });
+    expect(screen.getByRole("checkbox", { name: /source will be deleted/i })).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: OVERWRITE_ACK })).not.toBeChecked();
+  });
+
+  it("a failed real run clears the overwrite acknowledgement too", async () => {
+    mockInvoke
+      .mockResolvedValueOnce(PLAN_NO_SHARES)
+      .mockRejectedValueOnce({ message: "the destination refused the import" })
+      .mockResolvedValueOnce(PLAN_NO_SHARES);
+    setup();
+    await chooseDestination();
+    await userEvent.selectOptions(screen.getByLabelText("If the destination exists"), "overwrite");
+    await check();
+    await screen.findByRole("button", { name: "Copy now" });
+    await userEvent.click(screen.getByRole("checkbox", { name: OVERWRITE_ACK }));
+    await userEvent.click(screen.getByRole("button", { name: "Copy now" }));
+    await screen.findByRole("alert");
+    expect(screen.queryByRole("button", { name: "Copy now" })).not.toBeInTheDocument();
+
+    await check();
+    const run = await screen.findByRole("button", { name: "Copy now" });
+    expect(run).toBeDisabled();
+    expect(screen.getByRole("checkbox", { name: OVERWRITE_ACK })).not.toBeChecked();
   });
 
   it("uses_a_fixed_title_that_does_not_embed_the_path", () => {

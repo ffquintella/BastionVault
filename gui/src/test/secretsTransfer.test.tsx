@@ -176,6 +176,21 @@ describe("Secrets page: transfer a KV secret", () => {
     expect(await screen.findByText("No secret selected")).toBeInTheDocument();
   });
 
+  it("sends nothing and offers no transfer once the page leaves the mount's own path", async () => {
+    mockVault([{ path: "team/kv/", mount_type: "kv-v2" }], {
+      "team/kv/": ["a/"],
+      "team/kv/a/": ["c"],
+    });
+    renderPage();
+    const button = await select(["a/"], "c");
+    // The action row wraps instead of overflowing the detail card.
+    expect(button.parentElement).toHaveClass("flex-wrap");
+    // A breadcrumb above the mount's own path.
+    await userEvent.click(screen.getByText("team"));
+    await waitFor(() => expect(screen.queryByRole("button", { name: BUTTON })).not.toBeInTheDocument());
+    expect(transferCalls()).toEqual([]);
+  });
+
   it("keeps the secret selected after a copy", async () => {
     mockVault([{ path: "secret/", mount_type: "kv-v2" }], { "secret/": ["app"] });
     renderPage();

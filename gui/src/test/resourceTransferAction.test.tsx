@@ -76,6 +76,8 @@ describe("Info tab Copy / Move to namespace", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Edit" })).toBeDisabled());
     expect(button).toBeEnabled();
     expect(button.getAttribute("title")).toMatch(/moving .*delete/i);
+    // The four-button action row wraps instead of overflowing a narrow card.
+    expect(button.parentElement).toHaveClass("flex-wrap");
   });
 
   it("adds no hint for a viewer who can write", async () => {

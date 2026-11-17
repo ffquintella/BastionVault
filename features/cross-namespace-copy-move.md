@@ -205,6 +205,8 @@ cleans up its owner, shares and groups) and imports again.
 
 ## Known limits
 
+- **KV v1 mounts are not carried**: the transfer takes kv-v2 mounts only (the
+  GUI disables the action on a v1 mount).
 - Fixed by T504: a deny written as `<mount>/data/<path>` now refuses a KV
   import of `<path>`, as it refuses every KV v2 route to that secret.
 

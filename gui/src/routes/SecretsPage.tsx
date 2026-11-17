@@ -848,7 +848,7 @@ export function SecretsPage() {
                         hint="Full namespace-qualified path — paste into a policy path stanza."
                       />
                     )}
-                    <div className="flex gap-2 pt-2">
+                    <div className="flex flex-wrap gap-2 pt-2">
                       <Button size="sm" onClick={startEdit}>
                         Edit
                       </Button>

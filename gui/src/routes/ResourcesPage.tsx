@@ -1493,7 +1493,7 @@ function ResourceInfoCard({ resource, typeDef, onUpdate, onDelete, onRenamed, on
   if (!editing) {
     return (
       <Card actions={
-        <div className="flex gap-2">
+        <div className="flex flex-wrap justify-end gap-2">
           <Button size="sm" variant="ghost" disabled={readOnly} title={readOnly ? readOnlyTitle : undefined} onClick={() => { setForm({ ...resource }); setEditing(true); }}>Edit</Button>
           <Button size="sm" variant="ghost" disabled={readOnly} title={readOnly ? readOnlyTitle : undefined} onClick={() => setRenaming(true)}>Rename</Button>
           <Button size="sm" variant="ghost" disabled={!canTransfer} title={canTransfer ? (readOnly ? "Copy needs read access only. Moving also deletes the source, which needs delete rights you may not have." : undefined) : "No other namespace is available to this session."} onClick={onTransfer}>Copy / Move to namespace</Button>
