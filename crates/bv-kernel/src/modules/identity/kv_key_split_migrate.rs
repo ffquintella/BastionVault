@@ -2,8 +2,8 @@
 //!
 //! Before T499 a KV key was canonicalized twice, so `x` and `data/x` (and the
 //! secrets of a namespace or mount named `data`) shared one record. For each
-//! existing secret whose new key differs, the record its old key held is
-//! copied to the new key, so no secret changes hands; then the asset-group
+//! existing secret whose new key differs, its new key is made to hold exactly
+//! what its old key held, so no secret changes hands; then the asset-group
 //! secret indexes, which had the same bug, are rebuilt from the group records.
 
 use std::collections::HashSet;
@@ -21,19 +21,17 @@ use crate::{
         },
         namespace::{
             router::{namespace_logical_prefix, namespace_mount_config_path},
-            store::{NamespaceStore, NAMESPACE_REGISTRY_PREFIX},
+            store::NamespaceStore,
         },
         resource_group::{group_store::scope_of, ResourceGroupModule},
     },
     mount::MountTable,
-    storage::{Storage, StorageEntry},
+    storage::Storage,
 };
 
-/// Datafix version; a bumped value runs the pass again on the next unseal.
-pub const KV_KEY_SPLIT_VERSION: u32 = 1;
-/// Registry keys (under [`NAMESPACE_REGISTRY_PREFIX`]): the completed version,
-/// and the plan of a pass that has not finished yet.
-const MARKER_KEY: &str = "kv-key-split-version";
+pub use super::owner_store::KV_KEY_SPLIT_VERSION;
+
+/// The plan of a pass that has not finished yet, under `sys/owner/meta/`.
 const PLAN_KEY: &str = "kv-key-split-plan";
 /// Actor recorded on the share history rows the datafix writes.
 const ACTOR: &str = "kv-key-split-datafix";
@@ -47,8 +45,12 @@ pub struct KvKeySplitReport {
     /// Shares written under a secret's new key, or dropped from it.
     pub shares_copied: usize,
     pub shares_dropped: usize,
-    /// New keys that already held a record of their own: kept, and logged.
-    pub conflicts: usize,
+    /// New keys whose record or shares differed from the old key's and were
+    /// replaced by them (each logged, key names only).
+    pub replaced: usize,
+    /// Moved secrets whose old key is another live secret's key: the two
+    /// shared one record before T499 (each pair logged, key names only).
+    pub shared_pairs: usize,
     /// Asset-group scopes whose indexes were rebuilt.
     pub scopes_reindexed: usize,
     /// True when the marker was already set and nothing was done.
@@ -71,10 +73,6 @@ struct Plan {
     owners: Vec<(String, Option<OwnerRecord>)>,
     /// `(new key, shares to write, (grantee kind, grantee) to drop)`.
     shares: Vec<(String, Vec<SecretShare>, Vec<(String, String)>)>,
-}
-
-fn registry_key(leaf: &str) -> String {
-    format!("{NAMESPACE_REGISTRY_PREFIX}{leaf}")
 }
 
 /// One KV mount: router key (namespace prefix included), engine, the
@@ -103,6 +101,8 @@ impl KvMount {
 }
 
 /// Every `kv` and `kv-v2` mount of every namespace, from the stored tables.
+/// A namespace without a table has no mounts; any other failure to read one
+/// fails the pass, so no namespace's secrets are skipped unseen.
 async fn kv_mounts(core: &crate::core::Core, ns_store: &NamespaceStore) -> Result<Vec<KvMount>, RvError> {
     let barrier = core.barrier();
     let storage = barrier.as_storage();
@@ -116,9 +116,13 @@ async fn kv_mounts(core: &crate::core::Core, ns_store: &NamespaceStore) -> Resul
             (namespace_mount_config_path(&ns.uuid), namespace_logical_prefix(&ns.uuid), router_prefix)
         };
         let table = MountTable::new(&config_path);
-        // An absent table means the namespace has no mounts yet.
-        if table.load(storage, Some(&hmac_key), core.mount_entry_hmac_level()).await.is_err() {
-            continue;
+        match table.load(storage, Some(&hmac_key), core.mount_entry_hmac_level()).await {
+            Ok(_) => {}
+            Err(RvError::ErrConfigLoadFailed) => continue,
+            Err(e) => {
+                log::warn!(target: "migration", "kv key split: the mount table of namespace {:?} is unreadable", ns.path);
+                return Err(e);
+            }
         }
         let kv: Vec<(String, String, bool)> = {
             let entries = table.entries.read()?;
@@ -180,17 +184,39 @@ async fn changed_names(storage: &dyn Storage, mount: &KvMount) -> Result<Vec<Str
     Ok(names.into_iter().filter(|n| mount.keys(n).0.as_deref() != Some(mount.keys(n).1.as_str())).collect())
 }
 
-/// Every existing secret whose key changes, across all KV mounts.
-async fn moves(core: &crate::core::Core) -> Result<Vec<Move>, RvError> {
+/// Whether `key` is the key of a secret that exists: the mount with the
+/// longest router key it starts with holds a secret of the remaining name.
+async fn is_live(storage: &dyn Storage, mounts: &[KvMount], key: &str) -> Result<bool, RvError> {
+    let mount = mounts.iter().filter(|m| key.starts_with(&m.router_key)).max_by_key(|m| m.router_key.len());
+    let Some(mount) = mount else {
+        return Ok(false);
+    };
+    let name = &key[mount.router_key.len()..];
+    Ok(!name.is_empty() && storage.get(&format!("{}{name}", mount.secrets_prefix)).await?.is_some())
+}
+
+/// Every existing secret whose key changes, across all KV mounts. A pair of
+/// secrets that shared one record (the old key is a live secret's key) is
+/// logged by key names, so operators can review who owns them.
+async fn moves(core: &crate::core::Core, report: &mut KvKeySplitReport) -> Result<Vec<Move>, RvError> {
     let ns_store = NamespaceStore::new(core)?;
     let barrier = core.barrier();
     let storage = barrier.as_storage();
+    let mounts = kv_mounts(core, &ns_store).await?;
     let mut out = Vec::new();
-    for mount in kv_mounts(core, &ns_store).await? {
-        for name in changed_names(storage, &mount).await? {
+    for mount in &mounts {
+        for name in changed_names(storage, mount).await? {
             let (Some(old), new) = mount.keys(&name) else {
                 continue;
             };
+            if is_live(storage, &mounts, &old).await? {
+                report.shared_pairs += 1;
+                log::warn!(
+                    target: "migration",
+                    "kv key split: {new:?} and {old:?} shared one owner and share record before T499; \
+                     each keeps it, review who owns them"
+                );
+            }
             out.push(Move { old, new });
         }
     }
@@ -198,40 +224,39 @@ async fn moves(core: &crate::core::Core) -> Result<Vec<Move>, RvError> {
 }
 
 /// The writes that leave every moved secret with exactly what its old key
-/// held. A new key that already holds a record and is no other secret's old
-/// key is a record of its own (written since, or by another route): kept.
+/// held, read from one snapshot before anything is written. A different
+/// record already at a new key was never written by this release's keys
+/// while the switch was off (a stale claim, a deleted nested secret's old
+/// key): the old key's wins, and the replacement is logged.
 async fn build_plan(
     moves: &[Move],
     owners: &OwnerStore,
     shares: &ShareStore,
     report: &mut KvKeySplitReport,
 ) -> Result<Plan, RvError> {
-    let old_keys: HashSet<&str> = moves.iter().map(|m| m.old.as_str()).collect();
     let mut plan = Plan::default();
     for m in moves {
-        let shared_slot = old_keys.contains(m.new.as_str());
         let from = owners.get_kv_owner(&m.old).await?;
         let at = owners.get_kv_owner(&m.new).await?;
-        if at.is_some() && !shared_slot {
-            report.conflicts += 1;
-            log::warn!(target: "migration", "kv key split: {:?} already has an owner record; kept", m.new);
-        } else if from.is_some() || at.is_some() {
+        let (from_id, at_id) = (from.as_ref().map(|r| &r.entity_id), at.as_ref().map(|r| &r.entity_id));
+        if from_id != at_id {
+            if at.is_some() {
+                report.replaced += 1;
+                log::warn!(target: "migration", "kv key split: the owner record at {:?} replaced by {:?}'s", m.new, m.old);
+            }
             plan.owners.push((m.new.clone(), from));
         }
 
         let from = shares.list_shares_for_target(ShareTargetKind::KvSecret, &m.old).await?;
         let at = shares.list_shares_for_target(ShareTargetKind::KvSecret, &m.new).await?;
-        if !at.is_empty() && !shared_slot {
-            report.conflicts += 1;
-            log::warn!(target: "migration", "kv key split: {:?} already has shares; kept", m.new);
-        } else if !from.is_empty() || !at.is_empty() {
-            let keep: HashSet<(&str, &str)> =
-                from.iter().map(|s| (s.grantee_kind.as_str(), s.grantee_entity_id.as_str())).collect();
-            let drop = at
-                .iter()
-                .filter(|s| !keep.contains(&(s.grantee_kind.as_str(), s.grantee_entity_id.as_str())))
-                .map(|s| (s.grantee_kind.clone(), s.grantee_entity_id.clone()))
-                .collect();
+        let grantee = |s: &SecretShare| (s.grantee_kind.clone(), s.grantee_entity_id.clone());
+        let keep: HashSet<(String, String)> = from.iter().map(grantee).collect();
+        let drop: Vec<(String, String)> = at.iter().map(grantee).filter(|g| !keep.contains(g)).collect();
+        if !from.is_empty() || !drop.is_empty() {
+            if !drop.is_empty() {
+                report.replaced += 1;
+                log::warn!(target: "migration", "kv key split: the shares at {:?} replaced by {:?}'s", m.new, m.old);
+            }
             plan.shares.push((m.new.clone(), from, drop));
         }
     }
@@ -257,7 +282,6 @@ async fn apply(
         }
     }
     for (key, copy, drop) in &plan.shares {
-        report.shares_copied += shares.copy_shares_to(ShareTargetKind::KvSecret, copy, key, ACTOR).await?;
         for (grantee_kind, grantee) in drop {
             let kind = ShareGranteeKind::parse(grantee_kind).unwrap_or(ShareGranteeKind::Entity);
             shares
@@ -265,12 +289,14 @@ async fn apply(
                 .await?;
             report.shares_dropped += 1;
         }
+        report.shares_copied += shares.copy_shares_to(ShareTargetKind::KvSecret, copy, key, ACTOR).await?;
     }
     Ok(())
 }
 
-/// Rebuild the asset-group indexes of every scope: they filed a member under
-/// a second canonicalization of its path, which the group records never did.
+/// Rebuild the asset-group indexes of every scope that has groups: they filed
+/// a member under a second canonicalization of its path, which the group
+/// records never did.
 async fn reindex_asset_groups(core: &crate::core::Core) -> Result<usize, RvError> {
     let module = core.module_manager().get_module::<ResourceGroupModule>("resource-group");
     let Some(store) = module.and_then(|m| m.store()) else {
@@ -288,10 +314,10 @@ async fn reindex_asset_groups(core: &crate::core::Core) -> Result<usize, RvError
     Ok(scopes)
 }
 
-/// Run the datafix unless it has run; until it completes, KV keys keep their
-/// pre-T499 form (`OwnerStore::kv_keys_split` stays false), so records keep
-/// resolving. Called from `Core::post_unseal` after module init; an error is
-/// logged there and the pass retries on the next unseal.
+/// Run the datafix unless its replicated marker is set; until it is, KV keys
+/// keep their pre-T499 form on every node, so records keep resolving. Called
+/// from `Core::post_unseal` on every node after module init; an error is
+/// logged there and the pass retries on the next unseal, marker unset.
 pub async fn run_if_needed(core: &crate::core::Core) -> Result<KvKeySplitReport, RvError> {
     let mut report = KvKeySplitReport::default();
     let identity = core.module_manager().get_module::<IdentityModule>("identity");
@@ -299,42 +325,40 @@ pub async fn run_if_needed(core: &crate::core::Core) -> Result<KvKeySplitReport,
     let owners = identity.owner_store().ok_or_else(|| crate::bv_error_string!("kv key split: no owner store"))?;
     let shares = identity.share_store().ok_or_else(|| crate::bv_error_string!("kv key split: no share store"))?;
 
-    let barrier = core.barrier();
-    let storage = barrier.as_storage();
-    let done = match storage.get(&registry_key(MARKER_KEY)).await? {
-        Some(e) => serde_json::from_slice::<u32>(&e.value).unwrap_or(0),
-        None => 0,
-    };
-    if done >= KV_KEY_SPLIT_VERSION {
-        owners.set_kv_keys_split();
+    if owners.kv_keys_split().await {
         report.skipped = true;
         return Ok(report);
     }
 
-    let plan = match storage.get(&registry_key(PLAN_KEY)).await? {
-        Some(e) => serde_json::from_slice::<Plan>(&e.value)?,
+    let plan = match owners.meta_get(PLAN_KEY).await? {
+        Some(raw) => serde_json::from_slice::<Plan>(&raw)?,
         None => {
-            let plan = build_plan(&moves(core).await?, &owners, &shares, &mut report).await?;
-            storage.put(&StorageEntry { key: registry_key(PLAN_KEY), value: serde_json::to_vec(&plan)? }).await?;
+            let plan = build_plan(&moves(core, &mut report).await?, &owners, &shares, &mut report).await?;
+            // Another node may have finished while this one read (HA): no-op.
+            if owners.kv_keys_split().await {
+                report.skipped = true;
+                return Ok(report);
+            }
+            owners.meta_put(PLAN_KEY, serde_json::to_vec(&plan)?).await?;
             plan
         }
     };
     apply(&plan, &owners, &shares, &mut report).await?;
     report.scopes_reindexed = reindex_asset_groups(core).await?;
 
-    let marker = serde_json::to_vec(&KV_KEY_SPLIT_VERSION)?;
-    storage.put(&StorageEntry { key: registry_key(MARKER_KEY), value: marker }).await?;
-    storage.delete(&registry_key(PLAN_KEY)).await?;
-    owners.set_kv_keys_split();
+    owners.mark_kv_keys_split().await?;
+    owners.meta_delete(PLAN_KEY).await?;
     log::info!(target: "migration", "kv key split datafix v{KV_KEY_SPLIT_VERSION} complete: {report:?}");
     Ok(report)
 }
 
-/// Test support: forget that the datafix ran, so a test can plant pre-T499
-/// records and run it. The in-memory switch stays as it is.
+/// Test support: forget that the datafix ran (marker and switch), so a test
+/// can plant pre-T499 records and run it.
 #[cfg(any(test, feature = "test-support"))]
 pub async fn reset_for_test(core: &crate::core::Core) -> Result<(), RvError> {
-    core.barrier().as_storage().delete(&registry_key(MARKER_KEY)).await
+    let identity = core.module_manager().get_module::<IdentityModule>("identity");
+    let owners = identity.and_then(|m| m.owner_store()).ok_or_else(|| crate::bv_error_string!("no owner store"))?;
+    owners.unsplit_kv_keys_for_test().await
 }
 
 #[cfg(test)]

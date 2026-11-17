@@ -571,8 +571,15 @@ another such endpoint:
   drops exactly one sub-command segment, kv none); the owner and share
   stores never transform it again. The owner, share and `sys/kv-owner/*`
   endpoints take `<mount>/<name>` verbatim. A marker-guarded datafix
-  (`identity/kv_key_split_migrate.rs`) copies each moved secret's old
-  record and shares to its new key on the first unseal after upgrade.
+  (`identity/kv_key_split_migrate.rs`) gives each moved secret exactly its
+  old key's record and shares on the first unseal after upgrade.
+- **Ambiguous KV names are refused (T499).** An empty or `..` segment,
+  surrounding whitespace, or a trailing `/` on a non-list request: 400,
+  so no key is ever derived from a name the engine stores differently.
+- **The datafix's marker is replicated** (`sys/owner/meta/`) and read
+  lazily, so every node switches when one finishes. Downgrading after it
+  ran is unsupported: it overwrote some old keys, and an older release's
+  records are never copied again. Pairs that shared a record are logged.
 - **First-write carve-out for the `owner` scope.** A strict "target's
   owner must equal caller" check would make it impossible to create a
   new object under an owner-only policy (no owner exists yet). The

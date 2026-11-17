@@ -3205,15 +3205,19 @@ fn looks_like_kv_path(req_path: &str, ns_path: Option<&str>) -> bool {
 }
 
 /// Whether the T499 datafix has run, so KV keys are `<mount><name>`.
-fn kv_keys_split(core: &Core) -> bool {
+async fn kv_keys_split(core: &Core) -> bool {
     let module = core.module_manager().get_module::<IdentityModule>("identity");
-    module.and_then(|m| m.owner_store()).is_some_and(|s| s.kv_keys_split())
+    match module.and_then(|m| m.owner_store()) {
+        Some(store) => store.kv_keys_split().await,
+        None => false,
+    }
 }
 
 /// The owner and share key of the KV secret `req_path` addresses, derived
-/// once through the mount table (`kv_target::owner_key`, T499).
+/// once through the mount table (`kv_target::owner_key`, T499). `None` for an
+/// ambiguous KV name: no key is derived from it.
 fn kv_key(router: &Router, split: bool, req_path: &str, ns_path: Option<&str>) -> Option<String> {
-    let item = kv_target::resolve(router, req_path).ok().flatten();
+    let item = kv_target::resolve(router, req_path).ok()?;
     kv_target::owner_key(item.as_ref(), req_path, ns_path, split)
 }
 
@@ -3249,7 +3253,7 @@ pub(super) async fn resolve_asset_owner(
     }
     if looks_like_kv_path(req_path, ns_path) {
         // The key `post_route` stamps the owner under (namespace-scoped).
-        if let Some(key) = kv_key(&core.router, store.kv_keys_split(), req_path, ns_path) {
+        if let Some(key) = kv_key(&core.router, store.kv_keys_split().await, req_path, ns_path) {
             if let Ok(Some(rec)) = store.get_kv_owner(&key).await {
                 return rec.entity_id;
             }
@@ -3310,8 +3314,10 @@ pub(super) async fn resolve_target_shared_caps(core: &Weak<Core>, req: &Request)
         }
     }
     // Shares are keyed like owners (see `scope_share_target`).
-    let kv_share_key =
-        looks_like_kv_path(&req.path, ns).then(|| kv_key(&core.router, kv_keys_split(&core), &req.path, ns)).flatten();
+    let kv_share_key = match looks_like_kv_path(&req.path, ns) {
+        true => kv_key(&core.router, kv_keys_split(&core).await, &req.path, ns),
+        false => None,
+    };
     if let Some(key) = &kv_share_key {
         if let Ok(v) = store.shared_capabilities(ShareTargetKind::KvSecret, key, &caller_id).await {
             merge(v);
@@ -3764,8 +3770,9 @@ impl PolicyStore {
 
     /// The other path form of a kv-v2 request whose governing rule denies
     /// (T504): `<mount><name>` and `<mount>data/<name>` name one secret, so a
-    /// deny in either refuses every route to it. Allows are not widened: only
-    /// a probe that comes back `deny` counts. `None` for any other path.
+    /// deny in either refuses every route to it, unless the rule governing the
+    /// request is more specific on the secret's name (Vault's most-specific
+    /// rule, across the forms). Allows are never widened. `None` otherwise.
     pub(crate) fn kv_v2_alias_deny(&self, acl: &ACL, req: &mut Request) -> Result<Option<String>, RvError> {
         if acl.root {
             return Ok(None);
@@ -3774,11 +3781,20 @@ impl PolicyStore {
             return Ok(None);
         };
         let own = req.path.trim_start_matches('/').to_string();
-        for alias in item.deny_aliases().into_iter().filter(|a| *a != own) {
+        let granted = acl.governing_rule_on_name(&own, item.name_at());
+        let list = req.operation == Operation::List;
+        for (alias, name_at) in item.deny_aliases(list).into_iter().filter(|(a, _)| *a != own) {
             let original = std::mem::replace(&mut req.path, alias);
             let probe = acl.allow_operation(req, true);
             let alias = std::mem::replace(&mut req.path, original);
-            if probe?.capabilities_bitmap & Capability::Deny.to_bits() != 0 {
+            if probe?.capabilities_bitmap & Capability::Deny.to_bits() == 0 {
+                continue;
+            }
+            // A deny from a gated or scoped layer, or one that no ungated
+            // grant outranks, refuses (fail closed).
+            let deny = acl.governing_rule_on_name(&alias, name_at);
+            let outranked = matches!((deny, granted), (Some(d), Some(g)) if d.denies && !g.denies && !d.at_least_as_specific_as(&g));
+            if !outranked {
                 return Ok(Some(alias));
             }
         }
@@ -3798,6 +3814,15 @@ impl PolicyStore {
     /// authentication results. `import_route` is the transfer import route a
     /// request was addressed to when `req.path` holds the item it writes.
     async fn authorize_request(&self, req: &mut Request, import_route: Option<&str>) -> Result<(), RvError> {
+        // A KV name with an empty segment, or a trailing `/` on anything but a
+        // list, would be keyed as another secret: refused for every caller,
+        // before any key is derived from it (T499).
+        if let Some(item) = kv_target::resolve(&self.router, &req.path)? {
+            if item.folder() && req.operation != Operation::List {
+                return Err(kv_target::ambiguous());
+            }
+        }
+
         // A root path on either the route or the item demands sudo.
         let is_root_path = self.router.is_root_path(&req.path)?
             || import_route.map(|route| self.router.is_root_path(route)).transpose()?.unwrap_or(false);
@@ -4314,7 +4339,7 @@ impl PolicyStore {
                     if looks_like_kv_path(&req.path, ns) && !caller_id.is_empty() {
                         // Stamp under the key the owner-read, share and ACL
                         // paths look up (namespace-scoped, derived once).
-                        if let Some(key) = kv_key(&self.router, store.kv_keys_split(), &req.path, ns) {
+                        if let Some(key) = kv_key(&self.router, store.kv_keys_split().await, &req.path, ns) {
                             let _ = store.record_kv_owner_if_absent(&key, &caller_id).await;
                         }
                     }
@@ -4340,9 +4365,10 @@ impl PolicyStore {
                     }
                 }
                 Operation::Delete => {
-                    let kv_target_key = looks_like_kv_path(&req.path, ns)
-                        .then(|| kv_key(&self.router, store.kv_keys_split(), &req.path, ns))
-                        .flatten();
+                    let kv_target_key = match looks_like_kv_path(&req.path, ns) {
+                        true => kv_key(&self.router, store.kv_keys_split().await, &req.path, ns),
+                        false => None,
+                    };
                     if let Some(key) = &kv_target_key {
                         let _ = store.forget_kv_owner(key).await;
                     }
@@ -4520,6 +4546,15 @@ impl PolicyStore {
             let asset_groups = resolve_asset_groups(&self.core, path, ns_path).await;
             let asset_owner = resolve_asset_owner(&self.core, path, ns_path, op).await;
 
+            // An ambiguous KV name is refused by `post_auth`; so here.
+            let ambiguous = match kv_target::resolve(&self.router, path) {
+                Ok(item) => item.is_some_and(|i| i.folder() && op != Operation::List),
+                Err(_) => true,
+            };
+            if ambiguous {
+                continue;
+            }
+
             let mut req = Request::default();
             req.path = path.to_string();
             req.operation = op;
@@ -4620,6 +4655,7 @@ async fn filter_list_by_ownership(
 
     let want_owner = filter_scopes.iter().any(|s| s == "owner");
     let want_shared = filter_scopes.iter().any(|s| s == "shared");
+    let split = store.kv_keys_split().await;
 
     let prefix = if list_path.ends_with('/') { list_path.to_string() } else { format!("{list_path}/") };
 
@@ -4639,7 +4675,7 @@ async fn filter_list_by_ownership(
             // listing `secret/` returned nothing, and the grantee had no way
             // to learn `trend/` was worth descending into.
             let full = format!("{prefix}{k}");
-            let dir = match store.kv_keys_split() {
+            let dir = match split {
                 true => kv_key(router, true, &full, ns_path),
                 false => OwnerStore::canonicalize_kv_path_scoped(&full, ns_path),
             };
@@ -4666,7 +4702,7 @@ async fn filter_list_by_ownership(
         }
         let full = format!("{prefix}{k}");
         // The owner/share key of `full`, as `post_route` stamps it.
-        let scoped = kv_key(router, store.kv_keys_split(), &full, ns_path).unwrap_or_default();
+        let scoped = kv_key(router, split, &full, ns_path).unwrap_or_default();
 
         let mut included = false;
 

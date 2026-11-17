@@ -170,3 +170,69 @@ async fn a_kv_import_honours_a_deny_in_the_data_form() {
         assert_eq!(is_denied(&r), want_denied, "import into {dir}/: {r:?}");
     }
 }
+
+/// Vault's most-specific rule decides across the two forms too: a broad deny
+/// in one form does not override a narrower allow in the other, and a deny at
+/// least as specific as the allow still refuses (review fix round 1).
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn specificity_decides_across_the_two_forms() {
+    let (_bvault, core, root) = vault("alias_specificity").await;
+    write(&core, &root, "secret/data/team/x", json!({ "data": { "v": "seed" } })).await;
+    let cases: [(&str, &str, u8, &str, bool); 7] = [
+        // (deny rule, allow rule, api, read path, refused)
+        ("secret/*", "secret/data/team/*", 1, "secret/data/team/x", false),
+        ("secret/*", "secret/data/team/*", 2, "secret/data/team/x", false),
+        ("*", "secret/data/team/*", 1, "secret/data/team/x", false),
+        ("secret/data/*", "secret/team/*", 2, "secret/team/x", false),
+        ("secret/data/team/*", "secret/team/*", 2, "secret/team/x", true),
+        ("secret/team/*", "secret/data/team/*", 1, "secret/data/team/x", true),
+        ("secret/data/team/x", "secret/*", 2, "secret/team/x", true),
+    ];
+    for (i, (deny, allow, api, path, refused)) in cases.into_iter().enumerate() {
+        let hcl = format!(
+            "path \"{deny}\" {{ capabilities = [\"deny\"] }}\npath \"{allow}\" {{ capabilities = [\"read\"] }}\n"
+        );
+        write_policy(&core, &root, &format!("case-{i}"), &hcl).await;
+        let (token, _) = login(&core, &root, &format!("user-{i}"), &format!("case-{i}")).await;
+        let r = send(&core, &token, api, Operation::Read, path, None, json!({})).await;
+        assert_eq!(is_denied(&r), refused, "deny {deny} / allow {allow}: api {api} {path}: {r:?}");
+    }
+}
+
+/// A data-form deny-all also hides the mount-root listing, with or without
+/// its trailing `/`.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn a_data_form_deny_all_refuses_the_root_listing() {
+    let (_bvault, core, root) = vault("deny_all_root_list").await;
+    write_policy(&core, &root, "no-data", r#"path "secret/data/*" { capabilities = ["deny"] }"#).await;
+    let (token, _) = login(&core, &root, "user", "open,no-data").await;
+    for api in [1u8, 2] {
+        for path in ["secret/metadata", "secret/metadata/"] {
+            let r = send(&core, &token, api, Operation::List, path, None, json!({})).await;
+            assert!(is_denied(&r), "api {api} LIST {path}: {r:?}");
+        }
+    }
+}
+
+/// Inside a namespace the two forms carry the namespace prefix.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn a_deny_in_the_data_form_holds_in_a_namespace() {
+    let (_bvault, core, root) = new_unseal_test_bastion_vault("deny_data_form_ns").await;
+    write(&core, &root, "sys/namespaces/tenant", json!({})).await;
+    let ns = Some("tenant");
+    let hcl = r#"
+path "tenant/secret/*" { capabilities = ["create", "read", "update", "delete", "list"] }
+path "tenant/secret/data/prod/*" { capabilities = ["deny"] }
+"#;
+    send(&core, &root, 1, Operation::Write, "sys/policy/ns-p", ns, json!({ "policy": hcl })).await.unwrap();
+    let body = json!({ "policies": ["ns-p"], "ttl": "1h" });
+    let token = send(&core, &root, 1, Operation::Write, "auth/token/create", ns, body).await.unwrap();
+    let token = token.unwrap().auth.unwrap().client_token;
+    let data = json!({ "data": { "v": "w" } });
+    let r = send(&core, &token, 2, Operation::Write, "secret/prod/x", ns, data.clone()).await;
+    assert!(is_denied(&r), "short form under the deny: {r:?}");
+    let r = send(&core, &token, 1, Operation::Read, "secret/metadata/prod/x", ns, json!({})).await;
+    assert!(is_denied(&r), "metadata under the deny: {r:?}");
+    let r = send(&core, &token, 2, Operation::Write, "secret/dev/x", ns, data).await;
+    assert!(r.is_ok(), "outside the deny: {r:?}");
+}

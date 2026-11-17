@@ -875,12 +875,17 @@ For `kv-secret` the target is the secret's logical path `<mount>/<name>`,
 taken verbatim (T499): `secret/data/x` names a secret called `data/x`,
 not `x`. `sys/kv-owner/transfer`, `sys/kv-owner/claim`,
 `identity/owner/kv/<b64>` and `sys/owner/backfill`'s `kv_paths` read
-paths the same way.
+paths the same way. A KV request whose name has an empty or `..` segment,
+surrounding whitespace, or a trailing `/` on anything but a list is
+refused with a 400.
 
 A deny rule on a KV v2 secret applies in either path form (T504):
 `secret/data/<p>` and `secret/<p>` both refuse every route to the secret,
-`metadata/`, `destroy/` and `undelete/` included. Allows still match only
-the form the request uses.
+`metadata/`, `destroy/` and `undelete/` included, unless the rule that
+governs the request is more specific on the secret's name (`deny secret/*`
+with `allow secret/data/team/*` still reads `team/`). Allows still match
+only the form the request uses. A deny on `secret/data/x` also refuses a
+secret literally named `data/x`, whose short form is that path.
 
 ~~~
 GET    /v1/identity/sharing/by-target/{kind}/{target}/{grantee}

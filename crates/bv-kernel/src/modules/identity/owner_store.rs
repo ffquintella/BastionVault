@@ -42,6 +42,12 @@ const FILE_OWNER_SUB_PATH: &str = "owner/file/";
 /// blob cannot be confused for one another when they never share a view.
 const NS_RESOURCE_OWNER_SUB_PATH: &str = "owner/ns-resource/";
 const NS_FILE_OWNER_SUB_PATH: &str = "owner/ns-file/";
+/// The store's own bookkeeping (the T499 datafix marker and its plan), apart
+/// from every record keyspace.
+const META_SUB_PATH: &str = "owner/meta/";
+const KV_KEY_SPLIT_MARKER: &str = "kv-key-split-version";
+/// T499 datafix version; a bumped value runs the pass again on the next unseal.
+pub const KV_KEY_SPLIT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OwnerRecord {
@@ -55,8 +61,9 @@ pub struct OwnerStore {
     file_view: Arc<BarrierView>,
     ns_resource_view: Arc<BarrierView>,
     ns_file_view: Arc<BarrierView>,
-    /// Set once the T499 datafix has run: KV keys are `<mount><name>`. Until
-    /// then every caller derives the pre-T499 key, so records keep resolving.
+    meta_view: Arc<BarrierView>,
+    /// Cached once the T499 datafix marker is seen: KV keys are
+    /// `<mount><name>`. Until then every caller derives the pre-T499 key.
     kv_keys_split: AtomicBool,
 }
 
@@ -72,6 +79,7 @@ impl OwnerStore {
         let file_view = Arc::new(system_view.new_sub_view(FILE_OWNER_SUB_PATH));
         let ns_resource_view = Arc::new(system_view.new_sub_view(NS_RESOURCE_OWNER_SUB_PATH));
         let ns_file_view = Arc::new(system_view.new_sub_view(NS_FILE_OWNER_SUB_PATH));
+        let meta_view = Arc::new(system_view.new_sub_view(META_SUB_PATH));
 
         Ok(Arc::new(Self {
             kv_view,
@@ -79,6 +87,7 @@ impl OwnerStore {
             file_view,
             ns_resource_view,
             ns_file_view,
+            meta_view,
             kv_keys_split: AtomicBool::new(false),
         }))
     }
@@ -226,20 +235,50 @@ impl OwnerStore {
         URL_SAFE_NO_PAD.encode(canonical.as_bytes())
     }
 
-    /// Whether the T499 datafix has run on this store.
-    pub fn kv_keys_split(&self) -> bool {
-        self.kv_keys_split.load(Ordering::Acquire)
+    /// Whether the T499 datafix has completed: its replicated marker, cached
+    /// once seen, so every node switches when whichever node ran it is done.
+    /// A read failure answers `false` (the pre-T499 keys, never looser).
+    pub async fn kv_keys_split(&self) -> bool {
+        if self.kv_keys_split.load(Ordering::Acquire) {
+            return true;
+        }
+        let done = match self.meta_view.get(KV_KEY_SPLIT_MARKER).await {
+            Ok(Some(e)) => serde_json::from_slice::<u32>(&e.value).unwrap_or(0) >= KV_KEY_SPLIT_VERSION,
+            _ => false,
+        };
+        if done {
+            self.kv_keys_split.store(true, Ordering::Release);
+        }
+        done
     }
 
-    /// Switch KV key derivation to `<mount><name>`; the datafix calls this.
-    pub fn set_kv_keys_split(&self) {
+    /// Record that the datafix completed and switch to `<mount><name>`.
+    pub(crate) async fn mark_kv_keys_split(&self) -> Result<(), RvError> {
+        let value = serde_json::to_vec(&KV_KEY_SPLIT_VERSION)?;
+        self.meta_view.put(&StorageEntry { key: KV_KEY_SPLIT_MARKER.to_string(), value }).await?;
         self.kv_keys_split.store(true, Ordering::Release);
+        Ok(())
     }
 
-    /// Test support: back to pre-T499 keys, as before the datafix ran.
+    /// The datafix's own state under `owner/meta/<key>` (its persisted plan).
+    pub(crate) async fn meta_get(&self, key: &str) -> Result<Option<Vec<u8>>, RvError> {
+        Ok(self.meta_view.get(key).await?.map(|e| e.value))
+    }
+
+    pub(crate) async fn meta_put(&self, key: &str, value: Vec<u8>) -> Result<(), RvError> {
+        self.meta_view.put(&StorageEntry { key: key.to_string(), value }).await
+    }
+
+    pub(crate) async fn meta_delete(&self, key: &str) -> Result<(), RvError> {
+        self.meta_view.delete(key).await
+    }
+
+    /// Test support: back to pre-T499 keys, marker gone, as before the datafix.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn unsplit_kv_keys_for_test(&self) {
+    pub async fn unsplit_kv_keys_for_test(&self) -> Result<(), RvError> {
+        self.meta_view.delete(KV_KEY_SPLIT_MARKER).await?;
         self.kv_keys_split.store(false, Ordering::Release);
+        Ok(())
     }
 
     /// A KV owner/share key as stored: whitespace and `/` trimmed, refused

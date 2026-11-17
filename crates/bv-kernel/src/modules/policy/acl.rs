@@ -190,6 +190,38 @@ pub(super) fn segment_wildcard_glob(stored: &str) -> (&str, bool) {
     }
 }
 
+/// How specific a governing rule is, measured from a KV secret's name, and
+/// whether it denies ([`ACL::governing_rule_on_name`]). Ordered by the
+/// verified specificity order (`bv_policy_core::compare`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct NameRank {
+    spec: Specificity,
+    pub denies: bool,
+}
+
+impl NameRank {
+    /// Added to a rule's length so one shorter than the name's offset stays
+    /// comparable (lengths are unsigned).
+    const LEN_BASE: usize = 1 << 20;
+
+    /// Whether this rule is at least as specific as `other`.
+    pub(crate) fn at_least_as_specific_as(&self, other: &NameRank) -> bool {
+        bv_policy_core::compare(self, other) != std::cmp::Ordering::Less
+    }
+}
+
+impl Ranked for NameRank {
+    type Tiebreak = str;
+
+    fn specificity(&self) -> Specificity {
+        self.spec
+    }
+
+    fn tiebreak(&self) -> &str {
+        ""
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 struct WcPathDescr {
     first_wc_or_glob: isize,
@@ -550,6 +582,57 @@ impl ACL {
         }
 
         best.into_winner().and_then(|pd| pd.perms)
+    }
+
+    /// The ungated rule that governs `path` (exact, else the most specific
+    /// prefix or segment-wildcard rule, as `get_none_exact_paths_permissions`
+    /// picks it), ranked on the part from byte `name_at` (where a KV secret's
+    /// name starts), and whether it carries `deny`. For comparing the rules
+    /// that govern two spellings of one secret (T504).
+    pub(crate) fn governing_rule_on_name(&self, path: &str, name_at: usize) -> Option<NameRank> {
+        let path = ensure_no_leading_slash(path);
+        let denies = |p: &Permissions| p.capabilities_bitmap & Capability::Deny.to_bits() != 0;
+        let trimmed = path.trim_end_matches('/');
+        if let Some(perm) = self.exact_rules.get(path.as_str()).or_else(|| self.exact_rules.get(trimmed)) {
+            let spec = Specificity { first_wildcard: isize::MAX, is_prefix: false, wildcards: 0, len: 0 };
+            return Some(NameRank { spec, denies: denies(perm) });
+        }
+        let mut best = MostSpecific::new();
+        if let Some(item) = self.prefix_rules.get_ancestor(path.as_str()) {
+            let prefix = item.key().unwrap().clone();
+            let perms = item.value().cloned();
+            best.offer(WcPathDescr {
+                first_wc_or_glob: prefix.len() as isize,
+                wc_path: prefix,
+                is_prefix: true,
+                perms,
+                ..Default::default()
+            });
+        }
+        let path_parts: Vec<&str> = path.split('/').collect();
+        for item in self.segment_wildcard_paths.iter() {
+            let (full, permissions) = (item.key(), item.value());
+            if full.is_empty() {
+                continue;
+            }
+            let (wc_path, is_prefix) = segment_wildcard_glob(full);
+            let parts: Vec<&str> = wc_path.split('/').collect();
+            if let Some(wildcards) = bv_policy_core::segments_match(&parts, is_prefix, &path_parts) {
+                best.offer(WcPathDescr {
+                    first_wc_or_glob: full.find('+').map(|i| i as isize).unwrap_or(-1),
+                    wc_path: wc_path.to_string(),
+                    is_prefix,
+                    wildcards,
+                    perms: Some(permissions.clone()),
+                });
+            }
+        }
+        let winner = best.into_winner()?;
+        let mut spec = winner.specificity();
+        // Measured from the name: a rule ending before it ranks below one inside it.
+        spec.first_wildcard = spec.first_wildcard.saturating_sub(name_at as isize);
+        spec.len = (spec.len + NameRank::LEN_BASE).saturating_sub(name_at);
+        Some(NameRank { spec, denies: winner.perms.as_ref().is_some_and(denies) })
     }
 
     pub fn capabilities<S: Into<String>>(&self, path: S) -> Vec<String> {

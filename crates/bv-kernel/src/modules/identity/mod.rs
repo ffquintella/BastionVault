@@ -916,9 +916,12 @@ impl IdentityBackendInner {
     // ── Sharing ─────────────────────────────────────────────────────
 
     /// Whether KV owner and share keys are `<mount><name>` (the T499 datafix ran).
-    fn kv_keys_split(&self) -> bool {
+    async fn kv_keys_split(&self) -> bool {
         let module = self.core.module_manager().get_module::<IdentityModule>("identity");
-        module.and_then(|m| m.owner_store()).is_some_and(|s| s.kv_keys_split())
+        match module.and_then(|m| m.owner_store()) {
+            Some(store) => store.kv_keys_split().await,
+            None => false,
+        }
     }
 
     fn resolve_share_store(&self) -> Result<Arc<ShareStore>, RvError> {
@@ -1270,7 +1273,7 @@ impl IdentityBackendInner {
             {
                 if let Some(rg_store) = rg_module.store() {
                     let active = crate::modules::resource_group::group_store::scope_of(req.namespace_path.as_deref());
-                    let split = self.kv_keys_split();
+                    let split = self.kv_keys_split().await;
                     let mut expanded: Vec<ShareByGranteePointer> = Vec::with_capacity(ptrs.len());
                     for p in ptrs.drain(..) {
                         if p.target_kind != "asset-group" {
@@ -1365,7 +1368,7 @@ impl IdentityBackendInner {
         let kind = ShareTargetKind::parse(&kind_str).ok_or_else(|| bv_error_string!("invalid share kind"))?;
         let target_path = decode_b64url_path(&target_b64)
             .ok_or_else(|| bv_error_string!("invalid target segment (expected base64url)"))?;
-        let target_path = scope_share_target(kind, target_path, req, self.kv_keys_split());
+        let target_path = scope_share_target(kind, target_path, req, self.kv_keys_split().await);
 
         self.require_share_admin(req, kind, &target_path).await?;
 
@@ -1384,7 +1387,7 @@ impl IdentityBackendInner {
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let store = self.resolve_share_store()?;
-        let (kind, target_path, grantee) = extract_share_identifiers(req, self.kv_keys_split())?;
+        let (kind, target_path, grantee) = extract_share_identifiers(req, self.kv_keys_split().await)?;
 
         self.require_share_admin(req, kind, &target_path).await?;
 
@@ -1405,7 +1408,7 @@ impl IdentityBackendInner {
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let store = self.resolve_share_store()?;
-        let (url_kind, url_target_path, grantee) = extract_share_identifiers(req, self.kv_keys_split())?;
+        let (url_kind, url_target_path, grantee) = extract_share_identifiers(req, self.kv_keys_split().await)?;
 
         // Body can override kind/path with the raw (non-encoded) form.
         // Grantee is always taken from the URL.
@@ -1427,12 +1430,13 @@ impl IdentityBackendInner {
         // A body `target_path` override arrives in raw (non-encoded) form and
         // must be namespace-qualified the same way `extract_share_identifiers`
         // qualifies the URL form (which produced `url_target_path`).
+        let split = self.kv_keys_split().await;
         let target_path = req
             .get_data("target_path")
             .ok()
             .and_then(|v| v.as_str().map(|s| s.to_string()))
             .filter(|s| !s.trim().is_empty())
-            .map(|p| scope_share_target(kind, p, req, self.kv_keys_split()))
+            .map(|p| scope_share_target(kind, p, req, split))
             .unwrap_or(url_target_path);
 
         let capabilities: Vec<String> =
@@ -1486,7 +1490,7 @@ impl IdentityBackendInner {
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let store = self.resolve_share_store()?;
-        let (kind, target_path, grantee) = extract_share_identifiers(req, self.kv_keys_split())?;
+        let (kind, target_path, grantee) = extract_share_identifiers(req, self.kv_keys_split().await)?;
 
         self.require_share_admin(req, kind, &target_path).await?;
 
@@ -1653,7 +1657,7 @@ impl IdentityBackendInner {
         // namespace-scoped canonical key so a child-namespace secret's owner —
         // stamped as `<ns>/<mount>/<key>` by `post_route` — is found. The
         // mount-relative `path` is still echoed for display.
-        let key = OwnerStore::client_kv_key(&path, req.namespace_path.as_deref(), store.kv_keys_split());
+        let key = OwnerStore::client_kv_key(&path, req.namespace_path.as_deref(), store.kv_keys_split().await);
         let rec = match key {
             Some(key) => store.get_kv_owner(&key).await?,
             None => None,

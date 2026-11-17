@@ -39,31 +39,49 @@ pub(crate) struct KvItem {
     name: String,
     /// The request path ended in `/` (a list).
     folder: bool,
+    /// Byte offset of the name in the request path (after its leading `/`).
+    name_at: usize,
 }
 
 impl KvItem {
-    /// The item behind `rel`, the path below `mount` as requested, or `None`
+    /// The item behind `rel`, the path below `mount` as requested; `None`
     /// when the mount is not a KV engine or `rel` names no secret (kv-v2
-    /// `config`, an unroutable sub-command, `..`). Independent of the API
-    /// version: a version 2 short form `x` is the version 1 `data/x`.
-    pub(crate) fn from_route(mount: &str, logical_type: &str, rel: &str) -> Option<Self> {
+    /// `config`, an unroutable sub-command). Independent of the API version:
+    /// a version 2 short form `x` is the version 1 `data/x`. A name with an
+    /// empty or `..` segment or surrounding whitespace is an error: trimmed,
+    /// it would name another secret than the one the engine stores.
+    pub(crate) fn from_route(mount: &str, logical_type: &str, rel: &str) -> Result<Option<Self>, RvError> {
         let (engine, sub, raw) = match logical_type {
             "kv" => (Engine::V1, None, rel),
-            "kv-v2" => {
-                let (sub, raw) = classify_v2(rel)?;
-                (Engine::V2, Some(sub), raw)
-            }
-            _ => return None,
+            "kv-v2" => match classify_v2(rel) {
+                Some((sub, raw)) => (Engine::V2, Some(sub), raw),
+                None => return Ok(None),
+            },
+            _ => return Ok(None),
         };
-        let name = raw.trim_matches('/');
-        if name.split('/').any(|s| s == "..") {
-            return None;
+        // One trailing `/` marks a list; any other empty segment is not one.
+        let folder = raw.ends_with('/');
+        let name = raw.strip_suffix('/').unwrap_or(raw);
+        let bad_segment = !name.is_empty() && name.split('/').any(|s| s.is_empty() || s == "..");
+        if raw == "/" || bad_segment || name.trim() != name {
+            return Err(ambiguous());
         }
-        let folder = raw.ends_with('/') || name.is_empty();
         if name.is_empty() && sub != Some(KvSub::Metadata) {
-            return None;
+            return Ok(None);
         }
-        Some(Self { engine, mount: mount.to_string(), sub, name: name.to_string(), folder })
+        let name_at = mount.len() + rel.len() - raw.len();
+        let (mount, name) = (mount.to_string(), name.to_string());
+        Ok(Some(Self { engine, mount, sub, folder: folder || name.is_empty(), name, name_at }))
+    }
+
+    /// The request path ended in `/`: only a list may address a folder.
+    pub(crate) fn folder(&self) -> bool {
+        self.folder && !self.name.is_empty()
+    }
+
+    /// Byte offset of the secret's name in the request path.
+    pub(crate) fn name_at(&self) -> usize {
+        self.name_at
     }
 
     /// The owner and share key: `<mount><name>`. `None` for a mount-root list.
@@ -96,14 +114,15 @@ impl KvItem {
     }
 
     /// The two ACL paths that name this kv-v2 secret's data, `<mount><name>`
-    /// and `<mount>data/<name>` (with the `/` of a list); a deny on either
-    /// refuses every request on it (T504). Empty on a kv (v1) mount.
-    pub(crate) fn deny_aliases(&self) -> Vec<String> {
+    /// and `<mount>data/<name>` (a folder's for a `list`), each with the
+    /// offset of the name in it (T504). Empty on a kv (v1) mount.
+    pub(crate) fn deny_aliases(&self, list: bool) -> Vec<(String, usize)> {
         if self.engine != Engine::V2 {
             return Vec::new();
         }
-        let tail = if self.folder && !self.name.is_empty() { "/" } else { "" };
-        vec![format!("{}{}{tail}", self.mount, self.name), format!("{}data/{}{tail}", self.mount, self.name)]
+        let tail = if (self.folder || list) && !self.name.is_empty() { "/" } else { "" };
+        let (mount, name) = (&self.mount, &self.name);
+        vec![(format!("{mount}{name}{tail}"), mount.len()), (format!("{mount}data/{name}{tail}"), mount.len() + 5)]
     }
 }
 
@@ -111,6 +130,9 @@ impl KvItem {
 /// engine's routes read it. `None` for `config`, the `metadata` list root
 /// without its `/`, and paths no route serves.
 fn classify_v2(rel: &str) -> Option<(KvSub, &str)> {
+    if rel == "metadata" {
+        return Some((KvSub::Metadata, ""));
+    }
     let subs = [("data/", KvSub::Data), ("metadata/", KvSub::Metadata), ("destroy/", KvSub::Destroy)];
     for (prefix, sub) in subs.into_iter().chain([("undelete/", KvSub::Undelete)]) {
         if let Some(rest) = rel.strip_prefix(prefix) {
@@ -123,10 +145,16 @@ fn classify_v2(rel: &str) -> Option<(KvSub, &str)> {
     Some((KvSub::Data, rel))
 }
 
+/// The 400 for a KV path whose name is ambiguous (see [`KvItem::from_route`]).
+pub(crate) fn ambiguous() -> RvError {
+    RvError::ErrResponseStatus(400, "invalid KV path: an empty segment or surrounding whitespace in the name".into())
+}
+
 /// The KV item a request to `path` addresses, through the router's mount
-/// table as `Router::handle_request` resolves it.
+/// table as `Router::handle_request` resolves it, after the leading `/`s the
+/// ACL ignores too. An ambiguous name is an error (no key is derived).
 pub(crate) fn resolve(router: &Router, path: &str) -> Result<Option<KvItem>, RvError> {
-    let path = path.strip_prefix('/').unwrap_or(path);
+    let path = path.trim_start_matches('/');
     let mount = router.matching_mount(path)?;
     let Some(rel) = path.strip_prefix(mount.as_str()).filter(|_| !mount.is_empty()) else {
         return Ok(None);
@@ -135,7 +163,7 @@ pub(crate) fn resolve(router: &Router, path: &str) -> Result<Option<KvItem>, RvE
         return Ok(None);
     };
     let logical_type = entry.read()?.logical_type.clone();
-    Ok(KvItem::from_route(&mount, &logical_type, rel))
+    KvItem::from_route(&mount, &logical_type, rel)
 }
 
 /// The owner and share key of the secret `path` addresses. With `split` (the
@@ -154,7 +182,7 @@ mod tests {
     use super::*;
 
     fn v2(rel: &str) -> Option<KvItem> {
-        KvItem::from_route("secret/", "kv-v2", rel)
+        KvItem::from_route("secret/", "kv-v2", rel).unwrap()
     }
 
     #[test]
@@ -176,20 +204,38 @@ mod tests {
         for (rel, key) in cases {
             assert_eq!(v2(rel).and_then(|i| i.key()).as_deref(), Some(key), "{rel}");
         }
-        for rel in ["config", "metadata", "metadatafoo", "configs/x", "", "data/", "data/a/../b"] {
+        for rel in ["config", "metadatafoo", "configs/x", "", "data/"] {
             assert_eq!(v2(rel).and_then(|i| i.key()), None, "{rel}");
         }
-        assert!(v2("metadata/").is_some(), "the mount-root list is an item without a key");
+        for rel in ["metadata/", "metadata"] {
+            assert!(v2(rel).is_some_and(|i| i.key().is_none()), "{rel}: the root list is an item without a key");
+        }
+    }
+
+    // A name the engine would store under another spelling than its trimmed
+    // form gets no key: an empty or `..` segment, a doubled trailing `/`,
+    // surrounding whitespace.
+    #[test]
+    fn an_ambiguous_name_is_refused() {
+        for rel in ["data//x", "/x", "data/x//", "data/a//b", "data/a/../b", "metadata//", "data/x ", " x", "data//"] {
+            assert!(KvItem::from_route("secret/", "kv-v2", rel).is_err(), "kv-v2 {rel:?}");
+        }
+        for rel in ["/x", "x//", "a//b", "x ", "/"] {
+            assert!(KvItem::from_route("kv/", "kv", rel).is_err(), "kv {rel:?}");
+        }
+        let list = v2("metadata/team/").unwrap();
+        assert!(list.folder() && list.key().as_deref() == Some("secret/team"));
+        assert!(KvItem::from_route("kv/", "kv", "").unwrap().is_none(), "the kv root list names no secret");
     }
 
     #[test]
     fn a_kv_v1_path_is_the_name_verbatim() {
         for (rel, key) in [("x", "kv/x"), ("data/x", "kv/data/x"), ("metadata/data/x", "kv/metadata/data/x")] {
-            let item = KvItem::from_route("kv/", "kv", rel).unwrap();
+            let item = KvItem::from_route("kv/", "kv", rel).unwrap().unwrap();
             assert_eq!(item.key().as_deref(), Some(key));
-            assert!(item.deny_aliases().is_empty());
+            assert!(item.deny_aliases(false).is_empty());
         }
-        assert_eq!(KvItem::from_route("transit/", "transit", "keys/x"), None);
+        assert_eq!(KvItem::from_route("transit/", "transit", "keys/x").unwrap(), None);
     }
 
     // Every spelling of one secret gives one key, `<mount><name>`, and two
@@ -212,18 +258,28 @@ mod tests {
         assert_eq!(legacy("x").as_deref(), Some("secret/x"));
         assert_eq!(legacy("destroy/x").as_deref(), Some("secret/x"));
         assert_eq!(legacy("undelete/team/x").as_deref(), Some("secret/team/x"));
-        let ns = KvItem::from_route("team/secret/", "kv-v2", "data/data/x").unwrap();
+        let ns = KvItem::from_route("team/secret/", "kv-v2", "data/data/x").unwrap().unwrap();
         assert_eq!(ns.legacy_key("team/secret/data/data/x", Some("team")).as_deref(), Some("team/secret/data/x"));
         assert_eq!(ns.key().as_deref(), Some("team/secret/data/x"));
     }
 
     #[test]
     fn deny_aliases_name_both_data_forms() {
-        assert_eq!(v2("x").unwrap().deny_aliases(), ["secret/x", "secret/data/x"]);
-        assert_eq!(v2("metadata/prod/x").unwrap().deny_aliases(), ["secret/prod/x", "secret/data/prod/x"]);
-        assert_eq!(v2("metadata/prod/").unwrap().deny_aliases(), ["secret/prod/", "secret/data/prod/"]);
-        assert_eq!(v2("metadata/").unwrap().deny_aliases(), ["secret/", "secret/data/"]);
-        assert_eq!(v2("destroy/prod/x").unwrap().deny_aliases(), ["secret/prod/x", "secret/data/prod/x"]);
+        let aliases = |rel: &str, list: bool| -> Vec<String> {
+            v2(rel).unwrap().deny_aliases(list).into_iter().map(|(a, _)| a).collect()
+        };
+        assert_eq!(aliases("x", false), ["secret/x", "secret/data/x"]);
+        assert_eq!(aliases("metadata/prod/x", false), ["secret/prod/x", "secret/data/prod/x"]);
+        assert_eq!(aliases("metadata/prod/", true), ["secret/prod/", "secret/data/prod/"]);
+        assert_eq!(aliases("metadata/prod", true), ["secret/prod/", "secret/data/prod/"]);
+        assert_eq!(aliases("metadata/", true), ["secret/", "secret/data/"]);
+        assert_eq!(aliases("metadata", true), ["secret/", "secret/data/"]);
+        assert_eq!(aliases("destroy/prod/x", false), ["secret/prod/x", "secret/data/prod/x"]);
+        let offsets: Vec<usize> =
+            v2("data/prod/x").unwrap().deny_aliases(false).into_iter().map(|(_, at)| at).collect();
+        assert_eq!(offsets, [7, 12]);
+        assert_eq!(v2("data/prod/x").unwrap().name_at(), 12);
+        assert_eq!(v2("prod/x").unwrap().name_at(), 7);
     }
 
     #[test]
