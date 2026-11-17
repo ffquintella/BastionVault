@@ -168,6 +168,36 @@ pub struct McpAuditContext {
     pub otel_tracestate: Option<String>,
 }
 
+/// `Request::ctx` key under which [`InternalTransferImport`] is set.
+pub const INTERNAL_TRANSFER_IMPORT_CTX: &str = "bv.transfer.internal-import";
+
+/// Marks the namespace-transfer orchestrator's own import sub-request (T494).
+/// `Request::ctx` is set only in-process, never from HTTP, so the transfer
+/// import routes answer a request without this marker as an unknown route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InternalTransferImport;
+
+impl Request {
+    /// Mark this request as the transfer's own import (see [`InternalTransferImport`]).
+    pub fn mark_internal_transfer_import(&self) {
+        self.ctx.set(INTERNAL_TRANSFER_IMPORT_CTX, Arc::new(InternalTransferImport));
+    }
+
+    /// Whether the transfer orchestrator marked this request as its own import.
+    pub fn is_internal_transfer_import(&self) -> bool {
+        self.ctx.get(INTERNAL_TRANSFER_IMPORT_CTX).is_some_and(|marker| (*marker).is::<InternalTransferImport>())
+    }
+
+    /// `Ok` for a marked request; otherwise the error an unknown route answers
+    /// (404), so an unmarked call learns nothing about the item.
+    pub fn require_internal_transfer_import(&self) -> Result<(), RvError> {
+        match self.is_internal_transfer_import() {
+            true => Ok(()),
+            false => Err(RvError::ErrLogicalPathUnsupported),
+        }
+    }
+}
+
 #[maybe_async::maybe_async]
 impl Request {
     pub fn new<S: Into<String>>(path: S) -> Self {
@@ -383,6 +413,34 @@ impl Request {
         };
 
         storage.delete(key).await
+    }
+}
+
+#[cfg(test)]
+mod internal_transfer_import_tests {
+    use std::sync::Arc;
+
+    use super::{InternalTransferImport, Request, INTERNAL_TRANSFER_IMPORT_CTX};
+    use bv_errors::RvError;
+
+    #[test]
+    fn only_the_typed_marker_makes_a_request_an_internal_import() {
+        let plain = Request::new("resources/v2/transfer/import/x");
+        assert!(!plain.is_internal_transfer_import());
+        assert!(matches!(plain.require_internal_transfer_import(), Err(RvError::ErrLogicalPathUnsupported)));
+
+        // The key alone, holding any other value, is not the marker.
+        let forged = Request::new("resources/v2/transfer/import/x");
+        forged.ctx.set(INTERNAL_TRANSFER_IMPORT_CTX, Arc::new("true".to_string()));
+        assert!(!forged.is_internal_transfer_import());
+
+        let marked = Request::new("resources/v2/transfer/import/x");
+        marked.mark_internal_transfer_import();
+        assert!(marked.is_internal_transfer_import());
+        assert!(marked.require_internal_transfer_import().is_ok());
+        let stored = marked.ctx.get(INTERNAL_TRANSFER_IMPORT_CTX).unwrap();
+        assert_eq!(stored.downcast_ref::<InternalTransferImport>(), Some(&InternalTransferImport));
+        assert!(!Request::new("x").is_internal_transfer_import(), "a new request starts unmarked");
     }
 }
 

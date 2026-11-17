@@ -1,10 +1,10 @@
 //! Transfer import routes are authorized as the item they write (T494).
 //!
 //! `<kv-v2 mount>/v2/transfer/import/<path>` and `<resource mount>/v2/transfer/import/<name>`
-//! write one whole secret or resource. `post_auth` (ACL, owner, share and group
-//! lookups, plus each secret a resource carries), `post_route` (owner stamp) and
-//! `sys/capabilities-self` use the paths normal writes are authorized on, never
-//! the route's own. Every other path is left alone.
+//! write one whole secret or resource, and only for the transfer orchestrator:
+//! `post_auth` answers an unmarked request as an unknown route. For a marked one,
+//! `post_auth` (ACL, owner, share, group lookups, each secret of a resource),
+//! `post_route` (owner stamp) and `sys/capabilities-self` use the real item's paths.
 
 use std::collections::HashSet;
 

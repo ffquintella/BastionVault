@@ -883,7 +883,8 @@ fn collision(dest: &Place, detail: &str) -> RvError {
     RvError::ErrResponseStatus(409, format!("{}: {detail}", dest.display()))
 }
 
-/// The import of `body` at `dest`; answers the place the engine wrote.
+/// The import of `body` at `dest`, marked as the transfer's own (the import
+/// routes refuse any other request); answers the place the engine wrote.
 #[maybe_async::maybe_async]
 async fn import(
     core: &dyn VaultCtx,
@@ -893,7 +894,9 @@ async fn import(
     body: &Map<String, Value>,
 ) -> Result<Place, RvError> {
     let what = format!("the caller may not write {} in {}", dest.display(), namespace_label(&dest.ns));
-    let resp = call(core, caller, &dest.ns, Operation::Write, dest.import(), Some(body.clone())).await;
+    let mut req = as_caller(caller, &dest.ns, Operation::Write, dest.import(), Some(body.clone()));
+    req.mark_internal_transfer_import();
+    let resp = core.handle_request(&mut req).await;
     let data = resp.map_err(|e| refused(e, &what))?.and_then(|r| r.data).unwrap_or_default();
     let field = match kind {
         Kind::Resource => "name",

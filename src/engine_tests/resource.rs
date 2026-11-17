@@ -941,12 +941,31 @@ mod type_config_namespace_fallback_tests {
 /// write-time gates that need the ssh-broker and resource-group modules.
 /// The bundle handling itself is tested in the engine crate.
 mod transfer_import_tests {
+    use std::sync::Arc;
+
     use serde_json::{json, Map, Value};
 
     use crate::{
+        core::Core,
         errors::RvError,
+        logical::{Operation, Request, Response},
         test_utils::{new_unseal_test_bastion_vault, test_read_api, test_write_api},
     };
+
+    /// `path` written as the transfer writes it: marked as its own import.
+    async fn import(
+        core: &Arc<Core>,
+        token: &str,
+        path: &str,
+        body: Option<Map<String, Value>>,
+    ) -> Result<Option<Response>, RvError> {
+        let mut req = Request::new(path);
+        req.operation = Operation::Write;
+        req.client_token = token.to_string();
+        req.body = body;
+        req.mark_internal_transfer_import();
+        core.handle_request(&mut req).await
+    }
 
     fn version(n: u64, data: Value) -> Value {
         json!({ "version": n, "created_time": "2025-01-01T00:00:00Z", "deleted": false, "data": data })
@@ -977,7 +996,7 @@ mod transfer_import_tests {
         // Only v1 holds a password; the live v2 is clean.
         let versions = vec![version(1, json!({ "password": "old-S3CRET" })), version(2, json!({ "username": "u" }))];
         let body = bundle("database", versions, "");
-        let err = test_write_api(&core, &root, "resources/v2/transfer/import/db01", false, body).await.unwrap_err();
+        let err = import(&core, &root, "resources/v2/transfer/import/db01", body).await.unwrap_err();
         let RvError::ErrResponseStatus(409, message) = &err else { panic!("expected 409, got {err:?}") };
         assert!(message.contains("brokered_resource_no_static_credential"), "{message}");
         assert!(message.contains("`login`") && message.contains("version 1"), "names key and version: {message}");
@@ -1003,7 +1022,7 @@ mod transfer_import_tests {
 
         for mode in ["overwrite", "rename"] {
             let body = bundle("server", vec![version(1, json!({ "password": "new" }))], mode);
-            let err = test_write_api(&core, &root, "resources/v2/transfer/import/srv1", false, body).await.unwrap_err();
+            let err = import(&core, &root, "resources/v2/transfer/import/srv1", body).await.unwrap_err();
             let RvError::ErrResponseStatus(400, message) = &err else { panic!("{mode}: expected 400, got {err:?}") };
             assert!(message.contains("on_conflict must be refuse"), "{mode}: {message}");
         }
@@ -1017,7 +1036,7 @@ mod transfer_import_tests {
         assert_eq!(resp.data.unwrap()["groups"], json!(["alpha"]), "membership kept");
 
         let body = bundle("server", vec![version(1, json!({ "password": "new" }))], "refuse");
-        let err = test_write_api(&core, &root, "resources/v2/transfer/import/srv1", false, body).await.unwrap_err();
+        let err = import(&core, &root, "resources/v2/transfer/import/srv1", body).await.unwrap_err();
         assert!(matches!(err, RvError::ErrResponseStatus(409, _)), "{err:?}");
     }
 }

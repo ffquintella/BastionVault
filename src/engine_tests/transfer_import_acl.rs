@@ -1,9 +1,10 @@
 //! The transfer import routes are authorized as the item they write (T494).
 //!
 //! `<kv-mount>/v2/transfer/import/<path>` and `resources/v2/transfer/import/<name>`
-//! go through `Core::handle_request` with real tokens and policies, so the
-//! ACL, owner, share and asset-group resolution in `post_auth` and the owner
-//! stamp in `post_route` run exactly as in production.
+//! go through `Core::handle_request` with real tokens and policies, marked as
+//! the transfer marks its own imports, so the ACL, owner, share and asset-group
+//! resolution in `post_auth` and the owner stamp in `post_route` run exactly as
+//! in production. Unmarked calls are refused (the regression tests at the end).
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -18,7 +19,7 @@ use crate::{
         identity::{IdentityModule, SecretShare, ShareStore},
         namespace::{NamespaceModule, NamespaceQuotas, NAMESPACE_MODULE_NAME},
     },
-    test_utils::{new_unseal_test_bastion_vault, test_read_api},
+    test_utils::{new_unseal_test_bastion_vault, test_read_api, TestHttpServer},
 };
 
 const PASSWORD: &str = "hunter22XX!";
@@ -49,6 +50,19 @@ async fn send(
     ns: Option<&str>,
     body: Value,
 ) -> Result<Option<Response>, RvError> {
+    send_as(core, token, op, path, ns, body, false).await
+}
+
+/// [`send`], marked as the transfer's own import when `internal`.
+async fn send_as(
+    core: &Arc<Core>,
+    token: &str,
+    op: Operation,
+    path: &str,
+    ns: Option<&str>,
+    body: Value,
+    internal: bool,
+) -> Result<Option<Response>, RvError> {
     let mut req = Request::new(path);
     req.operation = op;
     req.client_token = token.to_string();
@@ -56,11 +70,15 @@ async fn send(
     if let Some(ns) = ns {
         req.headers = Some(HashMap::from([("x-bastionvault-namespace".to_string(), ns.to_string())]));
     }
+    if internal {
+        req.mark_internal_transfer_import();
+    }
     core.handle_request(&mut req).await
 }
 
+/// An import as the transfer sends it: marked as its own.
 async fn import(core: &Arc<Core>, token: &str, path: &str, body: Value) -> Result<Option<Response>, RvError> {
-    send(core, token, Operation::Write, path, None, body).await
+    send_as(core, token, Operation::Write, path, None, body, true).await
 }
 
 fn kv_bundle() -> Value {
@@ -501,14 +519,17 @@ async fn kv_import_in_a_namespace_uses_the_namespaced_real_path() {
     let created = send(&core, &root, Operation::Write, "auth/token/create", ns, body).await.unwrap().unwrap();
     let token = created.auth.unwrap().client_token;
 
-    let r = send(&core, &token, Operation::Write, "secret/v2/transfer/import/restricted/x", ns, kv_bundle()).await;
+    let restricted = "secret/v2/transfer/import/restricted/x";
+    let r = send_as(&core, &token, Operation::Write, restricted, ns, kv_bundle(), true).await;
     denied(r, "namespaced import under a denied prefix");
 
-    send(&core, &token, Operation::Write, "secret/v2/transfer/import/open/x", ns, kv_bundle()).await.unwrap();
+    send_as(&core, &token, Operation::Write, "secret/v2/transfer/import/open/x", ns, kv_bundle(), true).await.unwrap();
     let read = send(&core, &root, Operation::Read, "secret/data/open/x", ns, json!({})).await.unwrap().unwrap();
     assert_eq!(read.data.unwrap()["data"]["v"], json!("imported"));
     assert!(kv_owner(&core, "tenant-a/secret/open/x").await.is_some(), "owner keyed on the namespaced real path");
     assert_eq!(kv_owner(&core, "tenant-a/secret/v2/transfer/import/open/x").await, None, "no stray record");
+    let unmarked = send(&core, &token, Operation::Write, "secret/v2/transfer/import/open/y", ns, kv_bundle()).await;
+    unknown_route(unmarked, "an unmarked import inside a namespace");
 }
 
 /// At API version 2 a kv-v2 mount reads `v2/transfer/import/<p>` as a secret
@@ -538,4 +559,158 @@ async fn api_v2_kv_write_to_the_import_shape_is_an_ordinary_secret() {
     v2_write(literal).await.unwrap();
     assert_eq!(kv_value(&core, &root, "v2/transfer/import/x").await, Some(json!("plain")));
     assert_eq!(kv_value(&core, &root, "x").await, None, "the import route was not reached");
+}
+
+/// A request at `api_version` that nothing marked as the transfer's own.
+async fn direct(
+    core: &Arc<Core>,
+    token: &str,
+    path: &str,
+    api_version: u8,
+    body: Value,
+) -> Result<Option<Response>, RvError> {
+    let mut req = Request::new(path);
+    req.operation = Operation::Write;
+    req.api_version = api_version;
+    req.client_token = token.to_string();
+    req.body = body.as_object().cloned();
+    core.handle_request(&mut req).await
+}
+
+fn unknown_route(r: Result<Option<Response>, RvError>, what: &str) {
+    match r {
+        Err(RvError::ErrLogicalPathUnsupported) => {}
+        other => panic!("{what}: expected the unknown-route 404, got {other:?}"),
+    }
+}
+
+/// How many history entries the resource `name` has, read as root.
+async fn history_len(core: &Arc<Core>, root: &str, name: &str) -> usize {
+    let path = format!("resources/resources/{name}/history");
+    let resp = test_read_api(core.as_ref(), root, &path, true).await.unwrap();
+    resp.and_then(|r| r.data).and_then(|d| d.get("entries").and_then(Value::as_array).map(Vec::len)).unwrap_or(0)
+}
+
+/// A resource bundle whose history and version author name someone else.
+fn forged_resource_bundle() -> Value {
+    let mut body = resource_bundle(&["login"]);
+    body["history"] = json!([{ "ts": "2020-01-01T00:00:00Z", "user": "alice", "op": "create", "changed_fields": [] }]);
+    body["secrets"][0]["versions"][0]["username"] = json!("alice");
+    body["origin_owner"] = json!("someone-else");
+    body
+}
+
+/// Regression (T494 final review): the import routes are internal. A request
+/// the transfer did not mark is an unknown route (404) for every caller, root
+/// included, at API v1 and v2, so no forged history, origin or version author
+/// is written, and no owner is stamped.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn a_direct_import_is_refused_as_an_unknown_route() {
+    let (_bvault, core, root) = new_unseal_test_bastion_vault("direct_import_unknown_route").await;
+    write(&core, &root, "sys/auth/pass", json!({ "type": "userpass" })).await;
+    write_policy(&core, &root, "kv-writer", KV_WRITER).await;
+    write_policy(&core, &root, "res-writer", RESOURCE_WRITER).await;
+    let (writer, _) = login(&core, &root, "writer", "kv-writer,res-writer").await;
+
+    let mut kv_forged = kv_bundle();
+    kv_forged["versions"][0]["username"] = json!("alice");
+    kv_forged["versions"][0]["operation"] = json!("create");
+    for token in [&writer, &root] {
+        for (path, api, body) in [
+            ("secret/v2/transfer/import/open/x", 1, kv_forged.clone()),
+            ("resources/v2/transfer/import/free", 1, forged_resource_bundle()),
+            ("resources/v2/transfer/import/free", 2, forged_resource_bundle()),
+        ] {
+            unknown_route(direct(&core, token, path, api, body).await, &format!("{path} at v{api}"));
+        }
+    }
+    assert_eq!(kv_value(&core, &root, "open/x").await, None, "nothing written");
+    assert_eq!(kv_owner(&core, "secret/open/x").await, None, "no owner stamped");
+    assert!(test_read_api(core.as_ref(), &root, "resources/resources/free", true).await.unwrap().is_none());
+    assert_eq!(resource_owner(&core, "free").await, None, "no owner stamped");
+    assert_eq!(history_len(&core, &root, "free").await, 0, "no history entry");
+
+    // The transfer's own import of the same names succeeds, so the refused calls
+    // left nothing behind (leftover KV version data would answer 409).
+    import(&core, &root, "secret/v2/transfer/import/open/x", kv_bundle()).await.unwrap();
+    import(&core, &root, "resources/v2/transfer/import/free", resource_bundle(&[])).await.unwrap();
+    assert_eq!(history_len(&core, &root, "free").await, 1, "only the transfer-in entry");
+}
+
+/// Regression: a direct import answers the same 404 whether the item exists
+/// (and belongs to someone else) or not, so it tells the caller nothing.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn a_direct_import_answers_alike_whether_or_not_the_item_exists() {
+    let (_bvault, core, root) = new_unseal_test_bastion_vault("direct_import_no_existence_oracle").await;
+    write(&core, &root, "sys/auth/pass", json!({ "type": "userpass" })).await;
+    let (alice, alice_id) = login(&core, &root, "alice", "standard-user").await;
+    let (bob, _) = login(&core, &root, "bob", "standard-user").await;
+    send(&core, &alice, Operation::Write, "secret/data/team/a-secret", None, json!({ "data": { "v": "alice's" } }))
+        .await
+        .unwrap();
+    let meta = json!({ "type": "server", "hostname": "alice.example" });
+    send(&core, &alice, Operation::Write, "resources/resources/alice-srv", None, meta).await.unwrap();
+
+    for (taken, free, body) in [
+        ("secret/v2/transfer/import/team/a-secret", "secret/v2/transfer/import/team/b-new", kv_bundle()),
+        ("resources/v2/transfer/import/alice-srv", "resources/v2/transfer/import/bob-srv", forged_resource_bundle()),
+    ] {
+        unknown_route(direct(&core, &bob, taken, 1, body.clone()).await, taken);
+        unknown_route(direct(&core, &bob, free, 1, body).await, free);
+    }
+    assert_eq!(kv_value(&core, &root, "team/a-secret").await, Some(json!("alice's")), "untouched");
+    assert_eq!(kv_value(&core, &root, "team/b-new").await, None);
+    assert_eq!(kv_owner(&core, "secret/team/b-new").await, None);
+    assert_eq!(resource_owner(&core, "alice-srv").await, Some(alice_id), "still alice's");
+    assert_eq!(resource_owner(&core, "bob-srv").await, None);
+    assert_eq!(history_len(&core, &root, "alice-srv").await, 1, "only alice's own create");
+}
+
+/// Regression over real HTTP: neither import route is reachable from a client
+/// (`/v1` and `/v2`, root token), while a transfer through
+/// `/v2/sys/namespace-transfer/copy`, which marks its own imports, still works.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn the_import_routes_are_not_reachable_over_http() {
+    let mut server = TestHttpServer::new("import_routes_not_over_http", false).await;
+    server.token = server.root_token.clone();
+    let obj = |v: Value| v.as_object().cloned();
+    let v1 = server.url_prefix.clone();
+    let v2 = v1.replace("/v1", "/v2");
+
+    for (prefix, path, body) in [
+        (&v1, "secret/v2/transfer/import/open/x", kv_bundle()),
+        (&v1, "resources/v2/transfer/import/free", forged_resource_bundle()),
+        (&v2, "resources/v2/transfer/import/free", forged_resource_bundle()),
+    ] {
+        server.url_prefix = prefix.clone();
+        let (status, resp) = server.write(path, obj(body), None).unwrap();
+        assert_eq!(status, 404, "{prefix}/{path}: {resp}");
+    }
+    server.url_prefix = v1.clone();
+    let (core, root) = (server.core.clone(), server.root_token.clone());
+    assert_eq!(kv_value(&core, &root, "open/x").await, None, "nothing written");
+    assert!(test_read_api(core.as_ref(), &root, "resources/resources/free", true).await.unwrap().is_none());
+    assert_eq!(history_len(&core, &root, "free").await, 0, "no history entry");
+
+    for ns in ["src", "dst"] {
+        assert_eq!(server.write(&format!("sys/namespaces/{ns}"), obj(json!({})), None).unwrap().0, 200);
+    }
+    let meta = obj(json!({ "type": "server", "hostname": "h.example" }));
+    let header = [("X-BastionVault-Namespace", "src")];
+    let (status, resp) =
+        server.request_with_headers("POST", "resources/resources/srv1", meta, None, None, &header).unwrap();
+    assert!(status < 300, "{resp}");
+    server.url_prefix = v2;
+    let copy = json!({
+        "kind": "resource",
+        "source": { "namespace": "src", "mount": "resources", "path": "srv1" },
+        "destination": { "namespace": "dst", "mount": "resources", "path": "srv1" },
+    });
+    let (status, resp) = server.write("sys/namespace-transfer/copy", obj(copy), None).unwrap();
+    assert_eq!(status, 200, "the transfer marks its own imports: {resp}");
+    server.url_prefix = v1;
+    let header = [("X-BastionVault-Namespace", "dst")];
+    let (status, resp) =
+        server.request_with_headers("GET", "resources/resources/srv1", None, None, None, &header).unwrap();
+    assert_eq!(status, 200, "the copy arrived: {resp}");
 }

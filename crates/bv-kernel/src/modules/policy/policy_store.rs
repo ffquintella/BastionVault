@@ -3705,14 +3705,23 @@ impl AuthHandler for PolicyStore {
     }
 
     /// Handle authentication for a given request: see [`PolicyStore::authorize_request`].
-    /// A transfer import is authorized as what it writes (`transfer_target`): the
-    /// item first, and only then each secret a resource carries, so a caller who
-    /// may not write the item never has the list read. Each path stands in for
-    /// the route's while the lookups and the ACL run; the route's is put back.
+    /// A transfer import is internal-only: unmarked, it is an unknown route
+    /// before any lookup. Marked, it is authorized as what it writes
+    /// (`transfer_target`): the item first, then each secret a resource
+    /// carries. Each path stands in for the route's while the ACL runs.
     async fn post_auth(&self, req: &mut Request) -> Result<(), RvError> {
         let Some(target) = self.transfer_import_target(&req.path, req.api_version)? else {
             return self.authorize_request(req, None).await;
         };
+        if !req.is_internal_transfer_import() {
+            log::warn!(
+                target: "security",
+                "refused a direct call to the internal transfer import route '{}' by '{}'",
+                req.path,
+                req.name
+            );
+            return Err(RvError::ErrLogicalPathUnsupported);
+        }
         let route = std::mem::replace(&mut req.path, target.acl_path());
         let mut result = self.authorize_request(req, Some(&route)).await;
         if result.is_ok() {

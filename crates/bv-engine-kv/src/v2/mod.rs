@@ -198,8 +198,8 @@ impl KvV2Backend {
                 },
                 {
                     // Cross-namespace transfer, destination side
-                    // (features/cross-namespace-copy-move.md). See
-                    // `handle_transfer_import` for what one ACL check covers.
+                    // (features/cross-namespace-copy-move.md). Internal-only:
+                    // see `handle_transfer_import`.
                     pattern: TRANSFER_IMPORT_PATTERN,
                     fields: {
                         "name": {
@@ -212,8 +212,9 @@ impl KvV2Backend {
                     ],
                     help: "Import a secret with every version (numbers, timestamps, delete and destroy state, \
                            environments) under a path that holds no secret. Body: versions, current, \
-                           metadata, on_conflict (refuse only). Authorized as a write of <mount>/<path>; \
-                           the caller becomes its owner. Shares and asset groups are not written."
+                           metadata, on_conflict (refuse only). Internal: only the namespace transfer may \
+                           call it, any other request is answered 404. Authorized as a write of \
+                           <mount>/<path>; the caller becomes its owner. Shares and asset groups are not written."
                 }
             ],
             secrets: [{
@@ -615,11 +616,13 @@ async fn apply_kv_import(view: &dyn Storage, plan: KvImportPlan) -> Result<KvImp
     Ok(KvImportSummary { path, versions: count })
 }
 
-/// What `handle_transfer_import` does with a routed request. A token scoped
-/// to environments is refused: an import writes base data, which
-/// `enforce_env_scope` denies to such a token.
+/// What `handle_transfer_import` does with a routed request. Internal-only: a
+/// request the transfer did not mark is an unknown route, before anything is
+/// read. A token scoped to environments is refused: an import writes base
+/// data, which `enforce_env_scope` denies to such a token.
 #[maybe_async::maybe_async]
 async fn import_from_request(req: &Request) -> Result<KvImportSummary, RvError> {
+    req.require_internal_transfer_import()?;
     let path = req.data.as_ref().and_then(|d| d.get("name")).and_then(Value::as_str).unwrap_or("").to_string();
     enforce_env_scope(req, None)?;
     let bundle = parse_kv_bundle(req.body.as_ref().ok_or(RvError::ErrRequestNoDataField)?)?;
@@ -1172,13 +1175,12 @@ impl KvV2BackendInner {
         Ok(None)
     }
 
-    /// `<mount>/v2/transfer/import/<path>`: destination side of a cross-namespace
-    /// copy or move; writes a [`KvSecretBundle`], `metadata/` last. One ACL check,
-    /// on `<mount>/<path>` (the policy layer's `transfer_target`), covers every
-    /// version; `post_route` stamps the caller as owner of the path. `on_conflict`
-    /// is `refuse` only: overwrite is `DELETE metadata/<path>` first. Shares and
-    /// asset groups are untouched; `cas_required` and `max_versions` are stored,
-    /// not applied (no CAS check, no pruning).
+    /// `<mount>/v2/transfer/import/<path>`: the transfer's internal-only write of
+    /// a [`KvSecretBundle`], `metadata/` last; unmarked requests get a 404. One
+    /// ACL check, on `<mount>/<path>` (`transfer_target`), covers every version;
+    /// `post_route` stamps the caller as owner. `on_conflict` is `refuse` only.
+    /// Shares and asset groups are untouched; `cas_required` and `max_versions`
+    /// are stored, not applied (no CAS check, no pruning).
     pub async fn handle_transfer_import(
         &self,
         _backend: &dyn Backend,
@@ -1348,13 +1350,37 @@ mod transfer_import_tests {
         }
     }
 
-    /// The request the router hands `handle_transfer_import` for `path`.
+    /// The request the router hands `handle_transfer_import` for `path`, as
+    /// the transfer sends it (marked as its own import).
     fn request(mem: &Arc<MemStorage>, path: &str, body: Value) -> Request {
+        let req = unmarked(mem, path, body);
+        req.mark_internal_transfer_import();
+        req
+    }
+
+    /// The same request from anyone else.
+    fn unmarked(mem: &Arc<MemStorage>, path: &str, body: Value) -> Request {
         let mut req = Request::default();
         req.storage = Some(mem.clone() as Arc<dyn Storage>);
         req.data = json!({ "name": path }).as_object().cloned();
         req.body = body.as_object().cloned();
         req
+    }
+
+    /// Regression (T494 final review): an import the transfer did not mark is
+    /// an unknown route, refused before the body is parsed or storage is read,
+    /// even with a malformed body or a path that is taken.
+    #[test]
+    fn an_unmarked_import_is_an_unknown_route_and_writes_nothing() {
+        let mem = Arc::new(MemStorage::default());
+        let err = block_on(import_from_request(&unmarked(&mem, "team/db", bundle()))).err().unwrap();
+        assert!(matches!(err, RvError::ErrLogicalPathUnsupported), "{err:?}");
+        let err = block_on(import_from_request(&unmarked(&mem, "team/db", json!({ "bogus": 1 })))).err().unwrap();
+        assert!(matches!(err, RvError::ErrLogicalPathUnsupported), "not parsed first: {err:?}");
+        assert!(mem.snapshot().is_empty(), "nothing written");
+        import(&mem, "team/db", bundle()).unwrap();
+        let err = block_on(import_from_request(&unmarked(&mem, "team/db", bundle()))).err().unwrap();
+        assert!(matches!(err, RvError::ErrLogicalPathUnsupported), "a taken path answers alike: {err:?}");
     }
 
     fn import(mem: &Arc<MemStorage>, path: &str, body: Value) -> Result<KvImportSummary, RvError> {

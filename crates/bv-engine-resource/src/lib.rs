@@ -507,9 +507,9 @@ impl ResourceBackend {
                 {
                     // Cross-namespace transfer, destination side
                     // (features/cross-namespace-copy-move.md): write a
-                    // resource bundle under `name`. Called by the transfer
-                    // orchestrator with the caller's token; see
-                    // `handle_resource_import` for what one ACL check covers.
+                    // resource bundle under `name`. Internal-only: called by
+                    // the transfer orchestrator with the caller's token; see
+                    // `handle_resource_import`.
                     pattern: r"v2/transfer/import/(?P<name>[^/]+)$",
                     fields: {
                         "name": {
@@ -523,9 +523,10 @@ impl ResourceBackend {
                     ],
                     help: "Import a resource bundle (metadata, every secret with all its versions, change history) \
                            under a free name, keeping version numbers and timestamps. Body: meta, secrets, \
-                           history, on_conflict (refuse only), origin, origin_owner. Authorized as a write of \
-                           resources/<name> and of secrets/<name>/<key> per secret; the caller becomes its \
-                           owner. Shares are not written."
+                           history, on_conflict (refuse only), origin, origin_owner. Internal: only the \
+                           namespace transfer may call it, any other request is answered 404. Authorized as a \
+                           write of resources/<name> and of secrets/<name>/<key> per secret; the caller becomes \
+                           its owner. Shares are not written."
                 },
                 {
                     // CRUD a single resource
@@ -2091,17 +2092,17 @@ impl ResourceBackendInner {
         Ok(Some(Response::data_response(Some(data))))
     }
 
-    /// `resources/v2/transfer/import/<name>`: destination side of a
-    /// cross-namespace copy or move; writes a [`ResourceBundle`], `meta/` last.
-    /// Security: the policy layer (`transfer_target`) authorizes a write of
-    /// `resources/resources/<name>` and of `resources/secrets/<name>/<key>` per
-    /// secret before this runs. `on_conflict` is `refuse` only. Content gates
-    /// apply (`check_import_write_gates`); `post_route` stamps the owner.
+    /// `resources/v2/transfer/import/<name>`: the transfer's internal-only write
+    /// of a [`ResourceBundle`], `meta/` last; unmarked requests get a 404 first.
+    /// The policy layer (`transfer_target`) authorizes `resources/resources/<name>`
+    /// and each `resources/secrets/<name>/<key>` before this runs. `on_conflict`
+    /// is `refuse` only. Content gates apply; `post_route` stamps the owner.
     pub async fn handle_resource_import(
         &self,
         _backend: &dyn Backend,
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
+        req.require_internal_transfer_import()?;
         let raw = req.get_data("name")?.as_str().unwrap_or("").to_string();
         let bundle = parse_resource_bundle(req.body.as_ref().ok_or(RvError::ErrRequestNoDataField)?)?;
         let storage = req.storage.clone().ok_or(RvError::ErrRequestNotReady)?;
