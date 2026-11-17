@@ -18,8 +18,16 @@ and lose the version history, the change history and the shares.
 
 ## Current State
 
-**Design only (2026-11-17).** Nothing is implemented. Closest existing
-behaviour, to be reused as the pattern, not called as-is:
+**In progress (2026-11-17).** Implemented: the import endpoints
+(`resources/v2/transfer/import/<name>`, `<kv-mount>/v2/transfer/import/<path>`,
+refuse-only, authorized as a write of the real item), the share planner, and
+`POST /v2/sys/namespace-transfer/{copy|move}` (`docs/api.md`): reads, rights
+checks, `dry_run`, refuse/rename/overwrite, caller ownership, verified move,
+warnings. Not yet: re-creating shares, asset-group membership and attached
+files (the orchestrator's `carry_relations` seam), CLI, Tauri command, GUI.
+
+Closest existing behaviour before this feature, reused as the pattern, not
+called as-is:
 
 - `handle_resource_rename` (resource engine) migrates `meta/`, `hist/`,
   `secret/` `smeta/` `sver/`, asset-group membership, shares
@@ -142,7 +150,7 @@ membership is re-created only when a same-named group exists in the destination.
 
 | Phase | Content | Status |
 |---|---|---|
-| 1 | Engine-side copy/move of a resource and a KV secret with versions and history, collision handling, permission checks | Planned |
-| 2 | Share validation, warnings, `dry_run` | Planned |
+| 1 | Engine-side copy/move of a resource and a KV secret with versions and history, collision handling, permission checks | Done |
+| 2 | Share validation, warnings, `dry_run` | In progress (planner, warnings and `dry_run` done; writing shares pending) |
 | 3 | CLI, Tauri command, GUI action with warning dialog | Planned |
 | 4 | Tests: permission matrix, collision, partial failure, shares kept/dropped, audit in both namespaces | Planned |

@@ -256,6 +256,7 @@ GET    /v2/sys/audit-retention [routed] -> sys/audit-retention
 POST   /v2/sys/audit-retention [routed] -> sys/audit-retention
 PUT    /v2/sys/audit-retention [routed] -> sys/audit-retention
 POST   /v2/sys/capabilities-self [routed] -> sys/capabilities-self
+POST   /v2/sys/namespace-transfer/{op} [routed] -> sys/namespace-transfer/{op}
 GET    /v2/sys/policy-tests/{name:.*} [routed] -> sys/policy-tests/{name}
 POST   /v2/sys/policy-tests/{name:.*} [routed] -> sys/policy-tests/{name}
 DELETE /v2/sys/mcp/pairings/{id} [routed] -> sys/mcp/pairings/{id}

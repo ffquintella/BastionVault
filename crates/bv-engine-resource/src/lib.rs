@@ -1362,11 +1362,19 @@ fn first_static_credential(bundle: &ResourceBundle) -> Option<(&str, u64)> {
 /// True when secret data is stored under `name`, record or not. Without a
 /// record it is what an interrupted import leaves behind (it writes `meta/`
 /// last), or a secret written before its resource; an import never merges
-/// into it.
+/// into it. Only stored keys count: the local file backend lists a directory
+/// a delete left empty as `name/`, and that is no data.
 #[maybe_async::maybe_async]
 async fn has_secret_data_in(view: &dyn storage::Storage, name: &str) -> Result<bool, RvError> {
-    for prefix in [SECRET_PREFIX, SMETA_PREFIX, SVER_PREFIX] {
-        if !view.list(&format!("{prefix}{name}/")).await?.is_empty() {
+    for prefix in [SECRET_PREFIX, SMETA_PREFIX] {
+        if view.list(&format!("{prefix}{name}/")).await?.iter().any(|k| !k.ends_with('/')) {
+            return Ok(true);
+        }
+    }
+    // `sver/<name>/<key>/<version>`: the versions are one level deeper.
+    let sver = format!("{SVER_PREFIX}{name}/");
+    for key in view.list(&sver).await? {
+        if !key.ends_with('/') || view.list(&format!("{sver}{key}")).await?.iter().any(|v| !v.ends_with('/')) {
             return Ok(true);
         }
     }
@@ -2784,6 +2792,54 @@ mod tests {
         let mem = MemStorage::default();
         assert_eq!(status(import(&mem, "srv3", with(bundle(), "/on_conflict", json!("merge"))).await), 400);
         assert!(mem.snapshot().is_empty());
+    }
+
+    /// [`MemStorage`] plus the local file backend's habit (`local.rs`) of
+    /// listing a directory its deletes left empty as `name/`.
+    struct WithEmptyDirs {
+        mem: MemStorage,
+        dirs: Vec<&'static str>,
+    }
+
+    #[maybe_async::maybe_async]
+    impl Storage for WithEmptyDirs {
+        async fn list(&self, prefix: &str) -> Result<Vec<String>, RvError> {
+            let mut out = self.mem.list(prefix).await?;
+            for dir in self.dirs.iter().filter_map(|d| d.strip_prefix(prefix)).filter(|d| !d.is_empty()) {
+                let child = format!("{}/", dir.split('/').next().unwrap_or_default());
+                if !out.contains(&child) {
+                    out.push(child);
+                }
+            }
+            Ok(out)
+        }
+        async fn get(&self, key: &str) -> Result<Option<StorageEntry>, RvError> {
+            self.mem.get(key).await
+        }
+        async fn put(&self, entry: &StorageEntry) -> Result<(), RvError> {
+            self.mem.put(entry).await
+        }
+        async fn delete(&self, key: &str) -> Result<(), RvError> {
+            self.mem.delete(key).await
+        }
+    }
+
+    /// Regression: the empty directories an ordinary delete leaves are not
+    /// leftover data, so the deleted name can be imported to again; a stored
+    /// key at any level still is.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn import_ignores_empty_directories_a_delete_left() {
+        let dirs = vec!["secret/srv1/", "smeta/srv1/", "sver/srv1/login/", "sver/srv1/api/"];
+        let view = WithEmptyDirs { mem: MemStorage::default(), dirs };
+        assert!(!has_secret_data_in(&view, "srv1").await.unwrap());
+        let parsed = parse_resource_bundle(bundle().as_object().unwrap()).unwrap();
+        assert!(plan_resource_import(&view, "srv1", parsed).await.is_ok(), "a name whose resource was deleted is free");
+
+        for key in ["secret/srv1/login", "smeta/srv1/login", "sver/srv1/login/1"] {
+            let view = WithEmptyDirs { mem: MemStorage::default(), dirs: vec!["sver/srv1/api/"] };
+            view.mem.seed(key, json!({ "value": "left-behind" }));
+            assert!(has_secret_data_in(&view, "srv1").await.unwrap(), "{key}");
+        }
     }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]

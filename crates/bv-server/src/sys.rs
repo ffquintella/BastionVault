@@ -1583,6 +1583,28 @@ async fn sys_capabilities_self_request_handler(
     handle_request(core, &mut r).await
 }
 
+/// POST `/v2/sys/namespace-transfer/{copy|move}` — copy or move one resource
+/// or KV secret to another namespace with the caller's own token (T494). The
+/// namespaces are in the body; the header only scopes this request's ACL.
+async fn sys_namespace_transfer_request_handler(
+    req: HttpRequest,
+    op: web::Path<String>,
+    mut body: web::Bytes,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, HttpError> {
+    let payload: serde_json::Map<String, serde_json::Value> =
+        if body.is_empty() { serde_json::Map::new() } else { serde_json::from_slice(&body)? };
+    body.clear();
+
+    let mut r = request_auth(&req);
+    r.path = format!("sys/namespace-transfer/{}", op.into_inner());
+    r.operation = Operation::Write;
+    r.body = Some(payload);
+    copy_namespace_header(&req, &mut r);
+
+    handle_request(core, &mut r).await
+}
+
 /// GET `/v2/sys/policy-tests/{name}` — read a policy's saved effectivity
 /// test cases. v2-only; dedicated shim so remote (HTTP) GUI mode reaches
 /// the logical `policy-tests/...` route without colliding with the

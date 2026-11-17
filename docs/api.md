@@ -911,6 +911,67 @@ surface when at least one of the caller's policies carries
 }
 ~~~
 
+### Namespace transfer (copy and move, `v2` only)
+
+Copy or move one resource or KV secret to another namespace with its
+versions and, for a resource, its change history
+([features/cross-namespace-copy-move.md](../features/cross-namespace-copy-move.md),
+T494). Shares, asset-group membership and attached files are not carried
+yet.
+
+~~~
+POST /v2/sys/namespace-transfer/copy
+POST /v2/sys/namespace-transfer/move
+~~~
+
+~~~json
+{
+  "kind": "resource",
+  "source":      { "namespace": "team-a", "mount": "resources", "path": "db1" },
+  "destination": { "namespace": "team-b", "mount": "resources", "path": "db1" },
+  "on_conflict": "refuse",
+  "dry_run": false
+}
+~~~
+
+- `kind`: `resource` | `kv-secret` (a KV v2 mount; `path` is the secret path).
+  `namespace` `""` is the root namespace.
+- Every step is an ordinary request made with the **caller's token** in the
+  namespace it touches, so it needs: `update` on this route; read (and list
+  on `resources/secrets/<name>`) on everything read at the source; write on
+  the destination item and, for a resource, on each
+  `resources/secrets/<name>/<key>`; `delete` on the source item for `move`
+  and on the destination item for `overwrite`; `update` on
+  `sys/capabilities-self`, which checks those rights before anything is
+  written. The token must be valid in both namespaces. A missing right is a
+  403 naming it; the first denied read refuses the whole transfer.
+- `on_conflict`: `refuse` (default, 409 naming the path), `rename` (the
+  path if free, else the first free `<path>-2` … `<path>-100`, each tried as
+  a refused-on-conflict import so the ACL checks every name), `overwrite` (an
+  ordinary DELETE of the destination item, then the import; not atomic).
+- `dry_run`: every read, rights check and collision check, nothing written.
+- `move` re-reads the source after the copy and deletes it only if nothing
+  changed; otherwise it answers 409 and keeps both, saying what was written.
+- The caller owns the copy; a resource's `transfer-in` history entry records
+  the origin and the origin owner. At most 1000 secrets per resource (400).
+- A soft-deleted KV version cannot be read, so it arrives destroyed with a
+  `deleted-version-not-recoverable` warning; the source is never undeleted.
+
+Response (counts and warnings only, never a value):
+
+~~~json
+{
+  "transferred": { "secrets": 2, "versions": 5, "history": 4, "shares": 0 },
+  "warnings": [{ "code": "policies-not-carried", "subject": "team-a/resources/db1", "message": "…" }],
+  "dry_run": false,
+  "destination": { "namespace": "team-b", "mount": "resources", "path": "db1" }
+}
+~~~
+
+Warning codes: `deleted-version-not-recoverable`, `unversioned-secret`,
+`origin-owner-unreadable`, `collision-not-checked` (dry run without read on
+the destination), `destination-replaced`, `renamed`, `policies-not-carried`.
+
 ### Caller introspection
 
 ~~~

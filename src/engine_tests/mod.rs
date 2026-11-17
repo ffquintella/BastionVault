@@ -63,3 +63,5 @@ mod kernel_resource_group;
 mod kernel_token_binding;
 // The transfer import routes authorized as the item they write (T494).
 mod transfer_import_acl;
+// Cross-namespace copy and move through `sys/namespace-transfer` (T494).
+mod namespace_transfer;

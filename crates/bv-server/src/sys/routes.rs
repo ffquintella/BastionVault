@@ -339,6 +339,11 @@ pub(crate) const V2_ONLY: &[ResourceSpec] = &[
     resource!("/capabilities-self" => [
         route!(routed Post => sys_capabilities_self_request_handler, "sys/capabilities-self"),
     ]),
+    // Copy or move one resource or KV secret to another namespace
+    // (features/cross-namespace-copy-move.md, T494).
+    resource!("/namespace-transfer/{op}" => [
+        route!(routed Post => sys_namespace_transfer_request_handler, "sys/namespace-transfer/{op}"),
+    ]),
     // Policy effectivity test-case persistence (graphical builder regression
     // gate). Sibling to capabilities-self.
     resource!("/policy-tests/{name:.*}" => [

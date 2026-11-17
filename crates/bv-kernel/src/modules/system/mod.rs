@@ -10,10 +10,7 @@ pub mod housekeeping;
 mod leases;
 pub mod mcp;
 pub mod self_profile;
-// T494: the namespace-transfer orchestrator, which calls this planning code,
-// has not landed yet. Drop the allow once it does.
-#[cfg_attr(not(test), allow(dead_code))]
-mod transfer;
+pub mod transfer;
 
 use std::{
     any::Any,
@@ -181,6 +178,7 @@ impl SystemBackend {
         let sys_backend_internal_ui_mount_read = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_cache_flush = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_capabilities_self = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_namespace_transfer = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_policy_test = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_policy_tests_read = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_policy_tests_write = self.self_ptr.upgrade().unwrap().clone();
@@ -765,6 +763,43 @@ impl SystemBackend {
                     },
                     operations: [
                         {op: Operation::Write, handler: sys_backend_capabilities_self.handle_capabilities_self}
+                    ]
+                },
+                {
+                    // Copy or move one resource or KV secret to another
+                    // namespace (T494, features/cross-namespace-copy-move.md).
+                    // Every step runs as the caller in the namespace it
+                    // touches. HTTP shim under /v2/sys only.
+                    pattern: r"namespace-transfer/(?P<op>copy|move)$",
+                    fields: {
+                        "op": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "copy or move."
+                        },
+                        "kind": {
+                            field_type: FieldType::Str,
+                            description: "resource or kv-secret."
+                        },
+                        "source": {
+                            field_type: FieldType::Map,
+                            description: "{namespace, mount, path} of the item to read."
+                        },
+                        "destination": {
+                            field_type: FieldType::Map,
+                            description: "{namespace, mount, path} to write it to."
+                        },
+                        "on_conflict": {
+                            field_type: FieldType::Str,
+                            description: "refuse (default), rename or overwrite."
+                        },
+                        "dry_run": {
+                            field_type: FieldType::Bool,
+                            description: "Read, probe and check collisions, but write nothing."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: sys_backend_namespace_transfer.handle_namespace_transfer}
                     ]
                 },
                 {
@@ -3808,6 +3843,28 @@ impl SystemBackend {
         data.insert("active_namespace".into(), Value::String(active_ns.unwrap_or_default()));
 
         Ok(Some(Response::data_response(Some(data))))
+    }
+
+    /// `POST sys/namespace-transfer/{copy|move}` (exposed as
+    /// `/v2/sys/namespace-transfer/{copy|move}`, T494): copy or move one
+    /// resource or KV secret between namespaces with the caller's own token.
+    /// Answers counts and warnings only, never a value (`transfer::run_transfer`).
+    pub async fn handle_namespace_transfer(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        if req.auth.is_none() {
+            return Err(RvError::ErrPermissionDenied);
+        }
+        let raw_op = req.get_data("op")?.as_str().unwrap_or_default().to_string();
+        let op = transfer::TransferOp::parse(&raw_op)
+            .ok_or_else(|| bv_error_response_status!(404, &format!("unknown transfer operation '{raw_op}'")))?;
+        let body = Value::Object(req.body.clone().unwrap_or_default());
+        let request: transfer::TransferRequest = serde_json::from_value(body)
+            .map_err(|e| bv_error_response_status!(400, &format!("invalid namespace transfer: {e}")))?;
+        let result = transfer::run_transfer(self.core.as_ref(), req, op, request).await?;
+        Ok(Some(Response::data_response(serde_json::to_value(&result)?.as_object().cloned())))
     }
 
     /// `GET sys/dashboard/summary` — one-shot operational snapshot for
