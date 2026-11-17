@@ -934,7 +934,7 @@ async fn import(
     req.mark_internal_transfer_import();
     let resp = core.handle_request(&mut req).await;
     *body = req.body.take().unwrap_or_default();
-    let data = resp.map_err(|e| refused(e, &what))?.and_then(|r| r.data).unwrap_or_default();
+    let data = resp.map_err(|e| import_refused(e, &what, dest))?.and_then(|r| r.data).unwrap_or_default();
     let field = match kind {
         Kind::Resource => "name",
         Kind::KvSecret => "path",
@@ -942,6 +942,23 @@ async fn import(
     match data.get(field).and_then(Value::as_str) {
         Some(written) => Ok(dest.named(written.to_string())),
         None => Err(crate::bv_error_string!(format!("the import into {} did not say what it wrote", dest.display()))),
+    }
+}
+
+/// An import's failure for the caller. `check_place` confirmed the mount and
+/// its engine, so an unknown-route answer means the route refused the marked
+/// request: the transfer's own fault (500), never a "not found".
+fn import_refused(e: RvError, what: &str, dest: &Place) -> RvError {
+    match e {
+        RvError::ErrLogicalPathUnsupported => {
+            log::error!(
+                target: "security",
+                "namespace-transfer: the import route answered the transfer's own import into {} as an unknown route",
+                dest.display()
+            );
+            RvError::ErrResponseStatus(500, "internal error: the import route refused the transfer's request".into())
+        }
+        other => refused(other, what),
     }
 }
 
@@ -1315,6 +1332,19 @@ mod tests {
         caller.auth.as_mut().unwrap().bound_cidrs = vec!["10.0.0.0/24".into()];
         let e = refuse_cidr_bound(&caller).unwrap_err();
         assert!(matches!(e, RvError::ErrResponseStatus(403, ref m) if m.contains("bound to CIDRs")), "{e:?}");
+    }
+
+    #[test]
+    fn only_an_unknown_route_answer_to_an_import_is_an_internal_error() {
+        let dest = Place { ns: "dst".into(), mount: "resources/".into(), path: "srv1".into() };
+        let e = import_refused(RvError::ErrLogicalPathUnsupported, "w", &dest);
+        let internal = "internal error: the import route refused the transfer's request";
+        assert!(matches!(e, RvError::ErrResponseStatus(500, ref m) if m == internal), "{e:?}");
+        let e = import_refused(RvError::ErrPermissionDenied, "the caller may not write x", &dest);
+        assert!(matches!(e, RvError::ErrResponseStatus(403, ref m) if m.ends_with("may not write x")), "{e:?}");
+        assert!(matches!(import_refused(RvError::ErrRouterMountNotFound, "w", &dest), RvError::ErrRouterMountNotFound));
+        let conflict = RvError::ErrResponseStatus(409, "taken".into());
+        assert!(matches!(import_refused(conflict, "w", &dest), RvError::ErrResponseStatus(409, ref m) if m == "taken"));
     }
 
     #[test]

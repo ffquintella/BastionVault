@@ -21,6 +21,7 @@ use serde_json::{json, Value};
 use super::{run_transfer, IdentityStores, TransferOp, TransferRequest};
 use crate::{
     audit::AuditBroker,
+    context::Context,
     core::Core,
     errors::RvError,
     kernel_api::{
@@ -196,6 +197,32 @@ async fn a_repoint_fault_names_only_its_status_and_a_refusal_keeps_its_reason() 
     }
 }
 
+/// Regression (T494 final review): an import the route refuses as an unknown
+/// route (its internal marker lost, as a future bug might lose it) is the
+/// transfer's own fault, a 500, never a 404 read as "does not exist".
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn an_import_refused_as_an_unknown_route_is_an_internal_error() {
+    let (_bvault, core, root) = new_unseal_test_bastion_vault("ns_transfer_unmarked_import").await;
+    for ns in ["src", "dst"] {
+        send(&core, &root, Operation::Write, &format!("sys/namespaces/{ns}"), "", json!({})).await;
+    }
+    let meta = json!({ "type": "server", "hostname": "h.example" });
+    send(&core, &root, Operation::Write, "resources/resources/srv1", "src", meta).await;
+    let ctx = Interposer::new(&core, &root, Fault::UnmarkedImport);
+    let (caller, request) = srv1_to_dst(&root);
+
+    match run_transfer(&ctx, &caller, TransferOp::Move, request, None).await {
+        Err(RvError::ErrResponseStatus(500, m)) => {
+            assert_eq!(m, "internal error: the import route refused the transfer's request");
+        }
+        other => panic!("expected 500, got {other:?}"),
+    }
+    assert!(ctx.fired.load(Ordering::SeqCst), "the import went out without its marker");
+    let read = |path: &'static str, ns: &'static str| send(&core, &root, Operation::Read, path, ns, json!({}));
+    assert!(read("resources/resources/srv1", "dst").await.is_none(), "nothing was written");
+    assert!(read("resources/resources/srv1", "src").await.is_some(), "the source is not deleted");
+}
+
 /// The fault an [`Interposer`] injects.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Fault {
@@ -207,6 +234,8 @@ enum Fault {
     SecondShareWrite,
     /// Re-pointing the attached files answers this status.
     Repoint(u16),
+    /// Every import reaches the vault without the transfer's marker.
+    UnmarkedImport,
 }
 
 /// The real `Core` with one [`Fault`] slipped in.
@@ -250,6 +279,10 @@ impl VaultCtx for Interposer {
             _ => {}
         }
         let is_import = req.operation == Operation::Write && req.path.contains("v2/transfer/import/");
+        if self.fault == Fault::UnmarkedImport && is_import {
+            self.fired.store(true, Ordering::SeqCst);
+            req.ctx = Arc::new(Context::new());
+        }
         let result = VaultCtx::handle_request(self.inner.as_ref(), req).await;
         let change = self.fault == Fault::ChangeSourceAfterImport && is_import && result.is_ok();
         if change && !self.fired.swap(true, Ordering::SeqCst) {
