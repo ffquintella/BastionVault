@@ -181,9 +181,14 @@ via the VAULT_SKIP_VERIFY environment variable."#
         long,
         value_name = "key=value",
         action = ArgAction::Append,
-        long_help = r#"Key-value pair provided as key=value to provide http header added to any
-request done by the CLI. Trying to add headers starting with 'X-Vault-'
-is forbidden and will make the command fail. This can be specified multiple times.
+        long_help = r#"Key-value pair provided as key=value to provide an http header added to
+every request the CLI sends to the server (not to the cluster-discovery health
+probes). The header carrying the token, credential headers (Authorization,
+Proxy-Authorization), names starting with 'X-Vault-' and the headers the client
+sets itself (Accept, Content-Type, Host, Content-Length, ...) are refused and make
+the command fail, as does an entry that is not key=value. A header a command
+sets itself, such as the namespace of 'transfer --namespace', replaces one of
+the same name. This can be specified multiple times.
         "#
     )]
     header: Vec<String>,
@@ -254,6 +259,49 @@ pub enum LogLevel {
     Error,
 }
 
+/// Headers `--header` may not set (lower-case): the token and credentials, and
+/// the ones the client or the transport set themselves. Names starting with
+/// `x-vault-` are refused too, as the option's help has always said.
+const RESERVED_HEADERS: [&str; 13] = [
+    "x-bastionvault-token",
+    "authorization",
+    "proxy-authorization",
+    "cookie",
+    "accept",
+    "content-type",
+    "content-length",
+    "transfer-encoding",
+    "host",
+    "connection",
+    "upgrade",
+    "te",
+    "trailer",
+];
+
+/// The `--header key=value` entries as `(name, value)`, split at the first
+/// `=`, the name lower-cased. An entry that is not `key=value`, that HTTP
+/// cannot carry, or that names a reserved header is an error naming the
+/// entry's position or the header, never what was typed after the name.
+fn parse_headers(entries: &[String]) -> Result<Vec<(String, String)>, RvError> {
+    let mut headers = Vec::with_capacity(entries.len());
+    for (i, entry) in entries.iter().enumerate() {
+        let malformed = |why: &str| RvError::ErrString(format!("--header #{}: {why}; expected key=value", i + 1));
+        let (name, value) = entry.split_once('=').ok_or_else(|| malformed("no `=` in it"))?;
+        let name = http::HeaderName::from_bytes(name.trim().as_bytes())
+            .map_err(|_| malformed("the key is not a valid HTTP header name"))?;
+        http::HeaderValue::from_str(value)
+            .map_err(|_| malformed("the value holds a character an HTTP header cannot carry"))?;
+        let name = name.as_str();
+        if RESERVED_HEADERS.contains(&name) || name.starts_with("x-vault-") {
+            return Err(RvError::ErrString(format!(
+                "--header {name} is refused: it carries the token or a credential, or the CLI sets it itself"
+            )));
+        }
+        headers.push((name.to_string(), value.to_string()));
+    }
+    Ok(headers)
+}
+
 impl HttpOptions {
     pub fn init(&mut self) -> Result<(), RvError> {
         Ok(())
@@ -285,6 +333,7 @@ impl HttpOptions {
     /// [`Self::client`] after discovery resolves the cluster name,
     /// and by `cluster discover` for the diagnostics-only path.
     pub fn client_at(&self, url: &str) -> Result<Client, RvError> {
+        let headers = parse_headers(&self.header)?;
         // --tls-server-name rewrites the URL host to the supplied name so
         // rustls uses it as SNI, while a static resolver attached to the
         // ureq agent keeps the connection aimed at the original host's
@@ -312,6 +361,9 @@ impl HttpOptions {
             std::borrow::Cow::Borrowed(self.token.as_str())
         };
         let mut client = Client::new().with_addr(&effective_url).with_token(&token);
+        for (name, value) in &headers {
+            client = client.add_header(name, value);
+        }
         if let Some(addr) = override_addr {
             client = client.with_override_socket_addr(addr);
         }
@@ -535,6 +587,99 @@ pub trait CommandExecutor {
     }
 
     fn main(&self) -> Result<(), RvError>;
+}
+
+#[cfg(test)]
+mod header_tests {
+    use std::time::Duration;
+
+    use clap::Parser;
+    use serde_json::json;
+
+    use super::{namespace_transfer::test::fake_vault, HttpOptions};
+    use crate::{api::Client, errors::RvError};
+
+    #[derive(Parser)]
+    struct Cli {
+        #[command(flatten)]
+        http: HttpOptions,
+    }
+
+    fn options(address: &str, headers: &[&str]) -> HttpOptions {
+        let mut argv = vec!["bvault", "--address", address, "--token", "the-real-token"];
+        for header in headers {
+            argv.extend_from_slice(&["--header", header]);
+        }
+        Cli::try_parse_from(argv).expect("parses").http
+    }
+
+    fn refusal(client: Result<Client, RvError>) -> String {
+        match client {
+            Ok(_) => panic!("expected the --header to be refused"),
+            Err(e) => e.to_string(),
+        }
+    }
+
+    /// Every `--header` reaches the server on a request built from the
+    /// options, split at the first `=`, beside the token.
+    #[test]
+    fn each_header_is_sent_on_a_request() {
+        let (addr, seen) = fake_vault(200, json!({ "data": {} }));
+        let client = options(&addr, &["X-Team=blue", "x-trace=a=b"]).client().unwrap();
+        assert_eq!(client.request_read("/v1/secret/data/x").unwrap().response_status, 200);
+        let head = seen.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(head.contains("\r\nx-team: blue\r\n"), "{head}");
+        assert!(head.contains("\r\nx-trace: a=b\r\n"), "{head}");
+        assert!(head.contains("\r\nx-bastionvault-token: the-real-token\r\n"), "{head}");
+    }
+
+    /// A command's own header wins over a `--header` of the same name, once.
+    #[test]
+    fn a_commands_own_header_replaces_a_header_option_of_that_name() {
+        let (addr, seen) = fake_vault(200, json!({ "data": {} }));
+        let client = options(&addr, &["X-BastionVault-Namespace=team-a"]).client().unwrap();
+        let client = client.add_header("x-bastionvault-namespace", "team-b");
+        client.request_read("/v1/secret/data/x").unwrap();
+        let head = seen.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(head.matches("x-bastionvault-namespace:").count(), 1, "{head}");
+        assert!(head.contains("\r\nx-bastionvault-namespace: team-b\r\n"), "{head}");
+    }
+
+    /// A `--header` that is not `key=value`, or whose name or value HTTP
+    /// cannot carry, is refused, and the error never repeats what was typed.
+    #[test]
+    fn a_malformed_header_is_refused_without_echoing_it() {
+        for bad in ["s3cr3t-without-equals", "=s3cr3t", "bad name=s3cr3t", "x-ok=s3cr3t\r\nx-injected: 1"] {
+            let message = refusal(options("http://127.0.0.1:1", &[bad]).client());
+            assert!(message.contains("--header"), "{message}");
+            assert!(!message.contains("s3cr3t"), "the input is not echoed: {message}");
+        }
+    }
+
+    /// The token, credentials, `X-Vault-*` and the headers the client sets
+    /// itself cannot be replaced through `--header`: refused, not ignored.
+    #[test]
+    fn the_token_and_other_reserved_headers_are_refused() {
+        let reserved = [
+            "X-BastionVault-Token",
+            "x-bastionvault-token",
+            "Authorization",
+            "Proxy-Authorization",
+            "X-Vault-Token",
+            "X-Vault-Namespace",
+            "Host",
+            "Content-Length",
+            "Content-Type",
+            "Transfer-Encoding",
+            "Connection",
+            "Accept",
+        ];
+        for name in reserved {
+            let message = refusal(options("http://127.0.0.1:1", &[&format!("{name}=s3cr3t")]).client());
+            assert!(message.to_lowercase().contains(&name.to_lowercase()), "names the header: {message}");
+            assert!(!message.contains("s3cr3t"), "never the value: {message}");
+        }
+    }
 }
 
 #[cfg(test)]

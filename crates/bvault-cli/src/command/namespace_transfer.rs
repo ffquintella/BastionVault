@@ -438,7 +438,7 @@ fn display_parts(mount: Option<&str>, location: &str) -> (String, String) {
 }
 
 #[cfg(test)]
-mod test {
+pub(super) mod test {
     use super::*;
 
     fn parse_copy(extra: &[&str]) -> Copy {
@@ -671,7 +671,7 @@ mod test {
 
     /// A one-request HTTP server answering `status` with `reply` as JSON; the
     /// request head it received (header names lower-cased) arrives on the channel.
-    fn fake_vault(status: u16, reply: Value) -> (String, std::sync::mpsc::Receiver<String>) {
+    pub(in crate::command) fn fake_vault(status: u16, reply: Value) -> (String, std::sync::mpsc::Receiver<String>) {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();

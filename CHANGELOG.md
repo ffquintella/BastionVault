@@ -411,6 +411,11 @@ EXAMPLE ENTRY:
 - **Report a KV v2 request that a deny in the other path form refuses as denied in the policy tester, as enforcement does** (T509, S120)
   -- `POST /v2/sys/policies/acl/test` evaluated only the path of each case, so with `path "secret/data/prod/*" { capabilities = ["deny"] }` it reported `secret/prod/x`, `secret/metadata/prod/x` and the other sub-commands as allowed although every real request to them is refused (T504), and a deny on `secret/prod/*` likewise for `secret/data/prod/x`. A case on a kv-v2 secret now goes through the same check enforcement runs, so such a row reads `allowed: false` and `denied_by_deny: true`, names the other form in the new `denied_by_alias` field, and `draft_only_allowed` follows suit; a narrower allow that outranks the deny is still reported allowed. Cases on kv (v1) mounts and other engines are unchanged. Group-gated and scoped denies on the other form are still not resolved by this stateless test.
 
+#### CLI: `--header` is sent
+
+- **Send every `--header key=value` on the CLI's requests, as its help always said, and refuse one that would replace the token or a header the client sets** (T514, S120)
+  -- The option was parsed and then dropped, so a header an operator relied on (a namespace, a tracing id for a proxy) silently never reached the server. Each `--header` is now added to every request the CLI sends to the server, split at the first `=` (not to the cluster-discovery health probes). An entry that is not `key=value`, or that HTTP cannot carry, fails the command, and so does one naming `X-BastionVault-Token`, `Authorization`, `Proxy-Authorization`, `Cookie`, a name starting with `X-Vault-` (as the help already said) or a header the client sets itself (`Accept`, `Content-Type`, `Content-Length`, `Host`, ...); the error names the header or the entry's position, never its value. A header a command sets itself, such as `bvault transfer --namespace`, replaces a `--header` of the same name.
+
 #### Ownership: the KV key-split datafix retries after a failed unseal pass
 
 - **Retry the KV key-split datafix in the background when it fails at unseal, instead of keeping the old keys until the next unseal** (T511, S47)

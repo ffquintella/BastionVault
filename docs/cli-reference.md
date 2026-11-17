@@ -15,7 +15,7 @@ These options apply to all commands that connect to a server:
 | `--client-key` | `VAULT_CLIENT_KEY` | Path to client private key |
 | `--tls-skip-verify` | `VAULT_SKIP_VERIFY` | Skip TLS verification (not recommended) |
 | `--tls-server-name` | `VAULT_TLS_SERVER_NAME` | TLS SNI hostname |
-| `--header` | | Custom HTTP header as `key=value` (repeatable) |
+| `--header` | | Custom HTTP header as `key=value` (repeatable), sent on every request to the server (not on the cluster-discovery health probes). Refused, failing the command: an entry that is not `key=value`; `X-BastionVault-Token`, `Authorization`, `Proxy-Authorization`, `Cookie`; names starting with `X-Vault-`; and the headers the client sets itself (`Accept`, `Content-Type`, `Content-Length`, `Host`, `Transfer-Encoding`, `Connection`, `Upgrade`, `TE`, `Trailer`). The error names the header or the entry's position, never its value. A header a command sets itself (`transfer --namespace`) replaces one of the same name |
 | `--format` | `VAULT_FORMAT` | Output format: `table`, `json`, `yaml`, `raw` |
 | `--log-level` | `VAULT_LOG_LEVEL` | Log level: `trace`, `debug`, `info`, `warn`, `error` |
 
