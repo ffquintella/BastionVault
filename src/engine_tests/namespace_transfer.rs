@@ -893,8 +893,8 @@ async fn rename_stops_on_a_403() {
 
 /// Regression: the brokered-credential gate's 409 is the destination refusing
 /// the content, not a taken name. `rename` and `overwrite` surface it as is
-/// and delete nothing for it; an overwrite of an existing item whose import
-/// then fails on it says the destination was deleted. Pins the gate code.
+/// and delete nothing for it; an overwrite of an existing item checks the gate
+/// before its delete (T498), so the destination stays. Pins the gate code.
 #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
 async fn a_gate_refusal_is_never_read_as_a_collision() {
     let (_bvault, core, root) = vault("ns_transfer_gate").await;
@@ -919,13 +919,27 @@ async fn a_gate_refusal_is_never_read_as_a_collision() {
 
     let existing = json!({ "type": "server", "hostname": "existing.example" });
     send(&core, &root, Operation::Write, "resources/resources/srv1", Some("dst"), existing).await.unwrap();
-    let r = transfer(&core, &root, "copy", resource("srv1", "srv1", json!({ "on_conflict": "overwrite" }))).await;
-    assert_eq!(status(&r), 409, "{r:?}");
-    let m = message(&r);
-    assert!(m.contains("DELETE of dst/resources/srv1") && m.contains("import then failed"), "{m}");
-    assert!(m.contains("brokered_resource_no_static_credential") && !m.contains("rename"), "{m}");
-    assert!(!resource_exists(&core, &root, "dst", "srv1").await, "the overwrite's delete did run");
+    for dry_run in [false, true] {
+        let extra = json!({ "on_conflict": "overwrite", "dry_run": dry_run });
+        let r = transfer(&core, &root, "copy", resource("srv1", "srv1", extra)).await;
+        let kept = get(&core, &root, Some("dst"), "resources/resources/srv1").await;
+        assert_eq!(kept.map(|k| k["hostname"].clone()), Some(json!("existing.example")), "dry_run {dry_run}: {r:?}");
+        assert_eq!(status(&r), 409, "dry_run {dry_run}: {r:?}");
+        let m = message(&r);
+        assert!(m.starts_with("brokered_resource_no_static_credential"), "the gate's own reason: {m}");
+        assert!(m.contains("nothing was deleted") && !m.contains("DELETE of") && !m.contains("pw-1"), "{m}");
+    }
     assert!(resource_exists(&core, &root, "src", "srv1").await, "the source is untouched");
+
+    // The check refuses only what the import would: no static credential, no refusal.
+    let meta = json!({ "type": "server", "hostname": "h2.example" });
+    send(&core, &root, Operation::Write, "resources/resources/srv2", src, meta).await.unwrap();
+    send(&core, &root, Operation::Write, "resources/secrets/srv2/api", src, json!({ "token": "tok-1" })).await.unwrap();
+    let out =
+        result(transfer(&core, &root, "copy", resource("srv2", "srv1", json!({ "on_conflict": "overwrite" }))).await);
+    assert!(codes(&out).contains(&"destination-replaced".to_string()), "{out}");
+    let replaced = get(&core, &root, Some("dst"), "resources/resources/srv1").await.unwrap();
+    assert_eq!(replaced["hostname"], json!("h2.example"));
 }
 
 /// Regression (aliasing, ruling J): a mount in namespace `a` named `a/secret/`

@@ -1010,13 +1010,20 @@ POST /v2/sys/namespace-transfer/move
   all; if the name is taken, an ordinary DELETE of the destination item
   runs, which also revokes its owner, shares and asset-group membership,
   and then the import; not atomic: if the import then fails, the error
-  says the destination was deleted). The gate that refuses a brokered
-  resource a static credential, and the agent-access gate, depend on the
-  asset groups the delete prunes, so they cannot be checked before it: an
-  overwrite can delete a destination for an import that is then refused. A destination content refusal (a
-  brokered resource receiving a static SSH credential) is returned as is and
-  never treated as a taken name.
-- `dry_run`: every read, rights check and collision check, nothing written.
+  says the destination was deleted). Before that delete a resource
+  overwrite asks the destination, writing nothing, whether it would refuse
+  the import as a new item under that name (the bundle, a connection
+  profile's `agent_access` consent, the brokered-resource gate with no
+  asset-group tier, since the delete prunes the name from every group); if
+  it would, that refusal is returned with `nothing was deleted: <destination>
+  is untouched`. Only a change between that check and the import (a tier or
+  type configuration edited meanwhile, a failed group prune) can still fail
+  after the delete. A destination content refusal (a brokered resource
+  receiving a static SSH credential) is returned as is and never treated as
+  a taken name.
+- `dry_run`: every read, rights check and collision check, nothing written;
+  a resource `overwrite` also asks the destination whether it would refuse
+  the import.
 - `move` re-reads the source after the copy and deletes it only if nothing
   changed; otherwise it answers 409 and keeps both, saying what was written.
 - The caller owns the copy; a resource's `transfer-in` history entry records
@@ -1104,7 +1111,9 @@ as an unknown route fails the transfer with a 500 internal error, never a
 it (versions with their numbers and timestamps, history, settings), refuse
 a name that is taken (`on_conflict` accepts `refuse` only; rename and
 overwrite are the transfer's own doing, see above) and carry at most 1000
-secrets per resource (400). An import whose answer names another
+secrets per resource (400). A resource import with `check_only: true`
+writes nothing: it answers `checked`, or the refusal the import would meet
+(the overwrite's pre-check above). An import whose answer names another
 item than the one checked fails with a 500 naming the item, which was
 written without an owner record (logged on the `security` target). As
 defence in depth they are also authorised as a write of the **real** item (`<mount><path>` for KV,

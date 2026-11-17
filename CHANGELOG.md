@@ -392,6 +392,11 @@ EXAMPLE ENTRY:
 
 ### Fixed
 
+#### Namespace transfer: an overwrite the destination would refuse deletes nothing
+
+- **Refuse a resource overwrite before it deletes the destination when the destination would refuse the import itself** (T498, S120)
+  -- An overwrite deleted the destination and then imported, so an import the destination refused (a brokered resource type receiving a static SSH credential, a connection profile with `agent_access` the destination's type configuration does not consent to, an invalid bundle) left the destination gone. The transfer now asks the destination first, writing nothing, whether it would refuse the import as a new item under that name, and answers with that refusal followed by `nothing was deleted: <destination> is untouched`; a dry-run overwrite asks too. Only a change between that check and the import (a login-class tier or type configuration edited meanwhile, a failed asset-group prune) can still fail after the delete, and that error still says the destination was deleted. KV overwrites have no such gate and are unchanged.
+
 #### Asset groups: scoped to the namespace that created them
 
 - **A group created in a namespace is now visible only in that namespace and its children, no longer in every namespace** (T490, S47) -- the asset-group store (records, member/secret/file indexes, history, owner and share keys) is kept per namespace, so siblings and parents no longer see a tenant's groups and a tenant's `db1` no longer shares group membership with root's `db1`. Root keeps its existing keys, so groups already stored read as root groups (visible everywhere) and need no migration; groups made inside a namespace before this release are still root groups and must be re-created in the right namespace. A child sees ancestors' groups read-only (delete answers 403; writing the same name creates the child's own group, which shadows the parent's), reads return `namespace` and `inherited`, and requests addressed as `<ns>/resource-group/...` without the namespace header are refused with 400. `.bvx` export and import carry each namespace's own groups only, and import refuses group ids containing `/` or `..`. The `ResourceGroupIndex` trait methods now take the namespace.

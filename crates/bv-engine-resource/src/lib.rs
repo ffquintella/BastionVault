@@ -350,6 +350,10 @@ pub struct ResourceBundle {
     /// Where the resource came from (`<namespace>/<mount>/<name>`), recorded
     /// in the `transfer-in` history entry.
     pub origin: String,
+    /// Write nothing: answer whether the import of this bundle as a new item
+    /// under the name would be refused (T498, before an overwrite's delete).
+    #[serde(default)]
+    pub check_only: bool,
 }
 
 /// What an import wrote: the stored name and how many secrets, versions and
@@ -523,7 +527,8 @@ impl ResourceBackend {
                     ],
                     help: "Import a resource bundle (metadata, every secret with all its versions, change history) \
                            under a free name, keeping version numbers and timestamps. Body: meta, secrets, \
-                           history, on_conflict (refuse only), origin, origin_owner. Internal: only the \
+                           history, on_conflict (refuse only), origin, origin_owner, check_only (write nothing, \
+                           answer `checked` or the refusal the import would meet). Internal: only the \
                            namespace transfer may call it, any other request is answered 404. Authorized as a \
                            write of resources/<name> and of secrets/<name>/<key> per secret; the caller becomes \
                            its owner. Shares are not written."
@@ -1382,6 +1387,24 @@ async fn has_secret_data_in(view: &dyn storage::Storage, name: &str) -> Result<b
     Ok(false)
 }
 
+/// Where the brokered-credential gate reads the name's asset groups from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GroupTier {
+    /// The reverse index, as stored now.
+    Stored,
+    /// None: the name as an overwrite's delete leaves it (pruned from every group).
+    FreedName,
+}
+
+/// Validate a bundle and its name, without storage. Writes nothing.
+fn validate_resource_import(raw_name: &str, bundle: ResourceBundle) -> Result<ResourceImportPlan, RvError> {
+    check_on_conflict(&bundle.on_conflict)?;
+    let name = raw_name.trim().to_ascii_lowercase();
+    validate_name_segment("name", &name).map_err(bad_import)?;
+    let history_seq = validate_resource_bundle(&bundle)?;
+    Ok(ResourceImportPlan { name, history_seq, bundle })
+}
+
 /// Validate a bundle and check the name is free. Writes nothing.
 #[maybe_async::maybe_async]
 async fn plan_resource_import(
@@ -1389,21 +1412,19 @@ async fn plan_resource_import(
     raw_name: &str,
     bundle: ResourceBundle,
 ) -> Result<ResourceImportPlan, RvError> {
-    check_on_conflict(&bundle.on_conflict)?;
-    let name = raw_name.trim().to_ascii_lowercase();
-    validate_name_segment("name", &name).map_err(bad_import)?;
-    let history_seq = validate_resource_bundle(&bundle)?;
+    let plan = validate_resource_import(raw_name, bundle)?;
+    let name = plan.name.as_str();
 
-    if let Some(key) = existing_resource_key_in(view, &name).await? {
+    if let Some(key) = existing_resource_key_in(view, name).await? {
         return Err(import_conflict(format!("a resource named '{key}' already exists")));
     }
-    if has_secret_data_in(view, &name).await? {
+    if has_secret_data_in(view, name).await? {
         return Err(import_conflict(format!(
             "secret data with no resource record is stored under '{name}' (an interrupted \
              operation?); import under another name"
         )));
     }
-    Ok(ResourceImportPlan { name, history_seq, bundle })
+    Ok(plan)
 }
 
 /// Write a history entry at `seq`, or the next free key after it, and
@@ -2097,6 +2118,7 @@ impl ResourceBackendInner {
     /// The policy layer (`transfer_target`) authorizes `resources/resources/<name>`
     /// and each `resources/secrets/<name>/<key>` before this runs. `on_conflict`
     /// is `refuse` only. Content gates apply; `post_route` stamps the owner.
+    /// `check_only` writes nothing: `checked`, or the refusal it would meet.
     pub async fn handle_resource_import(
         &self,
         _backend: &dyn Backend,
@@ -2107,8 +2129,16 @@ impl ResourceBackendInner {
         let bundle = parse_resource_bundle(req.body.as_ref().ok_or(RvError::ErrRequestNoDataField)?)?;
         let storage = req.storage.clone().ok_or(RvError::ErrRequestNotReady)?;
 
+        if bundle.check_only {
+            // What the import after an overwrite's delete meets: the name is
+            // not checked (it is taken until that delete) and has no groups.
+            let plan = validate_resource_import(&raw, bundle)?;
+            self.check_import_write_gates(req, &plan, GroupTier::FreedName).await?;
+            let data = Map::from_iter([("checked".to_string(), Value::Bool(true))]);
+            return Ok(Some(Response::data_response(Some(data))));
+        }
         let plan = plan_resource_import(storage.as_ref(), &raw, bundle).await?;
-        self.check_import_write_gates(req, &plan).await?;
+        self.check_import_write_gates(req, &plan, GroupTier::Stored).await?;
 
         // Names, counts and the origin path only: never a secret value.
         let origin = plan.bundle.origin.clone();
@@ -2138,7 +2168,12 @@ impl ResourceBackendInner {
     /// from the origin's): MCP brokered-session profiles need this
     /// namespace's type consent (`handle_resource_write`), and a brokered
     /// resource may not carry a static SSH credential (`handle_secret_write`).
-    async fn check_import_write_gates(&self, req: &Request, plan: &ResourceImportPlan) -> Result<(), RvError> {
+    async fn check_import_write_gates(
+        &self,
+        req: &Request,
+        plan: &ResourceImportPlan,
+        groups: GroupTier,
+    ) -> Result<(), RvError> {
         let meta = &plan.bundle.meta;
         let type_id = meta.get("type").and_then(Value::as_str).unwrap_or_default();
 
@@ -2156,7 +2191,10 @@ impl ResourceBackendInner {
         }
 
         if let Some((key, version)) = first_static_credential(&plan.bundle) {
-            let eff = self.resolve_login_class_for_type(req, &plan.name, type_id).await?;
+            let eff = match groups {
+                GroupTier::Stored => self.resolve_login_class_for_type(req, &plan.name, type_id).await?,
+                GroupTier::FreedName => self.resolve_login_class_ungrouped(&plan.name, type_id).await?,
+            };
             if eff.brokered {
                 return Err(bv_error_response_status!(
                     409,
@@ -2295,6 +2333,19 @@ impl ResourceBackendInner {
         };
 
         policy.resolve_for(resource_type, &asset_groups, resource).await
+    }
+
+    /// [`Self::resolve_login_class_for_type`] for a name in no asset group,
+    /// as the delete before an overwrite's import leaves it (T498).
+    async fn resolve_login_class_ungrouped(
+        &self,
+        resource: &str,
+        resource_type: &str,
+    ) -> Result<LoginClassVerdict, RvError> {
+        match self.core.login_class() {
+            Some(policy) => policy.resolve_for(resource_type, &[], resource).await,
+            None => Ok(LoginClassVerdict::default()),
+        }
     }
 
     pub async fn handle_secret_write(
@@ -2867,6 +2918,34 @@ mod tests {
             }
         }
         assert_eq!(mem.snapshot(), existing, "a refused import writes nothing");
+    }
+
+    /// T498: a check (`check_only`) validates the bundle and name exactly as
+    /// an import does, but not whether the name is taken (an overwrite checks
+    /// before its delete frees it). It reads and writes no storage.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn a_check_validates_all_but_the_taken_name() {
+        let mem = MemStorage::default();
+        mem.seed("meta/srv1", json!({"name": "srv1", "hostname": "old"}));
+        let parse = |body: Value| parse_resource_bundle(body.as_object().unwrap()).unwrap();
+        let check = with(bundle(), "/check_only", json!(true));
+        assert!(parse(check.clone()).check_only && !parse(bundle()).check_only, "off unless asked");
+        let taken = plan_resource_import(&mem, "srv1", parse(check.clone())).await;
+        assert!(matches!(taken, Err(RvError::ErrResponseStatus(409, _))), "an import finds the name taken");
+        let plan = validate_resource_import(" SRV1 ", parse(check.clone())).unwrap();
+        assert_eq!(plan.name, "srv1", "named as the import would store it");
+
+        let invalid = [
+            with(check.clone(), "/secrets/0/versions/0/version", json!(0)),
+            with(check.clone(), "/on_conflict", json!("overwrite")),
+            with(check.clone(), "/origin", json!("")),
+        ];
+        for body in invalid {
+            let r = validate_resource_import("srv1", parse(body));
+            assert!(matches!(r, Err(RvError::ErrResponseStatus(400, _))), "the import's own 400");
+        }
+        assert!(validate_resource_import("a/b", parse(check)).is_err(), "the name is still validated");
+        assert_eq!(mem.snapshot().len(), 1, "nothing written");
     }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]

@@ -112,6 +112,16 @@ impl ImportTarget {
         Some(resp?.data.as_ref()?.get(field)?.as_str()?.to_string())
     }
 
+    /// A resource import sent as a gate check (`check_only`, T498) that the
+    /// engine answered as one (`checked`, no `name`): it wrote nothing. Any
+    /// other answer is bookkept as a write.
+    pub(crate) fn is_check(&self, body: Option<&Map<String, Value>>, resp: Option<&Response>) -> bool {
+        let asked = body.and_then(|b| b.get("check_only")).and_then(Value::as_bool) == Some(true);
+        let data = resp.and_then(|r| r.data.as_ref());
+        let answered = data.is_some_and(|d| d.get("checked") == Some(&Value::Bool(true)) && !d.contains_key("name"));
+        self.kind == Kind::Resource && asked && answered
+    }
+
     /// The path a normal write of `name` under this mount is authorized on. KV:
     /// `<mount><name>`, the API version 2 form, which the owner and share keys
     /// canonicalize to; `<mount>data/<name>` when the name would read as a
@@ -243,5 +253,25 @@ mod tests {
         assert_eq!(res.written_path(Some(&resp("name", "SRV1"))), None, "the engine answers lower-cased");
         assert_eq!(res.answered_name(Some(&resp("name", "srv1-2"))).as_deref(), Some("srv1-2"));
         assert_eq!(kv.answered_name(Some(&resp("name", "team/db"))), None, "KV answers with `path`");
+    }
+
+    /// A gate check (T498) is skipped by the bookkeeping only when it was
+    /// asked for and answered as one; a check that answers a name wrote.
+    #[test]
+    fn only_an_answered_resource_check_is_a_check() {
+        let res = ImportTarget::from_route("resources/", "resource", 1, "v2/transfer/import/srv1").unwrap();
+        let body = |check: Value| json!({ "meta": {}, "check_only": check }).as_object().cloned();
+        let answer = |data: Value| Response::data_response(data.as_object().cloned());
+        let checked = answer(json!({ "checked": true }));
+        assert!(res.is_check(body(json!(true)).as_ref(), Some(&checked)));
+        assert!(!res.is_check(body(json!(false)).as_ref(), Some(&checked)), "not asked");
+        assert!(!res.is_check(body(json!("true")).as_ref(), Some(&checked)), "not a boolean");
+        assert!(!res.is_check(None, Some(&checked)));
+        let wrote = answer(json!({ "checked": true, "name": "srv1" }));
+        assert!(!res.is_check(body(json!(true)).as_ref(), Some(&wrote)), "it answered a name: it wrote");
+        assert!(!res.is_check(body(json!(true)).as_ref(), Some(&answer(json!({})))), "not answered as one");
+        assert!(!res.is_check(body(json!(true)).as_ref(), None));
+        let kv = ImportTarget::from_route("secret/", "kv-v2", 1, "v2/transfer/import/x").unwrap();
+        assert!(!kv.is_check(body(json!(true)).as_ref(), Some(&checked)), "KV has no check");
     }
 }

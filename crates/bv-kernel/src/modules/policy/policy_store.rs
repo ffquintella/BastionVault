@@ -4316,6 +4316,10 @@ impl Handler for PolicyStore {
         if req.operation != Operation::Write {
             return Err(RvError::ErrHandlerDefault);
         }
+        // A gate check (T498) wrote nothing, so there is nothing to bookkeep.
+        if target.is_check(req.body.as_ref(), resp.as_ref()) {
+            return Err(RvError::ErrHandlerDefault);
+        }
         let Some(written) = target.written_path(resp.as_ref()) else {
             return Err(unowned_import(&target, resp.as_ref()));
         };

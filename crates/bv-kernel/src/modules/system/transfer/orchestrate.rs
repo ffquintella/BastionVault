@@ -900,13 +900,15 @@ fn replaced(dest: &Place, dry_run: bool) -> TransferWarning {
 }
 
 /// Dry run: settle the destination name with reads and capability probes,
-/// exactly as a run would, and write nothing.
+/// exactly as a run would, and write nothing. An overwrite also asks the
+/// destination whether it would refuse the import (`check_import`).
 #[maybe_async::maybe_async]
 async fn plan_destination(
     core: &dyn VaultCtx,
     caller: &Request,
     plan: &Plan,
     snapshot: &Snapshot,
+    origin_owner: &str,
     warnings: &mut Vec<TransferWarning>,
 ) -> Result<Place, RvError> {
     let dest = &plan.destination;
@@ -923,6 +925,10 @@ async fn plan_destination(
             let mut checks = write_checks(plan.kind, dest, snapshot);
             checks.push((dest.item(plan.kind), Right::Delete));
             require(core, caller, &dest.ns, &checks, "an overwrite").await?;
+            if plan.kind == Kind::Resource {
+                let mut body = import_body(plan.kind, snapshot, plan.source.display(), origin_owner);
+                check_import(core, caller, plan.kind, dest, &mut body).await?;
+            }
             match exists(core, caller, plan.kind, dest).await? {
                 Some(true) => warnings.push(replaced(dest, true)),
                 Some(false) => {}
@@ -968,6 +974,26 @@ async fn import(
     dest: &Place,
     body: &mut Map<String, Value>,
 ) -> Result<Place, RvError> {
+    let data = send_import(core, caller, dest, body).await?;
+    let field = match kind {
+        Kind::Resource => "name",
+        Kind::KvSecret => "path",
+    };
+    match data.get(field).and_then(Value::as_str) {
+        Some(written) => Ok(dest.named(written.to_string())),
+        None => Err(crate::bv_error_string!(format!("the import into {} did not say what it wrote", dest.display()))),
+    }
+}
+
+/// `body` to `dest`'s import route, marked as the transfer's own; the answer's
+/// data. The body is handed back, uncopied, whatever the outcome.
+#[maybe_async::maybe_async]
+async fn send_import(
+    core: &dyn VaultCtx,
+    caller: &Request,
+    dest: &Place,
+    body: &mut Map<String, Value>,
+) -> Result<Map<String, Value>, RvError> {
     // An import body is never empty (it names `on_conflict`): an empty one was
     // lost on an earlier attempt, and is not sent.
     if body.is_empty() {
@@ -978,14 +1004,36 @@ async fn import(
     req.mark_internal_transfer_import();
     let resp = core.handle_request(&mut req).await;
     *body = req.body.take().unwrap_or_default();
-    let data = resp.map_err(|e| import_refused(e, &what, dest))?.and_then(|r| r.data).unwrap_or_default();
-    let field = match kind {
-        Kind::Resource => "name",
-        Kind::KvSecret => "path",
+    Ok(resp.map_err(|e| import_refused(e, &what, dest))?.and_then(|r| r.data).unwrap_or_default())
+}
+
+/// Refuse now what the destination would refuse the import itself (T498):
+/// the resource engine checks `body` as a new item under `dest`'s name (the
+/// bundle, agent-access consent, the brokered-credential gate) and writes
+/// nothing. An overwrite's import after its delete meets the same checks.
+/// A KV import has no such gate.
+#[maybe_async::maybe_async]
+async fn check_import(
+    core: &dyn VaultCtx,
+    caller: &Request,
+    kind: Kind,
+    dest: &Place,
+    body: &mut Map<String, Value>,
+) -> Result<(), RvError> {
+    if kind != Kind::Resource {
+        return Ok(());
+    }
+    body.insert("check_only".into(), Value::Bool(true));
+    let answer = send_import(core, caller, dest, body).await;
+    body.remove("check_only");
+    let refused_before_delete = |e: RvError| {
+        let (status, detail) = split(e);
+        let message = format!("{detail}; nothing was deleted: {} is untouched", dest.display());
+        RvError::ErrResponseStatus(status, message)
     };
-    match data.get(field).and_then(Value::as_str) {
-        Some(written) => Ok(dest.named(written.to_string())),
-        None => Err(crate::bv_error_string!(format!("the import into {} did not say what it wrote", dest.display()))),
+    match answer.map_err(refused_before_delete)?.get("checked").and_then(Value::as_bool) {
+        Some(true) => Ok(()),
+        _ => Err(crate::bv_error_string!(format!("the import check of {} gave no answer", dest.display()))),
     }
 }
 
@@ -1018,8 +1066,9 @@ fn import_body(kind: Kind, snapshot: &Snapshot, origin: String, origin_owner: &s
 
 /// Write the item into the destination per `on_conflict`. `rename` tries
 /// `refuse` imports name by name, so the ACL sees each name; `overwrite` tries
-/// the import and, if the name is taken, runs an ordinary DELETE (owner, shares
-/// and groups cleaned up) and imports again.
+/// the import and, if the name is taken, checks that the destination would
+/// accept it, runs an ordinary DELETE (owner, shares and groups cleaned up)
+/// and imports again.
 #[maybe_async::maybe_async]
 async fn write_destination(
     core: &dyn VaultCtx,
@@ -1063,9 +1112,9 @@ async fn write_destination(
                 }
                 Err(e) => return Err(e),
             }
-            // The destination gates (brokered credential, agent access) depend on
-            // the replaced item's asset groups, which this delete prunes, so they
-            // cannot be checked before it: a failure below reports the deletion.
+            // The destination's own refusals (T498) come before the delete; any
+            // later failure (a race, a fault) reports the deletion below.
+            check_import(core, caller, kind, dest, body).await?;
             let what = format!("the caller may not delete {} in {}", dest.display(), namespace_label(&dest.ns));
             call(core, caller, &dest.ns, Operation::Delete, dest.item(kind), None)
                 .await
@@ -1176,7 +1225,7 @@ pub async fn run_transfer(
     }
 
     let written = match plan.dry_run {
-        true => plan_destination(core, caller, &plan, &snapshot, &mut warnings).await?,
+        true => plan_destination(core, caller, &plan, &snapshot, &origin_owner, &mut warnings).await?,
         false => {
             let mut body = import_body(plan.kind, &snapshot, plan.source.display(), &origin_owner);
             write_destination(core, caller, &plan, &mut body, &snapshot, &mut warnings).await?

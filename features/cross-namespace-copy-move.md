@@ -34,8 +34,8 @@ membership, from three surfaces:
 
 Not done: the KV secrets page has no action yet (the modal and the command
 are reusable), and the GUI was proven only in jsdom, not in a live window.
-Follow-ups are tracked in `ROADMAP.md` (T496-T505; T502 and T503 are
-done). What the feature cannot
+Follow-ups are tracked in `ROADMAP.md` (T496-T505; T498, T502 and T503
+are done). What the feature cannot
 carry is under "Known limits".
 
 Closest existing behaviour before this feature, reused as the pattern, not
@@ -142,9 +142,10 @@ value.
 `rename` and `overwrite` are the orchestrator's doing. The two import routes
 it writes through accept `refuse` only: rename tries `refuse` imports at
 `<name>-2` ... `<name>-100` so the ACL checks every name it attempts, and
-overwrite tries the import first and, if the name is taken, runs an ordinary
-DELETE of the destination (which cleans up its owner, shares and groups) and
-imports again.
+overwrite tries the import first and, if the name is taken, asks the
+destination whether it would refuse the import (a `check_only` import that
+writes nothing, T498), runs an ordinary DELETE of the destination (which
+cleans up its owner, shares and groups) and imports again.
 
 ## Security notes
 
@@ -215,9 +216,11 @@ imports again.
   engine.
 - **Overwrite is not atomic**: it tries the import first; if the name is
   taken it deletes the destination and imports again, and if that import
-  fails the destination stays deleted (the error says so). It cannot
-  pre-check the brokered-resource and agent-access gates, which depend on the
-  asset groups the delete prunes.
+  fails the destination stays deleted (the error says so). A resource's
+  destination gates (bundle, agent-access consent, brokered credential) are
+  checked before the delete (T498), so only a change between that check and
+  the import (a tier or type configuration edited meanwhile, a failed group
+  prune) or a fault can still leave the destination deleted.
 - **Namespace existence.** The transfer route answers a namespace the token
   may not operate in as one that does not exist (T503), but the request
   pipeline still answers a namespace header naming a missing namespace with
