@@ -247,7 +247,11 @@ cleans up its owner, shares and groups) and imports again.
   needs `update` on `sys/namespace-transfer/*` plus `sys/capabilities-self`
   there; no built-in policy grants the former. `bvault transfer --namespace
   <path>` sets the namespace header (T497); without it the request runs in
-  the root namespace.
+  the root namespace. A token born inside a namespace cannot run the transfer
+  at all (a namespace policy cannot name `sys/` paths, so it gets a bare
+  403); the flag serves a root sign-in assigned to the namespace, with the
+  `sys/namespace-transfer/*` and `sys/capabilities-self` grants in a
+  root-namespace policy.
 - **Policies naming the source path are not rewritten** (always warned as
   `policies-not-carried`).
 - **The import routes are internal-only.**

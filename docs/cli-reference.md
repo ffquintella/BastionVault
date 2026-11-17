@@ -447,13 +447,16 @@ The request itself runs in the root namespace unless you pass `--namespace`,
 which sets the `X-BastionVault-Namespace` header: the route is then evaluated
 in that namespace, as the API does with the header. `--namespace` is the
 namespace of the request, not of the source or the destination, which
-`--source-namespace` and `--destination-namespace` name in the body. The token
-must be valid in the namespace the request runs in and its policy must grant
-`update` on `sys/namespace-transfer/*` and `sys/capabilities-self` there. A
-token bound to CIDRs cannot run a transfer.
+`--source-namespace` and `--destination-namespace` name in the body. A token
+born inside a namespace cannot run the transfer at all (a namespace policy
+cannot name `sys/` paths, so the route answers it with a bare 403): the flag
+serves a **root sign-in assigned to that namespace**, whose policy in the
+root namespace grants `update` on `sys/namespace-transfer/*` and
+`sys/capabilities-self`. A token bound to CIDRs cannot run a transfer.
 
 ~~~bash
-# The request runs in team-a (the header), moving a resource out of it to team-b.
+# A root sign-in assigned to team-a: the request runs in team-a (the header),
+# moving a resource out of it to team-b.
 bvault transfer move --kind resource --namespace team-a \
     --source-namespace team-a --destination-namespace team-b \
     resources/db1 resources/db1

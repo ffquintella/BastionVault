@@ -1054,12 +1054,13 @@ async fn the_route_runs_with_the_namespace_header_set() {
     assert_eq!(resource_owner(&core, &root, "dst", "srv1").await, entity, "the caller owns the copy");
     assert!(resource_exists(&core, &root, "src", "srv1").await, "a copy leaves the source");
 
-    // The header is what the rights check follows: the same grant held by a
-    // token that may not operate in `src` is refused there, with nothing written.
+    // The same grant held by a token that may not operate in `src` is refused
+    // as a namespace it cannot see (T503's 400), with nothing written.
     let (outsider, _) = user(&core, &root, "outsider", "mover", false).await;
     let b = resource("srv1", "srv1-b", json!({}));
     let r = send(&core, &outsider, Operation::Write, "sys/namespace-transfer/copy", Some("src"), b).await;
-    assert!(status(&r) >= 400, "{r:?}");
+    assert_eq!(status(&r), 400, "{r:?}");
+    assert!(message(&r).contains("the caller can see"), "{}", message(&r));
     assert!(!resource_exists(&core, &root, "dst", "srv1-b").await, "nothing written");
 }
 

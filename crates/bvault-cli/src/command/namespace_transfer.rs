@@ -63,9 +63,11 @@ never part of them; name it with --source-namespace and
 --destination-namespace (default: the root namespace, "").
 
 The request itself runs in the root namespace unless you pass
---namespace <path>, which sets the X-BastionVault-Namespace header: use
-it when your token lives in, or your grant on sys/namespace-transfer is
-given in, another namespace (see docs/cli-reference.md).
+--namespace <path>, which sets the X-BastionVault-Namespace header. A token
+born inside a namespace cannot run the transfer at all (a namespace policy
+cannot name sys/ paths): the flag is for a ROOT sign-in assigned to that
+namespace, whose root-namespace policy grants update on
+sys/namespace-transfer/* and sys/capabilities-self (docs/cli-reference.md).
 
 For a mount whose name has a slash, name the mount with --source-mount /
 --destination-mount; the positional on that side is then the whole path
@@ -355,10 +357,21 @@ fn one_line(text: &str) -> String {
     text.chars().filter(|c| !is_invisible_format(*c)).map(|c| if c.is_control() { ' ' } else { c }).collect()
 }
 
-/// Zero-width and directional marks (U+200B-200F), bidi embeddings and
-/// overrides (U+202A-202E), bidi isolates (U+2066-2069) and the BOM (U+FEFF).
+/// Zero-width and directional marks (U+200B-200F), line and paragraph
+/// separators (U+2028-2029), bidi embeddings, overrides and isolates
+/// (U+202A-202E, U+2066-2069), word joiner and invisible operators
+/// (U+2060-2064), the Arabic letter mark (U+061C) and the BOM (U+FEFF).
+/// U+200C/U+200D go too: names in Persian, Indic or emoji-ZWJ scripts show altered.
 fn is_invisible_format(c: char) -> bool {
-    matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
+    matches!(
+        c,
+        '\u{061C}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{2028}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{FEFF}'
+    )
 }
 
 fn show_place(namespace: &str, mount: &str, path: &str) -> String {
@@ -733,6 +746,7 @@ mod test {
     fn invisible_format_characters_are_removed_from_server_text() {
         assert_eq!(one_line("a\u{202E}b\u{200B}c\u{2066}d\u{FEFF}e\u{200F}f\u{2069}g"), "abcdefg");
         assert_eq!(one_line("x\u{200B}\u{200C}\u{200D}\u{200E}y\u{202A}\u{202B}\u{202C}\u{202D}z"), "xyz");
+        assert_eq!(one_line("a\u{061C}b\u{2060}c\u{2061}\u{2062}\u{2063}\u{2064}d\u{2028}e\u{2029}f"), "abcdef");
         assert_eq!(one_line("tab\there\nnl\u{1b}[2J"), "tab here nl [2J", "control characters still become spaces");
         assert_eq!(one_line("plain ünïcode 日本"), "plain ünïcode 日本", "visible text is untouched");
 

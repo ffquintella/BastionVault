@@ -319,8 +319,9 @@ async fn a_repointed_approle_grantee_is_the_same_principal_in_the_destination() 
     let other_dst = approle_entity(&core, &root, "other-bot", "dst").await;
     assert_ne!(ci_dst, ci_root, "a role is a different entity in each namespace");
     let carried = shares_on(&core, ShareTargetKind::Resource, "dst/srv1").await;
-    assert_eq!(grantees(&carried), vec![ci_dst], "the entity role `ci-bot`'s own `dst` login resolves to: {carried:?}");
-    assert!(!grantees(&carried).contains(&other_dst), "another role's entity never inherits it");
+    assert_eq!(grantees(&carried), vec![ci_dst.clone()], "role `ci-bot`'s own `dst` login entity: {carried:?}");
+    // Not redundant with the equality: it shows the two roles resolve apart in `dst`.
+    assert_ne!(ci_dst, other_dst, "another role's entity is a different principal");
 }
 
 #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
