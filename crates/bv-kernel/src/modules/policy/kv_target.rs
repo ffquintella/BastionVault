@@ -308,6 +308,13 @@ mod tests {
             ("kv/", "kv", "data/x", None, true),
             ("team/kv/", "kv", "data/x", Some("team"), true),
             ("a/b/", "kv", "data/x", None, false),
+            ("apps/data/", "kv-v2", "x", None, true),
+            ("apps/data/", "kv-v2", "data/x", None, true),
+            ("apps/data/", "kv", "x", None, true),
+            ("team/data/", "kv-v2", "x", Some("team"), true),
+            ("team/apps/data/", "kv-v2", "x", Some("team"), true),
+            ("a/b/data/", "kv-v2", "x", Some("a/b"), false),
+            ("a/b/data/", "kv-v2", "x", None, false),
         ];
         for (mount, engine, rel, ns, moves) in cases {
             let item = KvItem::from_route(mount, engine, rel).unwrap().unwrap();

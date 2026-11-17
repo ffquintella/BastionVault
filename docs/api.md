@@ -966,21 +966,28 @@ key the switch moves is refused with a 503, for every caller, root included:
 
 - KV writes and deletes (through `data/`, `metadata/`, `destroy/`,
   `undelete/` or the version 2 short form) of:
+  - every secret, through any route (the version 2 short form included), on
+    a mount whose path has `data` or `metadata` as its second segment
+    (`apps/data/`, in any namespace), on a mount whose path starts with one
+    of them inside a one-segment namespace (`data/` in `team`), and on every
+    mount of a namespace whose path has one of them as its second segment
+    (`team/data`);
   - on a kv or kv-v2 mount whose path is one segment (`secret/`, `kv/`) in
     the root namespace, a secret named `data` or `metadata` or whose name
     starts with `data/` or `metadata/`;
   - on a kv (version 1) mount whose path is one segment, in any namespace,
     the same names;
-  - on a kv-v2 mount whose path has more than one segment (`team/kv/`), in
-    any namespace, every secret, through `data/`, `metadata/`, `destroy/` or
-    `undelete/` (the version 2 short form `team/kv/<name>` is not refused);
-  - in a namespace whose path has `data` or `metadata` as its second segment
-    (`team/data`), every KV secret, through any route.
+  - on any other kv-v2 mount whose path has more than one segment
+    (`team/kv/`), in any namespace, every secret through `data/`,
+    `metadata/`, `destroy/` or `undelete/`; the version 2 short form
+    `team/kv/<name>` is not refused on such a mount.
 - Owner claims and transfers (`sys/kv-owner/*`), `sys/owner/backfill` stamps
-  (not a dry run) and share grants and revokes naming `<mount>/<name>` where
-  the mount path is one segment and the name is `data` or `metadata` or
-  starts with `data/` or `metadata/` (any namespace), or any name in a
-  namespace like `team/data`.
+  (not a dry run) and share grants and revokes naming `<mount>/<name>` whose
+  second segment is `data` or `metadata` (a one-segment mount and a name that
+  is or starts with `data` or `metadata`, or a mount like `apps/data/`), in
+  any namespace, and any name whose namespace path followed by `<mount>/<name>`
+  has one of them as its second segment (any name in `team/data`, or on the
+  mount `data/` in `team`).
 - A namespace-transfer `move` whose source is such a secret, refused before
   anything is written, dry run included; a copy is unaffected.
 
@@ -994,9 +1001,11 @@ datafix retry N of 5 failed: ...`, or the unseal's `owner/share ns-scope
 datafix failed`), fix it (an unreadable namespace mount table, a storage
 fault), then seal and unseal a node: the pass runs at unseal and every node
 follows the replicated marker. To stop writes elsewhere meanwhile, a deny
-policy works as usual. Never write the marker by hand: it would switch every
-node to the new keys without moving any record, leaving the moved secrets
-unowned, so any owner-scoped user could take one with a first write.
+policy works as usual. Never set an unset marker by hand: it would switch
+every node to the new keys without moving any record, leaving the moved
+secrets unowned, so any owner-scoped user could take one with a first write.
+(Rewriting an unreadable marker as `1`, under "Sharing", is a different case:
+there the datafix had completed.)
 
 ### Namespace transfer (copy and move, `v2` only)
 

@@ -321,8 +321,8 @@ impl OwnerStore {
         RvError::ErrResponseStatus(
             503,
             "this KV secret's owner and share key changes when the pending KV key-split datafix completes, so \
-             writes, deletes, owner changes and shares on it are refused until it has; it is retried in the \
-             background and at every unseal (docs/api.md, \"KV key-split datafix pending\")"
+             writes, deletes, owner changes and shares on it are refused until a pass completes (at unseal, or by \
+             its background retry) (docs/api.md, \"KV key-split datafix pending\")"
                 .to_string(),
         )
     }
@@ -738,6 +738,11 @@ mod scoped_key_tests {
             ("secret/x", Some("team"), false),
             ("team/kv/data/x", None, false),
             ("secret/x", Some("team/data"), true),
+            ("apps/data/x", None, true),
+            ("data/x", Some("team"), true),
+            ("apps/data/x", Some("team"), true),
+            ("data/x", Some("a/b"), false),
+            ("a/b/data/x", None, false),
         ];
         for (path, ns, moves) in cases {
             let refused = OwnerStore::client_kv_key_for_write(path, ns, false).is_err();
