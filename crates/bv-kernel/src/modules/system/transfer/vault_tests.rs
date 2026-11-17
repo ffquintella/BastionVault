@@ -1,20 +1,24 @@
 //! `run_transfer` against a whole vault through a `VaultCtx` interposer, for
-//! what the route cannot show: a source that changes between the copy and the
-//! move's delete. Request-only (no `get_module` lookups), so it is sound in
-//! this crate's test binary. The route's own tests are in the facade
-//! (`src/engine_tests/namespace_transfer.rs`).
+//! what the route cannot show: a source that changes during a move, and
+//! faults injected into one kind of sub-request. Request-only (stores are
+//! built on storage, no `get_module`), so it is sound in this test binary.
+//! The route's own tests are in the facade (`src/engine_tests/`).
 
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Weak,
     },
 };
 
+use base64::{
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+    Engine as _,
+};
 use serde_json::{json, Value};
 
-use super::{run_transfer, TransferOp, TransferRequest};
+use super::{run_transfer, IdentityStores, TransferOp, TransferRequest};
 use crate::{
     audit::AuditBroker,
     core::Core,
@@ -30,6 +34,7 @@ use crate::{
         handler::{AuthHandler, Handler},
         Operation, Request, Response,
     },
+    modules::identity::{EntityStore, GroupStore, ShareStore, ShareTargetKind},
     storage::{barrier::SecurityBarrier, barrier_view::BarrierView, cache::CacheConfig, Backend as PhysicalBackend},
     test_utils::new_unseal_test_bastion_vault,
 };
@@ -58,15 +63,8 @@ async fn source_changed_during_copy_aborts_move() {
     send(&core, &root, Operation::Write, "resources/resources/srv1", "src", meta).await;
     send(&core, &root, Operation::Write, "resources/secrets/srv1/login", "src", json!({ "value": "pw-1" })).await;
 
-    let ctx = Interposer { inner: core.clone(), root: root.clone(), fired: AtomicBool::new(false) };
-    let mut caller = Request::new("sys/namespace-transfer/move");
-    caller.client_token = root.clone();
-    let request: TransferRequest = serde_json::from_value(json!({
-        "kind": "resource",
-        "source": { "namespace": "src", "mount": "resources", "path": "srv1" },
-        "destination": { "namespace": "dst", "mount": "resources", "path": "srv1" },
-    }))
-    .unwrap();
+    let ctx = Interposer::new(&core, &root, Fault::ChangeSourceAfterImport);
+    let (caller, request) = srv1_to_dst(&root);
 
     // No identity stores: the source has no share, so the planner never runs.
     match run_transfer(&ctx, &caller, TransferOp::Move, request, None).await {
@@ -84,21 +82,139 @@ async fn source_changed_during_copy_aborts_move() {
     assert!(read("resources/resources/srv1", "dst").await.is_some(), "the copy is kept");
 }
 
-/// The vault with one change slipped in: right after the destination import
-/// succeeds, a new version of the source's `login` secret is written, as a
-/// concurrent writer would. Everything else is the real `Core`.
+/// The caller and request of a transfer of `src/resources/srv1` to `dst`.
+fn srv1_to_dst(root: &str) -> (Request, TransferRequest) {
+    let mut caller = Request::new("sys/namespace-transfer/move");
+    caller.client_token = root.to_string();
+    let request = serde_json::from_value(json!({
+        "kind": "resource",
+        "source": { "namespace": "src", "mount": "resources", "path": "srv1" },
+        "destination": { "namespace": "dst", "mount": "resources", "path": "srv1" },
+    }))
+    .unwrap();
+    (caller, request)
+}
+
+/// `src` and `dst`, `src/srv1` with one secret, and user group `qa` (src only)
+/// and `ops`, `ops2` (both namespaces), each granted a share on `srv1`.
+#[maybe_async::maybe_async]
+async fn seed(core: &Arc<Core>, root: &str) -> IdentityStores {
+    let (core, root) = (core.clone(), root.to_string());
+    for ns in ["src", "dst"] {
+        send(&core, &root, Operation::Write, &format!("sys/namespaces/{ns}"), "", json!({})).await;
+    }
+    let meta = json!({ "type": "server", "hostname": "h.example" });
+    send(&core, &root, Operation::Write, "resources/resources/srv1", "src", meta).await;
+    send(&core, &root, Operation::Write, "resources/secrets/srv1/login", "src", json!({ "value": "pw-1" })).await;
+    let groups = [("qa", &["src"][..]), ("ops", &["src", "dst"][..]), ("ops2", &["src", "dst"][..])];
+    for (group, namespaces) in groups {
+        for ns in namespaces {
+            send(&core, &root, Operation::Write, &format!("identity/group/user/{group}"), ns, json!({})).await;
+        }
+        let path = format!("identity/sharing/by-target/resource/{}/{group}", URL_SAFE_NO_PAD.encode("srv1"));
+        let share = json!({ "grantee_kind": "group_user", "capabilities": ["read"] });
+        send(&core, &root, Operation::Write, &path, "src", share).await;
+    }
+    let entities = EntityStore::new(core.as_ref()).await.unwrap();
+    let groups = GroupStore::new(core.as_ref()).await.unwrap();
+    IdentityStores { entities, groups }
+}
+
+/// Regression (4b review): a fault while checking attached files after a
+/// completed move is a warning, and the share warnings already gathered
+/// reach the caller; the fault's own text does not.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn a_files_fault_after_a_completed_move_is_a_warning_and_keeps_the_share_warnings() {
+    let (_bvault, core, root) = new_unseal_test_bastion_vault("ns_transfer_files_fault").await;
+    let stores = seed(&core, &root).await;
+    let file = json!({ "name": "id.pem", "resource": "srv1", "content_base64": STANDARD.encode("x") });
+    send(&core, &root, Operation::Write, "files/files", "src", file).await;
+    let ctx = Interposer::new(&core, &root, Fault::FileReads);
+    let (caller, request) = srv1_to_dst(&root);
+
+    let out = run_transfer(&ctx, &caller, TransferOp::Move, request, Some(&stores)).await.expect("the move completes");
+    assert!(ctx.fired.load(Ordering::SeqCst), "a file record read was refused");
+    let find = |code: &str, subject: &str| out.warnings.iter().find(|w| w.code == code && w.subject == subject);
+    let files = find("files-not-transferred", "srv1").expect("the fault is a warning");
+    assert!(files.message.contains("status 500") && !files.message.contains("injected"), "{}", files.message);
+    assert!(find("group-not-in-destination", "qa").is_some(), "the share warnings stand: {:?}", out.warnings);
+    assert_eq!(out.transferred.shares, 2, "ops and ops2 were carried");
+    let read = |path: &'static str, ns: &'static str| send(&core, &root, Operation::Read, path, ns, json!({}));
+    assert!(read("resources/resources/srv1", "src").await.is_none(), "the move deleted the source");
+    assert!(read("resources/resources/srv1", "dst").await.is_some());
+}
+
+/// Regression (4b review): a server fault on one share write says how many
+/// were written before it, and which one failed; the copy stays.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn a_share_write_fault_says_how_many_shares_were_written() {
+    let (_bvault, core, root) = new_unseal_test_bastion_vault("ns_transfer_share_fault").await;
+    let stores = seed(&core, &root).await;
+    let ctx = Interposer::new(&core, &root, Fault::SecondShareWrite);
+    let (caller, request) = srv1_to_dst(&root);
+
+    match run_transfer(&ctx, &caller, TransferOp::Move, request, Some(&stores)).await {
+        Err(RvError::ErrResponseStatus(503, m)) => {
+            assert!(m.contains("1 of 2 planned shares were written before share 2 failed"), "{m}");
+            assert!(m.contains("dst/resources/srv1 was written") && m.contains("the source is untouched"), "{m}");
+        }
+        other => panic!("expected 503, got {other:?}"),
+    }
+    let shares = ShareStore::new(core.as_ref()).await.unwrap();
+    assert_eq!(shares.list_shares_for_target(ShareTargetKind::Resource, "dst/srv1").await.unwrap().len(), 1);
+    let source = send(&core, &root, Operation::Read, "resources/resources/srv1", "src", json!({})).await;
+    assert!(source.is_some(), "the move stopped before deleting the source");
+}
+
+/// The fault an [`Interposer`] injects.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Fault {
+    /// Right after the import, a new version of the source's `login` secret.
+    ChangeSourceAfterImport,
+    /// Every read of a file record fails as a storage fault would.
+    FileReads,
+    /// The second share write fails as a storage fault would.
+    SecondShareWrite,
+}
+
+/// The real `Core` with one [`Fault`] slipped in.
 struct Interposer {
     inner: Arc<Core>,
     root: String,
+    fault: Fault,
     fired: AtomicBool,
+    share_writes: AtomicUsize,
+}
+
+impl Interposer {
+    fn new(core: &Arc<Core>, root: &str, fault: Fault) -> Self {
+        let (inner, root) = (core.clone(), root.to_string());
+        Self { inner, root, fault, fired: AtomicBool::new(false), share_writes: AtomicUsize::new(0) }
+    }
+
+    fn injected(&self) -> Result<Option<Response>, RvError> {
+        self.fired.store(true, Ordering::SeqCst);
+        let status = if self.fault == Fault::FileReads { 500 } else { 503 };
+        Err(RvError::ErrResponseStatus(status, "injected fault".to_string()))
+    }
 }
 
 #[maybe_async::maybe_async]
 impl VaultCtx for Interposer {
     async fn handle_request(&self, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let file_read = req.operation == Operation::Read && req.path.starts_with("files/files/");
+        let share_write = req.operation == Operation::Write && req.path.starts_with("identity/sharing/by-target/");
+        match self.fault {
+            Fault::FileReads if file_read => return self.injected(),
+            Fault::SecondShareWrite if share_write && self.share_writes.fetch_add(1, Ordering::SeqCst) == 1 => {
+                return self.injected();
+            }
+            _ => {}
+        }
         let is_import = req.operation == Operation::Write && req.path.contains("v2/transfer/import/");
         let result = VaultCtx::handle_request(self.inner.as_ref(), req).await;
-        if is_import && result.is_ok() && !self.fired.swap(true, Ordering::SeqCst) {
+        let change = self.fault == Fault::ChangeSourceAfterImport && is_import && result.is_ok();
+        if change && !self.fired.swap(true, Ordering::SeqCst) {
             let mut change = Request::new("resources/secrets/srv1/login");
             change.operation = Operation::Write;
             change.client_token = self.root.clone();

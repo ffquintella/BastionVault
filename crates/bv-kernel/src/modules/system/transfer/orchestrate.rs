@@ -997,16 +997,12 @@ async fn write_destination(
     }
 }
 
-/// An error after the import: the copy at `written` stands, and the message
-/// says so and whether the source was deleted.
-fn after_import(e: RvError, written: &Place, what: &str, source_deleted: bool) -> RvError {
+/// An error after the import and before any delete of the source: the copy
+/// at `written` stands and the source is untouched, and the message says so.
+fn after_import(e: RvError, written: &Place, what: &str) -> RvError {
     log::warn!(target: "security", "namespace-transfer: {what} failed after the import to {}", written.display());
     let (status, detail) = split(e);
-    let source = match source_deleted {
-        true => "the move deleted the source",
-        false => "the source is untouched",
-    };
-    let message = format!("{} was written, but {what} failed: {detail}; {source}", written.display());
+    let message = format!("{} was written, but {what} failed: {detail}; the source is untouched", written.display());
     RvError::ErrResponseStatus(status, message)
 }
 
@@ -1087,20 +1083,16 @@ pub async fn run_transfer(
     // prunes its group membership.
     let carried = match relations::carry(core, caller, stores, &plan, &written).await {
         Ok(carried) => carried,
-        Err(e) if !plan.dry_run => return Err(after_import(e, &written, "carrying its shares or groups", false)),
+        Err(e) if !plan.dry_run => return Err(after_import(e, &written, "carrying its shares or groups")),
         Err(e) => return Err(e),
     };
     warnings.extend(carried.warnings);
-    let moved = plan.op == TransferOp::Move && !plan.dry_run;
-    if moved {
+    if plan.op == TransferOp::Move && !plan.dry_run {
         finish_move(core, caller, &plan, &snapshot, &written).await?;
     }
     // After the delete: a move re-points files only once the source is gone.
-    match relations::carry_files(core, caller, &plan, &written).await {
-        Ok(files) => warnings.extend(files),
-        Err(e) if !plan.dry_run => return Err(after_import(e, &written, "checking its attached files", moved)),
-        Err(e) => return Err(e),
-    }
+    // Never an error: the move may be complete, and the warnings above stand.
+    warnings.extend(relations::carry_files(core, caller, &plan, &written).await);
     let shares = carried.shares;
 
     let message = "policies that name the source path are not rewritten; review the destination namespace's policies";

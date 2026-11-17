@@ -998,9 +998,11 @@ POST /v2/sys/namespace-transfer/move
   only by a move within one namespace, after the source is deleted.
   Otherwise `files-not-transferred` (subject: the resource name) says how
   many stay where they are.
-- A failure after the import (a server error while carrying shares or
-  groups) answers with the error and says that the copy was written and
-  whether the source was deleted.
+- A server error while carrying shares or groups (after the import, before
+  a move deletes anything) answers with the error, says that the copy was
+  written and the source is untouched, and counts the shares written before
+  the one that failed. Checking attached files never fails a transfer: a
+  fault there is a `files-not-transferred` warning with its status.
 
 Response (counts and warnings only, never a value):
 

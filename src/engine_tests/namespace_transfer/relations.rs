@@ -194,11 +194,17 @@ async fn caller_without_grant_right_gets_item_but_no_shares() {
 #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
 async fn root_entity_grantee_is_repointed_and_redeemable_in_namespaced_destination() {
     let (_bvault, core, root) = vault("ns_transfer_share_repoint").await;
-    seed_resource(&core, &root, None, "srv1").await;
+    // `srv1` is shared with carol; `srv2` is not; `other` lives in `dst` only.
+    for name in ["srv1", "srv2"] {
+        seed_resource(&core, &root, None, name).await;
+    }
+    seed_resource(&core, &root, Some("dst"), "other").await;
     let (_, carol_root) = user(&core, &root, "carol", "default", true).await;
     grant(&core, &root, None, ("resource", "srv1"), ("entity", &carol_root), json!(["read"])).await.unwrap();
 
     result(transfer(&core, &root, "copy", from_root(json!({}))).await);
+    let srv2 = body("resource", "resources", ("", "srv2"), ("dst", "srv2"), json!({}));
+    result(transfer(&core, &root, "copy", srv2).await);
     // Carol has never logged in to `dst`: her login there resolves to the
     // entity the share was re-pointed to.
     let (carol, carol_dst) = login_in(&core, "carol", "dst").await;
@@ -207,6 +213,58 @@ async fn root_entity_grantee_is_repointed_and_redeemable_in_namespaced_destinati
     assert_eq!(grantees(&carried), vec![carol_dst], "{carried:?}");
     let record = get(&core, &carol, Some("dst"), "resources/resources/srv1").await.expect("carol reads via the share");
     assert_eq!(record["hostname"], json!("h2.example"));
+
+    // Negative controls: the access is the carried share's, not the
+    // transfer's or the namespace's.
+    for name in ["srv2", "other"] {
+        let path = format!("resources/resources/{name}");
+        let r = send(&core, &carol, Operation::Read, &path, Some("dst"), json!({})).await;
+        assert_eq!(super::status(&r), 403, "carol may not read {name}: {r:?}");
+    }
+}
+
+/// Guard (4b review): a root grantee re-pointed into `dst` cannot land on
+/// another principal. Auth mounts live in one global table (`sys/auth` ignores
+/// the namespace; `auth/` is header-scoped), and a userpass login names its
+/// entity `("userpass/", username, login namespace)` whatever its mount, so
+/// the source share's principals are exactly the re-pointed share's.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn a_repointed_grantee_is_the_same_principal_set_in_the_destination() {
+    let (_bvault, core, root) = vault("ns_transfer_repoint_principal").await;
+    seed_resource(&core, &root, None, "srv1").await;
+    let (_, carol_root) = user(&core, &root, "carol", "default", true).await;
+
+    // No namespace-local `userpass/`: enabling it from `dst` hits the one
+    // global table, and a user written from `dst` is root's same record.
+    let again =
+        send(&core, &root, Operation::Write, "sys/auth/userpass", Some("dst"), json!({ "type": "userpass" })).await;
+    assert!(again.is_err(), "the path is taken in the single auth table: {again:?}");
+    let reset = json!({ "password": "another22YY!", "token_policies": "default", "ttl": 0 });
+    send(&core, &root, Operation::Write, "auth/userpass/users/carol", Some("dst"), reset).await.unwrap();
+    let mut login = Request::new("auth/userpass/login/carol");
+    login.operation = Operation::Write;
+    login.body = json!({ "password": "another22YY!" }).as_object().cloned();
+    assert!(core.handle_request(&mut login).await.is_ok(), "the `dst` write changed root's carol");
+    send(&core, &root, Operation::Write, "auth/userpass/users/carol", None, json!({ "password": PASSWORD }))
+        .await
+        .unwrap();
+
+    // A second userpass mount, enabled from `dst`, with its own `carol`: her
+    // root login already resolves to the source share's grantee.
+    send(&core, &root, Operation::Write, "sys/auth/dstpass", Some("dst"), json!({ "type": "userpass" })).await.unwrap();
+    let other = json!({ "password": PASSWORD, "token_policies": "default", "ttl": 0 });
+    send(&core, &root, Operation::Write, "auth/dstpass/users/carol", None, other).await.unwrap();
+    let mut login = Request::new("auth/dstpass/login/carol");
+    login.operation = Operation::Write;
+    login.body = json!({ "password": PASSWORD }).as_object().cloned();
+    let auth = core.handle_request(&mut login).await.unwrap().unwrap().auth.unwrap();
+    assert_eq!(auth.metadata["entity_id"], carol_root, "both mounts' carol already share the source grantee");
+
+    grant(&core, &root, None, ("resource", "srv1"), ("entity", &carol_root), json!(["read"])).await.unwrap();
+    result(transfer(&core, &root, "copy", from_root(json!({}))).await);
+    let (_, carol_dst) = login_in(&core, "carol", "dst").await;
+    let carried = shares_on(&core, ShareTargetKind::Resource, "dst/srv1").await;
+    assert_eq!(grantees(&carried), vec![carol_dst], "the entity carol's own `dst` login resolves to");
 }
 
 #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]

@@ -66,6 +66,7 @@ async fn fetch(
 /// A route's refusal of one write (a 4xx, or a validation message the handler
 /// raised as a plain string, which maps to 500), as opposed to a storage or
 /// server fault, which fails the transfer instead.
+// Decision (4b review): a handler's `ErrString` is a refusal, not a fault.
 fn is_refusal(e: &RvError) -> bool {
     matches!(e, RvError::ErrString(_)) || status_of(e) < 500
 }
@@ -180,9 +181,11 @@ async fn write_share(
         Ok(_) => return Ok(None),
         Err(e) => e,
     };
+    // The route's own words: its 403 may come from the owner check, the
+    // token binding or the sql gate. Share-route messages carry no value.
     if status_of(&e) == 403 {
-        let reason = "the destination refused the grant (only the item's owner or an administrator may share it)";
-        return Ok(Some(planner::warning(CODE_CANNOT_GRANT, share, reason)));
+        let reason = format!("the destination refused the grant: {}", split(e).1);
+        return Ok(Some(planner::warning(CODE_CANNOT_GRANT, share, &reason)));
     }
     if !is_refusal(&e) {
         return Err(e);
@@ -219,10 +222,20 @@ async fn carry_shares(
         true => planned.keep.len(),
         false => {
             let mut written = 0;
-            for share in &planned.keep {
-                match write_share(core, caller, plan.op, plan.kind, dest, share).await? {
-                    None => written += 1,
-                    Some(refused) => warnings.push(refused),
+            for (index, share) in planned.keep.iter().enumerate() {
+                match write_share(core, caller, plan.op, plan.kind, dest, share).await {
+                    Ok(None) => written += 1,
+                    Ok(Some(refused)) => warnings.push(refused),
+                    // Counts only: the shares already written stay written.
+                    Err(e) => {
+                        let (status, detail) = split(e);
+                        let planned_count = planned.keep.len();
+                        let message = format!(
+                            "{written} of {planned_count} planned shares were written before share {} failed: {detail}",
+                            index + 1
+                        );
+                        return Err(RvError::ErrResponseStatus(status, message));
+                    }
                 }
             }
             written
@@ -350,42 +363,55 @@ async fn attached_files(core: &dyn VaultCtx, caller: &Request, src: &Place) -> R
 
 /// Files attached to a source resource. Each namespace has its own files
 /// engine, so they are re-pointed only by a move within one namespace (after
-/// the source is deleted); otherwise they stay and a warning says so.
+/// the source is deleted); otherwise they stay and a warning says so. Never
+/// fails: a fault becomes a warning, since a move may already be complete.
 #[maybe_async::maybe_async]
 pub(super) async fn carry_files(
     core: &dyn VaultCtx,
     caller: &Request,
     plan: &Plan,
     written: &Place,
-) -> Result<Vec<TransferWarning>, RvError> {
+) -> Vec<TransferWarning> {
     let src = &plan.source;
     let same_ns = src.ns == written.ns;
     // Files name a resource, not a mount: in one namespace they still match.
     if plan.kind != Kind::Resource || (same_ns && src.path.eq_ignore_ascii_case(&written.path)) {
-        return Ok(Vec::new());
+        return Vec::new();
     }
     let not_transferred = |message: String| vec![warning(CODE_FILES_NOT_TRANSFERRED, src.path.clone(), message)];
-    let Some((attached, unchecked)) = attached_files(core, caller, src).await? else {
+    // The status only: a fault's text is not the caller's to read.
+    let fault = |what: &str, e: &RvError| {
+        let message = format!("{what} of {} could not be checked: status {}", src.display(), status_of(e));
+        not_transferred(format!("{message}; none was transferred"))
+    };
+    let found = match attached_files(core, caller, src).await {
+        Ok(found) => found,
+        Err(e) => return fault("the attached files", &e),
+    };
+    let Some((attached, unchecked)) = found else {
         let message = format!(
             "the caller may not list files in {}, so files attached to {} were not checked or transferred",
             namespace_label(&src.ns),
             src.display()
         );
-        return Ok(not_transferred(message));
+        return not_transferred(message);
     };
     if attached == 0 && unchecked == 0 {
-        return Ok(Vec::new());
+        return Vec::new();
     }
     if same_ns && plan.op == TransferOp::Move {
         let repoint = format!("{FILES_MOUNT}files/repoint-resource");
         if plan.dry_run {
-            let may = held(core, caller, &src.ns, &[(repoint, Right::Write)]).await?;
+            let may = match held(core, caller, &src.ns, &[(repoint, Right::Write)]).await {
+                Ok(may) => may,
+                Err(e) => return fault("the right to re-point the files", &e),
+            };
             let message = format!("the caller may not re-point the files attached to {}", src.display());
-            return Ok(if may.first() == Some(&true) { Vec::new() } else { not_transferred(message) });
+            return if may.first() == Some(&true) { Vec::new() } else { not_transferred(message) };
         }
         let body = json!({ "old_resource": src.path, "new_resource": written.path }).as_object().cloned();
         return match call(core, caller, &src.ns, Operation::Write, repoint, body).await {
-            Ok(_) => Ok(Vec::new()),
+            Ok(_) => Vec::new(),
             Err(e) => {
                 let (status, detail) = split(e);
                 let message = format!(
@@ -395,7 +421,7 @@ pub(super) async fn carry_files(
                     src.display(),
                     src.path
                 );
-                Ok(not_transferred(message))
+                not_transferred(message)
             }
         };
     }
@@ -413,10 +439,11 @@ pub(super) async fn carry_files(
     if plan.op == TransferOp::Move {
         message.push_str(", which the move leaves naming no resource there");
     }
+    // The scan cannot tell whether a record it may not read is attached.
     if unchecked > 0 {
-        message.push_str(&format!("; {unchecked} file(s) the caller may not read were not checked"));
+        message.push_str(&format!("; {unchecked} file(s) in the namespace could not be checked"));
     }
-    Ok(not_transferred(message))
+    not_transferred(message)
 }
 
 #[cfg(test)]
