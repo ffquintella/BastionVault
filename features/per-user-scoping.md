@@ -579,7 +579,18 @@ another such endpoint:
   too). `can_operate` answers true for root before looking at the name,
   so a root preview of such a path says allowed while the request is 400.
 - **An unreadable key-switch marker refuses KV requests** (500), never
-  falling back to the pre-T499 keys; non-KV requests do not read it.
+  falling back to the pre-T499 keys. Requests that name no KV secret do not
+  read it, except the share endpoints (`identity/sharing/...`), which read
+  it for every share kind and answer 500 too. The 500 comes before the ACL,
+  so while storage fails it tells which paths are KV secrets.
+- **Recovering a garbled marker.** A node that reads it (every node after
+  its next unseal) refuses KV requests, root's included, and the datafix
+  cannot repair it. Rewrite it with the value `1` (barrier key
+  `sys/owner/meta/kv-key-split-version` under the root tenant's storage
+  prefix, e.g. `sys/raw/<key>` with a root token); KV requests work again at
+  once. Never delete it: a node that then reads no marker uses the pre-T499
+  keys, and the next unseal runs the datafix again, whose replace-on-conflict
+  rule can overwrite records written at the new keys since.
 - **The datafix's marker is replicated** (`sys/owner/meta/`) and read
   lazily, so every node switches when one finishes. Downgrading after it
   ran is unsupported: it overwrote some old keys, and an older release's

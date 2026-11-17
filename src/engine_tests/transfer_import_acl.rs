@@ -602,9 +602,10 @@ fn forged_resource_bundle() -> Value {
 }
 
 /// Regression (T494 final review): the import routes are internal. A request
-/// the transfer did not mark is an unknown route (404) for every caller, root
-/// included, at API v1 and v2, so no forged history, origin or version author
-/// is written, and no owner is stamped.
+/// the transfer did not mark is the unknown route's 404 for a caller allowed
+/// to write there (`writer`, root), at API v1 and v2, so no forged history,
+/// origin or version author is written and no owner stamped. A caller with
+/// no grant gets the unknown route's 403 (the tests below).
 #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
 async fn a_direct_import_is_refused_as_an_unknown_route() {
     let (_bvault, core, root) = new_unseal_test_bastion_vault("direct_import_unknown_route").await;

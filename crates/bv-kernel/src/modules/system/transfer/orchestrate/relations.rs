@@ -398,8 +398,17 @@ pub(super) async fn carry_files(
             "namespace-transfer: checking {what} of {} failed (status {status}); reported as a warning",
             src.display()
         );
-        let message = format!("{what} of {} could not be checked: status {status}", src.display());
-        not_transferred(format!("{message}; none was transferred"))
+        let mut message =
+            format!("{what} of {} could not be checked: status {status}; none was transferred", src.display());
+        // As a re-point failure says: a completed move vacated the name.
+        if plan.op == TransferOp::Move && !plan.dry_run {
+            message.push_str(&format!(
+                ", and any file attached to it stays attached to the name '{}', which the move leaves naming no \
+                 resource",
+                src.path
+            ));
+        }
+        not_transferred(message)
     };
     let found = match attached_files(core, caller, src).await {
         Ok(found) => found,

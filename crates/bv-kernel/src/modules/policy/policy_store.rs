@@ -3209,6 +3209,18 @@ fn looks_like_kv_path(req_path: &str, ns_path: Option<&str>) -> bool {
 /// neither matches nor sees an unowned target (fail closed).
 const UNRESOLVED_OWNER: &str = "\u{0}unresolved-owner";
 
+/// `(a KV secret's path, an ambiguous name)` of a [`kv_target::resolve`]
+/// answer, as `authorize_request` reads it. Only the ambiguous-name refusal
+/// is ambiguous; a router fault (a poisoned lock, the same for every path)
+/// is returned as is, so it stays a 500 rather than becoming that 400.
+fn kv_path_shape(resolved: Result<Option<kv_target::KvItem>, RvError>, op: Operation) -> Result<(bool, bool), RvError> {
+    Ok(match resolved {
+        Err(e) if kv_target::is_ambiguous(&e) => (false, true),
+        Err(e) => return Err(e),
+        Ok(item) => (item.is_some(), item.is_some_and(|i| i.folder() && op != Operation::List)),
+    })
+}
+
 /// The 500 for a transfer import whose answer does not name the item the ACL
 /// checked (T502). The engine wrote it and nothing stamped its owner, and
 /// `post_route` has no way to undo an engine's write, so the request fails
@@ -3858,12 +3870,7 @@ impl PolicyStore {
         // list, would be keyed as another secret: it gets no key, and a 400
         // only once the ACL and the token's namespace binding allowed the
         // request, so the answer names no mount to anyone else (T499).
-        let kv_item = kv_target::resolve(&self.router, &req.path);
-        let ambiguous = match &kv_item {
-            Err(_) => true,
-            Ok(item) => item.as_ref().is_some_and(|i| i.folder() && req.operation != Operation::List),
-        };
-        let kv_secret = matches!(kv_item, Ok(Some(_)));
+        let (kv_secret, ambiguous) = kv_path_shape(kv_target::resolve(&self.router, &req.path), req.operation)?;
         self.authorize_decision(req, import_route, kv_secret).await?;
         if ambiguous {
             if let Some(core) = self.core.upgrade() {
@@ -6559,5 +6566,28 @@ path "dti/esi/secret/data/blocked" { capabilities = ["read"] }
         }
         assert_eq!(emitted, vec![String::new()], "one line per interval, the rest counted");
         assert_eq!(POLICY_RESOLUTION_LOG.get(&key).map(|e| e.1), Some(2));
+    }
+}
+
+#[cfg(test)]
+mod kv_path_shape_tests {
+    use super::*;
+
+    /// Regression (batch-1a review): only the ambiguous-name refusal reads as
+    /// an ambiguous KV name; a router fault (a poisoned lock) stays an error,
+    /// a 500, instead of becoming the 400 an allowed caller would get.
+    #[test]
+    fn only_the_ambiguous_name_refusal_is_an_ambiguous_kv_path() {
+        let item = |rel: &str| kv_target::KvItem::from_route("secret/", "kv-v2", rel);
+        assert!(matches!(kv_path_shape(Err(kv_target::ambiguous()), Operation::Read), Ok((false, true))));
+        assert!(matches!(kv_path_shape(item("data//x"), Operation::Write), Ok((false, true))));
+        let read_poison = kv_path_shape(Err(RvError::ErrRwLockReadPoison), Operation::Read);
+        assert!(matches!(read_poison, Err(RvError::ErrRwLockReadPoison)), "{read_poison:?}");
+        let write_poison = kv_path_shape(Err(RvError::ErrRwLockWritePoison), Operation::Write);
+        assert!(matches!(write_poison, Err(RvError::ErrRwLockWritePoison)), "{write_poison:?}");
+        assert!(matches!(kv_path_shape(Ok(None), Operation::Write), Ok((false, false))));
+        assert!(matches!(kv_path_shape(item("data/x"), Operation::Read), Ok((true, false))));
+        assert!(matches!(kv_path_shape(item("metadata/x/"), Operation::Read), Ok((true, true))), "a folder read");
+        assert!(matches!(kv_path_shape(item("metadata/x/"), Operation::List), Ok((true, false))), "a folder list");
     }
 }

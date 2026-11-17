@@ -880,7 +880,10 @@ surrounding whitespace, or a trailing `/` on anything but a list is
 refused with a 400 once the ACL allowed it (a 403 otherwise), root
 included; a secret an earlier release stored under such a name is
 reachable only with storage tools. If the T499 key-switch marker
-(`sys/owner/meta/`) cannot be read, KV requests get a 500.
+(`sys/owner/meta/`) cannot be read, KV requests and every share endpoint
+(`identity/sharing/...`, whatever the share's kind) get a 500, root
+included; rewrite the marker as `1`, never delete it
+(`features/per-user-scoping.md`).
 
 A deny rule on a KV v2 secret applies in either path form (T504):
 `secret/data/<p>` and `secret/<p>` both refuse every route to the secret,
@@ -1102,7 +1105,10 @@ to either path, over HTTP (`/v1` or `/v2`) or in-process, is answered exactly
 as an unknown route at that place: 403 when the token's policies or its
 namespace binding do not let it write the literal path, otherwise 404. Its
 body is never read and the item never looked up, so the answer does not
-reveal whether the mount or the item exists. A client therefore cannot write
+reveal whether the mount or the item exists. One difference remains: the
+namespace request-rate (429) and storage (507) quotas run before a real
+unknown route is dispatched but not before this 404, so a token over its
+namespace's quota gets the 404 here and the 429 or 507 there. A client therefore cannot write
 an item with a history, origin or version author of its choosing. The marker
 is trusted in-process: any Rust code linked into the server can set it, no
 client (HTTP, MCP, WASM or process plugin) can. An import the route refuses

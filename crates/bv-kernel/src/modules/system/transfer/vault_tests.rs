@@ -138,11 +138,43 @@ async fn a_files_fault_after_a_completed_move_is_a_warning_and_keeps_the_share_w
     let find = |code: &str, subject: &str| out.warnings.iter().find(|w| w.code == code && w.subject == subject);
     let files = find("files-not-transferred", "srv1").expect("the fault is a warning");
     assert!(files.message.contains("status 500") && !files.message.contains("injected"), "{}", files.message);
+    assert!(files.message.contains(VACATED), "{}", files.message);
     assert!(find("group-not-in-destination", "qa").is_some(), "the share warnings stand: {:?}", out.warnings);
     assert_eq!(out.transferred.shares, 2, "ops and ops2 were carried");
     let read = |path: &'static str, ns: &'static str| send(&core, &root, Operation::Read, path, ns, json!({}));
     assert!(read("resources/resources/srv1", "src").await.is_none(), "the move deleted the source");
     assert!(read("resources/resources/srv1", "dst").await.is_some());
+}
+
+/// What a files-check fault after a completed move of `srv1` adds (4b review).
+const VACATED: &str = "stays attached to the name 'srv1', which the move leaves naming no resource";
+
+/// Regression (4b review): a files-check fault after a completed move within
+/// one namespace says the files stay on the vacated name, as a re-point
+/// failure does, and names only the fault's status.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn a_files_fault_after_a_move_within_a_namespace_names_the_vacated_name() {
+    let (_bvault, core, root) = new_unseal_test_bastion_vault("ns_transfer_files_fault_same_ns").await;
+    send(&core, &root, Operation::Write, "sys/namespaces/src", "", json!({})).await;
+    let meta = json!({ "type": "server", "hostname": "h.example" });
+    send(&core, &root, Operation::Write, "resources/resources/srv1", "src", meta).await;
+    let file = json!({ "name": "id.pem", "resource": "srv1", "content_base64": STANDARD.encode("x") });
+    send(&core, &root, Operation::Write, "files/files", "src", file).await;
+    let ctx = Interposer::new(&core, &root, Fault::FileReads);
+    let mut caller = Request::new("sys/namespace-transfer/move");
+    caller.client_token = root.clone();
+    let request: TransferRequest = serde_json::from_value(json!({
+        "kind": "resource",
+        "source": { "namespace": "src", "mount": "resources", "path": "srv1" },
+        "destination": { "namespace": "src", "mount": "resources", "path": "srv2" },
+    }))
+    .unwrap();
+
+    let out = run_transfer(&ctx, &caller, TransferOp::Move, request, None).await.expect("the move completes");
+    assert!(ctx.fired.load(Ordering::SeqCst), "a file record read was refused");
+    let files = out.warnings.iter().find(|w| w.code == "files-not-transferred").expect("a files warning");
+    assert!(files.message.contains("status 500") && !files.message.contains("injected"), "{}", files.message);
+    assert!(files.message.contains(VACATED), "{}", files.message);
 }
 
 /// Regression (4b review): a server fault on one share write says how many

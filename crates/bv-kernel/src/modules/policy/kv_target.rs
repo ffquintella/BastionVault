@@ -145,9 +145,18 @@ fn classify_v2(rel: &str) -> Option<(KvSub, &str)> {
     Some((KvSub::Data, rel))
 }
 
+/// The text of [`ambiguous`]'s 400.
+const AMBIGUOUS: &str = "invalid KV path: an empty segment or surrounding whitespace in the name";
+
 /// The 400 for a KV path whose name is ambiguous (see [`KvItem::from_route`]).
 pub(crate) fn ambiguous() -> RvError {
-    RvError::ErrResponseStatus(400, "invalid KV path: an empty segment or surrounding whitespace in the name".into())
+    RvError::ErrResponseStatus(400, AMBIGUOUS.into())
+}
+
+/// Whether `e` is [`ambiguous`]'s refusal, the only error [`resolve`] gives
+/// that is not a router fault.
+pub(crate) fn is_ambiguous(e: &RvError) -> bool {
+    matches!(e, RvError::ErrResponseStatus(400, message) if message == AMBIGUOUS)
 }
 
 /// The KV item a request to `path` addresses, through the router's mount
@@ -221,8 +230,11 @@ mod tests {
             assert!(KvItem::from_route("secret/", "kv-v2", rel).is_err(), "kv-v2 {rel:?}");
         }
         for rel in ["/x", "x//", "a//b", "x ", "/"] {
-            assert!(KvItem::from_route("kv/", "kv", rel).is_err(), "kv {rel:?}");
+            let refusal = KvItem::from_route("kv/", "kv", rel).unwrap_err();
+            assert!(is_ambiguous(&refusal), "kv {rel:?}: {refusal:?}");
         }
+        assert!(!is_ambiguous(&RvError::ErrRwLockReadPoison));
+        assert!(!is_ambiguous(&RvError::ErrResponseStatus(400, "another 400".into())));
         let list = v2("metadata/team/").unwrap();
         assert!(list.folder() && list.key().as_deref() == Some("secret/team"));
         assert!(KvItem::from_route("kv/", "kv", "").unwrap().is_none(), "the kv root list names no secret");

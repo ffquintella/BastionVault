@@ -254,7 +254,9 @@ cleans up its owner, shares and groups) and imports again.
   exist for the orchestrator and cannot be called directly: any request the
   orchestrator did not mark is answered as an unknown route at that place
   (404 for a token otherwise allowed to write there, 403 otherwise), never
-  revealing whether the mount or the item exists. The marker is trusted
+  revealing whether the mount or the item exists. Unlike a real unknown
+  route, the namespace rate (429) and storage (507) quotas are not checked
+  before this 404. The marker is trusted
   in-process: any Rust code linked into the server can set it, no client
   (HTTP, MCP, WASM or process plugin) can. The orchestrator's own imports
   are refuse-only and ACL-checked against the real path; one its import

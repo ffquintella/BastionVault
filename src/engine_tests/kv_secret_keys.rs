@@ -597,8 +597,9 @@ async fn the_datafix_resumes_from_its_saved_plan() {
 }
 
 /// A garbled T499 marker refuses KV requests with an internal error, for
-/// root too, instead of falling back to the pre-T499 keys; non-KV requests
-/// and the datafix's own error path are unaffected (review fix round 2).
+/// root too, instead of falling back to the pre-T499 keys; requests that name
+/// no KV secret are unaffected, except the share endpoints, which read the
+/// marker for every share kind; the datafix reports it (review fix round 2).
 #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
 async fn an_unreadable_key_switch_refuses_kv_requests_only() {
     use crate::modules::identity::kv_key_split_migrate;
@@ -621,8 +622,52 @@ async fn an_unreadable_key_switch_refuses_kv_requests_only() {
     assert_eq!(status(&r), 200, "a non-KV request: {r:?}");
     let r = send(&core, &root, 1, Operation::Write, "sys/policy/unrelated", None, json!({ "policy": "" })).await;
     assert!(status(&r) < 500, "a sys/ write: {r:?}");
+    let shares = format!("identity/sharing/by-target/resource/{}", URL_SAFE_NO_PAD.encode("srv1"));
+    let r = send(&core, &root, 1, Operation::List, &shares, None, json!({})).await;
+    assert!(status(&r) >= 500, "the share endpoints read it for every kind: {r:?}");
     assert!(
         kv_key_split_migrate::run_if_needed(core.as_ref()).await.is_err(),
         "the datafix reports it, unseal logs it"
     );
+}
+
+/// The recovery the docs give for a garbled T499 marker: rewrite it as `1`
+/// (here through `sys/raw`, a root path), never delete it. KV requests then
+/// work again without a restart, and the datafix stays done.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn a_rewritten_key_switch_marker_recovers_kv_requests() {
+    use crate::modules::identity::kv_key_split_migrate;
+    let (_bvault, core, root) = vault("rewritten_key_switch").await;
+    let (bob, _) = login(&core, &root, "bob", "standard-user").await;
+    allowed(send(&core, &bob, 1, Operation::Write, "secret/data/mine", None, data("v")).await, "before");
+    owner_store(&core).await.garble_kv_key_split_marker_for_test().await.unwrap();
+    let r = send(&core, &bob, 1, Operation::Read, "secret/data/mine", None, json!({})).await;
+    assert_eq!(status(&r), 500, "garbled: {r:?}");
+
+    // The barrier key sits under the root tenant's storage prefix.
+    let marker = format!("sys/raw/{}sys/owner/meta/kv-key-split-version", core.root_storage_prefix.load());
+    allowed(send(&core, &root, 1, Operation::Write, &marker, None, json!({ "value": "1" })).await, "rewrite");
+    let r = allowed(send(&core, &bob, 1, Operation::Read, "secret/data/mine", None, json!({})).await, "after");
+    assert_eq!(r.and_then(|r| r.data).map(|d| d["data"]["v"].clone()), Some(json!("v")), "bob reads his secret");
+    assert!(kv_key_split_migrate::run_if_needed(core.as_ref()).await.unwrap().skipped, "the datafix stays done");
+}
+
+/// The ambiguous-name 400 also waits for the token's namespace binding: a
+/// root-bound token whose policy names a tenant's paths, but that may not
+/// operate in the tenant, gets there the 403 a missing mount gives it, not
+/// the 400 root gets (batch-1a review: the binding branch).
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn an_ambiguous_path_where_the_token_may_not_operate_is_a_403() {
+    let (_bvault, core, root) = vault("ambiguous_path_binding").await;
+    write(&core, &root, "sys/namespaces/tenant-a", json!({})).await;
+    let hcl = r#"path "tenant-a/*" { capabilities = ["create", "read", "update", "list"] }"#;
+    write_policy(&core, &root, "tenant-a-all", hcl).await;
+    let (rooted, _) = login(&core, &root, "rooted", "tenant-a-all").await;
+
+    let existing = send(&core, &rooted, 1, Operation::Write, "tenant-a/secret/data/a//b", None, data("w")).await;
+    let missing = send(&core, &rooted, 1, Operation::Write, "tenant-a/nomount/data/a//b", None, data("w")).await;
+    assert_eq!(status(&existing), 403, "{existing:?}");
+    assert_eq!(format!("{existing:?}"), format!("{missing:?}"), "an existing KV mount and a missing mount");
+    let r = send(&core, &root, 1, Operation::Write, "tenant-a/secret/data/a//b", None, data("w")).await;
+    assert_eq!(status(&r), 400, "root may operate there: {r:?}");
 }
