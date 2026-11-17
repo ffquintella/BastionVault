@@ -914,10 +914,11 @@ surface when at least one of the caller's policies carries
 ### Namespace transfer (copy and move, `v2` only)
 
 Copy or move one resource or KV secret to another namespace with its
-versions and, for a resource, its change history
+versions, its shares, its asset-group membership and, for a resource, its
+change history
 ([features/cross-namespace-copy-move.md](../features/cross-namespace-copy-move.md),
-T494). Shares, asset-group membership and attached files are not carried
-yet.
+T494). Attached files stay in the source namespace's files engine unless
+the move stays inside one namespace.
 
 ~~~
 POST /v2/sys/namespace-transfer/copy
@@ -974,6 +975,32 @@ POST /v2/sys/namespace-transfer/move
   the origin and the origin owner. At most 1000 secrets per resource (400).
 - A soft-deleted KV version cannot be read, so it arrives destroyed with a
   `deleted-version-not-recoverable` warning; the source is never undeleted.
+- **Shares.** The source's shares are read through
+  `identity/sharing/by-target/...` (only the item's owner or an
+  administrator may list them; otherwise `shares-unreadable`). Each is
+  checked against the destination: an entity grantee is kept when it lives
+  in the destination or root namespace, a group grantee when a group of
+  that name exists in the destination. A share is written only when the
+  caller holds create or update on its `identity/sharing/by-target/...`
+  route in the destination, and it goes through that route, so the owner
+  check, capability normalisation and root-entity re-pointing apply.
+  Capabilities are carried unchanged (`connect` included) and the share
+  history records `copy` or `move`. Every share left behind is a warning;
+  if none is written, `all-shares-dropped` too. `transferred.shares` counts
+  the shares written (on a dry run, those that would be).
+- **Asset groups.** The item is added to the destination's own asset group
+  of the same name, through `resource-group/groups/<name>` as the caller,
+  only when that group exists there (not merely inherited), the caller can
+  see all of its members, and may modify it. A group is never created;
+  otherwise `group-membership-dropped` (subject: the group name).
+- **Files** (resources): each namespace has its own files engine and blobs
+  are not copied, so attached files are re-pointed (`files/files/repoint-resource`)
+  only by a move within one namespace, after the source is deleted.
+  Otherwise `files-not-transferred` (subject: the resource name) says how
+  many stay where they are.
+- A failure after the import (a server error while carrying shares or
+  groups) answers with the error and says that the copy was written and
+  whether the source was deleted.
 
 Response (counts and warnings only, never a value):
 
@@ -993,6 +1020,17 @@ the destination), `destination-replaced`, `renamed`, `policies-not-carried`,
 versions carry environments. Overrides are rebuilt from per-environment
 reads, so every environment reads the same in the destination, but an
 override equal to its base value is not carried.
+
+Relation warning codes. Share warnings name the grantee (entity id or
+group name) as `subject` and list the capability names:
+`grantee-not-in-destination`, `group-not-in-destination`, `cannot-grant`,
+`share-expired`, `unknown-grantee-kind`, `share-not-written` (the
+destination refused a planned share), `all-shares-dropped` and
+`shares-unreadable` (subject: the source item). Groups and files:
+`group-membership-dropped`, `group-membership-unreadable`,
+`files-not-transferred`. A dry run reports the same warnings without
+writing; it cannot check the share route's owner rule, which the import
+satisfies by making the caller the owner.
 
 ### Caller introspection
 

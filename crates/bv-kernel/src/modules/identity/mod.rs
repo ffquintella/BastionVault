@@ -616,6 +616,23 @@ fn display_share_target(target_path: &str, req: &Request) -> String {
     target_path.strip_prefix(&format!("{ns}/")).unwrap_or(target_path).to_string()
 }
 
+/// `Request::ctx` key under which an in-process caller (the namespace
+/// transfer, T494) puts a `String`, `copy` or `move`, so the share it writes
+/// through the share API is recorded as carried rather than granted. Only
+/// in-process code can set it; it changes the history label and nothing else.
+pub const SHARE_HISTORY_OP_CTX: &str = "identity.share-history-op";
+
+/// The history op of a share write: `copy` / `move` when an in-process
+/// caller set [`SHARE_HISTORY_OP_CTX`] to one of them, else `grant`.
+fn share_history_op(req: &Request) -> &'static str {
+    let marker = req.ctx.get(SHARE_HISTORY_OP_CTX);
+    match marker.as_deref().and_then(|v| v.downcast_ref::<String>()).map(String::as_str) {
+        Some(share_store::SHARE_OP_COPY) => share_store::SHARE_OP_COPY,
+        Some(share_store::SHARE_OP_MOVE) => share_store::SHARE_OP_MOVE,
+        _ => share_store::SHARE_OP_GRANT,
+    }
+}
+
 fn scope_share_target(kind: ShareTargetKind, target_path: String, req: &Request) -> String {
     let ns = req.namespace_path.as_deref();
     match kind {
@@ -1454,7 +1471,7 @@ impl IdentityBackendInner {
             expires_at,
         };
 
-        let stored = store.set_share(share).await?;
+        let stored = store.set_share_recorded(share, share_history_op(req)).await?;
         Ok(Some(Response::data_response(Some(share_to_value(&stored, req).as_object().cloned().unwrap_or_default()))))
     }
 

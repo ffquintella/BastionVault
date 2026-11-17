@@ -17,6 +17,9 @@ use crate::{
     test_utils::new_unseal_test_bastion_vault,
 };
 
+/// Shares, asset-group membership and attached files (Task 4b).
+mod relations;
+
 const PASSWORD: &str = "hunter22XX!";
 
 /// Full rights on resources and KV in `src` and `dst`, the transfer route and

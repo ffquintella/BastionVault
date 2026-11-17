@@ -4,7 +4,7 @@
 //! namespace it touches, so each one gets the ACL, token binding, owner stamp
 //! and audit entry a direct request would. Nothing here touches storage.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -15,10 +15,13 @@ use crate::{
     kernel_api::{namespace::normalize_path, VaultCtx},
     logical::{Operation, Request, Response},
     modules::{
+        identity::{EntityStore, GroupStore},
         namespace::router::{is_header_scoped_path, NAMESPACE_HEADER},
         policy::TRANSFER_IMPORT_MAX_SECRETS,
     },
 };
+
+mod relations;
 
 /// A soft-deleted KV version arrives destroyed: its value is not readable.
 pub const CODE_DELETED_VERSION_NOT_RECOVERABLE: &str = "deleted-version-not-recoverable";
@@ -37,6 +40,21 @@ pub const CODE_POLICIES_NOT_CARRIED: &str = "policies-not-carried";
 /// KV environment overrides are rebuilt from per-environment reads, so an
 /// override equal to its base value is not carried (there is no raw read).
 pub const CODE_KV_ENV_OVERRIDES_NORMALIZED: &str = "kv-environment-overrides-normalized";
+/// The source had shares and none was re-created (each has its own warning).
+pub const CODE_ALL_SHARES_DROPPED: &str = "all-shares-dropped";
+/// The caller may not list the source's shares, so none was carried.
+pub const CODE_SHARES_UNREADABLE: &str = "shares-unreadable";
+/// The destination refused a planned share for a reason other than the right
+/// to grant it (that is `cannot-grant`).
+pub const CODE_SHARE_NOT_WRITTEN: &str = "share-not-written";
+/// The item was not added to an asset group of the source's (subject: the
+/// group name).
+pub const CODE_GROUP_MEMBERSHIP_DROPPED: &str = "group-membership-dropped";
+/// The caller may not read the source's asset-group membership.
+pub const CODE_GROUP_MEMBERSHIP_UNREADABLE: &str = "group-membership-unreadable";
+/// Files attached to the source resource stay where they are (subject: the
+/// source resource name).
+pub const CODE_FILES_NOT_TRANSFERRED: &str = "files-not-transferred";
 
 /// `on_conflict = rename` tries the name, then `<name>-2` up to this suffix.
 const RENAME_MAX_SUFFIX: usize = 100;
@@ -117,6 +135,13 @@ pub struct TransferResult {
     pub destination: Location,
 }
 
+/// The identity stores the share planner reads. Without them a transfer whose
+/// source has shares fails explicitly rather than drops them.
+pub struct IdentityStores {
+    pub entities: Arc<EntityStore>,
+    pub groups: Arc<GroupStore>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Resource,
@@ -136,6 +161,14 @@ impl Kind {
         match self {
             Self::Resource => "resource",
             Self::KvSecret => "kv-v2",
+        }
+    }
+
+    /// The target kind the share API and the share store use.
+    fn share_kind(self) -> &'static str {
+        match self {
+            Self::Resource => "resource",
+            Self::KvSecret => "kv-secret",
         }
     }
 }
@@ -332,15 +365,13 @@ fn refused(e: RvError, what: &str) -> RvError {
 
 /// One request as the caller, in namespace `ns`. API version 1: the KV
 /// import route exists only there (at 2 the router reads it as a secret).
-#[maybe_async::maybe_async]
-async fn call(
-    core: &dyn VaultCtx,
+fn as_caller(
     caller: &Request,
     ns: &str,
     operation: Operation,
     path: String,
     body: Option<Map<String, Value>>,
-) -> Result<Option<Response>, RvError> {
+) -> Request {
     let mut req = Request::new(path);
     req.operation = operation;
     req.client_token = caller.client_token.clone();
@@ -351,7 +382,20 @@ async fn call(
     // An MCP tool call keeps its dispatcher marking and audit block.
     req.mcp_dispatch = caller.mcp_dispatch;
     req.mcp_audit = caller.mcp_audit.clone();
-    core.handle_request(&mut req).await
+    req
+}
+
+/// [`as_caller`], sent.
+#[maybe_async::maybe_async]
+async fn call(
+    core: &dyn VaultCtx,
+    caller: &Request,
+    ns: &str,
+    operation: Operation,
+    path: String,
+    body: Option<Map<String, Value>>,
+) -> Result<Option<Response>, RvError> {
+    core.handle_request(&mut as_caller(caller, ns, operation, path, body)).await
 }
 
 /// Read `path` in `ns` as the caller: the response data, `None` if absent.
@@ -696,6 +740,37 @@ async fn require(
     Ok(())
 }
 
+/// Whether the caller holds each `(path, right)` in `ns`, as
+/// `sys/capabilities-self` reports it. All `false` when the token may not
+/// operate there or may not probe: a relation it cannot verify is not written.
+#[maybe_async::maybe_async]
+async fn held(
+    core: &dyn VaultCtx,
+    caller: &Request,
+    ns: &str,
+    checks: &[(String, Right)],
+) -> Result<Vec<bool>, RvError> {
+    if checks.is_empty() {
+        return Ok(Vec::new());
+    }
+    let paths: Vec<&str> = checks.iter().map(|(p, _)| p.as_str()).collect();
+    let body = json!({ "paths": paths }).as_object().cloned();
+    let data = match call(core, caller, ns, Operation::Write, "sys/capabilities-self".to_string(), body).await {
+        Ok(resp) => resp.and_then(|r| r.data).unwrap_or_default(),
+        Err(RvError::ErrPermissionDenied) => return Ok(vec![false; checks.len()]),
+        Err(e) => return Err(e),
+    };
+    if data.get("namespace_operable").and_then(Value::as_bool) == Some(false) {
+        return Ok(vec![false; checks.len()]);
+    }
+    let caps = data.get("capabilities").and_then(Value::as_object);
+    let verdicts = checks.iter().map(|(path, right)| {
+        let held = caps.and_then(|c| c.get(path)).and_then(Value::as_array).cloned().unwrap_or_default();
+        right.held_in(&held.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+    });
+    Ok(verdicts.collect())
+}
+
 /// Writing `dest` is authorized on the item and, for a resource, on each
 /// secret it carries (as the import's policy layer does).
 fn write_checks(kind: Kind, dest: &Place, snapshot: &Snapshot) -> Vec<(String, Right)> {
@@ -922,20 +997,17 @@ async fn write_destination(
     }
 }
 
-/// Seam for Task 4b: re-create the shares, asset-group membership and
-/// attached files of the item at `destination`. Called after the import (on a
-/// dry run, after the probes) and before a move deletes the source; it reports
-/// how many shares it wrote and what it dropped. Carries nothing yet.
-#[maybe_async::maybe_async]
-async fn carry_relations(
-    _core: &dyn VaultCtx,
-    _caller: &Request,
-    _kind: Kind,
-    _source: &Place,
-    _destination: &Place,
-    _dry_run: bool,
-) -> Result<(usize, Vec<TransferWarning>), RvError> {
-    Ok((0, Vec::new()))
+/// An error after the import: the copy at `written` stands, and the message
+/// says so and whether the source was deleted.
+fn after_import(e: RvError, written: &Place, what: &str, source_deleted: bool) -> RvError {
+    log::warn!(target: "security", "namespace-transfer: {what} failed after the import to {}", written.display());
+    let (status, detail) = split(e);
+    let source = match source_deleted {
+        true => "the move deleted the source",
+        false => "the source is untouched",
+    };
+    let message = format!("{} was written, but {what} failed: {detail}; {source}", written.display());
+    RvError::ErrResponseStatus(status, message)
 }
 
 /// Re-read the source and delete it only if it still matches what was copied.
@@ -978,15 +1050,17 @@ async fn finish_move(
 }
 
 /// Copy or move one item with `caller`'s token: read the source, probe the
-/// rights, settle the destination name, import, then (move) verify and delete
-/// the source. A failure before the import writes nothing; one after it keeps
-/// the copy and says so. Never returns or logs a secret value.
+/// rights, settle the destination name, import, carry shares and asset-group
+/// membership, then (move) verify and delete the source, then attached files.
+/// A failure before the import writes nothing; one after it keeps the copy and
+/// says so. Never returns or logs a secret value.
 #[maybe_async::maybe_async]
 pub async fn run_transfer(
     core: &dyn VaultCtx,
     caller: &Request,
     op: TransferOp,
     t: TransferRequest,
+    stores: Option<&IdentityStores>,
 ) -> Result<TransferResult, RvError> {
     let plan = Plan::new(op, t)?;
     check_place(core, caller, plan.kind, &plan.source, "source").await?;
@@ -1009,11 +1083,25 @@ pub async fn run_transfer(
             write_destination(core, caller, &plan, &body, &snapshot, &mut warnings).await?
         }
     };
-    let (shares, dropped) = carry_relations(core, caller, plan.kind, &plan.source, &written, plan.dry_run).await?;
-    warnings.extend(dropped);
-    if plan.op == TransferOp::Move && !plan.dry_run {
+    // Before a move deletes the source, whose delete revokes its shares and
+    // prunes its group membership.
+    let carried = match relations::carry(core, caller, stores, &plan, &written).await {
+        Ok(carried) => carried,
+        Err(e) if !plan.dry_run => return Err(after_import(e, &written, "carrying its shares or groups", false)),
+        Err(e) => return Err(e),
+    };
+    warnings.extend(carried.warnings);
+    let moved = plan.op == TransferOp::Move && !plan.dry_run;
+    if moved {
         finish_move(core, caller, &plan, &snapshot, &written).await?;
     }
+    // After the delete: a move re-points files only once the source is gone.
+    match relations::carry_files(core, caller, &plan, &written).await {
+        Ok(files) => warnings.extend(files),
+        Err(e) if !plan.dry_run => return Err(after_import(e, &written, "checking its attached files", moved)),
+        Err(e) => return Err(e),
+    }
+    let shares = carried.shares;
 
     let message = "policies that name the source path are not rewritten; review the destination namespace's policies";
     warnings.push(warning(CODE_POLICIES_NOT_CARRIED, plan.source.display(), message));

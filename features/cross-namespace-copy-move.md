@@ -23,8 +23,11 @@ and lose the version history, the change history and the shares.
 refuse-only, authorized as a write of the real item), the share planner, and
 `POST /v2/sys/namespace-transfer/{copy|move}` (`docs/api.md`): reads, rights
 checks, `dry_run`, refuse/rename/overwrite, caller ownership, verified move,
-warnings. Not yet: re-creating shares, asset-group membership and attached
-files (the orchestrator's `carry_relations` seam), CLI, Tauri command, GUI.
+warnings, and the relations: shares written through the share API as the
+caller (history op `copy` / `move`), membership of same-named destination
+asset groups, and attached files re-pointed by a move within one namespace
+(otherwise `files-not-transferred`: blobs are never copied between
+namespaces). Not yet: CLI, Tauri command, GUI.
 
 Closest existing behaviour before this feature, reused as the pattern, not
 called as-is:
@@ -151,6 +154,6 @@ membership is re-created only when a same-named group exists in the destination.
 | Phase | Content | Status |
 |---|---|---|
 | 1 | Engine-side copy/move of a resource and a KV secret with versions and history, collision handling, permission checks | Done |
-| 2 | Share validation, warnings, `dry_run` | In progress (planner, warnings and `dry_run` done; writing shares pending) |
+| 2 | Share validation, warnings, `dry_run` | Done (shares, asset-group membership and files carried or reported) |
 | 3 | CLI, Tauri command, GUI action with warning dialog | Planned |
 | 4 | Tests: permission matrix, collision, partial failure, shares kept/dropped, audit in both namespaces | Planned |

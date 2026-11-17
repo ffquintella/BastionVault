@@ -121,8 +121,9 @@ async fn entity_usable_in(entities: &EntityStore, id: &str, dest: &str) -> Resul
 }
 
 /// The warning for one share left behind: the grantee, its capability names
-/// and `reason`, nothing read from the target.
-fn warning(code: &str, share: &SecretShare, reason: &str) -> ShareWarning {
+/// and `reason`, nothing read from the target. The orchestrator uses it for a
+/// share the destination refused at write time.
+pub(super) fn warning(code: &str, share: &SecretShare, reason: &str) -> ShareWarning {
     let subject = share.grantee_entity_id.trim().to_string();
     let grantee = match ShareGranteeKind::parse(&share.grantee_kind) {
         Some(ShareGranteeKind::Entity) => format!("entity {subject}"),

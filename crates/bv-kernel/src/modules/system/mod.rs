@@ -3863,7 +3863,12 @@ impl SystemBackend {
         let body = Value::Object(req.body.clone().unwrap_or_default());
         let request: transfer::TransferRequest = serde_json::from_value(body)
             .map_err(|e| bv_error_response_status!(400, &format!("invalid namespace transfer: {e}")))?;
-        let result = transfer::run_transfer(self.core.as_ref(), req, op, request).await?;
+        // The share planner reads entities and groups directly; everything
+        // else the transfer does is a request made with the caller's token.
+        let identity = self.get_module::<IdentityModule>("identity").ok();
+        let stores = identity
+            .and_then(|m| Some(transfer::IdentityStores { entities: m.entity_store()?, groups: m.group_store()? }));
+        let result = transfer::run_transfer(self.core.as_ref(), req, op, request, stores.as_ref()).await?;
         Ok(Some(Response::data_response(serde_json::to_value(&result)?.as_object().cloned())))
     }
 

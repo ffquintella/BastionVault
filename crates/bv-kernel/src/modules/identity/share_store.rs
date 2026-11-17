@@ -42,6 +42,13 @@ const SHARE_BY_GRANTEE_SUB_PATH: &str = "sharing/by-grantee/";
 /// the aggregator in the system backend walks this flat view.
 pub(crate) const SHARE_HISTORY_SUB_PATH: &str = "sharing/history/";
 
+/// History op of a share written through the share API.
+pub const SHARE_OP_GRANT: &str = "grant";
+/// History op of a share a namespace transfer copied with its item (T494).
+pub const SHARE_OP_COPY: &str = "copy";
+/// History op of a share a namespace transfer moved with its item (T494).
+pub const SHARE_OP_MOVE: &str = "move";
+
 /// Target object for a share — a KV secret (by logical path) or a
 /// resource (by resource name).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -177,10 +184,10 @@ pub struct ShareHistoryEntry {
     /// for `cascade-revoke` events driven by target deletion when
     /// the underlying request has no resolved entity (root token).
     pub actor_entity_id: String,
-    /// `"grant" | "revoke" | "cascade-revoke"`. `grant` covers both
-    /// create and update (both go through `set_share`); distinguish
-    /// the two by the presence of prior history for the same
-    /// `(target, grantee)` pair.
+    /// `"grant" | "revoke" | "cascade-revoke" | "rename" | "copy" |
+    /// "move"`. `grant` covers both create and update (both go through
+    /// `set_share`); `copy` / `move` mark a share a namespace transfer
+    /// re-created on the item's copy (T494).
     pub op: String,
     pub target_kind: String,
     pub target_path: String,
@@ -281,7 +288,17 @@ impl ShareStore {
     /// Upsert a share. Validates inputs, canonicalizes the target, and
     /// writes both the primary and by-grantee records. Capabilities
     /// are normalized (trimmed, lowercased, deduped, non-empty).
-    pub async fn set_share(&self, mut share: SecretShare) -> Result<SecretShare, RvError> {
+    pub async fn set_share(&self, share: SecretShare) -> Result<SecretShare, RvError> {
+        self.set_share_recorded(share, SHARE_OP_GRANT).await
+    }
+
+    /// [`Self::set_share`], recording `op` in the share history: `grant`, or
+    /// `copy` / `move` for a share a namespace transfer carried (T494). Any
+    /// other op is refused before anything is written.
+    pub async fn set_share_recorded(&self, mut share: SecretShare, op: &str) -> Result<SecretShare, RvError> {
+        if ![SHARE_OP_GRANT, SHARE_OP_COPY, SHARE_OP_MOVE].contains(&op) {
+            return Err(bv_error_string!(format!("invalid share history op: {op}")));
+        }
         let kind = ShareTargetKind::parse(&share.target_kind)
             .ok_or_else(|| bv_error_string!(format!("invalid share target_kind: {}", share.target_kind)))?;
         let grantee_kind = ShareGranteeKind::parse(&share.grantee_kind)
@@ -328,7 +345,7 @@ impl ShareStore {
         let hist = ShareHistoryEntry {
             ts: Utc::now().to_rfc3339(),
             actor_entity_id: share.granted_by_entity_id.clone(),
-            op: "grant".to_string(),
+            op: op.to_string(),
             target_kind: share.target_kind.clone(),
             target_path: share.target_path.clone(),
             grantee_kind: share.grantee_kind.clone(),

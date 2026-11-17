@@ -68,7 +68,8 @@ async fn source_changed_during_copy_aborts_move() {
     }))
     .unwrap();
 
-    match run_transfer(&ctx, &caller, TransferOp::Move, request).await {
+    // No identity stores: the source has no share, so the planner never runs.
+    match run_transfer(&ctx, &caller, TransferOp::Move, request, None).await {
         Err(RvError::ErrResponseStatus(409, m)) => {
             assert!(m.contains("changed") && m.contains("dst/resources/srv1"), "says what was written: {m}");
             assert!(!m.contains("pw-"), "{m}");
