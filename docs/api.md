@@ -885,6 +885,15 @@ reachable only with storage tools. If the T499 key-switch marker
 included; rewrite the marker as `1`, never delete it
 (`features/per-user-scoping.md`).
 
+A KV path that names no secret has no owner, share or asset group
+(T506): a kv-v2 mount's `config`, `data/`, `destroy/` or `undelete/`
+without a name, a path no kv-v2 route serves (`configs/x`) and the mount
+root. `scopes = ["owner"]`, `scopes = ["shared"]` and group-gated rules
+refuse them with a 403 (no first-write carve-out), and a write there
+records no owner, so `secret/config` is no longer reached through the
+secret named `config`. Rules without a scope or group gate are unchanged;
+on a kv (v1) mount `kv/config` is an ordinary secret.
+
 A deny rule on a KV v2 secret applies in either path form (T504):
 `secret/data/<p>` and `secret/<p>` both refuse every route to the secret,
 `metadata/`, `destroy/` and `undelete/` included, unless the plain rule

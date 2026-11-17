@@ -159,20 +159,57 @@ pub(crate) fn is_ambiguous(e: &RvError) -> bool {
     matches!(e, RvError::ErrResponseStatus(400, message) if message == AMBIGUOUS)
 }
 
+/// What a request path is to the owner, share and asset-group lookups.
+#[derive(Debug)]
+pub(crate) enum KvTarget {
+    /// No KV engine serves the path.
+    NotKv,
+    /// A KV engine serves it, but it names no secret: a kv-v2 mount's
+    /// `config`, a sub-command without a name, a mount root (T506).
+    NoSecret,
+    /// The secret, or for a list the folder, it addresses.
+    Item(KvItem),
+}
+
+/// [`resolve`], telling a path no KV engine serves from a KV path that names
+/// no secret. A mount-root list is an [`KvTarget::Item`] without a key.
+pub(crate) fn target(router: &Router, path: &str) -> Result<KvTarget, RvError> {
+    let path = path.trim_start_matches('/');
+    let mount = router.matching_mount(path)?;
+    let Some(rel) = path.strip_prefix(mount.as_str()).filter(|_| !mount.is_empty()) else {
+        return Ok(KvTarget::NotKv);
+    };
+    let Some(entry) = router.matching_mount_entry(&mount)? else {
+        return Ok(KvTarget::NotKv);
+    };
+    let logical_type = entry.read()?.logical_type.clone();
+    if !matches!(logical_type.as_str(), "kv" | "kv-v2") {
+        return Ok(KvTarget::NotKv);
+    }
+    Ok(match KvItem::from_route(&mount, &logical_type, rel)? {
+        Some(item) => KvTarget::Item(item),
+        None => KvTarget::NoSecret,
+    })
+}
+
 /// The KV item a request to `path` addresses, through the router's mount
 /// table as `Router::handle_request` resolves it, after the leading `/`s the
 /// ACL ignores too. An ambiguous name is an error (no key is derived).
 pub(crate) fn resolve(router: &Router, path: &str) -> Result<Option<KvItem>, RvError> {
-    let path = path.trim_start_matches('/');
-    let mount = router.matching_mount(path)?;
-    let Some(rel) = path.strip_prefix(mount.as_str()).filter(|_| !mount.is_empty()) else {
-        return Ok(None);
-    };
-    let Some(entry) = router.matching_mount_entry(&mount)? else {
-        return Ok(None);
-    };
-    let logical_type = entry.read()?.logical_type.clone();
-    KvItem::from_route(&mount, &logical_type, rel)
+    Ok(match target(router, path)? {
+        KvTarget::Item(item) => Some(item),
+        KvTarget::NotKv | KvTarget::NoSecret => None,
+    })
+}
+
+/// Whether `path` is a KV path that names no secret: [`KvTarget::NoSecret`]
+/// or a mount-root list. Nobody owns it and no share or group reaches it (T506).
+pub(crate) fn names_no_secret(router: &Router, path: &str) -> bool {
+    match target(router, path) {
+        Ok(KvTarget::NoSecret) => true,
+        Ok(KvTarget::Item(item)) => item.key().is_none(),
+        Ok(KvTarget::NotKv) | Err(_) => false,
+    }
 }
 
 /// The owner and share key of the secret `path` addresses. With `split` (the

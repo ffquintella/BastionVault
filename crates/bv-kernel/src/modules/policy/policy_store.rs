@@ -34,7 +34,7 @@ use stretto::Cache;
 
 use super::{
     acl::{ACLResults, ACL},
-    kv_target,
+    kv_target::{self, KvTarget},
     policy::{Capability, SentinelPolicy},
     transfer_target, Policy, PolicyType,
 };
@@ -3209,6 +3209,11 @@ fn looks_like_kv_path(req_path: &str, ns_path: Option<&str>) -> bool {
 /// neither matches nor sees an unowned target (fail closed).
 const UNRESOLVED_OWNER: &str = "\u{0}unresolved-owner";
 
+/// The `asset_owner` of a KV path that names no secret, such as a kv-v2
+/// mount's `config` (T506): an owner no caller is, so the owner scope neither
+/// matches nor admits it as a first write. Policies without the scope are unaffected.
+const NO_SECRET_OWNER: &str = "\u{0}no-secret";
+
 /// `(a KV secret's path, an ambiguous name)` of a [`kv_target::resolve`]
 /// answer, as `authorize_request` reads it. Only the ambiguous-name refusal
 /// is ambiguous; a router fault (a poisoned lock, the same for every path)
@@ -3247,18 +3252,20 @@ fn kv_key_with(router: &Router, split: bool, req_path: &str, ns_path: Option<&st
 
 /// The owner and share key of the KV secret `req_path` addresses, derived
 /// once through the mount table (`kv_target::owner_key`, T499); the pre-T499
-/// key of a path no KV mount serves; `None` for an ambiguous name. An error
-/// when the T499 marker cannot be read: no key is guessed then.
+/// key of a path no KV mount serves; `None` for an ambiguous name and for a
+/// KV path that names no secret (T506), so nothing is stamped or shared there.
+/// An error when the T499 marker cannot be read: no key is guessed then.
 async fn kv_key(
     router: &Router,
     owners: &OwnerStore,
     req_path: &str,
     ns_path: Option<&str>,
 ) -> Result<Option<String>, RvError> {
-    match kv_target::resolve(router, req_path) {
-        Err(_) => Ok(None),
-        Ok(None) => Ok(OwnerStore::legacy_kv_key(req_path, ns_path)),
-        Ok(Some(item)) => {
+    match kv_target::target(router, req_path) {
+        Err(_) | Ok(KvTarget::NoSecret) => Ok(None),
+        Ok(KvTarget::NotKv) => Ok(OwnerStore::legacy_kv_key(req_path, ns_path)),
+        Ok(KvTarget::Item(item)) if item.key().is_none() => Ok(None),
+        Ok(KvTarget::Item(item)) => {
             let split = owners.kv_keys_split().await?;
             Ok(kv_target::owner_key(Some(&item), req_path, ns_path, split))
         }
@@ -3296,6 +3303,11 @@ pub(super) async fn resolve_asset_owner(
         }
     }
     if looks_like_kv_path(req_path, ns_path) {
+        // Not a secret (a kv-v2 mount's `config`): no record is consulted, not
+        // even the namesake secret's, and it is never an unowned first write.
+        if kv_target::names_no_secret(&core.router, req_path) {
+            return NO_SECRET_OWNER.to_string();
+        }
         // The key `post_route` stamps the owner under (namespace-scoped).
         match kv_key(&core.router, &store, req_path, ns_path).await {
             Ok(Some(key)) => {
@@ -3556,7 +3568,9 @@ pub(super) async fn resolve_asset_groups(core: &Weak<Core>, req_path: &str, ns_p
         }
     }
 
-    if looks_like_kv_path(req_path, ns_path) {
+    // A KV path that names no secret is in no group, not even its namesake
+    // secret's (`secret/config` is not the secret `config`, T506).
+    if looks_like_kv_path(req_path, ns_path) && !kv_target::names_no_secret(&core.router, req_path) {
         // A kv-v2 `destroy/` or `undelete/` acts on the secret: look it up as
         // its `data/` request does, not as a secret named `destroy/<name>`.
         let item = kv_target::resolve(&core.router, req_path).ok().flatten().filter(|i| i.acts_on_data());

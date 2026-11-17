@@ -67,5 +67,7 @@ mod transfer_import_acl;
 mod kv_secret_keys;
 // KV v2 deny rules hold in either path form (T504).
 mod kv_v2_deny_forms;
+// A KV path that names no secret has no owner, shares or groups (T506).
+mod kv_no_secret_paths;
 // Cross-namespace copy and move through `sys/namespace-transfer` (T494).
 mod namespace_transfer;

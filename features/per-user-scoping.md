@@ -604,6 +604,19 @@ another such endpoint:
   Update on an unowned target are still denied, so a legacy secret
   predating this feature is invisible to scoped policies until an
   admin uses a future backfill endpoint to assign ownership.
+- **A KV path that names no secret is never a first write (T506).** On a
+  `kv` or `kv-v2` mount, a path that names no secret (a kv-v2 mount's
+  `config`, `data/`, `destroy/` or `undelete/` without a name, a path no
+  kv-v2 route serves such as `configs/x`, the mount root) resolves an owner
+  no caller is (`NO_SECRET_OWNER`), no share and no asset group: the
+  `owner` and `shared` scopes and group-gated rules refuse it, and a write
+  there stamps no owner. Before, `secret/config` was keyed like the secret
+  named `config`, so any `standard-user` rewrote the mount's settings as an
+  unowned first write, and that secret's owner, grantees and group members
+  reached them too. Ungated rules (admin policies, root) are unchanged, a
+  mount-root LIST is filtered as before (LIST waives the gate), a kv (v1)
+  `config` is an ordinary secret, and other engines' paths keep the
+  carve-out. Proven by `src/engine_tests/kv_no_secret_paths.rs`.
 - **Entity-id lookup via `auth.metadata["entity_id"]`.** The design
   suggested a new `auth.entity_id` field; the ship reuses the
   existing `metadata` `HashMap<String,String>` so no `Auth` struct
