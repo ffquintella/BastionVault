@@ -339,7 +339,8 @@ pub struct ResourceBundle {
     /// the order the entries arrive in does not matter.
     #[serde(default)]
     pub history: Vec<ResourceHistoryEntry>,
-    /// `refuse` (default, also when empty) | `rename` | `overwrite`.
+    /// `refuse` (default, also when empty) | `rename`. There is no overwrite:
+    /// the caller deletes the destination first (`DELETE resources/resources/<name>`).
     #[serde(default)]
     pub on_conflict: String,
     /// The origin's owner entity, recorded in the `transfer-in` history
@@ -522,8 +523,9 @@ impl ResourceBackend {
                     ],
                     help: "Import a resource bundle (metadata, every secret with all its versions, change history) \
                            under a name, keeping version numbers and timestamps. Body: meta, secrets, history, \
-                           on_conflict (refuse|rename|overwrite), origin, origin_owner. Ownership and shares \
-                           are not written."
+                           on_conflict (refuse|rename), origin, origin_owner. Authorized as a write of \
+                           resources/<name>; the caller becomes the owner of the resource written. Shares are \
+                           not written."
                 },
                 {
                     // CRUD a single resource
@@ -1241,17 +1243,21 @@ const IMPORT_RENAME_MAX_SUFFIX: u32 = 1000;
 enum ImportConflict {
     Refuse,
     Rename,
-    Overwrite,
 }
 
 impl ImportConflict {
-    /// An unknown mode is refused, never read as the default.
+    /// An unknown mode is refused, never read as the default. `overwrite` is
+    /// refused too: through this route it would skip the delete ACL and the
+    /// owner, share and asset-group cleanup a real delete runs.
     fn parse(raw: &str) -> Result<Self, RvError> {
         match raw.trim() {
             "" | "refuse" => Ok(Self::Refuse),
             "rename" => Ok(Self::Rename),
-            "overwrite" => Ok(Self::Overwrite),
-            other => Err(bad_import(format!("on_conflict must be refuse, rename or overwrite, not '{other}'"))),
+            "overwrite" => Err(bad_import(
+                "on_conflict must be refuse or rename; to overwrite, DELETE resources/resources/<name> first, \
+                 then import",
+            )),
+            other => Err(bad_import(format!("on_conflict must be refuse or rename, not '{other}'"))),
         }
     }
 }
@@ -1269,10 +1275,6 @@ struct ResourceImportPlan {
     /// The destination name: the requested one, lower-cased, or under
     /// `rename` the first free `<name>-<n>`.
     name: String,
-    /// Names whose stored data is deleted before anything is written
-    /// (`overwrite` only): the colliding record first, then the
-    /// destination name.
-    replaces: Vec<String>,
     /// History keys (nanoseconds), one per `bundle.history` entry.
     history_seq: Vec<u128>,
     bundle: ResourceBundle,
@@ -1397,64 +1399,27 @@ async fn plan_resource_import(
     raw_name: &str,
     bundle: ResourceBundle,
 ) -> Result<ResourceImportPlan, RvError> {
+    let mode = ImportConflict::parse(&bundle.on_conflict)?;
     let requested = raw_name.trim().to_ascii_lowercase();
     validate_name_segment("name", &requested).map_err(bad_import)?;
-    let mode = ImportConflict::parse(&bundle.on_conflict)?;
     let history_seq = validate_resource_bundle(&bundle)?;
 
     let existing = existing_resource_key_in(view, &requested).await?;
     let leftovers = has_secret_data_in(view, &requested).await?;
-    let (name, replaces) = match (mode, existing) {
-        (_, None) if !leftovers => (requested, Vec::new()),
+    let name = match (mode, existing) {
+        (_, None) if !leftovers => requested,
         (ImportConflict::Refuse, Some(key)) => {
             return Err(import_conflict(format!("a resource named '{key}' already exists")));
         }
         (ImportConflict::Refuse, None) => {
             return Err(import_conflict(format!(
                 "secret data with no resource record is stored under '{requested}' (an interrupted \
-                 operation?); import with on_conflict=overwrite to replace it"
+                 operation?); import with on_conflict=rename to use another name"
             )));
         }
-        (ImportConflict::Overwrite, existing) => {
-            let mut replaces: Vec<String> = existing.into_iter().collect();
-            if leftovers && !replaces.contains(&requested) {
-                replaces.push(requested.clone());
-            }
-            (requested, replaces)
-        }
-        (ImportConflict::Rename, _) => (free_resource_name_in(view, &requested).await?, Vec::new()),
+        (ImportConflict::Rename, _) => free_resource_name_in(view, &requested).await?,
     };
-    Ok(ResourceImportPlan { name, replaces, history_seq, bundle })
-}
-
-/// Delete what `handle_resource_delete` deletes under `name`: the record
-/// first, so the resource leaves listings before its data does, then
-/// secrets, version indexes and payloads. History is kept for audit, as
-/// delete keeps it. Ownership, shares and asset-group membership live
-/// elsewhere (`prune_replaced_memberships`).
-#[maybe_async::maybe_async]
-async fn purge_resource_in(view: &dyn storage::Storage, name: &str) -> Result<(), RvError> {
-    view.delete(&format!("{META_PREFIX}{name}")).await?;
-    for prefix in [SECRET_PREFIX, SMETA_PREFIX] {
-        let prefix = format!("{prefix}{name}/");
-        for k in view.list(&prefix).await? {
-            view.delete(&format!("{prefix}{k}")).await?;
-        }
-    }
-    // sver/ is two levels deep: <resource>/<key>/<version>.
-    let sver = format!("{SVER_PREFIX}{name}/");
-    for k in view.list(&sver).await? {
-        match k.strip_suffix('/') {
-            Some(key) => {
-                let sub = format!("{sver}{key}/");
-                for v in view.list(&sub).await? {
-                    view.delete(&format!("{sub}{v}")).await?;
-                }
-            }
-            None => view.delete(&format!("{sver}{k}")).await?,
-        }
-    }
-    Ok(())
+    Ok(ResourceImportPlan { name, history_seq, bundle })
 }
 
 /// Write a history entry at `seq`, or the next free key after it, and
@@ -1493,34 +1458,21 @@ async fn put_scrubbed(view: &dyn storage::Storage, key: String, value: Vec<u8>) 
     result
 }
 
-/// Write a planned import: replaced data out (after a `delete` history
-/// entry, as delete writes one), then every secret with all
-/// its versions, then the origin's history and a `transfer-in` entry, and
-/// `meta/` last. An import that fails partway therefore leaves no record (a
-/// listing never shows a half-written resource), and a retry sees the
-/// leftover secret data as a collision rather than merging into it.
+/// Write a planned import: every secret with all its versions, then the
+/// origin's history and a `transfer-in` entry, and `meta/` last. An import
+/// that fails partway therefore leaves no record (a listing never shows a
+/// half-written resource), and a retry sees the leftover secret data as a
+/// collision rather than merging into it.
 #[maybe_async::maybe_async]
 async fn apply_resource_import(
     view: &dyn storage::Storage,
     plan: ResourceImportPlan,
     user: &str,
 ) -> Result<ResourceImportSummary, RvError> {
-    let ResourceImportPlan { name, replaces, history_seq, bundle } = plan;
+    let ResourceImportPlan { name, history_seq, bundle } = plan;
     let ResourceBundle { mut meta, secrets, history, origin, origin_owner, .. } = bundle;
 
-    // An overwrite is a delete first: its history entry, then the data.
     let mut last_seq = 0;
-    for old in &replaces {
-        let delete = ResourceHistoryEntry {
-            ts: now_rfc3339(),
-            user: user.to_string(),
-            op: "delete".to_string(),
-            changed_fields: Vec::new(),
-        };
-        last_seq = last_seq.max(put_history_entry(view, old, now_nanos(), &delete).await?);
-        purge_resource_in(view, old).await?;
-    }
-
     let secret_count = secrets.len();
     let mut version_count = 0;
     for secret in secrets {
@@ -1560,8 +1512,7 @@ async fn apply_resource_import(
     for (seq, entry) in history_seq.iter().zip(&history) {
         last_seq = last_seq.max(put_history_entry(view, &name, *seq, entry).await?);
     }
-    let mut changed_fields = vec![format!("origin: {origin}"), format!("origin_owner: {origin_owner}")];
-    changed_fields.extend(replaces.iter().map(|r| format!("replaced: {r}")));
+    let changed_fields = vec![format!("origin: {origin}"), format!("origin_owner: {origin_owner}")];
     let arrival = ResourceHistoryEntry {
         ts: now_rfc3339(),
         user: user.to_string(),
@@ -2159,11 +2110,11 @@ impl ResourceBackendInner {
 
     /// `resources/v2/transfer/import/<name>`: destination side of a
     /// cross-namespace copy or move; writes a [`ResourceBundle`], `meta/` last.
-    /// Security: ONE ACL check (write on this path) covers every secret,
-    /// version and history entry; the per-secret write ACL and overwrite's
-    /// delete ACL are not consulted here, so the transfer orchestrator probes
-    /// those capabilities separately. Content gates still apply
-    /// (`check_import_write_gates`); ownership and shares are not touched.
+    /// Security: ONE ACL check, on `resources/resources/<name>` (the policy
+    /// layer's `transfer_target`), covers every secret, version and history
+    /// entry; per-secret ACLs are not consulted, so the orchestrator probes them.
+    /// Only `refuse` or `rename`. Content gates apply (`check_import_write_gates`);
+    /// `post_route` stamps the owner, and shares are not touched.
     pub async fn handle_resource_import(
         &self,
         _backend: &dyn Backend,
@@ -2175,7 +2126,6 @@ impl ResourceBackendInner {
 
         let plan = plan_resource_import(storage.as_ref(), &raw, bundle).await?;
         self.check_import_write_gates(req, &plan).await?;
-        self.prune_replaced_memberships(req, &plan).await?;
 
         // Names, counts and the origin path only: never a secret value.
         let origin = plan.bundle.origin.clone();
@@ -2223,16 +2173,7 @@ impl ResourceBackendInner {
         }
 
         if let Some((key, version)) = first_static_credential(&plan.bundle) {
-            let eff = if plan.replaces.is_empty() {
-                self.resolve_login_class_for_type(req, &plan.name, type_id).await?
-            } else {
-                // Overwrite prunes the replaced name's asset-group
-                // memberships before writing, so judge without them.
-                match self.core.login_class() {
-                    Some(policy) => policy.resolve_for(type_id, &[], &plan.name).await?,
-                    None => LoginClassVerdict::default(),
-                }
-            };
+            let eff = self.resolve_login_class_for_type(req, &plan.name, type_id).await?;
             if eff.brokered {
                 return Err(bv_error_response_status!(
                     409,
@@ -2245,26 +2186,6 @@ impl ResourceBackendInner {
                     )
                 ));
             }
-        }
-        Ok(())
-    }
-
-    /// Drop every asset-group membership of the names an overwrite replaces,
-    /// as `handle_resource_delete` does, so the imported content does not
-    /// inherit the old resource's group-based access. Unlike delete, a
-    /// failure refuses the import: the content would otherwise go live
-    /// under the stale memberships.
-    async fn prune_replaced_memberships(&self, req: &Request, plan: &ResourceImportPlan) -> Result<(), RvError> {
-        let Some(groups) = self.core.resource_groups() else {
-            return Ok(());
-        };
-        for old in &plan.replaces {
-            groups.prune_resource(old, req.namespace_path.as_deref()).await.map_err(|e| {
-                bv_error_response_status!(
-                    500,
-                    &format!("overwrite refused: could not remove '{old}' from its asset groups: {e}")
-                )
-            })?;
         }
         Ok(())
     }
@@ -2720,10 +2641,6 @@ mod tests {
             self.map.lock().unwrap().insert(key.to_string(), serde_json::to_vec(&value).unwrap());
         }
 
-        fn has(&self, key: &str) -> bool {
-            self.map.lock().unwrap().contains_key(key)
-        }
-
         fn keys_under(&self, prefix: &str) -> Vec<String> {
             self.map.lock().unwrap().keys().filter(|k| k.starts_with(prefix)).cloned().collect()
         }
@@ -2896,38 +2813,33 @@ mod tests {
     }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
-    async fn import_overwrite_replaces_and_rename_picks_free_name() {
+    async fn import_refuses_overwrite_and_rename_picks_free_name() {
         let mem = MemStorage::default();
         mem.seed("meta/srv1", json!({"name": "srv1", "hostname": "old"}));
         mem.seed("secret/srv1/old-key", json!({"password": "old"}));
         mem.seed("smeta/srv1/old-key", json!({"current_version": 1, "versions": {}}));
         mem.seed("sver/srv1/old-key/1", json!({"data": {"password": "old"}, "version": 1}));
         mem.seed("hist/srv1/00000000000000000001", json!({"ts": "t", "user": "u", "op": "create"}));
+        let existing = mem.snapshot();
 
-        // Overwrite: none of the replaced resource's data survives under the
-        // name, but its history does, as after a delete, closed by a
-        // `delete` entry.
-        let summary = import(&mem, "srv1", with(bundle(), "/on_conflict", json!("overwrite"))).await.unwrap();
-        assert_eq!(summary.name, "srv1");
-        for gone in ["secret/srv1/old-key", "smeta/srv1/old-key", "sver/srv1/old-key/1"] {
-            assert!(!mem.has(gone), "{gone} survived the overwrite");
+        // Overwrite is not a mode of this route: it would skip the delete ACL
+        // and the owner, share and asset-group cleanup a real delete runs. It
+        // is refused before storage is read, whatever is at the name.
+        for name in ["srv1", "fresh", ""] {
+            let r = import(&mem, name, with(bundle(), "/on_conflict", json!("overwrite"))).await;
+            let Err(RvError::ErrResponseStatus(400, message)) = r else {
+                panic!("{name:?}: expected a 400, got {r:?}")
+            };
+            assert!(message.contains("refuse or rename"), "{name:?}: {message}");
         }
-        assert_eq!(mem.json("meta/srv1")["hostname"], "h1");
-        assert_eq!(mem.json("secret/srv1/admin"), json!({"password": "v2-S3CRET"}));
-        let hist = timeline(&mem, "srv1");
-        let ops: Vec<&str> = hist.iter().map(|h| h.op.as_str()).collect();
-        assert_eq!(ops, ["create", "create", "update", "delete", "transfer-in"], "{hist:?}");
-        assert_eq!((hist[0].user.as_str(), hist[0].ts.as_str()), ("u", "t"), "the replaced resource's entry is kept");
-        assert_eq!(hist[3].user, "carol", "the delete is the importer's");
-        assert!(hist[4].changed_fields.contains(&"replaced: srv1".to_string()), "{:?}", hist[4]);
-        let replaced = mem.snapshot();
+        assert_eq!(mem.snapshot(), existing, "a refused overwrite writes nothing");
 
         // Rename: the first free `<name>-<n>`, the existing record untouched.
         let renamed = import(&mem, "srv1", with(bundle(), "/on_conflict", json!("rename"))).await.unwrap();
         assert_eq!(renamed.name, "srv1-2");
         assert_eq!(mem.json("meta/srv1-2")["name"], "srv1-2");
         assert_eq!(mem.json("secret/srv1-2/admin"), json!({"password": "v2-S3CRET"}));
-        for (k, v) in &replaced {
+        for (k, v) in &existing {
             assert_eq!(mem.snapshot().get(k), Some(v), "{k} changed under a rename import");
         }
         let again = import(&mem, "srv1", with(bundle(), "/on_conflict", json!("rename"))).await.unwrap();

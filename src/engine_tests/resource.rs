@@ -988,27 +988,36 @@ mod transfer_import_tests {
         assert!(test_read_api(&core, &root, "resources/secrets/db01/login", true).await.unwrap().is_none());
     }
 
-    /// Overwrite drops the replaced resource's asset-group membership, as a
-    /// delete does, and judges the imported content without it: the old
-    /// membership's brokered policy neither carries over nor blocks it.
+    /// Overwrite is refused through the whole vault (400 naming the two modes):
+    /// the existing resource, its secrets and its asset-group membership stay.
+    /// `refuse` still answers 409 and `rename` picks the first free name.
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
-    async fn test_import_overwrite_prunes_asset_group_membership() {
-        let (_bvault, core, root) = new_unseal_test_bastion_vault("test_import_overwrite_prunes_groups").await;
-        let meta = json!({ "name": "srv1", "type": "server" }).as_object().cloned();
+    async fn test_import_refuses_overwrite_and_keeps_the_existing_resource() {
+        let (_bvault, core, root) = new_unseal_test_bastion_vault("test_import_refuses_overwrite").await;
+        let meta = json!({ "name": "srv1", "type": "server", "hostname": "old" }).as_object().cloned();
         test_write_api(&core, &root, "resources/resources/srv1", true, meta).await.unwrap();
+        let secret = json!({ "password": "old" }).as_object().cloned();
+        test_write_api(&core, &root, "resources/secrets/srv1/login", true, secret).await.unwrap();
         let group = json!({ "members": "srv1" }).as_object().cloned();
         test_write_api(&core, &root, "resource-group/groups/alpha", true, group).await.unwrap();
-        let policy = json!({ "login_class": "brokered" }).as_object().cloned();
-        test_write_api(&core, &root, "ssh-broker/policy/asset-group/alpha", true, policy).await.unwrap();
-        let resp = test_read_api(&core, &root, "resource-group/by-resource/srv1", true).await.unwrap().unwrap();
-        assert_eq!(resp.data.unwrap()["groups"], json!(["alpha"]), "precondition: srv1 is in alpha");
 
-        let body = bundle("server", vec![version(1, json!({ "password": "p" }))], "overwrite");
-        test_write_api(&core, &root, "resources/v2/transfer/import/srv1", true, body).await.unwrap();
+        let body = bundle("server", vec![version(1, json!({ "password": "new" }))], "overwrite");
+        let err = test_write_api(&core, &root, "resources/v2/transfer/import/srv1", false, body).await.unwrap_err();
+        let RvError::ErrResponseStatus(400, message) = &err else { panic!("expected 400, got {err:?}") };
+        assert!(message.contains("refuse or rename"), "{message}");
 
-        let resp = test_read_api(&core, &root, "resource-group/by-resource/srv1", true).await.unwrap().unwrap();
-        assert_eq!(resp.data.unwrap()["groups"], json!([] as [String; 0]), "membership pruned");
+        let resp = test_read_api(&core, &root, "resources/resources/srv1", true).await.unwrap().unwrap();
+        assert_eq!(resp.data.unwrap()["hostname"], json!("old"));
         let resp = test_read_api(&core, &root, "resources/secrets/srv1/login", true).await.unwrap().unwrap();
-        assert_eq!(resp.data.unwrap()["password"], json!("p"));
+        assert_eq!(resp.data.unwrap()["password"], json!("old"));
+        let resp = test_read_api(&core, &root, "resource-group/by-resource/srv1", true).await.unwrap().unwrap();
+        assert_eq!(resp.data.unwrap()["groups"], json!(["alpha"]), "membership kept");
+
+        let body = bundle("server", vec![version(1, json!({ "password": "new" }))], "refuse");
+        let err = test_write_api(&core, &root, "resources/v2/transfer/import/srv1", false, body).await.unwrap_err();
+        assert!(matches!(err, RvError::ErrResponseStatus(409, _)), "{err:?}");
+        let body = bundle("server", vec![version(1, json!({ "password": "new" }))], "rename");
+        let resp = test_write_api(&core, &root, "resources/v2/transfer/import/srv1", true, body).await.unwrap();
+        assert_eq!(resp.unwrap().data.unwrap()["name"], json!("srv1-2"));
     }
 }
