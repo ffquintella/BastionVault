@@ -461,6 +461,7 @@ pub fn run() {
             commands::resources::write_resource,
             commands::resources::delete_resource,
             commands::resources::rename_resource,
+            commands::resources::transfer_object,
             commands::resources::list_resource_secrets,
             commands::resources::read_resource_secret,
             commands::resources::write_resource_secret,

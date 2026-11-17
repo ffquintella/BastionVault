@@ -1024,6 +1024,48 @@ export const deleteResource = (name: string) =>
 /// canonical (trimmed + lowercased) new name.
 export const renameResource = (oldName: string, newName: string) =>
   invoke<string>("rename_resource", { oldName, newName });
+
+// ── Namespace transfer (copy / move to another namespace) ──────────
+
+export type TransferOp = "copy" | "move";
+/** `kv-secret` is for the KV secrets page; the Resources page sends `resource`. */
+export type TransferKind = "resource" | "kv-secret";
+export type TransferOnConflict = "refuse" | "rename" | "overwrite";
+
+/** `namespace` is `""` for root; `mount` never carries a namespace prefix. */
+export interface TransferLocation {
+  namespace: string;
+  mount: string;
+  path: string;
+}
+
+/** A non-fatal finding, e.g. a share the destination cannot carry. */
+export interface TransferWarning {
+  code: string;
+  subject: string;
+  message: string;
+}
+
+/** Counts and warnings only; the server never returns a secret value. */
+export interface TransferResult {
+  transferred: { secrets: number; versions: number; history: number; shares: number };
+  warnings: TransferWarning[];
+  dry_run: boolean;
+  destination: TransferLocation;
+}
+
+/**
+ * Copy or move one object to another namespace. `dryRun` reads and checks
+ * everything and writes nothing; the Move source is deleted only by a real run.
+ */
+export const transferObject = (args: {
+  op: TransferOp;
+  kind: TransferKind;
+  source: TransferLocation;
+  destination: TransferLocation;
+  onConflict: TransferOnConflict;
+  dryRun: boolean;
+}) => invoke<TransferResult>("transfer_object", args);
 export const listResourceSecrets = (name: string) =>
   invoke<ResourceSecretListResult>("list_resource_secrets", { name });
 export const readResourceSecret = (name: string, key: string) =>

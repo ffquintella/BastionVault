@@ -33,7 +33,7 @@ import {
   type SecretHistoryVersion,
   useToast,
 } from "../components/ui";
-import { Copy, Database, ExternalLink, Pencil, Plug, Share2, Trash2 } from "lucide-react";
+import { ArrowRightLeft, Copy, Database, ExternalLink, Pencil, Plug, Share2, Trash2 } from "lucide-react";
 import type {
   ResourceMetadata,
   ResourceTypeConfig,
@@ -109,6 +109,7 @@ import {
 import { brokersThroughBastion, rustionPolicyEffective } from "../lib/rustion";
 import { RustionPolicyTierEditor } from "../components/RustionPolicyTierEditor";
 import { RustionDispatcherPreview } from "../components/RustionDispatcherPreview";
+import { TransferToNamespaceModal } from "../components/TransferToNamespaceModal";
 
 function parseTags(tags: unknown): string[] {
   if (Array.isArray(tags)) return tags.filter(Boolean);
@@ -390,6 +391,11 @@ export function ResourcesPage() {
   // shown before the MFA gate for a `provider` profile.
   const { pickProviderAccount, providerPicker } = useProviderAccountPicker(useProviderAccountsLink());
   const activeNamespace = useNamespaceStore((s) => s.active);
+  // Copy / Move needs another namespace to go to; the list is the session
+  // token's operable namespaces, so an empty or single-entry list (older
+  // server, single-tenant vault) leaves the action disabled with a reason.
+  const namespaceCount = useNamespaceStore((s) => s.namespaces.length);
+  const canTransfer = namespaceCount >= 2;
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
@@ -397,6 +403,10 @@ export function ResourcesPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const [renameTarget, setRenameTarget] = useState<string | null>(null);
+  // Resource being copied or moved to another namespace. Held here, not in
+  // the Info card, so the result stays visible after a move removes the card.
+  const [transferTarget, setTransferTarget] = useState<string | null>(null);
+  const transferMoved = useRef(false);
   // Right-click context menu anchor. Null when closed.
   const [cardMenu, setCardMenu] = useState<
     { x: number; y: number; entry: api.ResourceCardEntry } | null
@@ -994,6 +1004,31 @@ export function ResourcesPage() {
   const filterOptions = [{ value: "", label: "All types" }, ...typeOptions];
 
   // ── Detail view ──────────────────────────────────────────────────
+  // Rendered by both the detail and the list view, so it works from either.
+  // A move deselects the moved resource only when the dialog closes: doing it
+  // earlier would switch views and remount the dialog, losing its result.
+  const transferModal =
+    transferTarget !== null ? (
+      <TransferToNamespaceModal
+        kind="resource"
+        namespace={activeNamespace}
+        mount="resources"
+        path={transferTarget}
+        onClose={() => {
+          if (transferMoved.current && selected === transferTarget) {
+            setSelected(null);
+            setResourceInfo(null);
+          }
+          transferMoved.current = false;
+          setTransferTarget(null);
+        }}
+        onTransferred={(_result, op) => {
+          transferMoved.current = op === "move";
+          void fetchPage(true);
+        }}
+      />
+    ) : null;
+
   if (selected && resourceInfo) {
     const typeDef = getTypeDef(typeConfig, String(resourceInfo.type || ""));
     const isDatabase = String(resourceInfo.type || "") === "database";
@@ -1063,6 +1098,8 @@ export function ResourcesPage() {
               typeDef={typeDef}
               onUpdate={() => selectResource(selected)}
               onDelete={() => setDeleteTarget(selected)}
+              onTransfer={() => setTransferTarget(selected)}
+              canTransfer={canTransfer}
               onRenamed={(newName) => {
                 setRecent(pushRecent(newName));
                 void fetchPage(true);
@@ -1149,6 +1186,7 @@ export function ResourcesPage() {
             onConfirm={handleDelete} title="Delete Resource"
             message={`Delete "${deleteTarget}" and all its secrets? This cannot be undone.`}
             confirmLabel="Delete" />
+          {transferModal}
           {providerPicker}
           {mfaPrompt}
         </div>
@@ -1323,6 +1361,13 @@ export function ResourcesPage() {
               icon: <Pencil size={14} />,
               onSelect: () => setRenameTarget(entry.name),
             },
+            ...(canTransfer
+              ? [{
+                  label: "Copy / Move to namespace",
+                  icon: <ArrowRightLeft size={14} />,
+                  onSelect: () => setTransferTarget(entry.name),
+                }]
+              : []),
             {
               label: cloning === entry.name ? "Cloning…" : "Clone",
               icon: <Copy size={14} />,
@@ -1369,6 +1414,8 @@ export function ResourcesPage() {
           />
         )}
 
+        {transferModal}
+
         {/* Credential prompt for the card-level Connect. Same modal the
             Connection tab uses, so the shortcut asks for exactly what the
             tab would have asked for and nothing more. */}
@@ -1392,12 +1439,14 @@ export function ResourcesPage() {
 
 // ── Resource Info Card ─────────────────────────────────────────────
 
-function ResourceInfoCard({ resource, typeDef, onUpdate, onDelete, onRenamed, toast }: {
+function ResourceInfoCard({ resource, typeDef, onUpdate, onDelete, onRenamed, onTransfer, canTransfer, toast }: {
   resource: ResourceMetadata;
   typeDef: ResourceTypeDef;
   onUpdate: () => void;
   onDelete: () => void;
   onRenamed: (newName: string) => void;
+  onTransfer: () => void;
+  canTransfer: boolean;
   toast: (type: "success" | "error" | "info", msg: string) => void;
 }) {
   const [editing, setEditing] = useState(false);
@@ -1447,6 +1496,7 @@ function ResourceInfoCard({ resource, typeDef, onUpdate, onDelete, onRenamed, to
         <div className="flex gap-2">
           <Button size="sm" variant="ghost" disabled={readOnly} title={readOnly ? readOnlyTitle : undefined} onClick={() => { setForm({ ...resource }); setEditing(true); }}>Edit</Button>
           <Button size="sm" variant="ghost" disabled={readOnly} title={readOnly ? readOnlyTitle : undefined} onClick={() => setRenaming(true)}>Rename</Button>
+          <Button size="sm" variant="ghost" disabled={!canTransfer} title={canTransfer ? undefined : "No other namespace is available to this session."} onClick={onTransfer}>Copy / Move to namespace</Button>
           <Button size="sm" variant="danger" disabled={readOnly} title={readOnly ? readOnlyTitle : undefined} onClick={onDelete}>Delete</Button>
         </div>
       }>

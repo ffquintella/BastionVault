@@ -291,6 +291,160 @@ pub async fn rename_resource(state: State<'_, AppState>, old_name: String, new_n
     Ok(canonical)
 }
 
+// ── Namespace transfer (copy / move to another namespace) ──────────
+
+/// One side of a transfer, as `v2/sys/namespace-transfer/{copy|move}` takes
+/// it. `namespace` is `""` for the root namespace; `mount` carries no
+/// namespace prefix (the server refuses one).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TransferLocation {
+    pub namespace: String,
+    pub mount: String,
+    pub path: String,
+}
+
+/// What the transfer wrote (or, on a dry run, would write).
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct TransferCounts {
+    #[serde(default)]
+    pub secrets: u64,
+    #[serde(default)]
+    pub versions: u64,
+    #[serde(default)]
+    pub history: u64,
+    #[serde(default)]
+    pub shares: u64,
+}
+
+/// A non-fatal finding: something the destination will not carry or a
+/// choice the server made. `subject` names the grantee, group or item.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct TransferWarning {
+    #[serde(default)]
+    pub code: String,
+    #[serde(default)]
+    pub subject: String,
+    #[serde(default)]
+    pub message: String,
+}
+
+/// Counts and warnings only; the server never returns a secret value.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct TransferResult {
+    #[serde(default)]
+    pub transferred: TransferCounts,
+    #[serde(default)]
+    pub warnings: Vec<TransferWarning>,
+    #[serde(default)]
+    pub dry_run: bool,
+    #[serde(default)]
+    pub destination: TransferLocation,
+}
+
+/// Validate the closed vocabularies and build the route and body. Kept
+/// apart from the command so the request shape is testable without a vault.
+fn transfer_request(
+    op: &str,
+    kind: &str,
+    source: &TransferLocation,
+    destination: &TransferLocation,
+    on_conflict: Option<&str>,
+    dry_run: bool,
+) -> CmdResult<(String, Map<String, Value>)> {
+    if !matches!(op, "copy" | "move") {
+        return Err(CommandError::from("op must be \"copy\" or \"move\""));
+    }
+    if !matches!(kind, "resource" | "kv-secret") {
+        return Err(CommandError::from("kind must be \"resource\" or \"kv-secret\""));
+    }
+    let on_conflict = on_conflict.filter(|c| !c.is_empty()).unwrap_or("refuse");
+    if !matches!(on_conflict, "refuse" | "rename" | "overwrite") {
+        return Err(CommandError::from("on_conflict must be \"refuse\", \"rename\" or \"overwrite\""));
+    }
+    let side = |l: &TransferLocation| serde_json::json!({ "namespace": l.namespace, "mount": l.mount, "path": l.path });
+    let mut body = Map::new();
+    body.insert("kind".into(), Value::String(kind.into()));
+    body.insert("source".into(), side(source));
+    body.insert("destination".into(), side(destination));
+    body.insert("on_conflict".into(), Value::String(on_conflict.into()));
+    body.insert("dry_run".into(), Value::Bool(dry_run));
+    Ok((format!("sys/namespace-transfer/{op}"), body))
+}
+
+/// Copy or move one resource (or KV secret) to another namespace through
+/// `v2/sys/namespace-transfer/{copy|move}`. The server does every step as the
+/// caller, so a missing right is a 403 naming it. The request is made in the
+/// active namespace; `source` and `destination` name their own namespaces.
+/// `dry_run` reads and checks everything and writes nothing. Never logs.
+#[tauri::command]
+pub async fn transfer_object(
+    state: State<'_, AppState>,
+    op: String,
+    kind: String,
+    source: TransferLocation,
+    destination: TransferLocation,
+    on_conflict: Option<String>,
+    dry_run: Option<bool>,
+) -> CmdResult<TransferResult> {
+    let (path, body) =
+        transfer_request(&op, &kind, &source, &destination, on_conflict.as_deref(), dry_run.unwrap_or(false))?;
+    let resp = make_request(&state, Operation::Write, path, Some(body)).await?;
+    let data = resp.and_then(|r| r.data).ok_or_else(|| CommandError::from("the transfer answered without a result"))?;
+    serde_json::from_value(Value::Object(data))
+        .map_err(|e| CommandError::from(format!("unreadable transfer result: {e}")))
+}
+
+#[cfg(test)]
+mod transfer_tests {
+    use super::*;
+
+    fn loc(ns: &str, mount: &str, path: &str) -> TransferLocation {
+        TransferLocation { namespace: ns.into(), mount: mount.into(), path: path.into() }
+    }
+
+    #[test]
+    fn request_matches_the_api_shape() {
+        let (path, body) = transfer_request(
+            "move",
+            "resource",
+            &loc("a", "resources", "db1"),
+            &loc("", "resources", "db2"),
+            None,
+            true,
+        )
+        .unwrap();
+        assert_eq!(path, "sys/namespace-transfer/move");
+        assert_eq!(
+            Value::Object(body),
+            serde_json::json!({
+                "kind": "resource",
+                "source": { "namespace": "a", "mount": "resources", "path": "db1" },
+                "destination": { "namespace": "", "mount": "resources", "path": "db2" },
+                "on_conflict": "refuse",
+                "dry_run": true,
+            })
+        );
+    }
+
+    #[test]
+    fn closed_vocabularies_are_enforced() {
+        let l = loc("", "resources", "x");
+        assert!(transfer_request("rename", "resource", &l, &l, None, false).is_err());
+        assert!(transfer_request("copy", "files", &l, &l, None, false).is_err());
+        assert!(transfer_request("copy", "resource", &l, &l, Some("merge"), false).is_err());
+        assert!(transfer_request("copy", "kv-secret", &l, &l, Some("overwrite"), false).is_ok());
+    }
+
+    #[test]
+    fn result_parses_with_missing_parts() {
+        let v = serde_json::json!({ "transferred": { "secrets": 2 }, "warnings": [{ "code": "renamed" }] });
+        let r: TransferResult = serde_json::from_value(v).unwrap();
+        assert_eq!(r.transferred.secrets, 2);
+        assert_eq!(r.warnings[0].code, "renamed");
+        assert!(!r.dry_run);
+    }
+}
+
 // ── Resource Secrets ───────────────────────────────────────────────
 
 #[tauri::command]
