@@ -249,6 +249,13 @@ fn invalid(message: impl Into<String>) -> RvError {
     RvError::ErrResponseStatus(400, format!("invalid namespace transfer: {}", message.into()))
 }
 
+/// Whether `mount` (always ending in `/`) starts with the segments of its own
+/// namespace `ns`. The router leaves a path already starting with `<ns>/`
+/// unprefixed, so such a mount's requests reach another mount of `ns`.
+fn mount_repeats_namespace(ns: &str, mount: &str) -> bool {
+    !ns.is_empty() && mount.starts_with(&format!("{ns}/"))
+}
+
 /// Non-empty `/`-separated segments, none of them `.`, no `..` anywhere (the
 /// barrier refuses it in any key) and no control characters.
 fn clean_segments(path: &str) -> bool {
@@ -266,6 +273,10 @@ fn place(kind: Kind, field: &str, loc: &Location) -> Result<Place, RvError> {
     // These mounts live in the root table only and ignore the namespace.
     if is_header_scoped_path(&mount) {
         return Err(invalid(format!("{field}.mount '{mount}' is not a mount inside a namespace")));
+    }
+    if mount_repeats_namespace(&ns, &mount) {
+        let message = format!("{field}.mount must not start with its own namespace path");
+        return Err(invalid(format!("{message}; the router reads such a path as already qualified")));
     }
     let path = match kind {
         Kind::Resource => {
@@ -1101,6 +1112,31 @@ mod tests {
         let other_root =
             Plan::new(TransferOp::Move, request("kv-secret", loc("", "secret", "x"), loc("src", "secret", "x"), ""));
         assert!(other_root.is_ok(), "the same path in another namespace is another item");
+    }
+
+    /// Regression: only the exact `<ns>/` segment prefix is refused, so
+    /// `team-b/x` in namespace `team` is a legitimate mount.
+    #[test]
+    fn a_mount_may_not_start_with_its_own_namespace() {
+        for (ns, mount, refused) in [
+            ("team", "team/", true),
+            ("team", "team/x/", true),
+            ("a/b", "a/b/secret/", true),
+            ("team", "team-b/x/", false),
+            ("team", "teams/", false),
+            ("a/b", "a/bc/", false),
+            ("a/b", "a/", false),
+            ("", "team/x/", false),
+        ] {
+            assert_eq!(mount_repeats_namespace(ns, mount), refused, "{ns:?} {mount:?}");
+        }
+        let plan = |mount: &str| {
+            let request = request("kv-secret", loc("billing", mount, "x"), loc("dst", "secret", "x"), "");
+            Plan::new(TransferOp::Copy, request)
+        };
+        assert_eq!(status(plan("billing")), 400, "one-segment variant");
+        assert_eq!(status(plan("/billing/secret/")), 400);
+        assert!(plan("billing-archive").is_ok());
     }
 
     #[test]

@@ -939,7 +939,10 @@ POST /v2/sys/namespace-transfer/move
   kind's engine (`resource` or `kv-v2`) in that namespace that the caller
   can see, and must not carry a namespace prefix: name the namespace in
   `namespace`, never as `{ "namespace": "", "mount": "team-a/secret" }`
-  (400). Two spellings of the same item are refused as one (400).
+  (400). A mount that starts with its own namespace's path
+  (`{ "namespace": "team-a", "mount": "team-a/secret" }`) is refused too
+  (400), because the router reads such a path as already qualified. Two
+  spellings of the same item are refused as one (400).
 - Every step is an ordinary request made with the **caller's token** in the
   namespace it touches. The caller needs:
   - `update` on `sys/namespace-transfer/*` (this route; no built-in policy

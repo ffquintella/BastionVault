@@ -848,3 +848,42 @@ async fn a_gate_refusal_is_never_read_as_a_collision() {
     assert!(!resource_exists(&core, &root, "dst", "srv1").await, "the overwrite's delete did run");
     assert!(resource_exists(&core, &root, "src", "srv1").await, "the source is untouched");
 }
+
+/// Regression (aliasing, ruling J): a mount in namespace `a` named `a/secret/`
+/// is listed as a mount, but the router reads `a/secret/...` as already
+/// qualified and serves it from `a`'s `secret/`. So `{a, a/secret}` and
+/// `{a, secret}` are one item with different scopes; a mount that starts with
+/// its own namespace path is refused before anything is read.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn a_mount_named_after_its_own_namespace_is_refused() {
+    let (_bvault, core, root) = vault("ns_transfer_self_prefixed_mount").await;
+    write(&core, &root, "sys/namespaces/a", json!({})).await;
+    send(&core, &root, Operation::Write, "sys/mounts/a/secret/", Some("a"), json!({ "type": "kv-v2" })).await.unwrap();
+    let ns = Some("a");
+    send(&core, &root, Operation::Write, "secret/data/team/db", ns, json!({ "data": { "v": "only-copy" } }))
+        .await
+        .unwrap();
+    let aliased = get(&core, &root, ns, "a/secret/data/team/db").await.expect("the alias reaches the secret");
+    assert_eq!(aliased["data"]["v"], json!("only-copy"), "precondition: both spellings are one item");
+
+    let snapshot = || async {
+        json!({
+            "meta": get(&core, &root, ns, "secret/metadata/team/db").await,
+            "value": get(&core, &root, ns, "secret/data/team/db").await.map(|d| d["data"].clone()),
+        })
+    };
+    let before = snapshot().await;
+    let normal = ("a", "secret");
+    let alias = ("a", "a/secret");
+    for (from, to) in [(alias, normal), (normal, alias)] {
+        for (op, extra) in [("copy", json!({})), ("move", json!({ "on_conflict": "overwrite" }))] {
+            let mut req = body("kv-secret", "", (from.0, "team/db"), (to.0, "team/db"), extra);
+            req["source"]["mount"] = json!(from.1);
+            req["destination"]["mount"] = json!(to.1);
+            let r = transfer(&core, &root, op, req.clone()).await;
+            assert_eq!(status(&r), 400, "{op} {req}: {r:?}");
+            assert!(message(&r).contains("must not start with its own namespace path"), "{}", message(&r));
+        }
+    }
+    assert_eq!(snapshot().await, before, "the source is intact");
+}
