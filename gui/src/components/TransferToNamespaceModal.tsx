@@ -257,8 +257,8 @@ export function TransferToNamespaceModal({
 
         {onConflict === "overwrite" && (
           <p className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-400">
-            Overwrite deletes the destination item first and is not atomic: if the copy then fails, the
-            destination stays deleted.
+            Overwrite tries the import first; if the name is taken it deletes the destination and imports
+            again. This is not atomic: if that import fails, the destination stays deleted.
           </p>
         )}
 

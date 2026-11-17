@@ -166,6 +166,36 @@ async fn a_share_write_fault_says_how_many_shares_were_written() {
     assert!(source.is_some(), "the move stopped before deleting the source");
 }
 
+/// Regression (final review): when re-pointing the attached files after a
+/// same-namespace move fails, a server fault is reported by its status only,
+/// while a refusal keeps the route's own reason.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn a_repoint_fault_names_only_its_status_and_a_refusal_keeps_its_reason() {
+    let (_bvault, core, root) = new_unseal_test_bastion_vault("ns_transfer_repoint_fault").await;
+    send(&core, &root, Operation::Write, "sys/namespaces/src", "", json!({})).await;
+    for (status, from, to) in [(500, "srv1", "srv2"), (409, "srv3", "srv4")] {
+        let meta = json!({ "type": "server", "hostname": "h.example" });
+        send(&core, &root, Operation::Write, &format!("resources/resources/{from}"), "src", meta).await;
+        let file = json!({ "name": format!("{from}.pem"), "resource": from, "content_base64": STANDARD.encode("x") });
+        send(&core, &root, Operation::Write, "files/files", "src", file).await;
+        let ctx = Interposer::new(&core, &root, Fault::Repoint(status));
+        let mut caller = Request::new("sys/namespace-transfer/move");
+        caller.client_token = root.clone();
+        let request: TransferRequest = serde_json::from_value(json!({
+            "kind": "resource",
+            "source": { "namespace": "src", "mount": "resources", "path": from },
+            "destination": { "namespace": "src", "mount": "resources", "path": to },
+        }))
+        .unwrap();
+
+        let out = run_transfer(&ctx, &caller, TransferOp::Move, request, None).await.expect("the move completes");
+        assert!(ctx.fired.load(Ordering::SeqCst), "{status}: the re-point was refused");
+        let files = out.warnings.iter().find(|w| w.code == "files-not-transferred").expect("a files warning");
+        assert!(files.message.contains(&format!("status {status}")), "{}", files.message);
+        assert_eq!(files.message.contains("injected"), status < 500, "{status}: {}", files.message);
+    }
+}
+
 /// The fault an [`Interposer`] injects.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Fault {
@@ -175,6 +205,8 @@ enum Fault {
     FileReads,
     /// The second share write fails as a storage fault would.
     SecondShareWrite,
+    /// Re-pointing the attached files answers this status.
+    Repoint(u16),
 }
 
 /// The real `Core` with one [`Fault`] slipped in.
@@ -194,7 +226,11 @@ impl Interposer {
 
     fn injected(&self) -> Result<Option<Response>, RvError> {
         self.fired.store(true, Ordering::SeqCst);
-        let status = if self.fault == Fault::FileReads { 500 } else { 503 };
+        let status = match self.fault {
+            Fault::FileReads => 500,
+            Fault::Repoint(status) => status,
+            _ => 503,
+        };
         Err(RvError::ErrResponseStatus(status, "injected fault".to_string()))
     }
 }
@@ -204,8 +240,10 @@ impl VaultCtx for Interposer {
     async fn handle_request(&self, req: &mut Request) -> Result<Option<Response>, RvError> {
         let file_read = req.operation == Operation::Read && req.path.starts_with("files/files/");
         let share_write = req.operation == Operation::Write && req.path.starts_with("identity/sharing/by-target/");
+        let repoint = req.operation == Operation::Write && req.path == "files/files/repoint-resource";
         match self.fault {
             Fault::FileReads if file_read => return self.injected(),
+            Fault::Repoint(_) if repoint => return self.injected(),
             Fault::SecondShareWrite if share_write && self.share_writes.fetch_add(1, Ordering::SeqCst) == 1 => {
                 return self.injected();
             }

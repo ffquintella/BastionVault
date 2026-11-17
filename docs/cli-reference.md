@@ -436,10 +436,11 @@ on stdout. Every warning goes to stderr as
 `warning[<code>]: <subject>: <message>`; the codes are listed in the API
 reference. A dry run says `Dry run: nothing was written.` first. The exit code
 is 0 when the transfer succeeded, even with warnings, and 1 with the server's
-error message when it failed. `--on-conflict overwrite` deletes the destination
-item first and is not atomic: if the import then fails, the destination stays
-deleted, and the command prints `warning[overwrite-not-atomic]: <destination>: ...`
-to stderr before it sends the request. Secret values are never printed.
+error message when it failed. `--on-conflict overwrite` tries the import first;
+if the name is taken it deletes the destination and imports again. It is not
+atomic: if that import fails, the destination stays deleted. The command prints
+`warning[overwrite-not-atomic]: <destination>: ...` to stderr before it sends the
+request. Secret values are never printed.
 
 The request itself runs in the root namespace: `bvault transfer` has no flag
 for the namespace header, so the token must be valid there and its policy must

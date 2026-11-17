@@ -363,6 +363,20 @@ fn refused(e: RvError, what: &str) -> RvError {
     }
 }
 
+/// A 403 for a token bound to CIDRs, before any step: the steps are in-process
+/// requests with no client address, so the binding cannot be checked on them.
+fn refuse_cidr_bound(caller: &Request) -> Result<(), RvError> {
+    match caller.auth.as_ref().is_some_and(|auth| !auth.bound_cidrs.is_empty()) {
+        true => Err(RvError::ErrResponseStatus(
+            403,
+            "permission denied: tokens bound to CIDRs cannot run namespace transfers; each step is an internal \
+             request with no client address to check the binding against"
+                .to_string(),
+        )),
+        false => Ok(()),
+    }
+}
+
 /// One request as the caller, in namespace `ns`. API version 1: the KV
 /// import route exists only there (at 2 the router reads it as a secret).
 fn as_caller(
@@ -493,10 +507,16 @@ struct Snapshot {
 }
 
 #[maybe_async::maybe_async]
-async fn read_source(core: &dyn VaultCtx, caller: &Request, kind: Kind, src: &Place) -> Result<Snapshot, RvError> {
+async fn read_source(
+    core: &dyn VaultCtx,
+    caller: &Request,
+    op: TransferOp,
+    kind: Kind,
+    src: &Place,
+) -> Result<Snapshot, RvError> {
     match kind {
         Kind::Resource => read_resource(core, caller, src).await,
-        Kind::KvSecret => read_kv(core, caller, src).await,
+        Kind::KvSecret => read_kv(core, caller, op, src).await,
     }
 }
 
@@ -571,10 +591,20 @@ fn env_overrides(base: &Map<String, Value>, merged: &Map<String, Value>) -> Map<
     merged.iter().filter(|(k, v)| base.get(*k) != Some(*v)).map(|(k, v)| (k.clone(), v.clone())).collect()
 }
 
+/// Why soft-deleted version `n` arrives destroyed; a move also says that it
+/// deletes the only copy `undelete` could still recover.
+fn deleted_version_message(n: u64, op: TransferOp) -> String {
+    let message = format!("version {n} is deleted at the source; its value cannot be read, so it arrives destroyed");
+    match op {
+        TransferOp::Copy => message,
+        TransferOp::Move => format!("{message}, and the move deletes the only recoverable copy of this version"),
+    }
+}
+
 /// The secret's settings and every version, through `metadata/` and
 /// `data/` (one read per version and per environment).
 #[maybe_async::maybe_async]
-async fn read_kv(core: &dyn VaultCtx, caller: &Request, src: &Place) -> Result<Snapshot, RvError> {
+async fn read_kv(core: &dyn VaultCtx, caller: &Request, op: TransferOp, src: &Place) -> Result<Snapshot, RvError> {
     let ns = src.ns.as_str();
     let meta = read(core, caller, ns, src.item(Kind::KvSecret), None).await?.ok_or_else(|| not_found(src))?;
     let mut numbered: Vec<(u64, Map<String, Value>)> = meta
@@ -598,8 +628,7 @@ async fn read_kv(core: &dyn VaultCtx, caller: &Request, src: &Place) -> Result<S
         let deletion_time = text(vm, "deletion_time");
         if destroyed || !deletion_time.is_empty() {
             if !destroyed {
-                let message =
-                    format!("version {n} is deleted at the source; its value cannot be read, so it arrives destroyed");
+                let message = deleted_version_message(*n, op);
                 warnings.push(warning(CODE_DELETED_VERSION_NOT_RECOVERABLE, format!("version {n}"), message));
             }
             entry["destroyed"] = json!(true);
@@ -884,19 +913,27 @@ fn collision(dest: &Place, detail: &str) -> RvError {
 }
 
 /// The import of `body` at `dest`, marked as the transfer's own (the import
-/// routes refuse any other request); answers the place the engine wrote.
+/// routes refuse any other request); answers the place the engine wrote. The
+/// body rides in the request and is handed back for a retry, uncopied: nothing
+/// on the import's path rewrites it (no engine `SecretStr` field is an import key).
 #[maybe_async::maybe_async]
 async fn import(
     core: &dyn VaultCtx,
     caller: &Request,
     kind: Kind,
     dest: &Place,
-    body: &Map<String, Value>,
+    body: &mut Map<String, Value>,
 ) -> Result<Place, RvError> {
+    // An import body is never empty (it names `on_conflict`): an empty one was
+    // lost on an earlier attempt, and is not sent.
+    if body.is_empty() {
+        return Err(crate::bv_error_string!(format!("the import into {} has no body to send", dest.display())));
+    }
     let what = format!("the caller may not write {} in {}", dest.display(), namespace_label(&dest.ns));
-    let mut req = as_caller(caller, &dest.ns, Operation::Write, dest.import(), Some(body.clone()));
+    let mut req = as_caller(caller, &dest.ns, Operation::Write, dest.import(), Some(std::mem::take(body)));
     req.mark_internal_transfer_import();
     let resp = core.handle_request(&mut req).await;
+    *body = req.body.take().unwrap_or_default();
     let data = resp.map_err(|e| refused(e, &what))?.and_then(|r| r.data).unwrap_or_default();
     let field = match kind {
         Kind::Resource => "name",
@@ -919,14 +956,15 @@ fn import_body(kind: Kind, snapshot: &Snapshot, origin: String, origin_owner: &s
 }
 
 /// Write the item into the destination per `on_conflict`. `rename` tries
-/// `refuse` imports name by name, so the ACL sees each name; `overwrite` is an
-/// ordinary DELETE (owner, shares and groups cleaned up) and then an import.
+/// `refuse` imports name by name, so the ACL sees each name; `overwrite` tries
+/// the import and, if the name is taken, runs an ordinary DELETE (owner, shares
+/// and groups cleaned up) and imports again.
 #[maybe_async::maybe_async]
 async fn write_destination(
     core: &dyn VaultCtx,
     caller: &Request,
     plan: &Plan,
-    body: &Map<String, Value>,
+    body: &mut Map<String, Value>,
     snapshot: &Snapshot,
     warnings: &mut Vec<TransferWarning>,
 ) -> Result<Place, RvError> {
@@ -1029,7 +1067,7 @@ async fn finish_move(
         RvError::ErrResponseStatus(status, message)
     };
 
-    let again = match read_source(core, caller, plan.kind, src).await {
+    let again = match read_source(core, caller, plan.op, plan.kind, src).await {
         Ok(again) => again,
         Err(e) => return Err(partial(e, "could not be read again to verify the copy, so it was not deleted")),
     };
@@ -1061,10 +1099,11 @@ pub async fn run_transfer(
     t: TransferRequest,
     stores: Option<&IdentityStores>,
 ) -> Result<TransferResult, RvError> {
+    refuse_cidr_bound(caller)?;
     let plan = Plan::new(op, t)?;
     check_place(core, caller, plan.kind, &plan.source, "source").await?;
     check_place(core, caller, plan.kind, &plan.destination, "destination").await?;
-    let snapshot = read_source(core, caller, plan.kind, &plan.source).await?;
+    let snapshot = read_source(core, caller, plan.op, plan.kind, &plan.source).await?;
     let mut warnings = snapshot.warnings.clone();
     let origin_owner = match plan.kind {
         Kind::Resource => read_origin_owner(core, caller, &plan.source, &mut warnings).await?,
@@ -1078,8 +1117,8 @@ pub async fn run_transfer(
     let written = match plan.dry_run {
         true => plan_destination(core, caller, &plan, &snapshot, &mut warnings).await?,
         false => {
-            let body = import_body(plan.kind, &snapshot, plan.source.display(), &origin_owner);
-            write_destination(core, caller, &plan, &body, &snapshot, &mut warnings).await?
+            let mut body = import_body(plan.kind, &snapshot, plan.source.display(), &origin_owner);
+            write_destination(core, caller, &plan, &mut body, &snapshot, &mut warnings).await?
         }
     };
     // Before a move deletes the source, whose delete revokes its shares and
@@ -1265,5 +1304,25 @@ mod tests {
             refused(RvError::ErrResponseStatus(409, "taken".into()), "x"),
             RvError::ErrResponseStatus(409, _)
         ));
+    }
+
+    #[test]
+    fn only_a_cidr_bound_token_is_refused_up_front() {
+        let mut caller = Request::new("sys/namespace-transfer/copy");
+        assert!(refuse_cidr_bound(&caller).is_ok(), "no auth yet");
+        caller.auth = Some(crate::logical::Auth::default());
+        assert!(refuse_cidr_bound(&caller).is_ok(), "an unbound token");
+        caller.auth.as_mut().unwrap().bound_cidrs = vec!["10.0.0.0/24".into()];
+        let e = refuse_cidr_bound(&caller).unwrap_err();
+        assert!(matches!(e, RvError::ErrResponseStatus(403, ref m) if m.contains("bound to CIDRs")), "{e:?}");
+    }
+
+    #[test]
+    fn only_a_move_says_it_deletes_the_recoverable_version() {
+        let copy = deleted_version_message(2, TransferOp::Copy);
+        let moved = deleted_version_message(2, TransferOp::Move);
+        assert!(copy.starts_with("version 2 is deleted at the source") && moved.starts_with(&copy), "{moved}");
+        assert!(!copy.contains("only recoverable copy"), "{copy}");
+        assert!(moved.ends_with("the move deletes the only recoverable copy of this version"), "{moved}");
     }
 }

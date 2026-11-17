@@ -71,6 +71,16 @@ fn is_refusal(e: &RvError) -> bool {
     matches!(e, RvError::ErrString(_)) || status_of(e) < 500
 }
 
+/// A failed write for a warning: a refusal (4xx) with the route's own reason,
+/// a server fault (5xx) by its status only, since its text is not the
+/// caller's to read and may carry storage detail.
+fn failure_reason(e: RvError) -> String {
+    match split(e) {
+        (status, _) if status >= 500 => format!("status {status}"),
+        (status, detail) => format!("status {status}: {detail}"),
+    }
+}
+
 fn strings(data: &Map<String, Value>, field: &str) -> Vec<String> {
     let list = data.get(field).and_then(Value::as_array);
     list.map(|all| all.iter().filter_map(Value::as_str).map(String::from).collect()).unwrap_or_default()
@@ -379,9 +389,16 @@ pub(super) async fn carry_files(
         return Vec::new();
     }
     let not_transferred = |message: String| vec![warning(CODE_FILES_NOT_TRANSFERRED, src.path.clone(), message)];
-    // The status only: a fault's text is not the caller's to read.
+    // The status only, in the warning and the server log: a fault's text is
+    // not the caller's to read, and may carry storage detail.
     let fault = |what: &str, e: &RvError| {
-        let message = format!("{what} of {} could not be checked: status {}", src.display(), status_of(e));
+        let status = status_of(e);
+        log::warn!(
+            target: "security",
+            "namespace-transfer: checking {what} of {} failed (status {status}); reported as a warning",
+            src.display()
+        );
+        let message = format!("{what} of {} could not be checked: status {status}", src.display());
         not_transferred(format!("{message}; none was transferred"))
     };
     let found = match attached_files(core, caller, src).await {
@@ -413,12 +430,12 @@ pub(super) async fn carry_files(
         return match call(core, caller, &src.ns, Operation::Write, repoint, body).await {
             Ok(_) => Vec::new(),
             Err(e) => {
-                let (status, detail) = split(e);
                 let message = format!(
-                    "the move to {} is complete, but re-pointing the files attached to {} failed (status {status}: \
-                     {detail}); they stay attached to the name '{}'",
+                    "the move to {} is complete, but re-pointing the files attached to {} failed ({}); they stay \
+                     attached to the name '{}'",
                     written.display(),
                     src.display(),
+                    failure_reason(e),
                     src.path
                 );
                 not_transferred(message)
@@ -465,6 +482,18 @@ mod tests {
         let srv_target = URL_SAFE_NO_PAD.encode("srv1");
         let grant = format!("identity/sharing/by-target/resource/{srv_target}/ops");
         assert_eq!(grant_path(Kind::Resource, &srv, " ops "), grant);
+    }
+
+    #[test]
+    fn a_server_fault_is_reported_by_its_status_only() {
+        let fault = failure_reason(RvError::ErrResponseStatus(503, "barrier: disk /var/x full".into()));
+        assert_eq!(fault, "status 503");
+        assert_eq!(
+            failure_reason(RvError::ErrBarrierSealed),
+            format!("status {}", RvError::ErrBarrierSealed.response_status())
+        );
+        let refusal = failure_reason(RvError::ErrResponseStatus(409, "a file is locked".into()));
+        assert_eq!(refusal, "status 409: a file is locked");
     }
 
     #[test]

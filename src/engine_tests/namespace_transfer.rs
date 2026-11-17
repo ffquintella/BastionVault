@@ -12,7 +12,7 @@ use crate::{
     audit::entry::AuditEntry,
     core::Core,
     errors::RvError,
-    logical::{Operation, Request, Response},
+    logical::{Connection, Operation, Request, Response},
     modules::namespace::{ns_assignment::NsAssignmentStore, NamespaceModule, NAMESPACE_MODULE_NAME},
     test_utils::new_unseal_test_bastion_vault,
 };
@@ -405,6 +405,13 @@ async fn rename_probes_free_name_via_refuse_imports() {
     assert!(codes(&out).contains(&"renamed".to_string()), "{out}");
     let copied = get(&core, &root, Some("dst"), "resources/resources/srv1-3").await.unwrap();
     assert_eq!(copied["hostname"], json!("h2.example"));
+    // The third attempt sent the same bundle as the first: secrets and history intact.
+    let login = get(&core, &root, Some("dst"), "resources/secrets/srv1-3/login").await.unwrap();
+    assert_eq!(login["value"], json!("pw-2"));
+    let api = get(&core, &root, Some("dst"), "resources/secrets/srv1-3/api").await.unwrap();
+    assert_eq!(api["value"], json!("tok-1"));
+    let arrived = history(&core, &root, "dst", "srv1-3").await;
+    assert_eq!(arrived.len(), history(&core, &root, "src", "srv1").await.len() + 1, "{arrived:?}");
     for name in ["srv1", "srv1-2"] {
         let kept = get(&core, &root, Some("dst"), &format!("resources/resources/{name}")).await.unwrap();
         assert_eq!(kept["hostname"], json!(format!("{name}.example")), "{name} untouched");
@@ -599,6 +606,62 @@ async fn soft_deleted_kv_versions_become_destroyed_with_warning() {
 
     let after = get(&core, &root, src, "secret/metadata/team/x").await.unwrap();
     assert_eq!(after["versions"], before["versions"], "the source is never undeleted");
+    let text = warning["message"].as_str().unwrap();
+    assert!(!text.contains("the move deletes"), "a copy keeps the source's recoverable version: {text}");
+}
+
+/// Regression (final review): on a move, the warning for a soft-deleted
+/// version says the move deletes its only recoverable copy.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn moving_a_soft_deleted_kv_version_says_the_move_loses_it() {
+    let (_bvault, core, root) = vault("ns_transfer_soft_deleted_move").await;
+    let src = Some("src");
+    for v in ["one", "two"] {
+        send(&core, &root, Operation::Write, "secret/data/team/x", src, json!({ "data": { "v": v } })).await.unwrap();
+    }
+    send(&core, &root, Operation::Delete, "secret/data/team/x", src, json!({ "versions": [1] })).await.unwrap();
+
+    let out = result(transfer(&core, &root, "move", kv("team/x", "team/x", json!({}))).await);
+    let warnings = out["warnings"].as_array().unwrap();
+    let warning = warnings.iter().find(|w| w["code"] == json!("deleted-version-not-recoverable"));
+    let text = warning.unwrap_or_else(|| panic!("a warning names the version: {out}"))["message"].as_str().unwrap();
+    assert!(text.contains("the move deletes the only recoverable copy of this version"), "{text}");
+    assert!(get(&core, &root, src, "secret/metadata/team/x").await.is_none(), "the move deleted the source");
+}
+
+/// Regression (final review): a token bound to CIDRs is refused before any
+/// step, with a message naming the binding, instead of the misleading 403 of
+/// the first sub-request (which carries no client address).
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn a_cidr_bound_token_is_refused_up_front() {
+    let (_bvault, core, root) = vault("ns_transfer_cidr_bound").await;
+    seed_resource(&core, &root, Some("src"), "srv1").await;
+    write_policy(&core, &root, "mover", MOVER).await;
+    let body = json!({
+        "password": PASSWORD, "token_policies": "mover,default", "ttl": 0, "token_bound_cidrs": ["10.0.0.0/24"]
+    });
+    write(&core, &root, "auth/userpass/users/bound", body).await;
+    let ns_store = core
+        .module_manager()
+        .get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
+        .and_then(|m| m.store())
+        .expect("namespace store");
+    let namespaces = vec![String::new(), "src".to_string(), "dst".to_string()];
+    NsAssignmentStore::new(core.as_ref()).unwrap().set(&ns_store, "userpass/", "bound", namespaces).await.unwrap();
+    let mut login = Request::new("auth/userpass/login/bound");
+    login.operation = Operation::Write;
+    login.body = json!({ "password": PASSWORD }).as_object().cloned();
+    let token = core.handle_request(&mut login).await.unwrap().unwrap().auth.unwrap().client_token;
+
+    let mut req = Request::new("sys/namespace-transfer/copy");
+    req.operation = Operation::Write;
+    req.client_token = token;
+    req.body = resource("srv1", "srv1", json!({})).as_object().cloned();
+    req.connection = Some(Connection { peer_addr: "10.0.0.7:41222".to_string(), ..Default::default() });
+    let r = core.handle_request(&mut req).await;
+    assert_eq!(status(&r), 403, "{r:?}");
+    assert!(message(&r).contains("tokens bound to CIDRs cannot run namespace transfers"), "{}", message(&r));
+    assert!(!resource_exists(&core, &root, "dst", "srv1").await, "nothing is written");
 }
 
 #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]

@@ -130,7 +130,8 @@ pub struct TransferArgs {
         value_enum,
         value_name = "POLICY",
         default_value = "refuse",
-        help = "When the destination exists: refuse, rename or overwrite (delete first, not atomic)."
+        help = "When the destination exists: refuse, rename or overwrite (import first; if the name is taken, \
+                delete it and import again; not atomic)."
     )]
     on_conflict: OnConflict,
 
@@ -306,8 +307,9 @@ fn build_body(args: &TransferArgs) -> Result<Map<String, Value>, RvError> {
 fn overwrite_notice(on_conflict: OnConflict, dry_run: bool, destination: &str) -> Option<String> {
     (on_conflict == OnConflict::Overwrite && !dry_run).then(|| {
         format!(
-            "warning[overwrite-not-atomic]: {}: overwrite deletes the destination first and is not atomic; \
-             if the import then fails, the destination stays deleted",
+            "warning[overwrite-not-atomic]: {}: overwrite tries the import first; if the name is taken it \
+             deletes the destination and imports again; not atomic: if that import fails, the destination \
+             stays deleted",
             one_line(destination)
         )
     })
@@ -534,7 +536,9 @@ mod test {
     fn overwrite_prints_non_atomic_notice() {
         let notice = overwrite_notice(OnConflict::Overwrite, false, "team-b/resources/db1").expect("overwrite warns");
         assert!(notice.starts_with("warning[overwrite-not-atomic]: team-b/resources/db1: "), "{notice}");
-        assert!(notice.contains("deletes the destination") && notice.contains("not atomic"), "{notice}");
+        assert!(notice.contains("tries the import first"), "{notice}");
+        assert!(notice.contains("if the name is taken it deletes the destination and imports again"), "{notice}");
+        assert!(notice.contains("not atomic") && !notice.contains("deletes the destination first"), "{notice}");
         assert!(overwrite_notice(OnConflict::Overwrite, true, "x/y").is_none(), "a dry run deletes nothing");
         assert!(overwrite_notice(OnConflict::Refuse, false, "x/y").is_none());
         assert!(overwrite_notice(OnConflict::Rename, false, "x/y").is_none());

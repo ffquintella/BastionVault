@@ -149,7 +149,9 @@ describe("TransferToNamespaceModal", () => {
     expect(screen.queryByText(/not atomic/i)).not.toBeInTheDocument();
     await userEvent.selectOptions(screen.getByLabelText("If the destination exists"), "overwrite");
     const note = screen.getByText(/not atomic/i);
-    expect(note).toHaveTextContent(/deletes the destination/i);
+    expect(note).toHaveTextContent(/tries the import first/i);
+    expect(note).toHaveTextContent(/if the name is taken it deletes the destination and imports again/i);
+    expect(note).not.toHaveTextContent(/deletes the destination item first/i);
   });
 
   it("dry_run_is_always_first_and_writes_nothing", async () => {
