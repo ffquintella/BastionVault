@@ -574,8 +574,12 @@ another such endpoint:
   (`identity/kv_key_split_migrate.rs`) gives each moved secret exactly its
   old key's record and shares on the first unseal after upgrade.
 - **Ambiguous KV names are refused (T499).** An empty or `..` segment,
-  surrounding whitespace, or a trailing `/` on a non-list request: 400,
-  so no key is ever derived from a name the engine stores differently.
+  surrounding whitespace, or a trailing `/` on a non-list request: no key
+  is derived; once the ACL and namespace binding allowed it, a 400 (root
+  too). `can_operate` answers true for root before looking at the name,
+  so a root preview of such a path says allowed while the request is 400.
+- **An unreadable key-switch marker refuses KV requests** (500), never
+  falling back to the pre-T499 keys; non-KV requests do not read it.
 - **The datafix's marker is replicated** (`sys/owner/meta/`) and read
   lazily, so every node switches when one finishes. Downgrading after it
   ran is unsupported: it overwrote some old keys, and an older release's

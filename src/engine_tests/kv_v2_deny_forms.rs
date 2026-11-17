@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 
 use super::{
     kernel_policy_deny::{write, write_policy},
-    kv_secret_keys::{is_denied, login, send},
+    kv_secret_keys::{is_denied, login, owner_store, send, status},
 };
 use crate::{core::Core, logical::Operation, test_utils::new_unseal_test_bastion_vault};
 
@@ -235,4 +235,60 @@ path "tenant/secret/data/prod/*" { capabilities = ["deny"] }
     assert!(is_denied(&r), "metadata under the deny: {r:?}");
     let r = send(&core, &token, 2, Operation::Write, "secret/dev/x", ns, data).await;
     assert!(r.is_ok(), "outside the deny: {r:?}");
+}
+
+/// A group-gated or scoped deny on the other form is never masked by a broader
+/// plain deny that a narrower allow outranks (review fix round 2): with
+/// `deny secret/*`, `allow secret/data/team/*` and a deny on `secret/team/*`
+/// gated on group `s`, the secret in `s` is refused and the one outside it reads.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn a_gated_deny_on_the_other_form_is_not_masked() {
+    let (_bvault, core, root) = vault("gated_alias_deny").await;
+    for name in ["x", "y"] {
+        write(&core, &root, &format!("secret/data/team/{name}"), json!({ "data": { "v": "seed" } })).await;
+    }
+    write(&core, &root, "resource-group/groups/s", json!({ "secrets": "secret/team/x" })).await;
+    let hcl = r#"
+path "secret/*" { capabilities = ["deny"] }
+path "secret/data/team/*" { capabilities = ["read"] }
+path "secret/team/*" {
+  capabilities = ["deny"]
+  groups = ["s"]
+}
+"#;
+    write_policy(&core, &root, "gated-deny", hcl).await;
+    let (token, _) = login(&core, &root, "user", "gated-deny").await;
+    for api in [1u8, 2] {
+        let r = send(&core, &token, api, Operation::Read, "secret/data/team/x", None, json!({})).await;
+        assert_eq!(status(&r), 403, "api {api}: team/x is in group s: {r:?}");
+        let r = send(&core, &token, api, Operation::Read, "secret/data/team/y", None, json!({})).await;
+        assert_eq!(status(&r), 200, "api {api}: team/y is not: {r:?}");
+    }
+}
+
+/// A request granted only by a group-gated or a scoped rule has no ungated
+/// rule to outrank anything, so a deny on the other form refuses it.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn a_grant_only_through_a_gated_or_scoped_rule_yields_to_an_alias_deny() {
+    let (_bvault, core, root) = vault("layer_grant_alias_deny").await;
+    write(&core, &root, "secret/data/team/x", json!({ "data": { "v": "seed" } })).await;
+    write(&core, &root, "resource-group/groups/club", json!({ "secrets": "secret/team/x" })).await;
+    let gated = "path \"secret/*\" {\n  capabilities = [\"read\"]\n  groups = [\"club\"]\n}\n";
+    write_policy(&core, &root, "club-read", gated).await;
+    write_policy(&core, &root, "no-team", r#"path "secret/data/team/*" { capabilities = ["deny"] }"#).await;
+
+    let (control, _) = login(&core, &root, "control", "club-read").await;
+    let r = send(&core, &control, 2, Operation::Read, "secret/team/x", None, json!({})).await;
+    assert_eq!(status(&r), 200, "the group-gated grant is live: {r:?}");
+    let (gated_user, _) = login(&core, &root, "gateduser", "club-read,no-team").await;
+    let r = send(&core, &gated_user, 2, Operation::Read, "secret/team/x", None, json!({})).await;
+    assert_eq!(status(&r), 403, "a gated-only grant against a data-form deny: {r:?}");
+
+    let (alice, alice_id) = login(&core, &root, "alice", "standard-user").await;
+    owner_store(&core).await.set_kv_owner("secret/team/x", &alice_id).await.unwrap();
+    let r = send(&core, &alice, 2, Operation::Read, "secret/team/x", None, json!({})).await;
+    assert_eq!(status(&r), 200, "the owner-scoped grant is live: {r:?}");
+    let (alice, _) = login(&core, &root, "alice", "standard-user,no-team").await;
+    let r = send(&core, &alice, 2, Operation::Read, "secret/team/x", None, json!({})).await;
+    assert_eq!(status(&r), 403, "an owner-scoped grant against a data-form deny: {r:?}");
 }

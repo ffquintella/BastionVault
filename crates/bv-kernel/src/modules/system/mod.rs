@@ -2106,7 +2106,7 @@ impl SystemBackend {
         let key = crate::modules::identity::OwnerStore::client_kv_key(
             &path,
             req.namespace_path.as_deref(),
-            store.kv_keys_split().await,
+            store.kv_keys_split().await?,
         )
         .ok_or_else(|| bv_error_response_status!(400, "invalid KV path"))?;
         store.set_kv_owner(&key, &new_owner).await?;
@@ -2148,7 +2148,7 @@ impl SystemBackend {
         let key = crate::modules::identity::OwnerStore::client_kv_key(
             &path,
             req.namespace_path.as_deref(),
-            store.kv_keys_split().await,
+            store.kv_keys_split().await?,
         )
         .ok_or_else(|| bv_error_response_status!(400, "invalid KV path"))?;
 
@@ -3346,7 +3346,7 @@ impl SystemBackend {
             let Some(key) = crate::modules::identity::OwnerStore::client_kv_key(
                 path,
                 req.namespace_path.as_deref(),
-                store.kv_keys_split().await,
+                store.kv_keys_split().await?,
             ) else {
                 kv_invalid.push(path.clone());
                 continue;

@@ -325,7 +325,7 @@ pub async fn run_if_needed(core: &crate::core::Core) -> Result<KvKeySplitReport,
     let owners = identity.owner_store().ok_or_else(|| crate::bv_error_string!("kv key split: no owner store"))?;
     let shares = identity.share_store().ok_or_else(|| crate::bv_error_string!("kv key split: no share store"))?;
 
-    if owners.kv_keys_split().await {
+    if owners.kv_keys_split().await? {
         report.skipped = true;
         return Ok(report);
     }
@@ -335,7 +335,7 @@ pub async fn run_if_needed(core: &crate::core::Core) -> Result<KvKeySplitReport,
         None => {
             let plan = build_plan(&moves(core, &mut report).await?, &owners, &shares, &mut report).await?;
             // Another node may have finished while this one read (HA): no-op.
-            if owners.kv_keys_split().await {
+            if owners.kv_keys_split().await? {
                 report.skipped = true;
                 return Ok(report);
             }
@@ -359,6 +359,19 @@ pub async fn reset_for_test(core: &crate::core::Core) -> Result<(), RvError> {
     let identity = core.module_manager().get_module::<IdentityModule>("identity");
     let owners = identity.and_then(|m| m.owner_store()).ok_or_else(|| crate::bv_error_string!("no owner store"))?;
     owners.unsplit_kv_keys_for_test().await
+}
+
+/// Test support: a pass that stops right after saving its plan, as one cut
+/// short by a crash would; the next `run_if_needed` resumes from that plan.
+#[cfg(any(test, feature = "test-support"))]
+pub async fn plan_only_for_test(core: &crate::core::Core) -> Result<(), RvError> {
+    let identity = core.module_manager().get_module::<IdentityModule>("identity");
+    let identity = identity.ok_or_else(|| crate::bv_error_string!("no identity module"))?;
+    let owners = identity.owner_store().ok_or_else(|| crate::bv_error_string!("no owner store"))?;
+    let shares = identity.share_store().ok_or_else(|| crate::bv_error_string!("no share store"))?;
+    let mut report = KvKeySplitReport::default();
+    let plan = build_plan(&moves(core, &mut report).await?, &owners, &shares, &mut report).await?;
+    owners.meta_put(PLAN_KEY, serde_json::to_vec(&plan)?).await
 }
 
 #[cfg(test)]

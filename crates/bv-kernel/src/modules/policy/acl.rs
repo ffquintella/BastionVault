@@ -190,6 +190,90 @@ pub(super) fn segment_wildcard_glob(stored: &str) -> (&str, bool) {
     }
 }
 
+/// An ungated rule's permissions and rank, as [`RankIndex`] finds it.
+struct RankedCand {
+    perms: Permissions,
+    spec: Specificity,
+}
+
+/// Selection only: `bv_policy_core::governing` never checks parameters, so
+/// these answer as a refusal would, should anything ever ask.
+impl bv_policy_core::Params for RankedCand {
+    fn any_required_missing(&self) -> bool {
+        true
+    }
+    fn is_empty(&self) -> bool {
+        false
+    }
+    fn any_denied_value(&self) -> bool {
+        true
+    }
+    fn any_listed_value_rejected(&self) -> bool {
+        true
+    }
+    fn any_unlisted(&self) -> bool {
+        true
+    }
+}
+
+impl bv_policy_core::Candidate for RankedCand {
+    fn perm(&self) -> bv_policy_core::Perm {
+        self.perms.core_facts()
+    }
+}
+
+/// The ungated rules looked up as `UngatedIndex` looks them up, each with its
+/// rank, so `bv_policy_core::governing` over it picks the rule `decide` picks.
+struct RankIndex<'a> {
+    acl: &'a ACL,
+    path: &'a str,
+}
+
+impl RankIndex<'_> {
+    /// An exact rule outranks every glob.
+    fn exact_rank(perms: &Permissions) -> RankedCand {
+        let spec = Specificity { first_wildcard: isize::MAX, is_prefix: false, wildcards: 0, len: 0 };
+        RankedCand { perms: perms.clone(), spec }
+    }
+}
+
+impl bv_policy_core::Ungated for RankIndex<'_> {
+    type Cand = RankedCand;
+
+    fn exact(&self) -> Option<RankedCand> {
+        self.acl.exact_rules.get(self.path).map(Self::exact_rank)
+    }
+
+    fn exact_trimmed(&self) -> Option<RankedCand> {
+        self.acl.exact_rules.get(self.path.trim_end_matches('/')).map(Self::exact_rank)
+    }
+
+    fn non_exact(&self) -> Option<RankedCand> {
+        let winner = self.acl.most_specific_non_exact(self.path)?;
+        let spec = winner.specificity();
+        winner.perms.map(|perms| RankedCand { perms, spec })
+    }
+}
+
+/// No ungated rule: `decide` over it runs the gated and scoped layers alone.
+struct NoUngated<'a>(std::marker::PhantomData<&'a ()>);
+
+impl<'a> bv_policy_core::Ungated for NoUngated<'a> {
+    type Cand = core_bridge::Cand<'a>;
+
+    fn exact(&self) -> Option<Self::Cand> {
+        None
+    }
+
+    fn exact_trimmed(&self) -> Option<Self::Cand> {
+        None
+    }
+
+    fn non_exact(&self) -> Option<Self::Cand> {
+        None
+    }
+}
+
 /// How specific a governing rule is, measured from a KV secret's name, and
 /// whether it denies ([`ACL::governing_rule_on_name`]). Ordered by the
 /// verified specificity order (`bv_policy_core::compare`).
@@ -478,23 +562,19 @@ impl ACL {
     ///
     /// * `Option<Permissions>` - Returns permissions if found, otherwise `None`.
     pub fn get_none_exact_paths_permissions(&self, path: &str, bare_mount: bool) -> Option<Permissions> {
-        // The most specific candidate wins, by the verified order
-        // (`bv_policy_core::compare`, T4) — a single winner, never a union.
-        let mut best = MostSpecific::new();
+        if !bare_mount {
+            return self.most_specific_non_exact(path).and_then(|pd| pd.perms);
+        }
 
+        // `bare_mount`: mount visibility for `has_mount_access` only, not
+        // authorization, and deliberately looser — it matches a rule
+        // against a *shorter* mount path, so that `secret/foo/+` makes
+        // the `secret/` mount visible, and an empty segment satisfies
+        // `+`. Unchanged; not covered by the proofs.
         if let Some(item) = self.prefix_rules.get_ancestor(path) {
             if self.segment_wildcard_paths.is_empty() {
                 return Some(item.value().unwrap().clone());
             }
-
-            let prefix = item.key().unwrap().clone();
-            best.offer(WcPathDescr {
-                first_wc_or_glob: prefix.len() as isize,
-                wc_path: prefix,
-                is_prefix: true,
-                perms: item.value().cloned(),
-                ..Default::default()
-            });
         }
 
         if self.segment_wildcard_paths.is_empty() {
@@ -510,44 +590,8 @@ impl ACL {
                 continue;
             }
 
-            let mut pd = WcPathDescr {
-                first_wc_or_glob: full_wc_path.find('+').map(|i| i as isize).unwrap_or(-1),
-                ..Default::default()
-            };
-
             let (curr_wc_path, is_prefix) = segment_wildcard_glob(full_wc_path);
-            pd.is_prefix = is_prefix;
-            pd.wc_path = curr_wc_path.to_string();
-
             let split_curr_wc_path: Vec<&str> = curr_wc_path.split('/').collect();
-
-            if !bare_mount {
-                // Authorization. `+` is exactly one *non-empty* segment
-                // (`bv_policy_core::segments_match`, proved for every shape
-                // up to MAX_SEGMENTS). The LIST form of a collection path
-                // (`rustion/targets/`) splits to a trailing empty segment;
-                // matching it let a rule written for a named child
-                // out-specify -- and therefore *replace*, since a single
-                // winner is picked rather than a union -- any broader grant
-                // on the collection itself. `default`'s read-only
-                // `rustion/targets/+` silently downgraded every non-root
-                // token holding `path "*"` to read on `rustion/targets/`, so
-                // LIST 403'd for administrators as well as the share-grantees
-                // it was written to withhold it from.
-                if let Some(wildcards) = bv_policy_core::segments_match(&split_curr_wc_path, pd.is_prefix, &path_parts)
-                {
-                    pd.wildcards = wildcards;
-                    pd.perms = Some(permissions.clone());
-                    best.offer(pd);
-                }
-                continue;
-            }
-
-            // `bare_mount`: mount visibility for `has_mount_access` only, not
-            // authorization, and deliberately looser — it matches a rule
-            // against a *shorter* mount path, so that `secret/foo/+` makes
-            // the `secret/` mount visible, and an empty segment satisfies
-            // `+`. Unchanged; not covered by the proofs.
             let mut segments = Vec::with_capacity(split_curr_wc_path.len());
 
             for (i, acl_part) in split_curr_wc_path.iter().enumerate() {
@@ -558,7 +602,7 @@ impl ACL {
                     _ if *acl_part == path_parts[i] => {
                         segments.push(path_parts[i]);
                     }
-                    _ if pd.is_prefix && i == split_curr_wc_path.len() - 1 && path_parts[i].starts_with(acl_part) => {
+                    _ if is_prefix && i == split_curr_wc_path.len() - 1 && path_parts[i].starts_with(acl_part) => {
                         segments.extend_from_slice(&path_parts[i..]);
                     }
                     _ => {}
@@ -577,62 +621,99 @@ impl ACL {
             }
         }
 
-        if bare_mount {
-            return None;
-        }
-
-        best.into_winner().and_then(|pd| pd.perms)
+        None
     }
 
-    /// The ungated rule that governs `path` (exact, else the most specific
-    /// prefix or segment-wildcard rule, as `get_none_exact_paths_permissions`
-    /// picks it), ranked on the part from byte `name_at` (where a KV secret's
-    /// name starts), and whether it carries `deny`. For comparing the rules
-    /// that govern two spellings of one secret (T504).
-    pub(crate) fn governing_rule_on_name(&self, path: &str, name_at: usize) -> Option<NameRank> {
-        let path = ensure_no_leading_slash(path);
-        let denies = |p: &Permissions| p.capabilities_bitmap & Capability::Deny.to_bits() != 0;
-        let trimmed = path.trim_end_matches('/');
-        if let Some(perm) = self.exact_rules.get(path.as_str()).or_else(|| self.exact_rules.get(trimmed)) {
-            let spec = Specificity { first_wildcard: isize::MAX, is_prefix: false, wildcards: 0, len: 0 };
-            return Some(NameRank { spec, denies: denies(perm) });
-        }
+    /// The most specific prefix or segment-wildcard rule matching `path`, by
+    /// the verified order (`bv_policy_core::compare`, T4): a single winner,
+    /// never a union. The one selection both authorization and the T504
+    /// ranking ([`Self::governing_rule_on_name`]) read.
+    fn most_specific_non_exact(&self, path: &str) -> Option<WcPathDescr> {
         let mut best = MostSpecific::new();
-        if let Some(item) = self.prefix_rules.get_ancestor(path.as_str()) {
+
+        if let Some(item) = self.prefix_rules.get_ancestor(path) {
             let prefix = item.key().unwrap().clone();
-            let perms = item.value().cloned();
             best.offer(WcPathDescr {
                 first_wc_or_glob: prefix.len() as isize,
                 wc_path: prefix,
                 is_prefix: true,
-                perms,
+                perms: item.value().cloned(),
                 ..Default::default()
             });
         }
+
         let path_parts: Vec<&str> = path.split('/').collect();
+
         for item in self.segment_wildcard_paths.iter() {
-            let (full, permissions) = (item.key(), item.value());
-            if full.is_empty() {
+            let (full_wc_path, permissions) = (item.key(), item.value());
+
+            if full_wc_path.is_empty() {
                 continue;
             }
-            let (wc_path, is_prefix) = segment_wildcard_glob(full);
-            let parts: Vec<&str> = wc_path.split('/').collect();
-            if let Some(wildcards) = bv_policy_core::segments_match(&parts, is_prefix, &path_parts) {
+
+            let (curr_wc_path, is_prefix) = segment_wildcard_glob(full_wc_path);
+            let split_curr_wc_path: Vec<&str> = curr_wc_path.split('/').collect();
+
+            // Authorization. `+` is exactly one *non-empty* segment
+            // (`bv_policy_core::segments_match`, proved for every shape
+            // up to MAX_SEGMENTS). The LIST form of a collection path
+            // (`rustion/targets/`) splits to a trailing empty segment;
+            // matching it let a rule written for a named child
+            // out-specify -- and therefore *replace*, since a single
+            // winner is picked rather than a union -- any broader grant
+            // on the collection itself. `default`'s read-only
+            // `rustion/targets/+` silently downgraded every non-root
+            // token holding `path "*"` to read on `rustion/targets/`, so
+            // LIST 403'd for administrators as well as the share-grantees
+            // it was written to withhold it from.
+            if let Some(wildcards) = bv_policy_core::segments_match(&split_curr_wc_path, is_prefix, &path_parts) {
                 best.offer(WcPathDescr {
-                    first_wc_or_glob: full.find('+').map(|i| i as isize).unwrap_or(-1),
-                    wc_path: wc_path.to_string(),
+                    first_wc_or_glob: full_wc_path.find('+').map(|i| i as isize).unwrap_or(-1),
+                    wc_path: curr_wc_path.to_string(),
                     is_prefix,
                     wildcards,
                     perms: Some(permissions.clone()),
                 });
             }
         }
-        let winner = best.into_winner()?;
-        let mut spec = winner.specificity();
-        // Measured from the name: a rule ending before it ranks below one inside it.
-        spec.first_wildcard = spec.first_wildcard.saturating_sub(name_at as isize);
-        spec.len = (spec.len + NameRank::LEN_BASE).saturating_sub(name_at);
-        Some(NameRank { spec, denies: winner.perms.as_ref().is_some_and(denies) })
+
+        best.into_winner()
+    }
+
+    /// The ungated rule that governs `path` for a request that is (`list`) or
+    /// is not a LIST, chosen by `bv_policy_core::governing` exactly as
+    /// `decide` chooses it, ranked from byte `name_at` (where a KV secret's
+    /// name starts), and whether it carries `deny`. For comparing the rules
+    /// that govern two spellings of one secret (T504).
+    pub(crate) fn governing_rule_on_name(&self, path: &str, name_at: usize, list: bool) -> Option<NameRank> {
+        let path = ensure_no_leading_slash(path);
+        let winner = bv_policy_core::governing(list, &RankIndex { acl: self, path: &path })?;
+        let mut spec = winner.spec;
+        // Measured from the name: a rule ending before it ranks below one
+        // inside it. An exact rule outranks every glob and stays as it is.
+        if spec.first_wildcard != isize::MAX {
+            spec.first_wildcard = spec.first_wildcard.saturating_sub(name_at as isize);
+            spec.len = (spec.len + NameRank::LEN_BASE).saturating_sub(name_at);
+        }
+        let denies = winner.perms.capabilities_bitmap & Capability::Deny.to_bits() != 0;
+        Some(NameRank { spec, denies })
+    }
+
+    /// Whether a group-gated or scope-filtered rule refuses `req` (its path):
+    /// `decide` run over those two layers alone, as a probe, so a layered deny
+    /// decides exactly as it does in [`Self::allow_operation`] (T504).
+    pub(crate) fn layers_deny(&self, req: &Request) -> bool {
+        let query = Query { acl_is_root: false, op: core_bridge::core_op(req.operation), probe: true };
+        let path = ensure_no_leading_slash(&req.path);
+        let mut payload = Payload::new(self);
+        let decision = bv_policy_core::decide(
+            &query,
+            &NoUngated(std::marker::PhantomData),
+            &GatedLayer { rules: &self.grouped_rules, path: &path, req },
+            &ScopedLayer { rules: &self.scoped_rules, path: &path, req },
+            &mut payload,
+        );
+        decision.caps & Capability::Deny.to_bits() != 0
     }
 
     pub fn capabilities<S: Into<String>>(&self, path: S) -> Vec<String> {

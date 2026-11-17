@@ -877,15 +877,23 @@ not `x`. `sys/kv-owner/transfer`, `sys/kv-owner/claim`,
 `identity/owner/kv/<b64>` and `sys/owner/backfill`'s `kv_paths` read
 paths the same way. A KV request whose name has an empty or `..` segment,
 surrounding whitespace, or a trailing `/` on anything but a list is
-refused with a 400.
+refused with a 400 once the ACL allowed it (a 403 otherwise), root
+included; a secret an earlier release stored under such a name is
+reachable only with storage tools. If the T499 key-switch marker
+(`sys/owner/meta/`) cannot be read, KV requests get a 500.
 
 A deny rule on a KV v2 secret applies in either path form (T504):
 `secret/data/<p>` and `secret/<p>` both refuse every route to the secret,
-`metadata/`, `destroy/` and `undelete/` included, unless the rule that
-governs the request is more specific on the secret's name (`deny secret/*`
-with `allow secret/data/team/*` still reads `team/`). Allows still match
-only the form the request uses. A deny on `secret/data/x` also refuses a
-secret literally named `data/x`, whose short form is that path.
+`metadata/`, `destroy/` and `undelete/` included, unless the plain rule
+that governs the request is more specific on the secret's name and no
+group-gated or scoped rule on the other form denies (`deny secret/*` with
+`allow secret/data/team/*` still reads `team/`). Specificity is measured
+from the name, so the `data/` or `metadata/` segment weighs nothing and a
+tie goes to the deny: `deny secret/*` with `allow secret/data/*` refuses
+every read, and with `allow secret/metadata/*` every list (Vault allows
+both). Allows still match only the form the request uses. A deny on
+`secret/data/x` also refuses a secret literally named `data/x`, whose
+short form is that path.
 
 ~~~
 GET    /v1/identity/sharing/by-target/{kind}/{target}/{grantee}

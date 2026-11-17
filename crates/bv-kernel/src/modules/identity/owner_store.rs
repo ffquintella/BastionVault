@@ -237,19 +237,20 @@ impl OwnerStore {
 
     /// Whether the T499 datafix has completed: its replicated marker, cached
     /// once seen, so every node switches when whichever node ran it is done.
-    /// A read failure answers `false` (the pre-T499 keys, never looser).
-    pub async fn kv_keys_split(&self) -> bool {
+    /// Until then each call reads the marker. An unreadable or garbled marker
+    /// is an error, and callers refuse rather than use the pre-T499 keys.
+    pub async fn kv_keys_split(&self) -> Result<bool, RvError> {
         if self.kv_keys_split.load(Ordering::Acquire) {
-            return true;
+            return Ok(true);
         }
-        let done = match self.meta_view.get(KV_KEY_SPLIT_MARKER).await {
-            Ok(Some(e)) => serde_json::from_slice::<u32>(&e.value).unwrap_or(0) >= KV_KEY_SPLIT_VERSION,
-            _ => false,
+        let Some(entry) = self.meta_view.get(KV_KEY_SPLIT_MARKER).await? else {
+            return Ok(false);
         };
+        let done = serde_json::from_slice::<u32>(&entry.value)? >= KV_KEY_SPLIT_VERSION;
         if done {
             self.kv_keys_split.store(true, Ordering::Release);
         }
-        done
+        Ok(done)
     }
 
     /// Record that the datafix completed and switch to `<mount><name>`.
@@ -279,6 +280,13 @@ impl OwnerStore {
         self.meta_view.delete(KV_KEY_SPLIT_MARKER).await?;
         self.kv_keys_split.store(false, Ordering::Release);
         Ok(())
+    }
+
+    /// Test support: a garbled marker, which every reader must refuse.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn garble_kv_key_split_marker_for_test(&self) -> Result<(), RvError> {
+        self.kv_keys_split.store(false, Ordering::Release);
+        self.meta_view.put(&StorageEntry { key: KV_KEY_SPLIT_MARKER.to_string(), value: b"garbled".to_vec() }).await
     }
 
     /// A KV owner/share key as stored: whitespace and `/` trimmed, refused

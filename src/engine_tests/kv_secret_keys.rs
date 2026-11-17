@@ -59,6 +59,15 @@ pub(super) fn is_denied(r: &Result<Option<Response>, RvError>) -> bool {
     matches!(r, Err(RvError::ErrPermissionDenied) | Err(RvError::ErrResponseStatus(403, _)))
 }
 
+/// The HTTP status a request ends with (200 for success).
+pub(super) fn status(r: &Result<Option<Response>, RvError>) -> u16 {
+    match r {
+        Ok(_) => 200,
+        Err(RvError::ErrResponseStatus(s, _)) => *s,
+        Err(e) => e.response_status(),
+    }
+}
+
 fn denied(r: Result<Option<Response>, RvError>, what: &str) {
     assert!(is_denied(&r), "{what}: expected 403, got {r:?}");
 }
@@ -80,7 +89,7 @@ async fn value(core: &Arc<Core>, root: &str, name: &str) -> Option<Value> {
     resp.data.and_then(|d| d.get("data").and_then(|d| d.get("v")).cloned())
 }
 
-async fn owner_store(core: &Arc<Core>) -> Arc<crate::modules::identity::OwnerStore> {
+pub(super) async fn owner_store(core: &Arc<Core>) -> Arc<crate::modules::identity::OwnerStore> {
     let module = core.module_manager().get_module::<IdentityModule>("identity").expect("identity module");
     module.owner_store().expect("owner store")
 }
@@ -352,7 +361,7 @@ async fn the_datafix_keeps_every_existing_secret_with_its_owner_and_shares() {
     allowed(reads(carol.clone(), "secret/data/data/y").await, "legacy: carol's share on data/y");
 
     let report = kv_key_split_migrate::run_if_needed(core.as_ref()).await.unwrap();
-    assert!(!report.skipped && store.kv_keys_split().await, "{report:?}");
+    assert!(!report.skipped && store.kv_keys_split().await.unwrap(), "{report:?}");
     let counts = (report.owners_copied, report.shares_copied, report.replaced, report.shared_pairs);
     assert_eq!(counts, (3, 1, 0, 1), "z and data/z shared a record: {report:?}");
 
@@ -406,7 +415,7 @@ async fn an_ambiguous_kv_path_is_refused_and_stamps_nothing() {
     for (api, path) in cases {
         let body = if path.contains("kv/") { json!({ "v": "bob's" }) } else { data("bob's") };
         let r = send(&core, &bob, api, Operation::Write, path, None, body).await;
-        assert!(r.is_err(), "api {api} {path}: expected a refusal, got {r:?}");
+        assert_eq!(status(&r), 400, "api {api} {path}: {r:?}");
     }
     assert_eq!(kv_owner(&core, "secret/x").await, None, "x stays unowned");
     assert_eq!(kv_owner(&core, "kv/x").await, None, "kv/x stays unowned");
@@ -439,7 +448,7 @@ async fn an_ambiguous_kv_path_is_refused_in_a_namespace() {
     let token = created.unwrap().auth.unwrap().client_token;
     for (api, path) in [(1u8, "secret/data//x"), (2, "secret//x"), (1, "secret/data/x/")] {
         let r = send(&core, &token, api, Operation::Write, path, ns, data("mine")).await;
-        assert!(r.is_err(), "api {api} {path} in team: expected a refusal, got {r:?}");
+        assert_eq!(status(&r), 400, "api {api} {path} in team: {r:?}");
     }
     assert_eq!(kv_owner(&core, "team/secret/x").await, None, "nothing stamped on team's x");
     allowed(send(&core, &token, 1, Operation::Write, "secret/data/x", ns, data("mine")).await, "the real path");
@@ -526,8 +535,94 @@ async fn a_datafix_that_cannot_read_a_mount_table_sets_no_marker() {
     let store = owner_store(&core).await;
     store.unsplit_kv_keys_for_test().await.unwrap();
     assert!(kv_key_split_migrate::run_if_needed(core.as_ref()).await.is_err(), "the pass must fail");
-    assert!(!store.kv_keys_split().await, "the switch stays off");
+    assert!(!store.kv_keys_split().await.unwrap(), "the switch stays off");
     assert_eq!(kv_owner(&core, "secret/data/y").await, None, "nothing half-copied");
     let r = send(&core, &bob, 1, Operation::Read, "secret/data/data/y", None, json!({})).await;
     allowed(r, "the old key still decides");
+}
+
+/// The ambiguous-name 400 comes only after the ACL allowed the request and
+/// the token's namespace binding held, so a caller without a grant gets the
+/// same 403 whether the mount exists and whatever engine it runs (review fix
+/// round 2: no mount-name or engine-type oracle).
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn an_ambiguous_path_answers_a_caller_without_a_grant_like_any_path() {
+    let (_bvault, core, root) = vault("ambiguous_path_no_oracle").await;
+    write(&core, &root, "sys/mounts/kv/", json!({ "type": "kv" })).await;
+    write(&core, &root, "sys/namespaces/tenant-a", json!({})).await;
+    write(&core, &root, "sys/namespaces/tenant-b", json!({})).await;
+    let ns_b = Some("tenant-b");
+    let hcl = r#"path "tenant-b/secret/*" { capabilities = ["create", "read", "update"] }"#;
+    allowed(send(&core, &root, 1, Operation::Write, "sys/policy/b-writer", ns_b, json!({ "policy": hcl })).await, "p");
+    let body = json!({ "policies": ["b-writer"], "ttl": "1h" });
+    let created = allowed(send(&core, &root, 1, Operation::Write, "auth/token/create", ns_b, body).await, "token");
+    let bound_elsewhere = created.unwrap().auth.unwrap().client_token;
+    let (no_grant, _) = login(&core, &root, "nogrant", "default").await;
+
+    let write_as = |token: String, path: &'static str| {
+        let core = core.clone();
+        async move { status(&send(&core, &token, 1, Operation::Write, path, None, data("w")).await) }
+    };
+    for (who, token) in [("bound to tenant-b", bound_elsewhere.clone()), ("no grant", no_grant.clone())] {
+        let existing = write_as(token.clone(), "tenant-a/secret/data/a//b").await;
+        let missing = write_as(token.clone(), "tenant-x/secret/data/a//b").await;
+        assert_eq!((existing, missing), (403, 403), "{who}: an existing and a missing mount");
+        let kv_v1 = write_as(token.clone(), "kv/config/").await;
+        let kv_v2 = write_as(token.clone(), "secret/config/").await;
+        assert_eq!((kv_v1, kv_v2), (403, 403), "{who}: a kv and a kv-v2 mount");
+    }
+    let kv_open = r#"path "kv/*" { capabilities = ["create", "read", "update"] }"#;
+    write_policy(&core, &root, "kv-open", kv_open).await;
+    let (writer, _) = login(&core, &root, "writer", "kv-open").await;
+    assert_eq!(write_as(writer, "kv//x").await, 400, "an allowed caller learns the path is malformed");
+    assert_eq!(write_as(root.clone(), "tenant-a/secret/data/a//b").await, 400, "root too");
+    assert_eq!(write_as(root.clone(), "kv/config/").await, 400, "root too");
+}
+
+/// A pass cut short after saving its plan resumes from that plan, not from a
+/// fresh read of keys it may already have rewritten (review fix round 2).
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn the_datafix_resumes_from_its_saved_plan() {
+    use crate::modules::identity::kv_key_split_migrate;
+    let (_bvault, core, root) = vault("datafix_resume").await;
+    plant_old_owner(&core, &root, "data/y", "secret/y", "ent-bob").await;
+    kv_key_split_migrate::reset_for_test(core.as_ref()).await.unwrap();
+    kv_key_split_migrate::plan_only_for_test(core.as_ref()).await.unwrap();
+    // A fresh plan would now copy this record; the saved one copies bob's.
+    owner_store(&core).await.set_kv_owner("secret/y", "ent-mallory").await.unwrap();
+    let report = kv_key_split_migrate::run_if_needed(core.as_ref()).await.unwrap();
+    assert_eq!(report.owners_copied, 1, "{report:?}");
+    assert_eq!(kv_owner(&core, "secret/data/y").await.as_deref(), Some("ent-bob"), "the saved plan was applied");
+    assert!(kv_key_split_migrate::run_if_needed(core.as_ref()).await.unwrap().skipped, "done, plan gone");
+}
+
+/// A garbled T499 marker refuses KV requests with an internal error, for
+/// root too, instead of falling back to the pre-T499 keys; non-KV requests
+/// and the datafix's own error path are unaffected (review fix round 2).
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn an_unreadable_key_switch_refuses_kv_requests_only() {
+    use crate::modules::identity::kv_key_split_migrate;
+    let (_bvault, core, root) = vault("garbled_key_switch").await;
+    let (bob, _) = login(&core, &root, "bob", "standard-user").await;
+    allowed(send(&core, &bob, 1, Operation::Write, "secret/data/mine", None, data("v")).await, "before");
+    owner_store(&core).await.garble_kv_key_split_marker_for_test().await.unwrap();
+
+    let r = send(&core, &bob, 1, Operation::Write, "secret/data/mine", None, data("v2")).await;
+    assert_eq!(status(&r), 500, "a KV write: {r:?}");
+    let r = send(&core, &bob, 2, Operation::Read, "secret/mine", None, json!({})).await;
+    assert_eq!(status(&r), 500, "a KV read: {r:?}");
+    let r = send(&core, &root, 1, Operation::Read, "secret/data/mine", None, json!({})).await;
+    assert_eq!(status(&r), 500, "root's KV read: {r:?}");
+    let owner_path = format!("identity/owner/kv/{}", URL_SAFE_NO_PAD.encode("secret/mine"));
+    let r = send(&core, &root, 1, Operation::Read, &owner_path, None, json!({})).await;
+    assert!(status(&r) >= 500, "the owner endpoint: {r:?}");
+
+    let r = send(&core, &bob, 1, Operation::Read, "auth/token/lookup-self", None, json!({})).await;
+    assert_eq!(status(&r), 200, "a non-KV request: {r:?}");
+    let r = send(&core, &root, 1, Operation::Write, "sys/policy/unrelated", None, json!({ "policy": "" })).await;
+    assert!(status(&r) < 500, "a sys/ write: {r:?}");
+    assert!(
+        kv_key_split_migrate::run_if_needed(core.as_ref()).await.is_err(),
+        "the datafix reports it, unseal logs it"
+    );
 }
