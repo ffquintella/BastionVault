@@ -49,12 +49,18 @@ pub use bv_logical::{
     new_secret, new_secret_internal,
 };
 
-use std::{any::Any, collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    any::Any,
+    collections::{BTreeSet, HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use chrono::Utc;
 use derive_more::Deref;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use zeroize::Zeroize;
 
 use crate::kernel_api::{
     engines::LoginClassVerdict,
@@ -277,6 +283,85 @@ pub struct ResourceSecretVersion {
     pub operation: String,
 }
 
+// ── Transfer bundle (`v2/transfer/import/<name>`) ──────────────────
+//
+// The wire shape the cross-namespace transfer orchestrator sends to the
+// destination mount (features/cross-namespace-copy-move.md). It is a request
+// body, never persisted as such: the import writes the existing `meta/`,
+// `secret/`, `smeta/`, `sver/` and `hist/` records from it.
+
+/// One version of a resource secret in a transfer bundle. No `Debug` on the
+/// bundle types: they carry secret values, and a stray `{:?}` would print them.
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct SecretVersionBundle {
+    pub version: u64,
+    pub created_time: String,
+    /// Always false for a resource secret: this engine has no per-version
+    /// delete. The field is shared with the KV bundle, and a `true` here is
+    /// refused rather than imported as a live version.
+    #[serde(default)]
+    pub deleted: bool,
+    pub data: Map<String, Value>,
+    /// Author and operation of the version at the origin
+    /// (`ResourceSecretVersionMeta`). Optional so a bundle that does not
+    /// carry them still imports; they are written back verbatim, empty
+    /// included, never replaced by the importing caller.
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub operation: String,
+}
+
+/// A resource secret with its whole version history.
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct SecretBundle {
+    pub key: String,
+    pub versions: Vec<SecretVersionBundle>,
+    /// The live version; must be the highest one in `versions`, as it always
+    /// is in this engine (a write after the import continues from it).
+    pub current: u64,
+}
+
+impl SecretBundle {
+    fn current_data(&self) -> Option<&Map<String, Value>> {
+        self.versions.iter().find(|v| v.version == self.current).map(|v| &v.data)
+    }
+}
+
+/// Everything a resource carries across namespaces, minus ownership and
+/// shares (the orchestrator's, see `handle_resource_import`).
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct ResourceBundle {
+    pub meta: Map<String, Value>,
+    #[serde(default)]
+    pub secrets: Vec<SecretBundle>,
+    /// The origin's change history. Each entry is keyed by its own `ts`, so
+    /// the order the entries arrive in does not matter.
+    #[serde(default)]
+    pub history: Vec<ResourceHistoryEntry>,
+    /// `refuse` (default, also when empty) | `rename` | `overwrite`.
+    #[serde(default)]
+    pub on_conflict: String,
+    /// The origin's owner entity, recorded in the `transfer-in` history
+    /// entry. Empty for an unowned origin.
+    #[serde(default)]
+    pub origin_owner: String,
+    /// Where the resource came from (`<namespace>/<mount>/<name>`), recorded
+    /// in the `transfer-in` history entry.
+    pub origin: String,
+}
+
+/// What an import wrote: the final name (differs from the requested one
+/// under `rename`) and how many secrets, versions and origin history entries
+/// arrived. `history` does not count the `transfer-in` entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ResourceImportSummary {
+    pub name: String,
+    pub secrets: usize,
+    pub versions: usize,
+    pub history: usize,
+}
+
 // ── Module boilerplate ─────────────────────────────────────────────
 
 pub struct ResourceModule {
@@ -315,6 +400,7 @@ impl ResourceBackend {
         let h_res_write = self.inner.clone();
         let h_res_delete = self.inner.clone();
         let h_res_rename = self.inner.clone();
+        let h_res_import = self.inner.clone();
         let h_res_list = self.inner.clone();
         let h_res_search = self.inner.clone();
         let h_res_hist = self.inner.clone();
@@ -416,6 +502,28 @@ impl ResourceBackend {
                     ],
                     help: "Rename a resource, migrating metadata, history, secrets, \
                            shares, group membership, and ownership to the new name."
+                },
+                {
+                    // Cross-namespace transfer, destination side
+                    // (features/cross-namespace-copy-move.md): write a
+                    // resource bundle under `name`. Called by the transfer
+                    // orchestrator with the caller's token; see
+                    // `handle_resource_import` for what one ACL check covers.
+                    pattern: r"v2/transfer/import/(?P<name>[^/]+)$",
+                    fields: {
+                        "name": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Destination resource name."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_res_import.handle_resource_import}
+                    ],
+                    help: "Import a resource bundle (metadata, every secret with all its versions, change history) \
+                           under a name, keeping version numbers and timestamps. Body: meta, secrets, history, \
+                           on_conflict (refuse|rename|overwrite), origin, origin_owner. Ownership and shares \
+                           are not written."
                 },
                 {
                     // CRUD a single resource
@@ -995,8 +1103,25 @@ fn now_rfc3339() -> String {
 /// as the suffix of history log keys so `storage_list()` returns entries
 /// in chronological order.
 fn hist_seq() -> String {
+    format!("{:020}", now_nanos())
+}
+
+fn now_nanos() -> u128 {
     let n = Utc::now().timestamp_nanos_opt().unwrap_or_else(|| Utc::now().timestamp_millis() * 1_000_000);
-    format!("{:020}", n.max(0) as u128)
+    n.max(0) as u128
+}
+
+/// A resource name or a resource-secret key is a storage key segment *and*
+/// an ACL path segment: refuse anything that could escape the key space or
+/// collide with a sub-path. Returns the message; the caller picks the error.
+fn validate_name_segment(field: &str, value: &str) -> Result<(), String> {
+    if value.is_empty() {
+        return Err(format!("{field} is required"));
+    }
+    if value.contains('/') || value.contains("..") {
+        return Err(format!("{field} must not contain '/' or '..'"));
+    }
+    Ok(())
 }
 
 /// Best-effort caller identity for audit purposes. Prefers the `username`
@@ -1089,6 +1214,323 @@ pub(crate) async fn resolve_resource_name_in(view: &dyn storage::Storage, raw: &
         }
     }
     Ok(lower)
+}
+
+/// The storage name of the record `name` collides with, if any: the exact
+/// key, or a differently-cased legacy one (the case-insensitive rule of
+/// [`resolve_resource_name_in`]), so neither a rename nor an import can
+/// silently clobber a record.
+#[maybe_async::maybe_async]
+async fn existing_resource_key_in(view: &dyn storage::Storage, name: &str) -> Result<Option<String>, RvError> {
+    if view.get(&format!("{META_PREFIX}{name}")).await?.is_some() {
+        return Ok(Some(name.to_string()));
+    }
+    Ok(view.list(META_PREFIX).await?.into_iter().find(|k| k.eq_ignore_ascii_case(name)))
+}
+
+// ── Transfer import ────────────────────────────────────────────────
+//
+// `v2/transfer/import/<name>`. The pieces below take the mount's storage view
+// rather than a request so they are testable in-crate; the handler adds the
+// write-time gates that need the vault (`check_import_write_gates`).
+
+/// Upper bound on the `<name>-<n>` candidates `on_conflict = rename` tries.
+const IMPORT_RENAME_MAX_SUFFIX: u32 = 1000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImportConflict {
+    Refuse,
+    Rename,
+    Overwrite,
+}
+
+impl ImportConflict {
+    /// An unknown mode is refused, never read as the default.
+    fn parse(raw: &str) -> Result<Self, RvError> {
+        match raw.trim() {
+            "" | "refuse" => Ok(Self::Refuse),
+            "rename" => Ok(Self::Rename),
+            "overwrite" => Ok(Self::Overwrite),
+            other => Err(bad_import(format!("on_conflict must be refuse, rename or overwrite, not '{other}'"))),
+        }
+    }
+}
+
+fn bad_import(message: impl Into<String>) -> RvError {
+    RvError::ErrResponseStatus(400, format!("invalid resource import: {}", message.into()))
+}
+
+fn import_conflict(message: impl Into<String>) -> RvError {
+    RvError::ErrResponseStatus(409, message.into())
+}
+
+/// A validated import, ready to write.
+struct ResourceImportPlan {
+    /// The destination name: the requested one, lower-cased, or under
+    /// `rename` the first free `<name>-<n>`.
+    name: String,
+    /// Names whose stored data is deleted before anything is written
+    /// (`overwrite` only): the colliding record first, then the
+    /// destination name.
+    replaces: Vec<String>,
+    /// History keys (nanoseconds), one per `bundle.history` entry.
+    history_seq: Vec<u128>,
+    bundle: ResourceBundle,
+}
+
+/// Decode a request body into a [`ResourceBundle`]. serde's message quotes
+/// the offending value on a type error (`invalid type: string "…"`), and in
+/// a bundle that value can be secret material, so only a missing-field
+/// message, which names a field and nothing else, is passed through.
+fn parse_resource_bundle(body: &Map<String, Value>) -> Result<ResourceBundle, RvError> {
+    serde_json::from_value(Value::Object(body.clone())).map_err(|e| {
+        let message = e.to_string();
+        if message.starts_with("missing field") {
+            bad_import(message)
+        } else {
+            bad_import(
+                "the body does not have the bundle's shape (meta: object; secrets: [{key, versions: \
+                 [{version, created_time, deleted, data: object}], current}]; history: [{ts, user, op, \
+                 changed_fields}]; on_conflict, origin, origin_owner: strings)",
+            )
+        }
+    })
+}
+
+/// Everything about a bundle that can be checked without storage. Returns
+/// the history keys: each entry is keyed by its own `ts`, bumped by a
+/// nanosecond on a tie, so the entries sort in time whatever order they
+/// arrive in.
+fn validate_resource_bundle(bundle: &ResourceBundle) -> Result<Vec<u128>, RvError> {
+    if bundle.origin.trim().is_empty() {
+        return Err(bad_import("origin is required"));
+    }
+    let mut keys = HashSet::new();
+    for (i, secret) in bundle.secrets.iter().enumerate() {
+        validate_name_segment(&format!("secrets[{i}].key"), &secret.key).map_err(bad_import)?;
+        if !keys.insert(secret.key.as_str()) {
+            return Err(bad_import(format!("secrets[{i}].key repeats an earlier secret's key")));
+        }
+        let mut versions = BTreeSet::new();
+        for (j, v) in secret.versions.iter().enumerate() {
+            if v.version == 0 {
+                return Err(bad_import(format!("secrets[{i}].versions[{j}].version must be 1 or greater")));
+            }
+            if v.deleted {
+                return Err(bad_import(format!(
+                    "secrets[{i}].versions[{j}] is marked deleted; a resource secret has no per-version delete"
+                )));
+            }
+            if !versions.insert(v.version) {
+                return Err(bad_import(format!("secrets[{i}].versions[{j}].version {} appears twice", v.version)));
+            }
+        }
+        let Some(&latest) = versions.last() else {
+            return Err(bad_import(format!("secrets[{i}] has no versions")));
+        };
+        if secret.current != latest {
+            return Err(bad_import(format!("secrets[{i}].current must be the latest version, {latest}")));
+        }
+        // The live value passes the check `handle_secret_write` runs.
+        if let Some(data) = secret.current_data() {
+            sql_profile::validate_sql_endpoint_on_write(data).map_err(|m| bad_import(format!("secrets[{i}]: {m}")))?;
+        }
+    }
+
+    let mut used = BTreeSet::new();
+    let mut seq = Vec::with_capacity(bundle.history.len());
+    for (i, entry) in bundle.history.iter().enumerate() {
+        let nanos = chrono::DateTime::parse_from_rfc3339(&entry.ts)
+            .ok()
+            .and_then(|t| t.timestamp_nanos_opt())
+            .ok_or_else(|| bad_import(format!("history[{i}].ts is not a representable RFC 3339 timestamp")))?;
+        let mut key = nanos.max(0) as u128;
+        while !used.insert(key) {
+            key += 1;
+        }
+        seq.push(key);
+    }
+    Ok(seq)
+}
+
+/// True when secret data is stored under `name`, record or not. Without a
+/// record it is what an interrupted import leaves behind (it writes `meta/`
+/// last), or a secret written before its resource; an import never merges
+/// into it.
+#[maybe_async::maybe_async]
+async fn has_secret_data_in(view: &dyn storage::Storage, name: &str) -> Result<bool, RvError> {
+    for prefix in [SECRET_PREFIX, SMETA_PREFIX, SVER_PREFIX] {
+        if !view.list(&format!("{prefix}{name}/")).await?.is_empty() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// The first `<base>-<n>` (n from 2) with neither a record, in any case,
+/// nor secret data under it.
+#[maybe_async::maybe_async]
+async fn free_resource_name_in(view: &dyn storage::Storage, base: &str) -> Result<String, RvError> {
+    let taken: HashSet<String> = view.list(META_PREFIX).await?.into_iter().map(|k| k.to_ascii_lowercase()).collect();
+    for n in 2..=IMPORT_RENAME_MAX_SUFFIX {
+        let candidate = format!("{base}-{n}");
+        if !taken.contains(&candidate) && !has_secret_data_in(view, &candidate).await? {
+            return Ok(candidate);
+        }
+    }
+    Err(import_conflict(format!("no free name for '{base}' up to '{base}-{IMPORT_RENAME_MAX_SUFFIX}'")))
+}
+
+/// Validate a bundle and settle the destination name. Writes nothing.
+#[maybe_async::maybe_async]
+async fn plan_resource_import(
+    view: &dyn storage::Storage,
+    raw_name: &str,
+    bundle: ResourceBundle,
+) -> Result<ResourceImportPlan, RvError> {
+    let requested = raw_name.trim().to_ascii_lowercase();
+    validate_name_segment("name", &requested).map_err(bad_import)?;
+    let mode = ImportConflict::parse(&bundle.on_conflict)?;
+    let history_seq = validate_resource_bundle(&bundle)?;
+
+    let existing = existing_resource_key_in(view, &requested).await?;
+    let leftovers = has_secret_data_in(view, &requested).await?;
+    let (name, replaces) = match (mode, existing) {
+        (_, None) if !leftovers => (requested, Vec::new()),
+        (ImportConflict::Refuse, Some(key)) => {
+            return Err(import_conflict(format!("a resource named '{key}' already exists")));
+        }
+        (ImportConflict::Refuse, None) => {
+            return Err(import_conflict(format!(
+                "secret data with no resource record is stored under '{requested}' (an interrupted \
+                 operation?); import with on_conflict=overwrite to replace it"
+            )));
+        }
+        (ImportConflict::Overwrite, existing) => {
+            let mut replaces: Vec<String> = existing.into_iter().collect();
+            if leftovers && !replaces.contains(&requested) {
+                replaces.push(requested.clone());
+            }
+            (requested, replaces)
+        }
+        (ImportConflict::Rename, _) => (free_resource_name_in(view, &requested).await?, Vec::new()),
+    };
+    Ok(ResourceImportPlan { name, replaces, history_seq, bundle })
+}
+
+/// Delete everything this mount stores under `name`: the record first, so
+/// the resource leaves listings before its data does, then secrets, version
+/// indexes and payloads, and history. Ownership, shares and asset-group
+/// membership live elsewhere and are not touched.
+#[maybe_async::maybe_async]
+async fn purge_resource_in(view: &dyn storage::Storage, name: &str) -> Result<(), RvError> {
+    view.delete(&format!("{META_PREFIX}{name}")).await?;
+    for prefix in [SECRET_PREFIX, SMETA_PREFIX, HIST_PREFIX] {
+        let prefix = format!("{prefix}{name}/");
+        for k in view.list(&prefix).await? {
+            view.delete(&format!("{prefix}{k}")).await?;
+        }
+    }
+    // sver/ is two levels deep: <resource>/<key>/<version>.
+    let sver = format!("{SVER_PREFIX}{name}/");
+    for k in view.list(&sver).await? {
+        match k.strip_suffix('/') {
+            Some(key) => {
+                let sub = format!("{sver}{key}/");
+                for v in view.list(&sub).await? {
+                    view.delete(&format!("{sub}{v}")).await?;
+                }
+            }
+            None => view.delete(&format!("{sver}{k}")).await?,
+        }
+    }
+    Ok(())
+}
+
+/// `put` a value that carries secret material, then scrub this process's
+/// copy of the serialised bytes.
+#[maybe_async::maybe_async]
+async fn put_scrubbed(view: &dyn storage::Storage, key: String, value: Vec<u8>) -> Result<(), RvError> {
+    let mut entry = StorageEntry { key, value };
+    let result = view.put(&entry).await;
+    entry.value.zeroize();
+    result
+}
+
+/// Write a planned import: replaced data out, then every secret with all
+/// its versions, then the origin's history and a `transfer-in` entry, and
+/// `meta/` last. An import that fails partway therefore leaves no record (a
+/// listing never shows a half-written resource), and a retry sees the
+/// leftover secret data as a collision rather than merging into it.
+#[maybe_async::maybe_async]
+async fn apply_resource_import(
+    view: &dyn storage::Storage,
+    plan: ResourceImportPlan,
+    user: &str,
+) -> Result<ResourceImportSummary, RvError> {
+    let ResourceImportPlan { name, replaces, history_seq, bundle } = plan;
+    let ResourceBundle { mut meta, secrets, history, origin, origin_owner, .. } = bundle;
+
+    for old in &replaces {
+        purge_resource_in(view, old).await?;
+    }
+
+    let secret_count = secrets.len();
+    let mut version_count = 0;
+    for secret in secrets {
+        let mut index = ResourceSecretMeta { current_version: secret.current, versions: HashMap::new() };
+        let mut current = None;
+        for v in secret.versions {
+            index.versions.insert(
+                v.version.to_string(),
+                ResourceSecretVersionMeta {
+                    created_time: v.created_time.clone(),
+                    username: v.username.clone(),
+                    operation: v.operation.clone(),
+                },
+            );
+            let payload = ResourceSecretVersion {
+                data: v.data,
+                version: v.version,
+                created_time: v.created_time,
+                username: v.username,
+                operation: v.operation,
+            };
+            if payload.version == secret.current {
+                current = Some(serde_json::to_vec(&payload.data)?);
+            }
+            let key = format!("{SVER_PREFIX}{name}/{}/{}", secret.key, payload.version);
+            put_scrubbed(view, key, serde_json::to_vec(&payload)?).await?;
+            version_count += 1;
+        }
+        let smeta =
+            StorageEntry { key: format!("{SMETA_PREFIX}{name}/{}", secret.key), value: serde_json::to_vec(&index)? };
+        view.put(&smeta).await?;
+        // `validate_resource_bundle` made `current` one of the versions.
+        let current = current.ok_or_else(|| bad_import(format!("secret '{}' has no current version", secret.key)))?;
+        put_scrubbed(view, format!("{SECRET_PREFIX}{name}/{}", secret.key), current).await?;
+    }
+
+    for (seq, entry) in history_seq.iter().zip(&history) {
+        let key = format!("{HIST_PREFIX}{name}/{seq:020}");
+        view.put(&StorageEntry { key, value: serde_json::to_vec(entry)? }).await?;
+    }
+    let mut changed_fields = vec![format!("origin: {origin}"), format!("origin_owner: {origin_owner}")];
+    changed_fields.extend(replaces.iter().map(|r| format!("replaced: {r}")));
+    let arrival = ResourceHistoryEntry {
+        ts: now_rfc3339(),
+        user: user.to_string(),
+        op: "transfer-in".to_string(),
+        changed_fields,
+    };
+    let arrival_seq = history_seq.iter().max().map_or(0, |m| m + 1).max(now_nanos());
+    let key = format!("{HIST_PREFIX}{name}/{arrival_seq:020}");
+    view.put(&StorageEntry { key, value: serde_json::to_vec(&arrival)? }).await?;
+
+    meta.insert("name".to_string(), Value::String(name.clone()));
+    view.put(&StorageEntry { key: format!("{META_PREFIX}{name}"), value: serde_json::to_vec(&meta)? }).await?;
+
+    Ok(ResourceImportSummary { name, secrets: secret_count, versions: version_count, history: history.len() })
 }
 
 // ── Handlers ───────────────────────────────────────────────────────
@@ -1533,13 +1975,8 @@ impl ResourceBackendInner {
         // ACL path segment, so reject anything that could escape the key
         // space or collide with a sub-path.
         let raw_new = req.get_data("new_name")?.as_str().unwrap_or("").trim().to_string();
-        if raw_new.is_empty() {
-            return Err(bv_error_string!("new_name is required"));
-        }
         let new = raw_new.to_ascii_lowercase();
-        if new.contains('/') || new.contains("..") {
-            return Err(bv_error_string!("new_name must not contain '/' or '..'"));
-        }
+        validate_name_segment("new_name", &new).map_err(|m| bv_error_string!(m))?;
         if new == old {
             return Err(bv_error_string!("new_name is the same as the current name"));
         }
@@ -1554,13 +1991,9 @@ impl ResourceBackendInner {
         // case-insensitive scan (mirrors `resolve_resource_name`) so a
         // rename can never silently clobber a differently-cased record.
         let new_meta_key = format!("{META_PREFIX}{new}");
-        if req.storage_get(&new_meta_key).await?.is_some() {
+        let storage = req.storage.clone().ok_or(RvError::ErrRequestNotReady)?;
+        if existing_resource_key_in(storage.as_ref(), &new).await?.is_some() {
             return Err(bv_error_string!(format!("a resource named '{new}' already exists")));
-        }
-        for k in req.storage_list(META_PREFIX).await? {
-            if k.eq_ignore_ascii_case(&new) {
-                return Err(bv_error_string!(format!("a resource named '{new}' already exists")));
-            }
         }
 
         // ── 1. Metadata: write the new record (name + updated_at) ──────
@@ -1681,6 +2114,90 @@ impl ResourceBackendInner {
         Ok(Some(Response::data_response(Some(data))))
     }
 
+    /// `resources/v2/transfer/import/<name>`: destination side of a
+    /// cross-namespace copy or move; writes a [`ResourceBundle`], `meta/` last.
+    /// Security: ONE ACL check (write on this path) covers every secret,
+    /// version and history entry; the per-secret write ACL and overwrite's
+    /// delete ACL are not consulted here, so the transfer orchestrator probes
+    /// those capabilities separately. Content gates still apply
+    /// (`check_import_write_gates`); ownership and shares are not touched.
+    pub async fn handle_resource_import(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let raw = req.get_data("name")?.as_str().unwrap_or("").to_string();
+        let bundle = parse_resource_bundle(req.body.as_ref().ok_or(RvError::ErrRequestNoDataField)?)?;
+        let storage = req.storage.clone().ok_or(RvError::ErrRequestNotReady)?;
+
+        let plan = plan_resource_import(storage.as_ref(), &raw, bundle).await?;
+        self.check_import_write_gates(req, &plan).await?;
+
+        // Names, counts and the origin path only: never a secret value.
+        let origin = plan.bundle.origin.clone();
+        let user = caller_username(req);
+        let summary = apply_resource_import(storage.as_ref(), plan, &user).await?;
+        log::info!(
+            target: "security",
+            "resource-transfer-in: user={} resource={} origin={:?} secrets={} versions={} history={}",
+            user,
+            summary.name,
+            origin,
+            summary.secrets,
+            summary.versions,
+            summary.history
+        );
+
+        let mut data = Map::new();
+        data.insert("name".to_string(), Value::String(summary.name));
+        data.insert("secrets".to_string(), Value::from(summary.secrets));
+        data.insert("versions".to_string(), Value::from(summary.versions));
+        data.insert("history".to_string(), Value::from(summary.history));
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    /// The write-time checks the ordinary endpoints run on what an import
+    /// makes live, against the *destination's* configuration (it can differ
+    /// from the origin's): MCP brokered-session profiles need this
+    /// namespace's type consent (`handle_resource_write`), and a brokered
+    /// resource may not carry a static SSH credential (`handle_secret_write`).
+    async fn check_import_write_gates(&self, req: &Request, plan: &ResourceImportPlan) -> Result<(), RvError> {
+        let meta = &plan.bundle.meta;
+        let type_id = meta.get("type").and_then(Value::as_str).unwrap_or_default();
+
+        // `previous = None`: every profile is new to this namespace.
+        if agent_access::write_needs_type_check(None, meta) {
+            let types = type_config::effective_type_config(self.core.as_ref(), req).await.map_err(|e| match e {
+                type_config::TypeConfigError::Storage(e) => e,
+                type_config::TypeConfigError::Malformed(source) => bv_error_response_status!(
+                    422,
+                    &format!("the {} resource type configuration is not a JSON object", source.as_str())
+                ),
+            })?;
+            agent_access::validate_profiles_on_write(None, meta, types.type_def(type_id))
+                .map_err(agent_refusal_error)?;
+        }
+
+        let static_credential =
+            plan.bundle.secrets.iter().find(|s| s.current_data().is_some_and(static_ssh_credential_shape));
+        if let Some(secret) = static_credential {
+            let eff = self.resolve_login_class_for_type(req, &plan.name, type_id).await?;
+            if eff.brokered {
+                return Err(bv_error_response_status!(
+                    409,
+                    &format!(
+                        "brokered_resource_no_static_credential: resource `{}` is brokered in this \
+                         namespace (login_class via tier `{}`); secret `{}` carries a static SSH \
+                         credential, which may not be attached. Bind an `ssh-engine` credential \
+                         source instead.",
+                        plan.name, eff.source, secret.key
+                    )
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub async fn handle_resource_history(
         &self,
         _backend: &dyn Backend,
@@ -1767,9 +2284,9 @@ impl ResourceBackendInner {
     /// memberships) come from the resource record and the resource-group
     /// reverse index.
     async fn resolve_login_class(&self, req: &Request, resource: &str) -> Result<LoginClassVerdict, RvError> {
-        let Some(policy) = self.core.login_class() else {
+        if self.core.login_class().is_none() {
             return Ok(LoginClassVerdict::default());
-        };
+        }
 
         // Resource type from the metadata record.
         let resource_type = match req.storage_get(&format!("{META_PREFIX}{resource}")).await? {
@@ -1778,6 +2295,20 @@ impl ResourceBackendInner {
                 .and_then(|m| m.get("type").and_then(|v| v.as_str().map(String::from)))
                 .unwrap_or_default(),
             None => String::new(),
+        };
+        self.resolve_login_class_for_type(req, resource, &resource_type).await
+    }
+
+    /// [`Self::resolve_login_class`] for a resource whose type is known but
+    /// whose record may not be stored yet (an import writes `meta/` last).
+    async fn resolve_login_class_for_type(
+        &self,
+        req: &Request,
+        resource: &str,
+        resource_type: &str,
+    ) -> Result<LoginClassVerdict, RvError> {
+        let Some(policy) = self.core.login_class() else {
+            return Ok(LoginClassVerdict::default());
         };
 
         // Asset-group memberships from the resource-group reverse index.
@@ -1788,7 +2319,7 @@ impl ResourceBackendInner {
             None => Vec::new(),
         };
 
-        policy.resolve_for(&resource_type, &asset_groups, resource).await
+        policy.resolve_for(resource_type, &asset_groups, resource).await
     }
 
     pub async fn handle_secret_write(
@@ -2086,5 +2617,305 @@ mod tests {
         // A bare passphrase or a generic KV blob is not a static credential.
         assert!(!static_ssh_credential_shape(&obj(json!({ "passphrase": "p" }))));
         assert!(!static_ssh_credential_shape(&obj(json!({ "token": "t" }))));
+    }
+
+    // ── Transfer import (`v2/transfer/import/<name>`) ─────────────────
+
+    use std::{collections::BTreeMap, sync::Mutex};
+
+    use crate::storage::Storage;
+
+    /// A flat in-memory `Storage` with the barrier's `list` semantics
+    /// (immediate children, sub-trees as `name/`) that also records the
+    /// order of every `put`, so a test can assert what was written last.
+    #[derive(Default)]
+    struct MemStorage {
+        map: Mutex<BTreeMap<String, Vec<u8>>>,
+        puts: Mutex<Vec<String>>,
+    }
+
+    impl MemStorage {
+        fn snapshot(&self) -> BTreeMap<String, Vec<u8>> {
+            self.map.lock().unwrap().clone()
+        }
+
+        fn json(&self, key: &str) -> Value {
+            let map = self.map.lock().unwrap();
+            let raw = map.get(key).unwrap_or_else(|| panic!("missing storage key {key}"));
+            serde_json::from_slice(raw).unwrap()
+        }
+
+        fn seed(&self, key: &str, value: Value) {
+            self.map.lock().unwrap().insert(key.to_string(), serde_json::to_vec(&value).unwrap());
+        }
+
+        fn has(&self, key: &str) -> bool {
+            self.map.lock().unwrap().contains_key(key)
+        }
+
+        fn keys_under(&self, prefix: &str) -> Vec<String> {
+            self.map.lock().unwrap().keys().filter(|k| k.starts_with(prefix)).cloned().collect()
+        }
+    }
+
+    #[maybe_async::maybe_async]
+    impl Storage for MemStorage {
+        async fn list(&self, prefix: &str) -> Result<Vec<String>, RvError> {
+            let map = self.map.lock().unwrap();
+            let mut out: Vec<String> = Vec::new();
+            for k in map.keys().filter(|k| k.starts_with(prefix)) {
+                let rest = &k[prefix.len()..];
+                let child = match rest.find('/') {
+                    Some(i) => rest[..=i].to_string(),
+                    None => rest.to_string(),
+                };
+                if !out.contains(&child) {
+                    out.push(child);
+                }
+            }
+            Ok(out)
+        }
+        async fn get(&self, key: &str) -> Result<Option<StorageEntry>, RvError> {
+            Ok(self.map.lock().unwrap().get(key).map(|v| StorageEntry { key: key.into(), value: v.clone() }))
+        }
+        async fn put(&self, entry: &StorageEntry) -> Result<(), RvError> {
+            self.puts.lock().unwrap().push(entry.key.clone());
+            self.map.lock().unwrap().insert(entry.key.clone(), entry.value.clone());
+            Ok(())
+        }
+        async fn delete(&self, key: &str) -> Result<(), RvError> {
+            self.map.lock().unwrap().remove(key);
+            Ok(())
+        }
+    }
+
+    /// What the handler does after routing, minus the write-time gates that
+    /// need the vault (`check_import_write_gates`).
+    #[maybe_async::maybe_async]
+    async fn import(mem: &MemStorage, name: &str, body: Value) -> Result<ResourceImportSummary, RvError> {
+        let bundle = parse_resource_bundle(body.as_object().unwrap())?;
+        let plan = plan_resource_import(mem, name, bundle).await?;
+        apply_resource_import(mem, plan, "carol").await
+    }
+
+    fn bundle() -> Value {
+        json!({
+            "meta": {
+                "name": "srv1-origin",
+                "type": "server",
+                "hostname": "h1",
+                "created_at": "2025-01-01T00:00:00+00:00"
+            },
+            "secrets": [{
+                "key": "admin",
+                "versions": [
+                    {"version": 1, "created_time": "2025-01-02T00:00:00+00:00", "deleted": false,
+                     "data": {"password": "v1-S3CRET"}},
+                    {"version": 2, "created_time": "2025-01-03T00:00:00+00:00", "deleted": false,
+                     "data": {"password": "v2-S3CRET"}}
+                ],
+                "current": 2
+            }],
+            "history": [
+                {"ts": "2025-01-01T00:00:00+00:00", "user": "alice", "op": "create", "changed_fields": ["hostname"]},
+                {"ts": "2025-01-04T00:00:00+00:00", "user": "bob", "op": "update", "changed_fields": ["notes"]}
+            ],
+            "origin": "ns-a/resources/srv1",
+            "origin_owner": "entity-alice"
+        })
+    }
+
+    /// `body` with the value at `pointer` replaced; a top-level field the
+    /// bundle omits (`on_conflict`) is added.
+    fn with(mut body: Value, pointer: &str, value: Value) -> Value {
+        match body.pointer_mut(pointer) {
+            Some(slot) => *slot = value,
+            None => {
+                let field = pointer.strip_prefix('/').filter(|f| !f.contains('/'));
+                let field = field.unwrap_or_else(|| panic!("no {pointer} in bundle"));
+                body.as_object_mut().unwrap().insert(field.to_string(), value);
+            }
+        }
+        body
+    }
+
+    fn status(r: Result<ResourceImportSummary, RvError>) -> u16 {
+        match r {
+            Err(RvError::ErrResponseStatus(s, _)) => s,
+            other => panic!("expected a status error, got {other:?}"),
+        }
+    }
+
+    /// The history timeline of `name`, oldest first, as the history
+    /// endpoint orders it (by key).
+    fn timeline(mem: &MemStorage, name: &str) -> Vec<ResourceHistoryEntry> {
+        let mut keys = mem.keys_under(&format!("{HIST_PREFIX}{name}/"));
+        keys.sort();
+        keys.iter().map(|k| serde_json::from_value(mem.json(k)).unwrap()).collect()
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn import_writes_meta_secrets_versions_and_history() {
+        let mem = MemStorage::default();
+        let summary = import(&mem, "srv1", bundle()).await.unwrap();
+        assert_eq!(summary, ResourceImportSummary { name: "srv1".into(), secrets: 1, versions: 2, history: 2 });
+
+        // The record lands under the destination name, everything else verbatim.
+        let meta = mem.json("meta/srv1");
+        assert_eq!(meta["name"], "srv1");
+        assert_eq!(meta["hostname"], "h1");
+        assert_eq!(meta["created_at"], "2025-01-01T00:00:00+00:00");
+
+        // Version numbers and timestamps are the bundle's, not the import's.
+        for (n, ts, pw) in
+            [(1u64, "2025-01-02T00:00:00+00:00", "v1-S3CRET"), (2, "2025-01-03T00:00:00+00:00", "v2-S3CRET")]
+        {
+            let v: ResourceSecretVersion = serde_json::from_value(mem.json(&format!("sver/srv1/admin/{n}"))).unwrap();
+            assert_eq!(v.version, n);
+            assert_eq!(v.created_time, ts);
+            assert_eq!(v.data["password"], pw);
+        }
+        let smeta: ResourceSecretMeta = serde_json::from_value(mem.json("smeta/srv1/admin")).unwrap();
+        assert_eq!(smeta.current_version, 2);
+        assert_eq!(smeta.versions.len(), 2);
+        assert_eq!(smeta.versions["1"].created_time, "2025-01-02T00:00:00+00:00");
+        assert_eq!(smeta.versions["2"].created_time, "2025-01-03T00:00:00+00:00");
+        assert_eq!(mem.json("secret/srv1/admin"), json!({"password": "v2-S3CRET"}));
+
+        // The origin's timeline, in order, then the arrival.
+        let hist = timeline(&mem, "srv1");
+        assert_eq!(hist.len(), 3);
+        assert_eq!((hist[0].user.as_str(), hist[0].op.as_str()), ("alice", "create"));
+        assert_eq!(hist[0].ts, "2025-01-01T00:00:00+00:00");
+        assert_eq!(hist[0].changed_fields, vec!["hostname".to_string()]);
+        assert_eq!((hist[1].user.as_str(), hist[1].op.as_str()), ("bob", "update"));
+        let arrival = &hist[2];
+        assert_eq!(arrival.op, "transfer-in");
+        assert_eq!(arrival.user, "carol");
+        assert!(arrival.changed_fields.contains(&"origin: ns-a/resources/srv1".to_string()), "{arrival:?}");
+        assert!(arrival.changed_fields.contains(&"origin_owner: entity-alice".to_string()), "{arrival:?}");
+
+        // `meta/` is written last, so a half-written import is invisible to
+        // listings.
+        assert_eq!(mem.puts.lock().unwrap().last().map(String::as_str), Some("meta/srv1"));
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn import_refuses_existing_name_by_default() {
+        // A legacy mixed-case record collides case-insensitively.
+        let mem = MemStorage::default();
+        mem.seed("meta/Srv1", json!({"name": "Srv1", "hostname": "old"}));
+        let before = mem.snapshot();
+        assert_eq!(status(import(&mem, "srv1", bundle()).await), 409);
+        assert_eq!(status(import(&mem, "SRV1", with(bundle(), "/on_conflict", json!("refuse"))).await), 409);
+        assert_eq!(mem.snapshot(), before, "a refused import writes nothing");
+
+        // Secret data left under a name with no record (an interrupted
+        // import) is a collision too: never merged into the new resource.
+        let mem = MemStorage::default();
+        mem.seed("secret/srv2/stale", json!({"password": "left-behind"}));
+        let before = mem.snapshot();
+        assert_eq!(status(import(&mem, "srv2", bundle()).await), 409);
+        assert_eq!(mem.snapshot(), before);
+
+        // An unknown conflict mode is refused, not read as the default.
+        let mem = MemStorage::default();
+        assert_eq!(status(import(&mem, "srv3", with(bundle(), "/on_conflict", json!("merge"))).await), 400);
+        assert!(mem.snapshot().is_empty());
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn import_overwrite_replaces_and_rename_picks_free_name() {
+        let mem = MemStorage::default();
+        mem.seed("meta/srv1", json!({"name": "srv1", "hostname": "old"}));
+        mem.seed("secret/srv1/old-key", json!({"password": "old"}));
+        mem.seed("smeta/srv1/old-key", json!({"current_version": 1, "versions": {}}));
+        mem.seed("sver/srv1/old-key/1", json!({"data": {"password": "old"}, "version": 1}));
+        mem.seed("hist/srv1/00000000000000000001", json!({"ts": "t", "user": "u", "op": "create"}));
+
+        // Overwrite: nothing of the replaced resource survives under the name.
+        let summary = import(&mem, "srv1", with(bundle(), "/on_conflict", json!("overwrite"))).await.unwrap();
+        assert_eq!(summary.name, "srv1");
+        for gone in
+            ["secret/srv1/old-key", "smeta/srv1/old-key", "sver/srv1/old-key/1", "hist/srv1/00000000000000000001"]
+        {
+            assert!(!mem.has(gone), "{gone} survived the overwrite");
+        }
+        assert_eq!(mem.json("meta/srv1")["hostname"], "h1");
+        assert_eq!(mem.json("secret/srv1/admin"), json!({"password": "v2-S3CRET"}));
+        let hist = timeline(&mem, "srv1");
+        assert_eq!(hist.len(), 3);
+        assert_eq!(hist[2].op, "transfer-in");
+        let replaced = mem.snapshot();
+
+        // Rename: the first free `<name>-<n>`, the existing record untouched.
+        let renamed = import(&mem, "srv1", with(bundle(), "/on_conflict", json!("rename"))).await.unwrap();
+        assert_eq!(renamed.name, "srv1-2");
+        assert_eq!(mem.json("meta/srv1-2")["name"], "srv1-2");
+        assert_eq!(mem.json("secret/srv1-2/admin"), json!({"password": "v2-S3CRET"}));
+        for (k, v) in &replaced {
+            assert_eq!(mem.snapshot().get(k), Some(v), "{k} changed under a rename import");
+        }
+        let again = import(&mem, "srv1", with(bundle(), "/on_conflict", json!("rename"))).await.unwrap();
+        assert_eq!(again.name, "srv1-3");
+
+        // Rename with nothing in the way keeps the requested name.
+        let fresh = import(&mem, "fresh", with(bundle(), "/on_conflict", json!("rename"))).await.unwrap();
+        assert_eq!(fresh.name, "fresh");
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn import_rejects_name_with_slash_or_dotdot() {
+        let mem = MemStorage::default();
+        for name in ["a/b", "..", "a..b", "../x", "", "   "] {
+            assert_eq!(status(import(&mem, name, bundle()).await), 400, "name {name:?}");
+        }
+        assert!(mem.snapshot().is_empty(), "a refused import writes nothing");
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn import_rejects_unsafe_secret_keys_and_malformed_versions() {
+        let version = |n: u64| json!({"version": n, "created_time": "t", "deleted": false, "data": {"k": "v"}});
+        let cases: Vec<(&str, Value)> = vec![
+            ("key with '/'", with(bundle(), "/secrets/0/key", json!("a/b"))),
+            ("key '..'", with(bundle(), "/secrets/0/key", json!(".."))),
+            ("key containing '..'", with(bundle(), "/secrets/0/key", json!("x..y"))),
+            ("empty key", with(bundle(), "/secrets/0/key", json!(""))),
+            ("duplicate key", {
+                let mut b = bundle();
+                let dup = b["secrets"][0].clone();
+                b["secrets"].as_array_mut().unwrap().push(dup);
+                b
+            }),
+            ("no versions", with(bundle(), "/secrets/0/versions", json!([]))),
+            ("version 0", with(bundle(), "/secrets/0/versions", json!([version(0)]))),
+            ("duplicate version", with(bundle(), "/secrets/0/versions", json!([version(1), version(1)]))),
+            ("current not a version", with(bundle(), "/secrets/0/current", json!(3))),
+            ("current not the latest", with(bundle(), "/secrets/0/current", json!(1))),
+            ("deleted version", with(bundle(), "/secrets/0/versions/0/deleted", json!(true))),
+            ("version not a number", with(bundle(), "/secrets/0/versions/0/version", json!("1/../2"))),
+            ("empty origin", with(bundle(), "/origin", json!(""))),
+        ];
+        for (what, body) in cases {
+            let mem = MemStorage::default();
+            assert_eq!(status(import(&mem, "srv1", body).await), 400, "{what}");
+            assert!(mem.snapshot().is_empty(), "{what}: a refused import writes nothing");
+        }
+    }
+
+    #[test]
+    fn import_bundle_parse_errors_never_echo_values() {
+        // A secret value in the wrong place must not come back in the error:
+        // serde's own message quotes the offending string.
+        let body = with(bundle(), "/secrets/0/versions/0/data", json!("hunter2-S3CRET"));
+        let err = parse_resource_bundle(body.as_object().unwrap()).err().expect("a string is not a data map");
+        assert!(matches!(err, RvError::ErrResponseStatus(400, _)), "{err:?}");
+        assert!(!format!("{err:?} {err}").contains("hunter2"), "{err:?}");
+
+        // A missing field is named, since a field name is not a value.
+        let mut body = bundle();
+        body.as_object_mut().unwrap().remove("origin");
+        let err = parse_resource_bundle(body.as_object().unwrap()).err().expect("origin is required");
+        assert!(format!("{err}").contains("origin"), "{err}");
     }
 }
