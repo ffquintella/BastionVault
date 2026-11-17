@@ -12,6 +12,7 @@ use std::{any::Any, collections::HashMap, sync::Arc, time::Duration};
 
 use chrono::Utc;
 use derive_more::Deref;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::{
@@ -22,12 +23,12 @@ use crate::{
     },
     new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path, new_path_internal,
     new_secret, new_secret_internal,
-    storage::StorageEntry,
+    storage::{Storage, StorageEntry},
 };
 use bv_kernel_api::{Module, VaultCtx};
 
 use self::metadata::{EngineConfig, SecretMetadata, VersionMetadata};
-use self::version::{merge_env, VersionData};
+use self::version::{merge_env, KvVersionBundle, VersionData};
 
 static KV_V2_BACKEND_HELP: &str = r#"
 The KV v2 backend stores versioned key-value secrets. Each write creates
@@ -70,6 +71,7 @@ impl KvV2Backend {
         let h_metadata_delete = self.inner.clone();
         let h_destroy = self.inner.clone();
         let h_undelete = self.inner.clone();
+        let h_transfer_import = self.inner.clone();
         let h_renew = self.inner.clone();
         let h_revoke = self.inner.clone();
 
@@ -193,6 +195,24 @@ impl KvV2Backend {
                         {op: Operation::Write, handler: h_undelete.handle_undelete}
                     ],
                     help: "Recover soft-deleted versions of a secret."
+                },
+                {
+                    // Cross-namespace transfer, destination side
+                    // (features/cross-namespace-copy-move.md). See
+                    // `handle_transfer_import` for what one ACL check covers.
+                    pattern: TRANSFER_IMPORT_PATTERN,
+                    fields: {
+                        "name": {
+                            field_type: FieldType::Str,
+                            description: "Destination secret path."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_transfer_import.handle_transfer_import}
+                    ],
+                    help: "Import a secret with every version (numbers, timestamps, delete and destroy state, \
+                           environments) under a path. Body: versions, current, metadata, on_conflict \
+                           (refuse|rename|overwrite). Ownership and shares are not written."
                 }
             ],
             secrets: [{
@@ -338,6 +358,330 @@ fn get_versions_from_body(req: &Request) -> Vec<u64> {
         }
     }
     Vec::new()
+}
+
+// ── Transfer import (`v2/transfer/import/<path>`) ──────────────────
+//
+// The destination side of a cross-namespace copy or move
+// (features/cross-namespace-copy-move.md). The pieces below take the mount's
+// storage view rather than a request so they are testable in-crate.
+
+/// Mount-relative route; `name` keeps every segment of a nested path.
+const TRANSFER_IMPORT_PATTERN: &str = r"v2/transfer/import/(?P<name>.+)";
+
+/// Secret-level settings in a transfer bundle: `SecretMetadata` minus the
+/// version index, which the import derives from `versions`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KvSecretSettings {
+    #[serde(default)]
+    pub max_versions: u64,
+    #[serde(default)]
+    pub cas_required: bool,
+    /// Empty means `0s`, the engine default.
+    #[serde(default)]
+    pub delete_version_after: String,
+    /// Empty means the oldest version's `created_time`.
+    #[serde(default)]
+    pub created_time: String,
+    /// Empty means the import time.
+    #[serde(default)]
+    pub updated_time: String,
+}
+
+/// The body of `v2/transfer/import/<path>`: a secret with its whole version
+/// history. No `Debug`: it carries secret values.
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KvSecretBundle {
+    pub versions: Vec<KvVersionBundle>,
+    /// The highest version number, deleted or not, as `current_version` is.
+    pub current: u64,
+    #[serde(default)]
+    pub metadata: KvSecretSettings,
+    /// `refuse` (default, also when empty) | `rename` | `overwrite`.
+    #[serde(default)]
+    pub on_conflict: String,
+}
+
+/// What an import wrote: the final path (differs from the requested one
+/// under `rename`) and how many versions it recorded, destroyed included.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct KvImportSummary {
+    pub path: String,
+    pub versions: usize,
+}
+
+/// Upper bound on the `<path>-<n>` candidates `on_conflict = rename` tries.
+const IMPORT_RENAME_MAX_SUFFIX: u32 = 1000;
+
+/// Highest importable version number: exact in every JSON client (2^53 - 1),
+/// and far enough from `u64::MAX` that the next write's `+ 1` cannot overflow.
+const IMPORT_MAX_VERSION: u64 = (1 << 53) - 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImportConflict {
+    Refuse,
+    Rename,
+    Overwrite,
+}
+
+impl ImportConflict {
+    /// An unknown mode is refused, never read as the default.
+    fn parse(raw: &str) -> Result<Self, RvError> {
+        match raw.trim() {
+            "" | "refuse" => Ok(Self::Refuse),
+            "rename" => Ok(Self::Rename),
+            "overwrite" => Ok(Self::Overwrite),
+            other => Err(bad_import(format!("on_conflict must be refuse, rename or overwrite, not '{other}'"))),
+        }
+    }
+}
+
+fn bad_import(message: impl Into<String>) -> RvError {
+    RvError::ErrResponseStatus(400, format!("invalid KV import: {}", message.into()))
+}
+
+fn import_conflict(message: impl Into<String>) -> RvError {
+    RvError::ErrResponseStatus(409, message.into())
+}
+
+fn is_rfc3339(value: &str) -> bool {
+    chrono::DateTime::parse_from_rfc3339(value).is_ok()
+}
+
+/// A destination path that stays one secret under `metadata/` and
+/// `versions/`: no empty, `.` or `..` segment, no `..` anywhere, no control
+/// characters.
+fn validate_kv_path(path: &str) -> Result<(), RvError> {
+    if path.is_empty() {
+        return Err(bad_import("path is required"));
+    }
+    if path.contains("..") || path.split('/').any(|s| s.is_empty() || s == ".") {
+        return Err(bad_import("path must not contain '..', '.' or empty segments, or start or end with '/'"));
+    }
+    if path.chars().any(char::is_control) {
+        return Err(bad_import("path must not contain control characters"));
+    }
+    Ok(())
+}
+
+/// Decode a request body into a [`KvSecretBundle`]. serde quotes the
+/// offending value on a type error, and in a bundle that can be secret
+/// material, so only missing- and unknown-field messages (field names) pass.
+fn parse_kv_bundle(body: &Map<String, Value>) -> Result<KvSecretBundle, RvError> {
+    serde_json::from_value(Value::Object(body.clone())).map_err(|e| {
+        let message = e.to_string();
+        if message.starts_with("missing field") || message.starts_with("unknown field") {
+            bad_import(message)
+        } else {
+            bad_import(
+                "the body does not have the bundle's shape (versions: [{version, created_time, deleted, \
+                 destroyed, deletion_time, data: object, envs: object, username, operation}]; current: \
+                 number; metadata: {max_versions, cas_required, delete_version_after, created_time, \
+                 updated_time}; on_conflict: string)",
+            )
+        }
+    })
+}
+
+/// Everything about a bundle that can be checked without storage: versions
+/// are distinct, contiguous and >= 1, `current` is the highest, timestamps
+/// are RFC 3339, deletion state is consistent and env names are writable.
+fn validate_kv_bundle(bundle: &KvSecretBundle) -> Result<(), RvError> {
+    let mut numbers = std::collections::BTreeSet::new();
+    for (i, v) in bundle.versions.iter().enumerate() {
+        if v.version == 0 || v.version > IMPORT_MAX_VERSION {
+            return Err(bad_import(format!("versions[{i}].version must be between 1 and {IMPORT_MAX_VERSION}")));
+        }
+        if !numbers.insert(v.version) {
+            return Err(bad_import(format!("versions[{i}].version {} appears twice", v.version)));
+        }
+        if !is_rfc3339(&v.created_time) {
+            return Err(bad_import(format!("versions[{i}].created_time is not an RFC 3339 timestamp")));
+        }
+        match (v.deleted || v.destroyed, v.deletion_time.is_empty()) {
+            (true, true) => {
+                return Err(bad_import(format!("versions[{i}] is deleted or destroyed but has no deletion_time")))
+            }
+            (false, false) => {
+                return Err(bad_import(format!(
+                    "versions[{i}] has a deletion_time but is neither deleted nor destroyed"
+                )))
+            }
+            (true, false) if !is_rfc3339(&v.deletion_time) => {
+                return Err(bad_import(format!("versions[{i}].deletion_time is not an RFC 3339 timestamp")))
+            }
+            _ => {}
+        }
+        if v.destroyed {
+            if v.data.as_ref().is_some_and(|d| !d.is_empty()) || !v.envs.is_empty() {
+                return Err(bad_import(format!("versions[{i}] is destroyed and must carry no data or envs")));
+            }
+        } else if v.data.is_none() {
+            return Err(bad_import(format!("versions[{i}].data is required unless the version is destroyed")));
+        }
+        // The rule `handle_data_write` applies to env names; never echoed.
+        if v.envs.keys().any(|name| sanitize_env_name(name).is_err()) {
+            return Err(bad_import(format!("versions[{i}].envs has an empty or invalid environment name")));
+        }
+    }
+
+    let (Some(&oldest), Some(&latest)) = (numbers.first(), numbers.last()) else {
+        return Err(bad_import("versions must not be empty"));
+    };
+    if latest - oldest + 1 != numbers.len() as u64 {
+        return Err(bad_import(format!("versions must be contiguous from {oldest} to {latest}")));
+    }
+    if bundle.current != latest {
+        return Err(bad_import(format!("current must be the highest version, {latest}")));
+    }
+
+    let settings = &bundle.metadata;
+    for (field, value) in [("created_time", &settings.created_time), ("updated_time", &settings.updated_time)] {
+        if !value.is_empty() && !is_rfc3339(value) {
+            return Err(bad_import(format!("metadata.{field} is not an RFC 3339 timestamp")));
+        }
+    }
+    if !settings.delete_version_after.is_empty() && humantime::parse_duration(&settings.delete_version_after).is_err() {
+        return Err(bad_import("metadata.delete_version_after is not a duration"));
+    }
+    Ok(())
+}
+
+/// A validated import, ready to write.
+struct KvImportPlan {
+    /// The destination: the requested path, or under `rename` the first
+    /// free `<path>-<n>`.
+    path: String,
+    /// `overwrite` over something stored at `path`: purge it first.
+    replace: bool,
+    bundle: KvSecretBundle,
+}
+
+/// True when version payloads are stored for `path` itself. Sub-trees
+/// (`<child>/`) are nested secrets, not this one's versions. Without a
+/// record this is what an interrupted import leaves (it writes metadata last).
+#[maybe_async::maybe_async]
+async fn has_version_data_in(view: &dyn Storage, path: &str) -> Result<bool, RvError> {
+    Ok(view.list(&format!("versions/{path}/")).await?.iter().any(|k| !k.ends_with('/')))
+}
+
+/// True when anything of a secret is stored at `path`, record or payloads.
+#[maybe_async::maybe_async]
+async fn kv_path_taken_in(view: &dyn Storage, path: &str) -> Result<bool, RvError> {
+    Ok(view.get(&format!("metadata/{path}")).await?.is_some() || has_version_data_in(view, path).await?)
+}
+
+/// The first `<base>-<n>` (n from 2) with neither a record nor payloads.
+#[maybe_async::maybe_async]
+async fn free_kv_path_in(view: &dyn Storage, base: &str) -> Result<String, RvError> {
+    for n in 2..=IMPORT_RENAME_MAX_SUFFIX {
+        let candidate = format!("{base}-{n}");
+        if !kv_path_taken_in(view, &candidate).await? {
+            return Ok(candidate);
+        }
+    }
+    Err(import_conflict(format!("no free path for '{base}' up to '{base}-{IMPORT_RENAME_MAX_SUFFIX}'")))
+}
+
+/// Validate a bundle and settle the destination path. Writes nothing.
+#[maybe_async::maybe_async]
+async fn plan_kv_import(view: &dyn Storage, path: &str, bundle: KvSecretBundle) -> Result<KvImportPlan, RvError> {
+    validate_kv_path(path)?;
+    let mode = ImportConflict::parse(&bundle.on_conflict)?;
+    validate_kv_bundle(&bundle)?;
+
+    let path = path.to_string();
+    let existing = view.get(&format!("metadata/{path}")).await?.is_some();
+    let leftovers = has_version_data_in(view, &path).await?;
+    let (path, replace) = match mode {
+        _ if !existing && !leftovers => (path, false),
+        ImportConflict::Refuse if existing => {
+            return Err(import_conflict(format!("a secret already exists at '{path}'")));
+        }
+        ImportConflict::Refuse => {
+            return Err(import_conflict(format!(
+                "version data with no metadata record is stored at '{path}' (an interrupted operation?); \
+                 import with on_conflict=overwrite to replace it"
+            )));
+        }
+        ImportConflict::Overwrite => (path, true),
+        ImportConflict::Rename => (free_kv_path_in(view, &path).await?, false),
+    };
+    Ok(KvImportPlan { path, replace, bundle })
+}
+
+/// Delete what `handle_metadata_delete` deletes at `path`, the record first
+/// so the secret leaves reads and listings before its data does, plus any
+/// payload no record lists (an interrupted import's). Nested secrets stay.
+#[maybe_async::maybe_async]
+async fn purge_kv_secret_in(view: &dyn Storage, path: &str) -> Result<(), RvError> {
+    let meta_key = format!("metadata/{path}");
+    if view.get(&meta_key).await?.is_some() {
+        view.delete(&meta_key).await?;
+    }
+    let prefix = format!("versions/{path}/");
+    for k in view.list(&prefix).await? {
+        if !k.ends_with('/') {
+            view.delete(&format!("{prefix}{k}")).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Write a planned import: the replaced secret out (`overwrite`), then every
+/// version payload, then `metadata/` last. An import that fails partway thus
+/// leaves no record, and a retry sees the payloads as a collision.
+#[maybe_async::maybe_async]
+async fn apply_kv_import(view: &dyn Storage, plan: KvImportPlan) -> Result<KvImportSummary, RvError> {
+    let KvImportPlan { path, replace, bundle } = plan;
+    let KvSecretBundle { mut versions, current, metadata: settings, .. } = bundle;
+    if replace {
+        purge_kv_secret_in(view, &path).await?;
+    }
+
+    versions.sort_by_key(|v| v.version);
+    // `validate_kv_bundle` refused an empty list.
+    let oldest = versions.first().ok_or_else(|| bad_import("versions must not be empty"))?;
+    let (oldest_version, oldest_created) = (oldest.version, oldest.created_time.clone());
+    let count = versions.len();
+    let mut index = HashMap::with_capacity(count);
+    for v in versions {
+        index.insert(v.version.to_string(), v.version_metadata());
+        if let Some(payload) = v.into_version_data() {
+            let key = format!("versions/{path}/{}", payload.version);
+            view.put(&StorageEntry { key, value: serde_json::to_vec(&payload)? }).await?;
+        }
+    }
+
+    // The defaults `KvSecretSettings` documents for an empty field.
+    let given_or = |value: String, fallback: String| if value.is_empty() { fallback } else { value };
+    let meta = SecretMetadata {
+        current_version: current,
+        oldest_version,
+        max_versions: settings.max_versions,
+        cas_required: settings.cas_required,
+        delete_version_after: given_or(settings.delete_version_after, "0s".to_string()),
+        created_time: given_or(settings.created_time, oldest_created),
+        updated_time: given_or(settings.updated_time, now_rfc3339()),
+        versions: index,
+    };
+    view.put(&StorageEntry { key: format!("metadata/{path}"), value: serde_json::to_vec(&meta)? }).await?;
+    Ok(KvImportSummary { path, versions: count })
+}
+
+/// What `handle_transfer_import` does with a routed request. A token scoped
+/// to environments is refused: an import writes base data, which
+/// `enforce_env_scope` denies to such a token.
+#[maybe_async::maybe_async]
+async fn import_from_request(req: &Request) -> Result<KvImportSummary, RvError> {
+    let path = req.data.as_ref().and_then(|d| d.get("name")).and_then(Value::as_str).unwrap_or("").to_string();
+    enforce_env_scope(req, None)?;
+    let bundle = parse_kv_bundle(req.body.as_ref().ok_or(RvError::ErrRequestNoDataField)?)?;
+    let storage = req.storage.clone().ok_or(RvError::ErrRequestNotReady)?;
+    let plan = plan_kv_import(storage.as_ref(), &path, bundle).await?;
+    apply_kv_import(storage.as_ref(), plan).await
 }
 
 #[maybe_async::maybe_async]
@@ -884,6 +1228,21 @@ impl KvV2BackendInner {
         Ok(None)
     }
 
+    /// `<mount>/v2/transfer/import/<path>`: destination side of a cross-namespace
+    /// copy or move; writes a [`KvSecretBundle`], `metadata/` last. Security:
+    /// ONE ACL check (write on this path) covers every version, and overwrite
+    /// does not consult delete, so the transfer orchestrator probes those
+    /// capabilities separately. Ownership and shares are not touched.
+    pub async fn handle_transfer_import(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let summary = import_from_request(req).await?;
+        let data = json!({ "path": summary.path, "versions": summary.versions });
+        Ok(Some(Response::data_response(data.as_object().cloned())))
+    }
+
     pub async fn handle_noop(&self, _backend: &dyn Backend, _req: &mut Request) -> Result<Option<Response>, RvError> {
         Ok(None)
     }
@@ -957,5 +1316,425 @@ mod env_scope_tests {
         assert!(!env_scope_allows(Some("prod-*"), None, "staging"));
         // A bare "*" matches everything.
         assert!(env_scope_allows(Some("*"), Some("*"), "whatever"));
+    }
+}
+
+// The import is async-only here: the crate has no async runtime dev-dependency,
+// so `block_on` below drives `MemStorage` futures, which never wait.
+#[cfg(all(test, not(feature = "sync_handler")))]
+mod transfer_import_tests {
+    use std::{collections::BTreeMap, sync::Mutex};
+
+    use super::*;
+    use crate::logical::Auth;
+
+    /// A flat in-memory `Storage` with the barrier's `list` semantics
+    /// (immediate children, sub-trees as `name/`) that also records the
+    /// order of every `put`, so a test can assert what was written last.
+    #[derive(Default)]
+    struct MemStorage {
+        map: Mutex<BTreeMap<String, Vec<u8>>>,
+        puts: Mutex<Vec<String>>,
+    }
+
+    impl MemStorage {
+        fn snapshot(&self) -> BTreeMap<String, Vec<u8>> {
+            self.map.lock().unwrap().clone()
+        }
+
+        fn json(&self, key: &str) -> Value {
+            let map = self.map.lock().unwrap();
+            let raw = map.get(key).unwrap_or_else(|| panic!("missing storage key {key}"));
+            serde_json::from_slice(raw).unwrap()
+        }
+
+        fn seed(&self, key: &str, value: Value) {
+            self.map.lock().unwrap().insert(key.to_string(), serde_json::to_vec(&value).unwrap());
+        }
+
+        fn has(&self, key: &str) -> bool {
+            self.map.lock().unwrap().contains_key(key)
+        }
+
+        fn last_put(&self) -> Option<String> {
+            self.puts.lock().unwrap().last().cloned()
+        }
+    }
+
+    #[maybe_async::maybe_async]
+    impl Storage for MemStorage {
+        async fn list(&self, prefix: &str) -> Result<Vec<String>, RvError> {
+            let map = self.map.lock().unwrap();
+            let mut out: Vec<String> = Vec::new();
+            for k in map.keys().filter(|k| k.starts_with(prefix)) {
+                let rest = &k[prefix.len()..];
+                let child = match rest.find('/') {
+                    Some(i) => rest[..=i].to_string(),
+                    None => rest.to_string(),
+                };
+                if !out.contains(&child) {
+                    out.push(child);
+                }
+            }
+            Ok(out)
+        }
+        async fn get(&self, key: &str) -> Result<Option<StorageEntry>, RvError> {
+            Ok(self.map.lock().unwrap().get(key).map(|v| StorageEntry { key: key.into(), value: v.clone() }))
+        }
+        async fn put(&self, entry: &StorageEntry) -> Result<(), RvError> {
+            self.puts.lock().unwrap().push(entry.key.clone());
+            self.map.lock().unwrap().insert(entry.key.clone(), entry.value.clone());
+            Ok(())
+        }
+        async fn delete(&self, key: &str) -> Result<(), RvError> {
+            self.map.lock().unwrap().remove(key);
+            Ok(())
+        }
+    }
+
+    /// Poll a future once; every `MemStorage` call is ready immediately.
+    fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+        let mut fut = std::pin::pin!(fut);
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        match fut.as_mut().poll(&mut cx) {
+            std::task::Poll::Ready(out) => out,
+            std::task::Poll::Pending => panic!("an in-memory import never waits"),
+        }
+    }
+
+    /// The request the router hands `handle_transfer_import` for `path`.
+    fn request(mem: &Arc<MemStorage>, path: &str, body: Value) -> Request {
+        let mut req = Request::default();
+        req.storage = Some(mem.clone() as Arc<dyn Storage>);
+        req.data = json!({ "name": path }).as_object().cloned();
+        req.body = body.as_object().cloned();
+        req
+    }
+
+    fn import(mem: &Arc<MemStorage>, path: &str, body: Value) -> Result<KvImportSummary, RvError> {
+        block_on(import_from_request(&request(mem, path, body)))
+    }
+
+    fn status(r: Result<KvImportSummary, RvError>) -> u16 {
+        match r {
+            Err(RvError::ErrResponseStatus(s, _)) => s,
+            other => panic!("expected a status error, got {other:?}"),
+        }
+    }
+
+    /// Three versions, out of order: v1 destroyed, v2 soft-deleted, v3 live
+    /// with a `prod` environment override.
+    fn bundle() -> Value {
+        json!({
+            "versions": [
+                {"version": 3, "created_time": "2025-01-03T00:00:00+00:00", "deleted": false,
+                 "data": {"password": "v3-S3CRET"}, "envs": {"prod": {"password": "v3-PROD-S3CRET"}},
+                 "username": "bob", "operation": "update"},
+                {"version": 1, "created_time": "2025-01-01T00:00:00+00:00", "destroyed": true,
+                 "deletion_time": "2025-01-04T00:00:00+00:00", "username": "alice", "operation": "create"},
+                {"version": 2, "created_time": "2025-01-02T00:00:00+00:00", "deleted": true,
+                 "deletion_time": "2025-01-05T00:00:00+00:00", "data": {"password": "v2-S3CRET"},
+                 "username": "alice", "operation": "update"}
+            ],
+            "current": 3,
+            "metadata": {
+                "max_versions": 10,
+                "cas_required": true,
+                "delete_version_after": "0s",
+                "created_time": "2024-12-31T00:00:00+00:00",
+                "updated_time": "2025-01-05T00:00:00+00:00"
+            }
+        })
+    }
+
+    fn live(n: u64) -> Value {
+        json!({"version": n, "created_time": "2025-02-01T00:00:00+00:00", "data": {"k": format!("v{n}")}})
+    }
+
+    /// `body` with the value at `pointer` replaced, or added to its parent
+    /// object when absent.
+    fn with(mut body: Value, pointer: &str, value: Value) -> Value {
+        if let Some(slot) = body.pointer_mut(pointer) {
+            *slot = value;
+            return body;
+        }
+        let (parent, field) = pointer.rsplit_once('/').unwrap();
+        let parent = body.pointer_mut(parent).and_then(Value::as_object_mut);
+        parent.unwrap_or_else(|| panic!("no parent object for {pointer}")).insert(field.to_string(), value);
+        body
+    }
+
+    /// An existing secret at `path` with versions 1..=n, every payload stored.
+    fn seed_secret(mem: &MemStorage, path: &str, n: u64) {
+        let mut versions = HashMap::new();
+        for v in 1..=n {
+            let vm = VersionMetadata { created_time: "2020-01-01T00:00:00+00:00".into(), ..Default::default() };
+            versions.insert(v.to_string(), vm);
+            let vd = json!({"data": {"password": format!("old-{v}")}, "version": v,
+                            "created_time": "2020-01-01T00:00:00+00:00", "deletion_time": "", "destroyed": false});
+            mem.seed(&format!("versions/{path}/{v}"), vd);
+        }
+        let meta = SecretMetadata { current_version: n, oldest_version: 1, versions, ..Default::default() };
+        mem.seed(&format!("metadata/{path}"), serde_json::to_value(meta).unwrap());
+    }
+
+    fn metadata(mem: &MemStorage, path: &str) -> SecretMetadata {
+        serde_json::from_value(mem.json(&format!("metadata/{path}"))).unwrap()
+    }
+
+    fn payload(mem: &MemStorage, path: &str, n: u64) -> VersionData {
+        serde_json::from_value(mem.json(&format!("versions/{path}/{n}"))).unwrap()
+    }
+
+    #[test]
+    fn import_preserves_version_numbers_and_flags() {
+        let mem = Arc::new(MemStorage::default());
+        let summary = import(&mem, "team/db", bundle()).unwrap();
+        assert_eq!(summary, KvImportSummary { path: "team/db".into(), versions: 3 });
+
+        let meta = metadata(&mem, "team/db");
+        assert_eq!((meta.current_version, meta.oldest_version), (3, 1));
+        assert_eq!((meta.max_versions, meta.cas_required), (10, true));
+        assert_eq!(meta.delete_version_after, "0s");
+        assert_eq!(meta.created_time, "2024-12-31T00:00:00+00:00");
+        assert_eq!(meta.updated_time, "2025-01-05T00:00:00+00:00");
+        assert_eq!(meta.versions.len(), 3);
+
+        let v1 = &meta.versions["1"];
+        assert!(v1.destroyed);
+        assert_eq!(v1.created_time, "2025-01-01T00:00:00+00:00");
+        assert_eq!(v1.deletion_time, "2025-01-04T00:00:00+00:00");
+        assert_eq!((v1.username.as_str(), v1.operation.as_str()), ("alice", "create"));
+        assert!(!mem.has("versions/team/db/1"), "a destroyed version carries no data");
+
+        let v2 = &meta.versions["2"];
+        assert!(v2.is_soft_deleted());
+        assert_eq!(v2.deletion_time, "2025-01-05T00:00:00+00:00");
+        let p2 = payload(&mem, "team/db", 2);
+        assert_eq!((p2.version, p2.created_time.as_str()), (2, "2025-01-02T00:00:00+00:00"));
+        assert_eq!(p2.data["password"], "v2-S3CRET", "a soft-deleted version stays recoverable");
+        assert!(p2.deletion_time.is_empty() && !p2.destroyed, "deletion lives in metadata only");
+
+        let v3 = &meta.versions["3"];
+        assert!(v3.deletion_time.is_empty() && !v3.destroyed);
+        assert_eq!((v3.username.as_str(), v3.operation.as_str()), ("bob", "update"));
+        let p3 = payload(&mem, "team/db", 3);
+        assert_eq!((p3.version, p3.created_time.as_str()), (3, "2025-01-03T00:00:00+00:00"));
+        assert_eq!(p3.data["password"], "v3-S3CRET");
+        assert_eq!(merge_env(&p3.data, &p3.envs["prod"])["password"], "v3-PROD-S3CRET");
+
+        // `metadata/` is written last, so a half-written import is invisible.
+        assert_eq!(mem.last_put().as_deref(), Some("metadata/team/db"));
+
+        // A pruned history starts above 1; unset settings take their defaults.
+        let mem = Arc::new(MemStorage::default());
+        let body = json!({"versions": [live(8), live(7)], "current": 8});
+        assert_eq!(import(&mem, "pruned", body).unwrap().versions, 2);
+        let meta = metadata(&mem, "pruned");
+        assert_eq!((meta.current_version, meta.oldest_version), (8, 7));
+        assert_eq!(meta.delete_version_after, "0s");
+        assert_eq!(meta.created_time, "2025-02-01T00:00:00+00:00", "the oldest version's");
+        assert!(chrono::DateTime::parse_from_rfc3339(&meta.updated_time).is_ok(), "{}", meta.updated_time);
+        assert_eq!(payload(&mem, "pruned", 7).data["k"], "v7");
+    }
+
+    #[test]
+    fn import_refuses_existing_path_by_default() {
+        let mem = Arc::new(MemStorage::default());
+        seed_secret(&mem, "team/db", 2);
+        let before = mem.snapshot();
+        assert_eq!(status(import(&mem, "team/db", bundle())), 409);
+        assert_eq!(status(import(&mem, "team/db", with(bundle(), "/on_conflict", json!("refuse")))), 409);
+        assert_eq!(mem.snapshot(), before, "a refused import writes nothing");
+
+        // Version data left under a path with no metadata record (an
+        // interrupted import) is a collision too: never merged into.
+        let mem = Arc::new(MemStorage::default());
+        mem.seed("versions/team/db/4", json!({"data": {"password": "left-behind"}, "version": 4}));
+        let before = mem.snapshot();
+        assert_eq!(status(import(&mem, "team/db", bundle())), 409);
+        assert_eq!(mem.snapshot(), before);
+
+        // An unknown conflict mode is refused, not read as the default.
+        let mem = Arc::new(MemStorage::default());
+        assert_eq!(status(import(&mem, "team/db", with(bundle(), "/on_conflict", json!("merge")))), 400);
+        assert!(mem.snapshot().is_empty());
+    }
+
+    #[test]
+    fn import_overwrite_replaces_all_versions() {
+        let mem = Arc::new(MemStorage::default());
+        seed_secret(&mem, "team/db", 6);
+        // A secret nested below the path is a different secret.
+        seed_secret(&mem, "team/db/child", 1);
+        let child = (mem.json("metadata/team/db/child"), mem.json("versions/team/db/child/1"));
+
+        let summary = import(&mem, "team/db", with(bundle(), "/on_conflict", json!("overwrite"))).unwrap();
+        assert_eq!(summary, KvImportSummary { path: "team/db".into(), versions: 3 });
+        let meta = metadata(&mem, "team/db");
+        assert_eq!(meta.current_version, 3);
+        let mut kept: Vec<&str> = meta.versions.keys().map(String::as_str).collect();
+        kept.sort();
+        assert_eq!(kept, ["1", "2", "3"]);
+        for gone in [1, 4, 5, 6] {
+            // v1 is destroyed in the bundle: the replaced secret's v1 must not survive under it.
+            assert!(!mem.has(&format!("versions/team/db/{gone}")), "version {gone} survived the overwrite");
+        }
+        assert_eq!(payload(&mem, "team/db", 2).data["password"], "v2-S3CRET");
+        assert_eq!(mem.last_put().as_deref(), Some("metadata/team/db"));
+        assert_eq!((mem.json("metadata/team/db/child"), mem.json("versions/team/db/child/1")), child);
+
+        // Leftover version data with no record is replaced as well.
+        let mem = Arc::new(MemStorage::default());
+        mem.seed("versions/team/db/9", json!({"data": {"password": "left-behind"}, "version": 9}));
+        import(&mem, "team/db", with(bundle(), "/on_conflict", json!("overwrite"))).unwrap();
+        assert!(!mem.has("versions/team/db/9"));
+        assert_eq!(metadata(&mem, "team/db").current_version, 3);
+    }
+
+    #[test]
+    fn import_rename_picks_a_free_path() {
+        let mem = Arc::new(MemStorage::default());
+        seed_secret(&mem, "team/db", 2);
+        let existing = mem.snapshot();
+
+        let renamed = import(&mem, "team/db", with(bundle(), "/on_conflict", json!("rename"))).unwrap();
+        assert_eq!(renamed.path, "team/db-2");
+        assert_eq!(metadata(&mem, "team/db-2").current_version, 3);
+        assert_eq!(payload(&mem, "team/db-2", 3).data["password"], "v3-S3CRET");
+        for (k, v) in &existing {
+            assert_eq!(mem.snapshot().get(k), Some(v), "{k} changed under a rename import");
+        }
+
+        // Leftover version data makes a candidate taken, too.
+        mem.seed("versions/team/db-3/1", json!({"data": {}, "version": 1}));
+        let again = import(&mem, "team/db", with(bundle(), "/on_conflict", json!("rename"))).unwrap();
+        assert_eq!(again.path, "team/db-4");
+
+        // Nothing in the way keeps the requested path.
+        let fresh = import(&mem, "fresh", with(bundle(), "/on_conflict", json!("rename"))).unwrap();
+        assert_eq!(fresh.path, "fresh");
+    }
+
+    #[test]
+    fn import_does_not_count_nested_secrets_as_a_collision() {
+        // `team/db/child` lists as `db/` under `team/` and as `child/` under
+        // `team/db/`: neither is a secret at `team/db`.
+        let mem = Arc::new(MemStorage::default());
+        seed_secret(&mem, "team/db/child", 1);
+        assert_eq!(import(&mem, "team/db", bundle()).unwrap().path, "team/db");
+        assert_eq!(metadata(&mem, "team/db/child").current_version, 1);
+    }
+
+    #[test]
+    fn import_rejects_unsafe_paths() {
+        let mem = Arc::new(MemStorage::default());
+        for path in
+            ["", "/a", "a/", "a//b", "..", "../x", "a/../b", "a..b", ".", "./a", "a/./b", "a/.", "a\u{7}b", "a\nb"]
+        {
+            assert_eq!(status(import(&mem, path, bundle())), 400, "path {path:?}");
+        }
+        assert!(mem.snapshot().is_empty(), "a refused import writes nothing");
+    }
+
+    #[test]
+    fn import_rejects_malformed_bundles() {
+        // (case, body, a fragment of the refusal naming the rule it broke)
+        let cases: Vec<(&str, Value, &str)> = vec![
+            ("no versions", json!({"versions": [], "current": 0}), "must not be empty"),
+            ("version 0", json!({"versions": [live(0)], "current": 0}), "between 1 and"),
+            // The next write's `current_version + 1` must not overflow.
+            ("version 2^53", json!({"versions": [live(1 << 53)], "current": 1u64 << 53}), "between 1 and"),
+            ("version u64::MAX", json!({"versions": [live(u64::MAX)], "current": u64::MAX}), "between 1 and"),
+            ("duplicate version", json!({"versions": [live(1), live(1)], "current": 1}), "appears twice"),
+            ("non-contiguous", json!({"versions": [live(1), live(3)], "current": 3}), "contiguous from 1 to 3"),
+            ("current not the highest", with(bundle(), "/current", json!(2)), "current must be the highest"),
+            ("current above every version", with(bundle(), "/current", json!(4)), "current must be the highest"),
+            ("bad created_time", with(bundle(), "/versions/0/created_time", json!("yesterday")), "created_time"),
+            ("deleted, no deletion_time", with(bundle(), "/versions/2/deletion_time", json!("")), "no deletion_time"),
+            ("destroyed, no deletion_time", with(bundle(), "/versions/1/deletion_time", json!("")), "no deletion_time"),
+            ("bad deletion_time", with(bundle(), "/versions/2/deletion_time", json!("soon")), "deletion_time is not"),
+            (
+                "deletion_time on a live version",
+                with(bundle(), "/versions/0/deletion_time", json!("2025-01-06T00:00:00+00:00")),
+                "neither deleted nor destroyed",
+            ),
+            ("destroyed with data", with(bundle(), "/versions/1/data", json!({"password": "x"})), "carry no data"),
+            ("destroyed with envs", with(bundle(), "/versions/1/envs", json!({"prod": {}})), "carry no data"),
+            ("live without data", with(bundle(), "/versions/0/data", Value::Null), "data is required"),
+            ("deleted without data", with(bundle(), "/versions/2/data", Value::Null), "data is required"),
+            ("env name with '/'", with(bundle(), "/versions/0/envs", json!({"a/b": {}})), "environment name"),
+            ("empty env name", with(bundle(), "/versions/0/envs", json!({"": {}})), "environment name"),
+            ("bad created_time", with(bundle(), "/metadata/created_time", json!("x")), "metadata.created_time"),
+            ("bad updated_time", with(bundle(), "/metadata/updated_time", json!("x")), "metadata.updated_time"),
+            ("bad duration", with(bundle(), "/metadata/delete_version_after", json!("forever")), "delete_version"),
+            ("unknown metadata field", with(bundle(), "/metadata/custom_metadata", json!({})), "custom_metadata"),
+            ("unknown version field", with(bundle(), "/versions/0/note", json!("x")), "unknown field `note`"),
+            ("unknown top-level field", with(bundle(), "/origin", json!("ns-a/x")), "unknown field `origin`"),
+            ("version not a number", with(bundle(), "/versions/0/version", json!("3/../4")), "bundle's shape"),
+            (
+                "current missing",
+                {
+                    let mut b = bundle();
+                    b.as_object_mut().unwrap().remove("current");
+                    b
+                },
+                "missing field `current`",
+            ),
+        ];
+        for (what, body, rule) in cases {
+            let mem = Arc::new(MemStorage::default());
+            let err = import(&mem, "team/db", body).err().unwrap_or_else(|| panic!("{what}: imported"));
+            assert!(matches!(&err, RvError::ErrResponseStatus(400, m) if m.contains(rule)), "{what}: {err}");
+            assert!(mem.snapshot().is_empty(), "{what}: a refused import writes nothing");
+        }
+    }
+
+    #[test]
+    fn import_parse_errors_never_echo_values() {
+        // serde's own type-error message quotes the offending string, which
+        // in a bundle can be secret material; validation must not echo either.
+        for pointer in ["/versions/0/data", "/versions/0/envs", "/versions/0/version", "/versions/0/created_time"] {
+            let mem = Arc::new(MemStorage::default());
+            let body = with(bundle(), pointer, json!("hunter2-S3CRET"));
+            let err = import(&mem, "team/db", body).expect_err("not a valid value for the field");
+            assert!(matches!(err, RvError::ErrResponseStatus(400, _)), "{pointer}: {err:?}");
+            assert!(!format!("{err:?} {err}").contains("hunter2"), "{pointer}: {err:?}");
+        }
+
+        // A missing or unknown field is named: a field name is not a value.
+        let mut body = bundle();
+        body.as_object_mut().unwrap().remove("current");
+        let err = import(&Arc::new(MemStorage::default()), "team/db", body).err().unwrap();
+        assert!(format!("{err}").contains("current"), "{err}");
+        let body = with(bundle(), "/metadata/custom_metadata", json!({}));
+        let err = import(&Arc::new(MemStorage::default()), "team/db", body).err().unwrap();
+        assert!(format!("{err}").contains("custom_metadata"), "{err}");
+    }
+
+    #[test]
+    fn import_denies_env_scoped_tokens() {
+        // An AppRole token scoped to environments may not write base data
+        // (`enforce_env_scope`), and an import writes it.
+        let mem = Arc::new(MemStorage::default());
+        let mut req = request(&mem, "team/db", bundle());
+        let mut auth = Auth::default();
+        auth.metadata.insert("approle_env_scoped".into(), "true".into());
+        auth.metadata.insert("approle_env_secret".into(), "*".into());
+        req.auth = Some(auth);
+        let err = block_on(import_from_request(&req)).err().unwrap();
+        assert!(matches!(err, RvError::ErrPermissionDenied), "{err:?}");
+        assert!(mem.snapshot().is_empty());
+    }
+
+    #[test]
+    fn import_route_captures_the_whole_nested_path() {
+        let mut backend = LogicalBackend::new();
+        backend.paths.push(Arc::new(Path::new(TRANSFER_IMPORT_PATTERN)));
+        backend.init().unwrap();
+        let (_, captures) = backend.match_path("v2/transfer/import/team/db").unwrap();
+        assert_eq!(captures["name"], "team/db");
+        // Anchored: a secret named like the route is not the route.
+        assert!(backend.match_path("data/v2/transfer/import/x").is_none());
     }
 }

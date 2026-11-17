@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use super::metadata::VersionMetadata;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VersionData {
     /// Shared "base" key/value set, applied to every environment.
@@ -40,6 +42,68 @@ pub fn merge_env(base: &Map<String, Value>, overrides: &Value) -> Map<String, Va
         }
     }
     merged
+}
+
+/// One version of a secret in a transfer bundle (`v2/transfer/import/<path>`),
+/// a request body never stored as such. Unknown fields are refused so nothing
+/// is dropped unseen. No `Debug`: it carries secret values.
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KvVersionBundle {
+    pub version: u64,
+    pub created_time: String,
+    /// Soft-deleted at the origin, so recoverable with `undelete`.
+    #[serde(default)]
+    pub deleted: bool,
+    /// Destroyed at the origin: recorded in metadata, with no data.
+    #[serde(default)]
+    pub destroyed: bool,
+    /// Required when `deleted` or `destroyed`, refused otherwise.
+    #[serde(default)]
+    pub deletion_time: String,
+    /// The base key/value set; required unless `destroyed`.
+    #[serde(default)]
+    pub data: Option<Map<String, Value>>,
+    /// Per-environment overrides as stored (`VersionData::envs`), not merged.
+    #[serde(default)]
+    pub envs: Map<String, Value>,
+    /// Author and operation at the origin, written back verbatim.
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub operation: String,
+}
+
+impl KvVersionBundle {
+    /// This version's entry in `metadata/<path>`.
+    pub fn version_metadata(&self) -> VersionMetadata {
+        VersionMetadata {
+            created_time: self.created_time.clone(),
+            deletion_time: self.deletion_time.clone(),
+            destroyed: self.destroyed,
+            username: self.username.clone(),
+            operation: self.operation.clone(),
+        }
+    }
+
+    /// The `versions/<path>/<n>` payload, or `None` when there is none to
+    /// store (destroyed). Deletion lives in metadata only: `handle_data_delete`
+    /// leaves the payload as written, so it carries no deletion time.
+    pub fn into_version_data(self) -> Option<VersionData> {
+        if self.destroyed {
+            return None;
+        }
+        Some(VersionData {
+            data: self.data?,
+            envs: self.envs,
+            version: self.version,
+            created_time: self.created_time,
+            deletion_time: String::new(),
+            destroyed: false,
+            username: self.username,
+            operation: self.operation,
+        })
+    }
 }
 
 #[cfg(test)]
