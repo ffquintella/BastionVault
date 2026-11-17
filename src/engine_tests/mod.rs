@@ -65,5 +65,7 @@ mod kernel_token_binding;
 mod transfer_import_acl;
 // A KV secret's owner and share key is derived once (T499).
 mod kv_secret_keys;
+// KV v2 deny rules hold in either path form (T504).
+mod kv_v2_deny_forms;
 // Cross-namespace copy and move through `sys/namespace-transfer` (T494).
 mod namespace_transfer;

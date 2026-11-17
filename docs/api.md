@@ -877,6 +877,11 @@ not `x`. `sys/kv-owner/transfer`, `sys/kv-owner/claim`,
 `identity/owner/kv/<b64>` and `sys/owner/backfill`'s `kv_paths` read
 paths the same way.
 
+A deny rule on a KV v2 secret applies in either path form (T504):
+`secret/data/<p>` and `secret/<p>` both refuse every route to the secret,
+`metadata/`, `destroy/` and `undelete/` included. Allows still match only
+the form the request uses.
+
 ~~~
 GET    /v1/identity/sharing/by-target/{kind}/{target}/{grantee}
 PUT    /v1/identity/sharing/by-target/{kind}/{target}/{grantee}

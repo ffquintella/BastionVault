@@ -1,4 +1,4 @@
-//! The KV secret a request path addresses (T499).
+//! The KV secret a request path addresses (T499, T504).
 //!
 //! Owner and share records key a KV secret on `<router mount><name>`. The name
 //! is derived once, from the request and the mount's engine: a kv-v2 path loses
@@ -37,6 +37,8 @@ pub(crate) struct KvItem {
     /// The secret's name without surrounding `/`; empty only for a list of
     /// the mount's root.
     name: String,
+    /// The request path ended in `/` (a list).
+    folder: bool,
 }
 
 impl KvItem {
@@ -57,10 +59,11 @@ impl KvItem {
         if name.split('/').any(|s| s == "..") {
             return None;
         }
+        let folder = raw.ends_with('/') || name.is_empty();
         if name.is_empty() && sub != Some(KvSub::Metadata) {
             return None;
         }
-        Some(Self { engine, mount: mount.to_string(), sub, name: name.to_string() })
+        Some(Self { engine, mount: mount.to_string(), sub, name: name.to_string(), folder })
     }
 
     /// The owner and share key: `<mount><name>`. `None` for a mount-root list.
@@ -90,6 +93,17 @@ impl KvItem {
     /// request path: a kv-v2 `destroy/` or `undelete/` acts on the secret.
     pub(crate) fn acts_on_data(&self) -> bool {
         matches!(self.sub, Some(KvSub::Destroy | KvSub::Undelete))
+    }
+
+    /// The two ACL paths that name this kv-v2 secret's data, `<mount><name>`
+    /// and `<mount>data/<name>` (with the `/` of a list); a deny on either
+    /// refuses every request on it (T504). Empty on a kv (v1) mount.
+    pub(crate) fn deny_aliases(&self) -> Vec<String> {
+        if self.engine != Engine::V2 {
+            return Vec::new();
+        }
+        let tail = if self.folder && !self.name.is_empty() { "/" } else { "" };
+        vec![format!("{}{}{tail}", self.mount, self.name), format!("{}data/{}{tail}", self.mount, self.name)]
     }
 }
 
@@ -173,6 +187,7 @@ mod tests {
         for (rel, key) in [("x", "kv/x"), ("data/x", "kv/data/x"), ("metadata/data/x", "kv/metadata/data/x")] {
             let item = KvItem::from_route("kv/", "kv", rel).unwrap();
             assert_eq!(item.key().as_deref(), Some(key));
+            assert!(item.deny_aliases().is_empty());
         }
         assert_eq!(KvItem::from_route("transit/", "transit", "keys/x"), None);
     }
@@ -200,6 +215,15 @@ mod tests {
         let ns = KvItem::from_route("team/secret/", "kv-v2", "data/data/x").unwrap();
         assert_eq!(ns.legacy_key("team/secret/data/data/x", Some("team")).as_deref(), Some("team/secret/data/x"));
         assert_eq!(ns.key().as_deref(), Some("team/secret/data/x"));
+    }
+
+    #[test]
+    fn deny_aliases_name_both_data_forms() {
+        assert_eq!(v2("x").unwrap().deny_aliases(), ["secret/x", "secret/data/x"]);
+        assert_eq!(v2("metadata/prod/x").unwrap().deny_aliases(), ["secret/prod/x", "secret/data/prod/x"]);
+        assert_eq!(v2("metadata/prod/").unwrap().deny_aliases(), ["secret/prod/", "secret/data/prod/"]);
+        assert_eq!(v2("metadata/").unwrap().deny_aliases(), ["secret/", "secret/data/"]);
+        assert_eq!(v2("destroy/prod/x").unwrap().deny_aliases(), ["secret/prod/x", "secret/data/prod/x"]);
     }
 
     #[test]

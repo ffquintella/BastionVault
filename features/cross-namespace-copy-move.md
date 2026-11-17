@@ -195,6 +195,9 @@ imports again.
 
 ## Known limits
 
+- Fixed by T504: a deny written as `<mount>/data/<path>` now refuses a KV
+  import of `<path>`, as it refuses every KV v2 route to that secret.
+
 - **Entity shares.** An entity grantee is carried only if its entity lives in
   the destination namespace or in the root namespace, so entity shares
   survive a root to namespace transfer; an entity of another namespace is

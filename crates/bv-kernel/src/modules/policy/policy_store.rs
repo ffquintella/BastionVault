@@ -35,7 +35,7 @@ use stretto::Cache;
 use super::{
     acl::{ACLResults, ACL},
     kv_target,
-    policy::SentinelPolicy,
+    policy::{Capability, SentinelPolicy},
     transfer_target, Policy, PolicyType,
 };
 use crate::kernel_api::VaultCtx;
@@ -3762,6 +3762,29 @@ impl PolicyStore {
         Ok(())
     }
 
+    /// The other path form of a kv-v2 request whose governing rule denies
+    /// (T504): `<mount><name>` and `<mount>data/<name>` name one secret, so a
+    /// deny in either refuses every route to it. Allows are not widened: only
+    /// a probe that comes back `deny` counts. `None` for any other path.
+    pub(crate) fn kv_v2_alias_deny(&self, acl: &ACL, req: &mut Request) -> Result<Option<String>, RvError> {
+        if acl.root {
+            return Ok(None);
+        }
+        let Some(item) = kv_target::resolve(&self.router, &req.path)? else {
+            return Ok(None);
+        };
+        let own = req.path.trim_start_matches('/').to_string();
+        for alias in item.deny_aliases().into_iter().filter(|a| *a != own) {
+            let original = std::mem::replace(&mut req.path, alias);
+            let probe = acl.allow_operation(req, true);
+            let alias = std::mem::replace(&mut req.path, original);
+            if probe?.capabilities_bitmap & Capability::Deny.to_bits() != 0 {
+                return Ok(Some(alias));
+            }
+        }
+        Ok(None)
+    }
+
     /// The transfer import a request to `path` reaches, if it is one.
     pub(crate) fn transfer_import_target(
         &self,
@@ -3785,6 +3808,7 @@ impl PolicyStore {
 
         let mut acl_result = ACLResults::default();
         let mut deny_diagnostics: Option<DenyDiagnostics> = None;
+        let mut alias_denial: Option<String> = None;
 
         if let Some(auth) = &req.auth {
             if auth.policies.is_empty() {
@@ -3828,6 +3852,10 @@ impl PolicyStore {
                 )
                 .await?;
             acl_result = acl.allow_operation(req, false)?;
+            if acl_result.allowed {
+                alias_denial = self.kv_v2_alias_deny(&acl, req)?;
+                acl_result.allowed = alias_denial.is_none();
+            }
             if !acl_result.allowed {
                 // Denial diagnostics. Computed only when the request is being
                 // refused, so the allow path pays nothing.
@@ -3870,6 +3898,9 @@ impl PolicyStore {
                 detail.push_str(&describe_resolution(&d.resolution, &d.resolution.unresolved));
                 if let Some(route) = import_route {
                     detail.push_str(&format!("; authorized as the item the transfer import route \"{route}\" writes"));
+                }
+                if let Some(alias) = &alias_denial {
+                    detail.push_str(&format!("; refused by a deny on the same KV v2 secret's path \"{alias}\""));
                 }
                 if !d.scope_gated.is_empty() {
                     detail.push_str(&format!(
@@ -4502,6 +4533,10 @@ impl PolicyStore {
             // short-circuits without setting `allowed`, always returning
             // `allowed=false`. The full gate is cheap for a read probe.
             *verdict = acl.allow_operation(&req, false).map(|r| r.allowed).unwrap_or(false);
+            // As `post_auth`: a deny on the other KV v2 path form refuses.
+            if *verdict && !matches!(self.kv_v2_alias_deny(&acl, &mut req), Ok(None)) {
+                *verdict = false;
+            }
         }
         out
     }
