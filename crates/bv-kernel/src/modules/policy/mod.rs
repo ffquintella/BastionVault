@@ -33,6 +33,7 @@ mod sql_privileges;
 // The rolling-upgrade write gate for `sql_*` (features/sql-browser.md §13).
 pub mod sql_write_gate;
 // Transfer import routes authorized as the item they write (T494).
+pub(crate) mod kv_target;
 pub(crate) mod transfer_target;
 pub use transfer_target::IMPORT_MAX_SECRETS as TRANSFER_IMPORT_MAX_SECRETS;
 // The verified core against a frozen copy of the pre-delegation evaluator

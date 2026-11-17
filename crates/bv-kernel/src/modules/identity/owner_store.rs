@@ -11,13 +11,15 @@
 //!   sys/owner/kv/<b64url(full-path)>    -> OwnerRecord
 //!   sys/owner/resource/<resource-name>  -> OwnerRecord
 //!
-//! Canonicalization for KV paths mirrors the resource-group store:
-//! the KV-v2 `data/` / `metadata/` segment at position 1 is stripped
-//! so the owner of `secret/foo/bar` is keyed the same whether the
-//! write came in as v1 or v2. base64url encoding keeps the `/`
-//! characters out of the BarrierView key segment.
+//! A KV record is keyed on `<ns>/<mount>/<name>`, derived once by the policy
+//! layer (`policy::kv_target`) or the client endpoints; the KV methods here
+//! take that key as given and never transform it (T499). base64url keeps the
+//! `/` characters out of the BarrierView key segment.
 
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::Utc;
@@ -53,6 +55,9 @@ pub struct OwnerStore {
     file_view: Arc<BarrierView>,
     ns_resource_view: Arc<BarrierView>,
     ns_file_view: Arc<BarrierView>,
+    /// Set once the T499 datafix has run: KV keys are `<mount><name>`. Until
+    /// then every caller derives the pre-T499 key, so records keep resolving.
+    kv_keys_split: AtomicBool,
 }
 
 #[maybe_async::maybe_async]
@@ -68,7 +73,14 @@ impl OwnerStore {
         let ns_resource_view = Arc::new(system_view.new_sub_view(NS_RESOURCE_OWNER_SUB_PATH));
         let ns_file_view = Arc::new(system_view.new_sub_view(NS_FILE_OWNER_SUB_PATH));
 
-        Ok(Arc::new(Self { kv_view, resource_view, file_view, ns_resource_view, ns_file_view }))
+        Ok(Arc::new(Self {
+            kv_view,
+            resource_view,
+            file_view,
+            ns_resource_view,
+            ns_file_view,
+            kv_keys_split: AtomicBool::new(false),
+        }))
     }
 
     /// Namespace-scope a resource name, file id, or asset-group name for owner
@@ -147,9 +159,9 @@ impl OwnerStore {
         }
     }
 
-    /// Canonicalize a KV secret path for owner lookup/storage. Matches
-    /// `ResourceGroupStore::canonicalize_secret_path` so a secret's
-    /// owner and its asset-group membership key on the same identity.
+    /// The pre-T499 KV canonicalizer: strips a `data`/`metadata` segment at
+    /// index 1 whatever the mount. Not idempotent (`secret/data/x` is a key
+    /// and a request path); only [`Self::legacy_kv_key`] still uses it.
     pub fn canonicalize_kv_path(raw: &str) -> Option<String> {
         let trimmed = raw.trim().trim_matches('/');
         if trimmed.is_empty() || trimmed.split('/').any(|s| s == "..") {
@@ -214,11 +226,59 @@ impl OwnerStore {
         URL_SAFE_NO_PAD.encode(canonical.as_bytes())
     }
 
-    /// Return the owner of a KV secret, or `None` if it has no owner
-    /// record (legacy secrets predating this feature, or writes by
+    /// Whether the T499 datafix has run on this store.
+    pub fn kv_keys_split(&self) -> bool {
+        self.kv_keys_split.load(Ordering::Acquire)
+    }
+
+    /// Switch KV key derivation to `<mount><name>`; the datafix calls this.
+    pub fn set_kv_keys_split(&self) {
+        self.kv_keys_split.store(true, Ordering::Release);
+    }
+
+    /// Test support: back to pre-T499 keys, as before the datafix ran.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn unsplit_kv_keys_for_test(&self) {
+        self.kv_keys_split.store(false, Ordering::Release);
+    }
+
+    /// A KV owner/share key as stored: whitespace and `/` trimmed, refused
+    /// when empty or holding a `..` segment. Never strips anything else, so a
+    /// key passed back in is returned unchanged.
+    pub fn checked_kv_key(key: &str) -> Option<String> {
+        let k = key.trim().trim_matches('/');
+        (!k.is_empty() && !k.split('/').any(|s| s == "..")).then(|| k.to_string())
+    }
+
+    /// The key every release before T499 used for a KV request path: the
+    /// scoped canonical path, canonicalized a second time by the store. Kept
+    /// for non-KV paths, for the datafix, and until the datafix has run.
+    pub fn legacy_kv_key(path: &str, ns_path: Option<&str>) -> Option<String> {
+        Self::canonicalize_kv_path(&Self::canonicalize_kv_path_scoped(path, ns_path)?)
+    }
+
+    /// The key of a secret a client names as `<mount>/<name>` (the owner,
+    /// share and `sys/kv-owner` endpoints): `<ns>/<mount>/<name>` verbatim once
+    /// `split`, so a stored key passed back resolves to itself; the pre-T499
+    /// key before the datafix. A leading `<ns>/` is accepted as already scoped.
+    pub fn client_kv_key(path: &str, ns_path: Option<&str>, split: bool) -> Option<String> {
+        if !split {
+            return Self::legacy_kv_key(path, ns_path);
+        }
+        let trimmed = path.trim().trim_matches('/');
+        let key = match ns_path.map(|n| n.trim().trim_matches('/')).filter(|n| !n.is_empty()) {
+            Some(n) if trimmed.starts_with(&format!("{n}/")) => trimmed.to_string(),
+            Some(n) => format!("{n}/{trimmed}"),
+            None => trimmed.to_string(),
+        };
+        Self::checked_kv_key(&key)
+    }
+
+    /// Return the owner of the KV secret keyed `key`, or `None` if it has no
+    /// owner record (legacy secrets predating this feature, or writes by
     /// callers with no entity_id).
-    pub async fn get_kv_owner(&self, path: &str) -> Result<Option<OwnerRecord>, RvError> {
-        let Some(canonical) = Self::canonicalize_kv_path(path) else {
+    pub async fn get_kv_owner(&self, key: &str) -> Result<Option<OwnerRecord>, RvError> {
+        let Some(canonical) = Self::checked_kv_key(key) else {
             return Ok(None);
         };
         let key = Self::kv_key(&canonical);
@@ -269,11 +329,11 @@ impl OwnerStore {
     /// Silent on empty `entity_id` (root-token writes, or any path
     /// where the caller lacks entity metadata) so existing tests don't
     /// start stamping unknown owners.
-    pub async fn record_kv_owner_if_absent(&self, path: &str, entity_id: &str) -> Result<(), RvError> {
+    pub async fn record_kv_owner_if_absent(&self, key: &str, entity_id: &str) -> Result<(), RvError> {
         if entity_id.is_empty() {
             return Ok(());
         }
-        let Some(canonical) = Self::canonicalize_kv_path(path) else {
+        let Some(canonical) = Self::checked_kv_key(key) else {
             return Ok(());
         };
         let key = Self::kv_key(&canonical);
@@ -301,8 +361,8 @@ impl OwnerStore {
     /// existing owner record. Used by the admin ownership-transfer
     /// endpoint — callers who want "first write wins" semantics must
     /// use `record_kv_owner_if_absent` instead.
-    pub async fn set_kv_owner(&self, path: &str, entity_id: &str) -> Result<(), RvError> {
-        let Some(canonical) = Self::canonicalize_kv_path(path) else {
+    pub async fn set_kv_owner(&self, key: &str, entity_id: &str) -> Result<(), RvError> {
+        let Some(canonical) = Self::checked_kv_key(key) else {
             return Err(crate::bv_error_string!("invalid KV path"));
         };
         let entity_id = entity_id.trim();
@@ -315,8 +375,15 @@ impl OwnerStore {
         self.kv_view.put(&StorageEntry { key, value }).await
     }
 
-    pub async fn forget_kv_owner(&self, path: &str) -> Result<(), RvError> {
-        let Some(canonical) = Self::canonicalize_kv_path(path) else {
+    /// Write `rec` under the KV key `key` as it is, `created_at` included.
+    /// Migration support only (the T499 datafix copies records verbatim).
+    pub(crate) async fn put_kv_owner_record(&self, key: &str, rec: &OwnerRecord) -> Result<(), RvError> {
+        let canonical = Self::checked_kv_key(key).ok_or_else(|| crate::bv_error_string!("invalid KV key"))?;
+        self.kv_view.put(&StorageEntry { key: Self::kv_key(&canonical), value: serde_json::to_vec(rec)? }).await
+    }
+
+    pub async fn forget_kv_owner(&self, key: &str) -> Result<(), RvError> {
+        let Some(canonical) = Self::checked_kv_key(key) else {
             return Ok(());
         };
         let key = Self::kv_key(&canonical);
@@ -333,8 +400,8 @@ impl OwnerStore {
     /// sees two `TypeId`s for the same type), and `test` does not cross a
     /// crate boundary. Gated on the fixture feature that consumer enables.
     #[cfg(any(test, feature = "test-support"))]
-    pub async fn plant_kv_ghost_for_test(&self, path: &str) -> Result<(), RvError> {
-        let canonical = Self::canonicalize_kv_path(path).expect("valid kv path");
+    pub async fn plant_kv_ghost_for_test(&self, key: &str) -> Result<(), RvError> {
+        let canonical = Self::checked_kv_key(key).expect("valid kv key");
         let key = Self::kv_key(&canonical);
         let rec = OwnerRecord { entity_id: String::new(), created_at: String::new() };
         let value = serde_json::to_vec(&rec)?;
@@ -568,16 +635,43 @@ mod scoped_key_tests {
         assert_ne!(a, b);
     }
 
-    // Idempotence: feeding an already-scoped key back through must be a
-    // no-op, since downstream store methods re-run `canonicalize_kv_path`
-    // internally on whatever we hand them.
+    // Idempotence: re-scoping an already-scoped key is a no-op.
     #[test]
     fn already_scoped_key_is_idempotent() {
         let ns = Some("dti/esi");
         let once = OwnerStore::canonicalize_kv_path_scoped("dti/esi/secret/data/github", ns).unwrap();
-        // Re-scoping the canonical form, and running the plain canonicalizer
-        // that the store methods apply internally, both leave it unchanged.
         assert_eq!(OwnerStore::canonicalize_kv_path_scoped(&once, ns), Some(once.clone()),);
         assert_eq!(OwnerStore::canonicalize_kv_path(&once), Some(once));
+    }
+
+    // T499: the pre-T499 key canonicalized twice, so `data/x` keyed as `x`
+    // at root and a namespace named `team/data` keyed as `team`.
+    #[test]
+    fn the_legacy_key_is_the_double_canonicalized_one() {
+        assert_eq!(OwnerStore::legacy_kv_key("secret/data/data/x", None).as_deref(), Some("secret/x"));
+        assert_eq!(OwnerStore::legacy_kv_key("secret/data/x", None).as_deref(), Some("secret/x"));
+        let ns = Some("team/data");
+        assert_eq!(OwnerStore::legacy_kv_key("team/data/secret/data/x", ns).as_deref(), Some("team/secret/x"));
+        assert_eq!(OwnerStore::legacy_kv_key("secret/a/../b", None), None);
+    }
+
+    // T499: a client key is the secret's `<ns>/<mount>/<name>` verbatim, and a
+    // key passed back in comes back unchanged, for every name.
+    #[test]
+    fn a_client_key_is_a_fixed_point() {
+        for ns in [None, Some("dti/esi"), Some("team/data")] {
+            for path in ["secret/x", "secret/data/x", "secret/metadata/data/x", "kv/team/data/x"] {
+                let key = OwnerStore::client_kv_key(path, ns, true).unwrap();
+                let want = ns.map(|n| format!("{n}/{path}")).unwrap_or_else(|| path.to_string());
+                assert_eq!(key, want, "{ns:?} {path}");
+                assert_eq!(OwnerStore::client_kv_key(&key, ns, true), Some(key.clone()), "{ns:?} {path}");
+                assert_eq!(OwnerStore::checked_kv_key(&key), Some(key.clone()));
+            }
+        }
+        assert_eq!(OwnerStore::client_kv_key("secret/data/x", None, false).as_deref(), Some("secret/x"));
+        for bad in ["", "/", "secret/../x", " .. "] {
+            assert_eq!(OwnerStore::client_kv_key(bad, None, true), None, "{bad:?}");
+            assert_eq!(OwnerStore::checked_kv_key(bad), None, "{bad:?}");
+        }
     }
 }

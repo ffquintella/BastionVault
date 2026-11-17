@@ -566,6 +566,13 @@ another such endpoint:
   stable (no breaking change to `ResourceMetadata`) and gives KV the
   same canonicalization as the resource-group store so a secret's
   owner and group membership key on the same identity.
+- **One KV key per secret (T499).** The key is `<ns>/<mount>/<name>`,
+  derived once by `policy::kv_target` through the mount table (kv-v2
+  drops exactly one sub-command segment, kv none); the owner and share
+  stores never transform it again. The owner, share and `sys/kv-owner/*`
+  endpoints take `<mount>/<name>` verbatim. A marker-guarded datafix
+  (`identity/kv_key_split_migrate.rs`) copies each moved secret's old
+  record and shares to its new key on the first unseal after upgrade.
 - **First-write carve-out for the `owner` scope.** A strict "target's
   owner must equal caller" check would make it impossible to create a
   new object under an owner-only policy (no owner exists yet). The

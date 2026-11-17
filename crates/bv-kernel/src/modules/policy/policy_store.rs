@@ -34,6 +34,7 @@ use stretto::Cache;
 
 use super::{
     acl::{ACLResults, ACL},
+    kv_target,
     policy::SentinelPolicy,
     transfer_target, Policy, PolicyType,
 };
@@ -3203,6 +3204,19 @@ fn looks_like_kv_path(req_path: &str, ns_path: Option<&str>) -> bool {
     !p.is_empty() && !NON_KV_PREFIXES.iter().any(|pref| p.starts_with(pref))
 }
 
+/// Whether the T499 datafix has run, so KV keys are `<mount><name>`.
+fn kv_keys_split(core: &Core) -> bool {
+    let module = core.module_manager().get_module::<IdentityModule>("identity");
+    module.and_then(|m| m.owner_store()).is_some_and(|s| s.kv_keys_split())
+}
+
+/// The owner and share key of the KV secret `req_path` addresses, derived
+/// once through the mount table (`kv_target::owner_key`, T499).
+fn kv_key(router: &Router, split: bool, req_path: &str, ns_path: Option<&str>) -> Option<String> {
+    let item = kv_target::resolve(router, req_path).ok().flatten();
+    kv_target::owner_key(item.as_ref(), req_path, ns_path, split)
+}
+
 /// Best-effort resolve of the owner entity_id for the request target.
 /// Returns an empty string on any failure (module absent, no owner
 /// record, path shape we don't recognize). `scope_passes` treats an
@@ -3234,12 +3248,11 @@ pub(super) async fn resolve_asset_owner(
         }
     }
     if looks_like_kv_path(req_path, ns_path) {
-        // Key on the namespace-scoped canonical path so a child-namespace
-        // secret's owner (stamped under `<ns>/<mount>/<key>` by
-        // `post_route`) is found here. Falls back to the raw path for root.
-        let key = OwnerStore::canonicalize_kv_path_scoped(req_path, ns_path).unwrap_or_else(|| req_path.to_string());
-        if let Ok(Some(rec)) = store.get_kv_owner(&key).await {
-            return rec.entity_id;
+        // The key `post_route` stamps the owner under (namespace-scoped).
+        if let Some(key) = kv_key(&core.router, store.kv_keys_split(), req_path, ns_path) {
+            if let Ok(Some(rec)) = store.get_kv_owner(&key).await {
+                return rec.entity_id;
+            }
         }
     }
     // Asset group: the owner is captured on first write to
@@ -3296,13 +3309,11 @@ pub(super) async fn resolve_target_shared_caps(core: &Weak<Core>, req: &Request)
             merge(v);
         }
     }
-    if looks_like_kv_path(&req.path, ns) {
-        // Shares are keyed on the namespace-scoped canonical path (see
-        // `create_share`), so scope the request path the same way before
-        // looking up the caller's shared capabilities.
-        let key = OwnerStore::canonicalize_kv_path_scoped(&req.path, req.namespace_path.as_deref())
-            .unwrap_or_else(|| req.path.clone());
-        if let Ok(v) = store.shared_capabilities(ShareTargetKind::KvSecret, &key, &caller_id).await {
+    // Shares are keyed like owners (see `scope_share_target`).
+    let kv_share_key =
+        looks_like_kv_path(&req.path, ns).then(|| kv_key(&core.router, kv_keys_split(&core), &req.path, ns)).flatten();
+    if let Some(key) = &kv_share_key {
+        if let Ok(v) = store.shared_capabilities(ShareTargetKind::KvSecret, key, &caller_id).await {
             merge(v);
         }
     }
@@ -3377,15 +3388,9 @@ pub(super) async fn resolve_target_shared_caps(core: &Weak<Core>, req: &Request)
                             merge(v);
                         }
                     }
-                    if looks_like_kv_path(&req.path, ns) {
-                        // Canonicalize exactly as the entity-grantee lookup
-                        // above does: shares are stored under the scoped
-                        // canonical path, so passing the raw request path here
-                        // missed every KV group-share in a namespace (and every
-                        // v2 `data/`-infixed one at root).
-                        let key =
-                            OwnerStore::canonicalize_kv_path_scoped(&req.path, ns).unwrap_or_else(|| req.path.clone());
-                        if let Ok(v) = store.shared_capabilities(ShareTargetKind::KvSecret, &key, &g_name).await {
+                    // Keyed exactly as the entity-grantee lookup above.
+                    if let Some(key) = &kv_share_key {
+                        if let Ok(v) = store.shared_capabilities(ShareTargetKind::KvSecret, key, &g_name).await {
                             merge(v);
                         }
                     }
@@ -3497,7 +3502,11 @@ pub(super) async fn resolve_asset_groups(core: &Weak<Core>, req_path: &str, ns_p
     }
 
     if looks_like_kv_path(req_path, ns_path) {
-        if let Ok(groups) = store.groups_for_secret(mount_relative_path(req_path, ns_path), &scope).await {
+        // A kv-v2 `destroy/` or `undelete/` acts on the secret: look it up as
+        // its `data/` request does, not as a secret named `destroy/<name>`.
+        let item = kv_target::resolve(&core.router, req_path).ok().flatten().filter(|i| i.acts_on_data());
+        let group_path = item.map(|i| i.data_path()).unwrap_or_else(|| req_path.to_string());
+        if let Ok(groups) = store.groups_for_secret(mount_relative_path(&group_path, ns_path), &scope).await {
             for g in groups {
                 if !out.iter().any(|x| x == &g) {
                     out.push(g);
@@ -4234,6 +4243,7 @@ impl PolicyStore {
                     let share_store = self.share_store();
                     filter_list_by_ownership(
                         response,
+                        &self.router,
                         &req.path,
                         &req.list_filter_scopes,
                         &caller_id,
@@ -4271,12 +4281,11 @@ impl PolicyStore {
             match req.operation {
                 Operation::Write => {
                     if looks_like_kv_path(&req.path, ns) && !caller_id.is_empty() {
-                        // Stamp under the namespace-scoped canonical key so a
-                        // child-namespace secret's owner is stored where the
-                        // owner-read, share, and ACL paths look for it.
-                        let key = OwnerStore::canonicalize_kv_path_scoped(&req.path, req.namespace_path.as_deref())
-                            .unwrap_or_else(|| req.path.clone());
-                        let _ = store.record_kv_owner_if_absent(&key, &caller_id).await;
+                        // Stamp under the key the owner-read, share and ACL
+                        // paths look up (namespace-scoped, derived once).
+                        if let Some(key) = kv_key(&self.router, store.kv_keys_split(), &req.path, ns) {
+                            let _ = store.record_kv_owner_if_absent(&key, &caller_id).await;
+                        }
                     }
                     if let Some(name) = resource_name_from_path(&req.path, ns) {
                         // Only stamp ownership on the metadata create
@@ -4300,10 +4309,11 @@ impl PolicyStore {
                     }
                 }
                 Operation::Delete => {
-                    if looks_like_kv_path(&req.path, ns) {
-                        let key =
-                            OwnerStore::canonicalize_kv_path_scoped(&req.path, ns).unwrap_or_else(|| req.path.clone());
-                        let _ = store.forget_kv_owner(&key).await;
+                    let kv_target_key = looks_like_kv_path(&req.path, ns)
+                        .then(|| kv_key(&self.router, store.kv_keys_split(), &req.path, ns))
+                        .flatten();
+                    if let Some(key) = &kv_target_key {
+                        let _ = store.forget_kv_owner(key).await;
                     }
                     if let Some(name) = resource_name_from_path(&req.path, ns) {
                         if rel.starts_with("resources/resources/") {
@@ -4324,15 +4334,10 @@ impl PolicyStore {
                     // Admin → Audit page attributes the action to the
                     // user that triggered the target delete.
                     if let Some(sshare) = self.share_store() {
-                        if looks_like_kv_path(&req.path, ns) {
-                            // Shares are keyed on the namespace-scoped canonical
-                            // path; scope before cascading so a child-namespace
-                            // secret's shares are actually found and revoked.
-                            let key = OwnerStore::canonicalize_kv_path_scoped(&req.path, ns)
-                                .unwrap_or_else(|| req.path.clone());
-                            if let Err(e) = sshare
-                                .cascade_delete_target_audited(ShareTargetKind::KvSecret, &key, &audit_actor)
-                                .await
+                        // Shares are keyed like the owner record forgotten above.
+                        if let Some(key) = &kv_target_key {
+                            if let Err(e) =
+                                sshare.cascade_delete_target_audited(ShareTargetKind::KvSecret, key, &audit_actor).await
                             {
                                 log::warn!("share cascade-delete failed for KV path '{}': {e}", req.path,);
                             }
@@ -4566,6 +4571,7 @@ async fn filter_list_response(
 /// kept (scopes OR together).
 async fn filter_list_by_ownership(
     response: &mut Response,
+    router: &Router,
     list_path: &str,
     filter_scopes: &[String],
     caller_entity_id: &str,
@@ -4598,7 +4604,11 @@ async fn filter_list_by_ownership(
             // listing `secret/` returned nothing, and the grantee had no way
             // to learn `trend/` was worth descending into.
             let full = format!("{prefix}{k}");
-            let Some(dir) = OwnerStore::canonicalize_kv_path_scoped(&full, ns_path) else {
+            let dir = match store.kv_keys_split() {
+                true => kv_key(router, true, &full, ns_path),
+                false => OwnerStore::canonicalize_kv_path_scoped(&full, ns_path),
+            };
+            let Some(dir) = dir else {
                 continue;
             };
             let dir_prefix = format!("{dir}/");
@@ -4620,10 +4630,8 @@ async fn filter_list_by_ownership(
             continue;
         }
         let full = format!("{prefix}{k}");
-        // `full` is a rewritten request path in child namespaces; scope it
-        // to the canonical owner/share key so lookups hit the records
-        // stamped by `post_route` / `create_share`.
-        let scoped = OwnerStore::canonicalize_kv_path_scoped(&full, ns_path).unwrap_or_else(|| full.clone());
+        // The owner/share key of `full`, as `post_route` stamps it.
+        let scoped = kv_key(router, store.kv_keys_split(), &full, ns_path).unwrap_or_default();
 
         let mut included = false;
 

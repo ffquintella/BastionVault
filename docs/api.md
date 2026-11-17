@@ -871,6 +871,12 @@ Per-target CRUD plus a caller-introspecting feed. `target` is
 `base64url(no-pad)` of the canonical target path so KV paths
 containing slashes fit a single URL segment.
 
+For `kv-secret` the target is the secret's logical path `<mount>/<name>`,
+taken verbatim (T499): `secret/data/x` names a secret called `data/x`,
+not `x`. `sys/kv-owner/transfer`, `sys/kv-owner/claim`,
+`identity/owner/kv/<b64>` and `sys/owner/backfill`'s `kv_paths` read
+paths the same way.
+
 ~~~
 GET    /v1/identity/sharing/by-target/{kind}/{target}/{grantee}
 PUT    /v1/identity/sharing/by-target/{kind}/{target}/{grantee}

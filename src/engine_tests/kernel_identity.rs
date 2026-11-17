@@ -370,9 +370,10 @@ async fn test_share_store_roundtrip_and_cascade() {
     let got = store.get_share(ShareTargetKind::KvSecret, "secret/foo", "ent-bob").await.unwrap();
     assert!(got.is_some(), "share should be readable by (kind, path, grantee)");
 
-    // KV-v2 path form resolves to the same canonical key.
+    // A key is taken as given (T499): `secret/data/foo` is the key of a
+    // secret named `data/foo`, not a second spelling of `foo`.
     let got_v2 = store.get_share(ShareTargetKind::KvSecret, "secret/data/foo", "ent-bob").await.unwrap();
-    assert!(got_v2.is_some(), "v2 `secret/data/foo` should canonicalize to `secret/foo`");
+    assert!(got_v2.is_none(), "`secret/data/foo` must not resolve to the share on `secret/foo`");
 
     // shared_capabilities returns the stored list.
     let caps = store.shared_capabilities(ShareTargetKind::KvSecret, "secret/foo", "ent-bob").await.unwrap();
@@ -976,7 +977,7 @@ async fn test_root_token_resource_write_captures_owner() {
     )
     .await;
     let kv_rec = store
-        .get_kv_owner("secret/data/gateway-password")
+        .get_kv_owner("secret/gateway-password")
         .await
         .unwrap()
         .expect("root-token KV write must capture owner record");
@@ -995,11 +996,8 @@ async fn test_kv_ghost_record_overwritten_by_next_write() {
     let module = core.module_manager().get_module::<IdentityModule>("identity").expect("identity module");
     let store = module.owner_store().expect("owner store");
 
-    store.plant_kv_ghost_for_test("secret/data/ghost-secret").await.unwrap();
-    assert!(
-        store.get_kv_owner("secret/data/ghost-secret").await.unwrap().is_none(),
-        "ghost record must report as Unowned",
-    );
+    store.plant_kv_ghost_for_test("secret/ghost-secret").await.unwrap();
+    assert!(store.get_kv_owner("secret/ghost-secret").await.unwrap().is_none(), "ghost record must report as Unowned",);
 
     let _ = test_write_api(
         &core,
@@ -1010,8 +1008,7 @@ async fn test_kv_ghost_record_overwritten_by_next_write() {
     )
     .await;
 
-    let rec =
-        store.get_kv_owner("secret/data/ghost-secret").await.unwrap().expect("write after ghost must stamp owner");
+    let rec = store.get_kv_owner("secret/ghost-secret").await.unwrap().expect("write after ghost must stamp owner");
     assert_eq!(rec.entity_id, "root");
 }
 
@@ -1045,7 +1042,7 @@ async fn test_owner_backfill_stamps_unowned_and_skips_owned() {
     let body = json!({
         "entity_id": "root",
         "resources": ["orphan-resource", "claimed-resource", "missing-slash/bad"],
-        "kv_paths": ["secret/data/legacy-kv", "secret/..//escape"],
+        "kv_paths": ["secret/legacy-kv", "secret/..//escape"],
         "dry_run": false,
     })
     .as_object()
@@ -1098,7 +1095,7 @@ async fn test_owner_backfill_stamps_unowned_and_skips_owned() {
         Some("alice-ent".to_string()),
         "already-owned resource must not be overwritten"
     );
-    let kv_rec = store.get_kv_owner("secret/data/legacy-kv").await.unwrap();
+    let kv_rec = store.get_kv_owner("secret/legacy-kv").await.unwrap();
     assert_eq!(kv_rec.map(|r| r.entity_id), Some("root".to_string()));
 }
 

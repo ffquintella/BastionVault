@@ -531,6 +531,11 @@ EXAMPLE ENTRY:
 
 ### Security
 
+#### Ownership and sharing: one owner and share key per KV secret
+
+- **Key a KV secret's owner record, shares and asset-group membership on its own name, so a secret named `data/x` no longer captures `x`** (T499, S47)
+  -- The policy layer and the owner, share and asset-group stores each stripped a `data`/`metadata` segment from a KV path, so `secret/data/x` and `x` shared one record: a `standard-user` writing a secret named `data/x` became owner of an unowned `x` and could read and update it, deleting `data/x` erased `x`'s owner, a secret written in a namespace named `team/data` was keyed as `team`'s secret of that name, and `destroy/` and `undelete/` were keyed as a secret called `destroy/<name>`, so any `standard-user` could destroy or undelete another user's versions. A secret is now keyed once on `<namespace>/<mount>/<name>` through the mount table (a kv-v2 path loses exactly one sub-command segment, a kv path none). **Data migration:** on the first unseal after the upgrade a datafix copies, for every existing KV secret whose key changes, the owner record and shares its old key held to the new key, so no secret changes hands, and rebuilds the asset-group indexes; until it completes keys keep their old form. Records written by exploiting the collision before the upgrade cannot be told apart and are kept: review the owners of secrets that have a `data/` or `metadata/` sibling. The owner and share endpoints, `sys/kv-owner/*` and `sys/owner/backfill`'s `kv_paths` now read `<mount>/<name>` verbatim, so `secret/data/x` there names a secret called `data/x`.
+
 #### Namespace transfer: import routes authorised against the real path
 
 - **Authorise the transfer's import routes against the item they write, cap them at 1000 secrets per resource and make an overwrite a checked import, with an ordinary delete only when the name is taken** (T494, S120)

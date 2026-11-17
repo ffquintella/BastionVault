@@ -258,8 +258,20 @@ impl IdentityService for IdentityModule {
 #[maybe_async::maybe_async]
 impl crate::kernel_api::pipeline::NsScopeDatafix for IdentityModule {
     async fn run_if_needed(&self) -> Result<Option<String>, RvError> {
-        let report = super::ns_scope_migrate::run_if_needed(&self.core).await?;
-        Ok(if report.skipped { None } else { Some(format!("{report:?}")) })
+        // The T499 KV key split runs even when the scope datafix fails: until
+        // it completes, KV keys keep their pre-T499 form.
+        let scope = super::ns_scope_migrate::run_if_needed(&self.core).await;
+        let split = super::kv_key_split_migrate::run_if_needed(&self.core).await;
+        let mut ran = Vec::new();
+        let scope = scope?;
+        if !scope.skipped {
+            ran.push(format!("{scope:?}"));
+        }
+        let split = split?;
+        if !split.skipped {
+            ran.push(format!("{split:?}"));
+        }
+        Ok((!ran.is_empty()).then(|| ran.join("; ")))
     }
 }
 

@@ -654,7 +654,13 @@ impl ResourceGroupStore {
         let Some(canonical) = Self::canonicalize_secret_path(path) else {
             return Ok(Vec::new());
         };
-        let key = Self::secret_index_key(&canonical);
+        self.groups_for_canonical_secret(&canonical, ns_path).await
+    }
+
+    /// [`Self::groups_for_secret`] for a path already canonical (a stored
+    /// member): looked up as given, never canonicalized a second time (T499).
+    async fn groups_for_canonical_secret(&self, canonical: &str, ns_path: &str) -> Result<Vec<String>, RvError> {
+        let key = Self::secret_index_key(canonical);
         match self.view(ns_path, Keyspace::SecretIndex).get(&key).await? {
             Some(e) => {
                 let names: Vec<String> = serde_json::from_slice(&e.value).unwrap_or_default();
@@ -674,7 +680,7 @@ impl ResourceGroupStore {
         let Some(canonical) = Self::canonicalize_secret_path(path) else {
             return Ok(Vec::new());
         };
-        let groups = self.groups_for_secret(&canonical, ns_path).await?;
+        let groups = self.groups_for_canonical_secret(&canonical, ns_path).await?;
         let group_view = self.view(ns_path, Keyspace::Group);
 
         for g_name in &groups {
@@ -694,11 +700,13 @@ impl ResourceGroupStore {
         Ok(groups)
     }
 
-    async fn add_to_secret_index(&self, secret_path: &str, group_name: &str, ns_path: &str) -> Result<(), RvError> {
-        let Some(canonical) = Self::canonicalize_secret_path(secret_path) else {
+    /// File `group_name` under the stored member `canonical`, as given: it was
+    /// canonicalized once on its way into the group record (T499).
+    async fn add_to_secret_index(&self, canonical: &str, group_name: &str, ns_path: &str) -> Result<(), RvError> {
+        if canonical.is_empty() {
             return Ok(());
-        };
-        let key = Self::secret_index_key(&canonical);
+        }
+        let key = Self::secret_index_key(canonical);
         let view = self.view(ns_path, Keyspace::SecretIndex);
         let mut names: Vec<String> = match view.get(&key).await? {
             Some(e) => serde_json::from_slice(&e.value).unwrap_or_default(),
@@ -712,16 +720,12 @@ impl ResourceGroupStore {
         view.put(&StorageEntry { key, value }).await
     }
 
-    async fn remove_from_secret_index(
-        &self,
-        secret_path: &str,
-        group_name: &str,
-        ns_path: &str,
-    ) -> Result<(), RvError> {
-        let Some(canonical) = Self::canonicalize_secret_path(secret_path) else {
+    /// Drop `group_name` from the stored member `canonical`, as given (T499).
+    async fn remove_from_secret_index(&self, canonical: &str, group_name: &str, ns_path: &str) -> Result<(), RvError> {
+        if canonical.is_empty() {
             return Ok(());
-        };
-        let key = Self::secret_index_key(&canonical);
+        }
+        let key = Self::secret_index_key(canonical);
         let view = self.view(ns_path, Keyspace::SecretIndex);
         let mut names: Vec<String> = match view.get(&key).await? {
             Some(e) => serde_json::from_slice(&e.value).unwrap_or_default(),

@@ -79,6 +79,15 @@ The canonicalization is heuristic: a mount literally named `data` or
 `metadata` would be misclassified. This is documented and accepted for
 v1 given how unusual such mount names are.
 
+The member is canonicalized exactly once, on its way into the group
+record; the secret index files it under that stored form as is (T499).
+Before T499 the index canonicalized it a second time, so a member
+`secret/data/data/x` (the secret `data/x`) was indexed as `secret/x`. The
+T499 datafix rebuilds every scope's indexes from the group records once.
+A `destroy/` or `undelete/` request looks the secret up by its `data/`
+path. Not fixed: on a kv (v1) mount the heuristic still reads `kv/data/x`
+as `kv/x` (T507).
+
 ### Storage
 
 All data is encrypted behind the vault barrier via the system view.

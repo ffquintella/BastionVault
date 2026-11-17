@@ -2103,11 +2103,12 @@ impl SystemBackend {
         // child namespace is active reassigns the same record the owner-read,
         // ACL, and share paths use. The admin GUI sends the mount-relative
         // path with the active namespace in the request header.
-        let key = crate::modules::identity::owner_store::OwnerStore::canonicalize_kv_path_scoped(
+        let key = crate::modules::identity::OwnerStore::client_kv_key(
             &path,
             req.namespace_path.as_deref(),
+            store.kv_keys_split(),
         )
-        .unwrap_or_else(|| path.clone());
+        .ok_or_else(|| bv_error_response_status!(400, "invalid KV path"))?;
         store.set_kv_owner(&key, &new_owner).await?;
 
         let mut data = Map::new();
@@ -2144,11 +2145,12 @@ impl SystemBackend {
         // Claim under the namespace-qualified key so the "Claim ownership"
         // action captures the record the badge/ACL/share paths read (the GUI
         // sends the mount-relative path with the active namespace header).
-        let key = crate::modules::identity::owner_store::OwnerStore::canonicalize_kv_path_scoped(
+        let key = crate::modules::identity::OwnerStore::client_kv_key(
             &path,
             req.namespace_path.as_deref(),
+            store.kv_keys_split(),
         )
-        .unwrap_or_else(|| path.clone());
+        .ok_or_else(|| bv_error_response_status!(400, "invalid KV path"))?;
 
         if let Some(existing) = store.get_kv_owner(&key).await? {
             // Refuse to overwrite. Use sys/kv-owner/transfer (admin)
@@ -3247,9 +3249,8 @@ impl SystemBackend {
     /// Request fields:
     ///   `entity_id` (required, non-empty) — owner to stamp.
     ///   `resources` (optional array) — resource names.
-    ///   `kv_paths` (optional array)  — KV paths (any of the v1/v2 forms
-    ///                                   that `OwnerStore::canonicalize_kv_path`
-    ///                                   accepts).
+    ///   `kv_paths` (optional array)  — KV secrets as `<mount>/<name>`
+    ///                                   (`OwnerStore::client_kv_key`, T499).
     ///   `dry_run` (optional bool)    — report-only when true.
     ///
     /// Response: per-kind counts (`stamped` / `already_owned` / `invalid`).
@@ -3342,9 +3343,10 @@ impl SystemBackend {
             // `canonicalize_kv_path_scoped` returns None for malformed input
             // (empty segments, `..`, etc.); we surface those separately so the
             // operator sees exactly which paths were skipped.
-            let Some(key) = crate::modules::identity::owner_store::OwnerStore::canonicalize_kv_path_scoped(
+            let Some(key) = crate::modules::identity::OwnerStore::client_kv_key(
                 path,
                 req.namespace_path.as_deref(),
+                store.kv_keys_split(),
             ) else {
                 kv_invalid.push(path.clone());
                 continue;

@@ -14,10 +14,8 @@
 //! reverse-lookup directions are O(1) and the path is recoverable for
 //! audit tooling.
 //!
-//! Canonicalization: KV paths use the same canonicalizer as `OwnerStore`
-//! (KV-v2 `data/` / `metadata/` segments are stripped) so the share on
-//! `secret/foo/bar` keys identically whether a grantee reads it via v1
-//! or v2. Resource names are lowercased.
+//! Keys: a KV target is the owner store's key (`<ns>/<mount>/<name>`), taken
+//! as given and never transformed again (T499). Resource names are lowercased.
 
 use std::sync::Arc;
 
@@ -219,9 +217,9 @@ impl ShareStore {
         Ok(Arc::new(Self { primary_view, by_grantee_view, history_view }))
     }
 
-    /// Canonicalize a share target's path. Uses the same rules as
-    /// `OwnerStore::canonicalize_kv_path` for KV paths so the share on
-    /// `secret/foo/bar` matches whether the grantee hits v1 or v2.
+    /// Canonicalize a share target's path. A KV target is already the owner
+    /// store's key and is only checked (`OwnerStore::checked_kv_key`), so a
+    /// key passed back in resolves to itself (T499).
     ///
     /// Name-keyed kinds (resource, asset group, file) are lowercased and
     /// trimmed. They accept either a bare root name (`db1`) or the
@@ -236,7 +234,7 @@ impl ShareStore {
     /// could walk out of its own namespace's key space.
     pub fn canonicalize(kind: ShareTargetKind, raw: &str) -> Option<String> {
         match kind {
-            ShareTargetKind::KvSecret => OwnerStore::canonicalize_kv_path(raw),
+            ShareTargetKind::KvSecret => OwnerStore::checked_kv_key(raw),
             ShareTargetKind::Resource | ShareTargetKind::AssetGroup | ShareTargetKind::File => {
                 Self::canonicalize_name(raw)
             }
@@ -574,6 +572,49 @@ impl ShareStore {
         }
 
         Ok(moved)
+    }
+
+    /// Write `shares` (another target's records) under `new_path`, keeping
+    /// grantee, capabilities, expiry and grant provenance; history op `copy`.
+    /// Migration support only (the T499 datafix). Returns how many it wrote.
+    pub(crate) async fn copy_shares_to(
+        &self,
+        kind: ShareTargetKind,
+        shares: &[SecretShare],
+        new_path: &str,
+        actor_entity_id: &str,
+    ) -> Result<usize, RvError> {
+        let new_canonical =
+            Self::canonicalize(kind, new_path).ok_or_else(|| bv_error_string!("invalid new share target_path"))?;
+        let new_hash = Self::target_hash(kind, &new_canonical);
+        for share in shares {
+            let grantee_kind = ShareGranteeKind::parse(&share.grantee_kind).unwrap_or(ShareGranteeKind::Entity);
+            let grantee = share.grantee_entity_id.clone();
+            let mut copied = share.clone();
+            copied.target_path = new_canonical.clone();
+            let key = Self::primary_key(&new_hash, &grantee);
+            self.primary_view.put(&StorageEntry { key, value: serde_json::to_vec(&copied)? }).await?;
+            let pointer = ShareByGranteePointer {
+                target_kind: copied.target_kind.clone(),
+                target_path: new_canonical.clone(),
+                grantee_kind: copied.grantee_kind.clone(),
+            };
+            let key = Self::by_grantee_key(grantee_kind, &grantee, &new_hash);
+            self.by_grantee_view.put(&StorageEntry { key, value: serde_json::to_vec(&pointer)? }).await?;
+            let hist = ShareHistoryEntry {
+                ts: Utc::now().to_rfc3339(),
+                actor_entity_id: actor_entity_id.to_string(),
+                op: SHARE_OP_COPY.to_string(),
+                target_kind: copied.target_kind.clone(),
+                target_path: new_canonical.clone(),
+                grantee_kind: copied.grantee_kind.clone(),
+                grantee_entity_id: grantee,
+                capabilities: copied.capabilities.clone(),
+                expires_at: copied.expires_at.clone(),
+            };
+            let _ = self.append_history(hist).await;
+        }
+        Ok(shares.len())
     }
 
     /// Every distinct canonical target path of `kind` that currently has at
