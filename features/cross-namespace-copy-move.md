@@ -164,10 +164,16 @@ imports again.
   timestamps from the source; the history entry marks the arrival.
 - The two import routes are **internal-only**: the orchestrator marks its own
   import sub-requests in-process (`Request::ctx`, which HTTP cannot set), and
-  any other request to them, over HTTP or in-process, is answered as an
-  unknown route (404) by the policy layer and again by the handler, before
-  its body is read or anything is looked up. A client therefore cannot write
-  history, origins or version authors of its choosing. As defence in depth,
+  any other request to them, over HTTP or in-process, is refused as an
+  unknown route there: the ACL and the token's namespace binding run on the
+  literal path (403 for a token that may not write there), then the policy
+  layer, and again the handler, answer 404. The body is never read and the
+  item never looked up, so the answer does not reveal whether the mount or
+  the item exists. A client therefore cannot write history, origins or
+  version authors of its choosing. Any Rust code linked into the server
+  process can set the marker: it guards against clients (HTTP, MCP,
+  plugins), not against in-process code, which is trusted (WASM and process
+  plugins cannot set it). As defence in depth,
   the marked imports are authorised against the **real** item path (the
   policy layer maps `<mount>/v2/transfer/import/<p>` to the path a normal
   write is checked on), so deny rules, owner and share scopes and per-secret
@@ -230,16 +236,20 @@ imports again.
 - **The import routes are internal-only.**
   `resources/v2/transfer/import/<name>` and `<kv-mount>/v2/transfer/import/<p>`
   exist for the orchestrator and cannot be called directly: any request the
-  orchestrator did not mark is answered 404, as an unknown route, whatever
-  the caller's rights and whether or not the item exists. The orchestrator's
-  own imports are refuse-only and ACL-checked against the real path.
+  orchestrator did not mark is answered as an unknown route at that place
+  (404 for a token otherwise allowed to write there, 403 otherwise), never
+  revealing whether the mount or the item exists. The marker is trusted
+  in-process: any Rust code linked into the server can set it, no client
+  (HTTP, MCP, WASM or process plugin) can. The orchestrator's own imports
+  are refuse-only and ACL-checked against the real path; one its import
+  route refuses as an unknown route is reported as a 500 internal error.
 
 ## Phases
 
 | Phase | Content | Status |
 |---|---|---|
 | 1 | Engine-side import of a resource and a KV secret with versions and history, collision handling | Done |
-| 2 | Import routes authorised against the real item path (ACL, owner and share scopes) and internal-only (404 unless the orchestrator marked the request) | Done |
+| 2 | Import routes authorised against the real item path (ACL, owner and share scopes) and internal-only (an unknown route unless the orchestrator marked the request) | Done |
 | 3 | Share planner, `dry_run`, warnings | Done |
 | 4 | Orchestrator and `POST /v2/sys/namespace-transfer/{copy\|move}`: rights checks, refuse / rename / overwrite, verified move, shares, asset-group membership, files | Done |
 | 5 | `bvault transfer copy\|move` | Done |

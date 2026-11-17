@@ -174,6 +174,9 @@ pub const INTERNAL_TRANSFER_IMPORT_CTX: &str = "bv.transfer.internal-import";
 /// Marks the namespace-transfer orchestrator's own import sub-request (T494).
 /// `Request::ctx` is set only in-process, never from HTTP, so the transfer
 /// import routes answer a request without this marker as an unknown route.
+/// Any Rust code linked into the server process can set it: it guards against
+/// clients (HTTP, MCP, plugins), not in-process code, which is trusted (WASM
+/// and process plugins cannot set it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InternalTransferImport;
 

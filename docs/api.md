@@ -1062,11 +1062,16 @@ an overwrite; the server does not return that code.
 routes, `resources/v2/transfer/import/<name>` and
 `<kv-mount>/v2/transfer/import/<path>`. They are **internal-only**: the
 transfer marks its own import sub-requests in-process, and any other request
-to either path, over HTTP (`/v1` or `/v2`) or in-process, is answered as an
-unknown route (404) before its body is read or anything is looked up,
-whatever the caller's rights and whether or not the item exists. A client
-therefore cannot write an item with a history, origin or version author of
-its choosing. The transfer's own imports take the item as the transfer read
+to either path, over HTTP (`/v1` or `/v2`) or in-process, is answered exactly
+as an unknown route at that place: 403 when the token's policies or its
+namespace binding do not let it write the literal path, otherwise 404. Its
+body is never read and the item never looked up, so the answer does not
+reveal whether the mount or the item exists. A client therefore cannot write
+an item with a history, origin or version author of its choosing. The marker
+is trusted in-process: any Rust code linked into the server can set it, no
+client (HTTP, MCP, WASM or process plugin) can. An import the route refuses
+as an unknown route fails the transfer with a 500 internal error, never a
+404. The transfer's own imports take the item as the transfer read
 it (versions with their numbers and timestamps, history, settings), refuse
 a name that is taken (`on_conflict` accepts `refuse` only; rename and
 overwrite are the transfer's own doing, see above) and carry at most 1000
