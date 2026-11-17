@@ -118,7 +118,7 @@ async fn seed(core: &Arc<Core>, root: &str) -> IdentityStores {
     }
     let entities = EntityStore::new(core.as_ref()).await.unwrap();
     let groups = GroupStore::new(core.as_ref()).await.unwrap();
-    IdentityStores { entities, groups }
+    IdentityStores { entities, groups, owners: None }
 }
 
 /// Regression (4b review): a fault while checking attached files after a

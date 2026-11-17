@@ -212,6 +212,13 @@ pub(crate) fn names_no_secret(router: &Router, path: &str) -> bool {
     }
 }
 
+/// Whether `item`'s owner and share key, as a request to `path` derives it,
+/// changes when the T499 switch happens (T511): a record written under the old
+/// key before then would be left behind. See `docs/api.md` for which names.
+pub(crate) fn key_moves(item: &KvItem, path: &str, ns: Option<&str>) -> bool {
+    owner_key(Some(item), path, ns, false) != owner_key(Some(item), path, ns, true)
+}
+
 /// The owner and share key of the secret `path` addresses. With `split` (the
 /// T499 datafix has run) it is [`KvItem::key`]; before that, and for any
 /// path that is not a KV secret, the pre-T499 key, so records keep resolving.
@@ -275,6 +282,37 @@ mod tests {
         let list = v2("metadata/team/").unwrap();
         assert!(list.folder() && list.key().as_deref() == Some("secret/team"));
         assert!(KvItem::from_route("kv/", "kv", "").unwrap().is_none(), "the kv root list names no secret");
+    }
+
+    /// Which request paths move at the T499 switch, as `docs/api.md` lists
+    /// them: `(router mount, engine, rel, namespace, moves)`.
+    #[test]
+    fn the_keys_that_move_at_the_switch() {
+        let cases = [
+            ("secret/", "kv-v2", "data/x", None, false),
+            ("secret/", "kv-v2", "x", None, false),
+            ("secret/", "kv-v2", "data/data/x", None, true),
+            ("secret/", "kv-v2", "metadata/metadata/x", None, true),
+            ("secret/", "kv-v2", "destroy/data/x", None, true),
+            ("secret/", "kv-v2", "data/data", None, true),
+            ("secret/", "kv-v2", "data/database/x", None, false),
+            ("team/kv/", "kv-v2", "data/x", None, true),
+            ("team/kv/", "kv-v2", "metadata/x", None, true),
+            ("team/kv/", "kv-v2", "undelete/x", None, true),
+            ("team/kv/", "kv-v2", "x", None, false),
+            ("team/secret/", "kv-v2", "data/data/x", Some("team"), false),
+            ("team/kv/x/", "kv-v2", "data/y", Some("team"), true),
+            ("team/data/secret/", "kv-v2", "x", Some("team/data"), true),
+            ("team/data/secret/", "kv-v2", "data/x", Some("team/data"), true),
+            ("kv/", "kv", "x", None, false),
+            ("kv/", "kv", "data/x", None, true),
+            ("team/kv/", "kv", "data/x", Some("team"), true),
+            ("a/b/", "kv", "data/x", None, false),
+        ];
+        for (mount, engine, rel, ns, moves) in cases {
+            let item = KvItem::from_route(mount, engine, rel).unwrap().unwrap();
+            assert_eq!(key_moves(&item, &format!("{mount}{rel}"), ns), moves, "{mount}{rel} in {ns:?}");
+        }
     }
 
     #[test]

@@ -239,6 +239,12 @@ cleans up its owner, shares and groups) and imports again.
   (`kv-environment-overrides-normalized`).
 - **Group membership updates are read-modify-write**: a concurrent edit to
   that asset group between the read and the write can be lost.
+- **A move waits for the KV key switch** (T511): while the KV key-split
+  datafix is pending, a move whose source's owner and share key moves at the
+  switch (`docs/api.md`, "KV key-split datafix pending") is refused with a
+  503 before anything is written, dry run included, because its source
+  delete would be refused; a copy works, and so does the move once the
+  datafix has completed.
 - **A KV secret whose path has `data` or `metadata` second loses its
   asset-group membership** (T510): the asset-group store strips a
   `data`/`metadata` second segment from a KV path, so it reads

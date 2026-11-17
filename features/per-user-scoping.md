@@ -617,14 +617,26 @@ another such endpoint:
   marker a record written under a pre-T499 key that the switch moves
   would be left behind, or read as another secret's, afterwards. While the
   marker is unset, an allowed KV write or delete whose old and new keys
-  differ (`kv_target::owner_key` with and without the switch) is refused
-  with a 503 after the ACL and the namespace binding
-  (`PolicyStore::refuse_moving_key`), and so are an owner claim or
-  transfer, a backfill stamp and a share grant or revoke on such a name
-  (`OwnerStore::client_kv_key_for_write`). Root is refused too. This also
-  closes the same gap for a pass resumed from a saved plan. Reads, names
-  whose key does not move and other engines are unaffected;
-  `sys/capabilities-self` still answers as if allowed.
+  differ (`kv_target::key_moves`) is refused with a 503 after the ACL and
+  the namespace binding (`PolicyStore::refuse_moving_key`, through
+  `moving_key_pending`), and so are an owner claim or transfer, a backfill
+  stamp and a share grant or revoke on such a client name
+  (`OwnerStore::client_kv_key_for_write`), and a namespace move of such a
+  source, before it writes anything. Root is refused too. The moving names:
+  in the root namespace, on a one-segment kv or kv-v2 mount, a name that is
+  `data`/`metadata` or starts with `data/`/`metadata/`; on a one-segment kv
+  (v1) mount in any namespace, the same names; on a kv-v2 mount with a
+  multi-segment path, every secret through `data/`, `metadata/`, `destroy/`
+  or `undelete/` (not the version 2 short form); in a namespace like
+  `team/data`, every secret. Client names move when the mount path is one
+  segment and the name is or starts with `data`/`metadata` (any
+  namespace), or in a namespace like `team/data`. Pinned by
+  `the_keys_that_move_at_the_switch` and
+  `the_client_names_that_move_at_the_switch`. This also closes the gap for
+  a pass resumed from a saved plan. Reads are never refused;
+  `sys/capabilities-self` still answers as if allowed. Runbook when the
+  retry gives up: `docs/api.md`, "KV key-split datafix pending" (fix the
+  cause, seal and unseal; never write the marker by hand).
 - **First-write carve-out for the `owner` scope.** A strict "target's
   owner must equal caller" check would make it impossible to create a
   new object under an owner-only policy (no owner exists yet). The

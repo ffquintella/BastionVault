@@ -1171,3 +1171,34 @@ async fn a_namespace_without_rights_answers_alike_whether_it_exists() {
     let kept = get(&core, &root, Some("tenant-x"), "resources/resources/srv0").await.unwrap();
     assert_eq!(kept["hostname"], json!("h2.example"), "tenant-x's item is untouched");
 }
+
+/// While the KV key switch is pending (T511), a move whose source key moves
+/// at the switch could not delete its source, so it is refused before the
+/// import, dry run included, and nothing is written; a copy of the same
+/// secret works, and once the switch is done the move does too.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn a_move_whose_source_key_moves_is_refused_before_it_writes_while_the_switch_is_pending() {
+    use crate::modules::identity::kv_key_split_migrate;
+
+    let (_bvault, core, root) = vault("ns_transfer_pending_key_switch").await;
+    write(&core, &root, "secret/data/data/x", json!({ "data": { "v": "kv-1" } })).await;
+    kv_key_split_migrate::reset_for_test(core.as_ref()).await.unwrap();
+    let moving = |to: &str, extra: Value| body("kv-secret", "secret", ("", "data/x"), ("dst", to), extra);
+
+    let dry = transfer(&core, &root, "move", moving("x", json!({ "dry_run": true }))).await;
+    assert_eq!(status(&dry), 503, "the dry run reports the refusal: {dry:?}");
+    let r = transfer(&core, &root, "move", moving("x", json!({}))).await;
+    assert_eq!(status(&r), 503, "{r:?}");
+    assert!(message(&r).contains("nothing was written"), "{}", message(&r));
+    assert!(get(&core, &root, Some("dst"), "secret/data/x").await.is_none(), "the destination is untouched");
+    assert!(get(&core, &root, None, "secret/data/data/x").await.is_some(), "the source is untouched");
+
+    let out = result(transfer(&core, &root, "copy", moving("x", json!({}))).await);
+    assert_eq!(out["transferred"]["versions"], json!(1), "a copy deletes nothing: {out}");
+    assert!(get(&core, &root, Some("dst"), "secret/data/x").await.is_some());
+
+    kv_key_split_migrate::run_if_needed(core.as_ref()).await.unwrap();
+    let out = result(transfer(&core, &root, "move", moving("y", json!({}))).await);
+    assert_eq!(out["destination"]["path"], json!("y"), "{out}");
+    assert!(get(&core, &root, None, "secret/data/data/x").await.is_none(), "the move deleted its source");
+}

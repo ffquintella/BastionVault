@@ -130,7 +130,10 @@ async fn retry(core: Weak<Core>, first: Duration, (failures, wakes): (Arc<Atomic
     }
     log::error!(
         target: "security",
-        "kv key split datafix gave up after {MAX_RETRIES} background retries: KV owner and share keys keep their \
-         pre-T499 form on this node (a secret named data/x shares x's record) until the next unseal: {last_error}"
+        "kv key split datafix gave up after {MAX_RETRIES} background retries: until a pass completes, writes, \
+         deletes, owner changes and shares on KV secrets whose key moves at the switch answer 503 on every node, \
+         and the pre-T499 keys stay in use (a secret named data/x shares x's record); find the cause in the \
+         migration warnings above, fix it, then seal and unseal a node to run the pass again (docs/api.md, \
+         \"KV key-split datafix pending\"): {last_error}"
     );
 }

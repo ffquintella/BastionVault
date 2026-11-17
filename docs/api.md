@@ -889,12 +889,9 @@ reachable only with storage tools. If the T499 key-switch marker
 (`identity/sharing/...`, whatever the share's kind) get a 500, root
 included; rewrite the marker as `1`, never delete it
 (`features/per-user-scoping.md`).
-While that marker is unset (the datafix has not completed, T511), a KV
-write or delete, and an owner claim, transfer, backfill stamp or share
-grant or revoke, on a secret whose key changes when it completes (a name
-starting with `data/` or `metadata/`, a namespace whose second segment is
-one of them) is refused with a 503 for every caller; retry once the
-datafix, which retries in the background, has completed.
+While that marker is unset, writes, deletes, owner changes and shares on
+the secrets whose key moves at the switch answer 503: see "KV key-split
+datafix pending" below for which ones and what to do.
 
 A KV path that names no secret has no owner, share or asset group
 (T506): a kv-v2 mount's `config`, `data/`, `destroy/` or `undelete/`
@@ -957,6 +954,49 @@ surface when at least one of the caller's policies carries
   ]
 }
 ~~~
+
+### KV key-split datafix pending
+
+The T499 datafix gives every KV secret an owner and share key of its own.
+Until its marker (`sys/owner/meta/kv-key-split-version`) is set, every node
+keeps the pre-T499 keys; after a failed unseal pass it is retried in the
+background (five times, 5 to 80 s apart) and again at every unseal (T511).
+While it is pending, a request that would record an owner or a share under a
+key the switch moves is refused with a 503, for every caller, root included:
+
+- KV writes and deletes (through `data/`, `metadata/`, `destroy/`,
+  `undelete/` or the version 2 short form) of:
+  - on a kv or kv-v2 mount whose path is one segment (`secret/`, `kv/`) in
+    the root namespace, a secret named `data` or `metadata` or whose name
+    starts with `data/` or `metadata/`;
+  - on a kv (version 1) mount whose path is one segment, in any namespace,
+    the same names;
+  - on a kv-v2 mount whose path has more than one segment (`team/kv/`), in
+    any namespace, every secret, through `data/`, `metadata/`, `destroy/` or
+    `undelete/` (the version 2 short form `team/kv/<name>` is not refused);
+  - in a namespace whose path has `data` or `metadata` as its second segment
+    (`team/data`), every KV secret, through any route.
+- Owner claims and transfers (`sys/kv-owner/*`), `sys/owner/backfill` stamps
+  (not a dry run) and share grants and revokes naming `<mount>/<name>` where
+  the mount path is one segment and the name is `data` or `metadata` or
+  starts with `data/` or `metadata/` (any namespace), or any name in a
+  namespace like `team/data`.
+- A namespace-transfer `move` whose source is such a secret, refused before
+  anything is written, dry run included; a copy is unaffected.
+
+Reads are never refused, and every other secret and engine is unaffected.
+After an unseal whose pass completes there is no such window.
+
+When the background retry gives up, the `security` log says `kv key split
+datafix gave up` and the names above stay read-only for everyone until a
+pass completes. Find the cause in the `migration` warnings (`kv key split
+datafix retry N of 5 failed: ...`, or the unseal's `owner/share ns-scope
+datafix failed`), fix it (an unreadable namespace mount table, a storage
+fault), then seal and unseal a node: the pass runs at unseal and every node
+follows the replicated marker. To stop writes elsewhere meanwhile, a deny
+policy works as usual. Never write the marker by hand: it would switch every
+node to the new keys without moving any record, leaving the moved secrets
+unowned, so any owner-scoped user could take one with a first write.
 
 ### Namespace transfer (copy and move, `v2` only)
 

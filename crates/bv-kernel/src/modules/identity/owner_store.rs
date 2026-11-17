@@ -321,7 +321,8 @@ impl OwnerStore {
         RvError::ErrResponseStatus(
             503,
             "this KV secret's owner and share key changes when the pending KV key-split datafix completes, so \
-             writes, deletes, owner changes and shares on it are refused until then; retry later"
+             writes, deletes, owner changes and shares on it are refused until it has; it is retried in the \
+             background and at every unseal (docs/api.md, \"KV key-split datafix pending\")"
                 .to_string(),
         )
     }
@@ -722,6 +723,27 @@ mod scoped_key_tests {
         let ns = Some("team/data");
         assert_eq!(OwnerStore::legacy_kv_key("team/data/secret/data/x", ns).as_deref(), Some("team/secret/x"));
         assert_eq!(OwnerStore::legacy_kv_key("secret/a/../b", None), None);
+    }
+
+    // T511: which client names (`<mount>/<name>`) an owner or share write
+    // refuses while the switch is pending, as `docs/api.md` lists them.
+    #[test]
+    fn the_client_names_that_move_at_the_switch() {
+        let cases = [
+            ("secret/x", None, false),
+            ("secret/data/x", None, true),
+            ("secret/metadata", None, true),
+            ("secret/database/x", None, false),
+            ("secret/data/x", Some("team"), true),
+            ("secret/x", Some("team"), false),
+            ("team/kv/data/x", None, false),
+            ("secret/x", Some("team/data"), true),
+        ];
+        for (path, ns, moves) in cases {
+            let refused = OwnerStore::client_kv_key_for_write(path, ns, false).is_err();
+            assert_eq!(refused, moves, "{path} in {ns:?}");
+            assert!(OwnerStore::client_kv_key_for_write(path, ns, true).is_ok(), "never once split: {path}");
+        }
     }
 
     // T499: a client key is the secret's `<ns>/<mount>/<name>` verbatim, and a

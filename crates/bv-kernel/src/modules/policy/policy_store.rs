@@ -3244,6 +3244,22 @@ fn unowned_import(target: &transfer_target::ImportTarget, resp: Option<&Response
     RvError::ErrResponseStatus(500, message)
 }
 
+/// Whether a write or delete of `path` would record under a key the pending
+/// T499 switch moves (`kv_target::key_moves`, T511): false for a path that is
+/// not a KV item and once the marker is set. The policy layer refuses such a
+/// request, and a namespace move refuses one before it writes anything.
+pub(crate) async fn moving_key_pending(
+    router: &Router,
+    owners: &OwnerStore,
+    path: &str,
+    ns_path: Option<&str>,
+) -> Result<bool, RvError> {
+    let Ok(Some(item)) = kv_target::resolve(router, path) else {
+        return Ok(false);
+    };
+    Ok(!owners.kv_keys_split().await? && kv_target::key_moves(&item, path, ns_path))
+}
+
 /// [`kv_key`] with the T499 switch already read.
 fn kv_key_with(router: &Router, split: bool, req_path: &str, ns_path: Option<&str>) -> Option<String> {
     let item = kv_target::resolve(router, req_path).ok()?;
@@ -3895,7 +3911,7 @@ impl PolicyStore {
             return Err(kv_target::ambiguous());
         }
         match item {
-            Some(item) => self.refuse_moving_key(req, &item).await,
+            Some(_) => self.refuse_moving_key(req).await,
             None => Ok(()),
         }
     }
@@ -3905,19 +3921,14 @@ impl PolicyStore {
     /// `post_route` would stamp, forget or cascade records under a key the
     /// datafix may never move, and its background retry runs while the node
     /// serves. Other paths, and every request once the marker is set, pass.
-    async fn refuse_moving_key(&self, req: &Request, item: &kv_target::KvItem) -> Result<(), RvError> {
+    async fn refuse_moving_key(&self, req: &Request) -> Result<(), RvError> {
         if !matches!(req.operation, Operation::Write | Operation::Delete) {
             return Ok(());
         }
         let Some(owners) = self.owner_store() else {
             return Ok(());
         };
-        if owners.kv_keys_split().await? {
-            return Ok(());
-        }
-        let ns = req.namespace_path.as_deref();
-        let old = kv_target::owner_key(Some(item), &req.path, ns, false);
-        if old == kv_target::owner_key(Some(item), &req.path, ns, true) {
+        if !moving_key_pending(&self.router, &owners, &req.path, req.namespace_path.as_deref()).await? {
             return Ok(());
         }
         if let Some(core) = self.core.upgrade() {

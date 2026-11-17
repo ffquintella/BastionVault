@@ -15,9 +15,9 @@ use crate::{
     kernel_api::{namespace::normalize_path, VaultCtx},
     logical::{Operation, Request, Response},
     modules::{
-        identity::{EntityStore, GroupStore},
-        namespace::router::{is_header_scoped_path, NAMESPACE_HEADER},
-        policy::TRANSFER_IMPORT_MAX_SECRETS,
+        identity::{EntityStore, GroupStore, OwnerStore},
+        namespace::router::{is_header_scoped_path, qualify_path_in_namespace, NAMESPACE_HEADER},
+        policy::{policy_store::moving_key_pending, TRANSFER_IMPORT_MAX_SECRETS},
     },
 };
 
@@ -144,6 +144,8 @@ pub struct TransferResult {
 pub struct IdentityStores {
     pub entities: Arc<EntityStore>,
     pub groups: Arc<GroupStore>,
+    /// For the pending T499 key switch (T511); `None` checks nothing.
+    pub owners: Option<Arc<OwnerStore>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1169,6 +1171,29 @@ fn after_import(e: RvError, written: &Place, what: &str) -> RvError {
     RvError::ErrResponseStatus(status, message)
 }
 
+/// A move whose source delete the policy layer would refuse while the T499
+/// key switch is pending (T511) is refused before anything is written, dry run
+/// included: the same predicate, on the path and namespace the delete uses.
+#[maybe_async::maybe_async]
+async fn refuse_moving_source(core: &dyn VaultCtx, plan: &Plan, owners: Option<&OwnerStore>) -> Result<(), RvError> {
+    let (Some(owners), Kind::KvSecret) = (owners, plan.kind) else {
+        return Ok(());
+    };
+    let src = &plan.source;
+    let path = qualify_path_in_namespace(&src.ns, &src.item(plan.kind));
+    let ns = (!src.ns.is_empty()).then_some(src.ns.as_str());
+    if !moving_key_pending(&core.router(), owners, &path, ns).await? {
+        return Ok(());
+    }
+    let message = format!(
+        "{} cannot be moved yet, so nothing was written: its owner and share key changes when the pending KV \
+         key-split datafix completes, and until then its delete is refused; copy it instead, or move it once the \
+         datafix has completed (docs/api.md, \"KV key-split datafix pending\")",
+        src.display()
+    );
+    Err(RvError::ErrResponseStatus(503, message))
+}
+
 /// Re-read the source and delete it only if it still matches what was copied.
 /// Any failure leaves the complete copy and says so.
 #[maybe_async::maybe_async]
@@ -1234,6 +1259,7 @@ pub async fn run_transfer(
     if plan.op == TransferOp::Move {
         let origin = [(plan.source.item(plan.kind), Right::Delete)];
         require(core, caller, &plan.source.ns, &origin, "a move").await?;
+        refuse_moving_source(core, &plan, stores.and_then(|s| s.owners.as_deref())).await?;
     }
 
     let written = match plan.dry_run {
