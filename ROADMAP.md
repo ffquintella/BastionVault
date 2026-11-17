@@ -327,6 +327,8 @@ Next-up list recorded before the migration, in its order:
   - note: the member redaction on `resource-group/groups/<name>` probed `resources/resources/<member>` without the `<ns>/` prefix a tenant policy must carry, so every member of every group read as `<hidden>` for a non-owner, non-admin tenant caller and the GUI built no group chips. The probe is now namespace-qualified and passes the namespace to the policy evaluator; pinned by `test_asset_group_member_redaction_honors_namespace_prefix`.
 - [x] T469 List a group to a tenant caller who can read one of its members, so groups appear in a namespace's Resources page (S47, S2)
   - note: `resource-group/groups/` listed a group only to an admin, its owner or a grantee, so a tenant user whose policy reads the resources but who owns no group and holds no share got an empty list and the GUI had nothing to read. The list now also shows a group when the caller can `Read` at least one of its members, using the same namespace-qualified probe as the member redaction; pinned by the list assertions in `test_asset_group_member_redaction_honors_namespace_prefix`.
+- [ ] T494 Copy and move resources and KV secrets between namespaces with versions, history and validated shares (S120, S47)
+  - initiative: [Cross-namespace copy and move](features/cross-namespace-copy-move.md) — design approved 2026-11-17, not started.
 
 ## [M6] Authentication
 > outcome: Done when every listed auth method (token, AppID, userpass, cert, OIDC, SAML, FIDO2, FerroGate) is shipped and workforce identity can be brokered downstream.
@@ -761,3 +763,4 @@ Next-up list recorded before the migration, in its order:
 | S117 | Feature: Raft Timeout Tuning — operator-set timeouts for a two-node cluster on a lossy inter-site link | features/raft-timeout-tuning.md |
 | S118 | Feature: Raft Connection Pool — reuse the peer stream instead of opening one per linearizable read | features/raft-connection-pool.md |
 | S119 | Feature: Rustion-routed agent exec — MCP `ssh_exec` through a Rustion bastion | features/rustion-agent-exec.md |
+| S120 | Feature: Cross-namespace copy and move of resources and secrets (versions, history, validated shares) | features/cross-namespace-copy-move.md |
