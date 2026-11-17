@@ -102,12 +102,17 @@ impl HttpVaultLink {
 
 /// `DELETE <address>/<path>` returning only the HTTP status. For endpoints
 /// whose success answer is an empty body: `api::Client::request` parses JSON
-/// unconditionally and would report that success as an error.
+/// unconditionally and would report that success as an error. Carries the
+/// client's extra headers (`--header`) as `Client::request` does.
 pub(super) fn delete_status(client: &Client, path: &str) -> Result<u16, String> {
-    let request = http::Request::builder()
+    let mut builder = http::Request::builder()
         .method("DELETE")
         .uri(format!("{}/{}", client.address.trim_end_matches('/'), path))
-        .header("Accept", "application/json")
+        .header("Accept", "application/json");
+    for (name, value) in client.extra_headers() {
+        builder = builder.header(name, value);
+    }
+    let request = builder
         .header("X-BastionVault-Token", &client.token)
         .body(())
         .map_err(|e| format!("could not build the request: {e}"))?;

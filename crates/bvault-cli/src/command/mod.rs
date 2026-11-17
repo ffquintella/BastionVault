@@ -186,9 +186,10 @@ every request the CLI sends to the server (not to the cluster-discovery health
 probes). The header carrying the token, credential headers (Authorization,
 Proxy-Authorization), names starting with 'X-Vault-' and the headers the client
 sets itself (Accept, Content-Type, Host, Content-Length, ...) are refused and make
-the command fail, as does an entry that is not key=value. A header a command
-sets itself, such as the namespace of 'transfer --namespace', replaces one of
-the same name. This can be specified multiple times.
+the command fail, as does an entry that is not key=value or a name given twice.
+A header a command sets itself, such as the namespace of 'transfer --namespace'
+or 'mcp serve', replaces one of the same name in any case. This can be specified
+multiple times, once per header name.
         "#
     )]
     header: Vec<String>,
@@ -280,8 +281,8 @@ const RESERVED_HEADERS: [&str; 13] = [
 
 /// The `--header key=value` entries as `(name, value)`, split at the first
 /// `=`, the name lower-cased. An entry that is not `key=value`, that HTTP
-/// cannot carry, or that names a reserved header is an error naming the
-/// entry's position or the header, never what was typed after the name.
+/// cannot carry, that names a reserved header or repeats a name is an error
+/// naming the entry's position or the header, never what was typed after it.
 fn parse_headers(entries: &[String]) -> Result<Vec<(String, String)>, RvError> {
     let mut headers = Vec::with_capacity(entries.len());
     for (i, entry) in entries.iter().enumerate() {
@@ -296,6 +297,9 @@ fn parse_headers(entries: &[String]) -> Result<Vec<(String, String)>, RvError> {
             return Err(RvError::ErrString(format!(
                 "--header {name} is refused: it carries the token or a credential, or the CLI sets it itself"
             )));
+        }
+        if headers.iter().any(|(seen, _): &(String, String)| seen == name) {
+            return Err(RvError::ErrString(format!("--header {name} is given more than once; give it once")));
         }
         headers.push((name.to_string(), value.to_string()));
     }
@@ -633,16 +637,45 @@ mod header_tests {
         assert!(head.contains("\r\nx-bastionvault-token: the-real-token\r\n"), "{head}");
     }
 
-    /// A command's own header wins over a `--header` of the same name, once.
+    /// A command's own header wins over a `--header` of the same name, once,
+    /// whatever case either spells it in: `mcp serve` adds the capitalised
+    /// `X-BastionVault-Namespace`, `transfer --namespace` the lower-case one.
     #[test]
     fn a_commands_own_header_replaces_a_header_option_of_that_name() {
-        let (addr, seen) = fake_vault(200, json!({ "data": {} }));
-        let client = options(&addr, &["X-BastionVault-Namespace=team-a"]).client().unwrap();
-        let client = client.add_header("x-bastionvault-namespace", "team-b");
-        client.request_read("/v1/secret/data/x").unwrap();
+        for (option, own) in [
+            ("X-BastionVault-Namespace=team-a", "x-bastionvault-namespace"),
+            ("x-bastionvault-namespace=team-a", "X-BastionVault-Namespace"),
+        ] {
+            let (addr, seen) = fake_vault(200, json!({ "data": {} }));
+            let client = options(&addr, &[option]).client().unwrap().add_header(own, "team-b");
+            client.request_read("/v1/secret/data/x").unwrap();
+            let head = seen.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert_eq!(head.matches("x-bastionvault-namespace:").count(), 1, "{own}: {head}");
+            assert!(head.contains("\r\nx-bastionvault-namespace: team-b\r\n"), "{own}: {head}");
+        }
+    }
+
+    /// `bvault mcp revoke` sends its DELETE outside `Client::request`; it
+    /// carries the `--header` options too, and never a second token header.
+    #[test]
+    fn the_mcp_revoke_delete_carries_the_headers() {
+        let (addr, seen) = fake_vault(204, json!({}));
+        let client = options(&addr, &["X-Team=blue"]).client().unwrap().add_header("X-BastionVault-Token", "other");
+        let status = super::mcp_serve::delete_status(&client, "v2/sys/mcp/pairings/p1").unwrap();
+        assert_eq!(status, 204);
         let head = seen.recv_timeout(Duration::from_secs(5)).unwrap();
-        assert_eq!(head.matches("x-bastionvault-namespace:").count(), 1, "{head}");
-        assert!(head.contains("\r\nx-bastionvault-namespace: team-b\r\n"), "{head}");
+        assert!(head.starts_with("delete /v2/sys/mcp/pairings/p1 "), "{head}");
+        assert!(head.contains("\r\nx-team: blue\r\n"), "{head}");
+        assert_eq!(head.matches("x-bastionvault-token:").count(), 1, "{head}");
+        assert!(head.contains("\r\nx-bastionvault-token: the-real-token\r\n"), "{head}");
+    }
+
+    /// The same header given twice is refused rather than one value dropped.
+    #[test]
+    fn a_repeated_header_is_refused() {
+        let message = refusal(options("http://127.0.0.1:1", &["X-Team=s3cr3t-a", "x-team=s3cr3t-b"]).client());
+        assert!(message.contains("x-team") && message.contains("more than once"), "{message}");
+        assert!(!message.contains("s3cr3t"), "never the values: {message}");
     }
 
     /// A `--header` that is not `key=value`, or whose name or value HTTP

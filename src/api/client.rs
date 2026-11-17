@@ -205,9 +205,19 @@ impl Client {
         }
     }
 
+    /// Add a header to every request, replacing one of the same name in any
+    /// case: a later call wins, so a command's own header overrides `--header`.
     pub fn add_header(mut self, key: &str, value: &str) -> Self {
+        self.headers.retain(|name, _| !name.eq_ignore_ascii_case(key));
         self.headers.insert(key.into(), value.into());
         self
+    }
+
+    /// The headers [`Self::add_header`] set, as every request sends them:
+    /// all but the token header, which only the client's own token sets.
+    pub fn extra_headers(&self) -> impl Iterator<Item = (&str, &str)> {
+        let token = |name: &str| name.eq_ignore_ascii_case("X-BastionVault-Token");
+        self.headers.iter().filter(move |(name, _)| !token(name)).map(|(name, value)| (name.as_str(), value.as_str()))
     }
 
     pub fn build(mut self) -> Self {
@@ -282,10 +292,8 @@ impl Client {
             // The caller's extra headers (`add_header`), such as the
             // namespace an operator call targets. Set by code, never from a
             // response; the token header below is not one a caller can name.
-            for (name, value) in &self.headers {
-                if !name.eq_ignore_ascii_case("X-BastionVault-Token") {
-                    builder = builder.header(name.as_str(), value.as_str());
-                }
+            for (name, value) in self.extra_headers() {
+                builder = builder.header(name, value);
             }
             if !path.ends_with("/login") {
                 builder.header("X-BastionVault-Token", &self.token)
