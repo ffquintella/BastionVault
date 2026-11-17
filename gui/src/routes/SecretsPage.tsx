@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { Layout } from "../components/Layout";
 import { ObjectSharingCard } from "../components/ObjectSharingCard";
 import {
@@ -23,6 +23,7 @@ import {
   useToast,
 } from "../components/ui";
 import { DynamicSecretsSection } from "../components/DynamicSecretsSection";
+import { TransferToNamespaceModal } from "../components/TransferToNamespaceModal";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
 import { hasLiteralAdminPolicy } from "../lib/access";
@@ -72,6 +73,16 @@ export function SecretsPage() {
   // show a stable target even if the user navigates away.
   const [shareTarget, setShareTarget] = useState<string | null>(null);
 
+  // Copy / Move to another namespace. The target keeps the mount and the
+  // secret's own name exactly as the transfer API takes them (the mount path
+  // without a namespace, the name without any KV v2 `data/` plumbing); it is
+  // fixed when the dialog opens. `listKey` is the leaf in the key list, so a
+  // move can deselect it once the dialog closes.
+  const [transferTarget, setTransferTarget] = useState<
+    { mount: string; name: string; listKey: string; listPath: string } | null
+  >(null);
+  const transferMoved = useRef(false);
+
   // History view (KV-v2 version timeline) of the currently-selected secret.
   const [showHistory, setShowHistory] = useState(false);
   const [versions, setVersions] = useState<SecretHistoryVersion[]>([]);
@@ -85,6 +96,10 @@ export function SecretsPage() {
   // value is directly usable in a namespace-scoped policy (namespace policies
   // must reference namespace-prefixed paths; see policy_scope.rs).
   const activeNamespace = useNamespaceStore((s) => s.active);
+  // The transfer needs another namespace to go to; the list is the session
+  // token's operable namespaces, so an empty or single-entry list leaves the
+  // action disabled with a reason, as on the Resources page.
+  const namespaceCount = useNamespaceStore((s) => s.namespaces.length);
 
   // Full namespace-qualified ACL path for the selected secret, in the form a
   // policy `path "..."` stanza expects. KV-v2 inserts the `data/` infix after
@@ -104,6 +119,23 @@ export function SecretsPage() {
     const ns = activeNamespace.replace(/^\/+|\/+$/g, "");
     return ns ? `${ns}/${acl}` : acl;
   }, [selectedKey, mountBase, currentPath, mountType, activeNamespace]);
+
+  // The selected secret's own name under its mount (`secret/data/x` is the
+  // secret `data/x`): the page's list path minus the mount prefix, nothing else.
+  const transferName = (() => {
+    if (!selectedKey || selectedKey.endsWith("/") || !mountBase) return null;
+    const prefix = mountBase.endsWith("/") ? mountBase : `${mountBase}/`;
+    const full = currentPath + selectedKey;
+    return full.startsWith(prefix) && full.length > prefix.length ? full.slice(prefix.length) : null;
+  })();
+  const transferBlockedReason =
+    namespaceCount < 2
+      ? "No other namespace is available to this session."
+      : mountType !== "kv-v2"
+        ? "Only KV v2 secrets can be copied or moved to another namespace."
+        : transferName === null
+          ? "This secret's name could not be derived from its mount."
+          : undefined;
 
   // Stack of group filters applied as an AND chain. Empty means "no
   // filter, show every group with secrets under the current prefix".
@@ -833,6 +865,23 @@ export function SecretsPage() {
                         Share
                       </Button>
                       <Button
+                        size="sm"
+                        variant="secondary"
+                        disabled={transferBlockedReason !== undefined}
+                        title={transferBlockedReason}
+                        onClick={() => {
+                          if (transferName === null) return;
+                          setTransferTarget({
+                            mount: mountBase.replace(/\/+$/, ""),
+                            name: transferName,
+                            listKey: selectedKey,
+                            listPath: currentPath,
+                          });
+                        }}
+                      >
+                        Copy / Move to namespace
+                      </Button>
+                      <Button
                         variant="danger"
                         size="sm"
                         onClick={() => handleDelete(selectedKey)}
@@ -889,6 +938,34 @@ export function SecretsPage() {
             <SecretPairsEditor pairs={createPairs} onChange={setCreatePairs} />
           </div>
         </Modal>
+
+        {/* Copy / move to another namespace. Held at page level so its result
+            stays visible after a move removes the secret from the list. */}
+        {transferTarget && (
+          <TransferToNamespaceModal
+            kind="kv-secret"
+            namespace={activeNamespace}
+            mount={transferTarget.mount}
+            path={transferTarget.name}
+            onClose={() => {
+              if (
+                transferMoved.current &&
+                selectedKey === transferTarget.listKey &&
+                currentPath === transferTarget.listPath
+              ) {
+                setSelectedKey(null);
+                setSecretData({});
+                setEditingSecret(false);
+              }
+              transferMoved.current = false;
+              setTransferTarget(null);
+            }}
+            onTransferred={(_result, op) => {
+              transferMoved.current = op === "move";
+              void loadKeys();
+            }}
+          />
+        )}
 
         {/* Share secret modal */}
         <Modal

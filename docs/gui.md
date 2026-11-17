@@ -105,6 +105,7 @@ Once secrets exist, the page lets you:
 - View the version history and revert.
 - Share an individual secret with an entity or identity group (entry surfaces on the recipient's "Shared with me" tab — see below).
 - Edit metadata (max versions, `cas_required`, custom tags).
+- Copy or move a KV v2 secret to another namespace (**Copy / Move to namespace**, beside Share; a resource has the same action on its Info tab). The dialog checks first with a dry run and lists every warning, including shares that would be dropped, before anything is written; Overwrite and Move each need a ticked acknowledgement. The button is disabled when the session has no other namespace and on KV v1 mounts. See [features/cross-namespace-copy-move.md](https://github.com/ffquintella/BastionVault/blob/main/features/cross-namespace-copy-move.md).
 
 The **Dynamic** tab lists the mounts of dynamic-secret engine plugins (`plugin_type = "secret/dynamic"`, see [features/dynamic-secrets.md](https://github.com/ffquintella/BastionVault/blob/main/features/dynamic-secrets.md)) and their roles. **Generate credential** creates a credential on the target system and shows it once, masked with copy buttons and a countdown to its lease's end; it is cleared from the window when the dialog closes or the lease ends, and the GUI never logs or stores it. A credential served from the credential cache is flagged as a shared lease. Telling dynamic mounts apart needs read access to the plugin catalog (`sys/plugins`).
 

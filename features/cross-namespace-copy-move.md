@@ -28,15 +28,18 @@ membership, from three surfaces:
   move, warnings and the relations below.
 - `bvault transfer copy|move` (`docs/cli-reference.md`), with
   `--source-mount` / `--destination-mount`, `--on-conflict` and `--dry-run`.
-- The Resources page of the desktop app: a Copy or move action on a
-  resource's Info tab that checks first (dry run) and shows the warnings
-  before anything is written. It calls the Tauri command `transfer_object`.
+- The desktop app: a Copy or move action on a resource's Info tab (Resources
+  page) and a **Copy / Move to namespace** button on a KV v2 secret (Secrets
+  page), both through one dialog that checks first (dry run) and shows the
+  warnings before anything is written. It calls the Tauri command
+  `transfer_object`. On the Secrets page the button sends the browsed mount and
+  the secret's own path (a name that starts with `data/` goes as is) and is
+  disabled with a reason when no other namespace is available or the mount is
+  KV v1. Overwrite and Move each need their own acknowledgement after the check.
 
-Not done: the KV secrets page has no action yet (the modal and the command
-are reusable), and the GUI was proven only in jsdom, not in a live window.
-Follow-ups are tracked in `ROADMAP.md` (T496-T505; T498, T502 and T503
-are done). What the feature cannot
-carry is under "Known limits".
+Not done: the GUI was proven only in jsdom, not in a live window.
+Follow-ups are tracked in `ROADMAP.md` (T496-T505; T496, T498 and T501-T503
+are done). What the feature cannot carry is under "Known limits".
 
 Closest existing behaviour before this feature, reused as the pattern, not
 called as-is:
@@ -69,8 +72,8 @@ called as-is:
   membership, attached file resources.
 - **KV secret**: the secret, all its versions and metadata, explicit shares.
 - Entry points: `v2/` HTTP API (AGENTS.md §7 — new routes go under `v2/`),
-  `bvault` CLI, Tauri command, GUI action on the Resources page (the KV
-  secrets page is a follow-up).
+  `bvault` CLI, Tauri command, GUI action on the Resources page and on the KV
+  Secrets page.
 - A move is **copy, verify, then delete the source**. A mid-failure leaves the
   source intact and at most a recoverable partial destination, never a gap, the
   same ordering rename already uses. Copy never touches the source.
@@ -277,4 +280,5 @@ cleans up its owner, shares and groups) and imports again.
 | 4 | Orchestrator and `POST /v2/sys/namespace-transfer/{copy\|move}`: rights checks, refuse / rename / overwrite, verified move, shares, asset-group membership, files | Done |
 | 5 | `bvault transfer copy\|move` | Done |
 | 6 | Tauri command `transfer_object` and the Resources page action with the dry-run warning preview | Done |
+| 6b | The KV Secrets page action (T496) and the dialog polish: overwrite acknowledgement, fixed title, case-aware same-item check, fail-safe share banner (T501) | Done |
 | 7 | Tests: permission matrix, collision, partial failure, shares kept / dropped, aliasing of one item, in-crate, facade and GUI | Done |
