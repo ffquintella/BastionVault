@@ -684,7 +684,12 @@ Response (`parse_ok = false` with `errors` when the draft fails to parse):
 `match_kind` is one of `exact` | `prefix` | `segment_wildcard` | `none`.
 `matched_path`, `match_kind` and `granting_policies` are advisory;
 `allowed` / `denied_by_deny` are authoritative (produced by the real
-matcher).
+matcher). A case on a kv-v2 secret also applies the path-form deny that
+enforcement applies (T509, through the same function): when a deny on the
+secret's other data form refuses it, the row reports `allowed: false`,
+`denied_by_deny: true`, no `granting_policies`, and `denied_by_alias`, the
+other form's path (`null` otherwise); `draft_only_allowed` follows the same
+rule. Group-gated and scoped denies are not resolved by this stateless test.
 
 `granting_policies` names the policies that contributed the rule at
 `matched_path`. It is a list because capabilities are unioned **only**

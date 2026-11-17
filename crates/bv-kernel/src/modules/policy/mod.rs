@@ -12,7 +12,7 @@ use crate::{
     core::Core,
     errors::RvError,
     handler::{AuthHandler, Handler},
-    logical::{Backend, Request, Response},
+    logical::{Backend, Operation, Request, Response},
 };
 
 #[allow(clippy::module_inception)]
@@ -683,9 +683,34 @@ impl PolicyModule {
                         }
                         None => acl.explain_capability(&resolved_path, cap),
                     };
-                    let ex = explain(&entry.acl);
-                    let draft_only = explain(&draft_acl);
+                    // As enforcement (T509): a deny on the other path form of
+                    // a kv-v2 secret refuses it, through the same function.
+                    let op = match cap {
+                        Capability::List => Operation::List,
+                        Capability::Create | Capability::Update => Operation::Write,
+                        Capability::Delete => Operation::Delete,
+                        _ => Operation::Read,
+                    };
+                    let alias_deny = |acl: &ACL| {
+                        let mut probe = Request { operation: op, path: resolved_path.clone(), ..Default::default() };
+                        store.kv_v2_alias_deny(acl, &mut probe)
+                    };
+                    let mut ex = explain(&entry.acl);
+                    let mut denied_by_alias = None;
+                    if ex.allowed {
+                        denied_by_alias = alias_deny(&entry.acl)?;
+                        if denied_by_alias.is_some() {
+                            ex.allowed = false;
+                            ex.denied_by_deny = true;
+                            ex.granting_policies.clear();
+                        }
+                    }
+                    let mut draft_only = explain(&draft_acl);
+                    if draft_only.allowed && alias_deny(&draft_acl)?.is_some() {
+                        draft_only.allowed = false;
+                    }
 
+                    row.insert("denied_by_alias".into(), denied_by_alias.map(Value::String).unwrap_or(Value::Null));
                     row.insert("allowed".into(), Value::Bool(ex.allowed));
                     row.insert("denied_by_deny".into(), Value::Bool(ex.denied_by_deny));
                     row.insert("match_kind".into(), Value::String(ex.match_kind.as_str().into()));

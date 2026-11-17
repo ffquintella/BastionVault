@@ -292,3 +292,76 @@ async fn a_grant_only_through_a_gated_or_scoped_rule_yields_to_an_alias_deny() {
     let r = send(&core, &alice, 2, Operation::Read, "secret/team/x", None, json!({})).await;
     assert_eq!(status(&r), 403, "an owner-scoped grant against a data-form deny: {r:?}");
 }
+
+/// The policy tester's verdict for each `(path, capability)` against `draft`
+/// alone: `(allowed, denied_by_deny, draft_only_allowed)`.
+async fn tester(core: &Arc<Core>, root: &str, draft: &str, cases: &[(&str, &str)]) -> Vec<(bool, bool, bool)> {
+    let cases: Vec<Value> = cases.iter().map(|(p, c)| json!({ "path": p, "capability": c, "policies": [] })).collect();
+    let body = json!({ "policy": draft, "cases": cases });
+    let resp = send(core, root, 2, Operation::Write, "sys/policies/acl/test", None, body).await.unwrap().unwrap();
+    let results = resp.data.unwrap()["results"].as_array().cloned().unwrap();
+    let flag = |row: &Value, k: &str| row[k].as_bool().unwrap_or_else(|| panic!("{k} in {row}"));
+    results.iter().map(|r| (flag(r, "allowed"), flag(r, "denied_by_deny"), flag(r, "draft_only_allowed"))).collect()
+}
+
+/// The policy tester applies the same path-form deny as enforcement (T509): a
+/// deny in the data form refuses the short form and the other sub-commands,
+/// and a deny in the logical form refuses `data/`; outside it nothing changes.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn the_policy_tester_applies_the_path_form_deny() {
+    let (_bvault, core, root) = vault("tester_alias_deny").await;
+    let refused = (false, true, false);
+    let allowed = (true, false, true);
+
+    let data_form = format!("{OPEN}\npath \"secret/data/prod/*\" {{ capabilities = [\"deny\"] }}\n");
+    let cases = [
+        ("secret/prod/x", "read"),
+        ("secret/prod/x", "update"),
+        ("secret/metadata/prod/x", "read"),
+        ("secret/metadata/prod/", "list"),
+        ("secret/destroy/prod/x", "update"),
+        ("secret/dev/x", "read"),
+        ("secret/data/dev/x", "update"),
+    ];
+    let got = tester(&core, &root, &data_form, &cases).await;
+    let want = [refused, refused, refused, refused, refused, allowed, allowed];
+    for ((case, got), want) in cases.iter().zip(&got).zip(want) {
+        assert_eq!(*got, want, "deny in the data form: {case:?}");
+    }
+
+    let logical = format!("{OPEN}\npath \"secret/prod/*\" {{ capabilities = [\"deny\"] }}\n");
+    let cases = [("secret/data/prod/x", "read"), ("secret/data/prod/x", "delete"), ("secret/data/dev/x", "read")];
+    let got = tester(&core, &root, &logical, &cases).await;
+    assert_eq!(got, vec![refused, refused, allowed], "deny in the logical form");
+
+    // A narrower allow outranks a broader deny in the other form, as enforced.
+    let narrower = r#"
+path "secret/*" { capabilities = ["deny"] }
+path "secret/data/team/*" { capabilities = ["read"] }
+"#;
+    let got = tester(&core, &root, narrower, &[("secret/data/team/x", "read")]).await;
+    assert_eq!(got, vec![allowed], "deny secret/* with allow secret/data/team/*");
+    let r = send(&core, &root, 1, Operation::Write, "sys/policy/narrower", None, json!({ "policy": narrower })).await;
+    assert!(r.is_ok(), "{r:?}");
+    let (token, _) = login(&core, &root, "narrower", "narrower").await;
+    let r = send(&core, &token, 1, Operation::Read, "secret/data/team/x", None, json!({})).await;
+    assert_ne!(status(&r), 403, "enforcement agrees: {r:?}");
+}
+
+/// Paths that are not a kv-v2 secret keep the tester's plain verdict: a kv
+/// (v1) mount and another engine have no second path form.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn the_policy_tester_leaves_other_paths_alone() {
+    let (_bvault, core, root) = vault("tester_alias_other_paths").await;
+    write(&core, &root, "sys/mounts/kv/", json!({ "type": "kv" })).await;
+    write(&core, &root, "sys/mounts/transit/", json!({ "type": "transit" })).await;
+    let draft = r#"
+path "kv/*" { capabilities = ["read", "update"] }
+path "kv/data/*" { capabilities = ["deny"] }
+path "transit/*" { capabilities = ["read", "update"] }
+path "transit/data/*" { capabilities = ["deny"] }
+"#;
+    let cases = [("kv/x", "read"), ("kv/data/x", "read"), ("transit/keys/x", "update"), ("transit/data/x", "read")];
+    let got = tester(&core, &root, draft, &cases).await;
+    assert_eq!(got, vec![(true, false, true), (false, true, false), (true, false, true), (false, true, false)]);
+}

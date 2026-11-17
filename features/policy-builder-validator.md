@@ -195,6 +195,7 @@ POST /v2/sys/policies/acl/test
 - The endpoint is **stateless** — it never writes the policy. It requires the same capability as `write_policy` on `sys/policies/acl/*` so it is not an information-disclosure primitive beyond what the caller could already author. Attached policies are read through the same store the caller could already read them from.
 - Reuses the existing parser (`PolicyConfig::parse`) and the `ACL` builder + matcher; no new evaluation logic. One `ACL` is built per distinct attached-policy set and memoized across the cases that share it.
 - See [Multi-policy effectivity](#multi-policy-effectivity) for what `policies` / `granting_policies` / `draft_only_allowed` are for.
+- A case on a kv-v2 secret applies the path-form deny enforcement applies (T509): `PolicyStore::kv_v2_alias_deny`, called on the case's resolved path with the operation its capability maps to, so a deny on `secret/data/prod/*` refuses `secret/prod/x` here too. Such a row reports `denied_by_deny: true` and `denied_by_alias` (the other form's path). A gated or scoped deny on the other form is not resolved, as for every gated rule in this stateless test.
 
 A companion Tauri command `policy_test(policy, cases, name)` wraps it in [`gui/src-tauri/src/commands/policies.rs`](../gui/src-tauri/src/commands/policies.rs), with a TS wrapper in [`gui/src/lib/api.ts`](../gui/src/lib/api.ts).
 
