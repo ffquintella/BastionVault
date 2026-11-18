@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use derive_more::{Deref, DerefMut};
 use serde::{Deserialize, Serialize};
 
-use super::{UserPassBackend, UserPassBackendInner};
+use super::{username_mounts::AliasRule, UserPassBackend, UserPassBackendInner};
 use crate::kernel_api::VaultCtx;
 use crate::{
     context::Context,
@@ -564,20 +564,23 @@ impl UserPassBackendInner {
         // owner and share records stay for the admin ownership-transfer
         // endpoints. Deleting a name that is already gone still runs this, so
         // a failed forget, or an alias an older delete left, is retried.
-        let mut forget_failed = None;
+        let mut not_forgotten = None;
         if let Some(identity) = self.core.identity() {
-            match super::username_mounts::mounts_holding(self.core.as_ref(), &lc).await {
+            let holders = super::username_mounts::mounts_holding(self.core.as_ref(), &lc).await;
+            match super::username_mounts::alias_rule(holders) {
                 // Another userpass mount still holds the name (a pre-T500
                 // duplicate): its user logs in as these entities, so keep them.
-                Ok(holders) if !holders.is_empty() => log::warn!(
+                AliasRule::Keep(holders) => log::warn!(
                     target: "security",
                     "userpass: deleted user '{lc}' but kept its entity aliases: still held by {}",
                     holders.join(", ")
                 ),
-                Ok(_) => forget_failed = identity.forget_alias("userpass/", &lc).await.err(),
-                Err(e) => {
-                    log::warn!(target: "security", "userpass: deleted user '{lc}'; other mounts unreadable ({e}), aliases dropped as before");
-                    forget_failed = identity.forget_alias("userpass/", &lc).await.err();
+                AliasRule::Forget => {
+                    not_forgotten = identity.forget_alias("userpass/", &lc).await.err().map(|e| e.to_string())
+                }
+                AliasRule::Undecided(e) => {
+                    not_forgotten =
+                        Some(format!("the other userpass mounts could not be read ({e}), so they were kept"))
                 }
             }
         }
@@ -585,14 +588,14 @@ impl UserPassBackendInner {
         // Audit.
         record_user_audit(&self.core, req, "delete", &lc, "").await;
 
-        let Some(e) = forget_failed else {
+        let Some(reason) = not_forgotten else {
             return Ok(None);
         };
-        log::warn!(target: "security", "userpass: deleted user '{lc}' but could not forget all its entity aliases ({e}); delete it again to retry");
+        log::warn!(target: "security", "userpass: deleted user '{lc}' but did not forget all its entity aliases: {reason}; delete it again to retry");
         // In the data: the HTTP layer does not carry `Response::warnings`.
         let warning = format!(
-            "user '{lc}' was deleted, but its entity aliases could not all be forgotten: a user re-created under \
-             this name could log in as the old entity; delete the user again to retry"
+            "user '{lc}' was deleted, but its entity aliases were not all forgotten: a user re-created under \
+             this name could sign in as the old entity; delete the user again to retry"
         );
         Ok(Some(Response::data_response(serde_json::json!({ "warnings": [warning] }).as_object().cloned())))
     }

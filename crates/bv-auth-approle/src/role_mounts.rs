@@ -34,6 +34,27 @@ impl AuthMountPrincipals for AppRolePrincipals {
     }
 }
 
+/// What a role delete does with the name's entity aliases (T522).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AliasRule {
+    /// No other AppRole mount holds the name: forget it in every namespace.
+    Forget,
+    /// Other mounts hold it (`auth/<path>/`): their role signs in as these entities.
+    Keep(Vec<String>),
+    /// The other mounts could not be read: keep, and say so. A forget can be
+    /// retried; the plugin-data purge that follows it cannot be undone.
+    Undecided(String),
+}
+
+/// T500's keeping rule from [`mounts_holding`]'s answer.
+pub fn alias_rule(holders: Result<Vec<String>, RvError>) -> AliasRule {
+    match holders {
+        Ok(holders) if holders.is_empty() => AliasRule::Forget,
+        Ok(holders) => AliasRule::Keep(holders),
+        Err(e) => AliasRule::Undecided(e.to_string()),
+    }
+}
+
 /// The `auth/<path>/` of every AppRole mount holding role `name`, sorted. An
 /// unreadable mount is an error, never read as "not held".
 #[maybe_async::maybe_async]
@@ -49,4 +70,20 @@ pub async fn mounts_holding(core: &dyn VaultCtx, name: &str) -> Result<Vec<Strin
     }
     holders.sort();
     Ok(holders)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An error while reading the other mounts keeps the aliases (T522): a
+    /// live same-named role must never lose its entities on a guess.
+    #[test]
+    fn an_unreadable_mount_keeps_the_aliases() {
+        assert_eq!(alias_rule(Ok(vec![])), AliasRule::Forget);
+        let held = vec!["auth/ar2/".to_string()];
+        assert_eq!(alias_rule(Ok(held.clone())), AliasRule::Keep(held));
+        let unreadable = alias_rule(Err(RvError::ErrString("injected".into())));
+        assert!(matches!(unreadable, AliasRule::Undecided(ref e) if e.contains("injected")), "{unreadable:?}");
+    }
 }

@@ -65,6 +65,17 @@ pub struct AuthModule {
     pub principals: RwLock<HashMap<String, Arc<dyn AuthMountPrincipals>>>,
 }
 
+/// What T500's keeping rule decided for a disabled mount's principals.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct KeepDecision {
+    /// Another mount of the type holds the name: its aliases stay.
+    kept: Vec<String>,
+    /// No other mount holds it: forget its aliases everywhere.
+    forget: Vec<String>,
+    /// The other mounts could not be read: kept, and reported.
+    undecided: Vec<String>,
+}
+
 #[maybe_async::maybe_async]
 impl AuthModule {
     pub fn new(core: Arc<Core>) -> Result<Self, RvError> {
@@ -210,9 +221,12 @@ impl AuthModule {
         let names = match source.principals(view).await {
             Ok(names) => names,
             Err(e) => {
-                log::warn!(target: "security", "disabling {mount}: its principals could not be listed ({e}); their entity aliases were not forgotten");
+                log::warn!(target: "security", "disabling {mount}: its principals could not be listed ({e}); their entity aliases were not forgotten and the mount's storage is cleared");
                 return vec![format!(
-                    "the principals of {mount} could not be listed, so their entity aliases were not forgotten"
+                    "the principals of {mount} could not be listed, so their entity aliases were not forgotten: \
+                     compare GET identity/entity/aliases (at root and in each namespace) with the principals \
+                     of the remaining {logical_type} mounts, and delete each leftover name on a \
+                     {logical_type} mount that does not hold it"
                 )];
             }
         };
@@ -220,68 +234,76 @@ impl AuthModule {
             return Vec::new();
         }
 
-        let siblings: Vec<AuthMountView> = match self.auth_mounts_of_type(logical_type) {
-            Ok(mounts) => mounts.into_iter().filter(|m| m.path != path).collect(),
-            Err(e) => {
-                log::warn!(target: "security", "disabling {mount}: the other {logical_type} mounts could not be listed ({e}); no alias is kept for them");
-                Vec::new()
-            }
-        };
-        let (mut kept, mut forget) = (Vec::new(), Vec::new());
-        for name in names {
-            if Self::held_elsewhere(source.as_ref(), &siblings, &name, &mount).await {
-                kept.push(name);
-            } else {
-                forget.push(name);
-            }
-        }
-        if !kept.is_empty() {
-            log::warn!(target: "security", "disabling {mount}: kept the entity aliases of {} principal(s) another {logical_type} mount still holds: {}", kept.len(), kept.join(", "));
+        let siblings = self
+            .auth_mounts_of_type(logical_type)
+            .map(|mounts| mounts.into_iter().filter(|m| m.path != path).collect::<Vec<_>>());
+        let decision = Self::decide_keeping(source.as_ref(), siblings, names, &mount).await;
+        if !decision.kept.is_empty() {
+            log::warn!(target: "security", "disabling {mount}: kept the entity aliases of {} principal(s) another {logical_type} mount still holds: {}", decision.kept.len(), decision.kept.join(", "));
         }
 
-        let failed = match identity.forget_principals(&source.alias_mount(), &forget).await {
-            Ok(failed) => failed,
+        let mut failed = decision.undecided;
+        match identity.forget_principals(&source.alias_mount(), &decision.forget).await {
+            Ok(names) => failed.extend(names),
             Err(e) => {
                 log::warn!(target: "security", "disabling {mount}: the alias indexes could not be read ({e})");
-                forget.clone()
+                failed.extend(decision.forget.iter().cloned());
             }
-        };
+        }
         log::info!(
             "disabling {mount}: forgot the entity aliases of {} principal(s) in every namespace",
-            forget.len() - failed.len()
+            decision.forget.iter().filter(|name| !failed.contains(name)).count()
         );
         if failed.is_empty() {
             return Vec::new();
         }
         let names = failed.join(", ");
-        log::warn!(target: "security", "disabling {mount}: the entity aliases of {} principal(s) could not be forgotten: {names}; to retry, delete each name on a {logical_type} mount that does not hold it", failed.len());
+        log::warn!(target: "security", "disabling {mount}: the entity aliases of {} principal(s) were not forgotten: {names}; to retry, delete each name on a {logical_type} mount that does not hold it", failed.len());
         vec![format!(
-            "the entity aliases of {} principal(s) could not be forgotten ({names}): a principal re-created \
-             under one of these names would log in as its old entity; to retry, delete each name on a \
+            "the entity aliases of {} principal(s) were not forgotten ({names}): a principal re-created \
+             under one of these names would sign in as its old entity; to retry, delete each name on a \
              {logical_type} mount that does not hold it",
             failed.len()
         )]
     }
 
-    /// Whether a mount other than the one being disabled holds `name`. One
-    /// that cannot be read counts as not holding it: the alias is forgotten,
-    /// as a userpass delete does on the same error.
-    async fn held_elsewhere(
+    /// T500's keeping rule for a disabled mount's principals: a name another
+    /// mount of the type (`siblings`) holds is kept, one none holds is to be
+    /// forgotten. Any error while deciding keeps the name and reports it
+    /// undecided: a forget can be retried, the plugin-data purge cannot.
+    async fn decide_keeping(
         source: &dyn AuthMountPrincipals,
-        siblings: &[AuthMountView],
-        name: &str,
+        siblings: Result<Vec<AuthMountView>, RvError>,
+        names: Vec<String>,
         mount: &str,
-    ) -> bool {
-        for sibling in siblings {
-            match source.holds(&sibling.view, name).await {
-                Ok(true) => return true,
-                Ok(false) => {}
-                Err(e) => {
-                    log::warn!(target: "security", "disabling {mount}: could not read whether auth/{} holds '{name}' ({e})", sibling.path)
+    ) -> KeepDecision {
+        let mut decision = KeepDecision::default();
+        let siblings = match siblings {
+            Ok(siblings) => siblings,
+            Err(e) => {
+                log::warn!(target: "security", "disabling {mount}: the other mounts of its type could not be listed ({e}); every alias is kept");
+                decision.undecided = names;
+                return decision;
+            }
+        };
+        'names: for name in names {
+            for sibling in &siblings {
+                match source.holds(&sibling.view, &name).await {
+                    Ok(true) => {
+                        decision.kept.push(name);
+                        continue 'names;
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        log::warn!(target: "security", "disabling {mount}: could not read whether auth/{} holds '{name}' ({e}); its aliases are kept", sibling.path);
+                        decision.undecided.push(name);
+                        continue 'names;
+                    }
                 }
             }
+            decision.forget.push(name);
         }
-        false
+        decision
     }
 
     pub async fn remount_auth(&self, src: &str, dst: &str) -> Result<(), RvError> {
@@ -490,5 +512,57 @@ impl Module for AuthModule {
         self.delete_auth_backend("token")?;
         self.teardown_auth()?;
         Ok(())
+    }
+}
+
+/// T500's keeping rule on disable (T522): an unreadable sibling keeps the
+/// name and reports it, never reads as "not held".
+#[cfg(test)]
+mod keep_rule_tests {
+    use super::*;
+    use crate::{modules::identity::fault_storage, storage::Storage, storage::StorageEntry};
+
+    /// A mount holds `name` when its storage has a key `name`.
+    struct ByKey;
+
+    #[maybe_async::maybe_async]
+    impl AuthMountPrincipals for ByKey {
+        fn alias_mount(&self) -> String {
+            "stub/".to_string()
+        }
+
+        async fn principals(&self, view: &BarrierView) -> Result<Vec<String>, RvError> {
+            view.list("").await
+        }
+
+        async fn holds(&self, view: &BarrierView, name: &str) -> Result<bool, RvError> {
+            Ok(view.get(name).await?.is_some())
+        }
+    }
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|n| n.to_string()).collect()
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn a_name_a_sibling_cannot_answer_for_is_kept_and_reported() {
+        let (_, s1) = fault_storage::view("auth/s1/").await;
+        let (faulty, s2) = fault_storage::view("auth/s2/").await;
+        s1.put(&StorageEntry { key: "carol".into(), value: b"{}".to_vec() }).await.unwrap();
+        faulty.fail_under("auth/s2/erin");
+        let siblings =
+            vec![AuthMountView { path: "s1/".into(), view: s1 }, AuthMountView { path: "s2/".into(), view: s2 }];
+
+        let decision =
+            AuthModule::decide_keeping(&ByKey, Ok(siblings), names(&["carol", "dave", "erin"]), "auth/gone/").await;
+        let want = KeepDecision { kept: names(&["carol"]), forget: names(&["dave"]), undecided: names(&["erin"]) };
+        assert_eq!(decision, want, "erin is kept, never read as not held");
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn siblings_that_cannot_be_listed_keep_every_name() {
+        let listed = Err(RvError::ErrString("injected".into()));
+        let decision = AuthModule::decide_keeping(&ByKey, listed, names(&["carol", "dave"]), "auth/gone/").await;
+        assert_eq!(decision, KeepDecision { undecided: names(&["carol", "dave"]), ..Default::default() });
     }
 }

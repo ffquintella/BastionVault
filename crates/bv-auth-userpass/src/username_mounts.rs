@@ -68,6 +68,27 @@ pub async fn mounts_holding(core: &dyn VaultCtx, username: &str) -> Result<Vec<S
     Ok(holders)
 }
 
+/// What a user delete does with the name's entity aliases (T500, T522).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AliasRule {
+    /// No other userpass mount holds the name: forget it in every namespace.
+    Forget,
+    /// Other mounts hold it (`auth/<path>/`): their user signs in as these entities.
+    Keep(Vec<String>),
+    /// The other mounts could not be read: keep, and say so. A forget can be
+    /// retried; the plugin-data purge that follows it cannot be undone.
+    Undecided(String),
+}
+
+/// T500's keeping rule from [`mounts_holding`]'s answer.
+pub fn alias_rule(holders: Result<Vec<String>, RvError>) -> AliasRule {
+    match holders {
+        Ok(holders) if holders.is_empty() => AliasRule::Forget,
+        Ok(holders) => AliasRule::Keep(holders),
+        Err(e) => AliasRule::Undecided(e.to_string()),
+    }
+}
+
 /// Refuse to create `username` when another userpass mount holds it (409).
 ///
 /// Call only while this mount does not hold the name. The caller is told that
@@ -161,4 +182,20 @@ pub async fn report_duplicate_usernames(core: &dyn VaultCtx) -> Option<Vec<Dupli
         );
     }
     Some(duplicates)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An error while reading the other mounts keeps the aliases (T522): a
+    /// live duplicate must never lose its entities and plugin data on a guess.
+    #[test]
+    fn an_unreadable_mount_keeps_the_aliases() {
+        assert_eq!(alias_rule(Ok(vec![])), AliasRule::Forget);
+        let held = vec!["auth/corp/".to_string()];
+        assert_eq!(alias_rule(Ok(held.clone())), AliasRule::Keep(held));
+        let unreadable = alias_rule(Err(RvError::ErrString("injected".into())));
+        assert!(matches!(unreadable, AliasRule::Undecided(ref e) if e.contains("injected")), "{unreadable:?}");
+    }
 }

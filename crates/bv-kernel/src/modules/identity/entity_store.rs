@@ -361,3 +361,57 @@ pub struct AliasRecord {
     #[serde(default)]
     pub namespace: String,
 }
+
+#[cfg(test)]
+impl EntityStore {
+    /// A store over `system_view`, for tests that inject storage faults.
+    pub(crate) fn over(system_view: BarrierView) -> Arc<Self> {
+        let system_view = Arc::new(system_view);
+        let entity_view = Arc::new(system_view.new_sub_view(ENTITY_SUB_PATH));
+        let alias_view = Arc::new(system_view.new_sub_view(ALIAS_SUB_PATH));
+        Arc::new(Self { entity_view, alias_view, system_view })
+    }
+}
+
+/// Forgetting an alias in every namespace when one namespace's storage
+/// refuses (T522): the rest go, the principal is reported, a re-run finishes.
+#[cfg(test)]
+mod forget_tests {
+    use super::*;
+    use crate::modules::identity::fault_storage;
+
+    fn ns_aliases(ns: &str) -> String {
+        format!("sys/{IDENTITY_NS_SUB_PATH}{}/alias/", URL_SAFE_NO_PAD.encode(ns))
+    }
+
+    #[maybe_async::maybe_async]
+    async fn alias(store: &EntityStore, ns: &str) -> Option<String> {
+        store.get_by_alias_ns("userpass/", "carol", ns).await.unwrap().map(|e| e.id)
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn a_namespace_that_refuses_is_reported_and_a_rerun_finishes() {
+        let (faulty, view) = fault_storage::view("sys/").await;
+        let store = EntityStore::over(view);
+        let mut ids = Vec::new();
+        for ns in ["", "a", "b"] {
+            ids.push(store.get_or_create_entity_ns("userpass/", "carol", ns).await.unwrap().id);
+        }
+        let carol = vec!["carol".to_string()];
+
+        faulty.fail_under(&ns_aliases("b"));
+        let first = store.forget_aliases("userpass/", &carol).await.unwrap();
+        assert_eq!(first.failed, carol, "the principal whose alias stayed is reported");
+        assert_eq!(first.entity_ids, ids[..2].to_vec(), "root's and a's aliases went");
+        assert!(store.forget_alias("userpass/", "carol").await.is_err(), "the one-name form errors");
+
+        faulty.heal();
+        assert_eq!((alias(&store, "").await, alias(&store, "a").await), (None, None));
+        assert_eq!(alias(&store, "b").await, Some(ids[2].clone()), "b kept its alias");
+        let second = store.forget_aliases("userpass/", &carol).await.unwrap();
+        assert_eq!(second, ForgottenAliases { entity_ids: vec![ids[2].clone()], failed: vec![] });
+        assert_eq!(alias(&store, "b").await, None);
+        let third = store.forget_aliases("userpass/", &carol).await.unwrap();
+        assert_eq!(third, ForgottenAliases::default(), "a re-run is a no-op");
+    }
+}

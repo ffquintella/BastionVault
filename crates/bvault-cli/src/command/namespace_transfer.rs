@@ -356,7 +356,7 @@ fn overwrite_notice(on_conflict: OnConflict, dry_run: bool, destination: &str) -
 /// Server text is shown on one line with control characters replaced, and the
 /// invisible Unicode format and bidi characters removed, so a message cannot
 /// move the cursor, forge a second `warning[...]` line or reorder what follows.
-fn one_line(text: &str) -> String {
+pub(crate) fn one_line(text: &str) -> String {
     text.chars().filter(|c| !is_invisible_format(*c)).map(|c| if c.is_control() { ' ' } else { c }).collect()
 }
 

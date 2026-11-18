@@ -32,6 +32,8 @@ use crate::{
 
 pub mod default_account;
 pub mod entity_store;
+#[cfg(test)]
+pub(crate) mod fault_storage;
 pub mod group_store;
 pub mod kernel_service;
 pub mod kv_key_split_migrate;

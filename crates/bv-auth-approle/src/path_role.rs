@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::{
+    role_mounts::AliasRule,
     validation::{
         create_hmac, reject_reserved_secret_id_meta, verify_cidr_role_secret_id_subset, SecretIdStorageEntry,
     },
@@ -1544,27 +1545,27 @@ impl AppRoleBackendInner {
         let Some(identity) = self.core.identity() else {
             return Ok(None);
         };
-        let forget_failed = match super::role_mounts::mounts_holding(self.core.as_ref(), &lc).await {
+        let holders = super::role_mounts::mounts_holding(self.core.as_ref(), &lc).await;
+        let not_forgotten = match super::role_mounts::alias_rule(holders) {
             // Another AppRole mount holds the name: its role logs in as these
             // entities, so keep them.
-            Ok(holders) if !holders.is_empty() => {
+            AliasRule::Keep(holders) => {
                 log::warn!(target: "security", "approle: role '{lc}' deleted, entity aliases kept: still held by {}", holders.join(", "));
                 None
             }
-            Ok(_) => identity.forget_alias("approle/", &lc).await.err(),
-            Err(e) => {
-                log::warn!(target: "security", "approle: role '{lc}' deleted; other mounts unreadable ({e}), aliases dropped");
-                identity.forget_alias("approle/", &lc).await.err()
+            AliasRule::Forget => identity.forget_alias("approle/", &lc).await.err().map(|e| e.to_string()),
+            AliasRule::Undecided(e) => {
+                Some(format!("the other approle mounts could not be read ({e}), so they were kept"))
             }
         };
-        let Some(e) = forget_failed else {
+        let Some(reason) = not_forgotten else {
             return Ok(None);
         };
-        log::warn!(target: "security", "approle: role '{lc}' deleted but not all its entity aliases were forgotten ({e}); delete it again to retry");
+        log::warn!(target: "security", "approle: role '{lc}' deleted but not all its entity aliases were forgotten: {reason}; delete it again to retry");
         // In the data: the HTTP layer does not carry `Response::warnings`.
         let warning = format!(
-            "role '{lc}' was deleted, but its entity aliases could not all be forgotten: a role re-created under \
-             this name could log in as the old entity; delete the role again to retry"
+            "role '{lc}' was deleted, but its entity aliases were not all forgotten: a role re-created under \
+             this name could sign in as the old entity; delete the role again to retry"
         );
         Ok(Some(Response::data_response(json!({ "warnings": [warning] }).as_object().cloned())))
     }
