@@ -20,6 +20,9 @@ use crate::{
 /// Shares, asset-group membership and attached files (Task 4b).
 mod relations;
 
+/// A token born in a namespace running the transfer there (T513).
+mod namespace_born;
+
 const PASSWORD: &str = "hunter22XX!";
 
 /// Full rights on resources and KV in `src` and `dst`, the transfer route and

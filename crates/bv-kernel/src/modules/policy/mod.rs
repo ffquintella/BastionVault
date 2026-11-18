@@ -157,11 +157,8 @@ impl PolicyModule {
         // for non-root writers; a no-op for root-scoped writes. The same
         // namespace scopes where the policy document is *stored* below.
         let writer_ns = crate::modules::namespace::policy_scope::writer_namespace_path(req.headers.as_ref());
-        {
-            let paths: Vec<String> = policy.paths.iter().map(|r| r.path.clone()).collect();
-            crate::modules::namespace::policy_scope::refuse_cross_namespace_paths(&self.core, &writer_ns, &paths)
-                .await?;
-        }
+        crate::modules::namespace::policy_scope::refuse_cross_namespace_paths(&self.core, &writer_ns, &policy.paths)
+            .await?;
 
         // Sentinel (RGP/EGP) policies are deployment-global; they cannot be
         // authored inside a tenant namespace.

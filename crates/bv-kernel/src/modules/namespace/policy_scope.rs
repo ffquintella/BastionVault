@@ -23,8 +23,12 @@
 //! hot path. (Per-namespace policy *storage* — separate policy documents per
 //! namespace — is a larger, separately-reviewed change tracked in the feature
 //! file.)
+//!
+//! One exception (T513): [`NAMESPACE_GRANTABLE_ROUTES`], named exactly. The
+//! ACL keeps such a rule only for a token working in the namespace whose
+//! policy it is (`PolicyStore::build_acl`).
 
-use crate::{bv_error_response_status, errors::RvError};
+use crate::{bv_error_response_status, errors::RvError, modules::policy::PolicyPathRules};
 
 use super::{NamespaceModule, NAMESPACE_MODULE_NAME};
 
@@ -45,14 +49,31 @@ pub fn namespace_owner_of_path(policy_path: &str, namespaces: &[String]) -> Stri
     String::new()
 }
 
+/// The root-owned paths a namespace policy may name (T513): the namespace
+/// transfer, which runs every step as the caller's own request. Exact paths
+/// only, never a glob, so no other `sys/` path becomes nameable.
+pub const NAMESPACE_GRANTABLE_ROUTES: [&str; 2] = ["sys/namespace-transfer/copy", "sys/namespace-transfer/move"];
+
+/// Whether `path` is one of [`NAMESPACE_GRANTABLE_ROUTES`], byte for byte.
+pub fn is_namespace_grantable_route(path: &str) -> bool {
+    NAMESPACE_GRANTABLE_ROUTES.contains(&path)
+}
+
+/// Whether `rule` names a [`NAMESPACE_GRANTABLE_ROUTES`] path exactly: no
+/// trailing `*`, no `+` segment.
+pub fn is_namespace_grantable_rule(rule: &PolicyPathRules) -> bool {
+    !rule.is_prefix && !rule.has_segment_wildcards && is_namespace_grantable_route(&rule.path)
+}
+
 /// Refuse a policy write whose path rules reference a namespace other than the
-/// writer's. No-op for root-scoped writes (`writer_ns_path` empty). Errors with
+/// writer's, except a rule naming a [`NAMESPACE_GRANTABLE_ROUTES`] path
+/// exactly. No-op for root-scoped writes (`writer_ns_path` empty). Errors with
 /// a 403-style error naming the offending path and the namespace it belongs to.
 #[maybe_async::maybe_async]
 pub async fn refuse_cross_namespace_paths(
     core: &crate::core::Core,
     writer_ns_path: &str,
-    paths: &[String],
+    rules: &[PolicyPathRules],
 ) -> Result<(), RvError> {
     // Root operator may author policies referencing any tenant.
     if writer_ns_path.is_empty() {
@@ -70,7 +91,8 @@ pub async fn refuse_cross_namespace_paths(
     let namespaces: Vec<String> =
         store.list_all().await?.into_iter().map(|ns| ns.path).filter(|p| !p.is_empty()).collect();
 
-    for path in paths {
+    for rule in rules.iter().filter(|rule| !is_namespace_grantable_rule(rule)) {
+        let path = &rule.path;
         let owner = namespace_owner_of_path(path, &namespaces);
         if owner != writer_ns_path {
             let owner_label = if owner.is_empty() { "root".to_string() } else { format!("{owner:?}") };
@@ -79,7 +101,8 @@ pub async fn refuse_cross_namespace_paths(
                 &format!(
                     "policy in namespace {writer_ns_path:?} may not reference path {path:?} \
                      (belongs to namespace {owner_label}); namespace policies must use \
-                     {writer_ns_path:?}-prefixed paths"
+                     {writer_ns_path:?}-prefixed paths, except the exact paths {:?}",
+                    NAMESPACE_GRANTABLE_ROUTES
                 )
             ));
         }
@@ -107,5 +130,46 @@ mod tests {
         // A path that merely shares a prefix string but not a segment boundary
         // is not owned by that namespace.
         assert_eq!(namespace_owner_of_path("engineering-x/secret", &nss), "");
+    }
+
+    /// T513: exactly the two transfer routes, named exactly, are exempt; any
+    /// glob, other operation, spelling or `sys/` path is not.
+    #[test]
+    fn only_the_two_transfer_routes_are_namespace_grantable() {
+        use std::str::FromStr;
+
+        use crate::modules::policy::Policy;
+
+        let grantable = |path: &str| {
+            let hcl = format!("path \"{path}\" {{ capabilities = [\"update\"] }}");
+            let policy = Policy::from_str(&hcl).unwrap();
+            is_namespace_grantable_rule(&policy.paths[0])
+        };
+        for path in ["sys/namespace-transfer/copy", "sys/namespace-transfer/move", "/sys/namespace-transfer/copy"] {
+            assert!(grantable(path), "{path}");
+        }
+        for path in [
+            "sys/namespace-transfer/*",
+            "sys/namespace-transfer/+",
+            "sys/namespace-transfer/copy*",
+            "sys/namespace-transfer/copy/*",
+            "sys/namespace-transfer/copy/",
+            "sys/namespace-transfer",
+            "sys/namespace-transfer/",
+            "sys/namespace-transfer/delete",
+            "sys/namespace-transfer/../mounts",
+            "sys/+/copy",
+            "+/namespace-transfer/copy",
+            "SYS/namespace-transfer/copy",
+            "a/sys/namespace-transfer/copy",
+            "sys/capabilities-self",
+            "sys/policy",
+            "sys/*",
+            "*",
+        ] {
+            assert!(!grantable(path), "{path}");
+        }
+        assert!(!is_namespace_grantable_route("sys/namespace-transfer/copy/"));
+        assert!(!is_namespace_grantable_route("/sys/namespace-transfer/copy"));
     }
 }

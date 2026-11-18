@@ -39,6 +39,7 @@ use super::{
     transfer_target, Policy, PolicyType,
 };
 use crate::kernel_api::VaultCtx;
+use crate::modules::namespace::policy_scope::{is_namespace_grantable_route, is_namespace_grantable_rule};
 use crate::{
     bv_error_response_status, bv_error_string,
     core::Core,
@@ -2680,6 +2681,11 @@ impl PolicyStore {
             }
         };
         let mut materialized: Vec<Arc<Policy>> = all_policies.into_iter().filter_map(materialize).collect();
+        // T513: a namespace policy's grant on the transfer routes counts only
+        // while the token works in the namespace whose policy it is.
+        if !namespace_routes_apply(&ns_path, request_ns) {
+            materialized = materialized.into_iter().map(without_namespace_routes).collect();
+        }
 
         // Confinement runs on the *materialized* rule, so no template value
         // can carry a rule out of the request namespace.
@@ -4167,6 +4173,14 @@ impl PolicyStore {
                 if let Some(alias) = &alias_denial {
                     detail.push_str(&format!("; refused by a deny on the same KV v2 secret's path \"{alias}\""));
                 }
+                if is_namespace_grantable_route(&req.path)
+                    && !namespace_routes_apply(&d.resolution.binding_ns, req.namespace_path.as_deref())
+                {
+                    detail.push_str(
+                        "; a namespace policy grants this route only to a token working in the namespace it was \
+                         born in",
+                    );
+                }
                 if !d.scope_gated.is_empty() {
                     detail.push_str(&format!(
                         "; matched but granted nothing because their scope gate did not pass \
@@ -4337,6 +4351,25 @@ pub(super) fn confine_policy_to_namespace(policy: &Arc<Policy>, ns_prefix: &str)
         return (None, dropped);
     }
     (Some(Arc::new(confined)), dropped)
+}
+
+/// Whether rules naming a `NAMESPACE_GRANTABLE_ROUTES` path apply to a token
+/// whose policies resolve in `binding_ns`, for a request addressed to
+/// `request_ns` (T513). Root-namespace policies: always, as before. A
+/// namespace's policies: only in that namespace, never a descendant or root.
+fn namespace_routes_apply(binding_ns: &str, request_ns: Option<&str>) -> bool {
+    binding_ns.is_empty() || request_ns.unwrap_or_default() == binding_ns
+}
+
+/// `policy` without its rules naming a `NAMESPACE_GRANTABLE_ROUTES` path
+/// exactly; the same `Arc` when it has none.
+fn without_namespace_routes(policy: Arc<Policy>) -> Arc<Policy> {
+    if !policy.paths.iter().any(is_namespace_grantable_rule) {
+        return policy;
+    }
+    let mut kept = Policy::clone(&policy);
+    kept.paths.retain(|rule| !is_namespace_grantable_rule(rule));
+    Arc::new(kept)
 }
 
 /// Can `rule` match only paths beneath `ns_prefix`? A literal leading
@@ -6725,6 +6758,39 @@ path "dti/esi/secret/data/blocked" { capabilities = ["read"] }
         let none = named("n", r#"path "secret/*" { capabilities = ["read"] }"#);
         assert_eq!(confine_policy_to_namespace(&Arc::new(none), "dti/esi/").0.map(|p| p.paths.len()), None);
         assert!(!rule_confined_to(&named("x", r#"path "dti/esi/*" { capabilities = ["read"] }"#).paths[0], "dti/esi"));
+    }
+
+    /// T513: a namespace's route rules apply only in that namespace; root's
+    /// always. Only the exact route rules are dropped elsewhere.
+    #[test]
+    fn namespace_route_rules_apply_only_in_their_own_namespace() {
+        for (binding, request, applies) in [
+            ("", None, true),
+            ("", Some("a"), true),
+            ("a", Some("a"), true),
+            ("a", None, false),
+            ("a", Some(""), false),
+            ("a", Some("a/b"), false),
+            ("a/b", Some("a"), false),
+            ("a", Some("c"), false),
+            ("a", Some("a/"), false),
+        ] {
+            assert_eq!(namespace_routes_apply(binding, request), applies, "{binding:?} {request:?}");
+        }
+        let p = Arc::new(named(
+            "t",
+            r#"
+            path "sys/namespace-transfer/copy" { capabilities = ["update"] }
+            path "sys/namespace-transfer/move" { capabilities = ["deny"] }
+            path "a/secret/*" { capabilities = ["read"] }
+            path "a/sys/namespace-transfer/copy" { capabilities = ["update"] }
+            "#,
+        ));
+        let mut kept: Vec<String> = without_namespace_routes(p).paths.iter().map(|r| r.path.clone()).collect();
+        kept.sort();
+        assert_eq!(kept, ["a/secret/", "a/sys/namespace-transfer/copy"]);
+        let untouched = Arc::new(named("u", r#"path "a/secret/*" { capabilities = ["read"] }"#));
+        assert!(Arc::ptr_eq(&without_namespace_routes(untouched.clone()), &untouched), "no copy without a route rule");
     }
 
     #[test]
