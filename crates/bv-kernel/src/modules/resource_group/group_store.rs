@@ -64,6 +64,8 @@ enum Keyspace {
     SecretIndex,
     /// KV-secret members under the secret's own name (format 1, T507).
     SecretNameIndex,
+    /// Format 1 records' kept pre-T507 members, under their pre-T507 key.
+    SecretKeptIndex,
     FileIndex,
     History,
     /// Scope bookkeeping: the change-version record, and at root the T507 marker.
@@ -77,6 +79,7 @@ impl Keyspace {
             Keyspace::MemberIndex => "member-index/",
             Keyspace::SecretIndex => "secret-index/",
             Keyspace::SecretNameIndex => "secret-name-index/",
+            Keyspace::SecretKeptIndex => "secret-kept-index/",
             Keyspace::FileIndex => "file-index/",
             Keyspace::History => "history/",
             Keyspace::Meta => "meta/",
@@ -237,6 +240,11 @@ pub struct ResourceGroupEntry {
     /// How `secrets` names a secret ([`SECRETS_FORMAT`]); absent is 0.
     #[serde(default)]
     pub secrets_format: u32,
+    /// Format 1: pre-T507 members the own-name form cannot express exactly
+    /// (route-specific, or reaching no mount), still matched by the pre-T507
+    /// rule. Only ever shrinks: an operator regroups them by own name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secrets_legacy_kept: Vec<String>,
     /// On a record the T507 migration converted, the format 0 list it
     /// replaced: kept for rollback, never read for access once switched.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -279,6 +287,14 @@ impl ResourceGroupEntry {
         match self.secrets_format {
             0 => &[],
             _ => &self.secrets,
+        }
+    }
+
+    /// A format 1 record's members still matched by the pre-T507 rule.
+    pub fn kept_list(&self) -> &[String] {
+        match self.secrets_format {
+            0 => &[],
+            _ => &self.secrets_legacy_kept,
         }
     }
 }
@@ -588,6 +604,7 @@ impl ResourceGroupStore {
         for (index, old_list, new_list) in [
             (Keyspace::SecretIndex, old.legacy_list(), entry.legacy_list()),
             (Keyspace::SecretNameIndex, old.own_list(), entry.own_list()),
+            (Keyspace::SecretKeptIndex, old.kept_list(), entry.kept_list()),
         ] {
             let (old_set, new_set) = (as_set(old_list), as_set(new_list));
             for s in new_set.difference(&old_set) {
@@ -610,19 +627,29 @@ impl ResourceGroupStore {
 
     /// Give `entry` the stored record's KV-secret format. A write prepared on
     /// a format 0 read that the T507 migration converted meanwhile carries the
-    /// converted members when it left them unchanged, else it is refused. The
-    /// rollback copy of a converted record is never replaced by a write.
+    /// converted lists when it left the members unchanged, else it is refused.
+    /// The rollback copy never changes; kept members can only be removed.
     fn keep_secrets_format(entry: &mut ResourceGroupEntry, old: &ResourceGroupEntry) -> Result<(), RvError> {
         if old.secrets_format > entry.secrets_format {
             if as_set(&entry.secrets) != as_set(old.legacy_list()) {
                 return Err(converted_during_write(&entry.name));
             }
             entry.secrets = old.secrets.clone();
+            entry.secrets_legacy_kept = old.secrets_legacy_kept.clone();
             entry.secrets_format = old.secrets_format;
         } else if old.secrets_format < entry.secrets_format && !old.secrets.is_empty() {
             // Converting members is `convert_record`'s, which keeps the old list.
             return Err(converted_during_write(&entry.name));
         }
+        let kept: BTreeSet<String> =
+            entry.secrets_legacy_kept.drain(..).filter_map(|s| Self::checked_secret_name(&s)).collect();
+        if !kept.iter().all(|k| old.kept_list().contains(k)) {
+            return Err(RvError::ErrResponseStatus(
+                400,
+                format!("asset group '{}': kept pre-T507 members can only be removed, not added", entry.name),
+            ));
+        }
+        entry.secrets_legacy_kept = kept.into_iter().collect();
         if old.secrets_format > 0 {
             entry.legacy_secrets = old.legacy_secrets.clone();
         } else if entry.secrets_format == 0 {
@@ -695,6 +722,9 @@ impl ResourceGroupStore {
         }
         for s in old.own_list() {
             self.remove_from_secret_index(Keyspace::SecretNameIndex, s, &name, ns_path).await?;
+        }
+        for s in old.kept_list() {
+            self.remove_from_secret_index(Keyspace::SecretKeptIndex, s, &name, ns_path).await?;
         }
         for f in &old.files {
             self.remove_from_file_index(f, &name, ns_path).await?;
@@ -831,16 +861,53 @@ impl ResourceGroupStore {
         Ok(groups)
     }
 
-    /// Convert group `name`'s format 0 members `from` to `to`, their own
-    /// names (the T507 migration), keeping `from` as the rollback copy and
-    /// filing `to` in the name index. Re-reads first: `false`, writing
+    /// The groups whose kept pre-T507 members (format 1) a pre-T507 lookup
+    /// of the mount-relative `path` finds: matched by the old rule once
+    /// switched, beside [`Self::groups_for_secret_name`].
+    pub async fn groups_for_kept_secret(&self, path: &str, ns_path: &str) -> Result<Vec<String>, RvError> {
+        let Some(key) = Self::legacy_secret_key(path) else {
+            return Ok(Vec::new());
+        };
+        self.index_lookup(Keyspace::SecretKeptIndex, &key, ns_path).await
+    }
+
+    /// The pre-T507 KV-delete prune for kept members: remove the pre-T507 key
+    /// of the deleted mount-relative `path` from every kept list, as the old
+    /// rule removed it. Own-name members are `prune_secret_name`'s.
+    pub async fn prune_kept_secret(&self, path: &str, ns_path: &str) -> Result<Vec<String>, RvError> {
+        let Some(key) = Self::legacy_secret_key(path) else {
+            return Ok(Vec::new());
+        };
+        let groups = self.index_lookup(Keyspace::SecretKeptIndex, &key, ns_path).await?;
+        for g_name in &groups {
+            if let Some(mut g) = self.get_group(g_name, ns_path).await? {
+                if g.secrets_format == 0 {
+                    continue;
+                }
+                g.secrets_legacy_kept.retain(|s| s != &key);
+                g.updated_at = now_iso();
+                self.put_record(g, ns_path).await?;
+            }
+        }
+        self.view(ns_path, Keyspace::SecretKeptIndex).delete(&Self::secret_index_key(&key)).await?;
+        if !groups.is_empty() {
+            self.bump_version(ns_path).await?;
+        }
+        Ok(groups)
+    }
+
+    /// Convert group `name`'s format 0 members `from` to own names `own` and
+    /// kept members `kept` (the T507 migration), keeping `from` as the
+    /// rollback copy. Index entries are added before the record is written,
+    /// so no format 1 record ever lacks them. Re-reads: `false`, writing
     /// nothing, when the record is gone, converted, or no longer lists `from`.
     pub(crate) async fn convert_record(
         &self,
         name: &str,
         ns_path: &str,
         from: &[String],
-        to: &[String],
+        own: &[String],
+        kept: &[String],
     ) -> Result<bool, RvError> {
         let Some(mut g) = self.get_group(name, ns_path).await? else {
             return Ok(false);
@@ -848,41 +915,50 @@ impl ResourceGroupStore {
         if g.secrets_format >= SECRETS_FORMAT || as_set(&g.secrets) != as_set(from) {
             return Ok(false);
         }
-        let own: BTreeSet<String> = to.iter().filter_map(|s| Self::checked_secret_name(s)).collect();
+        let checked = |v: &[String]| -> Vec<String> {
+            v.iter().filter_map(|s| Self::checked_secret_name(s)).collect::<BTreeSet<_>>().into_iter().collect()
+        };
+        let (own, kept) = (checked(own), checked(kept));
+        for (index, list) in [(Keyspace::SecretNameIndex, &own), (Keyspace::SecretKeptIndex, &kept)] {
+            for s in list {
+                self.add_to_secret_index(index, s, &g.name, ns_path).await?;
+            }
+        }
         g.legacy_secrets = std::mem::take(&mut g.secrets);
-        g.secrets = own.into_iter().collect();
+        g.secrets = own;
+        g.secrets_legacy_kept = kept;
         g.secrets_format = SECRETS_FORMAT;
         let value = serde_json::to_vec(&g)?;
         self.view(ns_path, Keyspace::Group).put(&StorageEntry { key: g.name.clone(), value }).await?;
-        for s in &g.secrets {
-            self.add_to_secret_index(Keyspace::SecretNameIndex, s, &g.name, ns_path).await?;
-        }
         self.bump_version(ns_path).await?;
         Ok(true)
     }
 
-    /// Rebuild only scope `ns_path`'s name index from its format 1 records,
-    /// leaving the legacy index that decides while the switch is pending
-    /// untouched (the T507 migration). Returns the format 0 records skipped.
-    pub(crate) async fn rebuild_name_index(&self, ns_path: &str) -> Result<Vec<String>, RvError> {
-        let view = self.view(ns_path, Keyspace::SecretNameIndex);
-        for k in view.get_keys().await? {
-            view.delete(&k).await?;
-        }
+    /// Before the T507 marker is set: make sure every format 1 record of scope
+    /// `ns_path` is filed in the name and kept indexes, adding what a racing
+    /// writer lost, never deleting (no lookup reads them yet, and nothing may
+    /// leave them while pending). Returns the records still format 0.
+    pub(crate) async fn repair_converted(&self, ns_path: &str) -> Result<Vec<String>, RvError> {
         let mut unconverted = Vec::new();
         for gname in self.list_groups(ns_path).await? {
             let Some(g) = self.get_group(&gname, ns_path).await? else {
                 continue;
             };
-            if g.secrets_format == 0 && !g.secrets.is_empty() {
-                unconverted.push(gname);
+            if g.secrets_format == 0 {
+                if !g.secrets.is_empty() {
+                    unconverted.push(gname);
+                }
                 continue;
             }
-            for s in g.own_list() {
-                self.add_to_secret_index(Keyspace::SecretNameIndex, s, &gname, ns_path).await?;
+            for (index, list) in [(Keyspace::SecretNameIndex, g.own_list()), (Keyspace::SecretKeptIndex, g.kept_list())]
+            {
+                for s in list {
+                    if !self.index_lookup(index, s, ns_path).await?.iter().any(|n| n == &gname) {
+                        self.add_to_secret_index(index, s, &gname, ns_path).await?;
+                    }
+                }
             }
         }
-        self.bump_version(ns_path).await?;
         Ok(unconverted)
     }
 
@@ -1122,43 +1198,93 @@ impl ResourceGroupStore {
     }
 
     /// Rebuild scope `ns_path`'s reverse indexes from its primary records,
-    /// leaving every other scope alone. Recovery after an interrupted write;
-    /// callers must hold admin-level access since this overwrites index state.
-    /// A format 0 record is filed only in the legacy index (T507).
+    /// leaving every other scope alone. An entry is rewritten only if it
+    /// differs and stale ones are deleted last, so a live index never reads
+    /// empty mid-rebuild. Recovery after an interrupted write; admin-level.
     pub async fn reindex(&self, ns_path: &str) -> Result<usize, RvError> {
-        let keyspaces = [Keyspace::MemberIndex, Keyspace::SecretIndex, Keyspace::SecretNameIndex, Keyspace::FileIndex];
-        for keyspace in keyspaces {
-            let view = self.view(ns_path, keyspace);
-            for k in view.get_keys().await? {
-                view.delete(&k).await?;
+        let mut want: Vec<(Keyspace, BTreeMap<String, BTreeSet<String>>)> = [
+            Keyspace::MemberIndex,
+            Keyspace::SecretIndex,
+            Keyspace::SecretNameIndex,
+            Keyspace::SecretKeptIndex,
+            Keyspace::FileIndex,
+        ]
+        .into_iter()
+        .map(|k| (k, BTreeMap::new()))
+        .collect();
+        let mut touched = 0usize;
+        for gname in self.list_groups(ns_path).await? {
+            let Some(g) = self.get_group(&gname, ns_path).await? else {
+                continue;
+            };
+            let keyed = |list: &[String], key: fn(&str) -> Option<String>| list.iter().filter_map(|m| key(m)).collect();
+            let lists: [Vec<String>; 5] = [
+                keyed(&g.members, Self::sanitize_member),
+                keyed(g.legacy_list(), Self::secret_entry_key),
+                keyed(g.own_list(), Self::secret_entry_key),
+                keyed(g.kept_list(), Self::secret_entry_key),
+                keyed(&g.files, Self::sanitize_file_id),
+            ];
+            touched += g.members.len() + g.secrets.len() + g.files.len();
+            for ((_, index), keys) in want.iter_mut().zip(lists) {
+                for key in keys {
+                    index.entry(key).or_default().insert(gname.clone());
+                }
             }
         }
-
-        let groups = self.list_groups(ns_path).await?;
-        let mut touched = 0usize;
-        for gname in &groups {
-            if let Some(g) = self.get_group(gname, ns_path).await? {
-                for m in &g.members {
-                    self.add_to_index(m, gname, ns_path).await?;
-                    touched += 1;
-                }
-                for s in g.legacy_list() {
-                    self.add_to_secret_index(Keyspace::SecretIndex, s, gname, ns_path).await?;
-                }
-                for s in g.own_list() {
-                    self.add_to_secret_index(Keyspace::SecretNameIndex, s, gname, ns_path).await?;
-                }
-                touched += g.secrets.len();
-                for f in &g.files {
-                    self.add_to_file_index(f, gname, ns_path).await?;
-                    touched += 1;
-                }
-            }
+        for (keyspace, desired) in want {
+            self.replace_index(ns_path, keyspace, desired).await?;
         }
         // The indexes were rewritten wholesale (possibly repairing drift a
         // reader saw), so the scope counts as changed even when nothing did.
         self.bump_version(ns_path).await?;
         Ok(touched)
+    }
+
+    /// Rebuild only scope `ns_path`'s legacy secret index from the records'
+    /// pre-T507 lists, without a gap (the T499 datafix, while T507 is pending
+    /// and that index decides; nothing may change secret membership then).
+    pub(crate) async fn repair_legacy_index(&self, ns_path: &str) -> Result<(), RvError> {
+        let mut desired: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for gname in self.list_groups(ns_path).await? {
+            if let Some(g) = self.get_group(&gname, ns_path).await? {
+                for key in g.legacy_list().iter().filter_map(|m| Self::secret_entry_key(m)) {
+                    desired.entry(key).or_default().insert(gname.clone());
+                }
+            }
+        }
+        self.replace_index(ns_path, Keyspace::SecretIndex, desired).await?;
+        self.bump_version(ns_path).await.map(|_| ())
+    }
+
+    /// The index key of KV-secret member `member`, as `add_to_secret_index` files it.
+    fn secret_entry_key(member: &str) -> Option<String> {
+        (!member.is_empty()).then(|| Self::secret_index_key(member))
+    }
+
+    /// Make `keyspace` of scope `ns_path` hold exactly `desired` (index key ->
+    /// group names): differing entries are written first, stale ones deleted
+    /// after, so no key a reader needs is ever missing on the way.
+    async fn replace_index(
+        &self,
+        ns_path: &str,
+        keyspace: Keyspace,
+        desired: BTreeMap<String, BTreeSet<String>>,
+    ) -> Result<(), RvError> {
+        let view = self.view(ns_path, keyspace);
+        for (key, names) in &desired {
+            let names: Vec<&String> = names.iter().collect();
+            let current = view.get(key).await?.and_then(|e| serde_json::from_slice::<Vec<String>>(&e.value).ok());
+            if current.as_ref().map(|c| c.iter().collect::<Vec<_>>()) != Some(names.clone()) {
+                view.put(&StorageEntry { key: key.clone(), value: serde_json::to_vec(&names)? }).await?;
+            }
+        }
+        for key in view.get_keys().await? {
+            if !desired.contains_key(&key) {
+                view.delete(&key).await?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1441,9 +1567,9 @@ mod tests {
         assert!(store.groups_for_secret_name("kv/x", "").await.unwrap().is_empty(), "not an own name yet");
 
         let (from, to) = (vec!["kv/x".to_string()], vec!["kv/data/x".to_string(), "kv/x".to_string()]);
-        assert!(!store.convert_record("g", "", &["kv/y".to_string()], &to).await.unwrap(), "another list");
-        assert!(store.convert_record("g", "", &from, &to).await.unwrap());
-        assert!(!store.convert_record("g", "", &from, &to).await.unwrap(), "once");
+        assert!(!store.convert_record("g", "", &["kv/y".to_string()], &to, &[]).await.unwrap(), "another list");
+        assert!(store.convert_record("g", "", &from, &to, &[]).await.unwrap());
+        assert!(!store.convert_record("g", "", &from, &to, &[]).await.unwrap(), "once");
         let g = store.get_group("g", "").await.unwrap().unwrap();
         assert_eq!((g.secrets_format, g.secrets.clone(), g.legacy_secrets.clone()), (1, to.clone(), from.clone()));
         assert_eq!(store.groups_for_secret_name("kv/data/x", "").await.unwrap(), ["g"]);
@@ -1484,5 +1610,74 @@ mod tests {
         assert_eq!(ResourceGroupStore::legacy_secret_key("a/b/data/x").as_deref(), Some("a/b/data/x"));
         assert_eq!(ResourceGroupStore::checked_secret_name("/kv/data/x/").as_deref(), Some("kv/data/x"));
         assert_eq!(ResourceGroupStore::checked_secret_name("kv/../x"), None);
+    }
+
+    /// A kept pre-T507 member is filed in the kept index under its pre-T507
+    /// key, matched by the old rule, and can only be removed by a write.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn a_kept_member_matches_by_the_old_rule_and_can_only_be_removed() {
+        let (_bvault, core, _root) = new_unseal_test_bastion_vault("rg_t507_kept").await;
+        let store = ResourceGroupStore::new(&core).await.unwrap();
+        store.unmark_secret_names_for_test().await.unwrap();
+        store.set_group(legacy("g", &["team/kv/data/z", "kv/x"]), "").await.unwrap();
+        let from = vec!["kv/x".to_string(), "team/kv/data/z".to_string()];
+        let (own, kept) = (vec!["kv/x".to_string()], vec!["team/kv/data/z".to_string()]);
+        assert!(store.convert_record("g", "", &from, &own, &kept).await.unwrap());
+        store.mark_secret_names().await.unwrap();
+        assert_eq!(store.groups_for_kept_secret("team/kv/data/z", "").await.unwrap(), ["g"], "its route");
+        assert!(store.groups_for_kept_secret("team/kv/metadata/z", "").await.unwrap().is_empty(), "not another");
+        assert!(store.groups_for_secret_name("team/kv/data/z", "").await.unwrap().is_empty(), "not an own name");
+
+        let g = store.get_group("g", "").await.unwrap().unwrap();
+        let added = ResourceGroupEntry { secrets_legacy_kept: vec!["kv/new".into()], ..g.clone() };
+        let r = store.set_group(added, "").await;
+        assert!(matches!(r, Err(RvError::ErrResponseStatus(400, _))), "{r:?}");
+        let regrouped = ResourceGroupEntry {
+            secrets: vec!["kv/x".into(), "team/kv/z".into()],
+            secrets_legacy_kept: Vec::new(),
+            ..g
+        };
+        store.set_group(regrouped, "").await.unwrap();
+        assert!(store.groups_for_kept_secret("team/kv/data/z", "").await.unwrap().is_empty(), "removed");
+        assert_eq!(store.groups_for_secret_name("team/kv/z", "").await.unwrap(), ["g"], "by own name now");
+    }
+
+    /// The migration's repair adds what a converted record lacks and reports
+    /// records still format 0; it never deletes an entry.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn repair_adds_missing_entries_and_reports_unconverted_records() {
+        let (_bvault, core, _root) = new_unseal_test_bastion_vault("rg_t507_repair").await;
+        let store = ResourceGroupStore::new(&core).await.unwrap();
+        store.unmark_secret_names_for_test().await.unwrap();
+        store.set_group(legacy("old", &["kv/a"]), "").await.unwrap();
+        store.set_group(legacy("conv", &["kv/b"]), "").await.unwrap();
+        let b = vec!["kv/b".to_string()];
+        assert!(store.convert_record("conv", "", &b, &b, &[]).await.unwrap());
+        // A racing writer lost the entry; a stray one is left alone.
+        let name_index = store.view("", Keyspace::SecretNameIndex);
+        name_index.delete(&ResourceGroupStore::secret_index_key("kv/b")).await.unwrap();
+        store.add_to_secret_index(Keyspace::SecretNameIndex, "kv/stray", "conv", "").await.unwrap();
+        assert_eq!(store.repair_converted("").await.unwrap(), ["old"]);
+        assert_eq!(store.groups_for_secret_name("kv/b", "").await.unwrap(), ["conv"], "added back");
+        assert_eq!(store.groups_for_secret_name("kv/stray", "").await.unwrap(), ["conv"], "never deleted");
+    }
+
+    /// `reindex` never empties a live index: an entry that is right is not
+    /// rewritten, a wrong one is rewritten in place, a stale one deleted last.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn reindex_rewrites_in_place_and_deletes_stale_entries_last() {
+        let (_bvault, core, _root) = new_unseal_test_bastion_vault("rg_t507_reindex").await;
+        let store = ResourceGroupStore::new(&core).await.unwrap();
+        store.set_group(entry("g", &["web1"], &["kv/x"], &[]), "").await.unwrap();
+        store.set_group(entry("h", &[], &["kv/x"], &[]), "").await.unwrap();
+        let view = store.view("", Keyspace::SecretNameIndex);
+        let key = ResourceGroupStore::secret_index_key("kv/x");
+        // Drift a reader would see: `h` missing on kv/x, a stale kv/gone.
+        view.put(&StorageEntry { key: key.clone(), value: serde_json::to_vec(&["g"]).unwrap() }).await.unwrap();
+        store.add_to_secret_index(Keyspace::SecretNameIndex, "kv/gone", "g", "").await.unwrap();
+        store.reindex("").await.unwrap();
+        assert_eq!(store.groups_for_secret_name("kv/x", "").await.unwrap(), ["g", "h"]);
+        assert!(store.groups_for_secret_name("kv/gone", "").await.unwrap().is_empty());
+        assert_eq!(store.groups_for_resource("web1", "").await.unwrap(), ["g"], "other indexes rebuilt too");
     }
 }

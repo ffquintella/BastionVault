@@ -48,7 +48,7 @@ pub mod secret_name_migrate;
 pub(crate) mod secret_names;
 use group_store::{scope_of, SECRETS_FORMAT};
 pub use group_store::{ResourceGroupEntry, ResourceGroupHistoryEntry, ResourceGroupStore};
-use secret_names::{legacy_path_of_name, member_paths, own_members_via, pending_refusal};
+use secret_names::{legacy_path_of_name, member_paths, pending_refusal, split_members_via};
 
 /// Sentinel returned in the `members` / `secrets` list when the caller
 /// has group-read access but not read access on an individual member.
@@ -202,6 +202,11 @@ impl ResourceGroupBackend {
                             required: false,
                             description: "KV secrets that belong to this group, each by its own `<mount>/<name>` (on KV v2 `secret/data/x` is the secret named `data/x`), stored as given (T507)."
                         },
+                        "secrets_legacy_kept": {
+                            field_type: FieldType::CommaStringSlice,
+                            required: false,
+                            description: "Members the T507 migration kept with the pre-T507 rule. A write may only remove entries; their secrets are re-added by own name in `secrets`."
+                        },
                         "files": {
                             field_type: FieldType::CommaStringSlice,
                             required: false,
@@ -278,6 +283,9 @@ struct WritePayload {
     /// KV-secret paths. Same semantics as `members`.
     #[serde(default)]
     secrets: Option<Vec<String>>,
+    /// Kept pre-T507 members: only removals are accepted.
+    #[serde(default)]
+    secrets_legacy_kept: Option<Vec<String>>,
     /// File-resource ids (UUIDs). Same semantics as `members`.
     #[serde(default)]
     files: Option<Vec<String>>,
@@ -325,19 +333,21 @@ async fn redact_inaccessible_members(
     // takes (`secret_probe_paths`); either allowing `Read` is enough. An
     // unreadable T507 marker hides them all (fail closed).
     let switched = secret_names_switched(core).await;
-    for s in entry.secrets.iter_mut() {
-        if s == REDACTED_MEMBER {
-            continue;
-        }
-        let readable = match switched {
-            Some(switched) => {
-                let probes = secret_probe_paths(core, ns_path, s, switched);
-                secret_member_readable(&store, auth, ns_path, &probes).await
+    for (list, own) in [(&mut entry.secrets, true), (&mut entry.secrets_legacy_kept, false)] {
+        for s in list.iter_mut() {
+            if s == REDACTED_MEMBER {
+                continue;
             }
-            None => false,
-        };
-        if !readable {
-            *s = REDACTED_MEMBER.to_string();
+            let readable = match switched {
+                Some(switched) => {
+                    let probes = secret_probe_paths(core, ns_path, s, switched && own);
+                    secret_member_readable(&store, auth, ns_path, &probes).await
+                }
+                None => false,
+            };
+            if !readable {
+                *s = REDACTED_MEMBER.to_string();
+            }
         }
     }
 }
@@ -350,33 +360,35 @@ async fn secret_names_switched(core: &Core) -> Option<bool> {
 }
 
 /// The paths a `Read` probe of KV-secret member `secret` takes, namespaced:
-/// once switched, the routes whose key is that member (T507), none when no
-/// route has it (hidden); while pending, the pre-T507 member and its `data/` form.
-fn secret_probe_paths(core: &Core, ns_path: Option<&str>, secret: &str, switched: bool) -> Vec<String> {
-    if switched {
+/// for an own-name member (`by_own_name`, once switched) the routes whose key
+/// is that member, none when no route has it (hidden); for a pre-T507 member
+/// (pending, or kept) the member as is and in the KV-v2 `data/` form.
+fn secret_probe_paths(core: &Core, ns_path: Option<&str>, secret: &str, by_own_name: bool) -> Vec<String> {
+    if by_own_name {
         return member_paths(&core.router(), secret, ns_path);
     }
     vec![namespaced_probe_path(ns_path, secret), namespaced_probe_path(ns_path, &kv_v2_data_form(secret))]
 }
 
-/// The KV-secret members of `g` as callers see them: own names once switched
-/// (a format 0 record found then converted on the fly), the pre-T507 list
-/// while the T507 switch is pending. Never the rollback copy.
+/// The KV-secret members of `g` as callers see them, `(secrets, kept)`: own
+/// names and kept pre-T507 members once switched (a format 0 record found
+/// then read on the fly), the pre-T507 list and none while the T507 switch
+/// is pending. Never the rollback copy.
 fn shown_secrets(
     core: &Core,
     ns_path: Option<&str>,
     g: &ResourceGroupEntry,
     switched: bool,
-) -> Result<Vec<String>, RvError> {
+) -> Result<(Vec<String>, Vec<String>), RvError> {
     if !switched {
-        return Ok(g.legacy_list().to_vec());
+        return Ok((g.legacy_list().to_vec(), Vec::new()));
     }
-    own_members_via(&core.router(), g, ns_path)
+    split_members_via(&core.router(), g, ns_path)
 }
 
-/// `g` as callers see it: [`shown_secrets`] in place of the stored list.
+/// `g` as callers see it: [`shown_secrets`] in place of the stored lists.
 fn shown(core: &Core, home: &str, mut g: ResourceGroupEntry, switched: bool) -> Result<ResourceGroupEntry, RvError> {
-    g.secrets = shown_secrets(core, ns_opt(home), &g, switched)?;
+    (g.secrets, g.secrets_legacy_kept) = shown_secrets(core, ns_opt(home), &g, switched)?;
     g.legacy_secrets.clear();
     Ok(g)
 }
@@ -434,11 +446,12 @@ async fn caller_reads_any_member(
     let Some(switched) = secret_names_switched(core).await else {
         return false;
     };
-    let Ok(secrets) = shown_secrets(core, ns_path, entry, switched) else {
+    let Ok((secrets, kept)) = shown_secrets(core, ns_path, entry, switched) else {
         return false;
     };
-    for sec in secrets.iter().filter(|s| s.as_str() != REDACTED_MEMBER) {
-        let probes = secret_probe_paths(core, ns_path, sec, switched);
+    let members = secrets.iter().map(|s| (s, switched)).chain(kept.iter().map(|s| (s, false)));
+    for (sec, by_own_name) in members.filter(|(s, _)| s.as_str() != REDACTED_MEMBER) {
+        let probes = secret_probe_paths(core, ns_path, sec, by_own_name);
         if secret_member_readable(&store, auth, ns_path, &probes).await {
             return true;
         }
@@ -557,19 +570,22 @@ async fn redact_members_of_many(
     let caller_id = auth.metadata.get("entity_id").cloned().unwrap_or_default();
     let owned = |g: &ResourceGroupEntry| !g.owner_entity_id.is_empty() && g.owner_entity_id == caller_id;
 
-    // Home scope -> (resource members, secret members) still to decide.
-    let mut wanted: BTreeMap<String, (BTreeSet<String>, BTreeSet<String>)> = BTreeMap::new();
+    // Home scope -> (resource members, (secret member, by own name)) to decide.
+    type Wanted = (BTreeSet<String>, BTreeSet<(String, bool)>);
+    let mut wanted: BTreeMap<String, Wanted> = BTreeMap::new();
     for (home, g) in groups.iter() {
         if owned(g) {
             continue;
         }
         let slot = wanted.entry(home.clone()).or_default();
         slot.0.extend(g.members.iter().filter(|m| m.as_str() != REDACTED_MEMBER).cloned());
-        slot.1.extend(g.secrets.iter().filter(|s| s.as_str() != REDACTED_MEMBER).cloned());
+        let own = g.secrets.iter().map(|s| (s, switched));
+        let all = own.chain(g.secrets_legacy_kept.iter().map(|s| (s, false)));
+        slot.1.extend(all.filter(|(s, _)| s.as_str() != REDACTED_MEMBER).map(|(s, by)| (s.clone(), by)));
     }
 
     let mut readable_resources: HashSet<(String, String)> = HashSet::new();
-    let mut readable_secrets: HashSet<(String, String)> = HashSet::new();
+    let mut readable_secrets: HashSet<(String, String, bool)> = HashSet::new();
     for (home, (resources, secrets)) in wanted {
         let ns = ns_opt(&home);
         let resources: Vec<String> = resources.into_iter().collect();
@@ -583,14 +599,16 @@ async fn redact_members_of_many(
 
         // As `secret_member_readable`: each member's probe paths in one
         // batch, readable when any of them allows `Read`.
-        let probes: Vec<(String, String)> = secrets
+        let probes: Vec<((String, bool), String)> = secrets
             .into_iter()
-            .flat_map(|s| secret_probe_paths(core, ns, &s, switched).into_iter().map(move |p| (s.clone(), p)))
+            .flat_map(|(s, by)| secret_probe_paths(core, ns, &s, by).into_iter().map(move |p| ((s.clone(), by), p)))
             .collect();
         let paths: Vec<String> = probes.iter().map(|(_, p)| p.clone()).collect();
-        for ((s, _), ok) in probes.into_iter().zip(store.can_operate_many(auth, &paths, Operation::Read, ns).await) {
+        for (((s, by), _), ok) in
+            probes.into_iter().zip(store.can_operate_many(auth, &paths, Operation::Read, ns).await)
+        {
             if ok {
-                readable_secrets.insert((home.clone(), s));
+                readable_secrets.insert((home.clone(), s, by));
             }
         }
     }
@@ -604,9 +622,11 @@ async fn redact_members_of_many(
                 *m = REDACTED_MEMBER.to_string();
             }
         }
-        for s in g.secrets.iter_mut() {
-            if s != REDACTED_MEMBER && !readable_secrets.contains(&(home.clone(), s.clone())) {
-                *s = REDACTED_MEMBER.to_string();
+        for (list, by) in [(&mut g.secrets, switched), (&mut g.secrets_legacy_kept, false)] {
+            for s in list.iter_mut() {
+                if s != REDACTED_MEMBER && !readable_secrets.contains(&(home.clone(), s.clone(), by)) {
+                    *s = REDACTED_MEMBER.to_string();
+                }
             }
         }
     }
@@ -676,6 +696,15 @@ fn diff_with_values(
             after.insert("secrets".into(), string_array(&n.secrets));
         }
     }
+    if !same_set(&o.secrets_legacy_kept, &n.secrets_legacy_kept) {
+        changed.push("secrets_legacy_kept".to_string());
+        if old.is_some() {
+            before.insert("secrets_legacy_kept".into(), string_array(&o.secrets_legacy_kept));
+        }
+        if new.is_some() {
+            after.insert("secrets_legacy_kept".into(), string_array(&n.secrets_legacy_kept));
+        }
+    }
     if !same_set(&o.files, &n.files) {
         changed.push("files".to_string());
         if old.is_some() {
@@ -724,6 +753,7 @@ fn group_data(entry: &ResourceGroupEntry, home: &str, inherited: bool) -> Map<St
     data.insert("description".into(), Value::String(entry.description.clone()));
     data.insert("members".into(), Value::Array(entry.members.iter().cloned().map(Value::String).collect()));
     data.insert("secrets".into(), Value::Array(entry.secrets.iter().cloned().map(Value::String).collect()));
+    data.insert("secrets_legacy_kept".into(), string_array(&entry.secrets_legacy_kept));
     data.insert("files".into(), Value::Array(entry.files.iter().cloned().map(Value::String).collect()));
     data.insert("owner_entity_id".into(), Value::String(entry.owner_entity_id.clone()));
     data.insert("created_at".into(), Value::String(entry.created_at.clone()));
@@ -746,6 +776,10 @@ fn parse_write_payload(req: &Request) -> Result<WritePayload, RvError> {
 
     if let Ok(v) = req.get_data("secrets") {
         payload.secrets = Some(value_to_string_vec(&v));
+    }
+
+    if let Ok(v) = req.get_data("secrets_legacy_kept") {
+        payload.secrets_legacy_kept = Some(value_to_string_vec(&v));
     }
 
     if let Ok(v) = req.get_data("files") {
@@ -1113,8 +1147,8 @@ impl ResourceGroupBackendInner {
             // A format 0 record found once switched (a raw `.bvx` import) is
             // converted first, as the T507 migration would have.
             if g.secrets_format < SECRETS_FORMAT && !g.secrets.is_empty() {
-                let own = own_members_via(&self.core.router(), g, ns_opt(&scope))?;
-                store.convert_record(&name, &scope, &g.secrets, &own).await?;
+                let (own, kept) = split_members_via(&self.core.router(), g, ns_opt(&scope))?;
+                store.convert_record(&name, &scope, &g.secrets, &own, &kept).await?;
                 existing = store.get_group(&name, &scope).await?;
             }
         }
@@ -1141,6 +1175,15 @@ impl ResourceGroupBackendInner {
             } else if !same_members(s, existing.as_ref().map(|g| g.legacy_list()).unwrap_or_default()) {
                 // While the switch is pending no secret joins or leaves a
                 // group: the migration converts the lists as they stand.
+                return Err(pending_refusal());
+            }
+        }
+        if let Some(k) = &payload.secrets_legacy_kept {
+            if switched {
+                // Only removals: the store refuses an entry it does not keep.
+                entry.secrets_legacy_kept = k.clone();
+            } else if !k.is_empty() {
+                // Shown empty while pending: anything else is a change.
                 return Err(pending_refusal());
             }
         }
@@ -1319,8 +1362,8 @@ impl ResourceGroupBackendInner {
                     continue;
                 };
                 if g.secrets_format < SECRETS_FORMAT && !g.secrets.is_empty() {
-                    let own = own_members_via(&self.core.router(), &g, ns_opt(&scope))?;
-                    store.convert_record(&name, &scope, &g.secrets, &own).await?;
+                    let (own, kept) = split_members_via(&self.core.router(), &g, ns_opt(&scope))?;
+                    store.convert_record(&name, &scope, &g.secrets, &own, &kept).await?;
                 }
             }
         }

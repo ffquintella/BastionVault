@@ -294,20 +294,24 @@ async fn apply(
     Ok(())
 }
 
-/// Rebuild the asset-group indexes of every scope that has groups: they filed
-/// a member under a second canonicalization of its path, which the group
-/// records never did.
+/// Rebuild the asset-group legacy secret index of every scope that has
+/// groups: it filed a member under a second canonicalization of its path,
+/// which the group records never did. Only while the T507 switch is pending
+/// does that index decide; it is rebuilt without a gap, and nothing else.
 async fn reindex_asset_groups(core: &crate::core::Core) -> Result<usize, RvError> {
     let module = core.module_manager().get_module::<ResourceGroupModule>("resource-group");
     let Some(store) = module.and_then(|m| m.store()) else {
         return Ok(0);
     };
+    if store.secret_names().await? {
+        return Ok(0);
+    }
     let mut scopes = 0;
     for ns in NamespaceStore::new(core)?.list_all().await? {
         let scope = scope_of((!ns.is_root()).then_some(ns.path.as_str()));
         // A scope without groups has nothing to index, and its version stays.
         if !store.list_groups(&scope).await?.is_empty() {
-            store.reindex(&scope).await?;
+            store.repair_legacy_index(&scope).await?;
             scopes += 1;
         }
     }

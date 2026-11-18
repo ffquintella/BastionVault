@@ -3609,9 +3609,10 @@ pub(super) async fn resolve_asset_groups(core: &Weak<Core>, req_path: &str, ns_p
 }
 
 /// The asset groups of the request namespace listing the KV secret a request
-/// to `req_path` addresses: by its own name once the T507 switch is set
-/// (`secret_names::request_key`), by the pre-T507 key until then. None for a
-/// KV path that names no secret (T506). An unreadable switch is an error.
+/// to `req_path` addresses. Once the T507 switch is set: by its own name
+/// (`secret_names::request_key`), plus the groups whose kept pre-T507 members
+/// the old rule matches; until then by the pre-T507 key alone. None for a KV
+/// path that names no secret (T506). An unreadable switch is an error.
 async fn secret_groups(
     router: &Router,
     store: &ResourceGroupStore,
@@ -3619,20 +3620,37 @@ async fn secret_groups(
     ns_path: Option<&str>,
 ) -> Result<Vec<String>, RvError> {
     let scope = scope_of(ns_path);
-    if store.secret_names().await? {
-        return match secret_names::request_key(router, req_path, ns_path) {
-            Some(key) => store.groups_for_secret_name(&key, &scope).await,
+    let legacy = legacy_lookup_path(router, req_path, ns_path);
+    if !store.secret_names().await? {
+        return match &legacy {
+            Some(path) => store.groups_for_legacy_secret(path, &scope).await,
             None => Ok(Vec::new()),
         };
     }
-    if kv_target::names_no_secret(router, req_path) {
-        return Ok(Vec::new());
+    let mut out = match secret_names::request_key(router, req_path, ns_path) {
+        Some(key) => store.groups_for_secret_name(&key, &scope).await?,
+        None => Vec::new(),
+    };
+    if let Some(path) = &legacy {
+        for g in store.groups_for_kept_secret(path, &scope).await? {
+            if !out.contains(&g) {
+                out.push(g);
+            }
+        }
     }
-    // A kv-v2 `destroy/` or `undelete/` acts on the secret: looked up as its
-    // `data/` request was, not as a secret named `destroy/<name>`.
+    Ok(out)
+}
+
+/// The mount-relative path a pre-T507 group lookup of a request to `req_path`
+/// used: a kv-v2 `destroy/` or `undelete/` by its secret's `data/` path, not
+/// as a secret named `destroy/<name>`. None for a KV path naming no secret.
+fn legacy_lookup_path(router: &Router, req_path: &str, ns_path: Option<&str>) -> Option<String> {
+    if kv_target::names_no_secret(router, req_path) {
+        return None;
+    }
     let item = kv_target::resolve(router, req_path).ok().flatten().filter(|i| i.acts_on_data());
     let path = item.map(|i| i.data_path()).unwrap_or_else(|| req_path.to_string());
-    store.groups_for_legacy_secret(mount_relative_path(&path, ns_path), &scope).await
+    Some(mount_relative_path(&path, ns_path).to_string())
 }
 
 /// Whether a delete of `path` would prune asset-group membership under the
@@ -3651,8 +3669,9 @@ pub(crate) async fn group_change_pending(
 }
 
 /// The KV-delete lifecycle hook: once switched, the deleted secret leaves its
-/// groups by its own name. While pending, a delete a group lists was refused
-/// before it ran; a listing found anyway (a race) is kept and logged.
+/// groups by its own name, and a kept pre-T507 member leaves as the old rule
+/// removed it (by the delete path's pre-T507 key). While pending, a delete a
+/// group lists was refused before it ran; a listing found anyway is logged.
 async fn prune_secret_groups(
     router: &Router,
     store: &ResourceGroupStore,
@@ -3664,6 +3683,7 @@ async fn prune_secret_groups(
         if let Some(key) = secret_names::request_key(router, req_path, ns_path) {
             store.prune_secret_name(&key, &scope).await?;
         }
+        store.prune_kept_secret(mount_relative_path(req_path, ns_path), &scope).await?;
         return Ok(());
     }
     let groups = store.groups_for_legacy_secret(mount_relative_path(req_path, ns_path), &scope).await?;

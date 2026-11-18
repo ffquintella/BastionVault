@@ -36,8 +36,9 @@ pub(crate) enum Target {
     /// A KV path that names no secret (T506) or an ambiguous name: no key.
     NoKey,
     /// A KV secret by its own name; `acts_on_data` for a `destroy/` or
-    /// `undelete/` request, which looked its secret up by the `data/` path.
-    Secret { name: String, acts_on_data: bool },
+    /// `undelete/` request, which looked its secret up by the `data/` path;
+    /// `routes`, the paths a pre-T507 lookup of any request to it used.
+    Secret { name: String, acts_on_data: bool, routes: Vec<String> },
 }
 
 /// `sub`, the path below the namespace-relative `mount` of engine `ty`.
@@ -45,13 +46,31 @@ fn item_target(mount: &str, ty: &str, sub: &str) -> Target {
     if !matches!(ty, "kv" | "kv-v2") {
         return Target::NotKv;
     }
-    match KvItem::from_route(mount, ty, sub) {
-        Ok(Some(item)) => match item.key() {
-            Some(name) => Target::Secret { name, acts_on_data: item.acts_on_data() },
-            None => Target::NoKey,
-        },
-        Ok(None) | Err(_) => Target::NoKey,
+    let item = match KvItem::from_route(mount, ty, sub) {
+        Ok(Some(item)) => item,
+        Ok(None) | Err(_) => return Target::NoKey,
+    };
+    let Some(name) = item.key() else {
+        return Target::NoKey;
+    };
+    Target::Secret { routes: lookup_routes(mount, ty, &name), name, acts_on_data: item.acts_on_data() }
+}
+
+/// The paths a pre-T507 group lookup used for the requests to the secret
+/// `name` (`<mount><secret>`): kv one; kv-v2 its `data/` path (`destroy/`
+/// and `undelete/` too), `metadata/` path and, when it reads back as that
+/// secret, its version 2 short form.
+fn lookup_routes(mount: &str, ty: &str, name: &str) -> Vec<String> {
+    let secret = &name[mount.len()..];
+    if ty != "kv-v2" {
+        return vec![name.to_string()];
     }
+    let mut routes = vec![format!("{mount}data/{secret}"), format!("{mount}metadata/{secret}")];
+    let short = KvItem::from_route(mount, ty, secret).ok().flatten();
+    if short.is_some_and(|i| !i.acts_on_data() && i.key().as_deref() == Some(name)) {
+        routes.push(name.to_string());
+    }
+    routes
 }
 
 /// `path` without its leading `/`s and its namespace prefix.
@@ -84,19 +103,23 @@ pub(crate) fn router_target(router: &Router, path: &str, ns: Option<&str>) -> Re
     Ok(item_target(ns_mount, &ty, &path[mount.len()..]))
 }
 
-/// A namespace's logical mounts `(path, engine)`, as its stored mount table
-/// lists them, resolved like the router: the longest mount path a path
-/// starts with. Used by the migration, which runs before any request.
+/// Every namespace's logical mounts `(router key, engine)` from the stored
+/// tables, a namespace's keyed `<namespace path>/<mount>` as the shared
+/// router keys them, so a scope reaches its descendants' mounts by path,
+/// and an ancestor's mount covering its path, exactly as a request does.
 #[derive(Debug, Default)]
-pub(crate) struct NsMounts(pub Vec<(String, String)>);
+pub(crate) struct AllMounts(pub Vec<(String, String)>);
 
-impl NsMounts {
-    pub(crate) fn target(&self, rel: &str) -> Target {
-        let rel = rel.trim_start_matches('/');
+impl AllMounts {
+    /// `rel`, a path of scope `scope`, as a request in that scope resolves:
+    /// the longest router key its full path starts with.
+    pub(crate) fn target(&self, scope: &str, rel: &str) -> Target {
+        let ns = (!scope.is_empty()).then_some(scope);
+        let full = qualify(rel, ns);
         let best =
-            self.0.iter().filter(|(m, _)| !m.is_empty() && rel.starts_with(m.as_str())).max_by_key(|(m, _)| m.len());
+            self.0.iter().filter(|(m, _)| !m.is_empty() && full.starts_with(m.as_str())).max_by_key(|(m, _)| m.len());
         match best {
-            Some((mount, ty)) => item_target(mount, ty, &rel[mount.len()..]),
+            Some((mount, ty)) => item_target(ns_relative(mount, ns), ty, &full[mount.len()..]),
             None => Target::NoMount,
         }
     }
@@ -140,14 +163,26 @@ pub enum Reading {
     One,
     /// It reached several: each keeps the membership; operators prune.
     Several,
-    /// No lookup reaches it with the current mounts: kept as written.
-    Unresolved,
+    /// It reached a kv-v2 secret through some of its routes only: the own
+    /// name would cover them all, so it is kept with the pre-T507 rule.
+    KeptRouteSpecific,
+    /// No lookup reaches it with the current mounts: kept with the pre-T507
+    /// rule, which a mount created later would still follow.
+    KeptNoMount,
+}
+
+impl Reading {
+    /// Kept as written and matched by the pre-T507 rule, not by own name.
+    pub fn kept(self) -> bool {
+        matches!(self, Self::KeptRouteSpecific | Self::KeptNoMount)
+    }
 }
 
 /// A format 0 member as format 1 reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Conversion {
-    /// Every key a pre-T507 lookup could reach the member by, sorted.
+    /// Every own name a pre-T507 lookup reached the member by, sorted; for
+    /// a kept member, the member itself.
     pub keys: Vec<String>,
     pub reading: Reading,
 }
@@ -173,47 +208,62 @@ pub(crate) fn preimages(member: &str) -> Vec<String> {
     out
 }
 
-/// Read the format 0 `member` as every key a pre-T507 lookup reached it by,
-/// resolving each such path with `target`: the access it gave, exactly.
+/// Read the format 0 `member` as every own name a pre-T507 lookup reached it
+/// by, resolving each such path with `target`, when that is exact: a member
+/// that reached a kv-v2 secret through only some of its routes, or nothing,
+/// is kept and keeps matching by the pre-T507 rule (Ruling BB: no widening).
 pub(crate) fn convert_member(
     member: &str,
     target: impl Fn(&str) -> Result<Target, RvError>,
 ) -> Result<Conversion, RvError> {
     let mut keys = BTreeSet::new();
+    let mut route_specific = false;
     for path in preimages(member) {
         if !looks_like_kv_path(&path, None) {
             continue;
         }
         match target(&path)? {
-            Target::Secret { name, acts_on_data: false } => keys.insert(name),
-            Target::NotKv => keys.insert(path),
-            Target::Secret { acts_on_data: true, .. } | Target::NoKey | Target::NoMount => false,
-        };
+            Target::Secret { name, acts_on_data: false, routes } => {
+                let legacy = |r: &String| ResourceGroupStore::legacy_secret_key(r);
+                route_specific |= routes.iter().any(|r| legacy(r).as_deref() != Some(member));
+                keys.insert(name);
+            }
+            Target::NotKv => {
+                keys.insert(path);
+            }
+            Target::Secret { acts_on_data: true, .. } | Target::NoKey | Target::NoMount => {}
+        }
     }
     let reading = match keys.len() {
-        0 => Reading::Unresolved,
+        _ if route_specific => Reading::KeptRouteSpecific,
+        0 => Reading::KeptNoMount,
         1 => Reading::One,
         _ => Reading::Several,
     };
-    if keys.is_empty() {
-        keys.extend(ResourceGroupStore::checked_secret_name(member));
+    if reading.kept() {
+        keys = ResourceGroupStore::checked_secret_name(member).into_iter().collect();
     }
     Ok(Conversion { keys: keys.into_iter().collect(), reading })
 }
 
-/// The format 1 members of `g` through `target`; `g` itself when format 1.
-pub(crate) fn own_members(
+/// The format 1 lists `(own names, kept members)` of `g` through `target`;
+/// `g`'s own lists when it is format 1 already.
+pub(crate) fn split_members(
     g: &ResourceGroupEntry,
     target: impl Fn(&str) -> Result<Target, RvError>,
-) -> Result<Vec<String>, RvError> {
+) -> Result<(Vec<String>, Vec<String>), RvError> {
     if g.secrets_format > 0 {
-        return Ok(g.secrets.clone());
+        return Ok((g.secrets.clone(), g.secrets_legacy_kept.clone()));
     }
-    let mut keys = BTreeSet::new();
+    let (mut own, mut kept) = (BTreeSet::new(), BTreeSet::new());
     for member in &g.secrets {
-        keys.extend(convert_member(member, &target)?.keys);
+        let c = convert_member(member, &target)?;
+        match c.reading.kept() {
+            true => kept.extend(c.keys),
+            false => own.extend(c.keys),
+        }
     }
-    Ok(keys.into_iter().collect())
+    Ok((own.into_iter().collect(), kept.into_iter().collect()))
 }
 
 /// The path a pre-T507 lookup of the secret a client names by its own `name`
@@ -233,36 +283,38 @@ pub(crate) fn legacy_path_of_name(router: &Router, name: &str, ns: Option<&str>)
     }
 }
 
-/// The KV-secret members of `g` read as format 1 through `router`, in
-/// namespace `ns`: a format 0 record found once switched (a raw `.bvx`
-/// import) converted as the migration would, `g`'s own list otherwise.
-pub(crate) fn own_members_via(
+/// [`split_members`] through `router`, in namespace `ns`: a format 0 record
+/// found once switched (a raw `.bvx` import) read as the migration would.
+pub(crate) fn split_members_via(
     router: &Router,
     g: &ResourceGroupEntry,
     ns: Option<&str>,
-) -> Result<Vec<String>, RvError> {
-    own_members(g, |p| router_target(router, &qualify(p, ns), ns))
+) -> Result<(Vec<String>, Vec<String>), RvError> {
+    split_members(g, |p| router_target(router, &qualify(p, ns), ns))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The mounts of the classification table in the T507 report.
-    fn mounts() -> NsMounts {
+    /// The mounts of the classification table in the T507 report, by router
+    /// key: root mounts, `secret/` in namespace `team` and `kv/` in `a/b`.
+    fn mounts() -> AllMounts {
         let m = [
             ("secret/", "kv-v2"),
             ("kv/", "kv"),
             ("team/kv/", "kv-v2"),
-            ("a/b/", "kv"),
+            ("x/y/", "kv"),
             ("apps/data/", "kv-v2"),
             ("transit/", "transit"),
+            ("team/secret/", "kv-v2"),
+            ("a/b/kv/", "kv"),
         ];
-        NsMounts(m.iter().map(|(p, t)| (p.to_string(), t.to_string())).collect())
+        AllMounts(m.iter().map(|(p, t)| (p.to_string(), t.to_string())).collect())
     }
 
-    fn convert(member: &str) -> (Vec<String>, Reading) {
-        let c = convert_member(member, |p| Ok(mounts().target(p))).unwrap();
+    fn convert_in(scope: &str, member: &str) -> (Vec<String>, Reading) {
+        let c = convert_member(member, |p| Ok(mounts().target(scope, p))).unwrap();
         (c.keys, c.reading)
     }
 
@@ -278,39 +330,63 @@ mod tests {
         }
     }
 
-    /// The classification table (T507 report): `(stored member, own names,
-    /// reading)` with the mounts above.
+    /// The classification table (T507 report): `(scope, stored member, keys
+    /// after, reading)` with the mounts above. A kept member keeps itself.
     #[test]
     fn each_kind_of_stored_member_converts_to_the_access_it_gave() {
-        let one = Reading::One;
-        let cases: [(&str, &[&str], Reading); 12] = [
-            ("secret/x", &["secret/x"], one),
-            ("secret/data/y", &["secret/data/y"], one),
-            ("secret/destroy/x", &["secret/destroy/x"], one),
-            ("secret/config", &["secret/config"], one),
-            ("kv/x", &["kv/data/x", "kv/metadata/x", "kv/x"], Reading::Several),
-            ("kv/data/x", &["kv/data/data/x", "kv/metadata/data/x"], Reading::Several),
-            ("team/kv/data/z", &["team/kv/z"], one),
-            ("team/kv/z", &["team/kv/z"], one),
-            ("a/b/c", &["a/b/c"], one),
-            ("apps/x", &["apps/data/x"], one),
-            ("transit/keys/k", &["transit/data/keys/k", "transit/keys/k", "transit/metadata/keys/k"], Reading::Several),
-            ("gone/x", &["gone/x"], Reading::Unresolved),
+        let (one, several) = (Reading::One, Reading::Several);
+        let (route, none) = (Reading::KeptRouteSpecific, Reading::KeptNoMount);
+        let cases: [(&str, &str, &[&str], Reading); 22] = [
+            ("", "secret/x", &["secret/x"], one),
+            ("", "secret/data/y", &["secret/data/y"], one),
+            ("", "secret/destroy/x", &["secret/destroy/x"], one),
+            ("", "secret/config", &["secret/config"], one),
+            ("", "kv/x", &["kv/data/x", "kv/metadata/x", "kv/x"], several),
+            ("", "kv/data/x", &["kv/data/data/x", "kv/metadata/data/x"], several),
+            ("", "team/kv/data/z", &["team/kv/data/z"], route),
+            ("", "team/kv/metadata/z", &["team/kv/metadata/z"], route),
+            ("", "team/kv/z", &["team/kv/z"], route),
+            ("", "x/y/c", &["x/y/c"], one),
+            ("", "apps/x", &["apps/x"], route),
+            ("", "apps/data/x", &["apps/data/x"], route),
+            ("", "transit/keys/k", &["transit/data/keys/k", "transit/keys/k", "transit/metadata/keys/k"], several),
+            ("", "gone/x", &["gone/x"], none),
+            ("", "sys/x", &["sys/x"], none),
+            // A namespace's mounts seen from root by path: kv-v2 is
+            // multi-segment there, kv (v1) one route per secret.
+            ("", "team/secret/data/x", &["team/secret/data/x"], route),
+            ("", "team/secret/x", &["team/secret/x"], route),
+            ("", "a/b/kv/data/x", &["a/b/kv/data/x"], one),
+            // A namespace's own one-segment kv-v2 mount: exact.
+            ("team", "secret/x", &["secret/x"], one),
+            ("team", "secret/data/y", &["secret/data/y"], one),
+            // A scope reaching its child's mount (`a/b`'s `kv/` from `a`).
+            ("a", "b/kv/data/x", &["b/kv/data/x"], one),
+            ("a", "b/kv/x", &["b/kv/x"], one),
         ];
-        for (member, keys, reading) in cases {
-            assert_eq!(convert(member), (keys.iter().map(|k| k.to_string()).collect(), reading), "{member}");
+        for (scope, member, keys, reading) in cases {
+            let want = (keys.iter().map(|k| k.to_string()).collect::<Vec<_>>(), reading);
+            assert_eq!(convert_in(scope, member), want, "{member} in {scope:?}");
         }
-        assert_eq!(convert("sys/x"), (vec!["sys/x".to_string()], Reading::Unresolved), "never looked up");
     }
 
     #[test]
-    fn a_namespaced_mount_resolves_relative_to_its_namespace() {
+    fn a_path_resolves_like_the_router_relative_to_its_scope() {
         assert_eq!(ns_relative("/team/kv/data/x", Some("team")), "kv/data/x");
         assert_eq!(ns_relative("kv/data/x", None), "kv/data/x");
         assert_eq!(qualify("kv/x", Some("/team/")), "team/kv/x");
         assert_eq!(qualify("kv/x", None), "kv/x");
-        let ns = NsMounts(vec![("kv/".into(), "kv".into())]);
-        assert_eq!(ns.target("kv/data/x"), Target::Secret { name: "kv/data/x".into(), acts_on_data: false });
-        assert_eq!(ns.target("nomount/x"), Target::NoMount);
+        let m = mounts();
+        let secret = |name: &str, routes: &[&str]| Target::Secret {
+            name: name.into(),
+            acts_on_data: false,
+            routes: routes.iter().map(|r| r.to_string()).collect(),
+        };
+        assert_eq!(m.target("", "kv/data/x"), secret("kv/data/x", &["kv/data/x"]));
+        assert_eq!(m.target("a", "b/kv/x"), secret("b/kv/x", &["b/kv/x"]), "a child's mount");
+        let in_team = secret("secret/x", &["secret/data/x", "secret/metadata/x", "secret/x"]);
+        assert_eq!(m.target("team", "secret/x"), in_team, "its own mount");
+        assert_eq!(m.target("", "nomount/x"), Target::NoMount);
+        assert_eq!(m.target("team", "transit/x"), Target::NoMount, "a root mount does not cover team's paths");
     }
 }

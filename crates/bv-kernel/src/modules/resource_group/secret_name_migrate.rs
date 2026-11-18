@@ -1,13 +1,15 @@
 //! One-shot migration (T507): key asset-group KV-secret members on the
-//! secret's own name. A format 0 member lost a `data`/`metadata` second
-//! segment whatever the mount (on a kv v1 mount `x`, `data/x` and `metadata/x`
-//! were one member); it becomes every own name a pre-T507 lookup reached it
-//! by, through its namespace's mount table: exactly the access it gave. One
-//! that reached several keeps them all and is logged, so operators can prune.
+//! secret's own name. A format 0 member becomes every own name a pre-T507
+//! lookup reached it by, through the mount table the shared router uses,
+//! when that is exact; one that matched a kv-v2 secret through some routes
+//! only, or no mount, is kept with the pre-T507 rule (Ruling BB: no
+//! widening). Several secrets, or a kept member, are logged for operators.
+
+use std::{collections::VecDeque, sync::Arc};
 
 use super::{
     group_store::{scope_of, ResourceGroupStore, SECRETS_FORMAT},
-    secret_names::{convert_member, Conversion, NsMounts, Reading},
+    secret_names::{convert_member, AllMounts, Conversion, Reading},
     ResourceGroupModule,
 };
 use crate::kernel_api::VaultCtx;
@@ -17,12 +19,12 @@ use crate::{
     mount::MountTable,
 };
 
-/// Passes over the records before the pass gives up: a write landing between
-/// a record's read and its conversion leaves it for the next pass.
+/// Verify passes before the pass gives up: a write landing between a
+/// record's read and its conversion leaves it for the next one.
 const PASSES: usize = 3;
 
 /// What the migration did, for the log and tests (key names only).
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct SecretNameReport {
     /// Group records converted to format 1.
     pub groups_converted: usize,
@@ -30,41 +32,42 @@ pub struct SecretNameReport {
     pub members_rekeyed: usize,
     /// Members that reached several secrets: each kept (logged as a list).
     pub members_ambiguous: usize,
-    /// Members no lookup reaches with the current mounts: kept as written.
-    pub members_unresolved: usize,
+    /// Members kept with the pre-T507 rule: route-specific, or no mount.
+    pub members_kept_legacy: usize,
     /// True when the marker was already set and nothing was done.
     pub skipped: bool,
 }
 
-/// Every namespace's scope and logical mounts, from the stored tables. A
-/// namespace without a table has none; any other failure fails the pass.
-async fn scopes(core: &crate::core::Core) -> Result<Vec<(String, NsMounts)>, RvError> {
+/// Every namespace's scope, and every logical mount by the router key the
+/// shared router gives it, from the stored tables. A namespace without a
+/// table has none; any other failure fails the pass.
+async fn all_mounts(core: &crate::core::Core) -> Result<(Vec<String>, AllMounts), RvError> {
     let barrier = core.barrier();
     let storage = barrier.as_storage();
     let hmac_key = core.hmac_key().clone();
-    let mut out = Vec::new();
+    let (mut scopes, mut mounts) = (Vec::new(), Vec::new());
     for ns in NamespaceStore::new(core)?.list_all().await? {
-        let config_path = match ns.is_root() {
-            true => core.mounts_router().mounts.path.clone(),
-            false => namespace_mount_config_path(&ns.uuid),
+        let (config_path, prefix) = match ns.is_root() {
+            true => (core.mounts_router().mounts.path.clone(), String::new()),
+            false => (namespace_mount_config_path(&ns.uuid), format!("{}/", ns.path.trim_end_matches('/'))),
         };
         let table = MountTable::new(&config_path);
-        let mounts = match table.load(storage, Some(&hmac_key), core.mount_entry_hmac_level()).await {
+        match table.load(storage, Some(&hmac_key), core.mount_entry_hmac_level()).await {
             Ok(_) => {
                 let entries = table.entries.read()?;
                 let rows =
                     entries.values().filter_map(|e| e.read().ok().map(|m| (m.path.clone(), m.logical_type.clone())));
-                NsMounts(rows.collect())
+                mounts.extend(rows.map(|(path, ty)| (format!("{prefix}{path}"), ty)));
             }
-            Err(RvError::ErrConfigLoadFailed) => NsMounts::default(),
+            Err(RvError::ErrConfigLoadFailed) => {}
             Err(e) => {
                 log::warn!(target: "migration", "asset-group key switch: the mount table of namespace {:?} is unreadable", ns.path);
                 return Err(e);
             }
-        };
-        out.push((scope_of((!ns.is_root()).then_some(ns.path.as_str())), mounts));
+        }
+        scopes.push(scope_of((!ns.is_root()).then_some(ns.path.as_str())));
     }
-    Ok(out)
+    Ok((scopes, AllMounts(mounts)))
 }
 
 fn describe(scope: &str) -> String {
@@ -74,7 +77,9 @@ fn describe(scope: &str) -> String {
     }
 }
 
-/// Log and count one converted member (key names only, never values).
+/// Log and count one converted member (key names only, never values): a
+/// re-key at info; several secrets, or a member kept with the pre-T507
+/// rule, at warn; an unchanged one-secret member not at all.
 fn record(report: &mut SecretNameReport, group: &str, scope: &str, member: &str, c: &Conversion) {
     let at = describe(scope);
     match c.reading {
@@ -92,53 +97,154 @@ fn record(report: &mut SecretNameReport, group: &str, scope: &str, member: &str,
                 c.keys
             );
         }
-        Reading::Unresolved => {
-            report.members_unresolved += 1;
+        Reading::KeptRouteSpecific | Reading::KeptNoMount => {
+            report.members_kept_legacy += 1;
+            let why = match c.reading {
+                Reading::KeptRouteSpecific => "matched a kv-v2 secret through some of its routes only",
+                _ => "matches no mount",
+            };
             log::warn!(
                 target: "migration",
-                "asset-group key switch: member {member:?} of group {group:?} in {at} matches no mount; kept as \
-                 written, now read as a secret's own name"
+                "asset-group key switch: member {member:?} of group {group:?} in {at} {why}; it is kept with the \
+                 pre-T507 rule (`secrets_legacy_kept`), whose data/x-is-x collision stays for it until it is \
+                 removed and its secret added by its own name"
             );
         }
     }
 }
 
-/// Convert every format 0 record of every scope and rebuild each scope's
-/// name index. Returns the records still format 0 (changed under the pass).
-async fn convert_all(
-    store: &ResourceGroupStore,
-    scopes: &[(String, NsMounts)],
-    report: &mut SecretNameReport,
-) -> Result<usize, RvError> {
-    let mut left = 0;
-    for (scope, mounts) in scopes {
-        let groups = store.list_groups(scope).await?;
-        if groups.is_empty() {
-            continue;
+/// One unit of the migration's work.
+#[derive(Debug)]
+enum Step {
+    /// Convert one format 0 record.
+    Convert { scope: String, group: String },
+    /// Add any index entry a converted record lacks; re-queue what is left.
+    Verify,
+    /// Set the marker: lookups use own names from here on.
+    Mark,
+    /// Convert, additively, what a racing write left format 0 after Verify.
+    Final { scope: String },
+}
+
+/// The migration as a sequence of small steps, so a test can check the
+/// decisions requests get between any two of them. No step deletes an index
+/// entry a lookup may read: entries are added before a record is written,
+/// and the live indexes are never rebuilt (T507 review, fix round 1).
+pub struct SecretNameMigration {
+    store: Arc<ResourceGroupStore>,
+    scopes: Vec<String>,
+    mounts: AllMounts,
+    steps: VecDeque<Step>,
+    passes: usize,
+    report: SecretNameReport,
+}
+
+impl SecretNameMigration {
+    /// The pass, ready to step; `None` when its marker is already set.
+    pub async fn start(core: &crate::core::Core) -> Result<Option<Self>, RvError> {
+        let module = core.module_manager().get_module::<ResourceGroupModule>("resource-group");
+        let store =
+            module.and_then(|m| m.store()).ok_or_else(|| crate::bv_error_string!("asset-group store unavailable"))?;
+        if store.secret_names().await? {
+            return Ok(None);
         }
-        for name in &groups {
-            let Some(g) = store.get_group(name, scope).await? else {
-                continue;
-            };
-            if g.secrets_format >= SECRETS_FORMAT {
-                continue;
+        let (scopes, mounts) = all_mounts(core).await?;
+        let mut steps = VecDeque::new();
+        for scope in &scopes {
+            for group in store.list_groups(scope).await? {
+                steps.push_back(Step::Convert { scope: scope.clone(), group });
             }
-            let conversions: Vec<(&String, Conversion)> = g
-                .secrets
-                .iter()
-                .map(|m| convert_member(m, |p| Ok(mounts.target(p))).map(|c| (m, c)))
-                .collect::<Result<_, RvError>>()?;
-            let keys: Vec<String> = conversions.iter().flat_map(|(_, c)| c.keys.iter().cloned()).collect();
-            if store.convert_record(name, scope, &g.secrets, &keys).await? {
-                report.groups_converted += 1;
-                for (member, c) in &conversions {
-                    record(report, name, scope, member, c);
+        }
+        steps.push_back(Step::Verify);
+        Ok(Some(Self { store, scopes, mounts, steps, passes: 0, report: SecretNameReport::default() }))
+    }
+
+    /// What the pass did so far.
+    pub fn report(&self) -> &SecretNameReport {
+        &self.report
+    }
+
+    /// Run the next step; `false` when none is left.
+    pub async fn step(&mut self) -> Result<bool, RvError> {
+        let Some(step) = self.steps.pop_front() else {
+            return Ok(false);
+        };
+        match step {
+            Step::Convert { scope, group } => self.convert(&scope, &group).await?,
+            Step::Verify => self.verify().await?,
+            Step::Mark => {
+                self.store.mark_secret_names().await?;
+                self.steps.extend(self.scopes.iter().map(|scope| Step::Final { scope: scope.clone() }));
+            }
+            Step::Final { scope } => {
+                for group in self.store.list_groups(&scope).await? {
+                    self.convert(&scope, &group).await?;
                 }
             }
         }
-        left += store.rebuild_name_index(scope).await?.len();
+        Ok(true)
     }
-    Ok(left)
+
+    /// Convert group `group` of `scope` if it is still format 0.
+    async fn convert(&mut self, scope: &str, group: &str) -> Result<(), RvError> {
+        let Some(g) = self.store.get_group(group, scope).await? else {
+            return Ok(());
+        };
+        if g.secrets_format >= SECRETS_FORMAT {
+            return Ok(());
+        }
+        let mounts = &self.mounts;
+        let conversions: Vec<(&String, Conversion)> = g
+            .secrets
+            .iter()
+            .map(|m| convert_member(m, |p| Ok(mounts.target(scope, p))).map(|c| (m, c)))
+            .collect::<Result<_, RvError>>()?;
+        let (mut own, mut kept) = (Vec::new(), Vec::new());
+        for (_, c) in &conversions {
+            match c.reading.kept() {
+                true => kept.extend(c.keys.iter().cloned()),
+                false => own.extend(c.keys.iter().cloned()),
+            }
+        }
+        if self.store.convert_record(group, scope, &g.secrets, &own, &kept).await? {
+            self.report.groups_converted += 1;
+            for (member, c) in &conversions {
+                record(&mut self.report, group, scope, member, c);
+            }
+        }
+        Ok(())
+    }
+
+    /// Add what converted records lack in the indexes (additive only: while
+    /// pending nothing may leave a group, so nothing stale can be re-added),
+    /// then mark, or re-queue records a racing write kept at format 0.
+    async fn verify(&mut self) -> Result<(), RvError> {
+        // Another node finished and marked meanwhile: its own final pass ran.
+        if self.store.secret_names().await? {
+            self.steps.clear();
+            return Ok(());
+        }
+        let mut left = Vec::new();
+        for scope in &self.scopes {
+            for group in self.store.repair_converted(scope).await? {
+                left.push(Step::Convert { scope: scope.clone(), group });
+            }
+        }
+        if left.is_empty() {
+            self.steps.push_back(Step::Mark);
+            return Ok(());
+        }
+        self.passes += 1;
+        if self.passes >= PASSES {
+            return Err(crate::bv_error_string!(format!(
+                "asset-group key switch: {} group records changed while being converted; the pass is retried",
+                left.len()
+            )));
+        }
+        self.steps.extend(left);
+        self.steps.push_back(Step::Verify);
+        Ok(())
+    }
 }
 
 /// Run the migration unless its replicated marker is set; until it is, lookups
@@ -146,31 +252,11 @@ async fn convert_all(
 /// from `Core::post_unseal` after the T499 datafix; a failure is retried in
 /// the background (`identity::kv_key_split_retry`) and at the next unseal.
 pub async fn run_if_needed(core: &crate::core::Core) -> Result<SecretNameReport, RvError> {
-    let mut report = SecretNameReport::default();
-    let module = core.module_manager().get_module::<ResourceGroupModule>("resource-group");
-    let store =
-        module.and_then(|m| m.store()).ok_or_else(|| crate::bv_error_string!("asset-group store unavailable"))?;
-    if store.secret_names().await? {
-        report.skipped = true;
-        return Ok(report);
-    }
-    let scopes = scopes(core).await?;
-    let mut left = 0;
-    for _ in 0..PASSES {
-        left = convert_all(&store, &scopes, &mut report).await?;
-        if left == 0 {
-            break;
-        }
-    }
-    if left > 0 {
-        return Err(crate::bv_error_string!(format!(
-            "asset-group key switch: {left} group records changed while being converted; the pass is retried"
-        )));
-    }
-    store.mark_secret_names().await?;
-    // A write prepared on a format 0 read and landing after the last pass:
-    // once marked, no store method writes one back, so this pass is final.
-    convert_all(&store, &scopes, &mut report).await?;
+    let Some(mut pass) = SecretNameMigration::start(core).await? else {
+        return Ok(SecretNameReport { skipped: true, ..Default::default() });
+    };
+    while pass.step().await? {}
+    let report = pass.report().clone();
     log::info!(target: "migration", "asset-group key switch (format {SECRETS_FORMAT}) complete: {report:?}");
     Ok(report)
 }
@@ -182,24 +268,4 @@ pub async fn reset_for_test(core: &crate::core::Core) -> Result<(), RvError> {
     let module = core.module_manager().get_module::<ResourceGroupModule>("resource-group");
     let store = module.and_then(|m| m.store()).ok_or_else(|| crate::bv_error_string!("no asset-group store"))?;
     store.unmark_secret_names_for_test().await
-}
-
-/// Test support: a pass cut short after converting only the records of
-/// `scope` named in `only`, as one interrupted by a crash; nothing is marked.
-#[cfg(any(test, feature = "test-support"))]
-pub async fn convert_some_for_test(core: &crate::core::Core, scope: &str, only: &[&str]) -> Result<(), RvError> {
-    let module = core.module_manager().get_module::<ResourceGroupModule>("resource-group");
-    let store = module.and_then(|m| m.store()).ok_or_else(|| crate::bv_error_string!("no asset-group store"))?;
-    let mounts = scopes(core).await?.into_iter().find(|(s, _)| s == scope).map(|(_, m)| m).unwrap_or_default();
-    for name in only {
-        let Some(g) = store.get_group(name, scope).await? else {
-            continue;
-        };
-        let mut keys = Vec::new();
-        for m in &g.secrets {
-            keys.extend(convert_member(m, |p| Ok(mounts.target(p)))?.keys);
-        }
-        store.convert_record(name, scope, &g.secrets, &keys).await?;
-    }
-    Ok(())
 }

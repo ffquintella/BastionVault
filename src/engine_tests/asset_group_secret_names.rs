@@ -41,6 +41,13 @@ async fn reads(core: &Arc<Core>, token: &str, api: u8, path: &str, ns: Option<&s
     assert_eq!(status(&r), expected, "{who}: api {api} read {path}: {r:?}");
 }
 
+/// The kept pre-T507 members of root's group `name`, as root reads them.
+async fn kept(core: &Arc<Core>, root: &str, name: &str) -> Vec<String> {
+    let path = format!("resource-group/groups/{name}");
+    let resp = send(core, root, 1, Operation::Read, &path, None, json!({})).await.unwrap().unwrap();
+    serde_json::from_value(resp.data.unwrap()["secrets_legacy_kept"].clone()).unwrap()
+}
+
 /// The `secrets` of group `name`, as root reads it.
 async fn members(core: &Arc<Core>, root: &str, name: &str, ns: Option<&str>) -> Vec<String> {
     let path = format!("resource-group/groups/{name}");
@@ -318,8 +325,8 @@ async fn old_members_keep_their_access_before_while_pending_and_after_the_migrat
 
     let report = secret_name_migrate::run_if_needed(&core).await.unwrap();
     assert_eq!(
-        (report.groups_converted, report.members_ambiguous, report.members_rekeyed, report.members_unresolved),
-        (4, 1, 1, 0),
+        (report.groups_converted, report.members_ambiguous, report.members_rekeyed, report.members_kept_legacy),
+        (4, 1, 0, 1),
         "{report:?}"
     );
     assert!(store(&core).secret_names().await.unwrap());
@@ -327,16 +334,27 @@ async fn old_members_keep_their_access_before_while_pending_and_after_the_migrat
     assert_eq!(g1.secrets, ["kv/data/x", "kv/metadata/x", "kv/x"], "each secret kv/x reached");
     assert_eq!(g1.legacy_secrets, ["kv/x"], "the old list is kept for rollback");
     assert_eq!(record(&core, "", "g2").await.secrets, ["secret/data/y"], "already its own name");
-    assert_eq!(record(&core, "", "g3").await.secrets, ["team/kv/z"], "the secret, not its route");
+    let g3 = record(&core, "", "g3").await;
+    assert_eq!((g3.secrets, g3.secrets_legacy_kept), (vec![], vec!["team/kv/data/z".to_string()]), "kept");
+    assert_eq!(kept(&core, &root, "g3").await, ["team/kv/data/z"], "shown apart from own names");
 
-    // After: nothing lost, nothing gained but g3's other routes to z.
+    // After: nothing lost, nothing gained (Ruling BB).
     for path in ["kv/x", "kv/data/x", "kv/metadata/x"] {
         reads(&core, &u1, 1, path, None, 200, "after: g1").await;
     }
     reads(&core, &u2, 1, "secret/data/data/y", None, 200, "after: g2").await;
     reads(&core, &u3, 1, "team/kv/data/z", None, 200, "after: g3").await;
-    reads(&core, &u3, 1, "team/kv/metadata/z", None, 200, "after: g3 names the secret z").await;
+    reads(&core, &u3, 1, "team/kv/metadata/z", None, 403, "after: g3 still the data/ route only").await;
     assert_eq!(by_secret(&core, &root, "kv/data/x", None).await, ["g1"]);
+    assert!(by_secret(&core, &root, "team/kv/z", None).await.is_empty(), "a kept member is no own-name member");
+
+    // An operator regroups g3 by the secret's own name: now every route.
+    let regroup = json!({ "secrets": "team/kv/z", "secrets_legacy_kept": "" });
+    assert_eq!(w(regroup, "resource-group/groups/g3").await, 200);
+    reads(&core, &u3, 1, "team/kv/metadata/z", None, 200, "regrouped: the secret z").await;
+    reads(&core, &u3, 2, "team/kv/z", None, 200, "regrouped: the short form too").await;
+    let adds = json!({ "secrets_legacy_kept": "team/kv/data/z" });
+    assert_eq!(w(adds, "resource-group/groups/g3").await, 400, "a kept member is never added back");
 
     // An operator prunes the pair: the other members are unaffected.
     assert_eq!(w(json!({ "secrets": "kv/x,kv/metadata/x" }), "resource-group/groups/g1").await, 200);
@@ -368,7 +386,10 @@ async fn a_migration_cut_short_resumes_and_converts_each_record_once() {
     plant_old_group(&core, "", "first", &["kv/x"]).await;
     plant_old_group(&core, "", "second", &["kv/y"]).await;
 
-    secret_name_migrate::convert_some_for_test(&core, "", &["first"]).await.unwrap();
+    // A pass that converted `first` and then stopped, as a crash would.
+    let mut pass = secret_name_migrate::SecretNameMigration::start(&core).await.unwrap().unwrap();
+    assert!(pass.step().await.unwrap());
+    drop(pass);
     assert!(!store(&core).secret_names().await.unwrap(), "no marker after a cut-short pass");
     assert_eq!(record(&core, "", "first").await.secrets_format, 1);
     assert_eq!(record(&core, "", "second").await.secrets_format, 0);
@@ -409,9 +430,10 @@ async fn a_namespaced_scope_converts_through_its_own_mounts() {
     reads(&core, &token, 1, "kv/data/x", ns, 200, "pending, in team").await;
 
     let report = secret_name_migrate::run_if_needed(&core).await.unwrap();
-    assert_eq!((report.members_ambiguous, report.members_unresolved), (1, 1), "{report:?}");
+    assert_eq!((report.members_ambiguous, report.members_kept_legacy), (1, 1), "{report:?}");
     assert_eq!(record(&core, "team", "g").await.secrets, ["kv/data/x", "kv/metadata/x", "kv/x"]);
-    assert_eq!(record(&core, "", "rootg").await.secrets, ["kv/x"], "no root mount: kept as written");
+    let rootg = record(&core, "", "rootg").await;
+    assert_eq!(rootg.secrets_legacy_kept, ["kv/x"], "no mount reaches it: kept with the old rule");
     reads(&core, &token, 1, "kv/data/x", ns, 200, "after, in team").await;
     reads(&core, &token, 1, "kv/x", ns, 200, "kv/x is a member too: the gate passes (no such secret)").await;
 }
@@ -448,4 +470,189 @@ async fn an_unreadable_switch_marker_refuses_kv_requests() {
     let r = send(&core, &root, 1, Operation::Read, "auth/token/lookup-self", None, json!({})).await;
     assert_eq!(status(&r), 200, "a non-KV request: {r:?}");
     assert!(secret_name_migrate::run_if_needed(&core).await.is_err(), "the migration reports it");
+}
+
+// ── Fix round 1: route-specific members and namespaces seen by path ────
+
+/// A token at root, child-visible, carrying `policies` (it may operate in
+/// every namespace below root, as the requests below need).
+async fn child_visible_token(core: &Arc<Core>, root: &str, policies: &[&str], ns: Option<&str>) -> String {
+    let body = json!({ "policies": policies, "child_visible": true, "ttl": "1h" });
+    let created = send(core, root, 1, Operation::Write, "auth/token/create", ns, body).await;
+    created.unwrap().unwrap().auth.unwrap().client_token
+}
+
+/// Each `(api, path, namespace header)` read as `token`, in order.
+async fn decisions(core: &Arc<Core>, token: &str, reqs: &[(u8, &str, Option<&str>)]) -> Vec<u16> {
+    let mut out = Vec::new();
+    for (api, path, ns) in reqs {
+        out.push(status(&send(core, token, *api, Operation::Read, path, *ns, json!({})).await));
+    }
+    out
+}
+
+/// A member a multi-segment kv-v2 mount's lookup matched through one route
+/// only keeps exactly that route after the migration (Ruling BB): before T507
+/// `team/kv/data/z` gated the `data/` route of `z`, `team/kv/z` its short form.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn route_specific_members_keep_exactly_their_routes() {
+    let (_bvault, core, root) = vault("t507_route_specific").await;
+    write(&core, &root, "sys/mounts/team/kv/", json!({ "type": "kv-v2" })).await;
+    seed_kv(&core, &root, &["team/kv/data/z"], None).await;
+    secret_name_migrate::reset_for_test(&core).await.unwrap();
+    plant_old_group(&core, "", "by-data", &["team/kv/data/z"]).await;
+    plant_old_group(&core, "", "by-short", &["team/kv/z"]).await;
+    gated(&core, &root, "in-by-data", "team/kv/", "by-data").await;
+    gated(&core, &root, "in-by-short", "team/kv/", "by-short").await;
+    let (u_data, _) = login(&core, &root, "user-data", "in-by-data").await;
+    let (u_short, _) = login(&core, &root, "user-short", "in-by-short").await;
+    let routes = [(1u8, "team/kv/data/z", None), (2, "team/kv/z", None), (1, "team/kv/metadata/z", None)];
+
+    let before = (decisions(&core, &u_data, &routes).await, decisions(&core, &u_short, &routes).await);
+    assert_eq!(before, (vec![200, 403, 403], vec![403, 200, 403]), "pending: one route each");
+    secret_name_migrate::run_if_needed(&core).await.unwrap();
+    let after = (decisions(&core, &u_data, &routes).await, decisions(&core, &u_short, &routes).await);
+    assert_eq!(after, before, "after: the same routes, no widening");
+}
+
+/// Root's groups see a namespace's mounts by path, as the shared router
+/// does: a root member of `team`'s kv-v2 `secret/` (a two-segment mount from
+/// root), in its `data/` or short form, and one of `a/b`'s two levels down,
+/// keep exactly what they gave; so does a member of `a`'s child `a/b`.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn members_of_namespaced_mounts_seen_by_path_keep_their_access() {
+    let (_bvault, core, root) = vault("t507_ns_by_path").await;
+    for ns in ["team", "a", "a/b"] {
+        write(&core, &root, &format!("sys/namespaces/{ns}"), json!({})).await;
+    }
+    seed_kv(&core, &root, &["secret/data/x"], Some("team")).await;
+    seed_kv(&core, &root, &["secret/data/x"], Some("a/b")).await;
+    secret_name_migrate::reset_for_test(&core).await.unwrap();
+    plant_old_group(&core, "", "rd", &["team/secret/data/x"]).await;
+    plant_old_group(&core, "", "rs", &["team/secret/x"]).await;
+    plant_old_group(&core, "", "deep", &["a/b/secret/data/x"]).await;
+    plant_old_group(&core, "a", "child", &["b/secret/data/x"]).await;
+    for (policy, prefix, group) in [("in-rd", "team/secret/", "rd"), ("in-rs", "team/secret/", "rs")] {
+        gated(&core, &root, policy, prefix, group).await;
+    }
+    gated(&core, &root, "in-deep", "a/b/secret/", "deep").await;
+    // A namespace policy may not name a child's paths: a root policy gated on
+    // `a`'s group `child`, evaluated against the groups of the request's `a`.
+    gated(&core, &root, "in-child", "a/b/secret/", "child").await;
+    let rd = child_visible_token(&core, &root, &["in-rd"], None).await;
+    let rs = child_visible_token(&core, &root, &["in-rs"], None).await;
+    let deep = child_visible_token(&core, &root, &["in-deep"], None).await;
+    let child = child_visible_token(&core, &root, &["in-child"], None).await;
+
+    let team = [(1u8, "team/secret/data/x", None), (2, "team/secret/x", None), (1, "team/secret/metadata/x", None)];
+    let deep_reqs = [(1u8, "a/b/secret/data/x", None), (1, "a/b/secret/metadata/x", None)];
+    let child_reqs = [(1u8, "b/secret/data/x", Some("a")), (1, "b/secret/metadata/x", Some("a"))];
+    let all = |core: Arc<Core>| {
+        let (rd, rs, deep, child) = (rd.clone(), rs.clone(), deep.clone(), child.clone());
+        async move {
+            vec![
+                decisions(&core, &rd, &team).await,
+                decisions(&core, &rs, &team).await,
+                decisions(&core, &deep, &deep_reqs).await,
+                decisions(&core, &child, &child_reqs).await,
+            ]
+        }
+    };
+    let before = all(core.clone()).await;
+    assert_eq!(before, [vec![200, 403, 403], vec![403, 200, 403], vec![200, 403], vec![200, 403]], "pending");
+    secret_name_migrate::run_if_needed(&core).await.unwrap();
+    assert_eq!(all(core.clone()).await, before, "after: nothing lost, nothing widened");
+}
+
+/// While the pass runs, and after its marker, a group-gated allow and a
+/// group-gated deny keep their decisions after every step, the index the
+/// lookups read never loses the members, and the T499 datafix rebuilding
+/// the legacy index midway changes nothing (T507 review, fix round 1).
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn decisions_hold_at_every_step_of_the_migration() {
+    use crate::modules::identity::kv_key_split_migrate;
+    let (_bvault, core, root) = vault("t507_every_step").await;
+    write(&core, &root, "sys/mounts/kv/", json!({ "type": "kv" })).await;
+    seed_kv(&core, &root, &["kv/x", "kv/y", "kv/data/x"], None).await;
+    secret_name_migrate::reset_for_test(&core).await.unwrap();
+    for (group, member) in [("a-first", "kv/a"), ("allowg", "kv/x"), ("denyg", "kv/y"), ("z-last", "kv/z")] {
+        plant_old_group(&core, "", group, &[member]).await;
+    }
+    gated(&core, &root, "in-allowg", "kv/", "allowg").await;
+    write_policy(&core, &root, "reads-kv", "path \"kv/*\" { capabilities = [\"read\"] }\n").await;
+    let hcl = "path \"kv/*\" {\n  capabilities = [\"deny\"]\n  groups = [\"denyg\"]\n}\n";
+    write_policy(&core, &root, "denies-denyg", hcl).await;
+    let (allowed, _) = login(&core, &root, "user-allow", "in-allowg").await;
+    let (denied, _) = login(&core, &root, "user-deny", "reads-kv,denies-denyg").await;
+    let check = |when: String| {
+        let (core, allowed, denied) = (core.clone(), allowed.clone(), denied.clone());
+        async move {
+            let allow = decisions(&core, &allowed, &[(1, "kv/x", None), (1, "kv/data/x", None), (1, "kv/y", None)]);
+            assert_eq!(allow.await, [200, 200, 403], "the gated allow, {when}");
+            let deny = decisions(&core, &denied, &[(1, "kv/y", None), (1, "kv/x", None)]);
+            assert_eq!(deny.await, [403, 200], "the gated deny, {when}");
+            let s = store(&core);
+            let (x, y) = match s.secret_names().await.unwrap() {
+                true => (s.groups_for_secret_name("kv/x", "").await, s.groups_for_secret_name("kv/y", "").await),
+                false => (s.groups_for_legacy_secret("kv/x", "").await, s.groups_for_legacy_secret("kv/y", "").await),
+            };
+            assert_eq!((x.unwrap(), y.unwrap()), (vec!["allowg".to_string()], vec!["denyg".to_string()]), "{when}");
+        }
+    };
+
+    check("before the pass".into()).await;
+    let mut pass = secret_name_migrate::SecretNameMigration::start(&core).await.unwrap().unwrap();
+    let mut step = 0;
+    while pass.step().await.unwrap() {
+        step += 1;
+        check(format!("after step {step}")).await;
+        if step == 2 {
+            // The T499 datafix finishing midway rebuilds the legacy index.
+            kv_key_split_migrate::reset_for_test(&core).await.unwrap();
+            kv_key_split_migrate::run_if_needed(&core).await.unwrap();
+            check("after the T499 datafix ran midway".into()).await;
+        }
+    }
+    assert!(store(&core).secret_names().await.unwrap(), "marked");
+    assert!(step >= 7, "convert x4, verify, mark, final: {step}");
+    assert_eq!(pass.report().members_ambiguous, 4, "{:?}", pass.report());
+}
+
+/// A failed T507 pass, with the T499 datafix already done, schedules the
+/// background retry, which completes T507 once the cause is gone.
+#[tokio::test]
+async fn a_failed_asset_group_pass_is_retried_until_it_completes() {
+    use std::time::Duration;
+
+    use crate::{kernel_api::pipeline::NsScopeDatafix, modules::identity::IdentityModule};
+    let (_bvault, core, _root) = new_unseal_test_bastion_vault("t507_retry").await;
+    let identity = core.module_manager().get_module::<IdentityModule>("identity").unwrap();
+    identity.kv_split_retry.set_first_delay_for_test(Duration::from_millis(300));
+    store(&core).garble_secret_names_marker_for_test().await.unwrap();
+
+    assert!(identity.run_if_needed().await.is_err(), "the T507 pass fails at unseal");
+    assert!(identity.kv_split_retry.running(), "a background retry is scheduled");
+    for _ in 0..500 {
+        if identity.kv_split_retry.failures_for_test() >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(identity.kv_split_retry.failures_for_test() >= 1, "a retry failed while the marker was garbled");
+
+    store(&core).unmark_secret_names_for_test().await.unwrap();
+    for _ in 0..1000 {
+        if store(&core).secret_names().await.unwrap() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(store(&core).secret_names().await.unwrap(), "a later retry completed T507");
+    for _ in 0..500 {
+        if !identity.kv_split_retry.running() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(!identity.kv_split_retry.running(), "and the task ended");
 }
