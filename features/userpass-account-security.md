@@ -138,7 +138,8 @@ migration.
 - **Known limit:** two creations of one name on two mounts at the same moment
   can both pass (storage has no cross-mount lock); the next unseal reports it.
   Keying userpass identity by the real mount (separate entities, assignments
-  and `mount_path` per mount) would need a migration and is T521.
+  and `mount_path` per mount) was decided against on 2026-11-18, see T521
+  (abandoned); T530 and T531 close the remaining gaps.
 
 ## Defaults / operational notes
 
@@ -186,8 +187,10 @@ after the re-creation, AppRole, the keeping rule, disable, the purge).
 
 ### Not yet implemented
 
-- Separate identity entities per userpass mount (T521): today a username may
-  exist in only one userpass mount, and pre-T500 duplicates stay one entity.
+- Separate identity entities per userpass mount: decided against on
+  2026-11-18, see T521 (abandoned); T530 and T531 close the remaining gaps.
+  A username may exist in only one userpass mount, and pre-T500 duplicates
+  stay one entity.
 - Aliases a delete left in a namespace before T522 are not migrated: a name
   re-created since logs in there as the old entity. Deleting a name no mount
   holds clears them; no endpoint lists entities no alias names, or the
