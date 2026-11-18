@@ -202,14 +202,16 @@ async fn a_share_reaches_only_the_secret_it_names() {
     }
 }
 
-/// Asset-group membership of one secret is not membership of the other.
+/// Asset-group membership of one secret is not membership of the other. A
+/// member is the secret's own `<mount>/<name>` (T507): `secret/data/x` is
+/// the secret `data/x`.
 #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
 async fn asset_group_membership_names_one_secret() {
     let (_bvault, core, root) = vault("group_names_one_secret").await;
     allowed(send(&core, &root, 1, Operation::Write, "secret/data/x", None, data("x")).await, "seed x");
     allowed(send(&core, &root, 1, Operation::Write, "secret/data/data/x", None, data("data/x")).await, "seed data/x");
     write(&core, &root, "resource-group/groups/plain", json!({ "secrets": "secret/x" })).await;
-    write(&core, &root, "resource-group/groups/nested", json!({ "secrets": "secret/data/data/x" })).await;
+    write(&core, &root, "resource-group/groups/nested", json!({ "secrets": "secret/data/x" })).await;
     for group in ["plain", "nested"] {
         let hcl = format!("path \"secret/*\" {{\n  capabilities = [\"read\"]\n  groups = [\"{group}\"]\n}}\n");
         write_policy(&core, &root, &format!("in-{group}"), &hcl).await;

@@ -464,16 +464,16 @@ async fn test_resource_delete_prunes_from_groups() {
 }
 
 #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
-async fn test_resource_group_secret_membership_and_canonicalization() {
+async fn test_resource_group_secret_membership_by_own_name() {
     let (_bvault, core, root_token) =
-        new_unseal_test_bastion_vault("test_resource_group_secret_membership_and_canonicalization").await;
+        new_unseal_test_bastion_vault("test_resource_group_secret_membership_by_own_name").await;
 
-    // Group with a mix of resources and secrets. Secrets are
-    // supplied in three different forms; they must all canonicalize
-    // to two distinct entries (`secret/foo/bar` and `secret/baz`).
+    // Group with a mix of resources and secrets. Each secret is its own
+    // `<mount>/<name>`, stored as given (T507): on this KV v2 mount
+    // `secret/data/foo/bar` is the secret `data/foo/bar`, not `foo/bar`.
     let data = json!({
         "members": "web-01",
-        "secrets": "secret/foo/bar,secret/data/foo/bar,secret/metadata/baz,secret/baz",
+        "secrets": "secret/foo/bar,/secret/data/foo/bar/,secret/metadata/baz,secret/baz,secret/baz",
     })
     .as_object()
     .cloned();
@@ -482,29 +482,24 @@ async fn test_resource_group_secret_membership_and_canonicalization() {
     let resp = test_read_api(&core, &root_token, "resource-group/groups/mix", true).await.unwrap().unwrap();
     let data = resp.data.unwrap();
     assert_eq!(data["members"], json!(["web-01"]));
-    // Canonicalized form: `/data/` and `/metadata/` stripped; deduped
-    // and sorted lexicographically.
-    assert_eq!(data["secrets"], json!(["secret/baz", "secret/foo/bar"]));
+    // Trimmed, deduped and sorted; nothing stripped.
+    assert_eq!(data["secrets"], json!(["secret/baz", "secret/data/foo/bar", "secret/foo/bar", "secret/metadata/baz"]));
 
     // by-secret reverse lookup. The handler accepts base64url(no-pad).
     fn b64(s: &str) -> String {
         URL_SAFE_NO_PAD.encode(s.as_bytes())
     }
 
-    // Canonical form matches.
-    let path = format!("resource-group/by-secret/{}", b64("secret/foo/bar"));
-    let resp = test_read_api(&core, &root_token, &path, true).await.unwrap().unwrap();
-    assert_eq!(resp.data.unwrap()["groups"], json!(["mix"]));
-
-    // KV-v2 data/ form matches the same entry.
-    let path = format!("resource-group/by-secret/{}", b64("secret/data/foo/bar"));
-    let resp = test_read_api(&core, &root_token, &path, true).await.unwrap().unwrap();
-    assert_eq!(resp.data.unwrap()["groups"], json!(["mix"]));
-
-    // KV-v2 metadata/ form matches the same entry.
+    // Each secret by its own name.
+    for name in ["secret/foo/bar", "secret/data/foo/bar", "secret/metadata/baz"] {
+        let path = format!("resource-group/by-secret/{}", b64(name));
+        let resp = test_read_api(&core, &root_token, &path, true).await.unwrap().unwrap();
+        assert_eq!(resp.data.unwrap()["groups"], json!(["mix"]), "{name}");
+    }
+    // A secret no member names: `metadata/foo/bar` is not `foo/bar`.
     let path = format!("resource-group/by-secret/{}", b64("secret/metadata/foo/bar"));
     let resp = test_read_api(&core, &root_token, &path, true).await.unwrap().unwrap();
-    assert_eq!(resp.data.unwrap()["groups"], json!(["mix"]));
+    assert_eq!(resp.data.unwrap()["groups"], json!([] as [String; 0]));
 
     // Unrelated path → empty result.
     let path = format!("resource-group/by-secret/{}", b64("secret/other"));

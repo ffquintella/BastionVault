@@ -21,7 +21,7 @@ use crate::{
     logical::{Operation, Request},
     modules::{
         identity::{SecretShare, SHARE_HISTORY_OP_CTX},
-        resource_group::{ResourceGroupStore, REDACTED_MEMBER},
+        resource_group::REDACTED_MEMBER,
         system::transfer::shares::{self as planner, plan_shares, SharePlan, CODE_CANNOT_GRANT},
     },
 };
@@ -96,14 +96,6 @@ fn relation_key(kind: Kind, place: &Place) -> String {
     }
 }
 
-/// Whether the asset-group store would read the item at `place` as another
-/// one: it strips a `data`/`metadata` second segment from a KV path (T507), so
-/// `secret/data/x` is `x` there. Such membership is not carried (T510).
-fn group_store_misreads(kind: Kind, place: &Place) -> bool {
-    let key = relation_key(kind, place);
-    kind == Kind::KvSecret && ResourceGroupStore::canonicalize_secret_path(&key).as_deref() != Some(key.as_str())
-}
-
 /// `identity/sharing/by-target/<kind>/<b64(key)>` for the item at `place`.
 fn sharing_path(kind: Kind, place: &Place) -> String {
     let target = URL_SAFE_NO_PAD.encode(relation_key(kind, place));
@@ -122,7 +114,7 @@ pub(super) async fn carry(
     dest: &Place,
 ) -> Result<Carried, RvError> {
     let (shares, mut warnings) = carry_shares(core, caller, stores, plan, dest).await?;
-    warnings.extend(carry_groups(core, caller, plan, dest).await?);
+    warnings.extend(carry_groups(core, caller, stores, plan, dest).await?);
     Ok(Carried { shares, warnings })
 }
 
@@ -288,19 +280,23 @@ async fn source_groups(core: &dyn VaultCtx, caller: &Request, plan: &Plan) -> Re
 async fn carry_groups(
     core: &dyn VaultCtx,
     caller: &Request,
+    stores: Option<&IdentityStores>,
     plan: &Plan,
     dest: &Place,
 ) -> Result<Vec<TransferWarning>, RvError> {
     let src = &plan.source;
-    if let Some(misread) = [src, dest].into_iter().find(|p| group_store_misreads(plan.kind, p)) {
-        let message = format!(
-            "asset-group membership of {} was not carried: the asset-group store reads the KV path {} as the \
-             secret without its `data/` or `metadata/` segment, so it would carry or grant another secret's groups \
-             (T507)",
-            src.display(),
-            misread.display(),
-        );
-        return Ok(vec![warning(CODE_GROUP_MEMBERSHIP_NOT_CARRIED, src.display(), message)]);
+    // Groups list a KV secret by its own name (T507); until that switch has
+    // happened no secret joins a group, so none is carried.
+    let groups = stores.and_then(|s| s.asset_groups.as_deref());
+    if let (Kind::KvSecret, Some(groups)) = (plan.kind, groups) {
+        if !groups.secret_names().await? {
+            let message = format!(
+                "asset-group membership of {} was not carried: the asset-group key switch (T507) is pending, and \
+                 until it completes no secret joins a group (docs/api.md, \"Asset-group key switch pending\")",
+                src.display(),
+            );
+            return Ok(vec![warning(CODE_GROUP_MEMBERSHIP_NOT_CARRIED, src.display(), message)]);
+        }
     }
     let Some(groups) = source_groups(core, caller, plan).await? else {
         let message =
@@ -510,17 +506,6 @@ mod tests {
         let srv_target = URL_SAFE_NO_PAD.encode("srv1");
         let grant = format!("identity/sharing/by-target/resource/{srv_target}/ops");
         assert_eq!(grant_path(Kind::Resource, &srv, " ops "), grant);
-    }
-
-    #[test]
-    fn the_group_store_misreads_a_kv_name_with_a_data_or_metadata_segment() {
-        let cases = [("x", false), ("team/x", false), ("data/x", true), ("metadata/x", true), ("data", true)];
-        for (path, misread) in cases.into_iter().chain([("metadata", true), ("database", false)]) {
-            assert_eq!(group_store_misreads(Kind::KvSecret, &place("dst", "secret/", path)), misread, "{path}");
-        }
-        assert!(!group_store_misreads(Kind::KvSecret, &place("", "a/b/", "data/x")), "its second segment is b");
-        assert!(group_store_misreads(Kind::KvSecret, &place("", "a/data/", "x")), "a mount named data");
-        assert!(!group_store_misreads(Kind::Resource, &place("", "resources/", "data")), "resources are not KV");
     }
 
     #[test]

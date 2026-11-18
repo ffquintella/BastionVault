@@ -17,7 +17,11 @@ use crate::{
     modules::{
         identity::{EntityStore, GroupStore, OwnerStore},
         namespace::router::{is_header_scoped_path, qualify_path_in_namespace, NAMESPACE_HEADER},
-        policy::{policy_store::moving_key_pending, TRANSFER_IMPORT_MAX_SECRETS},
+        policy::{
+            policy_store::{group_change_pending, moving_key_pending},
+            TRANSFER_IMPORT_MAX_SECRETS,
+        },
+        resource_group::ResourceGroupStore,
     },
 };
 
@@ -52,9 +56,8 @@ pub const CODE_SHARE_NOT_WRITTEN: &str = "share-not-written";
 pub const CODE_GROUP_MEMBERSHIP_DROPPED: &str = "group-membership-dropped";
 /// The caller may not read the source's asset-group membership.
 pub const CODE_GROUP_MEMBERSHIP_UNREADABLE: &str = "group-membership-unreadable";
-/// A KV secret named `data/...` or `metadata/...` (source or destination):
-/// the asset-group store reads that path as another secret's, so no
-/// membership is carried (T510, subject: the source item).
+/// A KV secret's asset-group membership is not carried: the asset-group key
+/// switch (T507) is pending (subject: the source item).
 pub const CODE_GROUP_MEMBERSHIP_NOT_CARRIED: &str = "group-membership-not-carried";
 /// Files attached to the source resource stay where they are (subject: the
 /// source resource name).
@@ -146,6 +149,8 @@ pub struct IdentityStores {
     pub groups: Arc<GroupStore>,
     /// For the pending T499 key switch (T511); `None` checks nothing.
     pub owners: Option<Arc<OwnerStore>>,
+    /// For the pending T507 asset-group key switch; `None` checks nothing.
+    pub asset_groups: Option<Arc<ResourceGroupStore>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1172,26 +1177,44 @@ fn after_import(e: RvError, written: &Place, what: &str) -> RvError {
 }
 
 /// A move whose source delete the policy layer would refuse while the T499
-/// key switch is pending (T511) is refused before anything is written, dry run
-/// included: the same predicate, on the path and namespace the delete uses.
+/// key switch (T511) or the T507 asset-group key switch is pending is refused
+/// before anything is written, dry run included: the same predicates, on the
+/// path and namespace the delete uses.
 #[maybe_async::maybe_async]
-async fn refuse_moving_source(core: &dyn VaultCtx, plan: &Plan, owners: Option<&OwnerStore>) -> Result<(), RvError> {
-    let (Some(owners), Kind::KvSecret) = (owners, plan.kind) else {
+async fn refuse_moving_source(
+    core: &dyn VaultCtx,
+    plan: &Plan,
+    stores: Option<&IdentityStores>,
+) -> Result<(), RvError> {
+    if plan.kind != Kind::KvSecret {
         return Ok(());
-    };
+    }
     let src = &plan.source;
     let path = qualify_path_in_namespace(&src.ns, &src.item(plan.kind));
     let ns = (!src.ns.is_empty()).then_some(src.ns.as_str());
-    if !moving_key_pending(&core.router(), owners, &path, ns).await? {
-        return Ok(());
+    if let Some(owners) = stores.and_then(|s| s.owners.as_deref()) {
+        if moving_key_pending(&core.router(), owners, &path, ns).await? {
+            let message = format!(
+                "{} cannot be moved yet, so nothing was written: its owner and share key changes when the pending \
+                 KV key-split datafix completes, and until then its delete is refused; copy it instead, or move it \
+                 once the datafix has completed (docs/api.md, \"KV key-split datafix pending\")",
+                src.display()
+            );
+            return Err(RvError::ErrResponseStatus(503, message));
+        }
     }
-    let message = format!(
-        "{} cannot be moved yet, so nothing was written: its owner and share key changes when the pending KV \
-         key-split datafix completes, and until then its delete is refused; copy it instead, or move it once the \
-         datafix has completed (docs/api.md, \"KV key-split datafix pending\")",
-        src.display()
-    );
-    Err(RvError::ErrResponseStatus(503, message))
+    if let Some(groups) = stores.and_then(|s| s.asset_groups.as_deref()) {
+        if group_change_pending(groups, &path, ns).await? {
+            let message = format!(
+                "{} cannot be moved yet, so nothing was written: an asset group lists it and the asset-group key \
+                 switch (T507) is pending, and until it completes its delete is refused; copy it instead, or move it \
+                 once the switch has completed (docs/api.md, \"Asset-group key switch pending\")",
+                src.display()
+            );
+            return Err(RvError::ErrResponseStatus(503, message));
+        }
+    }
+    Ok(())
 }
 
 /// Re-read the source and delete it only if it still matches what was copied.
@@ -1259,7 +1282,7 @@ pub async fn run_transfer(
     if plan.op == TransferOp::Move {
         let origin = [(plan.source.item(plan.kind), Right::Delete)];
         require(core, caller, &plan.source.ns, &origin, "a move").await?;
-        refuse_moving_source(core, &plan, stores.and_then(|s| s.owners.as_deref())).await?;
+        refuse_moving_source(core, &plan, stores).await?;
     }
 
     let written = match plan.dry_run {

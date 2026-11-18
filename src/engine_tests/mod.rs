@@ -71,5 +71,7 @@ mod kv_v2_deny_forms;
 mod kv_no_secret_paths;
 // A KV key-split datafix that fails at unseal is retried in the background (T511).
 mod kv_key_split_retry;
+// An asset group's KV-secret member is the secret's own name (T507).
+mod asset_group_secret_names;
 // Cross-namespace copy and move through `sys/namespace-transfer` (T494).
 mod namespace_transfer;

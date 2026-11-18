@@ -44,8 +44,11 @@ use crate::{
 
 pub mod group_store;
 pub mod kernel_service;
-use group_store::scope_of;
+pub mod secret_name_migrate;
+pub(crate) mod secret_names;
+use group_store::{scope_of, SECRETS_FORMAT};
 pub use group_store::{ResourceGroupEntry, ResourceGroupHistoryEntry, ResourceGroupStore};
+use secret_names::{legacy_path_of_name, member_paths, own_members_via, pending_refusal};
 
 /// Sentinel returned in the `members` / `secrets` list when the caller
 /// has group-read access but not read access on an individual member.
@@ -197,7 +200,7 @@ impl ResourceGroupBackend {
                         "secrets": {
                             field_type: FieldType::CommaStringSlice,
                             required: false,
-                            description: "KV-secret paths that belong to this group. Accepts either the logical form (secret/foo/bar) or the KV-v2 API form (secret/data/foo/bar); stored canonicalized."
+                            description: "KV secrets that belong to this group, each by its own `<mount>/<name>` (on KV v2 `secret/data/x` is the secret named `data/x`), stored as given (T507)."
                         },
                         "files": {
                             field_type: FieldType::CommaStringSlice,
@@ -228,18 +231,15 @@ impl ResourceGroupBackend {
                 },
                 {
                     // Reverse lookup for KV-secret membership. The `path`
-                    // is a base64url-encoded (no padding) KV path, so
-                    // the '/' characters in the path don't clash with
-                    // the URL's path separators. Callers may encode
-                    // either the canonical form or the KV-v2 API form —
-                    // the handler canonicalizes both sides before
-                    // consulting the secret-index.
+                    // is base64url (no padding) of the secret's own
+                    // `<mount>/<name>`, so its '/' characters don't clash
+                    // with the URL's separators (T507: nothing stripped).
                     pattern: r"by-secret/(?P<path>[A-Za-z0-9_\-]+)$",
                     fields: {
                         "path": {
                             field_type: FieldType::Str,
                             required: true,
-                            description: "base64url(no-pad) encoded KV-secret path."
+                            description: "base64url(no-pad) of the KV secret's own `<mount>/<name>`."
                         }
                     },
                     operations: [
@@ -321,20 +321,64 @@ async fn redact_inaccessible_members(
         }
     }
 
-    // KV-secret members — stored in canonical logical form (no
-    // `data/` / `metadata/` segment). Policies on KV-v2 mounts are
-    // usually written against the v2 `<mount>/data/...` form, so we
-    // probe both shapes and consider the member visible if either
-    // check allows `Read`. Cheap on the common case (first probe
-    // matches).
+    // KV-secret members: probed through the paths a request to the secret
+    // takes (`secret_probe_paths`); either allowing `Read` is enough. An
+    // unreadable T507 marker hides them all (fail closed).
+    let switched = secret_names_switched(core).await;
     for s in entry.secrets.iter_mut() {
         if s == REDACTED_MEMBER {
             continue;
         }
-        if !secret_member_readable(&store, auth, ns_path, s).await {
+        let readable = match switched {
+            Some(switched) => {
+                let probes = secret_probe_paths(core, ns_path, s, switched);
+                secret_member_readable(&store, auth, ns_path, &probes).await
+            }
+            None => false,
+        };
+        if !readable {
             *s = REDACTED_MEMBER.to_string();
         }
     }
+}
+
+/// Whether the T507 switch is set; `None` when its marker cannot be read,
+/// which callers treat as nothing readable (never a guess at either keys).
+async fn secret_names_switched(core: &Core) -> Option<bool> {
+    let store = core.module_manager().get_module::<ResourceGroupModule>("resource-group").and_then(|m| m.store())?;
+    store.secret_names().await.ok()
+}
+
+/// The paths a `Read` probe of KV-secret member `secret` takes, namespaced:
+/// once switched, the routes whose key is that member (T507), none when no
+/// route has it (hidden); while pending, the pre-T507 member and its `data/` form.
+fn secret_probe_paths(core: &Core, ns_path: Option<&str>, secret: &str, switched: bool) -> Vec<String> {
+    if switched {
+        return member_paths(&core.router(), secret, ns_path);
+    }
+    vec![namespaced_probe_path(ns_path, secret), namespaced_probe_path(ns_path, &kv_v2_data_form(secret))]
+}
+
+/// The KV-secret members of `g` as callers see them: own names once switched
+/// (a format 0 record found then converted on the fly), the pre-T507 list
+/// while the T507 switch is pending. Never the rollback copy.
+fn shown_secrets(
+    core: &Core,
+    ns_path: Option<&str>,
+    g: &ResourceGroupEntry,
+    switched: bool,
+) -> Result<Vec<String>, RvError> {
+    if !switched {
+        return Ok(g.legacy_list().to_vec());
+    }
+    own_members_via(&core.router(), g, ns_path)
+}
+
+/// `g` as callers see it: [`shown_secrets`] in place of the stored list.
+fn shown(core: &Core, home: &str, mut g: ResourceGroupEntry, switched: bool) -> Result<ResourceGroupEntry, RvError> {
+    g.secrets = shown_secrets(core, ns_opt(home), &g, switched)?;
+    g.legacy_secrets.clear();
+    Ok(g)
 }
 
 /// `Read` probe on one resource member, in the namespaced form the ACL sees.
@@ -348,19 +392,20 @@ async fn resource_member_readable(
     store.can_operate(auth, &path, Operation::Read, ns_path).await
 }
 
-/// `Read` probe on one KV-secret member. Members are stored canonically (no
-/// `data/` segment) while KV-v2 policies are usually written against the
-/// `<mount>/data/...` form, so either shape allowing `Read` is enough.
+/// `Read` probe on one KV-secret member through `probes` (from
+/// [`secret_probe_paths`]): any one allowing `Read` is enough.
 async fn secret_member_readable(
     store: &crate::modules::policy::PolicyStore,
     auth: &crate::logical::Auth,
     ns_path: Option<&str>,
-    secret: &str,
+    probes: &[String],
 ) -> bool {
-    store.can_operate(auth, &namespaced_probe_path(ns_path, secret), Operation::Read, ns_path).await
-        || store
-            .can_operate(auth, &namespaced_probe_path(ns_path, &kv_v2_data_form(secret)), Operation::Read, ns_path)
-            .await
+    for path in probes {
+        if store.can_operate(auth, path, Operation::Read, ns_path).await {
+            return true;
+        }
+    }
+    false
 }
 
 /// True when `auth` can `Read` at least one member of `entry`. A caller who may
@@ -386,8 +431,15 @@ async fn caller_reads_any_member(
             return true;
         }
     }
-    for sec in entry.secrets.iter().filter(|s| s.as_str() != REDACTED_MEMBER) {
-        if secret_member_readable(&store, auth, ns_path, sec).await {
+    let Some(switched) = secret_names_switched(core).await else {
+        return false;
+    };
+    let Ok(secrets) = shown_secrets(core, ns_path, entry, switched) else {
+        return false;
+    };
+    for sec in secrets.iter().filter(|s| s.as_str() != REDACTED_MEMBER) {
+        let probes = secret_probe_paths(core, ns_path, sec, switched);
+        if secret_member_readable(&store, auth, ns_path, &probes).await {
             return true;
         }
     }
@@ -403,10 +455,10 @@ fn namespaced_probe_path(ns_path: Option<&str>, path: &str) -> String {
     }
 }
 
-/// Rewrite a canonical KV path (e.g., `secret/foo/bar`) into the
-/// KV-v2 API form (`secret/data/foo/bar`) for authorization probes.
-/// Returns the input unchanged when it already contains `/data/` or
-/// has no segments to insert into.
+/// Rewrite a pre-T507 member (e.g., `secret/foo/bar`) into the KV-v2
+/// API form (`secret/data/foo/bar`) for authorization probes while the
+/// T507 switch is pending. Returns the input unchanged when it already
+/// contains `/data/` or has no segments to insert into.
 fn kv_v2_data_form(canonical: &str) -> String {
     let trimmed = canonical.trim_matches('/');
     match trimmed.split_once('/') {
@@ -493,9 +545,11 @@ fn reverse_maps<'a>(groups: impl Iterator<Item = &'a ResourceGroupEntry>) -> (Va
 /// every other member is probed in its group's home namespace. Each distinct
 /// member is probed once, with one ACL build per namespace.
 async fn redact_members_of_many(
+    core: &Core,
     store: &crate::modules::policy::PolicyStore,
     auth: &crate::logical::Auth,
     groups: &mut [(String, ResourceGroupEntry)],
+    switched: bool,
 ) {
     if auth.policies.iter().any(|p| p == "root" || p == "admin") {
         return;
@@ -527,21 +581,14 @@ async fn redact_members_of_many(
             }
         }
 
-        // As `secret_member_readable`: the canonical form, then the KV-v2
-        // `data/` form for whatever the first probe refused.
-        let secrets: Vec<String> = secrets.into_iter().collect();
-        let paths: Vec<String> = secrets.iter().map(|s| namespaced_probe_path(ns, s)).collect();
-        let first = store.can_operate_many(auth, &paths, Operation::Read, ns).await;
-        let mut retry: Vec<String> = Vec::new();
-        for (s, ok) in secrets.into_iter().zip(first) {
-            if ok {
-                readable_secrets.insert((home.clone(), s));
-            } else {
-                retry.push(s);
-            }
-        }
-        let paths: Vec<String> = retry.iter().map(|s| namespaced_probe_path(ns, &kv_v2_data_form(s))).collect();
-        for (s, ok) in retry.into_iter().zip(store.can_operate_many(auth, &paths, Operation::Read, ns).await) {
+        // As `secret_member_readable`: each member's probe paths in one
+        // batch, readable when any of them allows `Read`.
+        let probes: Vec<(String, String)> = secrets
+            .into_iter()
+            .flat_map(|s| secret_probe_paths(core, ns, &s, switched).into_iter().map(move |p| (s.clone(), p)))
+            .collect();
+        let paths: Vec<String> = probes.iter().map(|(_, p)| p.clone()).collect();
+        for ((s, _), ok) in probes.into_iter().zip(store.can_operate_many(auth, &paths, Operation::Read, ns).await) {
             if ok {
                 readable_secrets.insert((home.clone(), s));
             }
@@ -644,6 +691,14 @@ fn diff_with_values(
 
 fn string_array(v: &[String]) -> Value {
     Value::Array(v.iter().cloned().map(Value::String).collect())
+}
+
+/// Whether the KV-secret list a client sent names the members `stored`, as
+/// sets, with surrounding whitespace and `/` ignored.
+fn same_members(sent: &[String], stored: &[String]) -> bool {
+    let set =
+        |v: &[String]| v.iter().filter_map(|s| ResourceGroupStore::checked_secret_name(s)).collect::<BTreeSet<_>>();
+    set(sent) == set(stored)
 }
 
 fn same_set(a: &[String], b: &[String]) -> bool {
@@ -942,6 +997,11 @@ impl ResourceGroupBackendInner {
             };
             groups.push((g.home, entry));
         }
+        let switched = store.secret_names().await?;
+        let groups: Vec<(String, ResourceGroupEntry)> = groups
+            .into_iter()
+            .map(|(home, g)| shown(&self.core, &home, g, switched).map(|g| (home, g)))
+            .collect::<Result<_, RvError>>()?;
 
         // The policy store answers both checks below. Without it nothing can be
         // shown safely, so refuse rather than return unredacted members.
@@ -963,7 +1023,7 @@ impl ResourceGroupBackendInner {
         let mut groups: Vec<(String, ResourceGroupEntry)> =
             groups.into_iter().zip(readable).filter_map(|(g, ok)| ok.then_some(g)).collect();
 
-        redact_members_of_many(&policy_store, &auth, &mut groups).await;
+        redact_members_of_many(&self.core, &policy_store, &auth, &mut groups, switched).await;
 
         let mut data = Map::new();
         data.insert("unchanged".into(), Value::Bool(false));
@@ -999,8 +1059,10 @@ impl ResourceGroupBackendInner {
         let scope = self.request_scope(req)?;
         let name = req.get_data("name")?.as_str().unwrap_or("").to_string();
         // Own scope first, then ancestors: a parent's group is readable here.
+        let switched = store.secret_names().await?;
         match store.resolve_group(&name, &scope).await? {
-            Some((home, mut entry)) => {
+            Some((home, entry)) => {
+                let mut entry = shown(&self.core, &home, entry, switched)?;
                 // Member redaction: callers with read access on the
                 // group but not on a specific member see the member
                 // replaced by `<hidden>` rather than the path, so
@@ -1041,17 +1103,30 @@ impl ResourceGroupBackendInner {
         }
 
         let payload = parse_write_payload(req)?;
+        let switched = store.secret_names().await?;
 
         // Writes act on this scope only. A name only an ancestor holds is
         // created here as a new group that shadows the inherited one, which
         // itself is never modified; the response says so.
-        let existing = store.get_group(&name, &scope).await?;
+        let mut existing = store.get_group(&name, &scope).await?;
+        if let (true, Some(g)) = (switched, &existing) {
+            // A format 0 record found once switched (a raw `.bvx` import) is
+            // converted first, as the T507 migration would have.
+            if g.secrets_format < SECRETS_FORMAT && !g.secrets.is_empty() {
+                let own = own_members_via(&self.core.router(), g, ns_opt(&scope))?;
+                store.convert_record(&name, &scope, &g.secrets, &own).await?;
+                existing = store.get_group(&name, &scope).await?;
+            }
+        }
         let shadows = match existing {
             Some(_) => None,
             None => store.resolve_group(&name, &scope).await?.map(|(home, _)| home),
         };
         let mut entry = existing.clone().unwrap_or_default();
         entry.name = name.clone();
+        if existing.is_none() && switched {
+            entry.secrets_format = SECRETS_FORMAT;
+        }
 
         if let Some(d) = &payload.description {
             entry.description = d.clone();
@@ -1060,7 +1135,14 @@ impl ResourceGroupBackendInner {
             entry.members = m.clone();
         }
         if let Some(s) = &payload.secrets {
-            entry.secrets = s.clone();
+            if switched {
+                // Each secret by its own `<mount>/<name>`, stored as given (T507).
+                entry.secrets = s.clone();
+            } else if !same_members(s, existing.as_ref().map(|g| g.legacy_list()).unwrap_or_default()) {
+                // While the switch is pending no secret joins or leaves a
+                // group: the migration converts the lists as they stand.
+                return Err(pending_refusal());
+            }
         }
         if let Some(f) = &payload.files {
             entry.files = f.clone();
@@ -1118,6 +1200,10 @@ impl ResourceGroupBackendInner {
         let name = req.get_data("name")?.as_str().unwrap_or("").to_string();
 
         let previous = store.get_group(&name, &scope).await?;
+        // While the T507 switch is pending no secret leaves a group.
+        if previous.as_ref().is_some_and(|g| !g.secrets.is_empty()) && !store.secret_names().await? {
+            return Err(pending_refusal());
+        }
         // An inherited group is read-only here: refuse rather than report a
         // delete that removed nothing while the group stays listed.
         if previous.is_none() {
@@ -1207,7 +1293,15 @@ impl ResourceGroupBackendInner {
             .map_err(|e| bv_error_string!(format!("invalid base64url path: {e}")))?;
         let path = String::from_utf8(decoded_bytes)
             .map_err(|e| bv_error_string!(format!("invalid utf-8 in decoded path: {e}")))?;
-        let groups = store.groups_for_secret(&path, &scope).await?;
+        // The secret's own `<mount>/<name>`: looked up as given once switched,
+        // by the key its `data/` path had while the switch is pending (T507).
+        let groups = match store.secret_names().await? {
+            true => store.groups_for_secret_name(&path, &scope).await?,
+            false => {
+                let legacy = legacy_path_of_name(&self.core.router(), &path, ns_opt(&scope));
+                store.groups_for_legacy_secret(&legacy, &scope).await?
+            }
+        };
         let mut data = Map::new();
         data.insert("path".into(), Value::String(path));
         data.insert("groups".into(), string_array(&groups));
@@ -1217,6 +1311,19 @@ impl ResourceGroupBackendInner {
     pub async fn handle_reindex(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let store = self.resolve_store()?;
         let scope = self.request_scope(req)?;
+        // Once switched, a format 0 record (a raw `.bvx` import) is converted
+        // as the T507 migration would have before the indexes are rebuilt.
+        if store.secret_names().await? {
+            for name in store.list_groups(&scope).await? {
+                let Some(g) = store.get_group(&name, &scope).await? else {
+                    continue;
+                };
+                if g.secrets_format < SECRETS_FORMAT && !g.secrets.is_empty() {
+                    let own = own_members_via(&self.core.router(), &g, ns_opt(&scope))?;
+                    store.convert_record(&name, &scope, &g.secrets, &own).await?;
+                }
+            }
+        }
         let touched = store.reindex(&scope).await?;
         let mut data = Map::new();
         data.insert("indexed_members".into(), Value::Number(serde_json::Number::from(touched)));

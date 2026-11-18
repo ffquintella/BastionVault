@@ -1,9 +1,8 @@
-//! Bounded background retry of the T499 KV key-split datafix (T511).
-//!
-//! The datafix runs in `Core::post_unseal`. When it fails there its marker
-//! stays unset and the node keeps the pre-T499 keys, so instead of waiting for
-//! the next unseal one task per node retries it with backoff. Scheduling never
-//! blocks unseal, a seal aborts the task, and a set marker ends it.
+//! Bounded background retry of the T499 KV key-split datafix (T511) and the
+//! T507 asset-group key switch, which run together in `Core::post_unseal`.
+//! When either fails there its marker stays unset and the node keeps the old
+//! keys, so one task per node retries both with backoff. Scheduling never
+//! blocks unseal, a seal aborts the task, and both markers set end it.
 
 use std::{
     sync::{
@@ -14,7 +13,7 @@ use std::{
 };
 
 use super::kv_key_split_migrate;
-use crate::core::Core;
+use crate::{core::Core, modules::resource_group::secret_name_migrate};
 
 /// Background attempts after a failed unseal pass, at 5, 10, 20, 40 and 80 s.
 pub const MAX_RETRIES: u32 = 5;
@@ -56,8 +55,8 @@ impl KvSplitRetry {
         self.wakes.store(0, Ordering::Relaxed);
         log::warn!(
             target: "migration",
-            "kv key split datafix failed at unseal; retrying it in the background up to {MAX_RETRIES} times, \
-             first in {first:?}"
+            "kv key datafixes (T499 key split, T507 asset-group keys) failed at unseal; retrying them in the \
+             background up to {MAX_RETRIES} times, first in {first:?}"
         );
         let counters = (self.failures.clone(), self.wakes.clone());
         *task = Some(runtime.spawn(retry(core, first, counters)));
@@ -98,7 +97,7 @@ impl KvSplitRetry {
 }
 
 /// Up to [`MAX_RETRIES`] attempts, each after a doubling wait. Stops when the
-/// vault is gone or sealed, or when a pass completes or finds the marker set.
+/// vault is gone or sealed, or when both passes complete or find their marker.
 async fn retry(core: Weak<Core>, first: Duration, (failures, wakes): (Arc<AtomicU32>, Arc<AtomicU32>)) {
     let mut delay = first;
     let mut last_error = String::new();
@@ -112,28 +111,33 @@ async fn retry(core: Weak<Core>, first: Duration, (failures, wakes): (Arc<Atomic
         if core.sealed() {
             return;
         }
-        match kv_key_split_migrate::run_if_needed(&core).await {
-            Ok(report) if report.skipped => {
-                log::info!(target: "migration", "kv key split datafix: the marker is set; background retry stopped");
+        let split = kv_key_split_migrate::run_if_needed(&core).await;
+        let names = secret_name_migrate::run_if_needed(&core).await;
+        match (split, names) {
+            (Ok(split), Ok(names)) if split.skipped && names.skipped => {
+                log::info!(target: "migration", "kv key datafixes: both markers are set; background retry stopped");
                 return;
             }
-            Ok(_) => {
-                log::info!(target: "migration", "kv key split datafix completed on background retry {attempt}");
+            (Ok(_), Ok(_)) => {
+                log::info!(target: "migration", "kv key datafixes completed on background retry {attempt}");
                 return;
             }
-            Err(e) => {
+            (split, names) => {
                 failures.fetch_add(1, Ordering::Relaxed);
-                log::warn!(target: "migration", "kv key split datafix retry {attempt} of {MAX_RETRIES} failed: {e}");
-                last_error = e.to_string();
+                for e in [split.err(), names.err()].into_iter().flatten() {
+                    log::warn!(target: "migration", "kv key datafix retry {attempt} of {MAX_RETRIES} failed: {e}");
+                    last_error = e.to_string();
+                }
             }
         }
     }
     log::error!(
         target: "security",
-        "kv key split datafix gave up after {MAX_RETRIES} background retries: until a pass completes, writes, \
+        "kv key datafixes gave up after {MAX_RETRIES} background retries: until the T499 pass completes, writes, \
          deletes, owner changes and shares on KV secrets whose key moves at the switch answer 503 on every node, \
-         and the pre-T499 keys stay in use (a secret named data/x shares x's record); find the cause in the \
-         migration warnings above, fix it, then seal and unseal a node to run the pass again (docs/api.md, \
-         \"KV key-split datafix pending\"): {last_error}"
+         and the pre-T499 keys stay in use (a secret named data/x shares x's record); until the T507 pass \
+         completes, asset-group KV-secret membership changes answer 503 and lookups use the pre-T507 keys; find \
+         the cause in the migration warnings above, fix it, then seal and unseal a node to run the passes again \
+         (docs/api.md, \"KV key-split datafix pending\" and \"Asset-group key switch pending\"): {last_error}"
     );
 }

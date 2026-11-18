@@ -47,7 +47,9 @@ use crate::{
     logical::{auth::PolicyResults, Operation, Request, Response},
     modules::{
         identity::{GroupKind, IdentityModule, OwnerStore, ShareStore, ShareTargetKind},
-        resource_group::{group_store::scope_of, ResourceGroupEntry, ResourceGroupModule, ResourceGroupStore},
+        resource_group::{
+            group_store::scope_of, secret_names, ResourceGroupEntry, ResourceGroupModule, ResourceGroupStore,
+        },
     },
     router::Router,
     storage::{barrier_view::BarrierView, Storage, StorageEntry},
@@ -3190,14 +3192,13 @@ async fn asset_group_share_key(core: &Core, req_path: &str, ns_path: Option<&str
 /// a permissive heuristic: anything that is *not* one of the fixed
 /// non-KV prefixes (`sys/`, `auth/`, `identity/`, `resource-group/`,
 /// `cubbyhole/`, `resources/`) is treated as a candidate KV path. If
-/// the secret-index has no entry for it, `groups_for_secret` returns
-/// an empty vec and the evaluator moves on. Worst case: a request for
-/// a non-KV path outside this allowlist hits one extra index lookup.
+/// no group lists it, `secret_groups` returns an empty vec and the
+/// evaluator moves on: a non-KV path costs one extra index lookup.
 ///
 /// Takes `ns_path` so a namespaced request is tested mount-relative: without
 /// it `dti/esi/resources/resources/db1` matches none of the non-KV prefixes and
 /// a tenant's resource request is misclassified as a KV path.
-fn looks_like_kv_path(req_path: &str, ns_path: Option<&str>) -> bool {
+pub(crate) fn looks_like_kv_path(req_path: &str, ns_path: Option<&str>) -> bool {
     let p = mount_relative_path(req_path, ns_path);
     const NON_KV_PREFIXES: &[&str] =
         &["sys/", "auth/", "identity/", "resource-group/", "cubbyhole/", "resources/", "files/"];
@@ -3584,14 +3585,8 @@ pub(super) async fn resolve_asset_groups(core: &Weak<Core>, req_path: &str, ns_p
         }
     }
 
-    // A KV path that names no secret is in no group, not even its namesake
-    // secret's (`secret/config` is not the secret `config`, T506).
-    if looks_like_kv_path(req_path, ns_path) && !kv_target::names_no_secret(&core.router, req_path) {
-        // A kv-v2 `destroy/` or `undelete/` acts on the secret: look it up as
-        // its `data/` request does, not as a secret named `destroy/<name>`.
-        let item = kv_target::resolve(&core.router, req_path).ok().flatten().filter(|i| i.acts_on_data());
-        let group_path = item.map(|i| i.data_path()).unwrap_or_else(|| req_path.to_string());
-        if let Ok(groups) = store.groups_for_secret(mount_relative_path(&group_path, ns_path), &scope).await {
+    if looks_like_kv_path(req_path, ns_path) {
+        if let Ok(groups) = secret_groups(&core.router, &store, req_path, ns_path).await {
             for g in groups {
                 if !out.iter().any(|x| x == &g) {
                     out.push(g);
@@ -3611,6 +3606,75 @@ pub(super) async fn resolve_asset_groups(core: &Weak<Core>, req_path: &str, ns_p
     }
 
     out
+}
+
+/// The asset groups of the request namespace listing the KV secret a request
+/// to `req_path` addresses: by its own name once the T507 switch is set
+/// (`secret_names::request_key`), by the pre-T507 key until then. None for a
+/// KV path that names no secret (T506). An unreadable switch is an error.
+async fn secret_groups(
+    router: &Router,
+    store: &ResourceGroupStore,
+    req_path: &str,
+    ns_path: Option<&str>,
+) -> Result<Vec<String>, RvError> {
+    let scope = scope_of(ns_path);
+    if store.secret_names().await? {
+        return match secret_names::request_key(router, req_path, ns_path) {
+            Some(key) => store.groups_for_secret_name(&key, &scope).await,
+            None => Ok(Vec::new()),
+        };
+    }
+    if kv_target::names_no_secret(router, req_path) {
+        return Ok(Vec::new());
+    }
+    // A kv-v2 `destroy/` or `undelete/` acts on the secret: looked up as its
+    // `data/` request was, not as a secret named `destroy/<name>`.
+    let item = kv_target::resolve(router, req_path).ok().flatten().filter(|i| i.acts_on_data());
+    let path = item.map(|i| i.data_path()).unwrap_or_else(|| req_path.to_string());
+    store.groups_for_legacy_secret(mount_relative_path(&path, ns_path), &scope).await
+}
+
+/// Whether a delete of `path` would prune asset-group membership under the
+/// pre-T507 keys: the T507 switch is pending and a group lists the path.
+/// The policy layer refuses such a delete, and a move refuses it up front.
+pub(crate) async fn group_change_pending(
+    store: &ResourceGroupStore,
+    path: &str,
+    ns_path: Option<&str>,
+) -> Result<bool, RvError> {
+    if store.secret_names().await? {
+        return Ok(false);
+    }
+    let groups = store.groups_for_legacy_secret(mount_relative_path(path, ns_path), &scope_of(ns_path)).await?;
+    Ok(!groups.is_empty())
+}
+
+/// The KV-delete lifecycle hook: once switched, the deleted secret leaves its
+/// groups by its own name. While pending, a delete a group lists was refused
+/// before it ran; a listing found anyway (a race) is kept and logged.
+async fn prune_secret_groups(
+    router: &Router,
+    store: &ResourceGroupStore,
+    req_path: &str,
+    ns_path: Option<&str>,
+) -> Result<(), RvError> {
+    let scope = scope_of(ns_path);
+    if store.secret_names().await? {
+        if let Some(key) = secret_names::request_key(router, req_path, ns_path) {
+            store.prune_secret_name(&key, &scope).await?;
+        }
+        return Ok(());
+    }
+    let groups = store.groups_for_legacy_secret(mount_relative_path(req_path, ns_path), &scope).await?;
+    if !groups.is_empty() {
+        log::warn!(
+            target: "security",
+            "the deleted KV path '{req_path}' stays listed in asset groups {groups:?}: the asset-group key switch \
+             (T507) is pending; remove it from them once the switch completes"
+        );
+    }
+    Ok(())
 }
 
 /// Substitute `{{username}}`, `{{entity.id}}`, and `{{auth.mount}}`
@@ -3910,10 +3974,30 @@ impl PolicyStore {
             }
             return Err(kv_target::ambiguous());
         }
-        match item {
-            Some(_) => self.refuse_moving_key(req).await,
-            None => Ok(()),
+        if item.is_some() {
+            self.refuse_moving_key(req).await?;
         }
+        self.refuse_pending_group_change(req).await
+    }
+
+    /// While the T507 switch is pending, an allowed delete of a path an asset
+    /// group lists is refused with a 503 (root included): its prune would
+    /// change membership in the pre-T507 form the migration is converting.
+    async fn refuse_pending_group_change(&self, req: &Request) -> Result<(), RvError> {
+        let ns = req.namespace_path.as_deref();
+        if req.operation != Operation::Delete || !looks_like_kv_path(&req.path, ns) {
+            return Ok(());
+        }
+        let Some(store) = self.resource_group_store() else {
+            return Ok(());
+        };
+        if !group_change_pending(&store, &req.path, ns).await? {
+            return Ok(());
+        }
+        if let Some(core) = self.core.upgrade() {
+            crate::modules::namespace::token_binding::enforce_request_token_binding(&core, req).await?;
+        }
+        Err(secret_names::pending_refusal())
     }
 
     /// While the T499 switch is pending, an allowed KV write or delete whose
@@ -3966,6 +4050,12 @@ impl PolicyStore {
                 if let Some(owners) = self.owner_store() {
                     owners.kv_keys_split().await.map_err(|_| {
                         RvError::ErrResponseStatus(500, "the KV key switch marker cannot be read".to_string())
+                    })?;
+                }
+                // Which asset-group keys decide (T507): never guessed either.
+                if let Some(groups) = self.resource_group_store() {
+                    groups.secret_names().await.map_err(|_| {
+                        RvError::ErrResponseStatus(500, "the asset-group key switch marker cannot be read".to_string())
                     })?;
                 }
             }
@@ -4365,7 +4455,7 @@ impl Handler for PolicyStore {
     ///    paths) and the secret-index (for KV paths).
     ///
     /// 2. **KV-delete prune.** On a successful `Delete` of a KV path,
-    ///    call `ResourceGroupStore::prune_secret` so the deleted
+    ///    call `prune_secret_groups` so the deleted
     ///    secret disappears from every asset group it was a member
     ///    of. Parallels the resource-delete hook in the resource
     ///    module. Failures are logged but never fail the delete —
@@ -4409,7 +4499,7 @@ impl PolicyStore {
         if let Some(store) = rg_store.as_ref() {
             if req.operation == Operation::List && !req.list_filter_groups.is_empty() {
                 if let Some(response) = resp.as_mut() {
-                    filter_list_response(response, &req.path, &req.list_filter_groups, store, ns).await;
+                    filter_list_response(response, &self.router, &req.path, &req.list_filter_groups, store, ns).await;
                 }
             }
         }
@@ -4573,7 +4663,7 @@ impl PolicyStore {
         let rg_scope = scope_of(ns);
         if let Some(store) = rg_store.as_ref() {
             if req.operation == Operation::Delete && looks_like_kv_path(&req.path, ns) {
-                if let Err(e) = store.prune_secret(&rel, &rg_scope).await {
+                if let Err(e) = prune_secret_groups(&self.router, store, &req.path, ns).await {
                     log::warn!(
                         "resource-group prune failed for deleted KV secret '{}': {e}. \
                          Use the resource-group/reindex endpoint to clean up.",
@@ -4734,11 +4824,11 @@ impl PolicyStore {
 /// Filter a list response's `keys` array down to entries that are
 /// members of any asset-group in `filter_groups`. The full logical
 /// path of each key is reconstructed by joining `list_path` with the
-/// key; `ResourceGroupStore::groups_for_resource` /
-/// `groups_for_secret` do the membership lookup. Unknown paths and
-/// folder entries (trailing slash) are dropped.
+/// key; `resolve_groups_for_any` does the membership lookup. Unknown
+/// paths and folder entries (trailing slash) are dropped.
 async fn filter_list_response(
     response: &mut Response,
+    router: &Router,
     list_path: &str,
     filter_groups: &[String],
     store: &Arc<ResourceGroupStore>,
@@ -4761,7 +4851,7 @@ async fn filter_list_response(
             continue;
         }
         let full = format!("{prefix}{k}");
-        let groups = resolve_groups_for_any(store, &full, ns_path).await;
+        let groups = resolve_groups_for_any(router, store, &full, ns_path).await;
         if groups.iter().any(|g| filter_groups.iter().any(|f| f == g)) {
             kept.push(v.clone());
         }
@@ -4910,10 +5000,14 @@ async fn filter_list_by_ownership(
 
 /// Look up asset-group membership for any target path — tries the
 /// resource-name extraction first (for `resources/resources/<name>`
-/// and `resources/secrets/<name>/...`), then falls back to the
-/// secret-index (treating the path as a KV path). Mirrors
-/// `resolve_asset_groups`.
-async fn resolve_groups_for_any(store: &Arc<ResourceGroupStore>, path: &str, ns_path: Option<&str>) -> Vec<String> {
+/// and `resources/secrets/<name>/...`), then the KV-secret lookup
+/// (`secret_groups`). Mirrors `resolve_asset_groups`.
+async fn resolve_groups_for_any(
+    router: &Router,
+    store: &Arc<ResourceGroupStore>,
+    path: &str,
+    ns_path: Option<&str>,
+) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let scope = scope_of(ns_path);
     if let Some(name) = resource_member_from_path(path, ns_path) {
@@ -4926,7 +5020,7 @@ async fn resolve_groups_for_any(store: &Arc<ResourceGroupStore>, path: &str, ns_
         }
     }
     if looks_like_kv_path(path, ns_path) {
-        if let Ok(groups) = store.groups_for_secret(mount_relative_path(path, ns_path), &scope).await {
+        if let Ok(groups) = secret_groups(router, store, path, ns_path).await {
             for g in groups {
                 if !out.iter().any(|x| x == &g) {
                     out.push(g);

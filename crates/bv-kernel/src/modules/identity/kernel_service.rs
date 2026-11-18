@@ -262,8 +262,10 @@ impl crate::kernel_api::pipeline::NsScopeDatafix for IdentityModule {
         // it completes, KV keys keep their pre-T499 form.
         let scope = super::ns_scope_migrate::run_if_needed(&self.core).await;
         let split = super::kv_key_split_migrate::run_if_needed(&self.core).await;
-        // A failed split is retried in the background (T511); the caller logs the error.
-        if split.is_err() {
+        // The asset-group member keys (T507) switch on their own marker.
+        let names = crate::modules::resource_group::secret_name_migrate::run_if_needed(&self.core).await;
+        // Either failing is retried in the background (T511); the caller logs the error.
+        if split.is_err() || names.is_err() {
             self.kv_split_retry.schedule(Arc::downgrade(&self.core));
         }
         let mut ran = Vec::new();
@@ -274,6 +276,10 @@ impl crate::kernel_api::pipeline::NsScopeDatafix for IdentityModule {
         let split = split?;
         if !split.skipped {
             ran.push(format!("{split:?}"));
+        }
+        let names = names?;
+        if !names.skipped {
+            ran.push(format!("{names:?}"));
         }
         Ok((!ran.is_empty()).then(|| ran.join("; ")))
     }
