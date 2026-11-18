@@ -1088,8 +1088,11 @@ POST /v2/sys/namespace-transfer/move
 
   The token must be valid in both namespaces. For a token born in namespace
   `a` that is `a` and, with `child_visible`, its descendants: it can copy or
-  move between `a`'s mounts and between `a` and a descendant, never to or
-  from a sibling or an ancestor (the 400 above). A plain copy relies on the
+  move between any two of them (`a`'s own mounts, `a` and `a/b`, `a/b` and
+  `a/c`), never to or from a sibling or an ancestor (the 400 above). The one
+  exception is filed as T519: if an operator's namespace assignment lets the
+  principal into a sibling or root, a policy of `a` with a partial-segment
+  glob such as `path "a*"` also matches paths there. A plain copy relies on the
   destination import's own ACL check. A `move`, an `overwrite` or a
   `dry_run` first checks the rights it needs through `sys/capabilities-self`,
   before anything is written. A missing right is a 403 naming it; the first

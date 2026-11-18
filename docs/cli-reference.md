@@ -456,8 +456,9 @@ flag serves two callers:
   exactly (T513; a glob is refused). The grant counts only with
   `--namespace` set to the token's own namespace. It copies or moves
   between that namespace's mounts and, for a `child_visible` token, between
-  it and its descendants; a sibling or an ancestor answers as a namespace
-  the caller cannot see.
+  any two of that namespace and its descendants; a sibling or an ancestor
+  answers as a namespace the caller cannot see (but see T519 for a policy
+  with a partial-segment glob such as `a*`).
 - **A root sign-in assigned to the namespace**, whose root-namespace policy
   grants `update` on `sys/namespace-transfer/*` (a namespace's own policy
   does not grant it the route).

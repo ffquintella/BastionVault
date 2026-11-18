@@ -67,7 +67,8 @@ The request itself runs in the root namespace unless you pass
 serves a token born in that namespace whose policy there names
 sys/namespace-transfer/copy and/or .../move exactly (the grant counts only
 in the token's own namespace; a child_visible token can also reach its
-descendants, never a sibling or an ancestor), and a ROOT sign-in assigned
+descendants, between any two of them, never a sibling or an ancestor), and
+a ROOT sign-in assigned
 to it whose root-namespace policy grants update on sys/namespace-transfer/*
 (docs/cli-reference.md).
 

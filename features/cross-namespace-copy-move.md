@@ -294,12 +294,15 @@ cleans up its owner, shares and groups) and imports again.
 
   The grant only starts the transfer: every read, check, import and delete
   is the token's own request where it lands. A token born in `a` can copy or
-  move between `a`'s mounts and, with `child_visible`, between `a` and its
-  descendants (its rights there come from its own policies or the
-  descendant's same-named ones, T471). A sibling or an ancestor answers as a
-  namespace the caller cannot see (400, T503); an operator's namespace
-  assignment can let the principal into a sibling, but `a`'s policies name
-  only `a`'s paths, so it sees no mount there either.
+  move between `a`'s mounts and, with `child_visible`, between any two of
+  `a` and its descendants (`a` to `a/b`, `a/b` to `a/c`; its rights there
+  come from its own policies or the descendant's same-named ones, T471). A
+  sibling or an ancestor answers as a namespace the caller cannot see (400,
+  T503); an operator's namespace assignment can let the principal into a
+  sibling, but `a`'s policies name only `a`'s paths, so it sees no mount
+  there either, unless a policy of `a` uses a partial-segment glob such as
+  `path "a*"`, which the write-time guard accepts and which also matches
+  `ab/...` or a root mount `apps/` (T519).
 - **Policies naming the source path are not rewritten** (always warned as
   `policies-not-carried`).
 - **The import routes are internal-only.**
