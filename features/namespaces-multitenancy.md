@@ -246,9 +246,11 @@ routes below. Everything else is refused: a root-owned path (`sys/*`,
 `auth/*`, `secret/*`), another namespace's path (`ab/*`, `a/b/x` when `a/b`
 is a namespace), a leading wildcard (`*`, `+/x`), and a glob that ends inside
 the namespace's own name (`a*`, which also matches the sibling `ab/...` and a
-root mount `apps/...`; T519). A namespace with a `+` path segment confines
-nothing (a rule would read the segment as a wildcard), so its policies are
-refused whole. Root-namespace policies are unrestricted.
+root mount `apps/...`; T519). A namespace whose path has a bare `+`
+segment (`t/+`) confines nothing (a rule would read the segment as a
+wildcard over its siblings), so its policies are refused whole; see "A
+namespace with a `+` segment" below. Root-namespace policies are
+unrestricted.
 
 | Where | What happens |
 |---|---|
@@ -268,13 +270,34 @@ namespace prefix (`<ns>/...`) through `sys/policy`, which applies the write
 rule above; a rule that has to reach a root-owned path belongs in a
 root-namespace policy, or, for the transfer, the exact routes.
 
+Keeping only confined rules never grants beyond the injected baseline every
+namespace token holds (`namespace-self`, `namespace-shared`). It can widen
+access up to that baseline: a dropped narrower rule (an exact `cubbyhole/x`
+read) no longer shadows the baseline's broader one (`cubbyhole/*`). Deny
+rules are kept wherever they point.
+
+**A namespace with a `+` segment.** Namespace creation still allows a path
+segment that is exactly `+` (refusing it is T523). No rule can be confined to
+such a namespace, so since T520 every allow rule of its policies stops
+granting: a whole-tenant lockout that rewriting cannot fix. Its WARN says so
+instead of the generic advice ("the namespace path has a bare `+` segment
+... Recreate the namespace under a path without a `+` segment and move its
+content there"). To recover: create the new namespace, recreate its mounts,
+policies and namespace assignments, move its resources and KV secrets with
+the namespace transfer (`sys/namespace-transfer/copy` or `move`,
+`bvault transfer`, [cross-namespace-copy-move.md](cross-namespace-copy-move.md)),
+then delete the old namespace.
+
 Policies that could hold such rules are those a `.bvx` import wrote before
 this check, a backup restore, or a build older than the write-time guard;
 with the evaluation rule they stop granting on upgrade, with no change to the
 stored document. In particular a tenant policy naming `sys/mcp/token` (never
 writable through `sys/policy`) no longer lets a session signed in to the
-tenant pair an MCP client; see
-[mcp-namespace-selection.md](mcp-namespace-selection.md).
+tenant pair an MCP client or exchange an app token; see
+[mcp-namespace-selection.md](mcp-namespace-selection.md) (a supported route
+for tenant-bound sessions is T524). A backup restore into a running vault
+does not flush the caches (T525): until a cached copy expires or
+`sys/cache/flush` runs, the pre-restore document can still be served.
 
 #### The one route a namespace policy may name outside its paths (T513)
 

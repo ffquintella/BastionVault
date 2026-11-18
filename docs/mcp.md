@@ -569,11 +569,11 @@ choice: it always needs you at a terminal (or in the desktop app), so a headless
 ## Namespaces
 
 An assistant acts in **one namespace**, fixed when its token is minted. By
-default that is the namespace your sign-in is bound to: sign in to `dti/esi`
-(in the desktop app, or any login sent with `X-BastionVault-Namespace:
-dti/esi` whose token `bvault mcp serve` then uses) and
-`bv_resource_list` lists `dti/esi`'s resources, `bv_whoami` says `dti/esi`,
-and every call is checked against `dti/esi`'s policies. The namespace comes
+default that is the namespace your sign-in is bound to; to work in `dti/esi`,
+sign in at root and narrow the pairing there (below): `bv_resource_list`
+lists `dti/esi`'s resources, `bv_whoami` says `dti/esi`, and every call is
+checked against `dti/esi`'s paths. (A sign-in to `dti/esi` itself cannot run
+the exchange: see "Who may exchange".) The namespace comes
 from your own token's stored binding — never from the assistant: a
 `namespace` tool argument, a `_meta` key or an `X-BastionVault-Namespace`
 header on `/v2/mcp` changes nothing. An assistant's token is never
@@ -582,10 +582,12 @@ The token follows your session: sign in somewhere else and the next token for
 the same pairing is bound there, and the move is audited as
 `mcp.pairing.namespace_changed`.
 
-**Narrowing to a namespace beneath yours.** An administrator signed in to a
-child-visible namespace (for example root, or `dti` when its
-`child_visible_default` is on) may bind an assistant's tokens to a namespace
-beneath it instead:
+**Narrowing to a namespace beneath yours.** An administrator signed in at
+root (child-visible, or with the tenant assigned to them) may bind an
+assistant's tokens to a namespace beneath it instead. A sign-in to any other
+namespace, even a child-visible one such as `dti`, cannot run the exchange at
+all: its grant would be a `sys/` rule in that namespace's policy, which grants
+nothing since T520.
 
 ```bash
 bvault mcp serve --namespace dti/esi        # every token this server mints
@@ -682,9 +684,10 @@ brokered-sessions switch yet, so sessions work against a remote vault only;
 operator who did not sign in with userpass cannot reach MFA-gated profiles.
 
 Namespaces (T457): a session signed in to a tenant namespace cannot be
-granted `sys/mcp/token` (no tenant policy can name a `sys/` path), so tenant
-work goes through narrowing from a child-visible ancestor (see
-[Namespaces](#namespaces)). A minted token that was refused because the vault
+granted `sys/mcp/token` (no tenant policy can name a `sys/` path, and since
+T520 one that does grants nothing), so tenant work goes through narrowing
+from a root sign-in (see [Namespaces](#namespaces)); a route for tenant
+sign-ins is T524. A minted token that was refused because the vault
 bound it elsewhere (`mcp_namespace_mismatch`) is discarded locally but stays
 valid on the vault until it expires.
 

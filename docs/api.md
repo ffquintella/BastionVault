@@ -621,8 +621,10 @@ Root-namespace policies are unrestricted. Anything else is refused with
   `policy in namespace "a" may not reference path "a*": it also matches paths
   outside the namespace (...); use "a"-prefixed paths such as "a/*", ending a
   glob only after a full segment`;
-- every rule of a policy in a namespace with a `+` path segment (a rule would
-  read the segment as a wildcard).
+- every rule of a policy in a namespace whose path has a bare `+` segment (a
+  rule would read the segment as a wildcard); such a namespace's stored
+  policies grant nothing either, so recreate it under another path (T523,
+  [namespaces-multitenancy.md](../features/namespaces-multitenancy.md)).
 
 The same rule is applied to a namespace bundle's policies on a `.bvx` / JSON
 exchange import (`sys/exchange/import`, the desktop app, a scheduled-export
@@ -3585,7 +3587,10 @@ Send the login token in `X-BastionVault-Token`, `X-Vault-Token` or
 - **Namespace** ([spec](../features/mcp-namespace-selection.md)). The token is
   bound to the namespace of the caller's own login (its stored binding, never
   a header) and is never child-visible; every tool call runs there. An app
-  token is bound to its AppID login's namespace. `X-BastionVault-Namespace`
+  token is bound to its AppID login's namespace. Since T520 only a
+  root-namespace login can hold `update` on this route (a namespace policy's
+  `sys/` rule grants nothing), so a login in a tenant, an AppRole's included,
+  gets a 403; a token reaches a tenant through `namespace` below (T524). `X-BastionVault-Namespace`
   on this request asks for nothing. A namespace that was deleted or cannot be
   resolved is refused, `403 mcp_namespace_unavailable`, never replaced by root.
 - **`namespace`** (optional string, pairing mode only; T457 Phase 2) asks to
