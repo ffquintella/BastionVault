@@ -248,6 +248,8 @@ cleans up its owner, shares and groups) and imports again.
 - **A KV secret carries its own asset groups** (T507, which replaced the
   T510 skip): the groups that list it by its own `<mount>/<name>`, and it
   joins the destination's as its own name, so `data/x` never carries `x`'s.
+  A group listing it only through a member the migration kept with the
+  pre-T507 rule (`secrets_legacy_kept`) is not carried.
   While the asset-group key switch is pending (`docs/api.md`, "Asset-group
   key switch pending") a KV secret carries no membership and
   `group-membership-not-carried` (subject: the source item) says so, dry run

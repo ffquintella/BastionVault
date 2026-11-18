@@ -82,25 +82,55 @@ Before T507 (format 0) a member and a request path lost a `data` or
 `kv/data/x` and `kv/metadata/x` were one member, a multi-segment KV v2
 mount's member named one route (`team/kv/data/z` matched only `data/`
 requests), and any edit of a group re-keyed a KV v2 member such as
-`secret/data/x` (the secret `data/x`) to `secret/x`. The T507 migration
-(`resource_group/secret_name_migrate.rs`) runs at unseal, after the T499
-datafix, and converts each format 0 member to every own name a pre-T507
-lookup reached it by, through its namespace's stored mount table: exactly
-the access it gave. A member that reached several secrets (every kv v1
-member: `kv/x` reached `x`, `data/x` and `metadata/x`) keeps all of them and
-is logged on the `migration` target, key names only, and counted, so
-operators can prune; a member no mount serves is kept as written. Each
-converted record keeps its old list in `legacy_secrets` for rollback;
-downgrading after the migration is unsupported. The conversion is per
-record and atomic (one write), skips converted records, and is retried by
-the T511 background retry and at every unseal. Until its marker
-(`resource-group/meta/secret-names`) is set, lookups use the pre-T507 keys
-and the legacy index, and any change to which secrets a group lists, a
-delete of a group listing secrets, and a delete of a listed secret answer
-503 (`docs/api.md`, "Asset-group key switch pending"); once set, no store
-method writes a format 0 record with members again. A format 0 record a
-`.bvx` import writes raw later is converted by `reindex` or the group's
-next write.
+`secret/data/x` (the secret `data/x`) to `secret/x`.
+
+The T507 migration (`resource_group/secret_name_migrate.rs`) runs at unseal,
+after the T499 datafix. It resolves each format 0 member's pre-T507 lookup
+paths through every namespace's stored mount table keyed as the shared
+router keys it (`<namespace>/<mount>`), so a scope reaches its descendants'
+mounts by path, and an ancestor's mount that covers its path, as a request
+does; a sibling's never (a request's path carries its own namespace). Then
+(Ruling BB, no widening):
+
+- a member every route of whose secrets the own-name form expresses
+  exactly becomes each own name it reached: unchanged on a one-segment KV v2
+  mount; on a kv (version 1) mount every member reached several secrets
+  (`kv/x` reached `x`, `data/x` and `metadata/x`), all kept and logged on the
+  `migration` target, key names only, and counted, so operators can prune;
+- a member that matched a KV v2 secret through some of its routes only
+  (every member of a KV v2 mount whose path has two or more segments as its
+  scope sees it: `team/kv/`, `apps/data/`, root's view of `team/secret/`),
+  or that no mount serves, is kept in `secrets_legacy_kept`, filed in the
+  kept index under its pre-T507 key, and matched by the pre-T507 rule
+  beside the own-name lookup, for allows, group-gated denies, the list filter
+  and the KV-delete prune; logged at warn and counted (`members_kept_legacy`).
+  Its old collision remains until an operator regroups it: add the secret's
+  own name to `secrets` and drop the kept entry (kept entries can only be
+  removed); finishing this is T518. `by-secret` and the transfer see own
+  names only.
+
+Each converted record keeps its old list in `legacy_secrets` for rollback.
+Downgrading after the migration is unsupported: an older release decides by
+the frozen legacy index and would corrupt converted records; restore the
+backup taken before the upgrade. The pass is a sequence of steps (convert a
+record, verify, mark, convert stragglers), each record's conversion atomic
+(one write, its index entries written first), converted records skipped, so a
+cut-short pass resumes; it is retried by the T511 background retry and at
+every unseal. No step deletes an index entry a lookup may read: before the
+marker an additive repair adds what a racing writer lost (nothing may leave a
+group then), after it stragglers convert additively. The storage has no
+compare-and-set and its `lock()` can stay held after a crash on the file
+backend, so index updates stay idempotent read-modify-writes. Until the
+marker (`resource-group/meta/secret-names`) is set, lookups use the pre-T507
+keys and the legacy index, and any change to which secrets a group lists, a
+delete of a group listing secrets, and a delete of a listed secret answer 503
+(`docs/api.md`, "Asset-group key switch pending"); meanwhile the GUI chips
+and the "shared with me" feed show the pre-T507 strings (display only). Once
+set, no store method writes a format 0 record with members again. A format 0
+record a `.bvx` import writes raw later is converted by `reindex` or the
+group's next write. `reindex` rewrites an entry only when it differs and
+deletes stale entries last, so it never empties a live index; the T499
+datafix rebuilds only the legacy index, and only while T507 is pending.
 
 ### Storage
 
@@ -112,6 +142,7 @@ sys/resource-group/group/<name>                    -> ResourceGroupEntry (JSON)
 sys/resource-group/member-index/<resource>         -> Vec<String>  (group names)
 sys/resource-group/secret-index/<b64url(path)>     -> Vec<String>  (group names; pre-T507 keys)
 sys/resource-group/secret-name-index/<b64url(name)> -> Vec<String>  (group names; own names, T507)
+sys/resource-group/secret-kept-index/<b64url(key)>  -> Vec<String>  (group names; kept pre-T507 members)
 sys/resource-group/file-index/<file-id>            -> Vec<String>  (group names)
 sys/resource-group/history/<name>/<20-nanos>       -> ResourceGroupHistoryEntry
 ```
@@ -427,7 +458,8 @@ once per call.
 | 13 | Ownership, admin transfer, sharing (depends on per-user-scoping) | Done (`OwnerStore` integration; `POST /v2/sys/asset-group-owner/transfer`; `ShareTargetKind::AssetGroup` with indirect member-expansion at authorize time; member redaction for non-owner / non-admin readers) |
 | 14 | Namespace scoping: per-namespace store, ancestor inheritance (read-only), per-namespace reverse indexes and `groups` qualifier, `.bvx` per-namespace groups | Done |
 | 15 | v2 batch read (`full` / `slim`), persisted per-scope change version with `since` revalidation, shared GUI cache; server-side reverse-index cache rejected | Done |
-| 16 | KV-secret members keyed on the secret's own name (record format 1), migration of stored members keeping their access exactly, pending-switch refusals, GUI chips by own name (T507) | Done |
+| 16 | KV-secret members keyed on the secret's own name (record format 1), migration of stored members keeping their access exactly (route-specific members kept with the pre-T507 rule), pending-switch refusals, GUI chips by own name (T507) | Done |
+| 17 | Regroup kept pre-T507 members by own name and drop the kept index (T518) | Planned |
 
 ## Testing
 

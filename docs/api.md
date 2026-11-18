@@ -1124,7 +1124,8 @@ POST /v2/sys/namespace-transfer/move
   otherwise `group-membership-dropped` (subject: the group name). A KV
   secret carries the groups that list it by its own `<mount>/<name>` and
   joins the destination's as its own name, so `data/x` never carries `x`'s
-  (T507). While the asset-group key switch is pending (see "Asset-group key
+  (T507); a group listing it only through a kept pre-T507 member
+  (`secrets_legacy_kept`) is not carried. While the asset-group key switch is pending (see "Asset-group key
   switch pending") a KV secret carries no membership at all, with one
   `group-membership-not-carried` warning (subject: the source item).
 - **Files** (resources): each namespace has its own files engine and blobs
@@ -2119,9 +2120,11 @@ PUT    /v1/resource-group/reindex
 ~~~
 
 `PUT /v1/resource-group/reindex` rebuilds the reverse indexes
-from primary records — recovery path for torn writes. It also converts a
-group record still in the pre-T507 member form (one a `.bvx` import wrote
-raw) as the migration below would have, so run it after such an import.
+from primary records — recovery path for torn writes. It rewrites an entry
+only when it differs and deletes stale entries last, so a lookup never finds
+an index empty mid-rebuild. It also converts a group record still in the
+pre-T507 member form (one a `.bvx` import wrote raw) as the migration below
+would have, so run it after such an import.
 
 **KV-secret members are each secret's own name (T507).** `secrets` lists
 `<mount>/<name>`, namespace-relative, stored as given (outer whitespace and
@@ -2138,21 +2141,46 @@ key is that member. Before T507 a member and a request lost a `data` or
 re-keyed a KV v2 member such as `secret/data/x` (from `secret/data/data/x`)
 to `secret/x`.
 
-A one-shot migration at unseal converts every stored member to each own
-name a pre-T507 lookup reached it by, through its namespace's mount table,
-so existing access is kept exactly: a kv (version 1) member `kv/x` becomes
-`kv/x`, `kv/data/x` and `kv/metadata/x`, each logged on the `migration`
-target (`member "kv/x" of group "g" in the root namespace reached [...]
-before T507; ...`, key names only) and counted, so operators can remove the
-ones a group should not list; a member of a multi-segment KV v2 mount stored
-in its `data/` form (`team/kv/data/z`) becomes the secret `team/kv/z`, now
-covering every route of `z`; a member no mount serves is kept as written.
-Each converted record keeps its old list (`legacy_secrets`, never read for
-access) for rollback; downgrading after the migration is unsupported.
+A one-shot migration at unseal converts every stored member, through the
+mount tables the shared router uses (a scope reaches its descendants'
+mounts by path, as a request does), so that no group gains or loses access
+to any route of any secret:
 
-`GET /v1/resource-group/groups/{name}` shows `secrets` as own names once the
-migration has completed, and as stored before (the pre-T507 list) while it
-is pending; the old list is never shown.
+- A member whose every route the own-name form expresses exactly becomes each
+  own name a pre-T507 lookup reached it by. On a one-segment KV v2 mount
+  (`secret/x`) the name is unchanged. Every kv (version 1) member reached
+  several secrets: `kv/x` becomes `kv/x`, `kv/data/x` and `kv/metadata/x`, each
+  logged on the `migration` target (`member "kv/x" of group "g" in the root
+  namespace reached [...] before T507; ...`, key names only) and counted, so
+  operators can remove the ones a group should not list.
+- A member that matched a KV v2 secret through some of its routes only is
+  **kept** with the pre-T507 rule: every member of a KV v2 mount whose path,
+  seen from the group's namespace, has two or more segments (`team/kv/`,
+  `apps/data/`, or another namespace's mount reached by path, such as root's
+  view of `team/secret/`), in its `data/`, `metadata/` or short form. So is a
+  member no mount serves. A kept member is listed in `secrets_legacy_kept`,
+  matched against a request's pre-T507 key exactly as before (allows, group-
+  gated denies and the group-gated `LIST` filter), logged at warn and counted
+  (`members_kept_legacy`); it keeps the old collision (`data/x` matching `x`)
+  until an operator regroups it. Regroup with one write: add the secret by its
+  own name to `secrets` and drop the kept entry from `secrets_legacy_kept` (a
+  write may only remove kept entries, never add one); the member then follows
+  the own-name rule and covers every route of its secret. `by-secret` and a
+  namespace transfer see own-name members only, so a kept member is not
+  reported or carried. Finishing this for those mounts is tracked as T518.
+
+Each converted record keeps its old list (`legacy_secrets`, never read for
+access) for rollback. Downgrading after the migration is unsupported: an
+older release decides by the frozen pre-T507 index and its edits would
+corrupt the converted records, so restore the backup taken before the
+upgrade instead.
+
+`GET /v1/resource-group/groups/{name}` shows `secrets` as own names and
+`secrets_legacy_kept` once the migration has completed, and the pre-T507
+list (with `secrets_legacy_kept` empty) while it is pending; the old list is
+never shown. Display only: while it is pending the GUI's group chips and the
+"shared with me" feed show those pre-T507 strings, which may name another
+secret than they read as.
 
 #### Asset-group key switch pending
 
@@ -2162,9 +2190,10 @@ in the background with the KV key-split datafix (five times, 5 to 80 s
 apart) and again at every unseal. While it is pending, every caller, root
 included, gets a 503 for:
 
-- a group write whose `secrets` list differs from the one the group shows
-  (a write that resends it unchanged, or changes only `description`,
-  `members` or `files`, works), and a new group with secrets;
+- a group write whose `secrets` list differs from the one the group shows,
+  or with a non-empty `secrets_legacy_kept` (a write that resends the list
+  unchanged, or changes only `description`, `members` or `files`, works), and
+  a new group with secrets;
 - deleting a group that lists secrets;
 - deleting a KV secret (or any path the `secrets` lookup reaches) that a
   group of the request's namespace lists;
