@@ -13,7 +13,13 @@ use crate::{
     errors::RvError,
     kernel_api::VaultCtx,
     logical::{Auth, Operation, Request, Response},
-    modules::identity::EntityStore,
+    modules::{
+        credential::userpass::{
+            username_mounts::{find_duplicate_usernames, report_duplicate_usernames, DuplicateUsername},
+            UserPassModule,
+        },
+        identity::EntityStore,
+    },
     storage::Storage,
     test_utils::{new_unseal_test_bastion_vault, test_write_api},
 };
@@ -194,15 +200,26 @@ async fn deleting_one_of_two_duplicates_keeps_the_survivors_entity() {
     assert_ne!(entity_of(&core, "up1", "carol").await, shared, "a recreated last holder is a new principal");
 }
 
-/// Duplicates that predate the refusal are found by mount path, never undone,
-/// and do not stop a seal and unseal: every holder still logs in after it.
-#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+/// Wait up to 10 s for the userpass module's next duplicate-scan result.
+async fn next_scan(core: &Arc<Core>) -> Option<Vec<DuplicateUsername>> {
+    let module = core.module_manager().get_module::<UserPassModule>("userpass").expect("userpass module");
+    for _ in 0..500 {
+        if let Some(found) = module.take_last_duplicate_scan() {
+            return Some(found);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    None
+}
+
+/// Duplicates that predate the refusal are found by mount path and never
+/// undone. The unseal itself runs the scan (in the background) and completes:
+/// a seal and unseal reports the planted duplicates, and every holder still
+/// logs in after it.
+#[tokio::test]
 async fn pre_existing_duplicates_are_reported_and_unseal_completes() {
     use crate::{
         core::SealConfig,
-        modules::credential::userpass::username_mounts::{
-            find_duplicate_usernames, report_duplicate_usernames, DuplicateUsername,
-        },
         test_utils::{init_test_bastion_vault, new_test_bastion_vault, unseal_test_bastion_vault},
     };
 
@@ -211,7 +228,7 @@ async fn pre_existing_duplicates_are_reported_and_unseal_completes() {
     let keys: Vec<&[u8]> = init.secret_shares.iter().take(2).map(|k| k.as_slice()).collect();
     assert!(unseal_test_bastion_vault(&bvault, &keys).await);
     let (core, root) = (bvault.core.load().clone(), init.root_token.clone());
-    assert_eq!(find_duplicate_usernames(core.as_ref()).await.unwrap(), vec![], "none with no userpass mount");
+    assert_eq!(next_scan(&core).await, Some(vec![]), "the first unseal's scan found nothing");
 
     for mount in ["up1", "up2", "up3"] {
         enable(&core, &root, mount).await;
@@ -231,14 +248,37 @@ async fn pre_existing_duplicates_are_reported_and_unseal_completes() {
         DuplicateUsername { username: "erin".into(), mounts: vec!["auth/up1/".into(), "auth/up2/".into()] },
     ];
     assert_eq!(find_duplicate_usernames(core.as_ref()).await.unwrap(), expected);
-    report_duplicate_usernames(core.as_ref()).await;
+    assert_eq!(report_duplicate_usernames(core.as_ref()).await, Some(expected.clone()));
 
     core.seal().await.unwrap();
     assert!(unseal_test_bastion_vault(&bvault, &keys).await, "an unseal with duplicates completes");
+    assert_eq!(next_scan(&core).await, Some(expected.clone()), "the unseal ran the scan and found both");
     for mount in ["up1", "up2", "up3"] {
         assert!(login(&core, mount, "carol", PW).await.is_some(), "carol still logs in to {mount}");
     }
     assert_eq!(find_duplicate_usernames(core.as_ref()).await.unwrap(), expected, "nothing was undone");
+}
+
+/// A mixed-case record left by the pre-T500 password route (`user/Carol`) is
+/// not counted as a duplicate, and `sys/raw` removes it by the mount's uuid
+/// read from `sys/raw/core/auth`, leaving `carol` alone: the documented step.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn a_stray_mixed_case_record_is_removed_through_sys_raw() {
+    let (_bvault, core, root) = new_unseal_test_bastion_vault("userpass_mounts_stray_record").await;
+    enable(&core, &root, "up1").await;
+    enable(&core, &root, "up2").await;
+    create(&core, &root, "up1", "carol", PW).await.unwrap();
+    let view = core.router().matching_view("auth/up2/").unwrap().expect("up2");
+    let record = core.router().matching_view("auth/up1/").unwrap().unwrap().get("user/carol").await.unwrap().unwrap();
+    view.put(&crate::storage::StorageEntry { key: "user/Carol".into(), value: record.value }).await.unwrap();
+    assert_eq!(find_duplicate_usernames(core.as_ref()).await.unwrap(), vec![], "a stray record is no duplicate");
+
+    let raw = send(&core, &root, Operation::Read, "sys/raw/core/auth", json!({})).await.unwrap().unwrap();
+    let table: Value = serde_json::from_str(raw.data.unwrap()["value"].as_str().unwrap()).unwrap();
+    let uuid = table["entries"]["up2/"]["uuid"].as_str().expect("the auth table names up2's uuid").to_string();
+    send(&core, &root, Operation::Delete, &format!("sys/raw/auth/{uuid}/user/Carol"), json!({})).await.unwrap();
+    assert!(view.get("user/Carol").await.unwrap().is_none(), "the stray record is gone");
+    assert!(login(&core, "up1", "carol", PW).await.is_some(), "carol on up1 is untouched");
 }
 
 /// A password reset naming the user in another letter case updates the

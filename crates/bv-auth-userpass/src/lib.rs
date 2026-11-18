@@ -20,7 +20,10 @@ pub use bv_logical::{
     new_secret, new_secret_internal,
 };
 
-use std::{any::Any, sync::Arc};
+use std::{
+    any::Any,
+    sync::{Arc, Mutex},
+};
 
 use derive_more::Deref;
 
@@ -56,6 +59,9 @@ present a TOTP code (see "config/mfa" and the per-user "totp_mfa_enabled" flag).
 pub struct UserPassModule {
     pub name: String,
     pub backend: Arc<UserPassBackend>,
+    /// What the last unseal's duplicate-username scan found (T500); `None`
+    /// until one completes. Read with [`Self::take_last_duplicate_scan`].
+    last_duplicate_scan: Arc<Mutex<Option<Vec<username_mounts::DuplicateUsername>>>>,
 }
 
 pub struct UserPassBackendInner {
@@ -108,7 +114,26 @@ impl UserPassBackend {
 
 impl UserPassModule {
     pub fn new(core: Arc<dyn VaultCtx>) -> Self {
-        Self { name: "userpass".to_string(), backend: Arc::new(UserPassBackend::new(core)) }
+        Self {
+            name: "userpass".to_string(),
+            backend: Arc::new(UserPassBackend::new(core)),
+            last_duplicate_scan: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Take what the last unseal's duplicate-username scan found, leaving
+    /// `None`: lets a test see that an unseal ran the scan.
+    pub fn take_last_duplicate_scan(&self) -> Option<Vec<username_mounts::DuplicateUsername>> {
+        self.last_duplicate_scan.lock().ok().and_then(|mut slot| slot.take())
+    }
+}
+
+fn record_duplicate_scan(
+    slot: &Mutex<Option<Vec<username_mounts::DuplicateUsername>>>,
+    found: Option<Vec<username_mounts::DuplicateUsername>>,
+) {
+    if let (Some(found), Ok(mut slot)) = (found, slot.lock()) {
+        *slot = Some(found);
     }
 }
 
@@ -139,12 +164,20 @@ impl Module for UserPassModule {
     }
 
     /// Report the usernames more than one userpass mount holds (T500), once
-    /// per unseal, detached so a slow storage listing never holds it up.
+    /// per unseal, detached so a slow storage listing never holds it up. The
+    /// `sync_handler` arm (off by default, built by no CI target) uses a thread.
     fn start_background(&self, core: Arc<dyn VaultCtx>) {
+        let slot = self.last_duplicate_scan.clone();
         #[cfg(not(feature = "sync_handler"))]
-        drop(tokio::task::spawn(async move { username_mounts::report_duplicate_usernames(core.as_ref()).await }));
+        drop(tokio::task::spawn(async move {
+            let found = username_mounts::report_duplicate_usernames(core.as_ref()).await;
+            record_duplicate_scan(&slot, found);
+        }));
         #[cfg(feature = "sync_handler")]
-        username_mounts::report_duplicate_usernames(core.as_ref());
+        drop(std::thread::spawn(move || {
+            let found = username_mounts::report_duplicate_usernames(core.as_ref());
+            record_duplicate_scan(&slot, found);
+        }));
     }
 
     fn cleanup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {

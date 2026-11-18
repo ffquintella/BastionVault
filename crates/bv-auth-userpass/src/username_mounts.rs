@@ -107,21 +107,22 @@ pub async fn find_duplicate_usernames(core: &dyn VaultCtx) -> Result<Vec<Duplica
 /// Log each username more than one userpass mount holds, then their count.
 ///
 /// Runs once per unseal. It only reports: nothing is changed, and a failure is
-/// logged, never returned, so it cannot hold up or fail an unseal.
+/// logged (`None`), never returned as an error, so it cannot fail an unseal.
 #[maybe_async::maybe_async]
-pub async fn report_duplicate_usernames(core: &dyn VaultCtx) {
+pub async fn report_duplicate_usernames(core: &dyn VaultCtx) -> Option<Vec<DuplicateUsername>> {
     let duplicates = match find_duplicate_usernames(core).await {
         Ok(duplicates) => duplicates,
         Err(e) => {
             log::warn!(target: "security", "userpass duplicate-username scan failed: {e}");
-            return;
+            return None;
         }
     };
     for duplicate in &duplicates {
         log::warn!(
             target: "security",
             "userpass username '{}' is held by {} userpass mounts ({}): they log in as one identity entity \
-             and share its ownership and shares; delete it from all but one mount (T500)",
+             and share its ownership and shares; delete it from all but one mount, then review that \
+             entity's ownership and shares (T500)",
             duplicate.username,
             duplicate.mounts.len(),
             duplicate.mounts.join(", ")
@@ -134,4 +135,5 @@ pub async fn report_duplicate_usernames(core: &dyn VaultCtx) {
             duplicates.len()
         );
     }
+    Some(duplicates)
 }
