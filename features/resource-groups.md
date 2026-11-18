@@ -100,7 +100,9 @@ does; a sibling's never (a request's path carries its own namespace). Then
 - a member that matched a KV v2 secret through some of its routes only
   (every member of a KV v2 mount whose path has two or more segments as its
   scope sees it: `team/kv/`, `apps/data/`, root's view of `team/secret/`),
-  or that no mount serves, is kept in `secrets_legacy_kept`, filed in the
+  or that no mount serves (it matches a mount created later at that path,
+  as before T507), or whose path two stored mounts share a router key for,
+  is kept in `secrets_legacy_kept`, filed in the
   kept index under its pre-T507 key, and matched by the pre-T507 rule
   beside the own-name lookup, for allows, group-gated denies, the list filter
   and the KV-delete prune; logged at warn and counted (`members_kept_legacy`).
@@ -117,10 +119,17 @@ record, verify, mark, convert stragglers), each record's conversion atomic
 (one write, its index entries written first), converted records skipped, so a
 cut-short pass resumes; it is retried by the T511 background retry and at
 every unseal. No step deletes an index entry a lookup may read: before the
-marker an additive repair adds what a racing writer lost (nothing may leave a
-group then), after it stragglers convert additively. The storage has no
-compare-and-set and its `lock()` can stay held after a crash on the file
-backend, so index updates stay idempotent read-modify-writes. Until the
+marker the verify step sets the own-name and kept indexes exactly from the
+records (entries written first, stale ones deleted after; nothing reads them
+yet, and it stops once another node marked), which removes what a conversion
+cut short between its index writes and its record left; after the marker
+stragglers convert additively. The storage has no compare-and-set and its
+`lock()` can stay held after a crash on the file backend, so index updates
+stay read-modify-writes: two nodes converting at once, or two writers
+changing groups that list one secret at once (as before T507), can leave an
+entry missing a group or naming a stale one, which mis-decides that group's
+gated rules for that secret until `PUT resource-group/reindex` (per
+namespace, `docs/api.md`) repairs it. Until the
 marker (`resource-group/meta/secret-names`) is set, lookups use the pre-T507
 keys and the legacy index, and any change to which secrets a group lists, a
 delete of a group listing secrets, and a delete of a listed secret answer 503

@@ -2158,7 +2158,10 @@ to any route of any secret:
   seen from the group's namespace, has two or more segments (`team/kv/`,
   `apps/data/`, or another namespace's mount reached by path, such as root's
   view of `team/secret/`), in its `data/`, `metadata/` or short form. So is a
-  member no mount serves. A kept member is listed in `secrets_legacy_kept`,
+  member no mount serves (it matches a mount created later at that path, as
+  it did before T507), and one whose path two stored mounts share a router
+  key for (a root mount `a/secret/` beside namespace `a`'s `secret/`). A
+  kept member is listed in `secrets_legacy_kept`,
   matched against a request's pre-T507 key exactly as before (allows, group-
   gated denies and the group-gated `LIST` filter), logged at warn and counted
   (`members_kept_legacy`); it keeps the old collision (`data/x` matching `x`)
@@ -2209,6 +2212,20 @@ fault), fix it, then seal and unseal a node. An unreadable marker refuses
 KV requests with a 500, root included, rather than guess which keys decide.
 Never set the marker by hand: records not yet converted would be read as own
 names.
+
+Before it marks, the pass sets the own-name and kept indexes exactly from the
+converted records (entries written first, stale ones deleted after; nothing
+reads them yet), which removes what a conversion cut short between its index
+writes and its record left. Index entries are updated read-modify-write, and
+the storage has no compare-and-set, so two nodes converting at the same moment,
+or two writers changing groups that list one secret at the same moment (as
+before T507), can leave an index entry missing a group or naming one that no
+longer lists the secret. Such an entry mis-decides that group's gated rules
+(an allow or a group-gated deny) for that secret until it is repaired:
+`PUT /v1/resource-group/reindex` (with `X-BastionVault-Namespace` for a
+namespace's groups), or `bvault write resource-group/reindex` (add
+`--header X-BastionVault-Namespace=<ns>`), rebuilds the request namespace's
+indexes from the records without emptying any of them.
 
 Asset groups are namespace-scoped. A group created in a namespace is
 listed and readable there and in its descendants; root's groups are
