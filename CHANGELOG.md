@@ -45,6 +45,11 @@ CATEGORIES:
   ### Deprecated  - Features that will be removed in a future version
   ### Removed     - Features, files, or dependencies removed
   ### Fixed       - Bug fixes
+
+#### Login page
+
+- **Sign in again after the remembered namespace was deleted, instead of failing with `no such namespace`** (T535, S47)
+  -- the session remembers its active namespace across launches, and a namespace that had since been removed made the first sign-in request fail with `HTTP 404: no such namespace` before any credential was checked. Token, password and security-key sign-in now put the session back at root on that error and retry once, and the session then lands in the namespace its token is bound to. SSO sign-in is not covered.
   ### Security    - Vulnerability fixes or security improvements
 
 EXAMPLE ENTRY:

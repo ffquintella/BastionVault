@@ -319,6 +319,30 @@ export function LoginPage() {
    * 5-minute default timeout. The phase state drives the in-flight
    * status text ("Waiting for browser callback…").
    */
+  /**
+   * Run a sign-in attempt, recovering once from a stale active namespace.
+   *
+   * The session's active namespace is remembered across launches, so a
+   * namespace that was since deleted (or one this server never had) makes the
+   * very first request fail with `no such namespace` before any credential is
+   * checked — the operator is stuck on the login page. On that specific error
+   * the session is put back at root (and the stale cached namespace list
+   * dropped) and the attempt retried once. `landSession` then moves the
+   * session to the namespace its token is actually bound to, which is root
+   * when the principal may operate there and otherwise the first namespace it
+   * can.
+   */
+  async function withStaleNamespaceRecovery<T>(attempt: () => Promise<T>): Promise<T> {
+    try {
+      return await attempt();
+    } catch (err: unknown) {
+      if (!/no such namespace/i.test(extractError(err))) throw err;
+      useNamespaceStore.getState().reset();
+      await api.setActiveNamespace("");
+      return await attempt();
+    }
+  }
+
   async function handleSsoLogin(provider: SsoProviderOption) {
     setLoading(true);
     setError(null);
@@ -362,11 +386,13 @@ export function LoginPage() {
       // vault, `remote_login_token` against the connected HTTP client.
       // Routing on `mode` here is what stops "Vault not open" from
       // surfacing when the user is signed into a remote server.
-      const result =
-        mode === "Remote"
-          ? await api.remoteLoginToken(token)
-          : await api.loginToken(token);
-      await finalizeLogin(result.token, result.policies);
+      await withStaleNamespaceRecovery(async () => {
+        const result =
+          mode === "Remote"
+            ? await api.remoteLoginToken(token)
+            : await api.loginToken(token);
+        await finalizeLogin(result.token, result.policies);
+      });
       navigate("/dashboard");
     } catch (err: unknown) {
       setError(extractError(err));
@@ -382,10 +408,11 @@ export function LoginPage() {
     setError(null);
     try {
       // Try to start FIDO2 login — if user has keys, this succeeds
-      await api.fido2NativeLogin(username).then(async (result) => {
+      await withStaleNamespaceRecovery(async () => {
+        const result = await api.fido2NativeLogin(username);
         await finalizeLogin(result.token, result.policies);
-        navigate("/dashboard");
       });
+      navigate("/dashboard");
     } catch (fido2Err: unknown) {
       const errMsg = extractError(fido2Err);
       // If the error indicates no FIDO2 keys or FIDO2 not set up, fall back to password
@@ -407,11 +434,13 @@ export function LoginPage() {
     setLoading(true);
     setError(null);
     try {
-      const result =
-        mode === "Remote"
-          ? await api.remoteLoginUserpass(username, password, totpCode)
-          : await api.loginUserpass(username, password, totpCode);
-      await finalizeLogin(result.token, result.policies);
+      await withStaleNamespaceRecovery(async () => {
+        const result =
+          mode === "Remote"
+            ? await api.remoteLoginUserpass(username, password, totpCode)
+            : await api.loginUserpass(username, password, totpCode);
+        await finalizeLogin(result.token, result.policies);
+      });
       navigate("/dashboard");
     } catch (err: unknown) {
       const msg = extractError(err);
