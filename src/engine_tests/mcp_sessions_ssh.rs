@@ -220,9 +220,10 @@ mod mod_test {
             Self::with_target_in(name, target, "").await
         }
 
-        /// The rig with the operator signed in to namespace `ns`, and web-01,
-        /// its stored login and the operator's policy in that namespace
-        /// (`features/mcp-namespace-selection.md`). `""` is the root rig.
+        /// The rig with web-01 and its stored login in namespace `ns`, and
+        /// the operator signed in at root, assigned to `ns`, the pairing
+        /// narrowed there (`features/mcp-namespace-selection.md`). `""` is
+        /// the root rig.
         async fn with_target_in(name: &str, target: TestServerConfig, ns: &str) -> Self {
             let (bvault, core, root) = new_unseal_test_bastion_vault(name).await;
             // Each ancestor first: `dti/esi` needs `dti`.
@@ -259,31 +260,28 @@ mod mod_test {
             // The operator: may pair, may call the agent route, may connect
             // to web-01 (a policy grant: an MCP token has no entity).
             test_mount_auth_api(core.as_ref(), &root, "userpass", "userpass").await;
-            let policy = OPERATOR_POLICY;
-            if ns.is_empty() {
-                let _ = test_write_api(
-                    core.as_ref(),
-                    &root,
-                    "sys/policy/agent-operator",
-                    true,
-                    obj(json!({ "policy": policy })),
-                )
-                .await;
-            } else {
-                // In the namespace's own store, its paths prefixed: `sys/policy`
-                // refuses a tenant policy naming `sys/mcp/token`, so it is
-                // written through the store (see `tenant_policy`).
-                tenant_policy(&core, ns, &tenant_scoped(policy, ns)).await;
-            }
+            // A root policy, the namespace's paths prefixed: a namespace
+            // policy may not name `sys/mcp/token` (T520), so an operator works
+            // in `ns` by signing in at root and narrowing the pairing there.
+            let policy = if ns.is_empty() { OPERATOR_POLICY.to_string() } else { tenant_scoped(OPERATOR_POLICY, ns) };
+            let _ = test_write_api(
+                core.as_ref(),
+                &root,
+                "sys/policy/agent-operator",
+                true,
+                obj(json!({ "policy": policy })),
+            )
+            .await;
             let user = json!({ "password": "pw", "policies": "agent-operator" });
             let _ = test_write_api(core.as_ref(), &root, "auth/userpass/users/felipe", true, obj(user)).await;
             let mut req = crate::logical::Request::new("auth/userpass/login/felipe");
             req.operation = crate::logical::Operation::Write;
             req.body = obj(json!({ "password": "pw" }));
-            if !ns.is_empty() {
-                req.headers = Some(std::collections::HashMap::from([("x-bastionvault-namespace".into(), ns.into())]));
-            }
             let op = core.handle_request(&mut req).await.unwrap().unwrap().auth.unwrap().client_token;
+            if !ns.is_empty() {
+                // After the sign-in: an assignment also limits where one may sign in.
+                assign_operator(&core, &[ns]).await;
+            }
 
             let mut rig = Rig {
                 _bvault: bvault,
@@ -312,7 +310,7 @@ mod mod_test {
         }
 
         async fn pair(&self, id: &str, scope: Value) -> String {
-            let body = json!({
+            let mut body = json!({
                 "pairing": {
                     "id": id,
                     "client_name": "claude-code",
@@ -323,6 +321,9 @@ mod mod_test {
                     "confirm_connect": true,
                 },
             });
+            if !self.ns.is_empty() {
+                body["namespace"] = json!(self.ns);
+            }
             let resp = test_write_api(self.core.as_ref(), &self.op, "sys/mcp/token", true, obj(body)).await;
             resp.unwrap().unwrap().data.unwrap()["auth"]["client_token"].as_str().unwrap().to_string()
         }
@@ -419,7 +420,9 @@ mod mod_test {
         path "resources/secrets/web-01/*"           { capabilities = ["connect"] }
     "#;
 
-    /// `hcl` as `agent-operator` in namespace `ns`'s own policy store.
+    /// `hcl` as `agent-operator` in namespace `ns`'s own policy store, past
+    /// the guard (`sys/policy` refuses `sys/mcp/token` there). Since T520 its
+    /// bare rules grant nothing: an operator signed in to `ns` is refused.
     async fn tenant_policy(core: &Core, ns: &str, hcl: &str) {
         use std::str::FromStr as _;
         let mut policy = crate::modules::policy::Policy::from_str(hcl).unwrap();
@@ -428,7 +431,17 @@ mod mod_test {
         module.policy_store.load().set_policy_ns(policy, ns).await.unwrap();
     }
 
-    /// The root policy's rules as a tenant writes them: every path the
+    /// The operator (`userpass/felipe`) may work in exactly `namespaces`
+    /// (and their descendants): what lets a root sign-in narrow there.
+    async fn assign_operator(core: &Core, namespaces: &[&str]) {
+        use crate::modules::namespace::{ns_assignment::NsAssignmentStore, NamespaceModule, NAMESPACE_MODULE_NAME};
+        let ns_store =
+            core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME).and_then(|m| m.store()).unwrap();
+        let namespaces = namespaces.iter().map(|n| n.to_string()).collect();
+        NsAssignmentStore::new(core).unwrap().set(&ns_store, "userpass/", "felipe", namespaces).await.unwrap().unwrap();
+    }
+
+    /// The root policy's rules naming namespace `ns`'s paths: every path the
     /// router rewrites is prefixed with the namespace; `sys/` is not.
     fn tenant_scoped(policy: &str, ns: &str) -> String {
         policy.replace("path \"resources/", &format!("path \"{ns}/resources/"))
@@ -1437,16 +1450,29 @@ mod mod_test {
 
     // ── MCP namespace selection, Phase 1 (features/mcp-namespace-selection.md) ──
 
-    /// Decision 1: a userpass operator with TOTP, signed in to a child
-    /// namespace, pairs an assistant whose MFA-gated session to a resource in
-    /// that namespace completes -- the gatekeeper's step-up runs in the
-    /// operator session's namespace -- and the session, its events and its
-    /// transcript are in that namespace. A ticket bound to another namespace
-    /// is refused there.
+    /// Decision 1: a userpass operator with TOTP working in a child namespace
+    /// (root sign-in assigned there, pairing narrowed: the supported route)
+    /// pairs an assistant whose MFA-gated session to a resource there
+    /// completes -- the step-up runs in that namespace -- and the session, its
+    /// events and transcript are there; a ticket for another namespace is
+    /// refused. Signed in to the tenant itself, the exchange is 403 (T520).
     #[tokio::test(flavor = "multi_thread")]
     async fn test_a_child_namespace_operator_completes_mfa_and_the_session_runs_there() {
         let rig = Rig::with_target_in("ssh_exec_mfa_tenant", target_config(), "tenant-a").await;
         rig.enroll_totp().await;
+
+        // The documented outcome for a tenant sign-in whose tenant policy
+        // names the exchange: the bare rule grants nothing.
+        tenant_policy(&rig.core, "tenant-a", &tenant_scoped(OPERATOR_POLICY, "tenant-a")).await;
+        let mut login = crate::logical::Request::new("auth/userpass/login/felipe");
+        login.operation = crate::logical::Operation::Write;
+        login.body = obj(json!({ "password": "pw" }));
+        login.headers = Some(std::collections::HashMap::from([("x-bastionvault-namespace".into(), "tenant-a".into())]));
+        let in_tenant = rig.core.handle_request(&mut login).await.unwrap().unwrap().auth.unwrap().client_token;
+        let pairing =
+            json!({ "pairing": { "id": "in-tenant", "client_name": "claude-code", "client_version": "2.1" } });
+        let refused = ns_call(&rig.core, &in_tenant, "", "sys/mcp/token", pairing).await;
+        assert!(matches!(refused, Err(RvError::ErrPermissionDenied)), "{refused:?}");
 
         // Ungated: the call runs in the tenant, where web-01 is.
         let answer = rig.call("uptime").await;
@@ -1456,9 +1482,9 @@ mod mod_test {
         assert_eq!(exec[0]["operator"]["namespace"], json!("tenant-a"));
         assert_eq!(rig.transcripts().await[0].summary.namespace, "tenant-a");
 
-        // Gated: the gatekeeper's step-up, as the operator, in their namespace.
+        // Gated: the gatekeeper's step-up, as the operator, in the token's namespace.
         rig.gate_profile().await;
-        let Gatekeeper { server, operator, .. } = gatekeeper(&rig, &rig.op, "felipe-tenant");
+        let Gatekeeper { server, operator, .. } = gatekeeper_narrowed(&rig, &rig.op, "felipe-tenant", Some("tenant-a"));
         let answer = assistant_call(&server, 1, ssh_args("uptime")).await;
         assert_eq!(structured(&answer)["stdout"], json!(" 10:00 up 3 days\n"), "{answer}");
         assert!(operator.shown.lock().unwrap().last().unwrap().2, "the prompt asked for MFA");
@@ -1479,25 +1505,20 @@ mod mod_test {
         assert_eq!(count(&rig.server.events(), "exec:"), 3, "{:?}", rig.server.events());
     }
 
-    /// T457 Phase 2 with MFA: an operator signed in to a child-visible `dti`
-    /// runs a gatekeeper narrowed to `dti/esi`. The token is bound there, the
-    /// operator's step-up runs there (the token's namespace, not the
-    /// session's), the ticket binds there, and the gated session completes
-    /// in `dti/esi` -- the binding's operator namespace follows the token.
+    /// T457 Phase 2 with MFA: an operator signed in at root and assigned to
+    /// the ancestor `dti` (the supported route) runs a gatekeeper narrowed to
+    /// `dti/esi`. The token is bound there, the operator's step-up runs there
+    /// (the token's namespace, not the session's), the ticket binds there,
+    /// and the gated session completes in `dti/esi` -- the binding's operator
+    /// namespace follows the token.
     #[tokio::test(flavor = "multi_thread")]
     async fn test_a_narrowed_pairing_completes_mfa_in_the_narrowed_namespace() {
         let rig = Rig::with_target_in("ssh_exec_mfa_narrowed", target_config(), "dti/esi").await;
         rig.enroll_totp().await;
         rig.gate_profile().await;
-        ns_write(&rig.core, &rig.root, "", "sys/namespaces/dti", json!({ "child_visible_default": true })).await;
-        tenant_policy(&rig.core, "dti", &tenant_scoped(OPERATOR_POLICY, "dti/esi")).await;
-        let mut login = crate::logical::Request::new("auth/userpass/login/felipe");
-        login.operation = crate::logical::Operation::Write;
-        login.body = obj(json!({ "password": "pw" }));
-        login.headers = Some(std::collections::HashMap::from([("x-bastionvault-namespace".into(), "dti".into())]));
-        let in_dti = rig.core.handle_request(&mut login).await.unwrap().unwrap().auth.unwrap().client_token;
+        assign_operator(&rig.core, &["dti"]).await;
 
-        let Gatekeeper { server, operator, .. } = gatekeeper_narrowed(&rig, &in_dti, "felipe-dti", Some("dti/esi"));
+        let Gatekeeper { server, operator, .. } = gatekeeper_narrowed(&rig, &rig.op, "felipe-dti", Some("dti/esi"));
         let answer = assistant_call(&server, 1, ssh_args("uptime")).await;
         assert_eq!(structured(&answer)["stdout"], json!(" 10:00 up 3 days\n"), "{answer}");
         assert!(operator.shown.lock().unwrap().last().unwrap().2, "the prompt asked for MFA");
