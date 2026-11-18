@@ -30,7 +30,9 @@
 //!
 //! The owner is computed on the parsed path, which loses a prefix rule's `*`;
 //! [`rule_within_namespace`] closes that (T519). `.bvx` import re-runs the
-//! same check on a namespace's policies ([`check_namespace_policy_rules`], T520).
+//! same check on a namespace's policies ([`check_namespace_policy_rules`], T520),
+//! and `PolicyStore::build_acl` keeps, of a stored namespace document, only the
+//! rules this predicate confines (backup restore, older builds: T520).
 
 use crate::{bv_error_response_status, errors::RvError, modules::policy::PolicyPathRules};
 

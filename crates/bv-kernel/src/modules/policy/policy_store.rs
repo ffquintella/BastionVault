@@ -39,7 +39,9 @@ use super::{
     transfer_target, Policy, PolicyType,
 };
 use crate::kernel_api::VaultCtx;
-use crate::modules::namespace::policy_scope::{is_namespace_grantable_route, is_namespace_grantable_rule};
+use crate::modules::namespace::policy_scope::{
+    is_namespace_grantable_route, is_namespace_grantable_rule, rule_within_namespace,
+};
 use crate::{
     bv_error_response_status, bv_error_string,
     core::Core,
@@ -2545,7 +2547,8 @@ impl PolicyStore {
     /// `ns_path`; beneath it, the rest are looked up in the request namespace
     /// and confined to `<request ns>/` (T471, [`cross_namespace_candidate`],
     /// [`confine_policy_to_namespace`]). A name found in `ns_path` is never
-    /// looked up again, so a tenant can neither shadow nor extend it.
+    /// looked up again, so a tenant can neither shadow nor extend it, and a
+    /// tenant document keeps only rules confined to `ns_path` (T519, T520).
     async fn build_acl(
         &self,
         policy_names: &[String],
@@ -2557,11 +2560,17 @@ impl PolicyStore {
     ) -> Result<(ACL, AclResolution), RvError> {
         let ns_path = ns_path.to_string();
         let mut resolution = AclResolution { binding_ns: ns_path.clone(), ..Default::default() };
-        let mut all_policies: Vec<Arc<Policy>> = vec![];
+        // Each policy with whether it is a document from the namespace
+        // keyspace `ns_path`, confined to that namespace below (T520).
+        let mut all_policies: Vec<(Arc<Policy>, bool)> = vec![];
         let mut pending: Vec<&String> = Vec::new();
         for policy_name in policy_names.iter() {
             match self.get_policy_ns(policy_name.as_str(), PolicyType::Token, &ns_path).await? {
-                Some(policy) => all_policies.push(policy),
+                Some(policy) => {
+                    // `root` is the synthetic global policy, never a tenant document.
+                    let from_keyspace = !ns_path.is_empty() && self.sanitize_name(policy_name) != "root";
+                    all_policies.push((policy, from_keyspace));
+                }
                 None => pending.push(policy_name),
             }
         }
@@ -2643,17 +2652,18 @@ impl PolicyStore {
         // untouched; they get the same endpoints from their real `default`
         // policy, so the pre-namespace hot path is byte-for-byte unchanged.
         if !ns_path.is_empty() {
-            all_policies.push(NAMESPACE_SELF_POLICY_PARSED.clone());
+            all_policies.push((NAMESPACE_SELF_POLICY_PARSED.clone(), false));
             // Same rationale, for the namespace's own data mounts: without this
             // a tenant token has no grant on `<ns>/resources/*` et al, so a
             // resource shared with them is both invisible (empty
             // `sys/internal/ui/mounts` -> no Resources tab) and unreachable.
             // Share-scoped only -- see NAMESPACE_SHARED_POLICY.
-            all_policies.push(NAMESPACE_SHARED_POLICY_PARSED.clone());
+            all_policies.push((NAMESPACE_SHARED_POLICY_PARSED.clone(), false));
         }
 
+        // The dry-run's draft rides here; it is judged as written.
         if let Some(ap) = additional_policies {
-            all_policies.extend(ap);
+            all_policies.extend(ap.into_iter().map(|p| (p, false)));
         }
 
         // Apply templating substitution to any policy flagged `templated`
@@ -2680,7 +2690,24 @@ impl PolicyStore {
                 Some(p)
             }
         };
-        let mut materialized: Vec<Arc<Policy>> = all_policies.into_iter().filter_map(materialize).collect();
+        // T519, T520: a namespace's own document keeps only the rules confined
+        // to it, judged on the materialized rule like the T471 step below.
+        // Decided per build, so a cached document never escapes it.
+        let mut materialized: Vec<Arc<Policy>> = Vec::with_capacity(all_policies.len());
+        for (policy, from_keyspace) in all_policies {
+            let Some(policy) = materialize(policy) else {
+                continue;
+            };
+            if !from_keyspace {
+                materialized.push(policy);
+                continue;
+            }
+            let (kept, dropped) = confine_namespace_document(&policy, &ns_path);
+            if !dropped.is_empty() && !modelled {
+                report_unconfined_rules(&ns_path, &policy.name, &dropped);
+            }
+            materialized.extend(kept);
+        }
         // T513: a namespace policy's grant on the transfer routes counts only
         // while the token works in the namespace whose policy it is.
         if !namespace_routes_apply(&ns_path, request_ns) {
@@ -4351,6 +4378,50 @@ pub(super) fn confine_policy_to_namespace(policy: &Arc<Policy>, ns_prefix: &str)
         return (None, dropped);
     }
     (Some(Arc::new(confined)), dropped)
+}
+
+/// `policy`, a document from namespace `ns_path`'s keyspace, with only the
+/// rules the namespace policy path rule allows (T519, T520), and the patterns
+/// of those it dropped. Deny rules stay wherever they point: they only take
+/// access from this namespace's tokens. The same `Arc` when nothing drops.
+fn confine_namespace_document(policy: &Arc<Policy>, ns_path: &str) -> (Option<Arc<Policy>>, Vec<String>) {
+    let keep = |rule: &crate::modules::policy::PolicyPathRules| {
+        rule_within_namespace(rule, ns_path)
+            || is_namespace_grantable_rule(rule)
+            || rule.permissions.capabilities_bitmap & Capability::Deny.to_bits() != 0
+    };
+    if policy.paths.iter().all(keep) {
+        return (Some(policy.clone()), Vec::new());
+    }
+    let mut confined = Policy::clone(policy);
+    let mut dropped = Vec::new();
+    confined.paths.retain(|rule| {
+        let kept = keep(rule);
+        if !kept {
+            dropped.push(if rule.is_prefix { format!("{}*", rule.path) } else { rule.path.clone() });
+        }
+        kept
+    });
+    if confined.paths.is_empty() {
+        return (None, dropped);
+    }
+    (Some(Arc::new(confined)), dropped)
+}
+
+/// The operator's record of a namespace document's rules that grant nothing
+/// (T520): policy, namespace and patterns only. Once per interval per set.
+fn report_unconfined_rules(ns_path: &str, policy_name: &str, dropped: &[String]) {
+    let patterns = dropped.join(", ");
+    log_rate_limited(format!("unconfined\u{1f}{ns_path}\u{1f}{policy_name}\u{1f}{patterns}"), |suppressed| {
+        log::warn!(
+            target: "security",
+            "policy {policy_name:?} in namespace {ns_path:?}: {} rule(s) ignored because they can match \
+             paths outside the namespace: [{patterns}]; a namespace policy grants only {:?}-prefixed paths \
+             (and the exact namespace-transfer routes). Rewrite them with the namespace prefix{suppressed}",
+            dropped.len(),
+            format!("{ns_path}/"),
+        )
+    });
 }
 
 /// Whether rules naming a `NAMESPACE_GRANTABLE_ROUTES` path apply to a token
@@ -6699,13 +6770,15 @@ path "dti/esi/secret/data/blocked" { capabilities = ["read"] }
         put_raw(&store, NS, "test-sql", TENANT_TEST_SQL).await;
         store.set_policy(named("ops", ROOT_OPS)).await.unwrap();
 
-        // Bound to the tenant: its own document, unconfined, as before T471.
+        // Bound to the tenant: its own document, resolved as before T471;
+        // since T520 confined to the tenant too (see the T520 tests below).
         let tenant = bound_to(NS, false, &["default", "test-sql"]);
         let (acl, r) = build(&store, &tenant, Some(NS)).await;
         assert_eq!(r.lookup, RequestNamespaceLookup::NotApplicable);
         assert!(r.from_request_ns.is_empty() && !r.request_ns_shared);
         assert_eq!(r.unresolved, vec!["default".to_string()]);
-        assert!(allows(&acl, "transit/keys/k", Capability::Read), "confinement is only for the cross-namespace step");
+        assert!(allows(&acl, "dti/esi/secret/data/app/config", Capability::Read));
+        assert!(!allows(&acl, "transit/keys/k", Capability::Read), "T520: a bare rule grants nothing");
 
         // A root request from a root-bound token: tenant names stay unresolved.
         for request_ns in [None, Some("")] {
@@ -6791,6 +6864,124 @@ path "dti/esi/secret/data/blocked" { capabilities = ["read"] }
         assert_eq!(kept, ["a/secret/", "a/sys/namespace-transfer/copy"]);
         let untouched = Arc::new(named("u", r#"path "a/secret/*" { capabilities = ["read"] }"#));
         assert!(Arc::ptr_eq(&without_namespace_routes(untouched.clone()), &untouched), "no copy without a route rule");
+    }
+
+    /// T519, T520: a token bound to the tenant keeps only its documents'
+    /// rules confined to the tenant, wherever it works; a deny stays wherever
+    /// it points; the injected baselines are untouched.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn a_tenant_bound_token_keeps_only_its_documents_confined_rules() {
+        let (_bvault, core, _root) = new_unseal_test_bastion_vault("test_t520_binding_confined").await;
+        let store = PolicyStore::new(&core).await.unwrap();
+        put_raw(&store, NS, "test-sql", TENANT_TEST_SQL).await;
+        put_raw(&store, NS, "bare-only", r#"path "sys/*" { capabilities = ["read", "update", "sudo"] }"#).await;
+        let tenant = bound_to(NS, false, &["test-sql", "bare-only"]);
+
+        for request_ns in [Some(NS), Some("dti/outro"), Some("dti"), Some(""), None] {
+            let (acl, r) = build(&store, &tenant, request_ns).await;
+            assert!(r.unresolved.is_empty(), "{request_ns:?}: both documents resolve: {r:?}");
+            let sql = "dti/esi/resources/resources/apldc1vds0044-db/sql/server";
+            assert!(allows(&acl, sql, Capability::SqlSelect), "{request_ns:?}");
+            assert!(allows(&acl, "dti/esi/secret/data/app/config", Capability::Read), "{request_ns:?}");
+            assert!(allows(&acl, "dti/esi/tpl-binding/x", Capability::Read), "{request_ns:?}: materialized, then kept");
+            let blocked = acl.explain_capability("dti/esi/secret/data/blocked", Capability::Read);
+            assert!(!blocked.allowed && blocked.denied_by_deny, "{request_ns:?}: {blocked:?}");
+            let outside = acl.explain_capability("secret/data/root-only", Capability::Read);
+            assert!(outside.denied_by_deny, "{request_ns:?}: a deny only takes access away, so it stays");
+            for (path, cap) in [
+                ("transit/keys/k", Capability::Read),
+                ("transit/encrypt/k", Capability::Update),
+                ("sys/policies/acl/administrator", Capability::Update),
+                ("sys/policies/acl/administrator", Capability::Sudo),
+                ("sys/mounts", Capability::Read),
+                ("dti/outro/secret/data/x", Capability::Read),
+                ("dti/esix/secret/data/x", Capability::Read),
+                ("dti/esi", Capability::Read),
+                ("dti/other/secret/x", Capability::Read),
+                ("other/esi/secret/x", Capability::Read),
+                ("kv/data/x", Capability::Read),
+                ("dti/esi/secret/data/other", Capability::Read),
+                ("dti/outro/tpl-request/x", Capability::Read),
+            ] {
+                assert!(!allows(&acl, path, cap), "{request_ns:?}: {path} ({cap:?}) must not be granted");
+            }
+            // `namespace-self` is injected, not a tenant document.
+            assert!(allows(&acl, "sys/capabilities-self", Capability::Update), "{request_ns:?}");
+            assert!(allows(&acl, "auth/token/lookup-self", Capability::Read), "{request_ns:?}");
+        }
+        let (acl, _) = build(&store, &tenant, Some(NS)).await;
+        assert!(allows(&acl, "dti/esi/tpl-request/x", Capability::Read), "templated to the tenant: kept");
+    }
+
+    /// The pieces T520 leaves alone: a root-bound token's module policy with
+    /// its bare self-service rules, a root token, and the dry-run's draft,
+    /// judged as written (stored documents are confined).
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn module_policies_root_tokens_and_the_dry_run_draft_are_unchanged() {
+        let (_bvault, core, _root) = new_unseal_test_bastion_vault("test_t520_unchanged").await;
+        let store = PolicyStore::new(&core).await.unwrap();
+        put_raw(&store, NS, "test-sql", TENANT_TEST_SQL).await;
+
+        let felipe = root_bound(&["secrets-full"]);
+        let (acl, r) = build(&store, &felipe, Some(NS)).await;
+        assert!(r.unresolved.is_empty(), "the module policy is seeded at root: {r:?}");
+        assert!(allows(&acl, "dti/esi/secret/data/x", Capability::Update), "a module policy's templated rule");
+        assert!(allows(&acl, "auth/token/lookup-self", Capability::Read), "a module policy's bare rule");
+        assert!(allows(&acl, "cubbyhole/x", Capability::Read));
+
+        let (acl, _) = build(&store, &root_bound(&["root"]), Some(NS)).await;
+        assert!(acl.explain_capability("transit/keys/k", Capability::Sudo).allowed, "a root token is unchanged");
+
+        let tenant = bound_to(NS, false, &[]);
+        let draft = Arc::new(named("draft", TENANT_TEST_SQL));
+        let no_names: [String; 0] = [];
+        let (acl, _) =
+            store.new_acl_in_namespace(&no_names, Some(vec![draft]), &tenant, Some(NS), NS, None).await.unwrap();
+        assert!(allows(&acl, "transit/keys/k", Capability::Read), "the draft is judged as written");
+        assert!(allows(&acl, "dti/esix/secret/data/x", Capability::Read), "the draft is judged as written");
+        let (acl, _) =
+            store.new_acl_in_namespace(&["test-sql".into()], None, &tenant, Some(NS), NS, None).await.unwrap();
+        assert!(!allows(&acl, "transit/keys/k", Capability::Read), "a stored document, as the pipeline sees it");
+        assert!(allows(&acl, "dti/esi/secret/data/app/x", Capability::Read));
+    }
+
+    #[test]
+    fn a_namespace_document_drops_exactly_its_unconfined_grants() {
+        let p = Arc::new(named("t", TENANT_TEST_SQL));
+        let (kept, mut dropped) = confine_namespace_document(&p, NS);
+        let mut kept: Vec<String> = kept.unwrap().paths.iter().map(|r| r.path.clone()).collect();
+        kept.sort();
+        dropped.sort();
+        // Unmaterialized here, so the templated rules are judged as written.
+        assert_eq!(
+            kept,
+            [
+                "dti/esi/resources/resources/apldc1vds0044-db/sql/",
+                "dti/esi/secret/data/app/",
+                "dti/esi/secret/data/blocked",
+                "secret/data/root-only",
+            ]
+        );
+        assert_eq!(
+            dropped,
+            [
+                "*",
+                "+/esi/*",
+                "dti/+/secret/*",
+                "dti/esi*",
+                "dti/outro/*",
+                "sys/policies/acl/*",
+                "transit/*",
+                "{{namespace.path}}/tpl-binding/*",
+                "{{request.namespace}}/tpl-request/*",
+            ]
+        );
+        let clean = Arc::new(named("c", r#"path "dti/esi/*" { capabilities = ["read"] }"#));
+        let (same, none) = confine_namespace_document(&clean, NS);
+        assert!(Arc::ptr_eq(&same.unwrap(), &clean) && none.is_empty(), "no copy when nothing drops");
+        let bare = Arc::new(named("b", r#"path "sys/*" { capabilities = ["read"] }"#));
+        let (none, dropped) = confine_namespace_document(&bare, NS);
+        assert!(none.is_none() && dropped == ["sys/*"], "{dropped:?}");
     }
 
     #[test]
