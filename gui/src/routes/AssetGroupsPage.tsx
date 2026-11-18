@@ -33,6 +33,9 @@ import { RustionPolicyTierEditor } from "../components/RustionPolicyTierEditor";
 export function AssetGroupsPage() {
   const { toast } = useToast();
   const [groups, setGroups] = useState<string[]>([]);
+  // Group name -> home namespace, for groups inherited from an ancestor
+  // namespace (read-only here). Own groups are absent.
+  const [inheritedFrom, setInheritedFrom] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [mountEnabled, setMountEnabled] = useState<boolean | null>(null);
 
@@ -76,8 +79,21 @@ export function AssetGroupsPage() {
       }
       const result = await api.listAssetGroups();
       setGroups(result.groups);
+      // Which of them live in an ancestor namespace. Best effort: a server
+      // without the batch route simply shows no inherited marker.
+      const inh: Record<string, string> = {};
+      try {
+        const batch = await api.assetGroupsBatch("full", null);
+        for (const g of batch.groups ?? []) {
+          if (g.inherited) inh[g.name] = g.namespace || "root";
+        }
+      } catch {
+        /* keep empty */
+      }
+      setInheritedFrom(inh);
     } catch {
       setGroups([]);
+      setInheritedFrom({});
     } finally {
       setLoading(false);
     }
@@ -244,13 +260,23 @@ export function AssetGroupsPage() {
                         }`}
                       >
                         {name}
+                        {inheritedFrom[name] !== undefined && (
+                          <span
+                            className="ml-1.5 text-[10px] uppercase opacity-70"
+                            title={`Inherited from namespace "${inheritedFrom[name]}" (read-only here)`}
+                          >
+                            inherited
+                          </span>
+                        )}
                       </button>
-                      <button
-                        onClick={() => setDeleteTarget(name)}
-                        className="opacity-0 group-hover:opacity-100 px-1 text-[var(--color-danger)] text-xs transition-opacity"
-                      >
-                        &times;
-                      </button>
+                      {inheritedFrom[name] === undefined && (
+                        <button
+                          onClick={() => setDeleteTarget(name)}
+                          className="opacity-0 group-hover:opacity-100 px-1 text-[var(--color-danger)] text-xs transition-opacity"
+                        >
+                          &times;
+                        </button>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -262,6 +288,7 @@ export function AssetGroupsPage() {
               {selected && selectedInfo ? (
                 <AssetGroupDetail
                   info={selectedInfo}
+                  inheritedFrom={inheritedFrom[selectedInfo.name]}
                   onEdit={openEdit}
                   onDelete={() => setDeleteTarget(selected)}
                   onReload={() => selectGroup(selected)}
@@ -394,13 +421,15 @@ export function AssetGroupsPage() {
 
 interface AssetGroupDetailProps {
   info: AssetGroupInfo;
+  /** Home namespace when the group is inherited from an ancestor. */
+  inheritedFrom?: string;
   onEdit: () => void;
   onDelete: () => void;
   /** Refetch the group after an owner transfer so the badge updates. */
   onReload?: () => void;
 }
 
-function AssetGroupDetail({ info, onEdit, onDelete, onReload }: AssetGroupDetailProps) {
+function AssetGroupDetail({ info, inheritedFrom, onEdit, onDelete, onReload }: AssetGroupDetailProps) {
   const [tab, setTab] = useState("overview");
   const [history, setHistory] = useState<AssetGroupHistoryEntry[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -441,14 +470,18 @@ function AssetGroupDetail({ info, onEdit, onDelete, onReload }: AssetGroupDetail
       <Card
         title={info.name}
         actions={
-          <div className="flex gap-2">
-            <Button variant="secondary" size="sm" onClick={onEdit}>
-              Edit
-            </Button>
-            <Button variant="danger" size="sm" onClick={onDelete}>
-              Delete
-            </Button>
-          </div>
+          inheritedFrom !== undefined ? (
+            <Badge label={`Inherited from ${inheritedFrom} (read-only)`} variant="warning" />
+          ) : (
+            <div className="flex gap-2">
+              <Button variant="secondary" size="sm" onClick={onEdit}>
+                Edit
+              </Button>
+              <Button variant="danger" size="sm" onClick={onDelete}>
+                Delete
+              </Button>
+            </div>
+          )
         }
       >
         <Tabs

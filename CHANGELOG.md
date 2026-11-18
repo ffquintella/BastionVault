@@ -334,6 +334,11 @@ EXAMPLE ENTRY:
 
 ### Changed
 
+#### Asset groups: inherited groups
+
+- **The Asset Groups page marks a group inherited from an ancestor namespace and shows it read-only** (T534, S47)
+  -- Such a group gets an "inherited" marker in the list and an "Inherited from <namespace> (read-only)" badge in place of Edit and Delete. The Resources page still lists no group that is not the active namespace's own, as before.
+
 #### Namespaces: a safer copy or move dialog
 
 - **The copy or move dialog asks for an acknowledgement before an overwrite, and never leaves a stale check usable** (T501, S120)
