@@ -573,11 +573,16 @@ async fn decisions_hold_at_every_step_of_the_migration() {
     use crate::modules::identity::kv_key_split_migrate;
     let (_bvault, core, root) = vault("t507_every_step").await;
     write(&core, &root, "sys/mounts/kv/", json!({ "type": "kv" })).await;
-    seed_kv(&core, &root, &["kv/x", "kv/y", "kv/data/x"], None).await;
+    write(&core, &root, "sys/mounts/team/kv/", json!({ "type": "kv-v2" })).await;
+    seed_kv(&core, &root, &["kv/x", "kv/y", "kv/data/x", "team/kv/data/z"], None).await;
     secret_name_migrate::reset_for_test(&core).await.unwrap();
     for (group, member) in [("a-first", "kv/a"), ("allowg", "kv/x"), ("denyg", "kv/y"), ("z-last", "kv/z")] {
         plant_old_group(&core, "", group, &[member]).await;
     }
+    // A member the pass keeps with the pre-T507 rule: the data/ route only.
+    plant_old_group(&core, "", "routeg", &["team/kv/data/z"]).await;
+    gated(&core, &root, "in-routeg", "team/kv/", "routeg").await;
+    let (routed, _) = login(&core, &root, "user-route", "in-routeg").await;
     gated(&core, &root, "in-allowg", "kv/", "allowg").await;
     write_policy(&core, &root, "reads-kv", "path \"kv/*\" { capabilities = [\"read\"] }\n").await;
     let hcl = "path \"kv/*\" {\n  capabilities = [\"deny\"]\n  groups = [\"denyg\"]\n}\n";
@@ -585,8 +590,10 @@ async fn decisions_hold_at_every_step_of_the_migration() {
     let (allowed, _) = login(&core, &root, "user-allow", "in-allowg").await;
     let (denied, _) = login(&core, &root, "user-deny", "reads-kv,denies-denyg").await;
     let check = |when: String| {
-        let (core, allowed, denied) = (core.clone(), allowed.clone(), denied.clone());
+        let (core, allowed, denied, routed) = (core.clone(), allowed.clone(), denied.clone(), routed.clone());
         async move {
+            let kept = decisions(&core, &routed, &[(1, "team/kv/data/z", None), (1, "team/kv/metadata/z", None)]);
+            assert_eq!(kept.await, [200, 403], "the kept member's route, {when}");
             let allow = decisions(&core, &allowed, &[(1, "kv/x", None), (1, "kv/data/x", None), (1, "kv/y", None)]);
             assert_eq!(allow.await, [200, 200, 403], "the gated allow, {when}");
             let deny = decisions(&core, &denied, &[(1, "kv/y", None), (1, "kv/x", None)]);
@@ -597,6 +604,11 @@ async fn decisions_hold_at_every_step_of_the_migration() {
                 false => (s.groups_for_legacy_secret("kv/x", "").await, s.groups_for_legacy_secret("kv/y", "").await),
             };
             assert_eq!((x.unwrap(), y.unwrap()), (vec!["allowg".to_string()], vec!["denyg".to_string()]), "{when}");
+            let z = match s.secret_names().await.unwrap() {
+                true => s.groups_for_kept_secret("team/kv/data/z", "").await,
+                false => s.groups_for_legacy_secret("team/kv/data/z", "").await,
+            };
+            assert_eq!(z.unwrap(), ["routeg"], "the kept member's index, {when}");
         }
     };
 
@@ -614,8 +626,9 @@ async fn decisions_hold_at_every_step_of_the_migration() {
         }
     }
     assert!(store(&core).secret_names().await.unwrap(), "marked");
-    assert!(step >= 7, "convert x4, verify, mark, final: {step}");
-    assert_eq!(pass.report().members_ambiguous, 4, "{:?}", pass.report());
+    assert!(step >= 8, "convert x5, verify, mark, final: {step}");
+    let report = pass.report();
+    assert_eq!((report.members_ambiguous, report.members_kept_legacy), (4, 1), "{report:?}");
 }
 
 /// A failed T507 pass, with the T499 datafix already done, schedules the
@@ -655,4 +668,103 @@ async fn a_failed_asset_group_pass_is_retried_until_it_completes() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(!identity.kv_split_retry.running(), "and the task ended");
+}
+
+// ── Fix round 2 ─────────────────────────────────────────────────────────
+
+/// Put `groups` under `member` in index `leaf` (`secret-name-index/` or
+/// `secret-kept-index/`) of root's scope, as a crashed conversion left it.
+async fn plant_index_entry(core: &Arc<Core>, leaf: &str, member: &str, groups: &[&str]) {
+    let key = format!("resource-group/{leaf}{}", URL_SAFE_NO_PAD.encode(member));
+    let value = serde_json::to_vec(groups).unwrap();
+    core.system_view().unwrap().put(&StorageEntry { key, value }).await.unwrap();
+}
+
+/// A conversion that wrote its index entries and died before its record,
+/// with the mount table changed before the retry, leaves entries no record
+/// lists: the pass sets both indexes exactly from the records before the
+/// switch, so none of them grants anything after it, and no step changes a
+/// decision or empties the index the lookups read.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn stale_entries_of_a_crashed_conversion_are_gone_before_the_switch() {
+    let (_bvault, core, root) = vault("t507_stale_entries").await;
+    // At the crash `old/` was a kv (v1) mount: `old/x` expanded to three own
+    // names. It is a kv-v2 mount at the retry, where `old/x` is one secret.
+    write(&core, &root, "sys/mounts/old/", json!({ "type": "kv" })).await;
+    let r = send(&core, &root, 1, Operation::Delete, "sys/mounts/old/", None, json!({})).await;
+    assert_eq!(status(&r), 200, "unmount: {r:?}");
+    write(&core, &root, "sys/mounts/old/", json!({ "type": "kv-v2" })).await;
+    seed_kv(&core, &root, &["old/data/x", "old/data/data/x", "old/data/zz"], None).await;
+    secret_name_migrate::reset_for_test(&core).await.unwrap();
+    plant_old_group(&core, "", "g", &["old/x"]).await;
+    plant_index_entry(&core, "secret-name-index/", "old/data/x", &["g"]).await;
+    plant_index_entry(&core, "secret-name-index/", "old/metadata/x", &["g"]).await;
+    plant_index_entry(&core, "secret-kept-index/", "old/zz", &["g"]).await;
+    gated(&core, &root, "in-g", "old/", "g").await;
+    let (u, _) = login(&core, &root, "user-g", "in-g").await;
+    let reqs = [(1u8, "old/data/x", None), (1, "old/data/data/x", None), (1, "old/data/zz", None)];
+    let check = |when: String| {
+        let (core, u) = (core.clone(), u.clone());
+        async move {
+            assert_eq!(decisions(&core, &u, &reqs).await, [200, 403, 403], "x only, {when}");
+            let s = store(&core);
+            let live = match s.secret_names().await.unwrap() {
+                true => s.groups_for_secret_name("old/x", "").await.unwrap(),
+                false => s.groups_for_legacy_secret("old/x", "").await.unwrap(),
+            };
+            assert_eq!(live, ["g"], "the index the lookups read, {when}");
+        }
+    };
+
+    check("before the pass".into()).await;
+    let mut pass = secret_name_migrate::SecretNameMigration::start(&core).await.unwrap().unwrap();
+    let mut step = 0;
+    while pass.step().await.unwrap() {
+        step += 1;
+        check(format!("after step {step}")).await;
+    }
+    let s = store(&core);
+    assert!(s.groups_for_secret_name("old/data/x", "").await.unwrap().is_empty(), "stale own-name entry");
+    assert!(s.groups_for_secret_name("old/metadata/x", "").await.unwrap().is_empty(), "stale own-name entry");
+    assert!(s.groups_for_kept_secret("old/zz", "").await.unwrap().is_empty(), "stale kept entry");
+}
+
+/// A group-gated deny through a kept member denies exactly the route it
+/// denied before T507, before and after the switch.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn a_gated_deny_through_a_kept_member_applies_as_before() {
+    let (_bvault, core, root) = vault("t507_kept_deny").await;
+    write(&core, &root, "sys/mounts/team/kv/", json!({ "type": "kv-v2" })).await;
+    seed_kv(&core, &root, &["team/kv/data/z"], None).await;
+    secret_name_migrate::reset_for_test(&core).await.unwrap();
+    plant_old_group(&core, "", "blocked", &["team/kv/data/z"]).await;
+    write_policy(&core, &root, "reads-team-kv", "path \"team/kv/*\" { capabilities = [\"read\"] }\n").await;
+    let hcl = "path \"team/kv/*\" {\n  capabilities = [\"deny\"]\n  groups = [\"blocked\"]\n}\n";
+    write_policy(&core, &root, "denies-blocked", hcl).await;
+    let (u, _) = login(&core, &root, "user-blocked", "reads-team-kv,denies-blocked").await;
+    let reqs = [(1u8, "team/kv/data/z", None), (2, "team/kv/z", None), (1, "team/kv/metadata/z", None)];
+
+    assert_eq!(decisions(&core, &u, &reqs).await, [403, 200, 200], "pending: the data/ route only");
+    let report = secret_name_migrate::run_if_needed(&core).await.unwrap();
+    assert_eq!(report.members_kept_legacy, 1, "{report:?}");
+    assert_eq!(decisions(&core, &u, &reqs).await, [403, 200, 200], "after: the same route");
+}
+
+/// Deleting a secret prunes a kept member as the pre-T507 rule did: by the
+/// delete path's pre-T507 key, so only the member of that route goes.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn a_kv_delete_prunes_a_kept_member_by_its_old_key() {
+    let (_bvault, core, root) = vault("t507_kept_prune").await;
+    write(&core, &root, "sys/mounts/team/kv/", json!({ "type": "kv-v2" })).await;
+    seed_kv(&core, &root, &["team/kv/data/z"], None).await;
+    secret_name_migrate::reset_for_test(&core).await.unwrap();
+    plant_old_group(&core, "", "routes", &["team/kv/data/z", "team/kv/metadata/z"]).await;
+    secret_name_migrate::run_if_needed(&core).await.unwrap();
+    assert_eq!(kept(&core, &root, "routes").await, ["team/kv/data/z", "team/kv/metadata/z"]);
+
+    let r = send(&core, &root, 1, Operation::Delete, "team/kv/data/z", None, json!({})).await;
+    assert_eq!(status(&r), 200, "delete: {r:?}");
+    assert_eq!(kept(&core, &root, "routes").await, ["team/kv/metadata/z"], "only the data/ route's member");
+    assert!(store(&core).groups_for_kept_secret("team/kv/data/z", "").await.unwrap().is_empty());
+    assert_eq!(store(&core).groups_for_kept_secret("team/kv/metadata/z", "").await.unwrap(), ["routes"]);
 }

@@ -934,12 +934,14 @@ impl ResourceGroupStore {
         Ok(true)
     }
 
-    /// Before the T507 marker is set: make sure every format 1 record of scope
-    /// `ns_path` is filed in the name and kept indexes, adding what a racing
-    /// writer lost, never deleting (no lookup reads them yet, and nothing may
-    /// leave them while pending). Returns the records still format 0.
-    pub(crate) async fn repair_converted(&self, ns_path: &str) -> Result<Vec<String>, RvError> {
+    /// Before the T507 marker is set: make scope `ns_path`'s name and kept
+    /// indexes hold exactly what its format 1 records list, writing entries
+    /// first and deleting stale ones last; nothing reads them yet. Stops
+    /// without touching them once another node set the marker. Returns the
+    /// records still format 0.
+    pub(crate) async fn settle_converted(&self, ns_path: &str) -> Result<Vec<String>, RvError> {
         let mut unconverted = Vec::new();
+        let (mut own, mut kept) = (BTreeMap::new(), BTreeMap::new());
         for gname in self.list_groups(ns_path).await? {
             let Some(g) = self.get_group(&gname, ns_path).await? else {
                 continue;
@@ -950,14 +952,21 @@ impl ResourceGroupStore {
                 }
                 continue;
             }
-            for (index, list) in [(Keyspace::SecretNameIndex, g.own_list()), (Keyspace::SecretKeptIndex, g.kept_list())]
-            {
-                for s in list {
-                    if !self.index_lookup(index, s, ns_path).await?.iter().any(|n| n == &gname) {
-                        self.add_to_secret_index(index, s, &gname, ns_path).await?;
-                    }
+            for (index, list) in [(&mut own, g.own_list()), (&mut kept, g.kept_list())] {
+                for key in list.iter().filter_map(|m| Self::secret_entry_key(m)) {
+                    index.entry(key).or_insert_with(BTreeSet::new).insert(gname.clone());
                 }
             }
+        }
+        for (keyspace, desired) in [(Keyspace::SecretNameIndex, own), (Keyspace::SecretKeptIndex, kept)] {
+            if self.secret_names().await? {
+                break;
+            }
+            self.write_index(ns_path, keyspace, &desired).await?;
+            if self.secret_names().await? {
+                break;
+            }
+            self.prune_index(ns_path, keyspace, &desired).await?;
         }
         Ok(unconverted)
     }
@@ -1271,14 +1280,36 @@ impl ResourceGroupStore {
         keyspace: Keyspace,
         desired: BTreeMap<String, BTreeSet<String>>,
     ) -> Result<(), RvError> {
+        self.write_index(ns_path, keyspace, &desired).await?;
+        self.prune_index(ns_path, keyspace, &desired).await
+    }
+
+    /// Write every entry of `desired` that differs from what `keyspace` holds.
+    async fn write_index(
+        &self,
+        ns_path: &str,
+        keyspace: Keyspace,
+        desired: &BTreeMap<String, BTreeSet<String>>,
+    ) -> Result<(), RvError> {
         let view = self.view(ns_path, keyspace);
-        for (key, names) in &desired {
+        for (key, names) in desired {
             let names: Vec<&String> = names.iter().collect();
             let current = view.get(key).await?.and_then(|e| serde_json::from_slice::<Vec<String>>(&e.value).ok());
             if current.as_ref().map(|c| c.iter().collect::<Vec<_>>()) != Some(names.clone()) {
                 view.put(&StorageEntry { key: key.clone(), value: serde_json::to_vec(&names)? }).await?;
             }
         }
+        Ok(())
+    }
+
+    /// Delete every entry of `keyspace` that `desired` does not list.
+    async fn prune_index(
+        &self,
+        ns_path: &str,
+        keyspace: Keyspace,
+        desired: &BTreeMap<String, BTreeSet<String>>,
+    ) -> Result<(), RvError> {
+        let view = self.view(ns_path, keyspace);
         for key in view.get_keys().await? {
             if !desired.contains_key(&key) {
                 view.delete(&key).await?;
@@ -1642,10 +1673,11 @@ mod tests {
         assert_eq!(store.groups_for_secret_name("team/kv/z", "").await.unwrap(), ["g"], "by own name now");
     }
 
-    /// The migration's repair adds what a converted record lacks and reports
-    /// records still format 0; it never deletes an entry.
+    /// Before the switch the migration settles the name index exactly from
+    /// the converted records: a lost entry is added back, a stray one goes,
+    /// records still format 0 are reported.
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
-    async fn repair_adds_missing_entries_and_reports_unconverted_records() {
+    async fn settle_sets_the_indexes_from_the_records_and_reports_unconverted_ones() {
         let (_bvault, core, _root) = new_unseal_test_bastion_vault("rg_t507_repair").await;
         let store = ResourceGroupStore::new(&core).await.unwrap();
         store.unmark_secret_names_for_test().await.unwrap();
@@ -1653,13 +1685,18 @@ mod tests {
         store.set_group(legacy("conv", &["kv/b"]), "").await.unwrap();
         let b = vec!["kv/b".to_string()];
         assert!(store.convert_record("conv", "", &b, &b, &[]).await.unwrap());
-        // A racing writer lost the entry; a stray one is left alone.
+        // A racing writer lost the entry; a crashed conversion left a stray one.
         let name_index = store.view("", Keyspace::SecretNameIndex);
         name_index.delete(&ResourceGroupStore::secret_index_key("kv/b")).await.unwrap();
         store.add_to_secret_index(Keyspace::SecretNameIndex, "kv/stray", "conv", "").await.unwrap();
-        assert_eq!(store.repair_converted("").await.unwrap(), ["old"]);
+        assert_eq!(store.settle_converted("").await.unwrap(), ["old"]);
         assert_eq!(store.groups_for_secret_name("kv/b", "").await.unwrap(), ["conv"], "added back");
-        assert_eq!(store.groups_for_secret_name("kv/stray", "").await.unwrap(), ["conv"], "never deleted");
+        assert!(store.groups_for_secret_name("kv/stray", "").await.unwrap().is_empty(), "stray entry removed");
+        // Once another node set the marker, the indexes are live: left alone.
+        store.add_to_secret_index(Keyspace::SecretNameIndex, "kv/stray", "conv", "").await.unwrap();
+        store.mark_secret_names().await.unwrap();
+        store.settle_converted("").await.unwrap();
+        assert_eq!(store.groups_for_secret_name("kv/stray", "").await.unwrap(), ["conv"], "not touched once marked");
     }
 
     /// `reindex` never empties a live index: an entry that is right is not

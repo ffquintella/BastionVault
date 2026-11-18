@@ -97,10 +97,11 @@ fn record(report: &mut SecretNameReport, group: &str, scope: &str, member: &str,
                 c.keys
             );
         }
-        Reading::KeptRouteSpecific | Reading::KeptNoMount => {
+        Reading::KeptRouteSpecific | Reading::KeptNoMount | Reading::KeptMountConflict => {
             report.members_kept_legacy += 1;
             let why = match c.reading {
                 Reading::KeptRouteSpecific => "matched a kv-v2 secret through some of its routes only",
+                Reading::KeptMountConflict => "reaches a path two mounts share a router key for",
                 _ => "matches no mount",
             };
             log::warn!(
@@ -129,7 +130,7 @@ enum Step {
 /// The migration as a sequence of small steps, so a test can check the
 /// decisions requests get between any two of them. No step deletes an index
 /// entry a lookup may read: entries are added before a record is written,
-/// and the live indexes are never rebuilt (T507 review, fix round 1).
+/// stale ones removed only before the marker (T507 review, fix rounds 1-2).
 pub struct SecretNameMigration {
     store: Arc<ResourceGroupStore>,
     scopes: Vec<String>,
@@ -215,9 +216,9 @@ impl SecretNameMigration {
         Ok(())
     }
 
-    /// Add what converted records lack in the indexes (additive only: while
-    /// pending nothing may leave a group, so nothing stale can be re-added),
-    /// then mark, or re-queue records a racing write kept at format 0.
+    /// Set the name and kept indexes exactly from the converted records (not
+    /// read before the marker: a crashed conversion's or a lost update's
+    /// entries go), then mark, or re-queue records still at format 0.
     async fn verify(&mut self) -> Result<(), RvError> {
         // Another node finished and marked meanwhile: its own final pass ran.
         if self.store.secret_names().await? {
@@ -226,7 +227,7 @@ impl SecretNameMigration {
         }
         let mut left = Vec::new();
         for scope in &self.scopes {
-            for group in self.store.repair_converted(scope).await? {
+            for group in self.store.settle_converted(scope).await? {
                 left.push(Step::Convert { scope: scope.clone(), group });
             }
         }

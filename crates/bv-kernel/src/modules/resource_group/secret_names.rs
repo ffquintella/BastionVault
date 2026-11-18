@@ -35,6 +35,10 @@ pub(crate) enum Target {
     NotKv,
     /// A KV path that names no secret (T506) or an ambiguous name: no key.
     NoKey,
+    /// Two stored mounts share the router key that serves it (a root mount
+    /// `a/secret/` and namespace `a`'s `secret/`): which one the router
+    /// keeps is not knowable here.
+    MountConflict,
     /// A KV secret by its own name; `acts_on_data` for a `destroy/` or
     /// `undelete/` request, which looked its secret up by the `data/` path;
     /// `routes`, the paths a pre-T507 lookup of any request to it used.
@@ -112,15 +116,19 @@ pub(crate) struct AllMounts(pub Vec<(String, String)>);
 
 impl AllMounts {
     /// `rel`, a path of scope `scope`, as a request in that scope resolves:
-    /// the longest router key its full path starts with.
+    /// the longest router key its full path starts with; a conflict when two
+    /// stored mounts share that key.
     pub(crate) fn target(&self, scope: &str, rel: &str) -> Target {
         let ns = (!scope.is_empty()).then_some(scope);
         let full = qualify(rel, ns);
-        let best =
-            self.0.iter().filter(|(m, _)| !m.is_empty() && full.starts_with(m.as_str())).max_by_key(|(m, _)| m.len());
-        match best {
-            Some((mount, ty)) => item_target(ns_relative(mount, ns), ty, &full[mount.len()..]),
-            None => Target::NoMount,
+        let serving: Vec<&(String, String)> =
+            self.0.iter().filter(|(m, _)| !m.is_empty() && full.starts_with(m.as_str())).collect();
+        let Some(longest) = serving.iter().map(|(m, _)| m.len()).max() else {
+            return Target::NoMount;
+        };
+        match serving.iter().filter(|(m, _)| m.len() == longest).collect::<Vec<_>>().as_slice() {
+            [(mount, ty)] => item_target(ns_relative(mount, ns), ty, &full[mount.len()..]),
+            _ => Target::MountConflict,
         }
     }
 }
@@ -132,7 +140,8 @@ pub(crate) fn request_key(router: &Router, path: &str, ns: Option<&str>) -> Opti
     match router_target(router, path, ns) {
         Ok(Target::Secret { name, .. }) => Some(name),
         Ok(Target::NoMount | Target::NotKv) => ResourceGroupStore::checked_secret_name(ns_relative(path, ns)),
-        Ok(Target::NoKey) | Err(_) => None,
+        // The router keeps one entry per key, so it never reports a conflict.
+        Ok(Target::NoKey | Target::MountConflict) | Err(_) => None,
     }
 }
 
@@ -169,12 +178,15 @@ pub enum Reading {
     /// No lookup reaches it with the current mounts: kept with the pre-T507
     /// rule, which a mount created later would still follow.
     KeptNoMount,
+    /// Two stored mounts share the router key of one of its paths: which
+    /// secret it reached is not knowable, so it is kept with the old rule.
+    KeptMountConflict,
 }
 
 impl Reading {
     /// Kept as written and matched by the pre-T507 rule, not by own name.
     pub fn kept(self) -> bool {
-        matches!(self, Self::KeptRouteSpecific | Self::KeptNoMount)
+        matches!(self, Self::KeptRouteSpecific | Self::KeptNoMount | Self::KeptMountConflict)
     }
 }
 
@@ -217,7 +229,7 @@ pub(crate) fn convert_member(
     target: impl Fn(&str) -> Result<Target, RvError>,
 ) -> Result<Conversion, RvError> {
     let mut keys = BTreeSet::new();
-    let mut route_specific = false;
+    let (mut route_specific, mut conflict) = (false, false);
     for path in preimages(member) {
         if !looks_like_kv_path(&path, None) {
             continue;
@@ -231,10 +243,12 @@ pub(crate) fn convert_member(
             Target::NotKv => {
                 keys.insert(path);
             }
+            Target::MountConflict => conflict = true,
             Target::Secret { acts_on_data: true, .. } | Target::NoKey | Target::NoMount => {}
         }
     }
     let reading = match keys.len() {
+        _ if conflict => Reading::KeptMountConflict,
         _ if route_specific => Reading::KeptRouteSpecific,
         0 => Reading::KeptNoMount,
         1 => Reading::One,
@@ -367,6 +381,19 @@ mod tests {
         for (scope, member, keys, reading) in cases {
             let want = (keys.iter().map(|k| k.to_string()).collect::<Vec<_>>(), reading);
             assert_eq!(convert_in(scope, member), want, "{member} in {scope:?}");
+        }
+    }
+
+    /// A root mount `a/secret/` and namespace `a`'s `secret/` share a router
+    /// key: whichever the router kept, the member keeps the old rule.
+    #[test]
+    fn a_member_behind_two_mounts_with_one_router_key_is_kept() {
+        let m = AllMounts(vec![("a/secret/".into(), "kv".into()), ("a/secret/".into(), "kv-v2".into())]);
+        assert_eq!(m.target("", "a/secret/x"), Target::MountConflict);
+        assert_eq!(m.target("a", "secret/x"), Target::MountConflict, "from the namespace too");
+        for (scope, member) in [("", "a/secret/x"), ("a", "secret/x"), ("", "a/secret/data/x")] {
+            let c = convert_member(member, |p| Ok(m.target(scope, p))).unwrap();
+            assert_eq!((c.keys, c.reading), (vec![member.to_string()], Reading::KeptMountConflict), "{member}");
         }
     }
 
