@@ -301,9 +301,9 @@ cleans up its owner, shares and groups) and imports again.
   sibling or an ancestor answers as a namespace the caller cannot see (400,
   T503); an operator's namespace assignment can let the principal into a
   sibling, but `a`'s policies name only `a`'s paths, so it sees no mount
-  there either, unless a policy of `a` uses a partial-segment glob such as
-  `path "a*"`, which the write-time guard accepts and which also matches
-  `ab/...` or a root mount `apps/` (T519).
+  there either. A partial-segment glob such as `path "a*"`, which would also
+  match `ab/...` or a root mount `apps/`, is refused at write time and on
+  `.bvx` import, and one already stored grants nothing (T519, T520).
 - **Policies naming the source path are not rewritten** (always warned as
   `policies-not-carried`).
 - **The import routes are internal-only.**

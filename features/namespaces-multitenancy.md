@@ -27,7 +27,8 @@ The HTTP surface follows Vault Enterprise's: every endpoint accepts an `X-Bastio
 > (`token_binding::login_child_visible`) rather than a hardcoded `false`, so an
 > operator can opt a namespace into minting child-visible admin tokens —
 > cross-namespace policy-path refusal
-> (`policy_scope.rs`), the cross-tenant identity-link primitive
+> (`policy_scope.rs`; also on `.bvx` import, and at evaluation for stored
+> namespace policies, T519/T520), the cross-tenant identity-link primitive
 > (`identity_link.rs`, `v2/sys/namespace-links`), and counting + rate quota
 > enforcement (`quota.rs`). Per-namespace **policy storage** lives in
 > `src/modules/policy/policy_store.rs` (tenant ACL keyspaces + namespace-aware
@@ -235,6 +236,45 @@ namespace's flag is configurable through the self-config route (`GET`/`POST
 Policies are namespace-scoped. A policy named `admin` in `engineering` and a policy named `admin` in `marketing` are unrelated documents. Within a policy, `path "..."` rules match paths *within the same namespace*; cross-namespace path references are syntactically refused at policy-write time with an error pointing at the namespace-spanning path.
 
 Templated policies (the existing `{{username}}` / `{{entity.id}}` / `{{auth.mount}}` from per-user scoping) gain `{{namespace.path}}` and `{{namespace.id}}` for advanced use cases.
+
+#### What a namespace policy may name (T519, T520)
+
+A policy stored in namespace `a` may name only paths confined to `a`: its
+rule's path starts with `a/` (`a/*`, `a/secret/*`, `a/se*`, `a/+/x`,
+`a/{{identity.entity.name}}/*`), or is exactly `a`, plus the two transfer
+routes below. Everything else is refused: a root-owned path (`sys/*`,
+`auth/*`, `secret/*`), another namespace's path (`ab/*`, `a/b/x` when `a/b`
+is a namespace), a leading wildcard (`*`, `+/x`), and a glob that ends inside
+the namespace's own name (`a*`, which also matches the sibling `ab/...` and a
+root mount `apps/...`; T519). A namespace with a `+` path segment confines
+nothing (a rule would read the segment as a wildcard), so its policies are
+refused whole. Root-namespace policies are unrestricted.
+
+| Where | What happens |
+|---|---|
+| **`sys/policy` write** in `a` | 403 naming the path and the namespace it belongs to, or, for `a*`, saying it matches outside the namespace and to use `a/*` (`policy_scope::check_namespace_policy_rules`). |
+| **`.bvx` import** of a bundle for `a` | The same check, and the policy text must parse. A policy that fails is skipped, with its saved tests, and never written; the preview and the result carry `policy "<name>" in namespace "a" skipped: <reason>`. Root's policies are imported as before. |
+| **Backup restore** | Writes every policy as it is in the backup (they are ciphertext there; refusing one would fail the whole restore). The evaluation rule below confines them. |
+| **Evaluation** (`build_acl`) | A document read from `a`'s keyspace for a token whose policies resolve in `a` keeps only the rules `rule_within_namespace` confines (judged after templating), the exact transfer routes, and deny rules (they only take access away). The rest grant nothing. The injected `namespace-self` / `namespace-shared`, the synthetic `root`, the dry-run's draft and every root-namespace policy are left alone; T471's cross-namespace step has its own confinement. |
+
+**Finding dropped rules.** Each time such a document is first used after it is
+loaded or after its dropped rules change, the server logs one WARN on the
+`security` target, then at most one every 5 minutes for that policy while it is
+unchanged (with a count of the repeats not logged):
+`policy "<name>" in namespace "<ns>": N rule(s) ignored because they can match
+paths outside the namespace: [<patterns>]; ...`. It names the policy, the
+namespace and the rule patterns only. Rewrite each named rule with the
+namespace prefix (`<ns>/...`) through `sys/policy`, which applies the write
+rule above; a rule that has to reach a root-owned path belongs in a
+root-namespace policy, or, for the transfer, the exact routes.
+
+Policies that could hold such rules are those a `.bvx` import wrote before
+this check, a backup restore, or a build older than the write-time guard;
+with the evaluation rule they stop granting on upgrade, with no change to the
+stored document. In particular a tenant policy naming `sys/mcp/token` (never
+writable through `sys/policy`) no longer lets a session signed in to the
+tenant pair an MCP client; see
+[mcp-namespace-selection.md](mcp-namespace-selection.md).
 
 #### The one route a namespace policy may name outside its paths (T513)
 
@@ -585,6 +625,7 @@ Land the data model and the routing path. No identity/policy/audit scoping yet �
 | `{{namespace.path}}` / `{{namespace.id}}` policy templates (`src/modules/policy/policy_store.rs`) | Namespace-aware ACL templating. | ✅ Done |
 | `namespace` field on audit entries (`crates/bv-audit/src/entry.rs`) | Per-tenant audit attribution. | ✅ Done |
 | `src/modules/namespace/policy_scope.rs` — cross-namespace path refusal (write-time guard, wired into policy write) | Refuses policies referencing another namespace's paths. | ✅ Done |
+| Namespace policy path rule everywhere (T519, T520): `policy_scope::rule_within_namespace` at write time, on `.bvx` import (`exchange::scope::apply_items`) and in `build_acl` | A partial-segment glob (`a*`) is refused; imported namespace policies are re-checked; a stored namespace document keeps only its confined rules when the ACL is built. See "What a namespace policy may name". | ✅ Done |
 | Namespace-grantable transfer route (T513): `policy_scope::NAMESPACE_GRANTABLE_ROUTES` + `build_acl` | A namespace policy may name `sys/namespace-transfer/copy` and `.../move` exactly, counted only for a token working in its own namespace. See "The one route a namespace policy may name outside its paths". | ✅ Done |
 | Per-namespace policy *storage* (separate policy documents per namespace, `src/modules/policy/policy_store.rs`) | Tenant ACL policies live in their own keyspace (`policy-ns/<b64(path)>/…`); root keeps the legacy keyspace. `get/set/list/delete/history` gain `_ns` variants; the `sys/policy*` handlers scope by the request namespace header. | ✅ Done |
 | `crates/bv-audit/src/broker.rs` — per-namespace *broadcasters* + root mirror | Devices carry a `namespace` + root-only `mirror` flag; `log` partitions fan-out by `entry.namespace` with a per-namespace hash chain and a superuser mirror on the root chain; `sys/audit` enable/disable/list scope by header. | ✅ Done |
@@ -673,6 +714,7 @@ decisions and rationale.
 - Deleting a namespace that has child namespaces or mounts: rejected with a clear listing of what blocks the delete.
 - Writing to a namespace path that doesn't exist: 404, not 403 (so the response distinguishes "no such namespace" from "you're not allowed"). Decision of 2026-11-18: kept; namespace existence is not confidential (T512, abandoned).
 - A token issued in `engineering/platform` operates with header `X-BastionVault-Namespace: engineering` (parent): rejected with `permission_denied`, audit-logged in the parent's broadcaster.
+- A policy in `a` naming `a*`, `ab*`, `*`, `+/x`, `sys/*` or `auth/*`: refused at write time and on `.bvx` import; the same rules stored in `a`'s keyspace grant a token of `a` nothing, in `ab` and at root included where an assignment lets it work, while the policy's confined rules still apply (`src/engine_tests/namespace_policy_rule.rs`, `policy_scope` and `policy_store` unit tests; T519, T520).
 
 ## Security Considerations
 

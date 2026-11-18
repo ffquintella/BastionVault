@@ -604,6 +604,39 @@ Request body:
 }
 ~~~
 
+**A policy written in a namespace** (`X-BastionVault-Namespace: a`) may name
+only paths confined to `a`: each rule's path starts with `a/` (`a/*`,
+`a/secret/*`, `a/se*`, `a/+/x`) or is exactly `a`, plus the exact routes
+`sys/namespace-transfer/copy` and `sys/namespace-transfer/move` (T513).
+Root-namespace policies are unrestricted. Anything else is refused with
+**`403`** and nothing is stored:
+
+- a root-owned or another namespace's path (`secret/*`, `sys/*`, `auth/*`,
+  `*`, `+/x`, `ab/*`, or `a/b/x` where `a/b` is a namespace):
+  `policy in namespace "a" may not reference path "sys/" (belongs to namespace
+  root); namespace policies must use "a"-prefixed paths, except the exact
+  paths [...]` (the path as parsed, without a trailing `*`);
+- a glob that ends inside the namespace's own name, which would also match
+  the sibling `ab/...` and a root mount `apps/...` (T519):
+  `policy in namespace "a" may not reference path "a*": it also matches paths
+  outside the namespace (...); use "a"-prefixed paths such as "a/*", ending a
+  glob only after a full segment`;
+- every rule of a policy in a namespace with a `+` path segment (a rule would
+  read the segment as a wildcard).
+
+The same rule is applied to a namespace bundle's policies on a `.bvx` / JSON
+exchange import (`sys/exchange/import`, the desktop app, a scheduled-export
+restore): a policy that would be refused here, or whose text does not parse,
+is skipped with its saved tests and never written, and the import (and its
+preview) answers with a warning `policy "<name>" in namespace "<ns>" skipped:
+<reason>`. A BVBK restore (`sys/restore`) writes policies as they are in the
+backup. A policy stored in a namespace however it got there (an import before
+this check, a restore, an older build) keeps, when a token's ACL is built,
+only its confined rules, the exact transfer routes and its deny rules; the
+others grant nothing and are logged at WARN on the `security` target with the
+policy, namespace and rule patterns (T520,
+[namespaces-multitenancy.md](../features/namespaces-multitenancy.md)).
+
 **Delete a policy**
 
 ~~~
@@ -1089,10 +1122,10 @@ POST /v2/sys/namespace-transfer/move
   The token must be valid in both namespaces. For a token born in namespace
   `a` that is `a` and, with `child_visible`, its descendants: it can copy or
   move between any two of them (`a`'s own mounts, `a` and `a/b`, `a/b` and
-  `a/c`), never to or from a sibling or an ancestor (the 400 above). The one
-  exception is filed as T519: if an operator's namespace assignment lets the
-  principal into a sibling or root, a policy of `a` with a partial-segment
-  glob such as `path "a*"` also matches paths there. A plain copy relies on the
+  `a/c`), never to or from a sibling or an ancestor (the 400 above), even
+  when an operator's namespace assignment lets the principal in there: a
+  policy of `a` names only `a/` paths (a partial-segment glob such as
+  `path "a*"` is refused, and grants nothing if stored, T519). A plain copy relies on the
   destination import's own ACL check. A `move`, an `overwrite` or a
   `dry_run` first checks the rights it needs through `sys/capabilities-self`,
   before anything is written. A missing right is a 403 naming it; the first

@@ -627,9 +627,11 @@ in the namespace the token's call runs in.
 written inside a namespace cannot name a `sys/` path (`sys/policy` refuses
 it), so a session signed in *to* a tenant namespace has no supported way to
 be granted the exchange today. The route that works is the one above: sign
-in to a child-visible ancestor (or at root with the tenant assigned to you)
-whose own policy grants `sys/mcp/token`, and narrow to the tenant; the token
-then acts there with that sign-in's own policies.
+in at root (child-visible, or with the tenant assigned to you), whose own
+policy grants `sys/mcp/token`, and narrow to the tenant; the token
+then acts there with that sign-in's own policies. A tenant policy that names
+`sys/mcp/token` anyway (left by a `.bvx` import or a backup restore) grants
+nothing since T520: a session signed in to the tenant gets a 403.
 
 ## The limits, stated plainly
 

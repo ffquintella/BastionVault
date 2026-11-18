@@ -457,8 +457,8 @@ flag serves two callers:
   `--namespace` set to the token's own namespace. It copies or moves
   between that namespace's mounts and, for a `child_visible` token, between
   any two of that namespace and its descendants; a sibling or an ancestor
-  answers as a namespace the caller cannot see (but see T519 for a policy
-  with a partial-segment glob such as `a*`).
+  answers as a namespace the caller cannot see (a namespace policy cannot
+  name them: a partial-segment glob such as `a*` is refused, T519).
 - **A root sign-in assigned to the namespace**, whose root-namespace policy
   grants `update` on `sys/namespace-transfer/*` (a namespace's own policy
   does not grant it the route).
