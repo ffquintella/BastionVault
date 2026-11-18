@@ -961,6 +961,31 @@ fn policy_name_is_safe(name: &str) -> bool {
         && name.split('/').all(|seg| !seg.is_empty() && seg != "." && seg != "..")
 }
 
+/// May this imported policy document live in namespace `ns_path` (T520)? It
+/// must parse, and pass the rule `sys/policy` applies to a namespace's
+/// policies. Always for root, whose policies are unrestricted. The error names
+/// the reason and the offending path, never anything else of the document.
+fn namespace_policy_admissible(value: &Value, ns_path: &str, namespaces: &[String]) -> Result<(), String> {
+    use std::str::FromStr as _;
+
+    use crate::modules::namespace::policy_scope::check_namespace_policy_rules;
+
+    if ns_path.is_empty() {
+        return Ok(());
+    }
+    let raw = value.get("raw").and_then(Value::as_str).ok_or("the document carries no policy text")?;
+    let policy = crate::modules::policy::Policy::from_str(raw).map_err(|_| "the policy does not parse".to_string())?;
+    // The importing namespace owns its own paths even if the list missed it.
+    let mut known = namespaces.to_vec();
+    if !known.iter().any(|n| n == ns_path) {
+        known.push(ns_path.to_string());
+    }
+    check_namespace_policy_rules(ns_path, &policy.paths, &known).map_err(|e| match e {
+        RvError::ErrResponseStatus(_, message) => message,
+        other => other.to_string(),
+    })
+}
+
 /// An asset-group id is one key segment, as the live store's `sanitize_name`
 /// enforces; anything else would address keys outside the group keyspace.
 fn group_id_is_safe(canonical: &str) -> bool {
@@ -1016,7 +1041,7 @@ pub async fn import_from_document(
     document.validate_schema_tag().map_err(|_| RvError::ErrRequestInvalid)?;
 
     let mut result = ImportResult::default();
-    apply_items(storage, mounts, &document.items, policy, dry_run, "", &mut result).await?;
+    apply_items(storage, mounts, &document.items, policy, dry_run, "", &[], &mut result).await?;
 
     // Namespace bundles need each namespace's own `MountIndex` to resolve
     // barrier keys, which this entry point does not have. Rather than write
@@ -1037,7 +1062,8 @@ pub async fn import_from_document(
 /// Apply one namespace's worth of items. `ns_label` is the namespace path used
 /// to qualify the human-readable `mount` shown in preview / audit output (`""`
 /// for the root namespace); it never affects the storage key, which comes
-/// entirely from `mounts`.
+/// entirely from `mounts`. `namespaces` lists every namespace path, for the
+/// namespace policy path rule a non-root namespace's policies must pass (T520).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn apply_items(
     storage: &dyn Storage,
@@ -1046,6 +1072,7 @@ pub(crate) async fn apply_items(
     policy: ConflictPolicy,
     dry_run: bool,
     ns_label: &str,
+    namespaces: &[String],
     result: &mut ImportResult,
 ) -> Result<(), RvError> {
     // Preview / audit output shows `<namespace>/<mount>` for a tenant's items
@@ -1171,7 +1198,9 @@ pub(crate) async fn apply_items(
     // ACL policies (plus each one's saved effectivity tests) — written into the
     // namespace's own policy keyspace. The name is lowercased to match what the
     // policy store writes, refused outright when it could escape the keyspace,
-    // and skipped for the built-ins the vault will not let anyone rewrite.
+    // and skipped for the built-ins the vault will not let anyone rewrite. A
+    // non-root namespace's policy must pass the rule `sys/policy` applies
+    // (T520): one that would be refused there is skipped, never written.
     let acl_prefix = mounts.policy_prefix();
     let tests_prefix = mounts.policy_tests_prefix();
     for item in &items.policies {
@@ -1182,6 +1211,10 @@ pub(crate) async fn apply_items(
         }
         if is_reserved_policy_name(&name) {
             result.warnings.push(format!("policy {name:?} skipped: reserved policy names are owned by the vault"));
+            continue;
+        }
+        if let Err(reason) = namespace_policy_admissible(&item.value, &mounts.ns_path, namespaces) {
+            result.warnings.push(format!("policy {name:?} in namespace {:?} skipped: {reason}", mounts.ns_path));
             continue;
         }
         let display_path = format!("policy/{name}");

@@ -77,3 +77,5 @@ mod kv_key_split_retry;
 mod asset_group_secret_names;
 // Cross-namespace copy and move through `sys/namespace-transfer` (T494).
 mod namespace_transfer;
+// A namespace policy names only its own paths, imported ones included (T519, T520).
+mod namespace_policy_rule;

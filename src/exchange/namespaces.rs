@@ -356,9 +356,11 @@ pub(crate) async fn import_document_gated(
     let mut warnings: Vec<String> = Vec::new();
     let indexes = all_namespace_indexes(core, &mut warnings).await?;
     result.warnings.append(&mut warnings);
+    // Every namespace, for the path rule a bundle's policies must pass (T520).
+    let namespaces = crate::modules::namespace::policy_scope::namespace_paths(core).await?.unwrap_or_default();
 
     let root = indexes.iter().find(|n| n.path.is_empty()).ok_or(RvError::ErrUnknown)?;
-    scope::apply_items(storage, &root.mounts, &document.items, policy, dry_run, "", &mut result).await?;
+    scope::apply_items(storage, &root.mounts, &document.items, policy, dry_run, "", &namespaces, &mut result).await?;
 
     for bundle in &document.items.namespaces {
         match indexes.iter().find(|n| n.path == bundle.path) {
@@ -370,6 +372,7 @@ pub(crate) async fn import_document_gated(
                     policy,
                     dry_run,
                     &ns.path,
+                    &namespaces,
                     &mut result,
                 )
                 .await?;
