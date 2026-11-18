@@ -365,3 +365,55 @@ async fn a_restored_namespace_policy_is_confined_when_the_acl_is_built() {
     let r = send(&core, &token, Operation::Read, "resources/resources/srv1", Some("a"), json!({})).await;
     assert!(r.is_ok(), "the confined rule still grants after the restore: {}", message(&r));
 }
+
+/// T520 regression: the WARN for a stored policy's dropped rules comes once
+/// for a load, not once per request; a change to the policy is seen by the
+/// very next request (the policy cache never holds a filtered copy) and, when
+/// it drops a different rule, is warned about at once; a clean rewrite
+/// through `sys/policy` grants as written and warns about nothing.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn the_drop_warning_comes_once_per_load_and_a_change_is_seen_at_once() {
+    let logging = capture::install();
+    let (_bvault, core, root) = vault("ns_policy_rule_warn_once").await;
+    seed_resource(&core, &root).await;
+    plant(&core, "a", "planted-glob", PARTIAL_GLOB).await;
+    let token = tenant_token(&core, &root, "planted-glob").await;
+    let read = |path: &'static str, ns: Option<&'static str>| {
+        let core = core.clone();
+        let token = token.clone();
+        async move { send(&core, &token, Operation::Read, path, ns, json!({})).await }
+    };
+
+    for _ in 0..5 {
+        assert_eq!(secret_value(read("secret/data/team/db", Some("a")).await), IN_A);
+        assert!(denied(&read("secret/data/team/db", Some("ab")).await));
+    }
+    assert!(denied(&read("resources/resources/srv1", Some("a")).await), "not granted by the first version");
+
+    // Changed in place (another planted version): seen by the next request.
+    let second = r#"
+path "apps/*" { capabilities = ["read"] }
+path "a/resources/*" { capabilities = ["read"] }
+"#;
+    plant(&core, "a", "planted-glob", second).await;
+    assert!(read("resources/resources/srv1", Some("a")).await.is_ok(), "the new confined rule grants at once");
+    assert!(denied(&read("secret/data/team/db", Some("a")).await), "the removed rule no longer grants");
+    assert!(denied(&read("apps/team", None).await), "the new unconfined rule grants nothing");
+
+    // Rewritten clean through `sys/policy`: grants as written, nothing dropped.
+    let clean = json!({ "policy": "path \"a/secret/*\" { capabilities = [\"read\"] }" });
+    send(&core, &root, Operation::Write, "sys/policy/planted-glob", Some("a"), clean).await.unwrap();
+    assert_eq!(secret_value(read("secret/data/team/db", Some("a")).await), IN_A);
+    assert!(denied(&read("resources/resources/srv1", Some("a")).await));
+
+    if logging {
+        let warns: Vec<String> = capture::lines()
+            .into_iter()
+            .filter(|l| l.starts_with("security ") && l.contains("policy \"planted-glob\" in namespace \"a\""))
+            .collect();
+        let with = |pattern: &str| warns.iter().filter(|l| l.contains(pattern)).count();
+        assert_eq!(with("[a*]"), 1, "one WARN for the first load, not one per request: {warns:#?}");
+        assert_eq!(with("[apps/*]"), 1, "the changed policy is warned about at once: {warns:#?}");
+        assert_eq!(warns.len(), 2, "nothing for the clean rewrite: {warns:#?}");
+    }
+}
