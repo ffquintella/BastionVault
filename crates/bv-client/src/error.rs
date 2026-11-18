@@ -119,6 +119,22 @@ pub fn map_body_read(err: ureq::Error, limit: u64) -> ClientError {
     }
 }
 
+/// Render a non-JSON error body (a proxy's HTML page, actix's plain-text
+/// 413) as a short single-line snippet for an `HTTP <status>: ...` message.
+/// Lossy UTF-8, whitespace collapsed, capped so a full HTML page never
+/// floods a toast. Never used on success responses.
+pub fn non_json_error_snippet(bytes: &[u8]) -> String {
+    const MAX_CHARS: usize = 200;
+    let text = String::from_utf8_lossy(bytes);
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() > MAX_CHARS {
+        let cut: String = collapsed.chars().take(MAX_CHARS).collect();
+        format!("{cut}...")
+    } else {
+        collapsed
+    }
+}
+
 /// Classify a transport-level error and an HTTP response body as
 /// either "the node went away" (yielding `NodeUnavailable`) or
 /// something else (passthrough). Used by `RemoteBackend::handle` to
@@ -152,6 +168,19 @@ pub fn classify_node_failure(host: &str, raw: ClientError) -> ClientError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn non_json_snippet_keeps_plain_text_body() {
+        assert_eq!(non_json_error_snippet(b"Payload reached size limit.\n"), "Payload reached size limit.");
+    }
+
+    #[test]
+    fn non_json_snippet_is_capped_and_lossy() {
+        let long = "<html>".to_string() + &"x ".repeat(500);
+        let s = non_json_error_snippet(long.as_bytes());
+        assert!(s.ends_with("...") && s.chars().count() <= 203);
+        assert_eq!(non_json_error_snippet(&[0xff, b'a']), "\u{fffd}a");
+    }
 
     #[test]
     fn io_error_classified_as_node_unavailable() {

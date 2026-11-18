@@ -88,6 +88,9 @@ Next-up list recorded before the migration, in its order:
 - [x] T538 Accept a real-size `.bvx` on the import routes instead of a plain-text 413 (S21)
   - source: GUI import of a full-vault `.bvx` from a remote profile failed with `json: expected value at line 1 column 1`: `sys/exchange/import` and `/preview` had no body limit, so actix's 256 KiB default answered a non-JSON 413 that `bv-client` could not parse.
   - note: landed 2026-11-18: `BodyLimit::Payload(32 MiB)` on both resources (`crates/bv-server/src/sys/routes.rs`), the ceiling plugin registration, logical and batch use. Not changed: `bv-client` still reports a non-JSON error body as a JSON parse error instead of the HTTP status.
+- [x] T539 Report the HTTP status when an error reply is not JSON (S21)
+  - source: T538 left `bv-client` turning any non-JSON error body into `json: expected value at line 1 column 1`, so a proxy's 413 or an old server's plain-text 413 was indistinguishable from a malformed file.
+  - note: landed 2026-11-18: `RemoteBackend::handle` (`crates/bv-client/src/remote.rs`) keeps a non-2xx, non-JSON body as `HTTP <status>: <snippet>` (`non_json_error_snippet`, 200 chars, whitespace collapsed); 2xx with a non-JSON body still errors as before.
 - [x] T11 Schedule recurring exports (S53)
   - source: roadmap.md feature row "Scheduled Exports", status `[x]` Done
   - old-notes: [spec](features/scheduled-exports.md) — `src/scheduled_exports/` (runner + schedule + store), `POST/GET/PUT/DELETE /v1/sys/scheduled-exports/*`, Tauri commands + GUI tab under `/exchange` (Scheduled backups). Built on top of the `.bvx` Exchange machinery. A `kind: "full"` backup now captures **every** secret engine (KV + PKI/SSH/Transit/TOTP/OpenLDAP/Rustion/… via opaque `raw` items) plus the vault's ACL policies, and restores resources/files/groups too, instead of only the `secret/` KV mount.

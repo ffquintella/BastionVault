@@ -430,6 +430,9 @@ EXAMPLE ENTRY:
 - **Import a full-vault `.bvx` file from the desktop app connected to a server, instead of failing with `json: expected value at line 1 column 1`** (T538, S21)
   -- `POST /v{1,2}/sys/exchange/import` and `.../import/preview` accepted request bodies of only 256 KiB, far below the size of a real export, and answered larger ones with a plain-text `413` that the client reported as a JSON parse error. Both now accept bodies up to 32 MiB, the same limit as plugin registration and batch requests. A file whose encoded envelope is larger than that is still refused.
 
+- **See the real HTTP error when a server or proxy answers a request with something that is not JSON** (T539, S21)
+  -- The desktop app and `bv-client` reported any non-JSON error reply (a reverse proxy's `413 Request Entity Too Large` page, a plain-text `413` from a server that predates T538) as `json: expected value at line 1 column 1`, hiding the status. They now report `HTTP <status>: <start of the reply>`, so an import refused for size reads as a `413`. If you still get a `413` importing a large `.bvx`, raise the body limit on your reverse proxy (for nginx, `client_max_body_size`) and make sure the server runs a build with the T538 fix.
+
 #### Policy tester: the KV v2 path-form deny
 
 - **Report a KV v2 request that a deny in the other path form refuses as denied in the policy tester, as enforcement does** (T509, S120)

@@ -145,7 +145,7 @@ pub const DEFAULT_MAX_RESPONSE_BYTES: u64 = 128 * 1024 * 1024;
 use crate::{
     backend::Backend,
     discovery::{self, DiscoveryConfig, SrvCandidate, SrvLookup, SystemResolver},
-    error::{classify_node_failure, map_body_read, ClientError},
+    error::{classify_node_failure, map_body_read, non_json_error_snippet, ClientError},
     health::{self, HealthConfig, Selected},
     tls::ClientTlsConfig,
     types::{JsonResponse, Operation},
@@ -692,7 +692,14 @@ impl RemoteBackend {
                 let json = if bytes.iter().all(|b| b.is_ascii_whitespace()) {
                     Value::Null
                 } else {
-                    serde_json::from_slice(&bytes).map_err(ClientError::from)?
+                    match serde_json::from_slice(&bytes) {
+                        Ok(v) => v,
+                        // A non-2xx reply that is not JSON (a proxy's HTML
+                        // page, actix's plain-text 413) must keep its status:
+                        // "json: expected value at line 1 column 1" hides it.
+                        Err(_) if !(200..300).contains(&status) => Value::String(non_json_error_snippet(&bytes)),
+                        Err(e) => return Err(ClientError::from(e)),
+                    }
                 };
                 Ok((status, json, retry_after))
             })
@@ -726,6 +733,7 @@ impl RemoteBackend {
             // so we pull that out when we can.
             let message = match &json {
                 Value::Null => format!("HTTP {status} (no body)"),
+                Value::String(text) => format!("HTTP {status}: {text}"),
                 Value::Object(obj) => obj
                     .get("errors")
                     .and_then(|v| match v {
