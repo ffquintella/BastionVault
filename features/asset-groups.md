@@ -90,9 +90,11 @@ contain `/` or `..`.
 
 Members are canonicalized on write:
 
-- KV paths are stored as the logical read path (e.g., `secret/data/foo`
-  for KV-v2), not the metadata path. The evaluator handles both forms
-  when it consults the reverse index.
+- A KV secret is stored by its own `<mount>/<name>` as given, nothing
+  stripped (T507): `secret/foo` is the KV-v2 secret `foo` through every
+  route, `secret/data/foo` the secret named `data/foo`. Stores before T507
+  stripped a `data`/`metadata` second segment; a migration at unseal
+  converted those members keeping their access (see resource-groups.md).
 - Resource names are stored as-is, lowercased.
 - Duplicates are collapsed. Order is lost (the store returns a
   lexicographically sorted members list).
@@ -241,7 +243,7 @@ Reverse-lookup:
 | Method | Path                                                       | Purpose |
 |--------|------------------------------------------------------------|---------|
 | GET    | `/v1/resource-group/by-resource/{name}`                    | List groups a resource belongs to |
-| GET    | `/v1/resource-group/by-secret/{b64url_path}`               | List groups a KV path belongs to. `b64url_path` is `base64url(no-pad)` of the canonical path; the server canonicalizes KV-v1/v2 variants. |
+| GET    | `/v1/resource-group/by-secret/{b64url_path}`               | List groups a KV secret belongs to. `b64url_path` is `base64url(no-pad)` of the secret's own `<mount>/<name>`, looked up as given (T507). |
 
 Admin:
 
@@ -360,9 +362,9 @@ label is "Group").
   `path "resources/resources/*" { groups = [...] capabilities = [...] }`
   policy rule is enforced per-request via the member-index.
 - **KV-secret half: shipped.** `ResourceGroupEntry` grew a
-  `secrets: Vec<String>` field stored in canonical form (the KV-v2
-  `data/` / `metadata/` segments are stripped so all three variants
-  of the same logical path collapse to one entry). A parallel
+  `secrets: Vec<String>` field, first stored with the KV-v2 `data/` /
+  `metadata/` second segment stripped and, since T507, by each secret's
+  own name (see resource-groups.md, "KV-secret members"). A parallel
   `sys/resource-group/secret-index/<base64url(path)>` reverse index
   lets `groups_for_secret(path)` run in a single read. The HTTP API
   grew a `GET /by-secret/<b64url_path>` reverse-lookup route; the

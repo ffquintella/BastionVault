@@ -245,17 +245,14 @@ cleans up its owner, shares and groups) and imports again.
   503 before anything is written, dry run included, because its source
   delete would be refused; a copy works, and so does the move once the
   datafix has completed.
-- **A KV secret whose path has `data` or `metadata` second loses its
-  asset-group membership** (T510): the asset-group store strips a
-  `data`/`metadata` second segment from a KV path, so it reads
-  `secret/data/x` as the secret `x`; carrying it would give the destination
-  `x`'s groups and make the destination's `x` a member. When the source's or
-  the destination's `<mount><name>` has either as its second segment (on a
-  one-segment mount, a name that is `data` or `metadata` or starts with
-  `data/` or `metadata/`; on a mount such as `team/data/`, every secret), no
-  membership is read or written and `group-membership-not-carried` (subject:
-  the source item) says so, on a dry run too. Lifted only when the group
-  store keys KV members by their own name (T507).
+- **A KV secret carries its own asset groups** (T507, which replaced the
+  T510 skip): the groups that list it by its own `<mount>/<name>`, and it
+  joins the destination's as its own name, so `data/x` never carries `x`'s.
+  While the asset-group key switch is pending (`docs/api.md`, "Asset-group
+  key switch pending") a KV secret carries no membership and
+  `group-membership-not-carried` (subject: the source item) says so, dry run
+  too; a move whose source a group lists is refused with a 503 before
+  anything is written, because its source delete would be refused.
 - **Tokens bound to a CIDR are refused** before any step (403 naming the
   binding): the steps are internal sub-requests with no client address, so
   the binding could not be checked on them.

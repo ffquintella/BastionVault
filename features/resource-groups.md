@@ -54,7 +54,9 @@ ResourceGroupEntry {
     name:         String,                // lowercased, no "/" or "..", unique
     description:  String,
     members:      Vec<String>,           // resource names; lowercased, trimmed, deduped, sorted
-    secrets:      Vec<String>,           // KV paths (canonical form); deduped, sorted
+    secrets:      Vec<String>,           // KV secrets by own name (format 1); deduped, sorted
+    secrets_format: u32,                 // 0 = pre-T507 keys, 1 = own names (T507)
+    legacy_secrets: Vec<String>,         // the format 0 list a migrated record replaced (rollback only)
     created_at:   RFC3339 String,
     updated_at:   RFC3339 String,
 }
@@ -64,31 +66,41 @@ ResourceGroupEntry {
 deduped, sorted lexicographically. Entries that are empty or contain
 `/` or `..` are silently dropped.
 
-**KV-secret members** are canonicalized on write by:
+**KV-secret members** are each secret's own `<mount>/<name>`,
+namespace-relative, stored as given (T507, record format 1): whitespace and
+surrounding slashes trimmed, a `..` segment dropped, nothing stripped,
+case preserved. On a KV v2 mount `secret/data/x` is the secret named
+`data/x` and `secret/x` the secret `x` through every route; on a kv
+(version 1) mount `kv/data/x` is the secret `data/x`. A request looks up
+the key `policy::kv_target` derives through the mount table, the same one
+owner and share records use (T499): a `destroy/` or `undelete/` request its
+secret's, a path no KV mount serves itself, a KV path that names no secret
+(T506) nothing.
 
-- Trimming whitespace and surrounding slashes.
-- **Stripping the `data/` or `metadata/` segment** that KV-v2 inserts
-  between the mount and the logical key. So `secret/foo/bar`,
-  `secret/data/foo/bar`, and `secret/metadata/foo/bar` all map to the
-  single canonical form `secret/foo/bar`.
-- Case-preserving (KV keys are case-sensitive on the storage backend).
-- Rejecting `..` segments to avoid path-traversal collisions in the
-  reverse-index key space.
-
-The canonicalization is heuristic: a mount literally named `data` or
-`metadata` would be misclassified. This is documented and accepted for
-v1 given how unusual such mount names are.
-
-The member is canonicalized exactly once, on its way into the group
-record; the secret index files it under that stored form as is (T499).
-Before T499 the index canonicalized it a second time, so a member
-`secret/data/data/x` (the secret `data/x`) was indexed as `secret/x`. The
-T499 datafix rebuilds every scope's indexes from the group records once;
-when it fails at unseal it is retried in the background up to five times
-(T511).
-A `destroy/` or `undelete/` request looks the secret up by its `data/`
-path. Not fixed: on a kv (v1) mount the heuristic still reads `kv/data/x`
-as `kv/x` (T507).
+Before T507 (format 0) a member and a request path lost a `data` or
+`metadata` second segment whatever the mount, so on a kv mount `kv/x`,
+`kv/data/x` and `kv/metadata/x` were one member, a multi-segment KV v2
+mount's member named one route (`team/kv/data/z` matched only `data/`
+requests), and any edit of a group re-keyed a KV v2 member such as
+`secret/data/x` (the secret `data/x`) to `secret/x`. The T507 migration
+(`resource_group/secret_name_migrate.rs`) runs at unseal, after the T499
+datafix, and converts each format 0 member to every own name a pre-T507
+lookup reached it by, through its namespace's stored mount table: exactly
+the access it gave. A member that reached several secrets (every kv v1
+member: `kv/x` reached `x`, `data/x` and `metadata/x`) keeps all of them and
+is logged on the `migration` target, key names only, and counted, so
+operators can prune; a member no mount serves is kept as written. Each
+converted record keeps its old list in `legacy_secrets` for rollback;
+downgrading after the migration is unsupported. The conversion is per
+record and atomic (one write), skips converted records, and is retried by
+the T511 background retry and at every unseal. Until its marker
+(`resource-group/meta/secret-names`) is set, lookups use the pre-T507 keys
+and the legacy index, and any change to which secrets a group lists, a
+delete of a group listing secrets, and a delete of a listed secret answer
+503 (`docs/api.md`, "Asset-group key switch pending"); once set, no store
+method writes a format 0 record with members again. A format 0 record a
+`.bvx` import writes raw later is converted by `reindex` or the group's
+next write.
 
 ### Storage
 
@@ -98,21 +110,23 @@ Primary record plus two parallel reverse indexes plus change history:
 ```
 sys/resource-group/group/<name>                    -> ResourceGroupEntry (JSON)
 sys/resource-group/member-index/<resource>         -> Vec<String>  (group names)
-sys/resource-group/secret-index/<b64url(path)>     -> Vec<String>  (group names)
+sys/resource-group/secret-index/<b64url(path)>     -> Vec<String>  (group names; pre-T507 keys)
+sys/resource-group/secret-name-index/<b64url(name)> -> Vec<String>  (group names; own names, T507)
 sys/resource-group/file-index/<file-id>            -> Vec<String>  (group names)
 sys/resource-group/history/<name>/<20-nanos>       -> ResourceGroupHistoryEntry
 ```
 
-That is the **root** scope. Every other namespace has its own scope with
-the same five keyspaces under
+That is the **root** scope (its `meta/` keyspace also holds the T507
+marker). Every other namespace has its own scope with the same keyspaces under
 `sys/resource-group/ns/<b64url(namespace path)>/` — see
 [Namespace scoping](#namespace-scoping).
 
 The **member-index** handles resource membership keyed by the bare
-resource name. The **secret-index** handles KV-secret membership keyed
-by `base64url(no-pad)` of the canonical path — base64url avoids `/`
-characters that would otherwise interact with the BarrierView key
-scheme.
+resource name. The **secret-name-index** handles KV-secret membership
+keyed by `base64url(no-pad)` of the secret's own name — base64url avoids
+`/` characters that would otherwise interact with the BarrierView key
+scheme. The **secret-index** holds the pre-T507 keys; it decides only
+while the T507 switch is pending, and is kept, not read, afterwards.
 
 Both indexes are maintained by `set_group` / `delete_group`: each
 write diffs old vs new `members` and old vs new `secrets`, and
@@ -248,11 +262,11 @@ Path-shape extraction in `resolve_asset_groups` (policy_store.rs):
   `<name>` and consult the member-index via `groups_for_resource`.
 - **KV paths**: anything that is *not* one of the fixed non-KV
   prefixes (`sys/`, `auth/`, `identity/`, `resource-group/`,
-  `cubbyhole/`, `resources/`) is treated as a candidate KV path and
-  passed verbatim to `groups_for_secret`, which canonicalizes
-  (stripping `data/` / `metadata/`) before consulting the
-  secret-index. KV-v1 `kv/foo`, KV-v2 `secret/data/foo/bar`, and KV-v2
-  `secret/metadata/foo/bar` all resolve to the same membership entry.
+  `cubbyhole/`, `resources/`, `files/`) is a candidate. Its key is the
+  secret's own name through the mount table (`secret_names::request_key`,
+  T507): KV-v2 `secret/data/foo/bar`, `secret/metadata/foo/bar` and the
+  short form `secret/foo/bar` are the secret `secret/foo/bar`; KV-v1
+  `kv/data/foo` is the secret `kv/data/foo`, not `kv/foo`.
 - Both lookups run independently and their results are unioned —
   `Request::asset_groups` may contain group names from either source.
   A single policy rule's `groups = [...]` filter passes as long as the
@@ -413,6 +427,7 @@ once per call.
 | 13 | Ownership, admin transfer, sharing (depends on per-user-scoping) | Done (`OwnerStore` integration; `POST /v2/sys/asset-group-owner/transfer`; `ShareTargetKind::AssetGroup` with indirect member-expansion at authorize time; member redaction for non-owner / non-admin readers) |
 | 14 | Namespace scoping: per-namespace store, ancestor inheritance (read-only), per-namespace reverse indexes and `groups` qualifier, `.bvx` per-namespace groups | Done |
 | 15 | v2 batch read (`full` / `slim`), persisted per-scope change version with `since` revalidation, shared GUI cache; server-side reverse-index cache rejected | Done |
+| 16 | KV-secret members keyed on the secret's own name (record format 1), migration of stored members keeping their access exactly, pending-switch refusals, GUI chips by own name (T507) | Done |
 
 ## Testing
 
@@ -436,11 +451,11 @@ Ten integration tests in `src/modules/resource_group/mod.rs`:
    can read a resource in "club" but is denied on a resource outside
    it. Moving the resource in/out of the group takes effect on the
    next request without re-login.
-6. `test_resource_group_secret_membership_and_canonicalization` —
-   secrets supplied in canonical, `data/`, and `metadata/` forms all
-   collapse to the same two entries; `by-secret` accepts
-   base64url-encoded queries and returns the matching groups for any
-   of the three forms; removing a secret clears the reverse index.
+6. `test_resource_group_secret_membership_by_own_name` — secrets are
+   stored as given (trimmed, deduped, nothing stripped); `by-secret`
+   finds each by its own name and not another secret's; removing a
+   secret clears the reverse index. The T507 behaviour and migration are
+   in `src/engine_tests/asset_group_secret_names.rs`.
 7. `test_resource_group_acl_groups_qualifier_kv` — the same ACL gate
    enforces access against a KV-v1 mount: a user with a
    `groups = ["kv-club"]` policy reads `kv/alpha` (in the group), is

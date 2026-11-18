@@ -1122,13 +1122,11 @@ POST /v2/sys/namespace-transfer/move
   only when that group exists there (not merely inherited), the caller can
   see all of its members, and may modify it. A group is never created;
   otherwise `group-membership-dropped` (subject: the group name). A KV
-  secret whose source or destination `<mount><name>` has `data` or
-  `metadata` as its second segment (on `secret/`, a name that is `data` or
-  `metadata` or starts with `data/` or `metadata/`; on a mount such as
-  `team/data/`, every secret) carries no membership at all, with one
-  `group-membership-not-carried` warning (subject: the source item): the
-  asset-group store reads `secret/data/x` as the secret `x`, so it would
-  carry `x`'s groups and add the destination's `x` (T510, until T507).
+  secret carries the groups that list it by its own `<mount>/<name>` and
+  joins the destination's as its own name, so `data/x` never carries `x`'s
+  (T507). While the asset-group key switch is pending (see "Asset-group key
+  switch pending") a KV secret carries no membership at all, with one
+  `group-membership-not-carried` warning (subject: the source item).
 - **Files** (resources): each namespace has its own files engine and blobs
   are not copied, so attached files are re-pointed (`files/files/repoint-resource`)
   only by a move within one namespace, after the source is deleted.
@@ -1166,8 +1164,8 @@ group name) as `subject` and list the capability names:
 destination refused a planned share), `all-shares-dropped` and
 `shares-unreadable` (subject: the source item). Groups and files:
 `group-membership-dropped`, `group-membership-unreadable`,
-`group-membership-not-carried` (a KV `<mount><name>` whose second
-segment is `data` or `metadata`), `files-not-transferred`. A dry run reports the same warnings without
+`group-membership-not-carried` (a KV secret while the asset-group key
+switch is pending), `files-not-transferred`. A dry run reports the same warnings without
 writing; it cannot check the share route's owner rule, which the import
 satisfies by making the caller the owner.
 
@@ -2120,8 +2118,68 @@ GET    /v1/resource-group/by-secret/{b64url_path}
 PUT    /v1/resource-group/reindex
 ~~~
 
-`PUT /v1/resource-group/reindex` rebuilds both reverse indexes
-from primary records — recovery path for torn writes.
+`PUT /v1/resource-group/reindex` rebuilds the reverse indexes
+from primary records — recovery path for torn writes. It also converts a
+group record still in the pre-T507 member form (one a `.bvx` import wrote
+raw) as the migration below would have, so run it after such an import.
+
+**KV-secret members are each secret's own name (T507).** `secrets` lists
+`<mount>/<name>`, namespace-relative, stored as given (outer whitespace and
+`/` trimmed, a `..` segment dropped): on a KV v2 mount `secret/data/x` is the
+secret named `data/x`, and `secret/x` the secret `x`, reached through every
+route (`data/`, `metadata/`, `destroy/`, `undelete/`, the version 2 short
+form); on a kv (version 1) mount `kv/data/x` is the secret `data/x`. The
+Vault API forms are no longer stripped, so a script that sent
+`secret/data/x` for `x` now names `data/x`. `by-secret/{b64url_path}` takes
+the same own name. A member's read probe for redaction uses the routes whose
+key is that member. Before T507 a member and a request lost a `data` or
+`metadata` second segment whatever the mount, so on a kv mount `kv/x`,
+`kv/data/x` and `kv/metadata/x` were one member, and editing a group
+re-keyed a KV v2 member such as `secret/data/x` (from `secret/data/data/x`)
+to `secret/x`.
+
+A one-shot migration at unseal converts every stored member to each own
+name a pre-T507 lookup reached it by, through its namespace's mount table,
+so existing access is kept exactly: a kv (version 1) member `kv/x` becomes
+`kv/x`, `kv/data/x` and `kv/metadata/x`, each logged on the `migration`
+target (`member "kv/x" of group "g" in the root namespace reached [...]
+before T507; ...`, key names only) and counted, so operators can remove the
+ones a group should not list; a member of a multi-segment KV v2 mount stored
+in its `data/` form (`team/kv/data/z`) becomes the secret `team/kv/z`, now
+covering every route of `z`; a member no mount serves is kept as written.
+Each converted record keeps its old list (`legacy_secrets`, never read for
+access) for rollback; downgrading after the migration is unsupported.
+
+`GET /v1/resource-group/groups/{name}` shows `secrets` as own names once the
+migration has completed, and as stored before (the pre-T507 list) while it
+is pending; the old list is never shown.
+
+#### Asset-group key switch pending
+
+Until the migration's marker (`resource-group/meta/secret-names`) is set,
+every node looks members up by their pre-T507 keys. A failed pass is retried
+in the background with the KV key-split datafix (five times, 5 to 80 s
+apart) and again at every unseal. While it is pending, every caller, root
+included, gets a 503 for:
+
+- a group write whose `secrets` list differs from the one the group shows
+  (a write that resends it unchanged, or changes only `description`,
+  `members` or `files`, works), and a new group with secrets;
+- deleting a group that lists secrets;
+- deleting a KV secret (or any path the `secrets` lookup reaches) that a
+  group of the request's namespace lists;
+- a namespace-transfer `move` whose source is such a secret, refused before
+  anything is written, dry run included.
+
+A namespace transfer of a KV secret carries no group membership then (a
+`group-membership-not-carried` warning). Reads, `by-secret` (by own name)
+and every other request work as before. The 503 points here. When the retry
+gives up, the `security` log says `kv key datafixes gave up`; find the cause
+in the `migration` warnings (an unreadable namespace mount table, a storage
+fault), fix it, then seal and unseal a node. An unreadable marker refuses
+KV requests with a 500, root included, rather than guess which keys decide.
+Never set the marker by hand: records not yet converted would be read as own
+names.
 
 Asset groups are namespace-scoped. A group created in a namespace is
 listed and readable there and in its descendants; root's groups are

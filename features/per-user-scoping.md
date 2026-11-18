@@ -410,8 +410,8 @@ secret `data/x`, which the server keys verbatim since T499. Before, the page
 ran the name through the asset-group canonicaliser, which strips a `data` or
 `metadata` second segment, so it showed `x`'s owner for `data/x` and an
 administrator sharing `data/x` granted a share on `x`. The asset-group chips
-and filters still use that canonicaliser, because the group store still
-strips (T507), so a secret named `data/x` shows `x`'s groups there.
+and filters use the same own name since T507, when the group store stopped
+stripping, so a secret named `data/x` shows its own groups, never `x`'s.
 
 ### Which entity a share names
 
