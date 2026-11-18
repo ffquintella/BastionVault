@@ -3301,13 +3301,28 @@ refused with `409` and nothing is written or provisioned:
 - The response does not say which mount holds the name; the server log does
   (WARN on the `security` target). Updating a user the mount already holds is
   unchanged.
+- The `409` is an existence check: a caller who may create users on one
+  userpass mount learns whether a username exists on another. That right is
+  an administrator's; before T500 the same caller silently created a second
+  user that logged in as the other one's entity.
 - Two creations of one name on two mounts at the same moment can both pass
   (there is no lock across mounts); the next unseal reports the pair.
 - Duplicates created before this check are not changed. On every unseal a
   background scan logs one WARN line on the `security` target per username
   held by more than one userpass mount (`userpass username 'carol' is held by
   2 userpass mounts (auth/corp/, auth/partners/) ...`), then a count. To
-  resolve one, delete the user from all but one mount.
+  resolve one, delete the user from all but one mount. The remaining user
+  keeps everything the shared entity owns and everything shared with it,
+  including what the other user created. When the two were different people,
+  create the other person under a new name (creation provisions their entity),
+  then review the shared entity: what is shared with it
+  (`LIST identity/sharing/by-grantee/{entity_id}`) and the owner of each of
+  their objects (`identity/owner/kv/...`, `identity/owner/resource/...`,
+  `identity/owner/file/...`). Move what belongs to the other person with
+  `sys/kv-owner/transfer`, `sys/resource-owner/transfer`,
+  `sys/file-owner/transfer` and `sys/asset-group-owner/transfer`
+  (`new_owner_entity_id`), and revoke and re-grant shares through
+  `identity/sharing/by-target/{kind}/{target}/{grantee}`.
 
 **Set a user's password**
 
@@ -3318,7 +3333,12 @@ POST /v1/auth/{mount}/users/{username}/password
 `{"password": "..."}`. Creates the user when it does not exist, so the same
 `409` applies. The username is lower-cased like on every other user route
 (before T500, a name with capitals wrote a second, unusable record and left
-the user's password unchanged).
+the user's password unchanged). Such a stray record (`user/Carol` next to
+`user/carol`) logs no one in, but it shows in `LIST .../users` and the user
+routes cannot delete it, because they lower-case the name. A root token
+removes it: read the mount's `uuid` from the auth table
+(`GET /v1/sys/raw/core/auth`, under `entries` and the mount path), then
+`DELETE /v1/sys/raw/auth/{uuid}/user/{Name}` with the exact case.
 
 **Read a user**
 
@@ -3342,11 +3362,14 @@ POST /v1/auth/{mount}/users/{username}/unlock
 DELETE /v1/auth/{mount}/users/{username}
 ~~~
 
-Deleting a user drops its identity alias (the entity record stays, with its
-ownership and shares), so a user created later under that name is a new
-principal. While another userpass mount still holds the same username (a
-duplicate from before T500) the alias is kept, because that mount's user logs
-in as the same entity.
+Deleting a user drops its root-namespace identity alias (the entity record
+stays, with its ownership and shares), so a user created later under that name
+who logs in at root is a new principal. Aliases made by logins inside a
+namespace are not dropped: a re-created user who logs in to that namespace
+gets the old entity there, with its ownership and shares (T522). While
+another userpass mount still holds the same username (a duplicate from
+before T500) the root alias is kept too, because that mount's user logs in as
+the same entity.
 
 **List users**
 

@@ -125,9 +125,15 @@ migration.
 - **Existing duplicates** are kept as they are. Each unseal spawns a scan
   (`username_mounts::report_duplicate_usernames`, from `start_background`)
   that logs one WARN per username held by more than one mount, with the mount
-  paths, then a count; it never fails or delays the unseal.
+  paths, then a count; it never fails or delays the unseal. The module keeps
+  the last result (`UserPassModule::take_last_duplicate_scan`) so a test can
+  see the unseal ran it. The `sync_handler` build (off by default, built by no
+  CI target) detaches it on a thread instead of a task.
+- **Existence check:** the `409` tells a caller who may create users on one
+  mount whether a username exists on another (an administrator's right).
 - **Deleting** one of two duplicates keeps the entity alias the other mount's
-  user still logs in as; deleting the last holder drops it as before.
+  user still logs in as; deleting the last holder drops it as before. Only the
+  root-namespace alias is ever dropped (T522).
 - **Known limit:** two creations of one name on two mounts at the same moment
   can both pass (storage has no cross-mount lock); the next unseal reports it.
   Keying userpass identity by the real mount (separate entities, assignments
@@ -169,6 +175,8 @@ the delete rule, the unseal scan on planted duplicates with a seal and unseal).
 
 - Separate identity entities per userpass mount (T521): today a username may
   exist in only one userpass mount, and pre-T500 duplicates stay one entity.
+- Dropping a deleted user's namespace aliases (T522): a re-created name that
+  logs in to a namespace inherits the deleted user's entity there.
 - GUI operator-login MFA prompt (the desktop app's own sign-in does not yet
   prompt for a TOTP code; the backend endpoint and CLI accept it today).
 - Namespace-aware TOTP mount resolution follows the existing cross-mount
