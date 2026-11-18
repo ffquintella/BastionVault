@@ -4177,8 +4177,8 @@ impl PolicyStore {
                     && !namespace_routes_apply(&d.resolution.binding_ns, req.namespace_path.as_deref())
                 {
                     detail.push_str(
-                        "; a namespace policy grants this route only to a token working in the namespace it was \
-                         born in",
+                        "; a namespace policy grants this route only to a token working in the namespace its \
+                         policies are bound to",
                     );
                 }
                 if !d.scope_gated.is_empty() {

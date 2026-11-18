@@ -132,10 +132,11 @@ async fn a_namespace_born_token_transfers_between_mounts_of_its_namespace() {
     assert!(get(&core, &root, a, "secret/data/team/db").await.is_none(), "the move deleted its source");
 }
 
-/// With `child_visible`, the same grant copies from `a` into its child `a/b`,
-/// where the token's rights come from `a/b`'s own policy. Without it, `a/b`
-/// is a namespace the token cannot see. The route itself is granted only in
-/// `a`: sent with the `a/b` header it is refused.
+/// With `child_visible`, the same grant copies from `a` into its child `a/b`
+/// and from `a/b` to the other child `a/c`, the token's rights there coming
+/// from each child's own policy. Without it, `a/b` is a namespace the token
+/// cannot see. The route is granted only in `a`: with the `a/b` header it is
+/// refused.
 #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
 async fn a_child_visible_token_transfers_into_a_descendant() {
     let (_bvault, core, root) = tenants("ns_born_transfer_descendant").await;
@@ -157,6 +158,16 @@ async fn a_child_visible_token_transfers_into_a_descendant() {
     let res = between("resource", ("a", "resources", "srv1"), ("a/b", "resources", "srv1"));
     result(run(&core, &token, "copy", a, res).await);
     assert!(get(&core, &root, Some("a/b"), "resources/resources/srv1").await.is_some(), "the resource arrived");
+
+    send(&core, &root, Operation::Write, "sys/namespaces/a/c", None, json!({})).await.unwrap();
+    let sibling_child = r#"path "a/c/secret/*" { capabilities = ["create", "read", "update", "delete", "list"] }"#;
+    ns_policy(&core, &root, "a/c", "c-writer", sibling_child).await.unwrap();
+    let both = born_in(&core, &root, "a", &["mover", "child-writer", "c-writer"], true).await;
+    let across = between("kv-secret", ("a/b", "secret", "team/db"), ("a/c", "secret", "team/db"));
+    let out = result(run(&core, &both, "copy", a, across).await);
+    assert_eq!(out["destination"]["namespace"], json!("a/c"), "{out}");
+    let arrived = get(&core, &root, Some("a/c"), "secret/data/team/db").await.expect("the secret arrived in a/c");
+    assert_eq!(arrived["data"], json!({ "v": "two" }));
 
     let header_b = run(&core, &token, "copy", Some("a/b"), kv.clone()).await;
     assert!(denied(&header_b), "the grant is a's, not a/b's: {header_b:?}");
@@ -377,6 +388,10 @@ async fn a_namespace_policy_names_no_other_sys_path() {
         let r = send(&core, &token, op, path, a, b).await;
         assert!(refused(&r), "{op:?} {path}: {r:?}");
     }
+    for path in ["sys/namespace-transfer/copy/", "sys/namespace-transfer//copy"] {
+        let r = send(&core, &token, Operation::Write, path, a, json!({})).await;
+        assert!(denied(&r), "an exact grant covers no other spelling: {path}: {r:?}");
+    }
     let reached = run(&core, &token, "copy", a, json!({})).await;
     assert_eq!(status(&reached), 400, "the grant reaches the handler: {reached:?}");
     assert!(message(&reached).starts_with("invalid namespace transfer"), "{}", message(&reached));
@@ -403,4 +418,44 @@ async fn a_namespace_policy_names_no_other_sys_path() {
         let expected = if reachable { json!(["update"]) } else { json!(["deny"]) };
         assert_eq!(caps, expected, "{path}");
     }
+}
+
+/// The policy dry-run decides the route as a real request does: `a`'s policy
+/// (as a draft or stored and attached) allows it for a token bound to `a`
+/// working in `a`, and not for one working in `a/b` or a root sign-in in
+/// `a` (`binding_namespace`), which the pipeline refuses too.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn the_policy_dry_run_reports_the_route_as_the_pipeline_decides() {
+    let (_bvault, core, root) = tenants("ns_born_transfer_dry_run").await;
+    let mover = format!("{ROUTES}{A_DATA}");
+    let harmless = r#"path "a/secret/x" { capabilities = ["read"] }"#.to_string();
+    let dry_run =
+        |ns: &'static str, binding: Option<&'static str>, draft: String, attached: &'static [&'static str]| {
+            let core = core.clone();
+            let root = root.clone();
+            let case = json!({ "path": "sys/namespace-transfer/copy", "capability": "update", "policies": attached });
+            let mut b = json!({ "policy": draft, "name": "draft", "cases": [case] });
+            if let Some(binding) = binding {
+                b["binding_namespace"] = json!(binding);
+            }
+            async move {
+                let r = send(&core, &root, Operation::Write, "sys/policies/acl/test", Some(ns), b).await;
+                r.unwrap().unwrap().data.unwrap()["results"][0].clone()
+            }
+        };
+    let own = dry_run("a", None, mover.clone(), &[]).await;
+    assert_eq!(own["allowed"], json!(true), "a draft of a, token bound to a: {own}");
+    let from_root = dry_run("a", Some(""), mover.clone(), &[]).await;
+    assert_eq!(from_root["allowed"], json!(false), "a root sign-in working in a: {from_root}");
+
+    ns_policy(&core, &root, "a", "mover", &mover).await.unwrap();
+    let attached = dry_run("a", None, harmless.clone(), &["mover"]).await;
+    assert_eq!(attached["allowed"], json!(true), "a's stored policy, token bound to a: {attached}");
+    let in_child = dry_run("a/b", Some("a"), harmless, &["mover"]).await;
+    assert_eq!(in_child["allowed"], json!(false), "a's stored policy, token bound to a working in a/b: {in_child}");
+
+    let token = born_in(&core, &root, "a", &["mover"], true).await;
+    let real = run(&core, &token, "copy", Some("a"), json!({})).await;
+    assert_eq!(status(&real), 400, "the real request is allowed and reaches the handler: {real:?}");
+    assert!(denied(&run(&core, &token, "copy", Some("a/b"), json!({})).await), "and refused from a/b");
 }
