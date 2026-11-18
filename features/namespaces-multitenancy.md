@@ -236,6 +236,25 @@ Policies are namespace-scoped. A policy named `admin` in `engineering` and a pol
 
 Templated policies (the existing `{{username}}` / `{{entity.id}}` / `{{auth.mount}}` from per-user scoping) gain `{{namespace.path}}` and `{{namespace.id}}` for advanced use cases.
 
+#### The one route a namespace policy may name outside its paths (T513)
+
+Root-owned paths (`sys/`, `auth/`, `identity/`, …) stay refused in a
+namespace policy, with exactly one exception: the namespace transfer,
+`sys/namespace-transfer/copy` and `sys/namespace-transfer/move`
+([cross-namespace-copy-move.md](cross-namespace-copy-move.md)). Every step of
+a transfer is the caller's own request in the namespace it touches, so the
+route grants no data access of its own.
+
+| Rule | Where |
+|---|---|
+| **Exact paths only.** A rule naming either path exactly is accepted at write time; a glob (`sys/namespace-transfer/*`, `…/copy*`, `…/+`), another operation, another spelling or any other root-owned path is refused as before (403). | `policy_scope::NAMESPACE_GRANTABLE_ROUTES`, `refuse_cross_namespace_paths` |
+| **Own namespace only.** `build_acl` drops such a rule unless the request is addressed to the namespace the token's policies resolve in. In a descendant (even `child_visible`), at root or in any other namespace the route answers the same 403 as without the grant, whether that namespace exists or not. A namespace's policy reached through T471 is confined to `<ns>/` and never grants it, so a root sign-in still needs a root-namespace grant. | `policy_store::namespace_routes_apply` |
+| **Reported as decided.** `sys/capabilities-self` (implicit for namespace tokens) and the policy dry-run build the ACL through the same `build_acl`, so they report `update` exactly where the route is allowed. | `build_acl` |
+
+Root-namespace policies and root tokens are unchanged. A namespace policy that
+named either path was refused before T513 and is accepted now; nothing stored
+changes meaning.
+
 #### Cross-namespace policy resolution (T471)
 
 A token's policy names resolve in the namespace its policies live in, `B`
@@ -566,6 +585,7 @@ Land the data model and the routing path. No identity/policy/audit scoping yet �
 | `{{namespace.path}}` / `{{namespace.id}}` policy templates (`src/modules/policy/policy_store.rs`) | Namespace-aware ACL templating. | ✅ Done |
 | `namespace` field on audit entries (`crates/bv-audit/src/entry.rs`) | Per-tenant audit attribution. | ✅ Done |
 | `src/modules/namespace/policy_scope.rs` — cross-namespace path refusal (write-time guard, wired into policy write) | Refuses policies referencing another namespace's paths. | ✅ Done |
+| Namespace-grantable transfer route (T513): `policy_scope::NAMESPACE_GRANTABLE_ROUTES` + `build_acl` | A namespace policy may name `sys/namespace-transfer/copy` and `.../move` exactly, counted only for a token working in its own namespace. See "The one route a namespace policy may name outside its paths". | ✅ Done |
 | Per-namespace policy *storage* (separate policy documents per namespace, `src/modules/policy/policy_store.rs`) | Tenant ACL policies live in their own keyspace (`policy-ns/<b64(path)>/…`); root keeps the legacy keyspace. `get/set/list/delete/history` gain `_ns` variants; the `sys/policy*` handlers scope by the request namespace header. | ✅ Done |
 | `crates/bv-audit/src/broker.rs` — per-namespace *broadcasters* + root mirror | Devices carry a `namespace` + root-only `mirror` flag; `log` partitions fan-out by `entry.namespace` with a per-namespace hash chain and a superuser mirror on the root chain; `sys/audit` enable/disable/list scope by header. | ✅ Done |
 | `src/modules/policy/policy_store.rs` `new_acl_inner` (extension) | Compiles policies against the calling token's bound namespace (loads each named policy from that namespace's store). | ✅ Done |

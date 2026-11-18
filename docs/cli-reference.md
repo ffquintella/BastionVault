@@ -447,14 +447,31 @@ The request itself runs in the root namespace unless you pass `--namespace`,
 which sets the `X-BastionVault-Namespace` header: the route is then evaluated
 in that namespace, as the API does with the header. `--namespace` is the
 namespace of the request, not of the source or the destination, which
-`--source-namespace` and `--destination-namespace` name in the body. A token
-born inside a namespace cannot run the transfer at all (a namespace policy
-cannot name `sys/` paths, so the route answers it with a bare 403): the flag
-serves a **root sign-in assigned to that namespace**, whose policy in the
-root namespace grants `update` on `sys/namespace-transfer/*` and
-`sys/capabilities-self`. A token bound to CIDRs cannot run a transfer.
+`--source-namespace` and `--destination-namespace` name in the body. The
+flag serves two callers:
+
+- **A token born in the namespace** (logged in there, or assigned to that
+  namespace only), whose policy in that namespace names
+  `sys/namespace-transfer/copy` and/or `sys/namespace-transfer/move`
+  exactly (T513; a glob is refused). The grant counts only with
+  `--namespace` set to the token's own namespace. It copies or moves
+  between that namespace's mounts and, for a `child_visible` token, between
+  it and its descendants; a sibling or an ancestor answers as a namespace
+  the caller cannot see.
+- **A root sign-in assigned to the namespace**, whose root-namespace policy
+  grants `update` on `sys/namespace-transfer/*` (a namespace's own policy
+  does not grant it the route).
+
+Either way every read, write and delete is the token's own request, decided
+by its rights where it lands. A token bound to CIDRs cannot run a transfer.
 
 ~~~bash
+# A token born in team-a whose team-a policy names the route: copy a KV
+# secret between two of team-a's mounts.
+bvault transfer copy --kind kv-secret --namespace team-a \
+    --source-namespace team-a --destination-namespace team-a \
+    secret/app/db archive/app/db
+
 # A root sign-in assigned to team-a: the request runs in team-a (the header),
 # moving a resource out of it to team-b.
 bvault transfer move --kind resource --namespace team-a \

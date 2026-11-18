@@ -1049,8 +1049,23 @@ POST /v2/sys/namespace-transfer/move
   named only to a caller who may operate in it.
 - The route itself is evaluated in the request's **active namespace** (the
   `X-Vault-Namespace` header, root when absent), so the caller's policy must
-  grant `update` on `sys/namespace-transfer/*` and `sys/capabilities-self`
-  there. A token bound to CIDRs (`token_bound_cidrs`) is refused before any
+  grant `update` on the route (`sys/namespace-transfer/copy` or `.../move`)
+  and on `sys/capabilities-self` there. A root-namespace policy names it like
+  any `sys/` path (`sys/namespace-transfer/*` works). A **token born in a
+  namespace** gets it from a policy of its own namespace that names
+  `sys/namespace-transfer/copy` and/or `sys/namespace-transfer/move`
+  **exactly** (T513). These two exact paths are the only root-owned paths a
+  namespace policy may name: a glob (`sys/namespace-transfer/*`), another
+  operation or any other `sys/` path is still refused at write time (403).
+  The rule counts only when the active namespace is the token's own: in a
+  descendant (even with `child_visible`), at root or anywhere else it is
+  ignored, and a namespace's policy reached by a root sign-in working there
+  never grants the route (T471 confines it to that namespace's paths). A
+  caller without the grant gets the same `403 permission denied` whatever
+  namespace the header or the body names, existing or not.
+  `sys/capabilities-self` is granted to every namespace token (implicit
+  `namespace-self`) and reports the route as this rule decides it. A token
+  bound to CIDRs (`token_bound_cidrs`) is refused before any
   step (403, `tokens bound to CIDRs cannot run namespace transfers`): the
   steps are internal sub-requests that carry no client address, so the
   binding could not be checked on them. A use-limited token (`num_uses`)
@@ -1061,8 +1076,9 @@ POST /v2/sys/namespace-transfer/move
   its import, which leaves the destination deleted like any failed overwrite.
 - Every step is an ordinary request made with the **caller's token** in the
   namespace it touches. The caller needs:
-  - `update` on `sys/namespace-transfer/*` (this route; no built-in policy
-    grants it) and on `sys/capabilities-self` (granted by `default`);
+  - `update` on the route (no built-in policy grants it; see above for a
+    token born in a namespace) and on `sys/capabilities-self` (granted by
+    `default`, and implicitly to a namespace token);
   - read (and list on `resources/secrets/<name>`) on everything read at the
     source;
   - write on the destination item and, for a resource, on each
@@ -1070,7 +1086,10 @@ POST /v2/sys/namespace-transfer/move
   - `delete` on the source item for `move` and on the destination item for
     `overwrite`.
 
-  The token must be valid in both namespaces. A plain copy relies on the
+  The token must be valid in both namespaces. For a token born in namespace
+  `a` that is `a` and, with `child_visible`, its descendants: it can copy or
+  move between `a`'s mounts and between `a` and a descendant, never to or
+  from a sibling or an ancestor (the 400 above). A plain copy relies on the
   destination import's own ACL check. A `move`, an `overwrite` or a
   `dry_run` first checks the rights it needs through `sys/capabilities-self`,
   before anything is written. A missing right is a 403 naming it; the first

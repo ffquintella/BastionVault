@@ -63,11 +63,13 @@ never part of them; name it with --source-namespace and
 --destination-namespace (default: the root namespace, "").
 
 The request itself runs in the root namespace unless you pass
---namespace <path>, which sets the X-BastionVault-Namespace header. A token
-born inside a namespace cannot run the transfer at all (a namespace policy
-cannot name sys/ paths): the flag is for a ROOT sign-in assigned to that
-namespace, whose root-namespace policy grants update on
-sys/namespace-transfer/* and sys/capabilities-self (docs/cli-reference.md).
+--namespace <path>, which sets the X-BastionVault-Namespace header. It
+serves a token born in that namespace whose policy there names
+sys/namespace-transfer/copy and/or .../move exactly (the grant counts only
+in the token's own namespace; a child_visible token can also reach its
+descendants, never a sibling or an ancestor), and a ROOT sign-in assigned
+to it whose root-namespace policy grants update on sys/namespace-transfer/*
+(docs/cli-reference.md).
 
 For a mount whose name has a slash, name the mount with --source-mount /
 --destination-mount; the positional on that side is then the whole path

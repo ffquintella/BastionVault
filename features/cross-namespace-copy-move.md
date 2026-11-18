@@ -37,6 +37,10 @@ membership, from three surfaces:
   disabled with a reason when no other namespace is available or the mount is
   KV v1. Overwrite and Move each need their own acknowledgement after the check.
 
+Who may run it: a root-namespace token with the grant in a root policy, or a
+token born in a namespace whose own policy names the routes exactly, working
+in that namespace (T513, "Known limits", Rights).
+
 Not done: the GUI was proven only in jsdom, not in a live window.
 Follow-ups are tracked in `ROADMAP.md` (T496-T505; T496, T498 and T501-T503
 are done). What the feature cannot carry is under "Known limits".
@@ -186,6 +190,13 @@ cleans up its owner, shares and groups) and imports again.
 - A namespace the token may not operate in is answered exactly as one that
   does not exist, and as a mount the caller cannot see (one 400), so the
   route tells nothing about namespaces the caller may not use (T503).
+- A namespace policy may name the two routes exactly and nothing else
+  root-owned (T513); the rule is dropped from the ACL unless the token works
+  in its own namespace, so a policy of `a` authorises the route nowhere
+  else. A namespace policy naming the route was refused before T513 and is
+  accepted now; nothing stored changes. A binary without T513 would apply
+  such a rule whatever the active namespace (each step is still the token's
+  own request); remove it before such a downgrade if that matters.
 - An import whose answer names another item than the one the ACL checked
   fails with a 500 naming the item, never leaving it silently unowned (T502).
 - No persisted-format change is expected; if one is needed, apply the
@@ -265,14 +276,30 @@ cleans up its owner, shares and groups) and imports again.
   The exception is an overwrite whose token runs out between its delete and
   its import, which leaves the destination deleted like any failed overwrite.
 - **Rights.** The route is evaluated in the request's active namespace and
-  needs `update` on `sys/namespace-transfer/*` plus `sys/capabilities-self`
-  there; no built-in policy grants the former. `bvault transfer --namespace
-  <path>` sets the namespace header (T497); without it the request runs in
-  the root namespace. A token born inside a namespace cannot run the transfer
-  at all (a namespace policy cannot name `sys/` paths, so it gets a bare
-  403); the flag serves a root sign-in assigned to the namespace, with the
-  `sys/namespace-transfer/*` and `sys/capabilities-self` grants in a
-  root-namespace policy.
+  needs `update` on the route plus `sys/capabilities-self` there; no
+  built-in policy grants the former. `bvault transfer --namespace <path>`
+  sets the namespace header (T497); without it the request runs in the root
+  namespace. Two callers hold the route (T513):
+  - a **token born in the namespace** (logged in there, or a sign-in
+    assigned to that namespace only, which login binds there), when a policy
+    of that namespace names `sys/namespace-transfer/copy` and/or
+    `sys/namespace-transfer/move` **exactly**. No glob: those two paths are
+    the only root-owned paths a namespace policy may name. The rule counts
+    only when the active namespace is the token's own; in a descendant, at
+    root or anywhere else the route answers the same 403 as without it.
+    `sys/capabilities-self` is implicit for namespace tokens.
+  - a **root-namespace token**, a root sign-in assigned to the namespace
+    included, with `sys/namespace-transfer/*` in a root-namespace policy, as
+    before; a namespace's own policy never grants it the route.
+
+  The grant only starts the transfer: every read, check, import and delete
+  is the token's own request where it lands. A token born in `a` can copy or
+  move between `a`'s mounts and, with `child_visible`, between `a` and its
+  descendants (its rights there come from its own policies or the
+  descendant's same-named ones, T471). A sibling or an ancestor answers as a
+  namespace the caller cannot see (400, T503); an operator's namespace
+  assignment can let the principal into a sibling, but `a`'s policies name
+  only `a`'s paths, so it sees no mount there either.
 - **Policies naming the source path are not rewritten** (always warned as
   `policies-not-carried`).
 - **The import routes are internal-only.**
@@ -300,3 +327,4 @@ cleans up its owner, shares and groups) and imports again.
 | 6 | Tauri command `transfer_object` and the Resources page action with the dry-run warning preview | Done |
 | 6b | The KV Secrets page action (T496) and the dialog polish: overwrite acknowledgement, fixed title, case-aware same-item check, fail-safe share banner (T501) | Done |
 | 7 | Tests: permission matrix, collision, partial failure, shares kept / dropped, aliasing of one item, in-crate, facade and GUI | Done |
+| 8 | A token born in a namespace runs the transfer there: a namespace policy names the two routes exactly, counted only in its own namespace (T513) | Done |
