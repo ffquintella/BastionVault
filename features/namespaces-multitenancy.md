@@ -364,6 +364,8 @@ exactly the ACL they built before.
 
 Each namespace has its own identity tree. An entity in `engineering` is a *different entity* from one in `marketing`, even if both are aliased to the same external SSO subject. This is the right default — one company's "alice" SSO claim shouldn't grant her anything in another customer's namespace just because both happen to use the same IdP.
 
+Because a principal has one alias, and so one entity, per namespace it signed in to, deleting it forgets the alias in every namespace, not only at root (T522): otherwise a principal re-created under the name and signed in to a namespace would get the old entity there, with its ownership and shares. The old entities and their owner and share records are kept, reachable by no one, for an administrator to transfer (docs/api.md, "Delete a user").
+
 For the SaaS / MSP case where a single human really does span tenants, the **identity-link** primitive (Phase 3) lets the parent namespace explicitly declare "entity X in child A and entity Y in child B are the same person, for audit-correlation purposes." The link is one-way visible from the parent, never from siblings.
 
 ### Namespace Assignment (Login-Restriction)
@@ -664,6 +666,7 @@ Land the data model and the routing path. No identity/policy/audit scoping yet �
 | `src/modules/identity/mod.rs` (extension) | Group-management + entity-alias HTTP handlers scope by the `X-BastionVault-Namespace` header; `identity/` is exempted from path-rewrite so it stays header-scoped like `sys/`. | ✅ Done |
 | Per-login namespace binding (`credential/userpass`, `credential/approle`, `oidc`, `saml`, standalone `fido2`) | Login resolves the namespace header (fails closed on an unknown namespace), provisions/loads the entity and expands groups *in that namespace*, and stamps the token's namespace binding. Covers userpass password + userpass-FIDO2 + approle + ferrogate, and now `oidc/`, `saml/` and the standalone `fido2/` mount. (`cert` login: no login path exists.) | ✅ Done |
 | `src/modules/namespace/identity_link.rs` + `v2/sys/namespace-links` | Parent-visible cross-tenant identity correlation: a namespace may link entities only within its own subtree (one-way), stored partitioned by owner so siblings/children never see it. List/create/read/delete via the system backend, scoped by header. | ✅ Done |
+| Deleted principals forgotten in every namespace (T522): `EntityStore::forget_aliases`, `IdentityModule::forget_principals`, `AuthModule::disable_auth` | Deleting a userpass user or AppRole role, or disabling their mount, removes the `(mount, name)` alias from root's index and from every `identity-ns/<b64>/alias/` keyspace in storage (deleted namespaces included), so a re-created name is a new entity in every namespace. A name another mount of the type holds keeps its aliases (T500's rule). Entity, owner and share records stay; plugin data is purged once no alias anywhere names the entity. | ✅ Done |
 
 ### Phase 4 — Quotas + GUI
 
@@ -738,6 +741,7 @@ decisions and rationale.
 - Writing to a namespace path that doesn't exist: 404, not 403 (so the response distinguishes "no such namespace" from "you're not allowed"). Decision of 2026-11-18: kept; namespace existence is not confidential (T512, abandoned).
 - A token issued in `engineering/platform` operates with header `X-BastionVault-Namespace: engineering` (parent): rejected with `permission_denied`, audit-logged in the parent's broadcaster.
 - A policy in `a` naming `a*`, `ab*`, `*`, `+/x`, `sys/*` or `auth/*`: refused at write time and on `.bvx` import; the same rules stored in `a`'s keyspace grant a token of `a` nothing, in `ab` and at root included where an assignment lets it work, while the policy's confined rules still apply (`src/engine_tests/namespace_policy_rule.rs`, `policy_scope` and `policy_store` unit tests; T519, T520).
+- A userpass user or AppRole role that signed in at root and in `dst`, then is deleted (or its mount disabled) and re-created: both sign-ins are new entities that see none of the old ownership or shares, and the old records are unchanged (`src/engine_tests/principal_aliases.rs`; T522).
 
 ## Security Considerations
 

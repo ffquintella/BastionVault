@@ -466,6 +466,19 @@ Request body:
 DELETE /v1/sys/auth/{path}
 ~~~
 
+Disabling a `userpass` or `approle` mount also forgets the identity aliases of
+the users or roles it held, at root and in every namespace (T522), as deleting
+each of them would: a name later created on another mount is a new entity
+everywhere. A name another mount of the same type still holds keeps its
+aliases, because that mount's principal logs in as the same entities. The old
+entities keep their owner records and shares (see "Delete a user"). The mount
+is disabled even when this step fails partway: the response is then a `200`
+whose `data.warnings` names the principals whose aliases remain (also logged
+at WARN on the `security` target); delete each of those names on a mount of the
+same type that does not hold it to retry. OIDC, SAML, FIDO2, certificate and
+FerroGate mounts keep no principals to enumerate, so nothing is forgotten
+when they are disabled.
+
 ### Leases
 
 Vault's lease paths on the system backend. The `/v1/sys` and `/v2/sys` HTTP
@@ -3397,14 +3410,38 @@ POST /v1/auth/{mount}/users/{username}/unlock
 DELETE /v1/auth/{mount}/users/{username}
 ~~~
 
-Deleting a user drops its root-namespace identity alias (the entity record
-stays, with its ownership and shares), so a user created later under that name
-who logs in at root is a new principal. Aliases made by logins inside a
-namespace are not dropped: a re-created user who logs in to that namespace
-gets the old entity there, with its ownership and shares (T522). While
-another userpass mount still holds the same username (a duplicate from
-before T500) the root alias is kept too, because that mount's user logs in as
-the same entity.
+A login names its identity entity by username in the namespace it logs in to,
+so a user who signed in at root and in `tenant-a` has one entity in each.
+Deleting the user forgets its alias at root and in every namespace (T522), so
+a user created later under that name is a new principal everywhere and sees
+none of the old entities' ownership or shares. While another userpass mount
+still holds the same username (a duplicate from before T500) every alias is
+kept, because that mount's user logs in as the same entities.
+
+The old entities are not deleted. Their owner records and shares stay,
+reachable by no one, until an administrator moves them: with
+`sys/kv-owner/transfer`, `sys/resource-owner/transfer`,
+`sys/file-owner/transfer` and `sys/asset-group-owner/transfer`
+(`new_owner_entity_id`), and by revoking and re-granting shares through
+`identity/sharing/by-target/{kind}/{target}/{grantee}`. Note the entity ids
+before deleting: `GET identity/entity/aliases` (with the namespace header for a
+namespace) lists each alias with its `entity_id`, and
+`LIST identity/sharing/by-grantee/{entity_id}` lists what is shared with one.
+No endpoint lists the objects an entity owns; each object's owner is read with
+`identity/owner/{kv,resource,file}/...` (T526). Entity-scoped plugin data
+(`GET v2/sys/plugins/{name}/entity-data`) is purged once no alias in any
+namespace names the entity. Identity group membership and namespace
+assignments name a user by username, so they are not changed: a re-created
+user is back in the groups and namespaces its name was in.
+
+Forgetting never fails the delete. If an alias could not be removed, the
+response is a `200` with a `data.warnings` list (and a WARN on the `security`
+target): delete the user again to retry. Deleting a username the mount does not hold
+still forgets its aliases, which also clears an alias a delete made before
+T522 left in a namespace. Find those by comparing
+`GET identity/entity/aliases` in each namespace with the users that exist; a
+name that has since been re-created already logs in to that namespace as the
+old entity there: move its objects, or delete and re-create the user.
 
 **List users**
 
@@ -3487,6 +3524,21 @@ GET /v1/auth/{mount}/role/{role_name}/role-id
 ~~~
 POST /v1/auth/{mount}/role/{role_name}/secret-id
 ~~~
+
+**Delete a role**
+
+~~~
+DELETE /v1/auth/{mount}/role/{role_name}
+~~~
+
+Deletes the role and its secret IDs, and forgets the role's identity alias at
+root and in every namespace (T522), so a role created later under that name
+is a new entity everywhere. As for a userpass user (see "Delete a user"), the
+old entities keep their owner records and shares for an administrator to
+move, a name another AppRole mount still holds keeps its aliases, a partial
+failure is a `data.warnings` list, and deleting a role name the mount does not
+hold still forgets its aliases (the retry, and the way to clear an alias an
+earlier delete left).
 
 ### OIDC Provider Configuration
 

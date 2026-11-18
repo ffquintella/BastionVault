@@ -738,6 +738,9 @@ Answer the questions this spec defers, and record the answers here:
   identity module deletes an entity" therefore had no hook. The purge now runs
   when `forget_alias` removes an entity's **last** alias, since a recreated
   principal gets a new entity and the old data could never be reached again.
+  Since T522 `forget_alias` removes the alias in every namespace, and "last"
+  means no alias in any namespace's index names the entity (it looked at
+  root's alone).
 - **Passphrase-protected SSH keys.** The direct SSH path accepts one
   (`SshCredential::PrivateKey { pem, passphrase }`). The Rustion path refuses it,
   because the bastion envelope has no passphrase channel

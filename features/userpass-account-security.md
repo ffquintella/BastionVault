@@ -131,9 +131,10 @@ migration.
   CI target) detaches it on a thread instead of a task.
 - **Existence check:** the `409` tells a caller who may create users on one
   mount whether a username exists on another (an administrator's right).
-- **Deleting** one of two duplicates keeps the entity alias the other mount's
-  user still logs in as; deleting the last holder drops it as before. Only the
-  root-namespace alias is ever dropped (T522).
+- **Deleting** one of two duplicates keeps the entity aliases the other
+  mount's user still logs in as; deleting the last holder forgets them at root
+  and in every namespace (T522), as does disabling the last mount that holds
+  the name.
 - **Known limit:** two creations of one name on two mounts at the same moment
   can both pass (storage has no cross-mount lock); the next unseal reports it.
   Keying userpass identity by the real mount (separate entities, assignments
@@ -166,17 +167,30 @@ TOTP-MFA controls, Unlock action, list status badges), Tauri commands, and
 | CLI: `totp_code` on login | Done |
 | Tests (Rust unit + GUI api) | Done |
 | Backend: one username per userpass mount, duplicate report at unseal (T500) | Done |
+| Backend: a deleted user or disabled mount forgets its aliases in every namespace (T522) | Done |
 
 T500 is proven by `src/engine_tests/userpass_mounts.rs` (refusal in any case,
 by both creating routes, no record or entity on refusal, same-mount updates,
 the delete rule, the unseal scan on planted duplicates with a seal and unseal).
 
+T522: deleting a user, or disabling its mount, forgets its alias at root and in
+every namespace keyspace found in storage, under T500's keeping rule; the old
+entities keep their owner and share records for the transfer endpoints, and
+their plugin data goes once no alias anywhere names them. A partial failure is
+a `data.warnings` list in the response; deleting the name again retries. Proven by
+`src/engine_tests/principal_aliases.rs` (namespace logins before the delete and
+after the re-creation, AppRole, the keeping rule, disable, the purge).
+
 ### Not yet implemented
 
 - Separate identity entities per userpass mount (T521): today a username may
   exist in only one userpass mount, and pre-T500 duplicates stay one entity.
-- Dropping a deleted user's namespace aliases (T522): a re-created name that
-  logs in to a namespace inherits the deleted user's entity there.
+- Aliases a delete left in a namespace before T522 are not migrated: a name
+  re-created since logs in there as the old entity. Deleting a name no mount
+  holds clears them; no endpoint lists entities no alias names, or the
+  objects an entity owns (T526).
+- Group membership and namespace assignments name a user by username, so a
+  user re-created under a deleted name is back in them.
 - GUI operator-login MFA prompt (the desktop app's own sign-in does not yet
   prompt for a TOTP code; the backend endpoint and CLI accept it today).
 - Namespace-aware TOTP mount resolution follows the existing cross-mount

@@ -182,6 +182,12 @@ and scope checks consume that value.
 The initial cut is one-entity-per-(mount, principal); cross-mount alias
 merging is a follow-up.
 
+Deleting a principal (a userpass user, an AppRole role, or every one of a
+disabled mount) removes its alias from root's index and from every
+namespace's (T522); the entity record, its owner records and its shares
+stay, so an administrator can move them with the `sys/*-owner/transfer`
+routes. A principal re-created under the name gets a new entity everywhere.
+
 ### 5. Sharing
 
 Shipped. The on-disk schema is `SecretShare`:
