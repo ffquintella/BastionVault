@@ -141,12 +141,12 @@ pub trait IdentityService: Send + Sync {
     /// credential check so the issued token carries an `entity_id`.
     async fn ensure_entity_id(&self, mount: &str, name: &str, ns_path: &str) -> Result<String, RvError>;
 
-    /// Drop the `(mount, name)` → entity lookup index for a deleted principal.
+    /// Drop a deleted principal's `(mount, name)` alias in every namespace, so
+    /// a principal re-created under the name is a new entity everywhere (T522).
     ///
-    /// The entity record itself survives: shares and owner records still point
-    /// at its `entity_id`, and vaporising it would take the audit history with
-    /// it. Only the alias index goes, which is what makes the principal
-    /// disappear from user pickers.
+    /// Entity, share and owner records stay for an operator to transfer; an
+    /// entity no alias in any namespace names any more has its plugin data
+    /// purged. Errors when an alias could not be removed; retrying is safe.
     async fn forget_alias(&self, mount: &str, name: &str) -> Result<(), RvError>;
 
     /// Display name and aliases of an entity, or `None` if it is gone.

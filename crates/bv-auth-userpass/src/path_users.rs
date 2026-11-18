@@ -559,27 +559,25 @@ impl UserPassBackendInner {
         let _ = req.storage_delete(&format!("challenge/reg/{lc}")).await;
         let _ = req.storage_delete(&format!("challenge/auth/{lc}")).await;
 
-        // Drop the entity alias so the user disappears from the picker
-        // immediately. The entity record itself stays (shares and
-        // ownership records still point at its `entity_id`) so audit
-        // history isn't vaporised — only the `mount:name` lookup index
-        // is removed. Admins can recover by using the admin
-        // ownership-transfer endpoints. Silent on failure.
+        // Forget the user's entity alias in every namespace (T522), so a user
+        // re-created under the name is a new entity everywhere. The entity,
+        // owner and share records stay for the admin ownership-transfer
+        // endpoints. Deleting a name that is already gone still runs this, so
+        // a failed forget, or an alias an older delete left, is retried.
+        let mut forget_failed = None;
         if let Some(identity) = self.core.identity() {
             match super::username_mounts::mounts_holding(self.core.as_ref(), &lc).await {
                 // Another userpass mount still holds the name (a pre-T500
-                // duplicate): its user logs in as this entity, so keep it.
+                // duplicate): its user logs in as these entities, so keep them.
                 Ok(holders) if !holders.is_empty() => log::warn!(
                     target: "security",
-                    "userpass: deleted user '{lc}' but kept its entity alias: still held by {}",
+                    "userpass: deleted user '{lc}' but kept its entity aliases: still held by {}",
                     holders.join(", ")
                 ),
-                Ok(_) => {
-                    let _ = identity.forget_alias("userpass/", &lc).await;
-                }
+                Ok(_) => forget_failed = identity.forget_alias("userpass/", &lc).await.err(),
                 Err(e) => {
-                    log::warn!(target: "security", "userpass: deleted user '{lc}'; other mounts unreadable ({e}), alias dropped as before");
-                    let _ = identity.forget_alias("userpass/", &lc).await;
+                    log::warn!(target: "security", "userpass: deleted user '{lc}'; other mounts unreadable ({e}), aliases dropped as before");
+                    forget_failed = identity.forget_alias("userpass/", &lc).await.err();
                 }
             }
         }
@@ -587,7 +585,16 @@ impl UserPassBackendInner {
         // Audit.
         record_user_audit(&self.core, req, "delete", &lc, "").await;
 
-        Ok(None)
+        let Some(e) = forget_failed else {
+            return Ok(None);
+        };
+        log::warn!(target: "security", "userpass: deleted user '{lc}' but could not forget all its entity aliases ({e}); delete it again to retry");
+        // In the data: the HTTP layer does not carry `Response::warnings`.
+        let warning = format!(
+            "user '{lc}' was deleted, but its entity aliases could not all be forgotten: a user re-created under \
+             this name could log in as the old entity; delete the user again to retry"
+        );
+        Ok(Some(Response::data_response(serde_json::json!({ "warnings": [warning] }).as_object().cloned())))
     }
 
     pub async fn list_user(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {

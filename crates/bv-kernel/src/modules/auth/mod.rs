@@ -4,20 +4,24 @@
 
 use std::{
     any::Any,
+    collections::HashMap,
     sync::{Arc, RwLock},
 };
 
 use arc_swap::ArcSwapOption;
 use lazy_static::lazy_static;
 
-use crate::kernel_api::{MountEntryHMACLevel, VaultCtx};
+use crate::kernel_api::{
+    auth::{AuthMountPrincipals, AuthMountRegistry, AuthMountView},
+    MountEntryHMACLevel, VaultCtx,
+};
 use crate::{
     bv_error_response_status,
     core::{Core, LogicalBackendNewFunc},
     errors::RvError,
     handler::{AuthHandler, Handler},
     logical::Backend,
-    modules::Module,
+    modules::{identity::IdentityModule, Module},
     mount::{MountEntry, MountTable, MountsRouter},
     storage::{barrier::SecurityBarrier, barrier_view::BarrierView},
     utils::{generate_uuid, is_protect_path},
@@ -56,6 +60,9 @@ pub struct AuthModule {
     pub mounts_router: Arc<MountsRouter>,
     pub token_store: ArcSwapOption<TokenStore>,
     pub expiration: ArcSwapOption<ExpirationManager>,
+    /// How each credential backend type names its principals, so disabling
+    /// one of its mounts forgets their entity aliases (T522).
+    pub principals: RwLock<HashMap<String, Arc<dyn AuthMountPrincipals>>>,
 }
 
 #[maybe_async::maybe_async]
@@ -74,6 +81,7 @@ impl AuthModule {
             )),
             token_store: ArcSwapOption::empty(),
             expiration: ArcSwapOption::empty(),
+            principals: RwLock::new(HashMap::new()),
         })
     }
 
@@ -138,7 +146,11 @@ impl AuthModule {
         Ok(())
     }
 
-    pub async fn disable_auth(&self, path: &str) -> Result<(), RvError> {
+    /// Disable the auth mount at `path`. Once no login can reach it, the
+    /// entity aliases of the principals it held are forgotten in every
+    /// namespace (T522); that step never fails the disable, and what it could
+    /// not do is returned as warnings for the response.
+    pub async fn disable_auth(&self, path: &str) -> Result<Vec<String>, RvError> {
         let mounts_router = &self.mounts_router;
 
         let mut path = path.to_string();
@@ -152,6 +164,10 @@ impl AuthModule {
 
         let full_path = format!("{}{}", AUTH_ROUTER_PREFIX, &path);
         let view = mounts_router.router.matching_view(&full_path)?;
+        let logical_type = match mounts_router.entries.read()?.get(&path) {
+            Some(entry) => Some(entry.read()?.logical_type.clone()),
+            None => None,
+        };
 
         self.taint_auth_entry(&path).await?;
 
@@ -159,13 +175,113 @@ impl AuthModule {
 
         mounts_router.router.unmount(&full_path)?;
 
-        if view.is_some() {
-            view.unwrap().clear().await?;
+        let mut warnings = Vec::new();
+        if let Some(view) = view {
+            if let Some(logical_type) = logical_type {
+                warnings = self.forget_principal_aliases(&path, &logical_type, &view).await;
+            }
+            view.clear().await?;
         }
 
         self.remove_auth_entry(&path).await?;
 
-        Ok(())
+        Ok(warnings)
+    }
+
+    /// Forget in every namespace the aliases of the principals the mount at
+    /// `path` holds, keeping a name another mount of its type still holds
+    /// (T500's rule). Never fails: problems are logged and returned as warnings.
+    async fn forget_principal_aliases(&self, path: &str, logical_type: &str, view: &BarrierView) -> Vec<String> {
+        let mount = format!("{AUTH_ROUTER_PREFIX}{path}");
+        let source = match self.principals.read() {
+            Ok(sources) => sources.get(logical_type).cloned(),
+            Err(_) => {
+                log::warn!(target: "security", "disabling {mount}: the principal registry is poisoned; no entity alias was forgotten");
+                return vec![format!("the entity aliases of the principals of {mount} were not forgotten")];
+            }
+        };
+        let Some(source) = source else {
+            // A backend that keeps no principals of its own (OIDC, SAML, ...).
+            return Vec::new();
+        };
+        let Some(identity) = self.core.module_manager().get_module::<IdentityModule>("identity") else {
+            return Vec::new();
+        };
+        let names = match source.principals(view).await {
+            Ok(names) => names,
+            Err(e) => {
+                log::warn!(target: "security", "disabling {mount}: its principals could not be listed ({e}); their entity aliases were not forgotten");
+                return vec![format!(
+                    "the principals of {mount} could not be listed, so their entity aliases were not forgotten"
+                )];
+            }
+        };
+        if names.is_empty() {
+            return Vec::new();
+        }
+
+        let siblings: Vec<AuthMountView> = match self.auth_mounts_of_type(logical_type) {
+            Ok(mounts) => mounts.into_iter().filter(|m| m.path != path).collect(),
+            Err(e) => {
+                log::warn!(target: "security", "disabling {mount}: the other {logical_type} mounts could not be listed ({e}); no alias is kept for them");
+                Vec::new()
+            }
+        };
+        let (mut kept, mut forget) = (Vec::new(), Vec::new());
+        for name in names {
+            if Self::held_elsewhere(source.as_ref(), &siblings, &name, &mount).await {
+                kept.push(name);
+            } else {
+                forget.push(name);
+            }
+        }
+        if !kept.is_empty() {
+            log::warn!(target: "security", "disabling {mount}: kept the entity aliases of {} principal(s) another {logical_type} mount still holds: {}", kept.len(), kept.join(", "));
+        }
+
+        let failed = match identity.forget_principals(&source.alias_mount(), &forget).await {
+            Ok(failed) => failed,
+            Err(e) => {
+                log::warn!(target: "security", "disabling {mount}: the alias indexes could not be read ({e})");
+                forget.clone()
+            }
+        };
+        log::info!(
+            "disabling {mount}: forgot the entity aliases of {} principal(s) in every namespace",
+            forget.len() - failed.len()
+        );
+        if failed.is_empty() {
+            return Vec::new();
+        }
+        let names = failed.join(", ");
+        log::warn!(target: "security", "disabling {mount}: the entity aliases of {} principal(s) could not be forgotten: {names}; to retry, delete each name on a {logical_type} mount that does not hold it", failed.len());
+        vec![format!(
+            "the entity aliases of {} principal(s) could not be forgotten ({names}): a principal re-created \
+             under one of these names would log in as its old entity; to retry, delete each name on a \
+             {logical_type} mount that does not hold it",
+            failed.len()
+        )]
+    }
+
+    /// Whether a mount other than the one being disabled holds `name`. One
+    /// that cannot be read counts as not holding it: the alias is forgotten,
+    /// as a userpass delete does on the same error.
+    async fn held_elsewhere(
+        source: &dyn AuthMountPrincipals,
+        siblings: &[AuthMountView],
+        name: &str,
+        mount: &str,
+    ) -> bool {
+        for sibling in siblings {
+            match source.holds(&sibling.view, name).await {
+                Ok(true) => return true,
+                Ok(false) => {}
+                Err(e) => {
+                    log::warn!(target: "security", "disabling {mount}: could not read whether auth/{} holds '{name}' ({e})", sibling.path)
+                }
+            }
+        }
+        false
     }
 
     pub async fn remount_auth(&self, src: &str, dst: &str) -> Result<(), RvError> {

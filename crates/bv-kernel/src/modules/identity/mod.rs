@@ -38,6 +38,7 @@ pub mod kv_key_split_migrate;
 pub mod kv_key_split_retry;
 pub mod ns_scope_migrate;
 pub mod owner_store;
+mod principal_forget;
 pub mod share_store;
 pub mod ssh_security_key;
 pub mod user_audit_store;

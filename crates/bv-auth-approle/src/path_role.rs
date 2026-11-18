@@ -1532,19 +1532,41 @@ impl AppRoleBackendInner {
 
             req.storage_delete(format!("role/{}", role_name.to_lowercase()).as_str()).await?;
 
-            // Drop the entity alias so the role disappears from the
-            // GUI user-picker immediately. Mirrors the delete-user
-            // hook in userpass. Entity record itself stays so audit
-            // history survives; only the (mount, name) lookup index
-            // is removed.
-            if let Some(identity) = self.core.identity() {
-                let _ = identity.forget_alias("approle/", &entry.name).await;
-            }
-
             record_approle_audit(&self.core, req, "delete", &entry.name, "").await;
         }
 
-        Ok(None)
+        // Forget the role's entity alias in every namespace (T522), as a
+        // userpass delete does, so a role re-created under the name is a new
+        // entity everywhere; entity, owner and share records stay. Deleting a
+        // role that is already gone still runs this, so a failed forget, or
+        // an alias an older delete left, is retried.
+        let lc = role_name.to_lowercase();
+        let Some(identity) = self.core.identity() else {
+            return Ok(None);
+        };
+        let forget_failed = match super::role_mounts::mounts_holding(self.core.as_ref(), &lc).await {
+            // Another AppRole mount holds the name: its role logs in as these
+            // entities, so keep them.
+            Ok(holders) if !holders.is_empty() => {
+                log::warn!(target: "security", "approle: role '{lc}' deleted, entity aliases kept: still held by {}", holders.join(", "));
+                None
+            }
+            Ok(_) => identity.forget_alias("approle/", &lc).await.err(),
+            Err(e) => {
+                log::warn!(target: "security", "approle: role '{lc}' deleted; other mounts unreadable ({e}), aliases dropped");
+                identity.forget_alias("approle/", &lc).await.err()
+            }
+        };
+        let Some(e) = forget_failed else {
+            return Ok(None);
+        };
+        log::warn!(target: "security", "approle: role '{lc}' deleted but not all its entity aliases were forgotten ({e}); delete it again to retry");
+        // In the data: the HTTP layer does not carry `Response::warnings`.
+        let warning = format!(
+            "role '{lc}' was deleted, but its entity aliases could not all be forgotten: a role re-created under \
+             this name could log in as the old entity; delete the role again to retry"
+        );
+        Ok(Some(Response::data_response(json!({ "warnings": [warning] }).as_object().cloned())))
     }
 
     pub async fn read_config(&self, _backend: &dyn Backend, _req: &mut Request) -> Result<Option<Response>, RvError> {

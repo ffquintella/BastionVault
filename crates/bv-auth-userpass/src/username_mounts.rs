@@ -7,10 +7,36 @@
 
 use std::collections::BTreeMap;
 
-use crate::{bv_error_response_status, errors::RvError, kernel_api::VaultCtx, storage::Storage};
+use crate::{
+    bv_error_response_status,
+    errors::RvError,
+    kernel_api::{auth::AuthMountPrincipals, VaultCtx},
+    storage::{barrier_view::BarrierView, Storage},
+};
 
 /// The mount type this backend registers under.
-const USERPASS: &str = "userpass";
+pub(crate) const USERPASS: &str = "userpass";
+
+/// The users of a userpass mount, as entity aliases (`userpass/<name>`), so
+/// disabling the mount forgets them in every namespace (T522). Only lower-case
+/// records count: login reads `user/<lower-case>`, so no other has an entity.
+pub struct UserPassPrincipals;
+
+#[maybe_async::maybe_async]
+impl AuthMountPrincipals for UserPassPrincipals {
+    fn alias_mount(&self) -> String {
+        "userpass/".to_string()
+    }
+
+    async fn principals(&self, view: &BarrierView) -> Result<Vec<String>, RvError> {
+        let names = view.list("user/").await?;
+        Ok(names.into_iter().filter(|n| !n.is_empty() && !n.contains('/') && *n == n.to_lowercase()).collect())
+    }
+
+    async fn holds(&self, view: &BarrierView, name: &str) -> Result<bool, RvError> {
+        Ok(view.get(&format!("user/{}", name.to_lowercase())).await?.is_some())
+    }
+}
 
 /// A username more than one userpass mount holds, and those mounts' paths.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,10 +58,9 @@ fn registry_unavailable() -> RvError {
 #[maybe_async::maybe_async]
 pub async fn mounts_holding(core: &dyn VaultCtx, username: &str) -> Result<Vec<String>, RvError> {
     let registry = core.auth_mounts().ok_or_else(registry_unavailable)?;
-    let key = format!("user/{}", username.to_lowercase());
     let mut holders = Vec::new();
     for mount in registry.auth_mounts_of_type(USERPASS)? {
-        if mount.view.get(&key).await?.is_some() {
+        if UserPassPrincipals.holds(&mount.view, username).await? {
             holders.push(format!("auth/{}", mount.path));
         }
     }

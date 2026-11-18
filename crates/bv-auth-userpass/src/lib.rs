@@ -155,7 +155,12 @@ impl Module for UserPassModule {
         };
 
         if let Some(auth_mounts) = core.auth_mounts() {
-            return auth_mounts.add_auth_backend("userpass", Arc::new(userpass_backend_new_func));
+            auth_mounts.add_auth_backend("userpass", Arc::new(userpass_backend_new_func))?;
+            // Disabling a userpass mount forgets its users' entity aliases (T522).
+            let principals = Arc::new(username_mounts::UserPassPrincipals);
+            if let Err(e) = auth_mounts.set_auth_mount_principals(username_mounts::USERPASS, Some(principals)) {
+                log::warn!(target: "security", "userpass: disabling a mount will not forget its users' entity aliases: {e}");
+            }
         } else {
             log::error!("get auth module failed!");
         }
@@ -182,6 +187,8 @@ impl Module for UserPassModule {
 
     fn cleanup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         if let Some(auth_mounts) = core.auth_mounts() {
+            // A registry that refused the registration at setup refuses this too.
+            let _ = auth_mounts.set_auth_mount_principals(username_mounts::USERPASS, None);
             return auth_mounts.delete_auth_backend("userpass");
         } else {
             log::error!("get auth module failed!");

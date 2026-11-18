@@ -13,7 +13,7 @@
 //! per (mount, principal) in v1. Cross-mount alias merging is a
 //! follow-up once sharing lands.
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::Utc;
@@ -173,22 +173,88 @@ impl EntityStore {
         Ok(entity)
     }
 
-    /// Remove the `(mount, name)` → `entity_id` lookup entry. The
-    /// entity record itself stays — share records and ownership
-    /// data still reference it, so wiping it would vaporise audit
-    /// trails. Callers use this when deleting the underlying
-    /// principal (userpass user, AppRole role) so the alias
-    /// disappears from the GUI user-picker immediately.
-    ///
-    /// Idempotent: missing keys are not errors.
-    pub async fn forget_alias(&self, mount: &str, name: &str) -> Result<(), RvError> {
-        self.forget_alias_ns(mount, name, "").await
+    /// Remove the `(mount, name)` alias from every namespace's index (T522)
+    /// and return the entity ids it named. Entity, share and owner records
+    /// stay. Idempotent; errors if any namespace's alias could not be removed.
+    pub async fn forget_alias(&self, mount: &str, name: &str) -> Result<Vec<String>, RvError> {
+        let forgotten = self.forget_aliases(mount, &[name.to_string()]).await?;
+        match forgotten.failed.first() {
+            Some(name) => Err(RvError::ErrString(format!("could not forget the alias {mount}{name} everywhere"))),
+            None => Ok(forgotten.entity_ids),
+        }
     }
 
-    /// Namespace-scoped alias removal.
+    /// One namespace's alias removal: only for tests and repairs, since a
+    /// deleted principal must be forgotten everywhere ([`Self::forget_alias`]).
     pub async fn forget_alias_ns(&self, mount: &str, name: &str, ns_path: &str) -> Result<(), RvError> {
         let key = Self::alias_key(mount, name);
         self.alias_view_for(ns_path).delete(&key).await
+    }
+
+    /// Root's alias index, then every `identity-ns/<b64>/alias/` keyspace in
+    /// storage, whether or not its namespace still exists: `(label, view)`.
+    async fn alias_keyspaces(&self) -> Result<Vec<(String, Arc<BarrierView>)>, RvError> {
+        let mut keyspaces = vec![(String::new(), self.alias_view.clone())];
+        for dir in self.system_view.new_sub_view(IDENTITY_NS_SUB_PATH).list("").await? {
+            let Some(b64) = dir.strip_suffix('/') else { continue };
+            let label = URL_SAFE_NO_PAD.decode(b64).ok().and_then(|b| String::from_utf8(b).ok());
+            let view = self.system_view.new_sub_view(&format!("{IDENTITY_NS_SUB_PATH}{b64}/alias/"));
+            keyspaces.push((label.unwrap_or_else(|| b64.to_string()), Arc::new(view)));
+        }
+        Ok(keyspaces)
+    }
+
+    /// [`Self::forget_alias`] for many names, listing the keyspaces once. A
+    /// namespace that refuses a removal is logged and the rest still run; the
+    /// result names those principals. Errors only when nothing could start.
+    pub async fn forget_aliases(&self, mount: &str, names: &[String]) -> Result<ForgottenAliases, RvError> {
+        let keyspaces = self.alias_keyspaces().await?;
+        let mut out = ForgottenAliases::default();
+        let mut seen = HashSet::new();
+        for name in names {
+            let key = Self::alias_key(mount, name);
+            let mut failed = false;
+            for (ns, view) in &keyspaces {
+                match Self::take_alias(view, &key).await {
+                    Ok(Some(id)) if seen.insert(id.clone()) => out.entity_ids.push(id),
+                    Ok(_) => {}
+                    Err(e) => {
+                        log::warn!("could not forget the identity alias {key} in namespace {ns:?}: {e}");
+                        failed = true;
+                    }
+                }
+            }
+            if failed {
+                out.failed.push(name.clone());
+            }
+        }
+        Ok(out)
+    }
+
+    /// Delete one alias entry, returning the entity id it named.
+    async fn take_alias(view: &BarrierView, key: &str) -> Result<Option<String>, RvError> {
+        let Some(raw) = view.get(key).await? else {
+            return Ok(None);
+        };
+        view.delete(key).await?;
+        let id = serde_json::from_slice::<String>(&raw.value).unwrap_or_default();
+        Ok((!id.is_empty()).then_some(id))
+    }
+
+    /// Those of `ids` an alias in any namespace's index still names.
+    pub async fn still_aliased(&self, ids: &[String]) -> Result<HashSet<String>, RvError> {
+        let wanted: HashSet<&str> = ids.iter().map(String::as_str).collect();
+        let mut found = HashSet::new();
+        for (_, view) in self.alias_keyspaces().await? {
+            for key in view.get_keys().await? {
+                let Some(raw) = view.get(&key).await? else { continue };
+                let id = serde_json::from_slice::<String>(&raw.value).unwrap_or_default();
+                if wanted.contains(id.as_str()) {
+                    found.insert(id);
+                }
+            }
+        }
+        Ok(found)
     }
 
     pub async fn list_entities(&self) -> Result<Vec<String>, RvError> {
@@ -266,6 +332,15 @@ pub fn grantee_namespaces(ns_path: &str) -> Vec<&str> {
     } else {
         vec![ns_path, ""]
     }
+}
+
+/// What [`EntityStore::forget_aliases`] did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ForgottenAliases {
+    /// Entities the removed aliases named, each once.
+    pub entity_ids: Vec<String>,
+    /// Principals some namespace's alias of which could not be removed.
+    pub failed: Vec<String>,
 }
 
 /// `(mount, principal-name, entity_id)` triple surfaced by

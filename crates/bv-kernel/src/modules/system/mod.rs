@@ -1979,9 +1979,16 @@ impl SystemBackend {
 
         let auth_module = self.get_module::<AuthModule>("auth")?;
 
-        auth_module.disable_auth(&path).await?;
-
-        Ok(None)
+        // The mount is disabled even when forgetting its principals' entity
+        // aliases (T522) failed partway; the response data says so (the HTTP
+        // layer does not carry `Response::warnings`).
+        let warnings = auth_module.disable_auth(&path).await?;
+        if warnings.is_empty() {
+            return Ok(None);
+        }
+        let mut data = Map::new();
+        data.insert("warnings".into(), json!(warnings));
+        Ok(Some(Response::data_response(Some(data))))
     }
 
     pub async fn handle_policy_list(

@@ -83,6 +83,7 @@ use bv_kernel_api::{Module, VaultCtx};
 pub mod path_login;
 pub mod path_role;
 pub mod path_tidy_secret_id;
+pub mod role_mounts;
 pub mod validation;
 
 const HMAC_INPUT_LEN_MAX: usize = 4096;
@@ -214,7 +215,12 @@ impl Module for AppRoleModule {
         };
 
         if let Some(auth_mounts) = core.auth_mounts() {
-            return auth_mounts.add_auth_backend("approle", Arc::new(approle_backend_new_func));
+            auth_mounts.add_auth_backend("approle", Arc::new(approle_backend_new_func))?;
+            // Disabling an AppRole mount forgets its roles' entity aliases (T522).
+            let principals = Arc::new(role_mounts::AppRolePrincipals);
+            if let Err(e) = auth_mounts.set_auth_mount_principals(role_mounts::APPROLE, Some(principals)) {
+                log::warn!(target: "security", "approle: disabling a mount will not forget its roles' entity aliases: {e}");
+            }
         } else {
             log::error!("get auth module failed!");
         }
@@ -237,6 +243,8 @@ impl Module for AppRoleModule {
 
     fn cleanup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
         if let Some(auth_mounts) = core.auth_mounts() {
+            // A registry that refused the registration at setup refuses this too.
+            let _ = auth_mounts.set_auth_mount_principals(role_mounts::APPROLE, None);
             return auth_mounts.delete_auth_backend("approle");
         } else {
             log::error!("get auth module failed!");

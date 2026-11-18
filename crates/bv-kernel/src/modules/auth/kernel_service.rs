@@ -15,7 +15,7 @@ use std::sync::Arc;
 use crate::{
     errors::RvError,
     kernel_api::{
-        auth::{AuthMountRegistry, AuthMountView, TokenInfo, TokenService},
+        auth::{AuthMountPrincipals, AuthMountRegistry, AuthMountView, TokenInfo, TokenService},
         leases::{LeaseRevocation, OwnedLeaseRevoker},
     },
     storage::barrier_view::BarrierView,
@@ -89,6 +89,19 @@ impl AuthMountRegistry for AuthModule {
             mounts.push(AuthMountView { path: entry.path.clone(), view });
         }
         Ok(mounts)
+    }
+
+    fn set_auth_mount_principals(
+        &self,
+        logical_type: &str,
+        principals: Option<Arc<dyn AuthMountPrincipals>>,
+    ) -> Result<(), RvError> {
+        let mut sources = self.principals.write()?;
+        match principals {
+            Some(source) => sources.insert(logical_type.to_string(), source),
+            None => sources.remove(logical_type),
+        };
+        Ok(())
     }
 }
 

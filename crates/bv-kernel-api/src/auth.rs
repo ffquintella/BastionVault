@@ -99,6 +99,20 @@ pub struct AuthMountView {
     pub view: BarrierView,
 }
 
+/// The principals one mount of a credential backend holds, named as their
+/// entity aliases, so disabling the mount can forget those aliases (T522).
+#[maybe_async::maybe_async]
+pub trait AuthMountPrincipals: Send + Sync {
+    /// The alias mount every mount of this type logs in as, e.g. `userpass/`.
+    fn alias_mount(&self) -> String;
+
+    /// Every principal one mount's storage (`view`) holds, by alias name.
+    async fn principals(&self, view: &BarrierView) -> Result<Vec<String>, RvError>;
+
+    /// Whether one mount's storage (`view`) holds the principal `name`.
+    async fn holds(&self, view: &BarrierView, name: &str) -> Result<bool, RvError>;
+}
+
 /// Registration and inspection of `auth/` mounts.
 #[maybe_async::maybe_async]
 pub trait AuthMountRegistry: Send + Sync {
@@ -122,5 +136,16 @@ pub trait AuthMountRegistry: Send + Sync {
     /// closed instead of reporting no sibling.
     fn auth_mounts_of_type(&self, logical_type: &str) -> Result<Vec<AuthMountView>, RvError> {
         Err(RvError::ErrString(format!("this auth mount registry cannot list the '{logical_type}' mounts by path")))
+    }
+
+    /// Say how mounts of `logical_type` name their principals (`None`
+    /// removes it), so disabling one forgets their entity aliases (T522). The
+    /// default refuses, so a backend can log that its aliases outlive a disable.
+    fn set_auth_mount_principals(
+        &self,
+        logical_type: &str,
+        _principals: Option<Arc<dyn AuthMountPrincipals>>,
+    ) -> Result<(), RvError> {
+        Err(RvError::ErrString(format!("this auth mount registry cannot forget the '{logical_type}' principals")))
     }
 }
