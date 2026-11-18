@@ -240,7 +240,8 @@ cleans up its owner, shares and groups) and imports again.
 - **Namespace existence.** The transfer route answers a namespace the token
   may not operate in as one that does not exist (T503), but the request
   pipeline still answers a namespace header naming a missing namespace with
-  a 404 before authentication (T512).
+  a 404 before authentication, by design (S27; T512 was abandoned on
+  2026-11-18 to keep it).
 - **At most 1000 secrets per resource** (400 above that).
 - **Soft-deleted KV versions** are copied as destroyed, with a
   `deleted-version-not-recoverable` warning. A move then deletes the only

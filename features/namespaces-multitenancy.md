@@ -671,7 +671,7 @@ decisions and rationale.
 
 - Creating a namespace with a name containing `/`, `..`, or `*`: rejected.
 - Deleting a namespace that has child namespaces or mounts: rejected with a clear listing of what blocks the delete.
-- Writing to a namespace path that doesn't exist: 404, not 403 (so the response distinguishes "no such namespace" from "you're not allowed").
+- Writing to a namespace path that doesn't exist: 404, not 403 (so the response distinguishes "no such namespace" from "you're not allowed"). Decision of 2026-11-18: kept; namespace existence is not confidential (T512, abandoned).
 - A token issued in `engineering/platform` operates with header `X-BastionVault-Namespace: engineering` (parent): rejected with `permission_denied`, audit-logged in the parent's broadcaster.
 
 ## Security Considerations
