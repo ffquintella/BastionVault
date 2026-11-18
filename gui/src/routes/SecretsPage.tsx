@@ -29,7 +29,7 @@ import { extractError } from "../lib/error";
 import { hasLiteralAdminPolicy } from "../lib/access";
 import { useAuthStore } from "../stores/authStore";
 import { useNamespaceStore } from "../stores/namespaceStore";
-import { useAssetGroupMap, canonicalizeSecretPath } from "../hooks/useAssetGroupMap";
+import { useAssetGroupMap } from "../hooks/useAssetGroupMap";
 
 type KvMount = { path: string; mount_type: string };
 
@@ -142,27 +142,18 @@ export function SecretsPage() {
   // Each entry deeper drills further into the faceted intersection.
   const [groupFilters, setGroupFilters] = useState<string[]>([]);
 
-  // Resolve the asset-groups a given leaf key belongs to. Checks both
-  // the full logical path (currentPath + key) and the bare
-  // key name — a user who typed just "test1" into the group editor
-  // without the "secret/" prefix should still see the chip here.
+  // The asset groups a leaf key belongs to, looked up by the secret's own
+  // `<mount>/<name>`, as the server keys group members (T507).
   function groupsForKey(key: string): string[] {
     if (key.endsWith("/")) return [];
-    const fullPath = canonicalizeSecretPath(currentPath + key);
-    const keyOnly = canonicalizeSecretPath(currentPath + key);
-    const out = new Set<string>();
-    for (const g of assetGroups.map.bySecret[fullPath] || []) out.add(g);
-    if (keyOnly !== fullPath) {
-      for (const g of assetGroups.map.bySecret[keyOnly] || []) out.add(g);
-    }
-    return Array.from(out).sort();
+    return [...(assetGroups.map.bySecret[secretOwnPath(currentPath + key)] || [])].sort();
   }
 
   // Set of canonical secret paths under the current path prefix that
   // belong to ALL currently-active group filters. This is the working
   // set used to (a) decide which sibling groups still have material to
   // offer as a next drill-down step and (b) filter the keys list.
-  const currentPrefix = canonicalizeSecretPath(currentPath);
+  const currentPrefix = secretOwnPath(currentPath);
   const matchingSecrets = new Set<string>();
   for (const [secretPath, groups] of Object.entries(assetGroups.map.bySecret)) {
     const underPrefix =
@@ -196,10 +187,10 @@ export function SecretsPage() {
   function keyMatchesFilters(key: string): boolean {
     if (groupFilters.length === 0) return true;
     if (!key.endsWith("/")) {
-      const full = canonicalizeSecretPath(currentPath + key);
+      const full = secretOwnPath(currentPath + key);
       return matchingSecrets.has(full);
     }
-    const folderPrefix = canonicalizeSecretPath(currentPath + key);
+    const folderPrefix = secretOwnPath(currentPath + key);
     for (const p of matchingSecrets) {
       if (p === folderPrefix || p.startsWith(folderPrefix + "/")) return true;
     }
@@ -1011,9 +1002,9 @@ export function SecretsPage() {
  * `data/x`, never `x` (T508). Everything else lives in `ObjectSharingCard`,
  * shared with resources and file resources.
  */
-/** A KV secret's own `<mount>/<name>` for the owner and share endpoints:
- *  outer slashes trimmed, nothing stripped (T508). The asset-group map is
- *  still indexed through `canonicalizeSecretPath` (the group store strips, T507). */
+/** A KV secret's own `<mount>/<name>` for the owner and share endpoints
+ *  (T508) and the asset-group map (T507): outer slashes trimmed, nothing
+ *  stripped, so `secret/data/x` is the secret `data/x`, never `x`. */
 function secretOwnPath(raw: string): string {
   return raw.replace(/^\/+|\/+$/g, "");
 }

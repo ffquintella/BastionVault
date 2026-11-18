@@ -330,10 +330,10 @@ export function AssetGroupsPage() {
                 Secrets
               </label>
               <p className="text-xs text-[var(--color-text-muted)] mb-2">
-                KV-secret paths. The KV-v2 <code className="font-mono">data/</code> /{" "}
-                <code className="font-mono">metadata/</code> segments are stripped server-side;
-                either form (<code className="font-mono">secret/foo/bar</code> or{" "}
-                <code className="font-mono">secret/data/foo/bar</code>) works.
+                Each KV secret by its own <code className="font-mono">mount/name</code>, as the
+                Secrets page shows it: <code className="font-mono">secret/foo/bar</code>. Nothing is
+                stripped, so <code className="font-mono">secret/data/foo/bar</code> is the secret named{" "}
+                <code className="font-mono">data/foo/bar</code>.
               </p>
               {formSecrets.length > 0 && (
                 <div className="flex flex-wrap gap-1 mb-2">

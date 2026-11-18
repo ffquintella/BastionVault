@@ -13,28 +13,14 @@ import { useNamespaceStore } from "../stores/namespaceStore";
 /**
  * Reverse-map view of asset-group membership for object-list pages (Resources,
  * Secrets): which of the active namespace's groups each object is in.
- * `bySecret` keys are canonical KV paths; canonicalize with
- * `canonicalizeSecretPath` before indexing in.
+ * `bySecret` keys are each KV secret's own `<mount>/<name>`, as the server
+ * keys group members (T507): index with the list path plus the key, trimmed
+ * of outer slashes, nothing stripped.
  */
 export interface AssetGroupMap {
   byResource: Record<string, string[]>;
   bySecret: Record<string, string[]>;
   byFile: Record<string, string[]>;
-}
-
-/** Strip the KV-v2 `data/` or `metadata/` segment in the second path
- *  position, as `ResourceGroupStore::canonicalize_secret_path` does on the
- *  backend, to index the asset-group map only. Never for an owner or share
- *  call: those key a secret on its own name (`secretOwnPath`, T508), and
- *  this reads a secret named `data/x` as `x` (the group store too, T507). */
-export function canonicalizeSecretPath(raw: string): string {
-  const trimmed = raw.trim().replace(/^\/+|\/+$/g, "");
-  if (!trimmed) return trimmed;
-  const segs = trimmed.split("/");
-  if (segs.length >= 2 && (segs[1] === "data" || segs[1] === "metadata")) {
-    return [segs[0], ...segs.slice(2)].join("/");
-  }
-  return trimmed;
 }
 
 interface State {
