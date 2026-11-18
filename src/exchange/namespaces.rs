@@ -42,7 +42,10 @@ use crate::{
         sql_gate::{self, SqlGate},
     },
     logical::Auth,
-    modules::namespace::{token_binding::token_operable_checked, NamespaceModule, NAMESPACE_MODULE_NAME},
+    modules::namespace::{
+        token_binding::{is_descendant, token_operable_checked},
+        NamespaceModule, NAMESPACE_MODULE_NAME,
+    },
     storage::Storage,
 };
 
@@ -207,6 +210,112 @@ pub async fn export_session_namespace(
 ) -> Result<ExchangeDocument, RvError> {
     let ns = session_namespace_index(core, auth, namespace_header).await?;
     pack_namespaces(core, exporter, scope, &[&ns], Vec::new()).await
+}
+
+/// Prepare an import (preview or single-shot) from the caller's session: the
+/// session namespace is authorized as for an export, the items are placed for
+/// it ([`place_import_for_session`]), then every target is authorized. Narrow
+/// with `retain_*` first: selectors name the file's own namespaces.
+pub async fn prepare_session_import(
+    core: &Arc<Core>,
+    auth: &Auth,
+    namespace_header: Option<&str>,
+    document: &mut ExchangeDocument,
+) -> Result<(), RvError> {
+    let session = session_namespace_index(core, auth, namespace_header).await?.path;
+    place_import_for_session(document, &session)?;
+    authorize_import_targets(core, auth, document).await
+}
+
+/// Re-check a previewed (already placed) document at apply time against the
+/// applying caller and session. It is not placed again, so it is written
+/// exactly where the preview classified it.
+pub async fn authorize_session_apply(
+    core: &Arc<Core>,
+    auth: &Auth,
+    namespace_header: Option<&str>,
+    document: &ExchangeDocument,
+) -> Result<(), RvError> {
+    let session = session_namespace_index(core, auth, namespace_header).await?.path;
+    check_import_placement(document, &session)?;
+    authorize_import_targets(core, auth, document).await
+}
+
+/// Place a file's items for an import from `session` (`""` = root, unchanged).
+/// In a child-namespace session, top-level items are the session namespace's:
+/// they become its bundle. A file that also carries a bundle for it is refused
+/// as ambiguous. Then [`check_import_placement`].
+pub fn place_import_for_session(document: &mut ExchangeDocument, session: &str) -> Result<(), RvError> {
+    if !session.is_empty() && document.items.local_len() > 0 {
+        if document.items.namespaces.iter().any(|b| b.path == session) {
+            return Err(RvError::ErrResponseStatus(
+                400,
+                format!(
+                    "the file carries namespace {session:?} twice (top-level items and a bundle for it); \
+                     import one of them by naming \"\" or {session:?} in `namespaces`"
+                ),
+            ));
+        }
+        let mut top = std::mem::take(&mut document.items);
+        let bundles = std::mem::take(&mut top.namespaces);
+        let mut namespaces = vec![NamespaceBundle { path: session.to_string(), items: top }];
+        namespaces.extend(bundles);
+        document.items = ExchangeItems { namespaces, ..Default::default() };
+    }
+    check_import_placement(document, session)
+}
+
+/// Refuse what an import from `session` may not write: a bundle whose path is
+/// not a canonical namespace path, and, from a child-namespace session,
+/// top-level items (placed for root) or a bundle outside the session's subtree.
+pub fn check_import_placement(document: &ExchangeDocument, session: &str) -> Result<(), RvError> {
+    for bundle in &document.items.namespaces {
+        if normalize_path(&bundle.path).ok().as_deref() != Some(bundle.path.as_str()) {
+            let msg = format!("the file's namespace {:?} is not a canonical namespace path", bundle.path);
+            return Err(RvError::ErrResponseStatus(400, msg));
+        }
+    }
+    if session.is_empty() {
+        return Ok(());
+    }
+    if document.items.local_len() > 0 {
+        let msg = format!(
+            "this preview places items in the root namespace, but the session is in {session:?}; preview the file again"
+        );
+        return Err(RvError::ErrResponseStatus(400, msg));
+    }
+    for bundle in &document.items.namespaces {
+        if bundle.path != session && !is_descendant(&bundle.path, session) {
+            let msg = format!(
+                "the file carries namespace {:?}, outside this session's namespace {session:?}; import it from \
+                 a session there or leave it out with `namespaces`",
+                bundle.path
+            );
+            return Err(RvError::ErrResponseStatus(400, msg));
+        }
+    }
+    Ok(())
+}
+
+/// Refuse unless `auth` may operate in every namespace `document` writes to
+/// (root for top-level items, each bundle's path), by the export rule. Runs
+/// before any lookup, so a refusal does not reveal whether a namespace exists.
+pub async fn authorize_import_targets(
+    core: &Arc<Core>,
+    auth: &Auth,
+    document: &ExchangeDocument,
+) -> Result<(), RvError> {
+    for target in document_namespaces(document) {
+        if !token_operable_checked(core.as_ref(), auth, &target).await? {
+            let (bound, _) = binding_from_metadata(&auth.metadata);
+            log::warn!(
+                target: "security",
+                "exchange import refused: a token bound to namespace {bound:?} may not write namespace {target:?}"
+            );
+            return Err(RvError::ErrPermissionDenied);
+        }
+    }
+    Ok(())
 }
 
 /// Resolve `scope` in each of `selected`: root's items at the top level, every
@@ -726,6 +835,153 @@ mod tests {
         let malformed = session_namespace_index(&core, &root_auth, Some("tenant-a/../tenant-b")).await;
         assert!(matches!(malformed, Err(RvError::ErrResponseStatus(400, _))), "malformed header");
         assert_eq!(path_of(session_namespace_index(&core, &root_auth, Some("tenant-b")).await).unwrap(), "tenant-b");
+    }
+
+    /// Root, `tenant-a` and its child each with a `cubby/` kv mount and
+    /// `cubby/foo` set to `from-<ns>`.
+    async fn session_import_vault(name: &str) -> (Arc<Core>, String) {
+        let (_bvault, core, root) = new_unseal_test_bastion_vault(name).await;
+        std::mem::forget(_bvault);
+        let store = store_of(&core);
+        for ns in ["tenant-a", "tenant-a/child", "tenant-b"] {
+            store.create(ns, NamespaceQuotas::default(), false).await.unwrap();
+        }
+        for (ns, value) in [("", "from-root"), ("tenant-a", "from-a"), ("tenant-a/child", "from-child")] {
+            let kv = json!({ "type": "kv" }).as_object().cloned();
+            ns_req(&core, &root, Operation::Write, "sys/mounts/cubby/", ns, kv).await.unwrap();
+            put_secret(&core, &root, ns, "cubby/foo", value).await;
+        }
+        (core, root)
+    }
+
+    fn root_auth() -> Auth {
+        Auth { policies: vec!["root".into()], ..Default::default() }
+    }
+
+    fn cubby_scope() -> ScopeSpec {
+        use crate::exchange::schema::ScopeSelector;
+        ScopeSpec { kind: ScopeKind::Selective, include: vec![ScopeSelector::Mount { mount: "cubby/".into() }] }
+    }
+
+    /// Regression (T537, a): a root-layout file (top-level items) imported from a
+    /// `tenant-a` session landed in root. It lands in `tenant-a`, and the
+    /// preview classifies it there too.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn tenant_session_import_places_a_root_layout_file_in_the_tenant() {
+        let (core, root) = session_import_vault("test_exchange_session_import_root_layout").await;
+        let file =
+            export_session_namespace(&core, &root_auth(), None, ExporterInfo::default(), cubby_scope()).await.unwrap();
+        assert!(file.items.local_len() > 0 && file.items.namespaces.is_empty(), "a root-layout file");
+        put_secret(&core, &root, "", "cubby/foo", "root-now").await;
+
+        let mut doc = file.clone();
+        let tenant_a = bound_token("tenant-a", false);
+        prepare_session_import(&core, &tenant_a, Some("tenant-a"), &mut doc).await.unwrap();
+        assert_eq!(document_namespaces(&doc), vec!["tenant-a".to_string()]);
+
+        let preview = import_document(&core, &doc, ConflictPolicy::Overwrite, true).await.unwrap();
+        assert!(!preview.items.is_empty());
+        assert!(preview.items.iter().all(|i| i.mount.starts_with("tenant-a/")), "{:?}", preview.items);
+        import_document(&core, &doc, ConflictPolicy::Overwrite, false).await.unwrap();
+        assert_eq!(read_secret(&core, &root, "tenant-a", "cubby/foo").await, "from-root");
+        assert_eq!(read_secret(&core, &root, "", "cubby/foo").await, "root-now", "root must not be written");
+
+        // From a root session the same file is a root import, as before.
+        let mut doc = file.clone();
+        prepare_session_import(&core, &root_auth(), None, &mut doc).await.unwrap();
+        assert_eq!(doc, file, "a root session places nothing");
+    }
+
+    /// Regression (T537, b): a file exported from `tenant-a` restores into
+    /// `tenant-a` from a `tenant-a` session and from a root session.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn tenant_export_round_trips_from_the_tenant_and_from_root() {
+        let (core, root) = session_import_vault("test_exchange_session_import_round_trip").await;
+        let tenant_a = bound_token("tenant-a", false);
+        let file = export_session_namespace(&core, &tenant_a, Some("tenant-a"), ExporterInfo::default(), cubby_scope())
+            .await
+            .unwrap();
+
+        for (auth, session) in [(tenant_a.clone(), Some("tenant-a")), (root_auth(), None)] {
+            put_secret(&core, &root, "tenant-a", "cubby/foo", "clobbered").await;
+            let mut doc = file.clone();
+            prepare_session_import(&core, &auth, session, &mut doc).await.unwrap();
+            assert_eq!(doc, file, "an exported tenant bundle is placed as it is");
+            import_document(&core, &doc, ConflictPolicy::Overwrite, false).await.unwrap();
+            assert_eq!(read_secret(&core, &root, "tenant-a", "cubby/foo").await, "from-a", "session {session:?}");
+            assert_eq!(read_secret(&core, &root, "", "cubby/foo").await, "from-root");
+        }
+
+        // Top-level items plus a bundle for the session namespace is ambiguous.
+        let mut both = file.clone();
+        both.items.kv = file.items.namespaces[0].items.kv.clone();
+        let e = prepare_session_import(&core, &tenant_a, Some("tenant-a"), &mut both).await.unwrap_err();
+        assert!(matches!(e, RvError::ErrResponseStatus(400, _)), "{e:?}");
+    }
+
+    /// Regression (T537, c): the importer wrote every bundle wherever it named.
+    /// A token that may not operate in a namespace the file writes is refused
+    /// before anything is classified or written; so is a namespace outside the
+    /// session's subtree, a non-canonical one, and a root-placed preview applied
+    /// from a tenant session.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn session_import_refuses_namespaces_the_token_may_not_write() {
+        let (core, root) = session_import_vault("test_exchange_session_import_authz").await;
+        let export_from = |ns: &'static str| {
+            let core = core.clone();
+            async move {
+                let session = Some(ns).filter(|s| !s.is_empty());
+                export_session_namespace(&core, &root_auth(), session, ExporterInfo::default(), cubby_scope())
+                    .await
+                    .unwrap()
+            }
+        };
+        let child_file = export_from("tenant-a/child").await;
+        let a_file = export_from("tenant-a").await;
+        let root_file = export_from("").await;
+        put_secret(&core, &root, "tenant-a/child", "cubby/foo", "untouched").await;
+        put_secret(&core, &root, "tenant-a", "cubby/foo", "untouched").await;
+        let status = |r: Result<(), RvError>| match r {
+            Ok(()) => 200,
+            Err(RvError::ErrPermissionDenied) => 403,
+            Err(RvError::ErrResponseStatus(code, _)) => code,
+            Err(e) => panic!("unexpected error {e:?}"),
+        };
+
+        // In its own session, a non-child-visible tenant-a token may not write
+        // the child the file carries; a child-visible one may.
+        let tenant_a = bound_token("tenant-a", false);
+        let mut doc = child_file.clone();
+        assert_eq!(status(prepare_session_import(&core, &tenant_a, Some("tenant-a"), &mut doc).await), 403);
+        let visible = bound_token("tenant-a", true);
+        let mut doc = child_file.clone();
+        assert_eq!(status(prepare_session_import(&core, &visible, Some("tenant-a"), &mut doc).await), 200);
+
+        // A root-bound, non-child-visible token in a root session may not
+        // write a tenant's bundle; a tenant token may not use a root session.
+        let root_bound = bound_token("", false);
+        let mut doc = a_file.clone();
+        assert_eq!(status(prepare_session_import(&core, &root_bound, None, &mut doc).await), 403);
+        let mut doc = root_file.clone();
+        assert_eq!(status(prepare_session_import(&core, &tenant_a, None, &mut doc).await), 403);
+
+        // Outside the session's subtree, and a non-canonical path: refused.
+        let mut doc = a_file.clone();
+        doc.items.namespaces[0].path = "tenant-b".into();
+        assert_eq!(status(prepare_session_import(&core, &root_auth(), Some("tenant-a"), &mut doc).await), 400);
+        let mut doc = a_file.clone();
+        doc.items.namespaces[0].path = "tenant-a/../tenant-b".into();
+        assert_eq!(status(prepare_session_import(&core, &visible, Some("tenant-a"), &mut doc).await), 400);
+
+        // A root-session preview (top-level items) applied from a tenant session.
+        assert_eq!(status(authorize_session_apply(&core, &root_auth(), Some("tenant-a"), &root_file).await), 400);
+        assert_eq!(status(authorize_session_apply(&core, &tenant_a, Some("tenant-a"), &a_file).await), 200);
+        assert_eq!(status(authorize_session_apply(&core, &tenant_a, Some("tenant-a"), &child_file).await), 403);
+
+        // Nothing was written by any refusal.
+        assert_eq!(read_secret(&core, &root, "tenant-a/child", "cubby/foo").await, "untouched");
+        assert_eq!(read_secret(&core, &root, "tenant-a", "cubby/foo").await, "untouched");
+        assert_eq!(read_secret(&core, &root, "", "cubby/foo").await, "from-root");
     }
 
     /// Policies belong in a backup: a vault whose secrets are restored but whose

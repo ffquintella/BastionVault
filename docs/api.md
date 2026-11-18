@@ -4246,6 +4246,20 @@ child namespace's data is written as that namespace's one
 `items.namespaces[]` bundle, so importing the file restores it there.
 `all_namespaces` and namespace-selected exports ignore the header, as before.
 
+`POST /v{1,2}/sys/exchange/import`, `.../import/preview` and `.../import/apply`
+read the same header, with the same `400`/`403`/`404` rules. From a root
+session nothing changes: top-level items go to root and each
+`items.namespaces[]` bundle to the namespace it names. From a session in
+namespace `T`, top-level items go to `T`. Bundles must name `T` or one of its
+descendants; any other bundle is a `400`, and so is a file that carries both
+top-level items and a `T` bundle (choose one with `namespaces`, which still
+names the file's own namespaces, `""` being its top level). The token must be
+allowed to operate in every namespace the import writes to, otherwise `403`
+before anything is classified or written. Preview places the items, and apply
+writes exactly what the preview classified. Apply checks the placement again
+against its own token and session, so a preview made at root cannot be applied
+from a namespace session.
+
 ### Credential-provider grant (v2)
 
 A plugin that declares `[capabilities.credential_provider]` (ABI 1.3) can supply

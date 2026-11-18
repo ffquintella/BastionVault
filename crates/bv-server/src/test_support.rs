@@ -630,13 +630,16 @@ pub fn new_test_http_server(core: Arc<Core>, tls_config: Option<TestTlsConfig>) 
         allow_plaintext_loopback: true,
         ..Default::default()
     });
+    // One store for every worker, as `bvault server` does: a preview minted on
+    // one worker must be consumable by an apply that lands on another.
+    let preview_store = web::Data::new(bastion_vault::exchange::PreviewStore::default());
     let mut http_server = HttpServer::new(move || {
         App::new()
             .wrap(middleware::Logger::default())
             .app_data(web::Data::new(core.clone()))
             .app_data(trusted_proxies.clone())
             .app_data(mcp_config.clone())
-            .app_data(web::Data::new(bastion_vault::exchange::PreviewStore::default()))
+            .app_data(preview_store.clone())
             .configure(init_service)
             .default_service(web::to(HttpResponse::NotFound))
     })
@@ -662,6 +665,7 @@ pub fn new_test_http_server_with_prometheus(
     tls_config: Option<TestTlsConfig>,
 ) -> Result<(Server, String), RvError> {
     let trusted_proxies = web::Data::new(TrustedProxies::default());
+    let preview_store = web::Data::new(bastion_vault::exchange::PreviewStore::default());
     let mut http_server = HttpServer::new(move || {
         App::new()
             .wrap(middleware::Logger::default())
@@ -669,7 +673,7 @@ pub fn new_test_http_server_with_prometheus(
             .app_data(web::Data::new(core.clone()))
             .app_data(web::Data::new(metrics_manager.clone()))
             .app_data(trusted_proxies.clone())
-            .app_data(web::Data::new(bastion_vault::exchange::PreviewStore::default()))
+            .app_data(preview_store.clone())
             .configure(init_service)
             .default_service(web::to(HttpResponse::NotFound))
     })

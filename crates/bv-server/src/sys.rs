@@ -2059,6 +2059,16 @@ fn default_format() -> String {
     "bvx".to_string()
 }
 
+/// The namespace header as the exchange handlers read it. A value that is not
+/// UTF-8 is a 400: the session namespace is never guessed, nor read as root.
+fn exchange_namespace_header(req: &HttpRequest) -> Result<Option<String>, RvError> {
+    req.headers()
+        .get(NAMESPACE_HEADER)
+        .map(|v| v.to_str().map(str::to_string))
+        .transpose()
+        .map_err(|_| RvError::ErrResponseStatus(400, "X-BastionVault-Namespace must be valid UTF-8".to_string()))
+}
+
 sys_route! {
     /// `POST /v{1,2}/sys/exchange/export` — build a `bvx.v1` document.
     SysExchangeExport { op: Write, path: "sys/exchange/export", body: WithBody, denial: Recorded }
@@ -2082,7 +2092,7 @@ async fn sys_exchange_export_request_handler(
     // A session-scoped export reads the namespace the header names, and only a
     // token allowed to operate there may read it (`session_namespace_index`).
     let caller = authz.auth().cloned();
-    let namespace_header = req.headers().get(NAMESPACE_HEADER).map(|v| v.to_str().map(str::to_string));
+    let namespace_header = exchange_namespace_header(&req);
     let body = authz.into_body();
 
     let result: Result<HttpResponse, HttpError> = (async move {
@@ -2120,13 +2130,7 @@ async fn sys_exchange_export_request_handler(
         let document = if fan_out {
             crate::exchange::export_namespaces(&core_arc, exporter, payload.scope.clone(), &payload.namespaces).await?
         } else {
-            let header = match namespace_header {
-                None => None,
-                Some(Ok(h)) => Some(h),
-                Some(Err(_)) => {
-                    return Ok(response_error(StatusCode::BAD_REQUEST, "X-BastionVault-Namespace must be valid UTF-8"));
-                }
-            };
+            let header = namespace_header?;
             let auth = caller.as_ref().ok_or(RvError::ErrPermissionDenied)?;
             crate::exchange::export_session_namespace(
                 &core_arc,
@@ -2289,6 +2293,8 @@ async fn sys_exchange_import_preview_handler(
     preview_store: web::Data<crate::exchange::PreviewStore>,
 ) -> Result<HttpResponse, HttpError> {
     let audit = SysAuditCtx::new(&authz, &req, &core);
+    let caller = authz.auth().cloned();
+    let namespace_header = exchange_namespace_header(&req);
     let body = authz.into_body();
     // Owner header is needed inside the work block but `req` is not moved
     // into the closure (we only own a few captures), so resolve it now.
@@ -2331,6 +2337,11 @@ async fn sys_exchange_import_preview_handler(
         let mut document = document;
         let mut select_warnings = crate::exchange::retain_namespaces(&mut document, &payload.namespaces);
         select_warnings.extend(crate::exchange::retain_mounts(&mut document, &payload.mounts));
+        // Place the items for the session namespace and authorize every
+        // namespace they land in, before anything is classified or stored.
+        let auth = caller.as_ref().ok_or(RvError::ErrPermissionDenied)?;
+        crate::exchange::prepare_session_import(core.get_ref(), auth, namespace_header?.as_deref(), &mut document)
+            .await?;
 
         // Classify each item against the destination *without* writing.
         let (new, identical, conflict, items, mut warnings) =
@@ -2381,6 +2392,8 @@ async fn sys_exchange_import_apply_handler(
     preview_store: web::Data<crate::exchange::PreviewStore>,
 ) -> Result<HttpResponse, HttpError> {
     let audit = SysAuditCtx::new(&authz, &req, &core);
+    let caller = authz.auth().cloned();
+    let namespace_header = exchange_namespace_header(&req);
     let body = authz.into_body();
     let owner_header =
         req.headers().get("X-BastionVault-Actor").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
@@ -2389,6 +2402,10 @@ async fn sys_exchange_import_apply_handler(
         let payload: ExchangeApplyRequest = serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
 
         let document = preview_store.consume(&payload.token, &owner_header)?;
+        // The preview placed the items; the applying caller and session are
+        // checked against that placement again, before anything is written.
+        let auth = caller.as_ref().ok_or(RvError::ErrPermissionDenied)?;
+        crate::exchange::authorize_session_apply(core.get_ref(), auth, namespace_header?.as_deref(), &document).await?;
 
         let result =
             crate::exchange::import_all_namespaces(&core.get_ref().clone(), &document, payload.conflict_policy, false)
@@ -4402,6 +4419,8 @@ async fn sys_exchange_import_request_handler(
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
     let audit = SysAuditCtx::new(&authz, &req, &core);
+    let caller = authz.auth().cloned();
+    let namespace_header = exchange_namespace_header(&req);
     let body = authz.into_body();
 
     let result: Result<HttpResponse, HttpError> = (async move {
@@ -4435,6 +4454,9 @@ async fn sys_exchange_import_request_handler(
             serde_json::from_slice(&document_bytes).map_err(|_| RvError::ErrRequestInvalid)?;
         let mut select_warnings = crate::exchange::retain_namespaces(&mut document, &payload.namespaces);
         select_warnings.extend(crate::exchange::retain_mounts(&mut document, &payload.mounts));
+        let auth = caller.as_ref().ok_or(RvError::ErrPermissionDenied)?;
+        crate::exchange::prepare_session_import(core.get_ref(), auth, namespace_header?.as_deref(), &mut document)
+            .await?;
 
         let mut result =
             crate::exchange::import_all_namespaces(&core.get_ref().clone(), &document, payload.conflict_policy, false)
@@ -6049,6 +6071,92 @@ mod exchange_export_route_tests {
             server.request_with_headers("POST", "sys/exchange/export", export, Some(&exporter), None, &tenant).unwrap();
         assert_eq!(status, 403, "naming a namespace the token may not operate in: {resp:?}");
         assert!(resp.get("file_b64").is_none(), "a refusal carries no data: {resp:?}");
+    }
+
+    /// Regression (T537): import, preview and apply wrote top-level items to
+    /// root and every bundle wherever it named. From a tenant session a
+    /// root-layout file lands in the tenant; a token that may not operate in a
+    /// namespace the file writes is refused, and nothing is written.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn an_import_lands_in_the_session_namespace_for_a_token_allowed_there() {
+        use base64::Engine;
+
+        let mut server = TestHttpServer::new("test_exchange_import_session_namespace", true).await;
+        server.token = server.root_token.clone();
+        let root = server.root_token.clone();
+        let server = server;
+        let tenant = [("X-BastionVault-Namespace", "tenant-a")];
+        let ok = |status: u16| status == 200 || status == 204;
+        let post = |path: &str, body: serde_json::Value, token: &str, headers: &[(&str, &str)]| {
+            server.request_with_headers("POST", path, body.as_object().cloned(), Some(token), None, headers).unwrap()
+        };
+        // A missing resource answers 404 with an empty body, which the harness
+        // reports as a JSON EOF; any other failure is a test failure.
+        let hostname = |headers: &[(&str, &str)]| -> Option<String> {
+            match server.request_with_headers("GET", "resources/resources/box", None, Some(&root), None, headers) {
+                Ok((200, resp)) => resp["data"]["hostname"].as_str().map(String::from),
+                Ok(_) => None,
+                Err(e) if format!("{e:?}").contains("EOF while parsing") => None,
+                Err(e) => panic!("resource read failed: {e:?}"),
+            }
+        };
+        let delete_box = |headers: &[(&str, &str)]| {
+            let (status, resp) = server
+                .request_with_headers("DELETE", "resources/resources/box", None, Some(&root), None, headers)
+                .unwrap();
+            assert!(ok(status), "delete: {status} {resp:?}");
+        };
+        let export = |token: &str, headers: &[(&str, &str)]| -> String {
+            let body = json!({
+                "format": "json", "allow_plaintext": true,
+                "scope": { "kind": "selective", "include": [{ "type": "resource", "id": "box" }] },
+            });
+            let (status, resp) = post("sys/exchange/export", body, token, headers);
+            assert_eq!(status, 200, "export: {resp:?}");
+            let bytes = base64::engine::general_purpose::STANDARD.decode(resp["file_b64"].as_str().unwrap()).unwrap();
+            String::from_utf8(bytes).unwrap()
+        };
+        let import_body = |file: &str| json!({ "file": file, "format": "json", "allow_plaintext": true });
+
+        let (status, resp) = post("sys/namespaces/tenant-a", json!({}), &root, &[]);
+        assert!(ok(status), "namespace create: {status} {resp:?}");
+        let (status, resp) =
+            post("resources/resources/box", json!({ "type": "server", "hostname": "root.example" }), &root, &[]);
+        assert!(ok(status), "root resource: {status} {resp:?}");
+        let root_file = export(&root, &[]);
+        delete_box(&[]);
+
+        // Single-shot, then preview + apply, from the tenant session.
+        let (status, resp) = post("sys/exchange/import", import_body(&root_file), &root, &tenant);
+        assert_eq!(status, 200, "{resp:?}");
+        assert_eq!(hostname(&tenant).as_deref(), Some("root.example"));
+        assert_eq!(hostname(&[]), None, "root must not be written");
+        delete_box(&tenant);
+        let (status, resp) = post("sys/exchange/import/preview", import_body(&root_file), &root, &tenant);
+        assert_eq!(status, 200, "{resp:?}");
+        let labels: Vec<&str> = resp["items"].as_array().unwrap().iter().filter_map(|i| i["mount"].as_str()).collect();
+        assert!(!labels.is_empty() && labels.iter().all(|m| m.starts_with("tenant-a/")), "{labels:?}");
+        let (status, resp) = post("sys/exchange/import/apply", json!({ "token": resp["token"] }), &root, &tenant);
+        assert_eq!(status, 200, "{resp:?}");
+        assert_eq!(hostname(&tenant).as_deref(), Some("root.example"));
+        assert_eq!(hostname(&[]), None, "root must not be written");
+
+        // A root-bound, non-child-visible token whose policy grants the route.
+        let tenant_file = export(&root, &tenant);
+        delete_box(&tenant);
+        let policy = json!({ "policy": "path \"sys/exchange/import\" { capabilities = [\"create\", \"update\"] }" });
+        let (status, resp) = post("sys/policy/importer", policy, &root, &[]);
+        assert!(ok(status), "policy write: {status} {resp:?}");
+        let (status, resp) = post("auth/token/create", json!({ "policies": ["importer"], "ttl": "1h" }), &root, &[]);
+        assert_eq!(status, 200, "{resp:?}");
+        let importer = resp["auth"]["client_token"].as_str().unwrap().to_string();
+
+        let (status, resp) = post("sys/exchange/import", import_body(&tenant_file), &importer, &[]);
+        assert_eq!(status, 403, "a bundle for a namespace the token may not write: {resp:?}");
+        let (status, resp) = post("sys/exchange/import", import_body(&root_file), &importer, &tenant);
+        assert_eq!(status, 403, "a session namespace the token may not use: {resp:?}");
+        assert_eq!(hostname(&tenant), None, "a refused import writes nothing");
+        assert_eq!(hostname(&[]), None, "a refused import writes nothing");
     }
 }
 

@@ -273,7 +273,7 @@ async fn exchange_export_inner(
             .await
             .map_err(CommandError::from)?
     } else {
-        let auth = embedded_caller_auth(core_arc, token).await?;
+        let auth = embedded_caller_auth(core_arc, token, "sys/exchange/export").await?;
         exchange::export_session_namespace(core_arc, &auth, namespace, exchange::ExporterInfo::default(), scope)
             .await
             .map_err(CommandError::from)?
@@ -325,19 +325,20 @@ async fn exchange_export_inner(
     Ok(ExchangeExportResult { size_bytes: bytes.len() as u64, file_b64: b64(bytes), format, files: Vec::new() })
 }
 
-/// The embedded session's token, authenticated, so a session-scoped export can
-/// be checked against the namespace it reads. Tauri IPC has no client address:
-/// the empty string refuses a CIDR-bound token rather than inventing one.
+/// The embedded session's token, authenticated for `path`, so a session-scoped
+/// export or import can be checked against the namespaces it touches. Tauri IPC
+/// has no client address: the empty string refuses a CIDR-bound token.
 async fn embedded_caller_auth(
     core: &std::sync::Arc<bastion_vault::core::Core>,
     token: &str,
+    path: &str,
 ) -> CmdResult<bastion_vault::logical::Auth> {
     let auth_module = core
         .module_manager
         .get_module::<bastion_vault::modules::auth::AuthModule>("auth")
         .ok_or("auth module unavailable")?;
     let token_store = auth_module.token_store.load_full().ok_or("token store unavailable")?;
-    let auth = token_store.check_token("sys/exchange/export", token, "", false).await.map_err(CommandError::from)?;
+    let auth = token_store.check_token(path, token, "", false).await.map_err(CommandError::from)?;
     auth.ok_or_else(|| "invalid or expired token".into())
 }
 
@@ -440,9 +441,19 @@ pub async fn exchange_preview(
     let mut select_warnings = exchange::retain_namespaces(&mut document, &namespaces);
     select_warnings.extend(exchange::retain_mounts(&mut document, &mounts));
 
+    let owner = state.token.lock().await.clone().unwrap_or_default();
+    let namespace = state.active_namespace.lock().await.clone();
     let vault_guard = state.vault.lock().await;
     let vault = vault_guard.as_ref().ok_or("Vault not open")?;
     let core = vault.core.load();
+
+    // Place the items for the session's active namespace and authorize every
+    // namespace they land in, as the HTTP preview does, before classifying.
+    let core_arc: std::sync::Arc<bastion_vault::core::Core> = std::sync::Arc::clone(&*core);
+    let auth = embedded_caller_auth(&core_arc, &owner, "sys/exchange/import/preview").await?;
+    exchange::prepare_session_import(&core_arc, &auth, namespace.as_deref(), &mut document)
+        .await
+        .map_err(CommandError::from)?;
 
     // Classify via the one engine in dry-run mode so the preview agrees with
     // the apply on every item type (KV, raw non-KV engines, structured
@@ -450,7 +461,6 @@ pub async fn exchange_preview(
     // under the re-rooted barrier layout — the old bare-`{mount}{path}` lookup
     // missed re-rooted mounts and mislabelled everything `new`, and never saw
     // non-KV items.
-    let core_arc: std::sync::Arc<bastion_vault::core::Core> = std::sync::Arc::clone(&*core);
     let classify = exchange::import_all_namespaces(
         &core_arc,
         &document,
@@ -477,11 +487,9 @@ pub async fn exchange_preview(
         })
         .collect();
 
-    let owner = state.token.lock().await.clone().unwrap_or_default();
     let preview_token = state.exchange_preview_store.insert(document, owner.clone());
     let expires_in_secs = state.exchange_preview_store.ttl_secs();
 
-    let core_arc: std::sync::Arc<bastion_vault::core::Core> = std::sync::Arc::clone(&*core);
     drop(vault_guard);
     let mut audit_body = serde_json::Map::new();
     audit_body.insert("format".into(), Value::String(format));
@@ -558,6 +566,7 @@ pub async fn exchange_apply(
         });
     }
 
+    let namespace = state.active_namespace.lock().await.clone();
     let vault_guard = state.vault.lock().await;
     let vault = vault_guard.as_ref().ok_or("Vault not open")?;
     let core = vault.core.load();
@@ -565,7 +574,12 @@ pub async fn exchange_apply(
     let owner = state.token.lock().await.clone().unwrap_or_default();
     let document = state.exchange_preview_store.consume(&token, &owner).map_err(CommandError::from)?;
 
+    // The preview placed the items; check them again for the applying session.
     let core_arc: std::sync::Arc<bastion_vault::core::Core> = std::sync::Arc::clone(&*core);
+    let auth = embedded_caller_auth(&core_arc, &owner, "sys/exchange/import/apply").await?;
+    exchange::authorize_session_apply(&core_arc, &auth, namespace.as_deref(), &document)
+        .await
+        .map_err(CommandError::from)?;
     let result =
         exchange::import_all_namespaces(&core_arc, &document, policy, false).await.map_err(CommandError::from)?;
 
