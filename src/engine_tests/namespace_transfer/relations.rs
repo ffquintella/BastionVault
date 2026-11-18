@@ -225,9 +225,9 @@ async fn root_entity_grantee_is_repointed_and_redeemable_in_namespaced_destinati
 
 /// Guard (4b review): a root grantee re-pointed into `dst` cannot land on
 /// another principal. Auth mounts live in one global table (`sys/auth` ignores
-/// the namespace; `auth/` is header-scoped), and a userpass login names its
-/// entity `("userpass/", username, login namespace)` whatever its mount, so
-/// the source share's principals are exactly the re-pointed share's.
+/// the namespace; `auth/` is header-scoped), and since T500 no second userpass
+/// mount can hold the same username, so the principal set is the single user's:
+/// the source share's principal is exactly the re-pointed share's.
 #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
 async fn a_repointed_grantee_is_the_same_principal_set_in_the_destination() {
     let (_bvault, core, root) = vault("ns_transfer_repoint_principal").await;
@@ -249,16 +249,27 @@ async fn a_repointed_grantee_is_the_same_principal_set_in_the_destination() {
         .await
         .unwrap();
 
-    // A second userpass mount, enabled from `dst`, with its own `carol`: her
-    // root login already resolves to the source share's grantee.
+    // A second userpass mount, enabled from `dst`, cannot hold another `carol`
+    // (T500): the write is refused, names no mount, and provisions nothing.
     send(&core, &root, Operation::Write, "sys/auth/dstpass", Some("dst"), json!({ "type": "userpass" })).await.unwrap();
+    let store = EntityStore::new(core.as_ref()).await.unwrap();
+    let entities = store.list_entities().await.unwrap();
     let other = json!({ "password": PASSWORD, "token_policies": "default", "ttl": 0 });
-    send(&core, &root, Operation::Write, "auth/dstpass/users/carol", None, other).await.unwrap();
+    match send(&core, &root, Operation::Write, "auth/dstpass/users/carol", None, other).await {
+        Err(RvError::ErrResponseStatus(409, msg)) => {
+            assert!(msg.contains("'carol'") && msg.contains("another userpass mount"), "the T500 refusal: {msg}");
+            assert!(!msg.contains("auth/") && !msg.contains("userpass/"), "names no mount: {msg}");
+        }
+        other => panic!("a second mount's carol must be refused with a 409, got {other:?}"),
+    }
+    assert_eq!(store.list_entities().await.unwrap(), entities, "the refused write created no entity");
+    let alias = store.get_by_alias("userpass/", "carol").await.unwrap().map(|e| e.id);
+    assert_eq!(alias, Some(carol_root.clone()), "carol's root alias still names her entity");
     let mut login = Request::new("auth/dstpass/login/carol");
     login.operation = Operation::Write;
     login.body = json!({ "password": PASSWORD }).as_object().cloned();
-    let auth = core.handle_request(&mut login).await.unwrap().unwrap().auth.unwrap();
-    assert_eq!(auth.metadata["entity_id"], carol_root, "both mounts' carol already share the source grantee");
+    let refused = core.handle_request(&mut login).await.unwrap().and_then(|r| r.auth);
+    assert!(refused.is_none(), "`dstpass` holds no carol to log in as");
 
     grant(&core, &root, None, ("resource", "srv1"), ("entity", &carol_root), json!(["read"])).await.unwrap();
     result(transfer(&core, &root, "copy", from_root(json!({}))).await);
