@@ -40,6 +40,8 @@ mod saml;
 mod self_accounts_connect;
 mod self_accounts_host;
 mod userpass;
+// A username is held by at most one userpass mount (T500).
+mod userpass_mounts;
 
 // ── Kernel-tier tests lifted in Phase 4.5 ────────────────────────────
 //

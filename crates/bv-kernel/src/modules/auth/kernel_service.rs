@@ -15,7 +15,7 @@ use std::sync::Arc;
 use crate::{
     errors::RvError,
     kernel_api::{
-        auth::{AuthMountRegistry, TokenInfo, TokenService},
+        auth::{AuthMountRegistry, AuthMountView, TokenInfo, TokenService},
         leases::{LeaseRevocation, OwnedLeaseRevoker},
     },
     storage::barrier_view::BarrierView,
@@ -71,17 +71,24 @@ impl AuthMountRegistry for AuthModule {
     }
 
     fn auth_mount_views(&self, logical_type: &str) -> Result<Vec<BarrierView>, RvError> {
+        Ok(self.auth_mounts_of_type(logical_type)?.into_iter().map(|mount| mount.view).collect())
+    }
+
+    /// Every entry of the one auth table, tainted ones included: a mount
+    /// being disabled or moved still holds its users until it is gone.
+    fn auth_mounts_of_type(&self, logical_type: &str) -> Result<Vec<AuthMountView>, RvError> {
         let entries = self.mounts_router.entries.read()?;
-        let mut views = Vec::new();
+        let mut mounts = Vec::new();
         for mount_entry in entries.values() {
             let entry = mount_entry.read()?;
             if entry.logical_type != logical_type {
                 continue;
             }
             let barrier_path = format!("{}{}/", self.mounts_router.barrier_prefix, entry.uuid);
-            views.push(BarrierView::new(self.mounts_router.barrier.clone(), &barrier_path));
+            let view = BarrierView::new(self.mounts_router.barrier.clone(), &barrier_path);
+            mounts.push(AuthMountView { path: entry.path.clone(), view });
         }
-        Ok(views)
+        Ok(mounts)
     }
 }
 

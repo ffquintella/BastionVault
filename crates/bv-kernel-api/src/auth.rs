@@ -89,6 +89,16 @@ pub trait TokenService: Send + Sync {
     fn set_auth_handlers(&self, handlers: Arc<Vec<Arc<dyn AuthHandler>>>);
 }
 
+/// One auth mount of a given type, as [`AuthMountRegistry::auth_mounts_of_type`]
+/// lists it.
+pub struct AuthMountView {
+    /// The mount's path in the auth table, without `auth/` and with the
+    /// trailing `/`: `userpass/`, `corp-users/`.
+    pub path: String,
+    /// The mount's own storage.
+    pub view: BarrierView,
+}
+
 /// Registration and inspection of `auth/` mounts.
 #[maybe_async::maybe_async]
 pub trait AuthMountRegistry: Send + Sync {
@@ -104,4 +114,13 @@ pub trait AuthMountRegistry: Send + Sync {
     /// off `userpass` user records is the only one today. Returns an empty
     /// vector, not an error, when no such mount exists.
     fn auth_mount_views(&self, logical_type: &str) -> Result<Vec<BarrierView>, RvError>;
+
+    /// [`Self::auth_mount_views`] with each mount's path, for a backend that
+    /// must find its sibling mounts and name them to an operator (userpass
+    /// refuses a username another userpass mount holds, T500). The default
+    /// is an error, so a registry that cannot list paths fails such a check
+    /// closed instead of reporting no sibling.
+    fn auth_mounts_of_type(&self, logical_type: &str) -> Result<Vec<AuthMountView>, RvError> {
+        Err(RvError::ErrString(format!("this auth mount registry cannot list the '{logical_type}' mounts by path")))
+    }
 }

@@ -421,6 +421,9 @@ impl UserPassBackendInner {
         let is_create = self.get_user(req, &username).await?.is_none();
         if !is_create {
             user_entry = self.get_user(req, &username).await?.unwrap();
+        } else {
+            // Before anything is written or provisioned (T500).
+            super::username_mounts::refuse_if_held_elsewhere(self.core.as_ref(), &username).await?;
         }
 
         if let Ok(password_value) = req.get_data("password") {
@@ -563,7 +566,22 @@ impl UserPassBackendInner {
         // is removed. Admins can recover by using the admin
         // ownership-transfer endpoints. Silent on failure.
         if let Some(identity) = self.core.identity() {
-            let _ = identity.forget_alias("userpass/", &lc).await;
+            match super::username_mounts::mounts_holding(self.core.as_ref(), &lc).await {
+                // Another userpass mount still holds the name (a pre-T500
+                // duplicate): its user logs in as this entity, so keep it.
+                Ok(holders) if !holders.is_empty() => log::warn!(
+                    target: "security",
+                    "userpass: deleted user '{lc}' but kept its entity alias: still held by {}",
+                    holders.join(", ")
+                ),
+                Ok(_) => {
+                    let _ = identity.forget_alias("userpass/", &lc).await;
+                }
+                Err(e) => {
+                    log::warn!(target: "security", "userpass: deleted user '{lc}'; other mounts unreadable ({e}), alias dropped as before");
+                    let _ = identity.forget_alias("userpass/", &lc).await;
+                }
+            }
         }
 
         // Audit.
@@ -584,14 +602,18 @@ impl UserPassBackendInner {
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let username_value = req.get_data("username")?;
-        let username = username_value.as_str().ok_or(RvError::ErrRequestFieldInvalid)?;
+        // Lower-cased like every other user route: `users/Carol/password` used
+        // to write a second record at `user/Carol` and leave carol's password.
+        let username = username_value.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_lowercase();
 
-        let mut user_entry = UserEntry::default();
-
-        let entry = self.get_user(req, username).await?;
-        if entry.is_some() {
-            user_entry = entry.unwrap();
-        }
+        // A missing user is created here, so it meets the same refusal (T500).
+        let mut user_entry = match self.get_user(req, &username).await? {
+            Some(entry) => entry,
+            None => {
+                super::username_mounts::refuse_if_held_elsewhere(self.core.as_ref(), &username).await?;
+                UserEntry::default()
+            }
+        };
 
         let password_value = req.get_data("password")?;
         let password = password_value.as_str().ok_or(RvError::ErrRequestFieldInvalid)?;
@@ -600,9 +622,9 @@ impl UserPassBackendInner {
 
         user_entry.password_hash = password_hash;
 
-        self.set_user(req, username, &user_entry).await?;
+        self.set_user(req, &username, &user_entry).await?;
 
-        record_user_audit(&self.core, req, "password-change", username, "").await;
+        record_user_audit(&self.core, req, "password-change", &username, "").await;
 
         Ok(None)
     }

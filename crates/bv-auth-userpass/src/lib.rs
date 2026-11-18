@@ -38,6 +38,7 @@ pub mod path_fido2_register;
 pub mod path_login;
 pub mod path_step_up;
 pub mod path_users;
+pub mod username_mounts;
 
 static USERPASS_BACKEND_HELP: &str = r#"
 The "userpass" credential provider allows authentication using a combination of
@@ -135,6 +136,15 @@ impl Module for UserPassModule {
         }
 
         Ok(())
+    }
+
+    /// Report the usernames more than one userpass mount holds (T500), once
+    /// per unseal, detached so a slow storage listing never holds it up.
+    fn start_background(&self, core: Arc<dyn VaultCtx>) {
+        #[cfg(not(feature = "sync_handler"))]
+        drop(tokio::task::spawn(async move { username_mounts::report_duplicate_usernames(core.as_ref()).await }));
+        #[cfg(feature = "sync_handler")]
+        username_mounts::report_duplicate_usernames(core.as_ref());
     }
 
     fn cleanup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {
