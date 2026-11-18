@@ -291,6 +291,12 @@ Disable an authentication method. All tokens from this method are revoked.
 bvault auth disable userpass/
 ~~~
 
+For a `userpass` or `approle` mount the server also forgets its users' or
+roles' identity aliases in every namespace (T522). When it could not forget
+some, the command still prints `Success!` (the mount is disabled) and then
+one `warning: ...` line per warning on stderr; see "Disable an auth method"
+in `docs/api.md` for the retry.
+
 ## auth list
 
 List all enabled authentication methods.

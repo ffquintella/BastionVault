@@ -470,14 +470,22 @@ Disabling a `userpass` or `approle` mount also forgets the identity aliases of
 the users or roles it held, at root and in every namespace (T522), as deleting
 each of them would: a name later created on another mount is a new entity
 everywhere. A name another mount of the same type still holds keeps its
-aliases, because that mount's principal logs in as the same entities. The old
-entities keep their owner records and shares (see "Delete a user"). The mount
-is disabled even when this step fails partway: the response is then a `200`
-whose `data.warnings` names the principals whose aliases remain (also logged
-at WARN on the `security` target); delete each of those names on a mount of the
-same type that does not hold it to retry. OIDC, SAML, FIDO2, certificate and
-FerroGate mounts keep no principals to enumerate, so nothing is forgotten
-when they are disabled.
+aliases, because that mount's principal logs in as the same entities; when
+the other mounts cannot be read, the aliases are kept too and reported. The
+old entities keep their owner records and shares (see "Delete a user"), but
+the plugin data of every entity no alias names any more is purged, which
+cannot be undone: read `GET /v2/sys/plugins/{name}/entity-data` and move what
+must be kept before disabling. The mount is disabled even when this step fails
+partway: the response is then a `200` whose body carries a `warnings` list
+naming the principals whose aliases remain (also logged at WARN on the
+`security` target, and printed by `bvault auth disable` as `warning: ...`
+lines); delete each of those names on a mount of the same type that does not
+hold it to retry. If the mount's principals cannot be listed at all, the
+warning says so: compare `GET identity/entity/aliases` (at root and in each
+namespace) with the principals of the remaining mounts and delete each
+leftover name the same way. OIDC, SAML, FIDO2, certificate and FerroGate
+mounts keep no principals to enumerate, so nothing is forgotten when they are
+disabled.
 
 ### Leases
 
@@ -3430,15 +3438,21 @@ namespace) lists each alias with its `entity_id`, and
 No endpoint lists the objects an entity owns; each object's owner is read with
 `identity/owner/{kv,resource,file}/...` (T526). Entity-scoped plugin data
 (`GET v2/sys/plugins/{name}/entity-data`) is purged once no alias in any
-namespace names the entity. Identity group membership and namespace
+namespace names the entity. Since T522 that includes the user's namespace
+entities, whose plugin data a delete used to leave, and the purge cannot be
+undone: read `GET /v2/sys/plugins/{name}/entity-data` (records per entity id)
+and move what must be kept before deleting. Identity group membership and namespace
 assignments name a user by username, so they are not changed: a re-created
 user is back in the groups and namespaces its name was in.
 
-Forgetting never fails the delete. If an alias could not be removed, the
-response is a `200` with a `data.warnings` list (and a WARN on the `security`
-target): delete the user again to retry. Deleting a username the mount does not hold
-still forgets its aliases, which also clears an alias a delete made before
-T522 left in a namespace. Find those by comparing
+Forgetting never fails the delete. If an alias could not be removed, or the
+other userpass mounts could not be read (the aliases are then kept, never
+forgotten on a guess), the response is a `200` with a `data.warnings` list
+(and a WARN on the `security` target): delete the user again to retry.
+Deleting a username the mount does not hold still forgets its aliases, which
+also clears an alias a delete made before T522 left in a namespace; it purges
+the plugin data of the entities those aliases named too, so check
+`GET /v2/sys/plugins/{name}/entity-data` for their ids first. Find those by comparing
 `GET identity/entity/aliases` in each namespace with the users that exist; a
 name that has since been re-created already logs in to that namespace as the
 old entity there: move its objects, or delete and re-create the user.

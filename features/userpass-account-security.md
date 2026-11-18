@@ -176,8 +176,11 @@ the delete rule, the unseal scan on planted duplicates with a seal and unseal).
 T522: deleting a user, or disabling its mount, forgets its alias at root and in
 every namespace keyspace found in storage, under T500's keeping rule; the old
 entities keep their owner and share records for the transfer endpoints, and
-their plugin data goes once no alias anywhere names them. A partial failure is
-a `data.warnings` list in the response; deleting the name again retries. Proven by
+their plugin data goes once no alias anywhere names them (for good; this now
+includes namespace entities a delete used to leave). If the other mounts
+cannot be read, the aliases are kept, never forgotten on a guess. A partial
+failure is a `data.warnings` list in the response; deleting the name again
+retries. Proven by
 `src/engine_tests/principal_aliases.rs` (namespace logins before the delete and
 after the re-creation, AppRole, the keeping rule, disable, the purge).
 
