@@ -4708,6 +4708,14 @@ const fn default_plugin_invoke_body_limit() -> usize {
     32 * 1024 * 1024
 }
 
+/// Body-size limit for `POST /v1/sys/exchange/import` and `.../import/preview`.
+/// The body is the whole `.bvx` envelope as a JSON string, so it scales with
+/// the vault being restored; actix's 256 KiB default rejects any real export.
+/// Matches the register / invoke / logical / batch limits.
+const fn default_exchange_import_body_limit() -> usize {
+    32 * 1024 * 1024
+}
+
 #[cfg(test)]
 mod plugin_surface_mount_tests {
     use actix_web::test::TestRequest;
@@ -6157,6 +6165,30 @@ mod exchange_export_route_tests {
         assert_eq!(status, 403, "a session namespace the token may not use: {resp:?}");
         assert_eq!(hostname(&tenant), None, "a refused import writes nothing");
         assert_eq!(hostname(&[]), None, "a refused import writes nothing");
+    }
+
+    /// Regression: the import resources had no body limit, so actix's 256 KiB
+    /// default answered a plain-text 413 for any real `.bvx`, which the client
+    /// surfaced as `json: expected value at line 1 column 1`.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn an_import_larger_than_the_actix_default_is_not_rejected_for_size() {
+        let mut server = TestHttpServer::new("test_exchange_import_large_body", true).await;
+        server.token = server.root_token.clone();
+        let root = server.root_token.clone();
+        let server = server;
+
+        // A valid-shaped file padded past 256 KiB; the document itself may be
+        // refused (400/403), but never for its size.
+        let file = format!("{{\"pad\":\"{}\"}}", "a".repeat(400 * 1024));
+        for path in ["sys/exchange/import/preview", "sys/exchange/import"] {
+            let body = json!({ "file": file, "format": "json", "allow_plaintext": true });
+            let result = server.request("POST", path, body.as_object().cloned(), Some(&root), None);
+            match result {
+                Ok((status, resp)) => assert_ne!(status, 413, "{path}: rejected for size: {resp:?}"),
+                // A non-JSON body (actix's plain-text 413) fails to parse here.
+                Err(e) => panic!("{path}: non-JSON reply, likely the size limit: {e:?}"),
+            }
+        }
     }
 }
 

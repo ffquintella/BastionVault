@@ -62,8 +62,16 @@ pub(crate) const SHARED: &[ResourceSpec] = &[
     resource!("/export/{path:.*}" => [route!(privileged SysExport: Get => sys_export_request_handler)]),
     resource!("/import/{mount:.*}" => [route!(privileged SysImport: Post => sys_import_request_handler)]),
     resource!("/exchange/export" => [route!(privileged SysExchangeExport: Post => sys_exchange_export_request_handler)]),
-    resource!("/exchange/import" => [route!(privileged SysExchangeImport: Post => sys_exchange_import_request_handler)]),
-    resource!("/exchange/import/preview" => [
+    // Import bodies carry the whole `.bvx` envelope (base64 ciphertext inside
+    // JSON), so a real vault export is far past actix's default 256 KiB
+    // `web::Bytes` limit. Without an explicit `PayloadConfig` the server
+    // answers a plain-text 413 and the client reports the unhelpful
+    // `json: expected value at line 1 column 1`. Same 32 MiB ceiling as
+    // plugin registration, logical and batch.
+    resource!("/exchange/import", body_limit: BodyLimit::Payload(default_exchange_import_body_limit()) => [
+        route!(privileged SysExchangeImport: Post => sys_exchange_import_request_handler),
+    ]),
+    resource!("/exchange/import/preview", body_limit: BodyLimit::Payload(default_exchange_import_body_limit()) => [
         route!(privileged SysExchangeImportPreview: Post => sys_exchange_import_preview_handler),
     ]),
     resource!("/exchange/import/apply" => [
