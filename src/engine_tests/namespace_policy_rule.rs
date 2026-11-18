@@ -88,6 +88,19 @@ async fn send(
     core.handle_request(&mut req).await
 }
 
+/// Installs [`capture`]. Under nextest (one process per test) it must
+/// succeed, so the WARN assertions always run there; elsewhere another test
+/// may own the process logger, and they are skipped, saying so.
+fn log_capture() -> bool {
+    let installed = capture::install();
+    if std::env::var_os("NEXTEST").is_some() {
+        assert!(installed, "the log capture must install under nextest");
+    } else if !installed {
+        eprintln!("namespace_policy_rule: another logger is installed; WARN assertions skipped");
+    }
+    installed
+}
+
 fn denied(r: &Result<Option<Response>, RvError>) -> bool {
     matches!(r, Err(RvError::ErrPermissionDenied))
 }
@@ -137,20 +150,23 @@ async fn plant(core: &Arc<Core>, ns: &str, name: &str, hcl: &str) {
 /// A userpass sign-in bound to `a` carrying `policies` (resolved in `a`), whom
 /// an operator's assignment also lets work in `ab` and in root.
 async fn tenant_token(core: &Arc<Core>, root: &str, policies: &str) -> String {
+    token_in(core, root, "tenant", policies, "a", &["a", "ab", ""]).await
+}
+
+/// Userpass user `user` carrying `policies`, assigned to `assigned`, signed in
+/// with the header `bound` and so bound there.
+async fn token_in(core: &Arc<Core>, root: &str, user: &str, policies: &str, bound: &str, assigned: &[&str]) -> String {
     let body = json!({ "password": PASSWORD, "token_policies": policies, "ttl": 0 });
-    send(core, root, Operation::Write, "auth/userpass/users/tenant", None, body).await.unwrap();
+    send(core, root, Operation::Write, &format!("auth/userpass/users/{user}"), None, body).await.unwrap();
     let ns_store =
         core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME).and_then(|m| m.store()).unwrap();
-    let assigned = vec!["a".to_string(), "ab".to_string(), String::new()];
-    NsAssignmentStore::new(core.as_ref()).unwrap().set(&ns_store, "userpass/", "tenant", assigned).await.unwrap();
-    let login =
-        send(core, "", Operation::Write, "auth/userpass/login/tenant", Some("a"), json!({ "password": PASSWORD }))
-            .await
-            .unwrap()
-            .unwrap();
-    let auth = login.auth.unwrap();
-    let bound = auth.metadata.get(crate::modules::namespace::token_binding::NS_PATH_META).map(String::as_str);
-    assert_eq!(bound, Some("a"), "bound to `a`: {:?}", auth.metadata);
+    let assigned = assigned.iter().map(|n| n.to_string()).collect();
+    NsAssignmentStore::new(core.as_ref()).unwrap().set(&ns_store, "userpass/", user, assigned).await.unwrap();
+    let path = format!("auth/userpass/login/{user}");
+    let login = send(core, "", Operation::Write, &path, Some(bound), json!({ "password": PASSWORD })).await;
+    let auth = login.unwrap().unwrap().auth.unwrap();
+    let binding = auth.metadata.get(crate::modules::namespace::token_binding::NS_PATH_META).map(String::as_str);
+    assert_eq!(binding, Some(bound), "bound to {bound:?}: {:?}", auth.metadata);
     auth.client_token
 }
 
@@ -209,7 +225,7 @@ async fn a_partial_namespace_glob_is_refused_at_write_time() {
 /// the namespace and the pattern, and no secret value.
 #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
 async fn a_stored_partial_namespace_glob_grants_nothing_outside_the_namespace() {
-    let logging = capture::install();
+    let logging = log_capture();
     let (_bvault, core, root) = vault("ns_policy_rule_stored_glob").await;
     plant(&core, "a", "planted-glob", PARTIAL_GLOB).await;
     let token = tenant_token(&core, &root, "planted-glob").await;
@@ -241,7 +257,7 @@ async fn a_stored_partial_namespace_glob_grants_nothing_outside_the_namespace() 
 /// still work.
 #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
 async fn stored_bare_sys_and_auth_rules_grant_a_namespace_token_nothing() {
-    let logging = capture::install();
+    let logging = log_capture();
     let (_bvault, core, root) = vault("ns_policy_rule_stored_bare").await;
     plant(&core, "a", "planted-sys", BARE).await;
     seed_resource(&core, &root).await;
@@ -373,7 +389,7 @@ async fn a_restored_namespace_policy_is_confined_when_the_acl_is_built() {
 /// through `sys/policy` grants as written and warns about nothing.
 #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
 async fn the_drop_warning_comes_once_per_load_and_a_change_is_seen_at_once() {
-    let logging = capture::install();
+    let logging = log_capture();
     let (_bvault, core, root) = vault("ns_policy_rule_warn_once").await;
     seed_resource(&core, &root).await;
     plant(&core, "a", "planted-glob", PARTIAL_GLOB).await;
@@ -415,5 +431,42 @@ path "a/resources/*" { capabilities = ["read"] }
         assert_eq!(with("[a*]"), 1, "one WARN for the first load, not one per request: {warns:#?}");
         assert_eq!(with("[apps/*]"), 1, "the changed policy is warned about at once: {warns:#?}");
         assert_eq!(warns.len(), 2, "nothing for the clean rewrite: {warns:#?}");
+    }
+}
+
+/// T520 for a namespace whose path has a bare `+` segment (`t/+`): a rule
+/// reads that segment as a wildcard, so `t/+/secret/*` also matches the
+/// sibling `t/x`. No rule can be confined to it: the write is refused, a
+/// stored rule grants nothing, even in `t/+` itself, and the WARN says to
+/// recreate the namespace rather than to rewrite the rule.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn a_namespace_with_a_bare_plus_segment_is_locked_out_and_told_to_recreate() {
+    let logging = log_capture();
+    let (_bvault, core, root) = vault("ns_policy_rule_plus").await;
+    for ns in ["t", "t/+", "t/x"] {
+        send(&core, &root, Operation::Write, &format!("sys/namespaces/{ns}"), None, json!({})).await.unwrap();
+    }
+    for (ns, v) in [("t/+", "in-plus"), ("t/x", "in-x")] {
+        let body = json!({ "data": { "v": v } });
+        send(&core, &root, Operation::Write, "secret/data/team/db", Some(ns), body).await.unwrap();
+    }
+    let hcl = "path \"t/+/secret/*\" { capabilities = [\"read\"] }";
+    let written = send(&core, &root, Operation::Write, "sys/policy/plus-reader", Some("t/+"), json!({ "policy": hcl }));
+    assert!(matches!(written.await, Err(RvError::ErrResponseStatus(403, _))), "refused at write time");
+
+    plant(&core, "t/+", "plus-reader", hcl).await;
+    let token = token_in(&core, &root, "plus", "plus-reader", "t/+", &["t/+", "t/x"]).await;
+    for ns in ["t/+", "t/x"] {
+        let r = send(&core, &token, Operation::Read, "secret/data/team/db", Some(ns), json!({})).await;
+        assert!(denied(&r), "{ns}: {r:?}");
+    }
+
+    if logging {
+        let lines = capture::lines();
+        let warn = lines
+            .iter()
+            .find(|l| l.starts_with("security ") && l.contains("policy \"plus-reader\" in namespace \"t/+\""))
+            .unwrap_or_else(|| panic!("no WARN for plus-reader: {lines:#?}"));
+        assert!(warn.contains("bare `+` segment") && warn.contains("Recreate the namespace"), "{warn}");
     }
 }

@@ -4381,9 +4381,10 @@ pub(super) fn confine_policy_to_namespace(policy: &Arc<Policy>, ns_prefix: &str)
 }
 
 /// `policy`, a document from namespace `ns_path`'s keyspace, with only the
-/// rules the namespace policy path rule allows (T519, T520), and the patterns
-/// of those it dropped. Deny rules stay wherever they point: they only take
-/// access from this namespace's tokens. The same `Arc` when nothing drops.
+/// rules the namespace policy path rule allows (T519, T520), deny rules kept
+/// wherever they point, and the patterns of those it dropped. A dropped
+/// narrower rule can unshadow a broader injected baseline rule, so access
+/// may widen, never beyond that baseline. The same `Arc` when nothing drops.
 fn confine_namespace_document(policy: &Arc<Policy>, ns_path: &str) -> (Option<Arc<Policy>>, Vec<String>) {
     let keep = |rule: &crate::modules::policy::PolicyPathRules| {
         rule_within_namespace(rule, ns_path)
@@ -4412,16 +4413,31 @@ fn confine_namespace_document(policy: &Arc<Policy>, ns_path: &str) -> (Option<Ar
 /// (T520): policy, namespace and patterns only. Once per interval per set.
 fn report_unconfined_rules(ns_path: &str, policy_name: &str, dropped: &[String]) {
     let patterns = dropped.join(", ");
-    log_rate_limited(format!("unconfined\u{1f}{ns_path}\u{1f}{policy_name}\u{1f}{patterns}"), |suppressed| {
-        log::warn!(
-            target: "security",
-            "policy {policy_name:?} in namespace {ns_path:?}: {} rule(s) ignored because they can match \
-             paths outside the namespace: [{patterns}]; a namespace policy grants only {:?}-prefixed paths \
-             (and the exact namespace-transfer routes). Rewrite them with the namespace prefix{suppressed}",
-            dropped.len(),
-            format!("{ns_path}/"),
-        )
-    });
+    log_rate_limited(
+        format!("unconfined\u{1f}{ns_path}\u{1f}{policy_name}\u{1f}{patterns}"),
+        |suppressed| log::warn!(target: "security", "{}{suppressed}", unconfined_rules_message(ns_path, policy_name, dropped)),
+    );
+}
+
+/// [`report_unconfined_rules`]'s text. A namespace whose path has a bare `+`
+/// segment confines no rule, so rewriting cannot help: it says to recreate it.
+fn unconfined_rules_message(ns_path: &str, policy_name: &str, dropped: &[String]) -> String {
+    let patterns = dropped.join(", ");
+    let count = dropped.len();
+    if ns_path.split('/').any(|segment| segment == "+") {
+        return format!(
+            "policy {policy_name:?} in namespace {ns_path:?}: {count} rule(s) ignored: [{patterns}]; the \
+             namespace path has a bare `+` segment, which a policy rule reads as a wildcard, so no rule of its \
+             policies can be confined to it. Recreate the namespace under a path without a `+` segment and \
+             move its content there"
+        );
+    }
+    format!(
+        "policy {policy_name:?} in namespace {ns_path:?}: {count} rule(s) ignored because they can match \
+         paths outside the namespace: [{patterns}]; a namespace policy grants only {:?}-prefixed paths \
+         (and the exact namespace-transfer routes). Rewrite them with the namespace prefix",
+        format!("{ns_path}/"),
+    )
 }
 
 /// Whether rules naming a `NAMESPACE_GRANTABLE_ROUTES` path apply to a token
@@ -6982,6 +6998,23 @@ path "dti/esi/secret/data/blocked" { capabilities = ["read"] }
         let bare = Arc::new(named("b", r#"path "sys/*" { capabilities = ["read"] }"#));
         let (none, dropped) = confine_namespace_document(&bare, NS);
         assert!(none.is_none() && dropped == ["sys/*"], "{dropped:?}");
+    }
+
+    /// The WARN says how to fix it: rewrite with the prefix, or, for a
+    /// namespace whose path has a bare `+` segment, recreate the namespace.
+    #[test]
+    fn the_unconfined_rules_message_names_the_remedy() {
+        let dropped = ["sys/*".to_string(), "a*".to_string()];
+        let plain = unconfined_rules_message("a", "p", &dropped);
+        assert!(plain.starts_with("policy \"p\" in namespace \"a\": 2 rule(s) ignored"), "{plain}");
+        assert!(plain.contains("[sys/*, a*]") && plain.contains("\"a/\"") && plain.contains("Rewrite"), "{plain}");
+        assert!(!plain.contains("Recreate"), "{plain}");
+        for ns in ["+", "t/+", "+/x"] {
+            let plus = unconfined_rules_message(ns, "p", &dropped);
+            assert!(plus.contains("bare `+` segment") && plus.contains("Recreate the namespace"), "{ns}: {plus}");
+            assert!(!plus.contains("Rewrite them"), "{ns}: {plus}");
+        }
+        assert!(!unconfined_rules_message("a+b", "p", &dropped).contains("Recreate"), "only a whole `+` segment");
     }
 
     #[test]

@@ -2219,6 +2219,22 @@ mod mod_test {
         app_exchange_attempt(core, root, ns, policies).await.unwrap()["auth"].clone()
     }
 
+    /// A login as AppRole `role`, bound to namespace `ns` by the header.
+    async fn approle_login_in(core: &crate::core::Core, root: &str, role: &str, ns: &str) -> String {
+        let resp = test_read_api(core, root, &format!("auth/approle/role/{role}/role-id"), true).await;
+        let role_id = resp.unwrap().unwrap().data.unwrap()["role_id"].as_str().unwrap().to_string();
+        let resp = test_write_api(core, root, &format!("auth/approle/role/{role}/secret-id"), true, None).await;
+        let secret_id = resp.unwrap().unwrap().data.unwrap()["secret_id"].as_str().unwrap().to_string();
+        let credentials = json!({ "role_id": role_id, "secret_id": secret_id });
+        ns_call(core, "", Operation::Write, ns, "auth/approle/login", Some(credentials))
+            .await
+            .unwrap()
+            .unwrap()
+            .auth
+            .expect("an approle login mints a token")
+            .client_token
+    }
+
     /// [`app_exchange_in`], returning the exchange's answer data or its error.
     async fn app_exchange_attempt(
         core: &crate::core::Core,
@@ -2226,18 +2242,7 @@ mod mod_test {
         ns: &str,
         policies: &str,
     ) -> Result<Value, RvError> {
-        let resp = test_read_api(core, root, "auth/approle/role/tenant-app-role/role-id", true).await;
-        let role_id = resp.unwrap().unwrap().data.unwrap()["role_id"].as_str().unwrap().to_string();
-        let resp = test_write_api(core, root, "auth/approle/role/tenant-app-role/secret-id", true, None).await;
-        let secret_id = resp.unwrap().unwrap().data.unwrap()["secret_id"].as_str().unwrap().to_string();
-        let credentials = json!({ "role_id": role_id, "secret_id": secret_id });
-        let login = ns_call(core, "", Operation::Write, ns, "auth/approle/login", Some(credentials))
-            .await
-            .unwrap()
-            .unwrap()
-            .auth
-            .expect("an approle login mints a token")
-            .client_token;
+        let login = approle_login_in(core, root, "tenant-app-role", ns).await;
         let body = json!({ "app": "tenant-app", "policies": policies });
         let resp = ns_call(core, &login, Operation::Write, "", "sys/mcp/token", Some(body)).await?;
         Ok(Value::Object(resp.and_then(|r| r.data).unwrap_or_default()))
@@ -2299,6 +2304,25 @@ mod mod_test {
             assert!(matches!(refused, Err(RvError::ErrPermissionDenied)), "{policies}: {refused:?}");
         }
         assert_eq!(minted().await, 0, "nothing was minted in the tenant");
+
+        // T457 itself, which the 403 above would hide (T520 drops a root
+        // fallback's `sys/mcp/token` too): `mcp-app-root-only` also names the
+        // confined `tenant-a/resources/resources/*`, which T520 keeps, yet a
+        // tenant login holding only that name gets nothing there; the
+        // tenant's own `mcp-tenant` (positive control) does.
+        let root_only_role = json!({ "policies": "mcp-app-root-only", "bypass_machine_binding": true });
+        let path = "auth/approle/role/root-only-role";
+        let _ = test_write_api(core, &root, path, true, root_only_role.as_object().cloned()).await;
+        // (`list` there comes from the injected `namespace-shared` either way.)
+        let gw_a = "tenant-a/resources/resources/gw-a";
+        for (role, reads) in [("root-only-role", false), ("tenant-app-role", true)] {
+            let login = approle_login_in(core, &root, role, "tenant-a").await;
+            let body = json!({ "paths": [gw_a] });
+            let caps = ns_call(core, &login, Operation::Write, "tenant-a", "sys/capabilities-self", Some(body)).await;
+            let caps = caps.unwrap().unwrap().data.unwrap();
+            let held = caps["capabilities"][gw_a].as_array().cloned().unwrap_or_default();
+            assert_eq!(held.contains(&json!("read")), reads, "{role}: {caps:?}");
+        }
 
         // The root-only name is live at root: a root login's token is bound
         // there, never child-visible, and acts with it.
