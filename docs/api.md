@@ -3287,6 +3287,39 @@ left unchanged):
 - `totp_mount` — TOTP engine mount (default: the global `config/mfa`
   `default_mount`, i.e. `totp/`).
 
+**A username belongs to one userpass mount** (T500). A userpass login names
+its identity entity by username alone, whatever mount it came through, so two
+mounts holding one username would be one principal sharing ownership and
+shares. Creating a user whose name another userpass mount already holds is
+refused with `409` and nothing is written or provisioned:
+
+~~~json
+{ "error": "user 'carol' already exists in another userpass mount; a username may be held by only one userpass mount" }
+~~~
+
+- Usernames are stored lower-cased, so `Carol` and `carol` are the same name.
+- The response does not say which mount holds the name; the server log does
+  (WARN on the `security` target). Updating a user the mount already holds is
+  unchanged.
+- Two creations of one name on two mounts at the same moment can both pass
+  (there is no lock across mounts); the next unseal reports the pair.
+- Duplicates created before this check are not changed. On every unseal a
+  background scan logs one WARN line on the `security` target per username
+  held by more than one userpass mount (`userpass username 'carol' is held by
+  2 userpass mounts (auth/corp/, auth/partners/) ...`), then a count. To
+  resolve one, delete the user from all but one mount.
+
+**Set a user's password**
+
+~~~
+POST /v1/auth/{mount}/users/{username}/password
+~~~
+
+`{"password": "..."}`. Creates the user when it does not exist, so the same
+`409` applies. The username is lower-cased like on every other user route
+(before T500, a name with capitals wrote a second, unusable record and left
+the user's password unchanged).
+
 **Read a user**
 
 ~~~
@@ -3308,6 +3341,12 @@ POST /v1/auth/{mount}/users/{username}/unlock
 ~~~
 DELETE /v1/auth/{mount}/users/{username}
 ~~~
+
+Deleting a user drops its identity alias (the entity record stays, with its
+ownership and shares), so a user created later under that name is a new
+principal. While another userpass mount still holds the same username (a
+duplicate from before T500) the alias is kept, because that mount's user logs
+in as the same entity.
 
 **List users**
 

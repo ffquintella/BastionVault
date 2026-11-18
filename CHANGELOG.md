@@ -576,6 +576,15 @@ EXAMPLE ENTRY:
 
 ### Security
 
+#### Userpass: a username belongs to one userpass mount
+
+- **Refuse to create a userpass user whose username another userpass mount already holds, so users of two mounts can no longer be one identity entity** (T500, S47)
+  -- A userpass login names its identity entity by username alone (`userpass/<name>` in the login namespace), whatever mount it came through, so a `carol` on `auth/corp/` and a `carol` on `auth/partners/` were one principal: each owned what the other created and received the other's shares, in every namespace. Creating such a user, through `users/<name>` or through `users/<name>/password` on a missing user, now answers `409` (`user '<name>' already exists in another userpass mount; a username may be held by only one userpass mount`) before anything is written or an entity is provisioned. Names compare case-insensitively. The response does not name the other mount (the `security` log does). Updating a user the mount already holds is unchanged.
+  -- **Upgrade note: nothing is migrated.** Duplicates created before this release keep working and stay one entity. On every unseal a background scan logs one WARN line on the `security` target per duplicated username, with the mount paths (`userpass username 'carol' is held by 2 userpass mounts (auth/corp/, auth/partners/) ...`), then a count; search the log for `held by` after upgrading. It never fails or delays the unseal. To resolve a duplicate, delete the user from all but one mount, and recreate it under a new name where a second person needs access. Deleting one of the duplicates now keeps the entity the remaining user logs in as; it used to drop it, and with it that user's entity-scoped plugin data such as personal credentials.
+  -- Known limit: two creations of one username on two mounts at the same moment can both pass (no cross-mount lock); the next unseal reports them. Separate entities per mount stay possible as a future migration (T521). `bv-kernel-api` gains `AuthMountRegistry::auth_mounts_of_type`, a defaulted method, so the crate needs only a patch release. Proven by `src/engine_tests/userpass_mounts.rs`.
+- **Apply a userpass password reset sent with capital letters (`users/Carol/password`) to the user, instead of writing an unusable second record and leaving the old password working** (T500, S61)
+  -- Every other user route lower-cases the username; this one stored the record at `user/Carol`, which no login reads, so the reset silently did nothing. It now updates `user/carol`. A stray `user/<Name>` record left by the old behaviour is inert (no login reads it), though `LIST auth/<mount>/users` still shows it.
+
 #### Asset groups: a KV secret's membership is its own
 
 - **Key asset-group KV-secret members on the secret's own name, so on a kv (version 1) mount membership of `x` no longer reaches `data/x` or `metadata/x`, and editing a group no longer re-keys a member** (T507, S47)

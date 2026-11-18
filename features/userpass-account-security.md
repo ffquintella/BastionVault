@@ -104,6 +104,35 @@ typos; the phone is stored as entered after trimming. Both are surfaced on
 `read_user` (they are not stripped like `password_hash`/`credentials_json`) and
 editable from the Users admin page's Create and Edit dialogs.
 
+### One username, one userpass mount (T500)
+
+A userpass login names its identity entity `("userpass/", <username>,
+<login namespace>)` whatever mount it came through (the backend never sees its
+own mount path: the router strips it), and namespace assignments and the
+token's `mount_path` say `userpass/` too. So two userpass mounts holding one
+username were one principal: they owned each other's resources and secrets and
+received each other's shares. Decision of 2026-11-18: refuse the repeat, no
+migration.
+
+- **Creation** (`users/<name>`, and `users/<name>/password` on a missing user)
+  asks every other userpass mount, through the kernel's
+  `AuthMountRegistry::auth_mounts_of_type`, whether it holds `user/<name>`
+  (names are lower-cased). If one does: `409`, before anything is written or
+  an entity provisioned. The caller is told "another userpass mount", not
+  which; the `security` log names it. An unreadable mount is an error, never
+  "not held". An update of a user the mount holds is unchanged. There is no
+  rename route; a rename is a creation and meets the same check.
+- **Existing duplicates** are kept as they are. Each unseal spawns a scan
+  (`username_mounts::report_duplicate_usernames`, from `start_background`)
+  that logs one WARN per username held by more than one mount, with the mount
+  paths, then a count; it never fails or delays the unseal.
+- **Deleting** one of two duplicates keeps the entity alias the other mount's
+  user still logs in as; deleting the last holder drops it as before.
+- **Known limit:** two creations of one name on two mounts at the same moment
+  can both pass (storage has no cross-mount lock); the next unseal reports it.
+  Keying userpass identity by the real mount (separate entities, assignments
+  and `mount_path` per mount) would need a migration and is T521.
+
 ## Defaults / operational notes
 
 - **Lockout is enabled by default** (5 attempts / 900 s). Operators can widen,
@@ -130,9 +159,16 @@ TOTP-MFA controls, Unlock action, list status badges), Tauri commands, and
 | GUI: user controls + Account Security panel | Done |
 | CLI: `totp_code` on login | Done |
 | Tests (Rust unit + GUI api) | Done |
+| Backend: one username per userpass mount, duplicate report at unseal (T500) | Done |
+
+T500 is proven by `src/engine_tests/userpass_mounts.rs` (refusal in any case,
+by both creating routes, no record or entity on refusal, same-mount updates,
+the delete rule, the unseal scan on planted duplicates with a seal and unseal).
 
 ### Not yet implemented
 
+- Separate identity entities per userpass mount (T521): today a username may
+  exist in only one userpass mount, and pre-T500 duplicates stay one entity.
 - GUI operator-login MFA prompt (the desktop app's own sign-in does not yet
   prompt for a TOTP code; the backend endpoint and CLI accept it today).
 - Namespace-aware TOTP mount resolution follows the existing cross-mount
