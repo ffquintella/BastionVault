@@ -31,6 +31,7 @@
 
 use std::sync::Arc;
 
+use crate::kernel_api::namespace::{binding_from_metadata, normalize_path};
 use crate::kernel_api::VaultCtx;
 use crate::{
     core::Core,
@@ -40,7 +41,8 @@ use crate::{
         scope::{self, ConflictPolicy, ImportResult, MountIndex},
         sql_gate::{self, SqlGate},
     },
-    modules::namespace::{NamespaceModule, NAMESPACE_MODULE_NAME},
+    logical::Auth,
+    modules::namespace::{token_binding::token_operable_checked, NamespaceModule, NAMESPACE_MODULE_NAME},
     storage::Storage,
 };
 
@@ -140,9 +142,6 @@ pub async fn export_namespaces(
     only: &[String],
 ) -> Result<ExchangeDocument, RvError> {
     let only = normalize_selectors(only);
-    let selected = |path: &str| only.is_empty() || only.iter().any(|o| o == path);
-    let __barrier = core.barrier();
-    let storage = __barrier.as_storage();
     let mut warnings: Vec<String> = Vec::new();
     let indexes = all_namespace_indexes(core, &mut warnings).await?;
     for o in &only {
@@ -150,14 +149,82 @@ pub async fn export_namespaces(
             warnings.push(format!("namespace {o:?} does not exist on this vault: nothing exported for it"));
         }
     }
+    let selected: Vec<&NamespaceIndex> =
+        indexes.iter().filter(|ns| only.is_empty() || only.iter().any(|o| o == &ns.path)).collect();
+    pack_namespaces(core, exporter, scope, &selected, warnings).await
+}
+
+/// The namespace a session-scoped export (`full`, or `selective` naming no
+/// namespaces) reads: the one the `X-BastionVault-Namespace` header names, or
+/// root when it is absent or names root.
+///
+/// `sys/` paths skip the pipeline's token-binding enforcer, so the header is
+/// checked here with its rule (`token_operable_checked`), root included.
+/// Never falls back to root: 400 malformed, 403 (before existence), 404 unknown.
+pub async fn session_namespace_index(
+    core: &Arc<Core>,
+    auth: &Auth,
+    namespace_header: Option<&str>,
+) -> Result<NamespaceIndex, RvError> {
+    let raw = namespace_header.map(str::trim).unwrap_or_default();
+    let ns_path = normalize_path(raw)
+        .map_err(|e| RvError::ErrResponseStatus(400, format!("invalid X-BastionVault-Namespace header: {e}")))?;
+
+    if !token_operable_checked(core.as_ref(), auth, &ns_path).await? {
+        let (bound, _) = binding_from_metadata(&auth.metadata);
+        log::warn!(
+            target: "security",
+            "exchange export refused: a token bound to namespace {bound:?} may not operate in namespace {ns_path:?}"
+        );
+        return Err(RvError::ErrPermissionDenied);
+    }
+
+    if ns_path.is_empty() {
+        return Ok(NamespaceIndex { path: String::new(), mounts: MountIndex::from_core(core)? });
+    }
+    let unavailable =
+        || RvError::ErrResponseStatus(404, format!("namespace support is unavailable; cannot export {ns_path:?}"));
+    let module = core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME).ok_or_else(unavailable)?;
+    let store = module.store().ok_or_else(unavailable)?;
+    let ns = store
+        .get_by_path(&ns_path)
+        .await?
+        .ok_or_else(|| RvError::ErrResponseStatus(404, format!("no such namespace: {ns_path:?}")))?;
+    let router = module.registry.ensure_router(core.clone(), &ns.uuid, &ns.path).await?;
+    let mounts = MountIndex::from_namespace_router(core, &router, &ns.uuid, &ns.path)?;
+    Ok(NamespaceIndex { path: ns.path.clone(), mounts })
+}
+
+/// Export `scope` from the caller's session namespace. A child namespace stays
+/// its one [`NamespaceBundle`]: the importer places items by where they sit,
+/// so the file restores into the namespace it came from ([`split_by_namespace`]).
+pub async fn export_session_namespace(
+    core: &Arc<Core>,
+    auth: &Auth,
+    namespace_header: Option<&str>,
+    exporter: ExporterInfo,
+    scope: ScopeSpec,
+) -> Result<ExchangeDocument, RvError> {
+    let ns = session_namespace_index(core, auth, namespace_header).await?;
+    pack_namespaces(core, exporter, scope, &[&ns], Vec::new()).await
+}
+
+/// Resolve `scope` in each of `selected`: root's items at the top level, every
+/// other namespace as a [`NamespaceBundle`] (empty ones dropped).
+async fn pack_namespaces(
+    core: &Arc<Core>,
+    exporter: ExporterInfo,
+    scope: ScopeSpec,
+    selected: &[&NamespaceIndex],
+    mut warnings: Vec<String>,
+) -> Result<ExchangeDocument, RvError> {
+    let __barrier = core.barrier();
+    let storage = __barrier.as_storage();
 
     let mut root_items = ExchangeItems::default();
     let mut bundles: Vec<NamespaceBundle> = Vec::new();
 
-    for ns in &indexes {
-        if !selected(&ns.path) {
-            continue;
-        }
+    for ns in selected {
         let (items, mut ns_warnings) = scope::resolve_scope(storage, &ns.mounts, &scope).await?;
         if ns.path.is_empty() {
             root_items = items;
@@ -414,7 +481,7 @@ mod tests {
 
     use super::*;
     use crate::exchange::schema::{ScopeKind, ScopeSpec};
-    use crate::logical::{Operation, Request, Response};
+    use crate::logical::{Auth, Operation, Request, Response};
     use crate::modules::namespace::{NamespaceQuotas, NamespaceStore};
     use crate::test_utils::new_unseal_test_bastion_vault;
 
@@ -555,6 +622,110 @@ mod tests {
         assert!(doc.items.namespaces.is_empty());
         let joined: String = doc.items.kv.iter().map(|k| k.value.to_string()).collect();
         assert!(!joined.contains("from-a"), "root full export leaked tenant data");
+    }
+
+    /// A token bound to `ns` with an ordinary (non-root) policy.
+    fn bound_token(ns: &str, child_visible: bool) -> Auth {
+        let mut auth = Auth { policies: vec!["exporter".into()], ..Default::default() };
+        crate::kernel_api::namespace::stamp_binding(&mut auth.metadata, ns, "test-uuid", child_visible);
+        auth
+    }
+
+    /// Regression (T536): a `full` export from a `dti/esi` session read the
+    /// root namespace. It must read `dti/esi` alone, as that namespace's own
+    /// bundle, and the file must restore into `dti/esi`.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn session_export_reads_the_child_namespace_not_root() {
+        let (_bvault, core, root) = new_unseal_test_bastion_vault("test_exchange_session_namespace").await;
+        let store = store_of(&core);
+        store.create("dti", NamespaceQuotas::default(), false).await.unwrap();
+        store.create("dti/esi", NamespaceQuotas::default(), false).await.unwrap();
+        for (path, ty) in [("sys/mounts/cubby/", "kv"), ("sys/mounts/resources/", "resource")] {
+            let body = json!({ "type": ty }).as_object().cloned();
+            ns_req(&core, &root, Operation::Write, path, "dti/esi", body).await.unwrap();
+        }
+        let kv = json!({ "type": "kv" }).as_object().cloned();
+        ns_req(&core, &root, Operation::Write, "sys/mounts/cubby/", "", kv).await.unwrap();
+        put_secret(&core, &root, "dti/esi", "cubby/foo", "from-esi").await;
+        put_secret(&core, &root, "", "cubby/foo", "from-root").await;
+        let server = |host: &str| json!({ "type": "server", "hostname": host }).as_object().cloned();
+        let esi_box = server("esi.example");
+        ns_req(&core, &root, Operation::Write, "resources/resources/esi-box", "dti/esi", esi_box).await.unwrap();
+        let root_box = server("root.example");
+        ns_req(&core, &root, Operation::Write, "resources/resources/root-box", "", root_box).await.unwrap();
+
+        let full = || ScopeSpec { kind: ScopeKind::Full, include: vec![] };
+        let esi = bound_token("dti/esi", false);
+        let doc =
+            export_session_namespace(&core, &esi, Some("/dti/esi/"), ExporterInfo::default(), full()).await.unwrap();
+
+        assert_eq!(document_namespaces(&doc), vec!["dti/esi".to_string()]);
+        assert_eq!(doc.items.local_len(), 0, "a top-level item would restore into root");
+        let bundle = &doc.items.namespaces[0];
+        let ids: Vec<&str> = bundle.items.resources.iter().map(|r| r.id.as_str()).collect();
+        assert!(ids.contains(&"esi-box") && !ids.contains(&"root-box"), "resources: {ids:?}");
+        let values: String = bundle.items.kv.iter().map(|k| k.value.to_string()).collect();
+        assert!(values.contains("from-esi") && !values.contains("from-root"), "kv: {values}");
+
+        // The file restores into dti/esi and leaves root alone.
+        put_secret(&core, &root, "dti/esi", "cubby/foo", "clobbered").await;
+        put_secret(&core, &root, "", "cubby/foo", "root-now").await;
+        import_document(&core, &doc, ConflictPolicy::Overwrite, false).await.unwrap();
+        assert_eq!(read_secret(&core, &root, "dti/esi", "cubby/foo").await, "from-esi");
+        assert_eq!(read_secret(&core, &root, "", "cubby/foo").await, "root-now");
+
+        // No header is the root namespace, at the top level, as before.
+        let root_auth = Auth { policies: vec!["root".into()], ..Default::default() };
+        let root_doc =
+            export_session_namespace(&core, &root_auth, None, ExporterInfo::default(), full()).await.unwrap();
+        assert!(root_doc.items.namespaces.is_empty());
+        let ids: Vec<&str> = root_doc.items.resources.iter().map(|r| r.id.as_str()).collect();
+        assert!(ids.contains(&"root-box") && !ids.contains(&"esi-box"), "resources: {ids:?}");
+    }
+
+    /// Regression (T536): `sys/` paths skip the pipeline's token-binding check,
+    /// so the export applies it: naming a namespace (root included, also by
+    /// omitting the header) the token may not operate in is refused, never
+    /// answered with another namespace's data, and before any existence check.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn session_export_refuses_a_namespace_the_token_may_not_operate_in() {
+        let (_bvault, core, _root) = new_unseal_test_bastion_vault("test_exchange_session_namespace_authz").await;
+        let store = store_of(&core);
+        for ns in ["tenant-a", "tenant-a/child", "tenant-b"] {
+            store.create(ns, NamespaceQuotas::default(), false).await.unwrap();
+        }
+        let path_of = |r: Result<NamespaceIndex, RvError>| r.map(|ns| ns.path);
+
+        let tenant_a = bound_token("tenant-a", false);
+        for header in [Some("tenant-b"), Some("tenant-a/child"), None, Some(""), Some("/"), Some("ghost")] {
+            let got = path_of(session_namespace_index(&core, &tenant_a, header).await);
+            assert_eq!(got, Err(RvError::ErrPermissionDenied), "tenant-a token, header {header:?}");
+        }
+        assert_eq!(path_of(session_namespace_index(&core, &tenant_a, Some("tenant-a")).await).unwrap(), "tenant-a");
+
+        // Child-visible reaches a descendant, never a sibling or the parent.
+        let visible = bound_token("tenant-a", true);
+        let child = session_namespace_index(&core, &visible, Some("tenant-a/child")).await;
+        assert_eq!(path_of(child).unwrap(), "tenant-a/child");
+        for header in [Some("tenant-b"), None] {
+            let got = path_of(session_namespace_index(&core, &visible, header).await);
+            assert_eq!(got, Err(RvError::ErrPermissionDenied), "child-visible token, header {header:?}");
+        }
+
+        // A root-bound, non-child-visible token keeps root and nothing else.
+        let root_bound = bound_token("", false);
+        assert_eq!(path_of(session_namespace_index(&core, &root_bound, None).await).unwrap(), "");
+        let got = path_of(session_namespace_index(&core, &root_bound, Some("tenant-a")).await);
+        assert_eq!(got, Err(RvError::ErrPermissionDenied));
+
+        // A root token may name any namespace; an unknown one or a malformed
+        // header is refused, not exported from root.
+        let root_auth = Auth { policies: vec!["root".into()], ..Default::default() };
+        let unknown = session_namespace_index(&core, &root_auth, Some("ghost")).await;
+        assert!(matches!(unknown, Err(RvError::ErrResponseStatus(404, _))), "unknown namespace");
+        let malformed = session_namespace_index(&core, &root_auth, Some("tenant-a/../tenant-b")).await;
+        assert!(matches!(malformed, Err(RvError::ErrResponseStatus(400, _))), "malformed header");
+        assert_eq!(path_of(session_namespace_index(&core, &root_auth, Some("tenant-b")).await).unwrap(), "tenant-b");
     }
 
     /// Policies belong in a backup: a vault whose secrets are restored but whose

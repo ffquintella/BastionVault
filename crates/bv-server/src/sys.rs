@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::kernel_api::{mount::MountsRouter, VaultCtx};
+use crate::kernel_api::{mount::MountsRouter, namespace::NAMESPACE_HEADER, VaultCtx};
 use crate::{
     authz::{sys_route, Authorized, SysAuditCtx},
     core::{Core, SealConfig},
@@ -2079,6 +2079,10 @@ async fn sys_exchange_export_request_handler(
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, HttpError> {
     let audit = SysAuditCtx::new(&authz, &req, &core);
+    // A session-scoped export reads the namespace the header names, and only a
+    // token allowed to operate there may read it (`session_namespace_index`).
+    let caller = authz.auth().cloned();
+    let namespace_header = req.headers().get(NAMESPACE_HEADER).map(|v| v.to_str().map(str::to_string));
     let body = authz.into_body();
 
     let result: Result<HttpResponse, HttpError> = (async move {
@@ -2097,7 +2101,8 @@ async fn sys_exchange_export_request_handler(
 
         // Build the bvx.v1 document by walking barrier-decrypted storage. An
         // `all_namespaces` scope fans out over every tenant's barrier prefix (see
-        // `crate::exchange::namespaces`); anything else stays root-scoped.
+        // `crate::exchange::namespaces`); anything else reads the session's
+        // namespace (the header's, or root).
         let exporter = crate::exchange::ExporterInfo::default();
         let core_arc = core.get_ref().clone();
         let all_ns = payload.scope.kind == crate::exchange::ScopeKind::AllNamespaces;
@@ -2115,10 +2120,18 @@ async fn sys_exchange_export_request_handler(
         let document = if fan_out {
             crate::exchange::export_namespaces(&core_arc, exporter, payload.scope.clone(), &payload.namespaces).await?
         } else {
-            let mounts = crate::exchange::scope::MountIndex::from_core(&core_arc)?;
-            crate::exchange::scope::export_to_document(
-                core.barrier().as_storage(),
-                &mounts,
+            let header = match namespace_header {
+                None => None,
+                Some(Ok(h)) => Some(h),
+                Some(Err(_)) => {
+                    return Ok(response_error(StatusCode::BAD_REQUEST, "X-BastionVault-Namespace must be valid UTF-8"));
+                }
+            };
+            let auth = caller.as_ref().ok_or(RvError::ErrPermissionDenied)?;
+            crate::exchange::export_session_namespace(
+                &core_arc,
+                auth,
+                header.as_deref(),
                 exporter,
                 payload.scope.clone(),
             )
@@ -5965,6 +5978,77 @@ mod exchange_export_route_tests {
         assert_eq!(status, 200, "all_namespaces export must be accepted: {resp:?}");
         assert_eq!(resp["format"].as_str(), Some("bvx"));
         assert!(resp["size_bytes"].as_u64().unwrap_or(0) > 0, "export must produce bytes: {resp:?}");
+    }
+
+    /// Regression (T536): a `full` export sent with the namespace header read
+    /// the root namespace. It reads the header's namespace, as that namespace's
+    /// bundle, and a token that may not operate there is refused even though a
+    /// root-namespace policy grants it the route.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn a_full_export_reads_the_header_namespace_for_a_token_allowed_there() {
+        use base64::Engine;
+
+        let mut server = TestHttpServer::new("test_exchange_export_session_namespace", true).await;
+        server.token = server.root_token.clone();
+        let root = server.root_token.clone();
+        let tenant = [("X-BastionVault-Namespace", "tenant-a")];
+        let ok = |status: u16| status == 200 || status == 204;
+
+        // Namespace creation seeds `resources/`; root has its own.
+        let (status, resp) = server
+            .request("POST", "sys/namespaces/tenant-a", json!({}).as_object().cloned(), Some(&root), None)
+            .unwrap();
+        assert!(ok(status), "namespace create: {status} {resp:?}");
+        let resource = |host: &str| json!({ "type": "server", "hostname": host }).as_object().cloned();
+        let (status, resp) = server
+            .request_with_headers(
+                "POST",
+                "resources/resources/tenant-box",
+                resource("t.example"),
+                Some(&root),
+                None,
+                &tenant,
+            )
+            .unwrap();
+        assert!(ok(status), "tenant resource: {status} {resp:?}");
+        let (status, resp) =
+            server.request("POST", "resources/resources/root-box", resource("r.example"), Some(&root), None).unwrap();
+        assert!(ok(status), "root resource: {status} {resp:?}");
+
+        let export = json!({ "format": "json", "allow_plaintext": true, "scope": { "kind": "full", "include": [] } });
+        let export = export.as_object().cloned();
+        let (status, resp) = server
+            .request_with_headers("POST", "sys/exchange/export", export.clone(), Some(&root), None, &tenant)
+            .unwrap();
+        assert_eq!(status, 200, "{resp:?}");
+        assert_eq!(resp["namespaces"], json!(["tenant-a"]));
+        let file = base64::engine::general_purpose::STANDARD.decode(resp["file_b64"].as_str().unwrap()).unwrap();
+        let doc: serde_json::Value = serde_json::from_slice(&file).unwrap();
+        let ids = |v: &serde_json::Value| -> Vec<String> {
+            v["resources"].as_array().into_iter().flatten().filter_map(|r| r["id"].as_str().map(String::from)).collect()
+        };
+        assert!(ids(&doc["items"]).is_empty(), "nothing at the top level: {doc}");
+        let bundle = &doc["items"]["namespaces"][0];
+        assert_eq!(bundle["path"], "tenant-a");
+        assert_eq!(ids(&bundle["items"]), vec!["tenant-box".to_string()]);
+
+        // A root-bound, non-child-visible token whose policy grants the route.
+        let policy = json!({ "policy": "path \"sys/exchange/export\" { capabilities = [\"create\", \"update\"] }" });
+        let (status, resp) =
+            server.request("POST", "sys/policy/exporter", policy.as_object().cloned(), Some(&root), None).unwrap();
+        assert!(ok(status), "policy write: {status} {resp:?}");
+        let create = json!({ "policies": ["exporter"], "ttl": "1h" }).as_object().cloned();
+        let (status, resp) = server.request("POST", "auth/token/create", create, Some(&root), None).unwrap();
+        assert_eq!(status, 200, "{resp:?}");
+        let exporter = resp["auth"]["client_token"].as_str().unwrap().to_string();
+
+        let (status, resp) =
+            server.request("POST", "sys/exchange/export", export.clone(), Some(&exporter), None).unwrap();
+        assert_eq!(status, 200, "its own (root) namespace exports: {resp:?}");
+        let (status, resp) =
+            server.request_with_headers("POST", "sys/exchange/export", export, Some(&exporter), None, &tenant).unwrap();
+        assert_eq!(status, 403, "naming a namespace the token may not operate in: {resp:?}");
+        assert!(resp.get("file_b64").is_none(), "a refusal carries no data: {resp:?}");
     }
 }
 

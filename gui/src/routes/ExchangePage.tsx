@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Layout } from "../components/Layout";
 import { Button, Card, Tabs, Input, Select, ConfirmModal, useToast } from "../components/ui";
 import * as api from "../lib/api";
@@ -474,6 +474,7 @@ function ExportTab({ toast }: { toast: ToastFn }) {
 
 function ImportTab({ toast }: { toast: ToastFn }) {
   const [fileB64, setFileB64] = useState<string>("");
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [fileName, setFileName] = useState<string>("");
   const [format, setFormat] = useState<"bvx" | "json">("bvx");
   const [password, setPassword] = useState("");
@@ -585,11 +586,24 @@ function ImportTab({ toast }: { toast: ToastFn }) {
         <div className="grid grid-cols-2 gap-3">
           <div className="col-span-2">
             <label className="text-sm font-medium block mb-1">File</label>
+            <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={() => fileInputRef.current?.click()}
+              >
+                Choose file…
+              </Button>
+              <span className="text-xs text-[var(--color-text-muted)] font-mono truncate min-w-0">
+                {fileName ? fileName : "(no file selected)"}
+              </span>
+            </div>
             <input
+              ref={fileInputRef}
               type="file"
               accept=".bvx,.json,application/json,application/octet-stream"
               onChange={handleFile}
-              className="text-sm"
+              className="hidden"
             />
             {fileName && (
               <p className="text-xs text-[var(--color-text-muted)] mt-1">

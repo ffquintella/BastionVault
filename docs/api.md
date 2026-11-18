@@ -4234,6 +4234,18 @@ spelling out:
 `PUT /v1/sys/seal` is sudo-gated: `seal` is a `root_paths` entry, so it needs a
 root token or a policy granting `sudo` on that path.
 
+`POST /v{1,2}/sys/exchange/export` with a `full` scope, or a `selective` scope
+that names no `namespaces`, exports the namespace named by
+`X-BastionVault-Namespace` (root when the header is absent). The token must
+also be allowed to operate in that namespace, under the same rule as any
+namespaced request: a `root` token, the token's own namespace, a descendant
+when the token is child-visible, or an explicit namespace assignment. Otherwise
+the answer is `403`, also when the namespace does not exist. A malformed header
+is a `400` and an unknown namespace a `404`, and neither falls back to root. A
+child namespace's data is written as that namespace's one
+`items.namespaces[]` bundle, so importing the file restores it there.
+`all_namespaces` and namespace-selected exports ignore the header, as before.
+
 ### Credential-provider grant (v2)
 
 A plugin that declares `[capabilities.credential_provider]` (ABI 1.3) can supply

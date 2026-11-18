@@ -418,6 +418,11 @@ EXAMPLE ENTRY:
 
 ### Fixed
 
+#### Import / Export: a session in a child namespace exports that namespace
+
+- **Export the namespace your session is in, not the root namespace, when you choose Full vault or a selection without namespaces** (T536, S21, S27)
+  -- From a session in a child namespace such as `dti/esi`, Import/Export > Export with "Full vault" (and a selective export that names no namespaces) returned the root namespace's data and none of the tenant's resources or secrets. `POST /v{1,2}/sys/exchange/export` now reads the namespace named by `X-BastionVault-Namespace`, and the desktop app's embedded vault reads the session's active namespace; with no namespace, the root namespace is exported as before. Your token must be allowed to work in that namespace (a root token, its own namespace, a descendant when it is child-visible, or a namespace assignment), otherwise the export answers `403`, including for a namespace that does not exist, even when your policy grants the route. A malformed namespace is a `400` and an unknown one a `404`. Neither falls back to the root namespace. A child namespace's file holds that namespace as its one bundle, so importing it restores the data into that namespace. In the embedded vault, a token bound to a source-address range can no longer export, because the desktop app has no client address to check it against. Exports of all namespaces, or of chosen namespaces, are unchanged.
+
 #### Policy tester: the KV v2 path-form deny
 
 - **Report a KV v2 request that a deny in the other path form refuses as denied in the policy tester, as enforcement does** (T509, S120)

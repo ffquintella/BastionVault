@@ -97,7 +97,12 @@ use std::{future::Future, marker::PhantomData, pin::Pin, sync::Arc};
 use actix_web::{dev::Payload, http::Method, web, FromRequest, Handler, HttpRequest, HttpResponse, Responder, Route};
 use serde_json::{Map, Value};
 
-use crate::{core::Core, errors::RvError, logical::Operation, request_auth, HttpError};
+use crate::{
+    core::Core,
+    errors::RvError,
+    logical::{Auth, Operation},
+    request_auth, HttpError,
+};
 
 /// The future every witness extractor returns.
 pub type WitnessFuture<T> = Pin<Box<dyn Future<Output = Result<T, actix_web::Error>>>>;
@@ -210,6 +215,8 @@ pub trait Witness: FromRequest + sealed::Sealed + 'static {}
 /// without making `Authorized` inherit `R`'s auto-traits.
 pub struct Authorized<R: SysRoute> {
     policy_path: String,
+    /// The caller as the gate authenticated it (`None` only on an unauth path).
+    auth: Option<Auth>,
     body: <R::Body as WitnessBody>::Stored,
     _route: PhantomData<fn() -> R>,
 }
@@ -218,6 +225,12 @@ impl<R: SysRoute> Authorized<R> {
     /// The path the caller was actually cleared for.
     pub fn policy_path(&self) -> &str {
         &self.policy_path
+    }
+
+    /// The token this request was cleared with, for a handler that must also
+    /// check it against something the request names (its namespace header).
+    pub fn auth(&self) -> Option<&Auth> {
+        self.auth.as_ref()
     }
 }
 
@@ -251,7 +264,7 @@ impl<R: SysRoute> FromRequest for Authorized<R> {
             let policy_path = expand_policy_path(R::POLICY_PATH, &req);
 
             match authorize_sys_request(&core, &req, &policy_path, R::OPERATION).await {
-                Ok(()) => Ok(Authorized { policy_path, body, _route: PhantomData }),
+                Ok(auth) => Ok(Authorized { policy_path, auth, body, _route: PhantomData }),
                 Err(err) => {
                     let err = HttpError(err);
                     if R::DENIAL_AUDIT == DenialAudit::Recorded {
@@ -333,7 +346,7 @@ async fn authorize_sys_request(
     req: &HttpRequest,
     path: &str,
     operation: Operation,
-) -> Result<(), RvError> {
+) -> Result<Option<Auth>, RvError> {
     let mut r = request_auth(req);
     r.path = path.to_string();
     r.operation = operation;
@@ -357,9 +370,9 @@ async fn authorize_sys_request(
     let token_store = auth_module.token_store.load_full().ok_or(RvError::ErrPermissionDenied)?;
 
     // `pre_route` runs pre_auth → check_token → post_auth (the ACL check in
-    // `PolicyStore::post_auth`). `Ok(_)` means the caller is cleared.
+    // `PolicyStore::post_auth`). `Ok(_)` means the caller is cleared, as `r.auth`.
     match crate::handler::Handler::pre_route(token_store.as_ref(), &mut r).await {
-        Ok(_) => Ok(()),
+        Ok(_) => Ok(r.auth.take()),
         // A privileged route reached with no token at all is a permission
         // failure, not a malformed request: `ErrRequestClientTokenMissing`
         // renders as 400, which tells a client to fix its body when what it

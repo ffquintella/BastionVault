@@ -206,9 +206,12 @@ pub async fn exchange_export(
     let core_arc: std::sync::Arc<bastion_vault::core::Core> = std::sync::Arc::clone(&*core);
     drop(vault_guard);
     let token = state.token.lock().await.clone().unwrap_or_default();
+    let namespace = state.active_namespace.lock().await.clone();
 
     let outcome = exchange_export_inner(
         &core_arc,
+        &token,
+        namespace.as_deref(),
         scope,
         format.clone(),
         password,
@@ -244,6 +247,8 @@ pub async fn exchange_export(
 
 async fn exchange_export_inner(
     core_arc: &std::sync::Arc<bastion_vault::core::Core>,
+    token: &str,
+    namespace: Option<&str>,
     scope: exchange::ScopeSpec,
     format: String,
     password: Option<String>,
@@ -256,7 +261,8 @@ async fn exchange_export_inner(
     // (`namespaces/<uuid>/logical/…`), which the root mount index cannot
     // address — fan out through the namespace-aware exporter instead. A
     // selective (engine / path) export fans out only when namespaces are named
-    // or a split is asked for; otherwise it stays root-only, as before.
+    // or a split is asked for; otherwise it reads the session's active
+    // namespace, as the HTTP handler reads the namespace header.
     let all_ns = scope.kind == exchange::ScopeKind::AllNamespaces;
     let fan_out = all_ns || (scope.kind == exchange::ScopeKind::Selective && (split || !namespaces.is_empty()));
     if !fan_out && (split || !namespaces.is_empty()) {
@@ -267,15 +273,10 @@ async fn exchange_export_inner(
             .await
             .map_err(CommandError::from)?
     } else {
-        let mounts = exchange::scope::MountIndex::from_core(core_arc).map_err(CommandError::from)?;
-        exchange::scope::export_to_document(
-            core_arc.barrier.as_storage(),
-            &mounts,
-            exchange::ExporterInfo::default(),
-            scope,
-        )
-        .await
-        .map_err(CommandError::from)?
+        let auth = embedded_caller_auth(core_arc, token).await?;
+        exchange::export_session_namespace(core_arc, &auth, namespace, exchange::ExporterInfo::default(), scope)
+            .await
+            .map_err(CommandError::from)?
     };
 
     exchange::ensure_not_empty(&document).map_err(CommandError::from)?;
@@ -322,6 +323,22 @@ async fn exchange_export_inner(
     }
     let bytes = &files[0].1;
     Ok(ExchangeExportResult { size_bytes: bytes.len() as u64, file_b64: b64(bytes), format, files: Vec::new() })
+}
+
+/// The embedded session's token, authenticated, so a session-scoped export can
+/// be checked against the namespace it reads. Tauri IPC has no client address:
+/// the empty string refuses a CIDR-bound token rather than inventing one.
+async fn embedded_caller_auth(
+    core: &std::sync::Arc<bastion_vault::core::Core>,
+    token: &str,
+) -> CmdResult<bastion_vault::logical::Auth> {
+    let auth_module = core
+        .module_manager
+        .get_module::<bastion_vault::modules::auth::AuthModule>("auth")
+        .ok_or("auth module unavailable")?;
+    let token_store = auth_module.token_store.load_full().ok_or("token store unavailable")?;
+    let auth = token_store.check_token("sys/exchange/export", token, "", false).await.map_err(CommandError::from)?;
+    auth.ok_or_else(|| "invalid or expired token".into())
 }
 
 #[derive(Debug, Serialize)]
