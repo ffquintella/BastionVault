@@ -44,6 +44,9 @@
 //!   their account, and the caller is already authenticated — the attempt is
 //!   recorded on the user-audit trail instead, and the IP-level DoS guard still
 //!   applies.
+//! - A write re-reads the record under the userpass user-records lock (T531):
+//!   a user deleted meanwhile is a 404, never re-created; one disabled
+//!   meanwhile is a 403; a password reset meanwhile wins (409).
 //! - Changing the password does not revoke sessions issued before the change
 //!   (there is no per-principal lease index to revoke by). Operators who need
 //!   that must revoke the tokens explicitly.
@@ -58,7 +61,10 @@ use crate::{
     logical::{Backend, Request, Response},
     modules::{
         auth::AuthModule,
-        credential::userpass::path_users::{is_plausible_email, UserEntry},
+        credential::userpass::{
+            path_users::{is_plausible_email, UserEntry},
+            user_lock::lock_user_records,
+        },
         identity::{IdentityModule, UserAuditEntry},
     },
     storage::{Storage, StorageEntry},
@@ -133,16 +139,32 @@ impl SystemBackend {
         Ok(Some(SelfUserpassPrincipal { mount, username, entry: user_entry }))
     }
 
-    /// Persist a modified userpass record back to its own mount.
-    ///
-    /// Writes the whole `UserEntry` after a read-modify-write, exactly like the
-    /// userpass backend's own `set_user`, so no unrelated field is disturbed.
-    async fn store_self_userpass(&self, principal: &SelfUserpassPrincipal) -> Result<(), RvError> {
+    /// Apply `change` to the caller's record as stored now and write it back
+    /// when it reports a change (T531). Under the userpass user-records lock
+    /// (T530), so a deleted user is refused (404), never re-created; a user
+    /// disabled since the first read is refused (403); and fields `change`
+    /// does not touch keep an administrator's newer values.
+    async fn update_self_userpass(
+        &self,
+        principal: &SelfUserpassPrincipal,
+        change: impl FnOnce(&mut UserEntry) -> Result<bool, RvError>,
+    ) -> Result<UserEntry, RvError> {
         let Some(view) = self.core.router().matching_view(&principal.mount)? else {
             return Err(bv_error_response_status!(500, "the auth mount that issued this token is no longer available"));
         };
-        let entry = StorageEntry::new(format!("user/{}", principal.username).as_str(), &principal.entry)?;
-        view.put(&entry).await
+        let key = format!("user/{}", principal.username);
+        let _records = lock_user_records(view.as_ref()).await?;
+        let Some(raw) = view.get(&key).await? else {
+            return Err(bv_error_response_status!(404, "this account no longer exists"));
+        };
+        let mut entry: UserEntry = serde_json::from_slice(&raw.value)?;
+        if entry.disabled {
+            return Err(bv_error_response_status!(403, "account is disabled"));
+        }
+        if change(&mut entry)? {
+            view.put(&StorageEntry::new(&key, &entry)?).await?;
+        }
+        Ok(entry)
     }
 
     /// Best-effort user-audit append for a self-service change. Reuses the op
@@ -274,7 +296,7 @@ impl SystemBackend {
         _backend: &dyn Backend,
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        let Some(mut principal) = self.resolve_self_userpass(req).await? else {
+        let Some(principal) = self.resolve_self_userpass(req).await? else {
             return Err(bv_error_response_status!(
                 400,
                 "changing your own password requires a username/password login"
@@ -324,8 +346,28 @@ impl SystemBackend {
             return Err(bv_error_response_status!(403, "current password is incorrect"));
         }
 
-        principal.entry.password_hash = bcrypt::hash(&new_password, bcrypt::DEFAULT_COST)?;
-        self.store_self_userpass(&principal).await?;
+        // Both bcrypt runs stay outside the lock `update_self_userpass` takes.
+        let new_hash = bcrypt::hash(&new_password, bcrypt::DEFAULT_COST)?;
+        let verified_hash = principal.entry.password_hash.clone();
+        self.update_self_userpass(&principal, |entry| {
+            if entry.fido2_enabled {
+                return Err(bv_error_response_status!(
+                    400,
+                    "this account authenticates with a FIDO2 security key; it has no password to change"
+                ));
+            }
+            // The current password was checked against the first read; an
+            // administrator's reset since then wins.
+            if entry.password_hash != verified_hash {
+                return Err(bv_error_response_status!(
+                    409,
+                    "the password was changed while this request ran; sign in again and retry"
+                ));
+            }
+            entry.password_hash = new_hash;
+            Ok(true)
+        })
+        .await?;
 
         self.record_self_audit(req, "password-change", &principal.mount, &principal.username, "self-service").await;
 
@@ -344,7 +386,7 @@ impl SystemBackend {
         _backend: &dyn Backend,
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        let Some(mut principal) = self.resolve_self_userpass(req).await? else {
+        let Some(principal) = self.resolve_self_userpass(req).await? else {
             return Err(bv_error_response_status!(
                 400,
                 "editing your own contact details requires a username/password login"
@@ -354,27 +396,35 @@ impl SystemBackend {
             return Err(bv_error_response_status!(403, "account is disabled"));
         }
 
-        let mut changed: Vec<&str> = Vec::new();
+        let mut email = None;
         if let Ok(v) = req.get_data("email") {
-            let email = v.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.trim().to_string();
-            if !email.is_empty() && !is_plausible_email(&email) {
+            let value = v.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.trim().to_string();
+            if !value.is_empty() && !is_plausible_email(&value) {
                 return Err(bv_error_response_status!(400, "email is not a valid address"));
             }
-            if email != principal.entry.email {
-                principal.entry.email = email;
-                changed.push("email");
-            }
+            email = Some(value);
         }
+        let mut phone = None;
         if let Ok(v) = req.get_data("phone") {
-            let phone = v.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.trim().to_string();
-            if phone != principal.entry.phone {
-                principal.entry.phone = phone;
-                changed.push("phone");
-            }
+            phone = Some(v.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.trim().to_string());
         }
 
+        let mut changed: Vec<&str> = Vec::new();
+        let stored = self
+            .update_self_userpass(&principal, |entry| {
+                if let Some(email) = email.filter(|e| *e != entry.email) {
+                    entry.email = email;
+                    changed.push("email");
+                }
+                if let Some(phone) = phone.filter(|p| *p != entry.phone) {
+                    entry.phone = phone;
+                    changed.push("phone");
+                }
+                Ok(!changed.is_empty())
+            })
+            .await?;
+
         if !changed.is_empty() {
-            self.store_self_userpass(&principal).await?;
             self.record_self_audit(
                 req,
                 "update",
@@ -388,8 +438,8 @@ impl SystemBackend {
         Ok(Some(Response::data_response(
             json!({
                 "username": principal.username,
-                "email": principal.entry.email,
-                "phone": principal.entry.phone,
+                "email": stored.email,
+                "phone": stored.phone,
             })
             .as_object()
             .cloned(),

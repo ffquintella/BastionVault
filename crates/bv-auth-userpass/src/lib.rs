@@ -41,6 +41,7 @@ pub mod path_fido2_register;
 pub mod path_login;
 pub mod path_step_up;
 pub mod path_users;
+pub mod user_lock;
 pub mod username_mounts;
 
 static USERPASS_BACKEND_HELP: &str = r#"

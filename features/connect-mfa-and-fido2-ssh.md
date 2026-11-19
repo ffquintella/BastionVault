@@ -328,6 +328,10 @@ to reconstruct, or a Windows Hello-brokered agent), not a transport swap.
 - **No oracle on the step-up path.** `verify` returns `{verified: true}` or an
   error; it never reveals whether a factor exists for another principal, because
   it only ever operates on the caller's own token identity.
+- **The step-up runs on the token's login mount (T532).** The userpass mount
+  comes from the token's login path, not `mount_path` (`userpass/` on every
+  mount), and `auth/<mount>/v2/step-up/*` refuse a token that did not log in
+  through `<mount>`; the ticket still binds the principal as `userpass/<name>`.
 - **The signature counter still matters.** The step-up FIDO2 path writes the
   authenticator's new sign count back to the user record, so clone detection keeps
   working across login and step-up alike.

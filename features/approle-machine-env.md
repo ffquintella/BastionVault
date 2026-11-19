@@ -130,6 +130,10 @@ environment display in the accessor detail. Tauri commands in
 - Backend: **Done** (data model, routes, login gate, KV enforcement, config gate,
   per-role `bypass_machine_binding` incl. the token-layer exemption, `bound_source_ips` filter).
 - GUI: **Done** (Machines tab, env selector, banner, bypass toggle + source IP filter field).
+- One role name per AppRole mount (T533): **Done**. Every AppRole mount logs in as
+  `approle/<role>`, so creating a role another AppRole mount holds (any letter case) is a 409
+  that does not name the mount, under a cross-node lock (`role_lock.rs`, as userpass's T530);
+  older duplicates are reported at every unseal and never undone. `src/engine_tests/approle_mounts.rs`.
 - Tests: unit tests for `env_scope_allows`, machine-binding CRUD, secret-ID env round-trip, the
   mandatory-machine login gate, `test_approle_bypass_machine_binding`,
   `test_bypassed_appid_survives_the_server_machine_identity_gate` (which also pins the

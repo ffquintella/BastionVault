@@ -1353,6 +1353,12 @@ A wrong current password is recorded on the user-audit trail but does
 live token could lock its owner out. Sessions issued before the change
 are not revoked.
 
+Both writes re-read the account when they write (T531): `404` when it was
+deleted meanwhile (nothing is written back), `403` when it was disabled
+meanwhile, and for a password change `409` when an administrator reset the
+password meanwhile (sign in again). Fields the write does not change keep
+their current stored values.
+
 ~~~json
 { "current_password": "…", "new_password": "…" }
 ~~~
@@ -3361,8 +3367,12 @@ refused with `409` and nothing is written or provisioned:
   userpass mount learns whether a username exists on another. That right is
   an administrator's; before T500 the same caller silently created a second
   user that logged in as the other one's entity.
-- Two creations of one name on two mounts at the same moment can both pass
-  (there is no lock across mounts); the next unseal reports the pair.
+- Two creations of one name on two mounts at the same moment admit one; the
+  other gets the `409` (T530). Creating, deleting and self-service writes of
+  userpass users hold one lock across every userpass mount and HA node (the
+  storage backend's lock: cluster-wide on hiqlite and MySQL). On MySQL a write
+  that waits more than a second for another node's lock fails with a storage
+  lock error; retry it.
 - Duplicates created before this check are not changed. On every unseal a
   background scan logs one WARN line on the `security` target per username
   held by more than one userpass mount (`userpass username 'carol' is held by
@@ -3520,6 +3530,23 @@ POST /v1/auth/{mount}/login
 ~~~
 POST /v1/auth/{mount}/role/{role_name}
 ~~~
+
+**A role name belongs to one AppRole mount** (T533). Every AppRole mount logs
+in as `approle/<role>`, so two mounts holding one role name would be one
+identity entity. Creating a role whose name (in any letter case) another
+AppRole mount holds is refused with `409`, before anything is written or
+provisioned; the response does not name the mount (the `security` log does):
+
+~~~json
+{ "error": "role 'web' already exists in another approle mount; a role name may be held by only one approle mount" }
+~~~
+
+Updating a role the mount holds is unchanged. Two creations racing on two
+mounts admit one (the same kind of cross-node lock as userpass, T530).
+Same-named roles created before this check are kept; every unseal logs one
+WARN line on the `security` target per such name with its mount paths
+(`approle role 'web' is held by 2 approle mounts (auth/ci/, auth/ops/) ...`).
+Delete the role from all but one mount to resolve it.
 
 **Read a role**
 
@@ -4169,6 +4196,11 @@ a profile is gated and which factors the caller holds; `verify` takes
   on a gated profile with a reason that starts `mfa_unavailable:` (as they do
   a userpass caller with no factor enrolled); the gatekeeper turns that into
   `mcp_session_mfa_unavailable` before it prompts anyone.
+- The ceremony runs on the userpass mount the token logged in through, read
+  from the token's login path (T532), so a user of a second mount such as
+  `auth/corp/` proves their own factors. The ticket stays bound to the
+  principal as `userpass/<name>`. `auth/<mount>/v2/step-up/{begin,verify}`
+  refuse (`403`) a token that did not log in through that mount.
 - The response is the same as without `mcp_call`: `connect_ticket`,
   `expires_at`, `method`, `resource`, `profile_id`. The gatekeeper keeps the
   ticket in memory and relays it with the call; it is never shown to the MCP

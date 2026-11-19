@@ -1305,11 +1305,17 @@ impl AppRoleBackendInner {
 
         let lock_entry = self.role_locks.get_lock(role_name);
         let _locked = lock_entry.lock.write().await;
+        // Held to the end: the other mounts' check, the write and the entity
+        // provisioning are one step for every AppRole mount and node (T533).
+        let storage = req.storage.clone().ok_or(RvError::ErrRequestNotReady)?;
+        let _roles = super::role_lock::lock_role_records(storage.as_ref()).await?;
 
         let entry = self.get_role(req, role_name).await?;
         if entry.is_some() {
             role_entry = entry.unwrap();
         } else {
+            // Before anything is written or provisioned (T533, as T500).
+            super::role_mounts::refuse_if_held_elsewhere(self.core.as_ref(), role_name).await?;
             role_entry.name = role_name.to_lowercase();
             role_entry.lower_case_role_name = true;
             role_entry.hmac_key = utils::generate_uuid();
@@ -1522,6 +1528,10 @@ impl AppRoleBackendInner {
 
         let lock_entry = self.role_locks.get_lock(&role_name);
         let _locked = lock_entry.lock.write().await;
+        // Held to the end, so a creation on another mount sees the role whole
+        // or gone, and waits for its aliases to be forgotten (T533).
+        let storage = req.storage.clone().ok_or(RvError::ErrRequestNotReady)?;
+        let _roles = super::role_lock::lock_role_records(storage.as_ref()).await?;
 
         if let Some(entry) = self.get_role(req, &role_name).await? {
             let storage = req.storage.as_ref().unwrap();

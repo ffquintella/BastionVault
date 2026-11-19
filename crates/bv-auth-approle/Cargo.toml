@@ -26,7 +26,8 @@ bv-auth-audit = { path = "../bv-auth-audit", version = "0.41.0", registry = "uox
 bv-auth-ferrogate = { path = "../bv-auth-ferrogate", version = "0.41.0", registry = "uox-bastionvault" }
 
 async-trait = "0.1"
-tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "time"] }
+# `sync` for the in-process half of the role-records lock (T533).
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "time", "sync"] }
 derive_more = "2.1.1"
 log = "0.4"
 maybe-async = "0.2"

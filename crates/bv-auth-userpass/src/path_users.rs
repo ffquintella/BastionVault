@@ -13,7 +13,7 @@ use crate::{
         PathOperation, Request, Response,
     },
     new_fields, new_fields_internal, new_path, new_path_internal,
-    storage::StorageEntry,
+    storage::{Storage, StorageEntry},
     utils::{
         deserialize_duration, serialize_duration,
         sock_addr::SockAddrMarshaler,
@@ -417,6 +417,19 @@ impl UserPassBackendInner {
         let username_value = req.get_data("username")?;
         let username = username_value.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_lowercase();
 
+        // Hashed before the lock below is taken: bcrypt is the slow part.
+        let mut password_hash = None;
+        if let Ok(password_value) = req.get_data("password") {
+            let password = password_value.as_str().ok_or(RvError::ErrRequestFieldInvalid)?;
+            if !password.is_empty() {
+                password_hash = Some(self.gen_password_hash(password)?);
+            }
+        }
+
+        // Held to the end: the other mounts' check, the write and the entity
+        // provisioning are one step for every userpass mount and node (T530).
+        let _records = super::user_lock::lock_user_records(request_storage(req)?.as_ref()).await?;
+
         let mut user_entry = UserEntry::default();
         let is_create = self.get_user(req, &username).await?.is_none();
         if !is_create {
@@ -426,11 +439,8 @@ impl UserPassBackendInner {
             super::username_mounts::refuse_if_held_elsewhere(self.core.as_ref(), &username).await?;
         }
 
-        if let Ok(password_value) = req.get_data("password") {
-            let password = password_value.as_str().ok_or(RvError::ErrRequestFieldInvalid)?;
-            if !password.is_empty() {
-                user_entry.password_hash = self.gen_password_hash(password)?;
-            }
+        if let Some(password_hash) = password_hash {
+            user_entry.password_hash = password_hash;
         }
 
         let ttl_value = req.get_data_or_default("ttl")?;
@@ -554,6 +564,10 @@ impl UserPassBackendInner {
         }
 
         let lc = username.to_lowercase();
+        // Held to the end, so a creation on another mount (T530) or a
+        // self-service write-back (T531) sees the user either whole or gone,
+        // and a name re-created elsewhere waits for the aliases to be forgotten.
+        let _records = super::user_lock::lock_user_records(request_storage(req)?.as_ref()).await?;
         req.storage_delete(format!("user/{lc}").as_str()).await?;
         // Clean up any pending FIDO2 challenge state
         let _ = req.storage_delete(&format!("challenge/reg/{lc}")).await;
@@ -616,7 +630,14 @@ impl UserPassBackendInner {
         // to write a second record at `user/Carol` and leave carol's password.
         let username = username_value.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_lowercase();
 
-        // A missing user is created here, so it meets the same refusal (T500).
+        let password_value = req.get_data("password")?;
+        let password = password_value.as_str().ok_or(RvError::ErrRequestFieldInvalid)?;
+        // Before the lock: bcrypt is the slow part.
+        let password_hash = self.gen_password_hash(password)?;
+
+        // A missing user is created here, so it meets the same refusal (T500),
+        // under the same lock as the user route (T530).
+        let _records = super::user_lock::lock_user_records(request_storage(req)?.as_ref()).await?;
         let mut user_entry = match self.get_user(req, &username).await? {
             Some(entry) => entry,
             None => {
@@ -624,11 +645,6 @@ impl UserPassBackendInner {
                 UserEntry::default()
             }
         };
-
-        let password_value = req.get_data("password")?;
-        let password = password_value.as_str().ok_or(RvError::ErrRequestFieldInvalid)?;
-
-        let password_hash = self.gen_password_hash(password)?;
 
         user_entry.password_hash = password_hash;
 
@@ -668,6 +684,12 @@ impl UserPassBackendInner {
         let result = bcrypt::verify(password, password_hash)?;
         Ok(result)
     }
+}
+
+/// The request's mount storage, owned, so a lock taken through it holds no
+/// borrow of the request.
+fn request_storage(req: &Request) -> Result<Arc<dyn Storage>, RvError> {
+    req.storage.clone().ok_or(RvError::ErrRequestNotReady)
 }
 
 /// Current Unix-epoch seconds. Lockout timestamps are coarse (minutes),

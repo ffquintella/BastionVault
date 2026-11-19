@@ -40,8 +40,15 @@ mod saml;
 mod self_accounts_connect;
 mod self_accounts_host;
 mod userpass;
-// A username is held by at most one userpass mount (T500).
+// A username is held by at most one userpass mount (T500), even when two
+// creations race (T530).
 mod userpass_mounts;
+// A role name is held by at most one AppRole mount (T533).
+mod approle_mounts;
+// Connect-MFA step-up runs on the mount the token logged in through (T532).
+mod connect_mfa_mounts;
+// A self-service profile write never re-creates a deleted user (T531).
+mod self_profile_writes;
 
 // ── Kernel-tier tests lifted in Phase 4.5 ────────────────────────────
 //

@@ -290,18 +290,21 @@ async fn disabling_an_approle_mount_forgets_its_roles_aliases_everywhere() {
 
 /// AppRole keeps T500's rule too: a role name another AppRole mount holds logs
 /// in as the same entities, so deleting one of them keeps the aliases, and so
-/// does disabling its mount; deleting the last holder forgets them all.
+/// does disabling its mount; deleting the last holder forgets them all. The
+/// second holder is planted, as only a duplicate from before T533 can exist.
 #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
 async fn an_approle_name_another_mount_holds_keeps_its_aliases() {
+    use super::approle_mounts::plant_role_copy;
+
     let (_vault, core, root) = vault("t522_approle_keep", &[("ar1", "approle"), ("ar2", "approle")]).await;
     create_role(&core, &root, "ar1", "svc").await;
-    create_role(&core, &root, "ar2", "svc").await;
+    plant_role_copy(&core, "ar1", "ar2", "svc").await;
     let shared = role_entity(&core, &root, "ar1", "svc", Some(NS)).await;
     assert_eq!(role_entity(&core, &root, "ar2", "svc", Some(NS)).await, shared, "one entity for the name");
 
     delete(&core, &root, "auth/ar2/role/svc").await;
     assert_eq!(aliases(&core, "approle/", "svc").await.1, Some(shared.clone()), "kept while ar1 holds svc");
-    create_role(&core, &root, "ar2", "svc").await;
+    plant_role_copy(&core, "ar1", "ar2", "svc").await;
     delete(&core, &root, "sys/auth/ar2").await;
     assert_eq!(role_entity(&core, &root, "ar1", "svc", Some(NS)).await, shared, "ar1's svc keeps its entity");
 

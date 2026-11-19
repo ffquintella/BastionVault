@@ -23,12 +23,14 @@
 //! online guessing attack against another principal's TOTP key.
 //!
 //! Both paths are authenticated (deliberately absent from the backend's
-//! `unauth_paths`), so an unauthenticated caller never reaches them.
+//! `unauth_paths`), so an unauthenticated caller never reaches them, and
+//! refuse a token that did not log in through their own mount (T532).
 
 use std::{collections::HashMap, sync::Arc};
 
 use super::{UserPassBackend, UserPassBackendInner};
 use crate::{
+    bv_error_response_status,
     context::Context,
     errors::RvError,
     logical::{Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
@@ -144,13 +146,39 @@ pub fn caller_username(req: &Request) -> Result<String, RvError> {
 
 #[maybe_async::maybe_async]
 impl UserPassBackendInner {
+    /// [`caller_username`], refused unless the token logged in through the
+    /// mount serving this request (T532): the step-up checks this mount's
+    /// record and factors. The login mount comes from the token entry's path,
+    /// never from `mount_path`, the literal `userpass/` on every mount.
+    pub async fn caller_on_this_mount(&self, req: &Request) -> Result<String, RvError> {
+        let username = caller_username(req)?;
+        let tokens = self.core.tokens().ok_or_else(|| RvError::ErrString("step-up: no token service".into()))?;
+        let token = tokens.lookup(&req.client_token).await?.ok_or(RvError::ErrPermissionDenied)?;
+        let router = self.core.router();
+        let login_mount = router.matching_mount(&token.path)?;
+        let login_view = if login_mount.is_empty() { None } else { router.matching_view(&login_mount)? };
+        // The router hands a handler its mount's own view, so the two are one
+        // allocation exactly when the token's login mount is this mount.
+        let own = match (login_view, req.storage.as_ref()) {
+            (Some(login), Some(this)) => std::ptr::addr_eq(Arc::as_ptr(&login), Arc::as_ptr(this)),
+            _ => false,
+        };
+        if !own {
+            return Err(bv_error_response_status!(
+                403,
+                "step-up must run on the userpass mount this token logged in through"
+            ));
+        }
+        Ok(username)
+    }
+
     /// Which factors the calling principal has enrolled. Reads the user
     /// record and the FIDO2 relying-party config; a factor counts as
     /// available only when everything needed to verify it is present, so a
     /// half-configured FIDO2 deployment reports `fido2: false` rather than
     /// failing at verify time.
     pub async fn step_up_factors(&self, req: &mut Request) -> Result<AvailableFactors, RvError> {
-        let username = caller_username(req)?;
+        let username = self.caller_on_this_mount(req).await?;
         let user =
             self.get_user(req, &username).await?.ok_or_else(|| RvError::ErrResponse("no such principal".into()))?;
 
@@ -174,7 +202,7 @@ impl UserPassBackendInner {
     /// `challenge/stepup/<username>`. A second `begin` overwrites the first,
     /// so an abandoned prompt cannot be redeemed later.
     pub async fn step_up_begin(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
-        let username = caller_username(req)?;
+        let username = self.caller_on_this_mount(req).await?;
         let factors = self.step_up_factors(req).await?;
 
         let mut data = serde_json::Map::new();
@@ -214,7 +242,7 @@ impl UserPassBackendInner {
     /// body, so a caller cannot mistake a failed factor for a successful
     /// call with a falsy field.
     pub async fn step_up_verify(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
-        let username = caller_username(req)?;
+        let username = self.caller_on_this_mount(req).await?;
         let method = req.get_data("method")?.as_str().unwrap_or_default().trim().to_lowercase();
 
         match method.as_str() {

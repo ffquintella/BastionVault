@@ -281,6 +281,64 @@ async fn a_stray_mixed_case_record_is_removed_through_sys_raw() {
     assert!(login(&core, "up1", "carol", PW).await.is_some(), "carol on up1 is untouched");
 }
 
+/// What a raced request came to: `Ok` or `(status, message)`, so it can cross
+/// back from its thread whatever the error type holds.
+pub(super) type Outcome = Result<(), (u16, String)>;
+
+fn outcome(result: Result<Option<Response>, RvError>) -> Outcome {
+    match result {
+        Ok(_) => Ok(()),
+        Err(RvError::ErrResponseStatus(status, msg)) => Err((status, msg)),
+        Err(e) => Err((0, e.to_string())),
+    }
+}
+
+/// Send each `(path, body)` write as root on its own OS thread and runtime,
+/// released together, so the handlers really run at the same time; the
+/// outcomes come back in request order.
+pub(super) fn race(core: &Arc<Core>, token: &str, requests: &[(String, Value)]) -> Vec<Outcome> {
+    let start = std::sync::Barrier::new(requests.len());
+    std::thread::scope(|scope| {
+        let threads: Vec<_> = requests
+            .iter()
+            .map(|(path, body)| {
+                let (core, start) = (core.clone(), &start);
+                scope.spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+                    start.wait();
+                    outcome(rt.block_on(send(&core, token, Operation::Write, path, body.clone())))
+                })
+            })
+            .collect();
+        threads.into_iter().map(|t| t.join().expect("a raced request panicked")).collect()
+    })
+}
+
+/// Two creations of one username on two mounts at the same moment admit one
+/// (T530), by the user route and by the password route: the other is refused
+/// with T500's 409 and writes nothing, so no mount pair holds the name twice.
+/// Before T530 the check of the other mounts and the write were not
+/// serialised, and the bcrypt hash between them let both pass.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn simultaneous_creations_of_one_name_on_two_mounts_admit_one() {
+    let (_bvault, core, root) = new_unseal_test_bastion_vault("userpass_mounts_race").await;
+    enable(&core, &root, "up1").await;
+    enable(&core, &root, "up2").await;
+
+    for (name, second_route) in [("carol", "auth/up2/users/carol"), ("dave", "auth/up2/users/dave/password")] {
+        let requests = [
+            (format!("auth/up1/users/{name}"), json!({ "password": PW })),
+            (second_route.to_string(), json!({ "password": PW })),
+        ];
+        let outcomes = tokio::task::block_in_place(|| race(&core, &root, &requests));
+        assert_eq!(outcomes.iter().filter(|o| o.is_ok()).count(), 1, "exactly one creation of {name}: {outcomes:?}");
+        let refused = outcomes.iter().find_map(|o| o.clone().err()).expect("one refusal");
+        assert_eq!(refused.0, 409, "{name}: {refused:?}");
+        assert!(refused.1.contains("another userpass mount"), "{name}: {refused:?}");
+    }
+    assert_eq!(find_duplicate_usernames(core.as_ref()).await.unwrap(), vec![], "no name is held twice");
+}
+
 /// A password reset naming the user in another letter case updates the
 /// user's own record: it used to write a second record under the mixed-case
 /// key, leaving the real one, and its old password, in place.

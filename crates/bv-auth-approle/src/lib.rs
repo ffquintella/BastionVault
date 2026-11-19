@@ -66,7 +66,7 @@ pub use bv_logical::{
 use std::{
     any::Any,
     collections::HashMap,
-    sync::{atomic::AtomicU32, Arc},
+    sync::{atomic::AtomicU32, Arc, Mutex},
 };
 
 use arc_swap::ArcSwapOption;
@@ -83,6 +83,7 @@ use bv_kernel_api::{Module, VaultCtx};
 pub mod path_login;
 pub mod path_role;
 pub mod path_tidy_secret_id;
+pub mod role_lock;
 pub mod role_mounts;
 pub mod validation;
 
@@ -112,6 +113,9 @@ pub struct AppRoleModule {
     pub name: String,
     #[deref]
     pub backend: Arc<AppRoleBackend>,
+    /// What the last unseal's duplicate-role scan found (T533); `None` until
+    /// one completes. Read with [`Self::take_last_duplicate_scan`].
+    last_duplicate_scan: Arc<Mutex<Option<Vec<role_mounts::DuplicateRoleName>>>>,
 }
 
 pub struct AppRoleBackendInner {
@@ -193,8 +197,36 @@ impl AppRoleBackendInner {
 
 impl AppRoleModule {
     pub fn new(core: Arc<dyn VaultCtx>) -> Self {
-        Self { name: "approle".to_string(), backend: Arc::new(AppRoleBackend::new(core)) }
+        Self {
+            name: "approle".to_string(),
+            backend: Arc::new(AppRoleBackend::new(core)),
+            last_duplicate_scan: Arc::new(Mutex::new(None)),
+        }
     }
+
+    /// Take what the last unseal's duplicate-role scan found, leaving `None`:
+    /// lets a test see that an unseal ran the scan.
+    pub fn take_last_duplicate_scan(&self) -> Option<Vec<role_mounts::DuplicateRoleName>> {
+        self.last_duplicate_scan.lock().ok().and_then(|mut slot| slot.take())
+    }
+}
+
+type DuplicateScanSlot = Arc<Mutex<Option<Vec<role_mounts::DuplicateRoleName>>>>;
+
+/// Report the role names more than one AppRole mount holds (T533), detached
+/// so a slow listing never holds up the unseal; a thread on `sync_handler`.
+fn spawn_duplicate_scan(slot: DuplicateScanSlot, core: Arc<dyn VaultCtx>) {
+    let record = move |found: Option<Vec<role_mounts::DuplicateRoleName>>| {
+        if let (Some(found), Ok(mut slot)) = (found, slot.lock()) {
+            *slot = Some(found);
+        }
+    };
+    #[cfg(not(feature = "sync_handler"))]
+    drop(tokio::task::spawn(async move {
+        record(role_mounts::report_duplicate_role_names(core.as_ref()).await);
+    }));
+    #[cfg(feature = "sync_handler")]
+    drop(std::thread::spawn(move || record(role_mounts::report_duplicate_role_names(core.as_ref()))));
 }
 
 #[maybe_async::maybe_async]
@@ -239,6 +271,11 @@ impl Module for AppRoleModule {
         self.backend.inner.salt.store(Some(Arc::new(salt)));
 
         Ok(())
+    }
+
+    /// Report pre-existing duplicate role names once per unseal (T533).
+    fn start_background(&self, core: Arc<dyn VaultCtx>) {
+        spawn_duplicate_scan(self.last_duplicate_scan.clone(), core);
     }
 
     fn cleanup(&self, core: &dyn VaultCtx) -> Result<(), RvError> {

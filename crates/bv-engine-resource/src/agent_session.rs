@@ -326,6 +326,9 @@ mod executor {
 
     /// Whether the binding's operator is a userpass principal: the only kind
     /// with a second factor on file to step up with (§3.1 "Userpass-only").
+    /// `mount_path` is the identity's `userpass/` on every userpass mount, as
+    /// in the ticket binding; the step-up itself ran on the operator's login
+    /// mount, in `connect/mfa/verify` (T532), so nothing is routed from here.
     pub fn userpass_operator(binding: &McpBinding) -> Option<&crate::logical::McpOperatorRef> {
         binding.operator.as_ref().filter(|o| !o.username.is_empty() && o.mount_path.starts_with("userpass"))
     }

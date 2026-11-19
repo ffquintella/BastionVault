@@ -639,6 +639,32 @@ fn step_up_path(mount: &str, leaf: &str) -> String {
     format!("auth/{m}/v2/step-up/{leaf}")
 }
 
+/// The userpass mount the caller's token logged in through (`corp/`), where
+/// its step-up runs (T532). From the token entry's path, never `mount_path`:
+/// every userpass mount stamps the literal `userpass/`, which sent a second
+/// mount's users to the root mount's records and factors.
+async fn step_up_mount(core: &dyn VaultCtx, req: &Request) -> Result<String, RvError> {
+    let tokens = core.tokens().ok_or_else(|| bv_error_response_status!(500, "connect MFA: no token service"))?;
+    let token = tokens.lookup(&req.client_token).await?.ok_or(RvError::ErrPermissionDenied)?;
+    let router = core.router();
+    let mount = router.matching_mount(&token.path)?;
+    let userpass = match router.matching_mount_entry(&mount)? {
+        Some(entry) if !mount.is_empty() => {
+            entry.read().map_err(|_| RvError::ErrRequestInvalid)?.logical_type == "userpass"
+        }
+        _ => false,
+    };
+    match mount.strip_prefix("auth/") {
+        Some(path) if userpass => Ok(path.to_string()),
+        // Same stable reason as `caller_principal`: no factor can be proved.
+        _ => Err(bv_error_response_status!(
+            403,
+            "mfa_unavailable: the auth mount this token logged in through is not a userpass mount, or no \
+             longer exists, so no second factor can be proved for it. Sign in again with a userpass login."
+        )),
+    }
+}
+
 /// `resource` and `profile_id` off a connect pre-flight body, trimmed and
 /// required.
 fn target_fields(req: &Request) -> Result<(String, String), RvError> {
@@ -836,7 +862,8 @@ impl super::ResourceBackendInner {
         }
         data.insert("required".into(), Value::Bool(true));
 
-        let (mount, _principal) = caller_principal(req)?;
+        caller_principal(req)?;
+        let mount = step_up_mount(self.core.as_ref(), req).await?;
 
         let mut sub = Request::new(step_up_path(&mount, "begin"));
         sub.operation = Operation::Write;
@@ -925,7 +952,11 @@ impl super::ResourceBackendInner {
             ));
         }
 
+        // The ticket binds the principal as its identity names it (`userpass/`,
+        // one principal per username across mounts, T500); the ceremony runs
+        // on the mount the token logged in through (T532).
         let (mount, principal) = caller_principal(req)?;
+        let login_mount = step_up_mount(self.core.as_ref(), req).await?;
 
         let mut body = Map::new();
         body.insert("method".into(), Value::String(method.clone()));
@@ -935,7 +966,7 @@ impl super::ResourceBackendInner {
             }
         }
 
-        let mut sub = Request::new(step_up_path(&mount, "verify"));
+        let mut sub = Request::new(step_up_path(&login_mount, "verify"));
         sub.operation = Operation::Write;
         sub.auth = req.auth.clone();
         sub.client_token = req.client_token.clone();

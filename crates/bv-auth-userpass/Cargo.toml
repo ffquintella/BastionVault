@@ -37,8 +37,9 @@ maybe-async = "0.2"
 serde = { version = "^1.0", features = ["derive", "rc", "alloc"] }
 serde_json = "^1.0"
 # Spawns the once-per-unseal scan for usernames more than one userpass mount
-# holds (T500), detached so it never holds up an unseal. Already in every build.
-tokio = { version = "1.52", features = ["rt"] }
+# holds (T500), detached so it never holds up an unseal; `sync` for the
+# in-process half of the user-records lock (T530). Already in every build.
+tokio = { version = "1.52", features = ["rt", "sync"] }
 uuid = { version = "1", features = ["v4"] }
 
 [features]

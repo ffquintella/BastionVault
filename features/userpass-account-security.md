@@ -135,11 +135,38 @@ migration.
   mount's user still logs in as; deleting the last holder forgets them at root
   and in every namespace (T522), as does disabling the last mount that holds
   the name.
-- **Known limit:** two creations of one name on two mounts at the same moment
-  can both pass (storage has no cross-mount lock); the next unseal reports it.
-  Keying userpass identity by the real mount (separate entities, assignments
+- **Concurrent creations (T530):** the check of the other mounts and the
+  write are one step. Every HA node accepts writes (a follower forwards them
+  to the Raft leader), so a lock held in one process covers no other node.
+  `user_lock::lock_user_records` takes an in-process mutex, so two local
+  tasks never wait on the backend lock together (the file backend polls a
+  lock file with a blocking sleep), then the storage backend's lock
+  `bv-auth/userpass/user-records`: a Raft distributed lock with a lease on
+  hiqlite, `GET_LOCK` on MySQL (gives up after 1 s and fails the request), a
+  lock file on the file backend, nothing on the single-node cloud file
+  targets. The user route, the password route and delete hold it to the end
+  of the handler; bcrypt runs before it is taken. One lock for all names: user
+  writes are rare, and a per-name lock name would have to be a safe file path
+  and fit MySQL's 64-character limit. Of two racing creations, one gets 409.
+- **Self-service write-back (T531):** `sys/identity/profile/self/{password,
+  contact}` take the same lock, re-read the record and apply only their change
+  to it: a user deleted meanwhile is a 404 (never re-created), one disabled
+  meanwhile a 403, and an administrator's password reset meanwhile wins (409).
+  The default-account self write stores no userpass record.
+- Keying userpass identity by the real mount (separate entities, assignments
   and `mount_path` per mount) was decided against on 2026-11-18, see T521
-  (abandoned); T530 and T531 close the remaining gaps.
+  (abandoned).
+
+### Step-up on the login mount (T532)
+
+A userpass token's `mount_path` is `userpass/` on every mount, so connect-MFA
+used to send a second mount's user to `auth/userpass/` for the step-up. It now
+takes the mount from the token entry's login path (`auth/<mount>/login/...`),
+as the self-service profile does, and refuses a token whose login mount is not
+a userpass mount (`mfa_unavailable`). The step-up routes refuse (403) a token
+that did not log in through their own mount, so no route checks another
+mount's user. The ticket still binds `userpass/<name>`, the principal's
+identity (T500), which is also what an MCP pairing's operator record carries.
 
 ## Defaults / operational notes
 
@@ -169,6 +196,9 @@ TOTP-MFA controls, Unlock action, list status badges), Tauri commands, and
 | Tests (Rust unit + GUI api) | Done |
 | Backend: one username per userpass mount, duplicate report at unseal (T500) | Done |
 | Backend: a deleted user or disabled mount forgets its aliases in every namespace (T522) | Done |
+| Backend: user creation serialised across mounts and HA nodes (T530) | Done |
+| Backend: self-service writes re-read the user under that lock (T531) | Done |
+| Backend: connect-MFA step-up on the token's login mount (T532) | Done |
 
 T500 is proven by `src/engine_tests/userpass_mounts.rs` (refusal in any case,
 by both creating routes, no record or entity on refusal, same-mount updates,
@@ -185,12 +215,23 @@ retries. Proven by
 `src/engine_tests/principal_aliases.rs` (namespace logins before the delete and
 after the re-creation, AppRole, the keeping rule, disable, the purge).
 
+T530 is proven by `userpass_mounts.rs`
+(`simultaneous_creations_of_one_name_on_two_mounts_admit_one`: two OS threads,
+user and password routes; both passed before), T531 by
+`self_profile_writes.rs` (delete, disable and admin reset while the write
+waits), T532 by `connect_mfa_mounts.rs` (a second mount's user, the root
+mount unchanged, a pre-T500 duplicate without factors on the root mount), and
+T533, the same refusal for AppRole role names, by `approle_mounts.rs`.
+
 ### Not yet implemented
 
 - Separate identity entities per userpass mount: decided against on
-  2026-11-18, see T521 (abandoned); T530 and T531 close the remaining gaps.
-  A username may exist in only one userpass mount, and pre-T500 duplicates
-  stay one entity.
+  2026-11-18, see T521 (abandoned). A username may exist in only one userpass
+  mount, and pre-T500 duplicates stay one entity.
+- The userpass backend's own read-modify-writes of a user record (failed-login
+  counter and lockout, unlock, passkey registration and sign counters) do not
+  take the user-records lock, so a delete racing one of them can still put
+  the record back (T544).
 - Aliases a delete left in a namespace before T522 are not migrated: a name
   re-created since logs in there as the old entity. Deleting a name no mount
   holds clears them; no endpoint lists entities no alias names, or the
