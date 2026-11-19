@@ -432,6 +432,13 @@ EXAMPLE ENTRY:
 
 - **Restore each file to the files mount it came from when a namespace has several** (T542, S21)
   -- An export (a scheduled backup included) did not record which files mount a file lived on, so restoring into a namespace with more than one files mount wrote every file to the first mount and left the others empty. Each file now records its mount and returns to it when that mount exists; a document written before this change still lands on the first files mount.
+
+#### Scheduled backups: restoring from another node
+
+- **Restore a backup held by another cluster node instead of failing with a `Rustls + PlatformVerifier requires feature: platform-verifier` panic** (T543, S21)
+  -- Restoring a scheduled backup that lives on a peer node answered `502` because the server built its HTTPS client for the peer fetch without the platform certificate verifier compiled in. The client now has it, so the peer's certificate is checked against the operating system trust store (which carries a corporate CA) unless `peer_ca_file` pins one.
+- **Say why a scheduled-backup restore was refused instead of `Request is invalid`** (T543, S21)
+  -- `POST /v{1,2}/sys/scheduled-exports/{id}/restore` answered every refusal with the same `400 Request is invalid.`. A missing password, a wrong password or corrupted file, a decrypted body that is not an export document, and an unsupported schema tag each now return their own `400` message.
 - **Include the selected resources and KV paths of every namespace in a scheduled selective backup** (T541, S21)
   -- A schedule with a selective scope resolved its selections in the root namespace only, so a resource or KV path of the same name inside a namespace was missing from the daily file. Each selection is now resolved by name in the root namespace and in every namespace (a schedule cannot name one); a selection that matches nothing in a namespace only adds a warning to the file. Files already written are unchanged.
 - **Include every namespace in a scheduled "full vault" backup** (T540, S21)

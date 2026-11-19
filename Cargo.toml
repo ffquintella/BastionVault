@@ -247,7 +247,7 @@ hex = "0.4"
 pem = "3.0"
 chrono = "0.4"
 zeroize = { version = "1.8.2", features = ["zeroize_derive"] }
-ureq = { version = "3.3", features = ["json", "socks-proxy", "win-system-proxy"] }
+ureq = { version = "3.3", features = ["json", "socks-proxy", "win-system-proxy", "platform-verifier"] }
 # Pure-Rust SMB2/3 client (NTLM auth via the `sspi` crate). Optional —
 # enabled by the `files_smb` feature so default builds don't ship the
 # SMB stack. No direct C deps; sspi pulls `ring` which we already

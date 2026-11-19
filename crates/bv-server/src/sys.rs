@@ -4348,12 +4348,25 @@ async fn sys_scheduled_exports_restore_handler(
 
         let document_bytes = match format {
             "bvx" => {
-                let password = payload.password.as_deref().ok_or(RvError::ErrRequestInvalid)?;
-                let bytes = crate::exchange::decrypt_bvx(&file_bytes, password)?;
+                let Some(password) = payload.password.as_deref() else {
+                    return Ok(response_error(
+                        StatusCode::BAD_REQUEST,
+                        "a password is required to restore a .bvx backup",
+                    ));
+                };
+                let decrypted = crate::exchange::decrypt_bvx(&file_bytes, password);
                 if let Some(ref mut p) = payload.password {
                     p.zeroize();
                 }
-                bytes
+                match decrypted {
+                    Ok(bytes) => bytes,
+                    Err(_) => {
+                        return Ok(response_error(
+                            StatusCode::BAD_REQUEST,
+                            "cannot decrypt backup: wrong password, or the file is corrupted",
+                        ))
+                    }
+                }
             }
             // "json"
             _ => {
@@ -4367,9 +4380,19 @@ async fn sys_scheduled_exports_restore_handler(
             }
         };
 
-        let document: crate::exchange::ExchangeDocument =
-            serde_json::from_slice(&document_bytes).map_err(|_| RvError::ErrRequestInvalid)?;
-        document.validate_schema_tag().map_err(|_| RvError::ErrRequestInvalid)?;
+        let document: crate::exchange::ExchangeDocument = match serde_json::from_slice(&document_bytes) {
+            Ok(d) => d,
+            Err(e) => {
+                log::warn!("scheduled-exports: backup {} is not a valid export document: {e}", payload.filename);
+                return Ok(response_error(
+                    StatusCode::BAD_REQUEST,
+                    &format!("backup content is not a valid export document: {e}"),
+                ));
+            }
+        };
+        if let Err(msg) = document.validate_schema_tag() {
+            return Ok(response_error(StatusCode::BAD_REQUEST, &format!("backup rejected: {msg}")));
+        }
 
         if payload.dry_run {
             let (new, identical, conflict, items, warnings) =
