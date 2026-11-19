@@ -2,7 +2,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use super::{UserPassBackend, UserPassBackendInner};
+use super::{path_users::UserEntry, UserPassBackend, UserPassBackendInner};
 use crate::{
     context::Context,
     errors::RvError,
@@ -11,7 +11,17 @@ use crate::{
     new_fields, new_fields_internal, new_path, new_path_internal,
     storage::StorageEntry,
 };
-use bv_auth_fido2::rp::{AuthenticationState, PublicKeyCredentialAssertion, RelyingParty};
+use bv_auth_fido2::rp::{AuthResult, AuthenticationState, PublicKeyCredentialAssertion, RelyingParty};
+
+/// What [`UserPassBackendInner::store_sign_count`] found under the record lock.
+pub(crate) enum SignCountUpdate {
+    /// The user was deleted meanwhile; nothing was written.
+    Gone,
+    /// The user is disabled; nothing was written.
+    Disabled,
+    /// The counter was stored; the record as it is now.
+    Stored(Box<UserEntry>),
+}
 
 impl UserPassBackend {
     pub fn fido2_login_begin_path(&self) -> Path {
@@ -185,26 +195,24 @@ impl UserPassBackendInner {
         let assertion: PublicKeyCredentialAssertion = serde_json::from_str(&credential_json)
             .map_err(|e: serde_json::Error| RvError::ErrFido2AuthFailed(format!("invalid credential: {e}")))?;
 
-        let mut user_entry = self.get_user(req, &username).await?.ok_or(RvError::ErrFido2CredentialNotFound)?;
+        let user_entry = self.get_user(req, &username).await?.ok_or(RvError::ErrFido2CredentialNotFound)?;
 
-        let mut passkeys =
+        let passkeys =
             user_entry.get_passkeys().map_err(|e: serde_json::Error| RvError::ErrFido2AuthFailed(e.to_string()))?;
 
         let auth_result = rp
             .finish_authentication(&assertion, &auth_state, &passkeys)
             .map_err(|e| RvError::ErrFido2AuthFailed(e.to_string()))?;
 
-        for pk in passkeys.iter_mut() {
-            if let Ok(id) = pk.cred_id_bytes() {
-                if id == auth_result.cred_id {
-                    pk.sign_count = auth_result.new_sign_count;
-                }
+        // The token is built from the record as stored now (T544).
+        let mut user_entry = match self.store_sign_count(req, &username, &auth_result).await? {
+            SignCountUpdate::Stored(entry) => *entry,
+            SignCountUpdate::Gone => return Err(RvError::ErrFido2CredentialNotFound),
+            SignCountUpdate::Disabled => {
+                log::warn!(target: "security", "userpass passkey login refused: account '{username}' is disabled");
+                return Err(RvError::ErrResponse("account is disabled".into()));
             }
-        }
-        user_entry
-            .set_passkeys(&passkeys)
-            .map_err(|e: serde_json::Error| RvError::ErrFido2AuthFailed(e.to_string()))?;
-        self.set_user(req, &username, &user_entry).await?;
+        };
 
         // Multi-tenancy: bind the FIDO2 session to the namespace named by the
         // request header — or, unscoped, to the principal's first assigned
@@ -263,6 +271,59 @@ impl UserPassBackendInner {
         }
 
         Ok(Some(Response { auth: Some(auth), ..Response::default() }))
+    }
+
+    /// Store a verified assertion's signature counter on the record as stored
+    /// now, under its record lock (T544); the assertion is checked before,
+    /// outside the lock. Nothing is written for a user deleted or disabled
+    /// meanwhile. A key removed meanwhile, or whose counter reached the
+    /// presented one meanwhile (a concurrent use, or a clone), is refused, so a
+    /// stored counter never goes back.
+    pub(crate) async fn store_sign_count(
+        &self,
+        req: &mut Request,
+        username: &str,
+        auth_result: &AuthResult,
+    ) -> Result<SignCountUpdate, RvError> {
+        let mut disabled = false;
+        let stored = self
+            .update_user(req, username, |stored| {
+                if stored.disabled {
+                    disabled = true;
+                    return Ok(false);
+                }
+                let mut passkeys = stored
+                    .get_passkeys()
+                    .map_err(|e: serde_json::Error| RvError::ErrFido2AuthFailed(e.to_string()))?;
+                let passkey = passkeys
+                    .iter_mut()
+                    .find(|pk| pk.cred_id_bytes().is_ok_and(|id| id == auth_result.cred_id))
+                    .ok_or_else(|| {
+                        RvError::ErrFido2AuthFailed("the security key was removed while it was being verified".into())
+                    })?;
+                let presented = auth_result.new_sign_count;
+                // The relying party's rule, against the counter as stored now.
+                if (passkey.sign_count != 0 || presented != 0) && presented <= passkey.sign_count {
+                    log::warn!(
+                        target: "security",
+                        "userpass passkey for '{username}' refused: signature counter {presented} is not past the stored {}",
+                        passkey.sign_count
+                    );
+                    return Err(RvError::ErrFido2AuthFailed(format!(
+                        "signature counter regression: stored {}, presented {presented}",
+                        passkey.sign_count
+                    )));
+                }
+                passkey.sign_count = presented;
+                stored.set_passkeys(&passkeys).map_err(|e: serde_json::Error| RvError::ErrFido2AuthFailed(e.to_string()))?;
+                Ok(true)
+            })
+            .await?;
+        Ok(match stored {
+            None => SignCountUpdate::Gone,
+            Some(_) if disabled => SignCountUpdate::Disabled,
+            Some(entry) => SignCountUpdate::Stored(Box::new(entry)),
+        })
     }
 
     pub async fn fido2_login_renew(

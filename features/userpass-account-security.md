@@ -68,6 +68,10 @@ the TOTP binding fields. `password_hash` and `credentials_json` remain redacted.
    missing key, or malformed policy refuses the login.
 7. **Success:** reset the counter/lock if set, then issue the token as before.
 
+Every write in steps 4, 5 and 7 re-reads the record under the user's record
+lock and changes only its own fields (T544, below); bcrypt runs before the
+lock is taken.
+
 ### TOTP validation (cross-mount, fail-closed)
 
 The TOTP engine is a sibling mount. Login reads the bound key's policy through
@@ -138,21 +142,53 @@ migration.
 - **Concurrent creations (T530):** the check of the other mounts and the
   write are one step. Every HA node accepts writes (a follower forwards them
   to the Raft leader), so a lock held in one process covers no other node.
-  `user_lock::lock_user_records` takes an in-process mutex, so two local
-  tasks never wait on the backend lock together (the file backend polls a
-  lock file with a blocking sleep), then the storage backend's lock
-  `bv-auth/userpass/user-records`: a Raft distributed lock with a lease on
-  hiqlite, `GET_LOCK` on MySQL (gives up after 1 s and fails the request), a
-  lock file on the file backend, nothing on the single-node cloud file
-  targets. The user route, the password route and delete hold it to the end
-  of the handler; bcrypt runs before it is taken. One lock for all names: user
-  writes are rare, and a per-name lock name would have to be a safe file path
-  and fit MySQL's 64-character limit. Of two racing creations, one gets 409.
+  `user_lock::lock_user_record(storage, name)` takes an in-process mutex, so
+  two local tasks never wait on one backend lock together (the file backend
+  polls a lock file with a blocking sleep), then the storage backend's lock:
+  a Raft distributed lock with a lease on hiqlite, `GET_LOCK` on MySQL (gives
+  up after 1 s and fails the request), a lock file on the file backend,
+  nothing on the single-node cloud file targets. The user route, the password
+  route and delete hold it to the end of the handler; bcrypt runs before it is
+  taken. Of two racing creations, one gets 409. The race is between two
+  creations of one name, so the lock is per name (T544 below); T530 shipped
+  one lock for all names, `bv-auth/userpass/user-records`, which T544 replaced
+  before a release.
 - **Self-service write-back (T531):** `sys/identity/profile/self/{password,
-  contact}` take the same lock, re-read the record and apply only their change
-  to it: a user deleted meanwhile is a 404 (never re-created), one disabled
-  meanwhile a 403, and an administrator's password reset meanwhile wins (409).
-  The default-account self write stores no userpass record.
+  contact}` take the user's record lock, re-read the record and apply only
+  their change to it: a user deleted meanwhile is a 404 (never re-created), one
+  disabled meanwhile a 403, and an administrator's password reset meanwhile
+  wins (409). The default-account self write stores no userpass record.
+- **The backend's own write-backs (T544):** the failed-login counter and
+  lockout, the elapsed-lock clear and the success reset in the password login,
+  unlock, passkey registration and removal, and the passkey sign counter of the
+  passkey login and the step-up used to read `user/<name>`, run bcrypt or a
+  passkey check, and write the whole record back: a delete in between
+  re-created the user, an administrator's `disabled: true` or password reset in
+  between was undone, and two concurrent failed logins counted once. Each now
+  re-reads the record under the user's record lock
+  (`UserPassBackendInner::update_user`) and applies only its own change:
+  - a user deleted meanwhile is never written back: a failed login is not
+    counted, a successful login is refused (`invalid username or password`),
+    unlock answers `user <name> does not exist`, a passkey registration
+    `User not found`, a passkey login or step-up is refused;
+  - a successful password login whose record shows a disable, a lock or a new
+    password meanwhile is refused, and writes nothing;
+  - a passkey login or step-up on a disabled account is refused (the passkey
+    login never checked `disabled` before), as is one whose key was removed
+    meanwhile or whose stored counter already reached the presented one (a
+    concurrent use or a clone): the counter never goes back;
+  - a failed attempt arriving while a lock is in force adds nothing.
+- **Why one lock per name:** the failed-login counter is written on
+  unauthenticated requests, and one lock for every name would let anyone
+  contend with every user write in the cluster. The lock name is
+  `bv-auth/userpass/user/` plus the first 32 hex digits of the SHA-256 of a
+  fixed domain string and the lower-cased name: one lock per principal across
+  mounts and letter cases, never a path whatever the name holds, and 54
+  characters, within MySQL's 64. A hash collision would only share a lock.
+  The in-process half is 64 fixed stripes, so names sprayed at the login route
+  allocate nothing. No handler holds two record locks, nor one across bcrypt
+  or a passkey verification; a failed login holds it for one read and one
+  write. An unknown username, or lockout disabled, takes no lock.
 - Keying userpass identity by the real mount (separate entities, assignments
   and `mount_path` per mount) was decided against on 2026-11-18, see T521
   (abandoned).
@@ -199,6 +235,7 @@ TOTP-MFA controls, Unlock action, list status badges), Tauri commands, and
 | Backend: user creation serialised across mounts and HA nodes (T530) | Done |
 | Backend: self-service writes re-read the user under that lock (T531) | Done |
 | Backend: connect-MFA step-up on the token's login mount (T532) | Done |
+| Backend: counters, unlock and passkey write-backs re-read the user under a per-name lock (T544) | Done |
 
 T500 is proven by `src/engine_tests/userpass_mounts.rs` (refusal in any case,
 by both creating routes, no record or entity on refusal, same-mount updates,
@@ -223,15 +260,26 @@ waits), T532 by `connect_mfa_mounts.rs` (a second mount's user, the root
 mount unchanged, a pre-T500 duplicate without factors on the root mount), and
 T533, the same refusal for AppRole role names, by `approle_mounts.rs`.
 
+T544 is proven by `src/engine_tests/userpass_record_writes.rs`: a delete, a
+disable and a password reset while a failed or successful password login, an
+unlock, a passkey removal, a passkey registration, a passkey login (also a
+counter moved past the assertion) and a passkey step-up wait for the record
+lock, driven by a software Ed25519 authenticator; all but the per-name check
+failed before. That check holds dave's lock while carol fails a login; the
+lock-name rules are unit tests in `user_lock.rs`.
+
 ### Not yet implemented
 
 - Separate identity entities per userpass mount: decided against on
   2026-11-18, see T521 (abandoned). A username may exist in only one userpass
   mount, and pre-T500 duplicates stay one entity.
-- The userpass backend's own read-modify-writes of a user record (failed-login
-  counter and lockout, unlock, passkey registration and sign counters) do not
-  take the user-records lock, so a delete racing one of them can still put
-  the record back (T544).
+- A successful login with no counter to reset writes nothing and takes no
+  lock, so one that read the record just before a delete or a disable still
+  gets its token (as any check-then-act read does). T544 closes the
+  write-backs, not that window.
+- On MySQL a write that waits more than a second for another node's record
+  lock fails; for a failed login that means the attempt is refused with a
+  storage error and not counted.
 - Aliases a delete left in a namespace before T522 are not migrated: a name
   re-created since logs in there as the old entity. Deleting a name no mount
   holds clears them; no endpoint lists entities no alias names, or the

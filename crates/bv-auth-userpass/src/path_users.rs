@@ -379,6 +379,27 @@ impl UserPassBackendInner {
         req.storage_put(&entry).await
     }
 
+    /// Re-read `name`'s record under its record lock, let `change` apply one
+    /// operation's own change to the record as stored now, and write it back
+    /// when `change` returns `Ok(true)` (T544). `None` when the user no longer
+    /// exists: nothing is written, so a user deleted meanwhile is never
+    /// re-created, and every field `change` leaves alone keeps its newer value.
+    /// An error from `change` writes nothing. Run slow checks before this.
+    pub async fn update_user<F>(&self, req: &mut Request, name: &str, change: F) -> Result<Option<UserEntry>, RvError>
+    where
+        F: FnOnce(&mut UserEntry) -> Result<bool, RvError>,
+    {
+        let name = name.to_lowercase();
+        let _record = super::user_lock::lock_user_record(request_storage(req)?.as_ref(), &name).await?;
+        let Some(mut stored) = self.get_user(req, &name).await? else {
+            return Ok(None);
+        };
+        if change(&mut stored)? {
+            self.set_user(req, &name, &stored).await?;
+        }
+        Ok(Some(stored))
+    }
+
     pub async fn read_user(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let username_value = req.get_data("username")?;
         let username = username_value.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_lowercase();
@@ -427,8 +448,9 @@ impl UserPassBackendInner {
         }
 
         // Held to the end: the other mounts' check, the write and the entity
-        // provisioning are one step for every userpass mount and node (T530).
-        let _records = super::user_lock::lock_user_records(request_storage(req)?.as_ref()).await?;
+        // provisioning are one step for every userpass mount and node (T530),
+        // and no login or passkey write-back lands in between (T544).
+        let _record = super::user_lock::lock_user_record(request_storage(req)?.as_ref(), &username).await?;
 
         let mut user_entry = UserEntry::default();
         let is_create = self.get_user(req, &username).await?.is_none();
@@ -564,10 +586,10 @@ impl UserPassBackendInner {
         }
 
         let lc = username.to_lowercase();
-        // Held to the end, so a creation on another mount (T530) or a
-        // self-service write-back (T531) sees the user either whole or gone,
-        // and a name re-created elsewhere waits for the aliases to be forgotten.
-        let _records = super::user_lock::lock_user_records(request_storage(req)?.as_ref()).await?;
+        // Held to the end, so a creation on another mount (T530) or any
+        // write-back (T531, T544) sees the user either whole or gone, and a
+        // name re-created elsewhere waits for the aliases to be forgotten.
+        let _record = super::user_lock::lock_user_record(request_storage(req)?.as_ref(), &lc).await?;
         req.storage_delete(format!("user/{lc}").as_str()).await?;
         // Clean up any pending FIDO2 challenge state
         let _ = req.storage_delete(&format!("challenge/reg/{lc}")).await;
@@ -637,7 +659,7 @@ impl UserPassBackendInner {
 
         // A missing user is created here, so it meets the same refusal (T500),
         // under the same lock as the user route (T530).
-        let _records = super::user_lock::lock_user_records(request_storage(req)?.as_ref()).await?;
+        let _record = super::user_lock::lock_user_record(request_storage(req)?.as_ref(), &username).await?;
         let mut user_entry = match self.get_user(req, &username).await? {
             Some(entry) => entry,
             None => {
@@ -661,14 +683,19 @@ impl UserPassBackendInner {
         let username_value = req.get_data("username")?;
         let username = username_value.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_lowercase();
 
-        let entry = self.get_user(req, &username).await?;
-        let Some(mut user_entry) = entry else {
+        // Under the record lock (T544): a user deleted meanwhile stays gone,
+        // and only the two lockout fields change.
+        let unlocked = self
+            .update_user(req, &username, |stored| {
+                let changed = stored.locked_until != 0 || stored.failed_login_count != 0;
+                stored.locked_until = 0;
+                stored.failed_login_count = 0;
+                Ok(changed)
+            })
+            .await?;
+        if unlocked.is_none() {
             return Err(RvError::ErrResponse(format!("user {username} does not exist")));
-        };
-
-        user_entry.locked_until = 0;
-        user_entry.failed_login_count = 0;
-        self.set_user(req, &username, &user_entry).await?;
+        }
 
         record_user_audit(&self.core, req, "unlock", &username, "").await;
 

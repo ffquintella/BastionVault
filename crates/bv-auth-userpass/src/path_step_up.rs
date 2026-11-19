@@ -28,7 +28,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use super::{UserPassBackend, UserPassBackendInner};
+use super::{path_fido2_login::SignCountUpdate, UserPassBackend, UserPassBackendInner};
 use crate::{
     bv_error_response_status,
     context::Context,
@@ -333,13 +333,13 @@ impl UserPassBackendInner {
         let auth_state: AuthenticationState = serde_json::from_str(&state_str)
             .map_err(|e: serde_json::Error| RvError::ErrFido2AuthFailed(format!("invalid state: {e}")))?;
 
-        let mut user =
+        let user =
             self.get_user(req, username).await?.ok_or_else(|| RvError::ErrResponse("no such principal".into()))?;
         if user.disabled {
             return Err(RvError::ErrResponse("this principal is disabled".into()));
         }
 
-        let mut passkeys =
+        let passkeys =
             user.get_passkeys().map_err(|e: serde_json::Error| RvError::ErrFido2AuthFailed(e.to_string()))?;
         if passkeys.is_empty() {
             return Err(RvError::ErrFido2CredentialNotFound);
@@ -353,17 +353,12 @@ impl UserPassBackendInner {
             .finish_authentication(&assertion, &auth_state, &passkeys)
             .map_err(|e| RvError::ErrFido2AuthFailed(e.to_string()))?;
 
-        for pk in passkeys.iter_mut() {
-            if let Ok(id) = pk.cred_id_bytes() {
-                if id == auth_result.cred_id {
-                    pk.sign_count = auth_result.new_sign_count;
-                }
-            }
+        // Re-checked on the record as stored now, under its record lock (T544).
+        match self.store_sign_count(req, username, &auth_result).await? {
+            SignCountUpdate::Stored(_) => Ok(()),
+            SignCountUpdate::Gone => Err(RvError::ErrResponse("no such principal".into())),
+            SignCountUpdate::Disabled => Err(RvError::ErrResponse("this principal is disabled".into())),
         }
-        user.set_passkeys(&passkeys).map_err(|e: serde_json::Error| RvError::ErrFido2AuthFailed(e.to_string()))?;
-        self.set_user(req, username, &user).await?;
-
-        Ok(())
     }
 }
 

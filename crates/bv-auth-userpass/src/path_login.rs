@@ -133,52 +133,44 @@ impl UserPassBackendInner {
         let password_value = req.get_data("password")?;
         let password = password_value.as_str().unwrap();
 
-        let user = self.get_user(req, &username).await?;
-        if user.is_none() {
+        let Some(mut user) = self.get_user(req, &username).await? else {
             log::warn!(target: "security", "userpass login failed: unknown user '{username}'");
-            let resp = Response::error_response(err_info);
-            return Ok(Some(resp));
-        }
+            return Ok(Some(Response::error_response(err_info)));
+        };
 
-        let mut user = user.unwrap();
-
-        // Admin enable/disable switch: a disabled account authenticates by
-        // no method (password or FIDO2), whatever the supplied credentials.
-        if user.disabled {
-            log::warn!(target: "security", "userpass login refused: account '{username}' is disabled");
-            return Ok(Some(Response::error_response("account is disabled")));
-        }
-
-        // Block password login when FIDO2 is enabled for this user
-        if user.fido2_enabled {
-            let resp = Response::error_response(
-                "Password login is disabled for this account. Use your FIDO2 security key instead.",
-            );
-            return Ok(Some(resp));
-        }
-
-        // Temporary lockout. Refuse while a lock is in force; clear a lock
-        // that has already elapsed (plus its counter) before checking the
-        // password so the account becomes usable again on this attempt.
         let lockout = self.get_lockout_config(req).await?;
         let now = super::path_users::now_secs();
-        if user.locked_until > now {
-            let retry = user.locked_until - now;
-            log::warn!(target: "security", "userpass login refused: account '{username}' locked for {retry}s");
-            return Ok(Some(Response::error_response(&format!(
-                "account temporarily locked; try again in {retry} seconds"
-            ))));
+        if let Some(refusal) = password_login_refusal(&username, &user, now) {
+            return Ok(Some(refusal));
         }
+
+        // A lock that has elapsed is cleared, with its counter, before the
+        // password is checked, so the account is usable again on this attempt.
+        // On the record as stored now, under its record lock (T544).
         if user.locked_until != 0 {
-            user.locked_until = 0;
-            user.failed_login_count = 0;
-            self.set_user(req, &username, &user).await?;
+            let cleared = self
+                .update_user(req, &username, |stored| {
+                    if stored.locked_until == 0 || stored.locked_until > now {
+                        return Ok(false);
+                    }
+                    stored.locked_until = 0;
+                    stored.failed_login_count = 0;
+                    Ok(true)
+                })
+                .await?;
+            let Some(stored) = cleared else {
+                return Ok(Some(deleted_during_login(&username)));
+            };
+            if let Some(refusal) = password_login_refusal(&username, &stored, now) {
+                return Ok(Some(refusal));
+            }
+            user = stored;
         }
 
         let check = self.verify_password_hash(password, &user.password_hash)?;
         if !check {
             log::warn!(target: "security", "userpass login failed: bad password for '{username}'");
-            self.record_failed_attempt(req, &username, &mut user, &lockout).await?;
+            self.record_failed_attempt(req, &username, &lockout).await?;
             let resp = Response::error_response(err_info);
             return Ok(Some(resp));
         }
@@ -219,16 +211,40 @@ impl UserPassBackendInner {
             let ok = self.verify_totp_mfa(&user, &mfa, &code, &ns_path, &ns_uuid).await?;
             if !ok {
                 log::warn!(target: "security", "userpass login failed: bad TOTP code for '{username}'");
-                self.record_failed_attempt(req, &username, &mut user, &lockout).await?;
+                self.record_failed_attempt(req, &username, &lockout).await?;
                 return Ok(Some(Response::error_response("invalid TOTP code")));
             }
         }
 
-        // Success: reset the failed-attempt counter / lock if either is set.
+        // Success: reset the failed-attempt counter / lock if either is set,
+        // on the record as stored now, under its record lock (T544). A user
+        // deleted, disabled, locked or given a new password meanwhile is
+        // refused: the password was checked against the record as it was.
         if user.failed_login_count != 0 || user.locked_until != 0 {
-            user.failed_login_count = 0;
-            user.locked_until = 0;
-            self.set_user(req, &username, &user).await?;
+            let verified_hash = user.password_hash.clone();
+            let mut refusal = None;
+            let reset = self
+                .update_user(req, &username, |stored| {
+                    refusal = password_login_refusal(&username, stored, super::path_users::now_secs());
+                    if refusal.is_none() && stored.password_hash != verified_hash {
+                        log::warn!(target: "security", "userpass login refused: the password of '{username}' changed during the login");
+                        refusal = Some(Response::error_response(err_info));
+                    }
+                    if refusal.is_some() || (stored.failed_login_count == 0 && stored.locked_until == 0) {
+                        return Ok(false);
+                    }
+                    stored.failed_login_count = 0;
+                    stored.locked_until = 0;
+                    Ok(true)
+                })
+                .await?;
+            let Some(stored) = reset else {
+                return Ok(Some(deleted_during_login(&username)));
+            };
+            if let Some(refusal) = refusal {
+                return Ok(Some(refusal));
+            }
+            user = stored;
         }
 
         // Multi-tenancy: refuse the login if this principal is assigned to a set
@@ -301,31 +317,48 @@ impl UserPassBackendInner {
         Ok(Some(resp))
     }
 
-    /// Increment the failed-attempt counter and, once the lockout policy's
-    /// threshold is reached, stamp a lock expiry (and reset the counter so a
-    /// post-unlock streak starts fresh). Persists the user. No-op when
-    /// lockout is disabled, so `failed_login_count` stays at 0 there.
+    /// Increment the failed-attempt counter and, at the lockout threshold,
+    /// stamp a lock expiry and reset the counter. No-op, and no lock taken,
+    /// when lockout is disabled. On the record as stored now, under its record
+    /// lock (T544): no concurrent attempt is lost, an administrator's change
+    /// made meanwhile stays, a user deleted meanwhile is not re-created, and an
+    /// attempt landing while a lock is in force adds nothing.
     async fn record_failed_attempt(
         &self,
         req: &mut Request,
         username: &str,
-        user: &mut UserEntry,
         lockout: &LockoutConfig,
     ) -> Result<(), RvError> {
         if !lockout.enabled {
             return Ok(());
         }
-        user.failed_login_count = user.failed_login_count.saturating_add(1);
-        if lockout.should_lock(user.failed_login_count) {
-            let dur = lockout.lockout_duration_secs.max(1) as i64;
-            user.locked_until = super::path_users::now_secs() + dur;
-            user.failed_login_count = 0;
+        let mut locked_for = None;
+        let recorded = self
+            .update_user(req, username, |stored| {
+                let now = super::path_users::now_secs();
+                if stored.locked_until > now {
+                    return Ok(false);
+                }
+                stored.failed_login_count = stored.failed_login_count.saturating_add(1);
+                if lockout.should_lock(stored.failed_login_count) {
+                    let dur = lockout.lockout_duration_secs.max(1) as i64;
+                    stored.locked_until = now + dur;
+                    stored.failed_login_count = 0;
+                    locked_for = Some(dur);
+                }
+                Ok(true)
+            })
+            .await?;
+        if recorded.is_none() {
+            log::warn!(target: "security", "userpass: failed attempt for '{username}' not counted: the user was deleted meanwhile");
+        }
+        if let Some(dur) = locked_for {
             log::warn!(
                 target: "security",
                 "userpass account '{username}' locked for {dur}s after repeated failed attempts"
             );
         }
-        self.set_user(req, username, user).await
+        Ok(())
     }
 
     /// Validate a submitted TOTP `code` against the key this user is bound
@@ -399,4 +432,33 @@ impl UserPassBackendInner {
 
         Ok(Some(Response { auth: Some(auth), ..Response::default() }))
     }
+}
+
+/// The refusal for a user who may not sign in with a password at `now`, or
+/// `None`. Checked on the first read and again on every re-read (T544).
+fn password_login_refusal(username: &str, user: &UserEntry, now: i64) -> Option<Response> {
+    // Admin enable/disable switch: a disabled account authenticates by no
+    // method (password or FIDO2), whatever the supplied credentials.
+    if user.disabled {
+        log::warn!(target: "security", "userpass login refused: account '{username}' is disabled");
+        return Some(Response::error_response("account is disabled"));
+    }
+    if user.fido2_enabled {
+        return Some(Response::error_response(
+            "Password login is disabled for this account. Use your FIDO2 security key instead.",
+        ));
+    }
+    if user.locked_until > now {
+        let retry = user.locked_until - now;
+        log::warn!(target: "security", "userpass login refused: account '{username}' locked for {retry}s");
+        return Some(Response::error_response(&format!("account temporarily locked; try again in {retry} seconds")));
+    }
+    None
+}
+
+/// The refusal for a login whose user was deleted after its first read: the
+/// unknown-user answer, and nothing written back (T544).
+fn deleted_during_login(username: &str) -> Response {
+    log::warn!(target: "security", "userpass login failed: user '{username}' was deleted during the login");
+    Response::error_response("invalid username or password")
 }

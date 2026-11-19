@@ -92,8 +92,8 @@ pub fn alias_rule(holders: Result<Vec<String>, RvError>) -> AliasRule {
 /// Refuse to create `username` when another userpass mount holds it (409).
 ///
 /// Call only while this mount does not hold the name, and under
-/// [`crate::user_lock::lock_user_records`] held until the record is written
-/// (T530). The caller is told another mount holds it, never which one.
+/// [`crate::user_lock::lock_user_record`] for `username` held until the record
+/// is written (T530): every mount takes the same lock for one name. The caller is told another mount holds it, never which one.
 #[maybe_async::maybe_async]
 pub async fn refuse_if_held_elsewhere(core: &dyn VaultCtx, username: &str) -> Result<(), RvError> {
     let holders = mounts_holding(core, username).await?;

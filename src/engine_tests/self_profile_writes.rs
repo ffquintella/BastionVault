@@ -14,7 +14,7 @@ use crate::{
     errors::RvError,
     kernel_api::VaultCtx,
     logical::{Operation, Request, Response},
-    modules::credential::userpass::user_lock::lock_user_records,
+    modules::credential::userpass::user_lock::lock_user_record,
     storage::{barrier_view::BarrierView, Storage, StorageEntry},
     test_utils::{new_unseal_test_bastion_vault, test_write_api},
 };
@@ -67,7 +67,7 @@ fn spawn_write(
 }
 
 /// Start a self-service write, let it read carol's record, then run `meddle`
-/// on the record while the write waits on the user-records lock, which the
+/// on the record while the write waits on carol's record lock, which the
 /// test holds as a concurrent delete or update would: the write re-reads
 /// after it, whatever the bcrypt timing. Returns the write's outcome.
 async fn write_while_meddling(
@@ -78,7 +78,7 @@ async fn write_while_meddling(
     body: Value,
     meddle: Option<Value>,
 ) -> Result<(), (u16, String)> {
-    let held = lock_user_records(view.as_ref()).await.unwrap();
+    let held = lock_user_record(view.as_ref(), "carol").await.unwrap();
     let write = spawn_write(core, token, path, body);
     tokio::time::sleep(Duration::from_millis(200)).await;
     match meddle {

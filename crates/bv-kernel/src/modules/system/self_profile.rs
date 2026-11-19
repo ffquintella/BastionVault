@@ -44,7 +44,7 @@
 //!   their account, and the caller is already authenticated — the attempt is
 //!   recorded on the user-audit trail instead, and the IP-level DoS guard still
 //!   applies.
-//! - A write re-reads the record under the userpass user-records lock (T531):
+//! - A write re-reads the record under the user's record lock (T531, T544):
 //!   a user deleted meanwhile is a 404, never re-created; one disabled
 //!   meanwhile is a 403; a password reset meanwhile wins (409).
 //! - Changing the password does not revoke sessions issued before the change
@@ -63,7 +63,7 @@ use crate::{
         auth::AuthModule,
         credential::userpass::{
             path_users::{is_plausible_email, UserEntry},
-            user_lock::lock_user_records,
+            user_lock::lock_user_record,
         },
         identity::{IdentityModule, UserAuditEntry},
     },
@@ -140,8 +140,8 @@ impl SystemBackend {
     }
 
     /// Apply `change` to the caller's record as stored now and write it back
-    /// when it reports a change (T531). Under the userpass user-records lock
-    /// (T530), so a deleted user is refused (404), never re-created; a user
+    /// when it reports a change (T531). Under the user's userpass record lock
+    /// (T530, T544), so a deleted user is refused (404), never re-created; a user
     /// disabled since the first read is refused (403); and fields `change`
     /// does not touch keep an administrator's newer values.
     async fn update_self_userpass(
@@ -153,7 +153,7 @@ impl SystemBackend {
             return Err(bv_error_response_status!(500, "the auth mount that issued this token is no longer available"));
         };
         let key = format!("user/{}", principal.username);
-        let _records = lock_user_records(view.as_ref()).await?;
+        let _record = lock_user_record(view.as_ref(), &principal.username).await?;
         let Some(raw) = view.get(&key).await? else {
             return Err(bv_error_response_status!(404, "this account no longer exists"));
         };

@@ -49,6 +49,8 @@ mod approle_mounts;
 mod connect_mfa_mounts;
 // A self-service profile write never re-creates a deleted user (T531).
 mod self_profile_writes;
+// Nor does userpass's own counter, unlock or passkey write-back (T544).
+mod userpass_record_writes;
 
 // ── Kernel-tier tests lifted in Phase 4.5 ────────────────────────────
 //

@@ -128,17 +128,26 @@ impl UserPassBackendInner {
             .finish_registration(&attestation, &reg_state)
             .map_err(|e| RvError::ErrFido2RegistrationFailed(e.to_string()))?;
 
-        let mut user_entry =
-            self.get_user(req, &username).await?.ok_or_else(|| RvError::ErrResponse("User not found".into()))?;
-
-        let mut passkeys = user_entry.get_passkeys().unwrap_or_default();
-        passkeys.push(passkey);
-        user_entry
-            .set_passkeys(&passkeys)
-            .map_err(|e: serde_json::Error| RvError::ErrFido2RegistrationFailed(e.to_string()))?;
-        user_entry.fido2_enabled = true;
-
-        self.set_user(req, &username, &user_entry).await?;
+        // Added to the record as stored now, under its record lock (T544): a
+        // user deleted meanwhile is not re-created, and a disable or another
+        // key added meanwhile stays. Unreadable stored keys refuse rather than
+        // being replaced by this one.
+        let registered = self
+            .update_user(req, &username, |stored| {
+                let mut passkeys = stored
+                    .get_passkeys()
+                    .map_err(|e: serde_json::Error| RvError::ErrFido2RegistrationFailed(e.to_string()))?;
+                passkeys.push(passkey);
+                stored
+                    .set_passkeys(&passkeys)
+                    .map_err(|e: serde_json::Error| RvError::ErrFido2RegistrationFailed(e.to_string()))?;
+                stored.fido2_enabled = true;
+                Ok(true)
+            })
+            .await?;
+        if registered.is_none() {
+            return Err(RvError::ErrResponse("User not found".into()));
+        }
 
         Ok(None)
     }

@@ -65,14 +65,18 @@ impl UserPassBackendInner {
     ) -> Result<Option<Response>, RvError> {
         let username = req.get_data("username")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_lowercase();
 
-        let mut user_entry = match self.get_user(req, &username).await? {
-            Some(entry) => entry,
-            None => return Ok(None),
-        };
-
-        user_entry.credentials_json = String::new();
-        user_entry.fido2_enabled = false;
-        self.set_user(req, &username, &user_entry).await?;
+        // Under the record lock (T544): a user deleted meanwhile stays gone,
+        // and only the passkey fields change.
+        let cleared = self
+            .update_user(req, &username, |stored| {
+                stored.credentials_json = String::new();
+                stored.fido2_enabled = false;
+                Ok(true)
+            })
+            .await?;
+        if cleared.is_none() {
+            return Ok(None);
+        }
 
         // Clean up any pending challenge state
         let _ = req.storage_delete(&format!("challenge/reg/{username}")).await;

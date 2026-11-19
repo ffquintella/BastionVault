@@ -3308,6 +3308,15 @@ a locked-out account, or a missing/invalid TOTP code is rejected with a
 generic error and no `auth` block. A failed TOTP code counts toward the
 lockout threshold just like a bad password.
 
+The counter and lockout are written on the account as stored at that moment,
+under a per-username lock (T544): concurrent failed attempts are all counted,
+and an administrator's delete, disable or password reset made while a login
+runs is never undone. A login whose counter it would reset is refused when the
+account was deleted, disabled, locked or given a new password meanwhile. The
+userpass passkey login (`fido2/login/complete`) and the step-up
+(`v2/step-up/verify`) refuse a disabled account, a key removed meanwhile, and
+a signature counter that does not move past the stored one.
+
 Response includes an `auth` block with the client token:
 
 ~~~json
@@ -3368,11 +3377,13 @@ refused with `409` and nothing is written or provisioned:
   an administrator's; before T500 the same caller silently created a second
   user that logged in as the other one's entity.
 - Two creations of one name on two mounts at the same moment admit one; the
-  other gets the `409` (T530). Creating, deleting and self-service writes of
-  userpass users hold one lock across every userpass mount and HA node (the
-  storage backend's lock: cluster-wide on hiqlite and MySQL). On MySQL a write
-  that waits more than a second for another node's lock fails with a storage
-  lock error; retry it.
+  other gets the `409` (T530). Every write of a userpass user record (create,
+  update, delete, password reset, unlock, the self-service writes, the
+  failed-login counter and the passkey writes) holds that username's lock
+  across every userpass mount and HA node (the storage backend's lock:
+  cluster-wide on hiqlite and MySQL); writes of different usernames do not
+  wait for each other (T544). On MySQL a write that waits more than a second
+  for another node's lock fails with a storage lock error; retry it.
 - Duplicates created before this check are not changed. On every unseal a
   background scan logs one WARN line on the `security` target per username
   held by more than one userpass mount (`userpass username 'carol' is held by
