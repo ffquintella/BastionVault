@@ -418,6 +418,11 @@ EXAMPLE ENTRY:
 
 ### Fixed
 
+#### Namespaces: mounts keep routing after a seal and unseal
+
+- **Reach a child namespace's engines after the vault is sealed and unsealed** (T547, S27)
+  -- A namespace used before a seal kept listing its mounts under Admin > Mounts, but every request into it (Resources, Files, Secrets) failed with `Router mount not found`, shown as "Resource engine not enabled here". The per-namespace router cache now resets on seal, so the first request after unseal re-mounts the namespace's engines.
+
 #### Import / Export: a session in a child namespace exports and imports that namespace
 
 - **Export the namespace your session is in, not the root namespace, when you choose Full vault or a selection without namespaces** (T536, S21, S27)

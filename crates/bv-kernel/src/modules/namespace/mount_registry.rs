@@ -167,6 +167,15 @@ impl NamespaceMountRegistry {
         Ok(out)
     }
 
+    /// Drop every cached per-namespace router (called on seal).
+    ///
+    /// Sealing empties the shared trie, and `ensure_router` returns a cached
+    /// router without re-mounting it, so a stale cache lists mounts that
+    /// requests can no longer reach (`Router mount not found`).
+    pub fn clear(&self) {
+        self.routers.clear();
+    }
+
     /// Drop a namespace's router and clear its mounts from the shared router
     /// trie. Caller must have already confirmed the namespace is empty.
     pub fn forget(&self, ns_uuid: &str) {

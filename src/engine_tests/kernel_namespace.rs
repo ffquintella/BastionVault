@@ -359,6 +359,61 @@ async fn test_ensure_router_setup_is_idempotent_over_shared_trie() {
     .expect("mounting a new engine after re-setup must succeed");
 }
 
+/// Regression for a namespace that lists its mounts but 404s every request
+/// (`Router mount not found`) after a seal/unseal. Sealing empties the shared
+/// router trie; the per-namespace router cache used to survive, so
+/// `ensure_router` returned the cached router without re-mounting it.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn test_namespace_mounts_route_again_after_seal_unseal() {
+    use crate::logical::{Operation, Request};
+    use std::collections::HashMap;
+
+    let (_bvault, core, root) = new_unseal_test_bastion_vault("test_ns_route_after_reseal").await;
+
+    async fn ns_req(
+        core: &dyn VaultCtx,
+        token: &str,
+        op: Operation,
+        path: &str,
+        body: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<Option<crate::logical::Response>, RvError> {
+        let mut req = Request::new(path);
+        req.operation = op;
+        req.client_token = token.to_string();
+        req.body = body;
+        let mut h = HashMap::new();
+        h.insert("x-bastionvault-namespace".to_string(), "tenant-r".to_string());
+        req.headers = Some(h);
+        core.handle_request(&mut req).await
+    }
+
+    let store = store_of(&core);
+    store.create("tenant-r", NamespaceQuotas::default(), false).await.unwrap();
+    ns_req(&core, &root, Operation::Write, "sys/mounts/resources/", json!({ "type": "resource" }).as_object().cloned())
+        .await
+        .unwrap();
+    // Reachable before the seal; this also caches the namespace router.
+    ns_req(&core, &root, Operation::List, "resources/resources/", None)
+        .await
+        .expect("mount must route before the seal");
+
+    let keys = core.generate_unseal_keys().await.unwrap();
+    core.seal().await.unwrap();
+    let mut unsealed = false;
+    for key in keys.iter() {
+        if core.unseal_once(key).await.is_ok() {
+            unsealed = true;
+            break;
+        }
+    }
+    assert!(unsealed && !core.sealed());
+
+    // Pre-fix: the table still listed `resources/` but this was
+    // `ErrRouterMountNotFound`.
+    let after = ns_req(&core, &root, Operation::List, "resources/resources/", None).await;
+    assert!(!matches!(after, Err(RvError::ErrRouterMountNotFound)), "namespace mount unreachable after unseal");
+}
+
 /// End-to-end regression for the "secret shows as unowned in a
 /// non-root namespace" bug. A KV secret created through the namespace
 /// header must be reported as *owned* by the `identity/owner/kv`

@@ -113,6 +113,9 @@ impl Module for NamespaceModule {
     fn cleanup(&self, _core: &dyn VaultCtx) -> Result<(), RvError> {
         self.store.store(Arc::new(None));
         self.link_store.store(Arc::new(None));
+        // The shared router trie is cleared on seal; cached namespace routers
+        // would otherwise be reused after unseal without being re-mounted.
+        self.registry.clear();
         Ok(())
     }
 }
