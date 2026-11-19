@@ -151,10 +151,20 @@ _exe := $(if $(_is_windows_target),.exe,)
 # The indexes are read out of `.cargo/config.toml` so this stays a single
 # source of truth. Harmless when the runner is bare `cargo`: the values match
 # what it reads from the file anyway, and cargo ignores the Docker variable.
+#
+# A fourth break: cross mounts the operator's `~/.cargo` into the container,
+# so a host-only `rustc-wrapper = "/opt/homebrew/bin/sccache"` in
+# `~/.cargo/config.toml` is read inside Linux, where that path does not
+# exist, and the build dies with `sccache rustc -vV (exit status: 127)`.
+# `Cross.toml` passthrough only forwards host env, so the override goes in
+# through `CROSS_CONTAINER_OPTS` (`docker run -e`): an empty
+# `CARGO_BUILD_RUSTC_WRAPPER` disables the wrapper in the container only.
+# Any operator-set `CROSS_CONTAINER_OPTS` is kept.
 _registry_index = $(shell sed -n 's/^$(1) = { index = "\(.*\)" }.*/\1/p' .cargo/config.toml)
 _plugins_cross_env := \
 	CROSS_CONFIG='$(CURDIR)/Cross.toml' \
 	DOCKER_DEFAULT_PLATFORM=linux/amd64 \
+	CROSS_CONTAINER_OPTS='$(strip $(CROSS_CONTAINER_OPTS) -e CARGO_BUILD_RUSTC_WRAPPER=)' \
 	CARGO_REGISTRIES_UOX_BASTIONVAULT_INDEX=$(call _registry_index,uox-bastionvault) \
 	CARGO_REGISTRIES_UOX_FERROGATE_INDEX=$(call _registry_index,uox-ferrogate)
 
