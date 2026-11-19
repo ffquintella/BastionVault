@@ -430,6 +430,8 @@ EXAMPLE ENTRY:
 - **Import a full-vault `.bvx` file from the desktop app connected to a server, instead of failing with `json: expected value at line 1 column 1`** (T538, S21)
   -- `POST /v{1,2}/sys/exchange/import` and `.../import/preview` accepted request bodies of only 256 KiB, far below the size of a real export, and answered larger ones with a plain-text `413` that the client reported as a JSON parse error. Both now accept bodies up to 32 MiB, the same limit as plugin registration and batch requests. A file whose encoded envelope is larger than that is still refused.
 
+- **Include the selected resources and KV paths of every namespace in a scheduled selective backup** (T541, S21)
+  -- A schedule with a selective scope resolved its selections in the root namespace only, so a resource or KV path of the same name inside a namespace was missing from the daily file. Each selection is now resolved by name in the root namespace and in every namespace (a schedule cannot name one); a selection that matches nothing in a namespace only adds a warning to the file. Files already written are unchanged.
 - **Include every namespace in a scheduled "full vault" backup** (T540, S21)
   -- A schedule with scope `full` (the "Back up everything (full vault)" toggle) exported only the root namespace, so a resource, secret or group inside a namespace was missing from every daily file and a restore could not bring it back. It now covers the root namespace and every namespace, as `all_namespaces` does; files already written are unchanged and still lack namespace data.
 - **Get a deleted resource back in its resource groups when you restore a `.bvx` backup** (T540, S21)

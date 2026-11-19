@@ -141,7 +141,11 @@ async fn bvx_restore_brings_back_a_deleted_resource_in_a_namespace() {
 }
 
 /// The daily backup: `run_once` writes the file, a restore reads it back.
-async fn daily_roundtrip(kind: crate::exchange::ScopeKind, in_ns: bool) -> (String, String) {
+async fn daily_roundtrip(
+    kind: crate::exchange::ScopeKind,
+    in_ns: bool,
+    include: Vec<crate::exchange::ScopeSelector>,
+) -> (String, String) {
     use crate::{
         exchange::{import_all_namespaces, ConflictPolicy, ExchangeDocument, ScopeSpec},
         scheduled_exports::{runner::run_once, schedule::ExportFormat, DestinationKind, Schedule},
@@ -163,7 +167,7 @@ async fn daily_roundtrip(kind: crate::exchange::ScopeKind, in_ns: bool) -> (Stri
         name: "daily".into(),
         cron: "0 0 3 * * *".into(),
         format: ExportFormat::Json,
-        scope: ScopeSpec { kind, include: vec![] },
+        scope: ScopeSpec { kind, include },
         destination: DestinationKind::LocalPath { path: dir.to_string_lossy().into() },
         password_ref: None,
         allow_plaintext: true,
@@ -186,9 +190,21 @@ async fn daily_roundtrip(kind: crate::exchange::ScopeKind, in_ns: bool) -> (Stri
 
 #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
 async fn daily_backup_restores_a_deleted_resource_root_and_namespace() {
-    use crate::exchange::ScopeKind::{AllNamespaces, Full};
-    for (kind, ns) in [(Full, false), (Full, true), (AllNamespaces, false), (AllNamespaces, true)] {
-        let (carried, back) = daily_roundtrip(kind, ns).await;
+    use crate::exchange::{
+        ScopeKind::{AllNamespaces, Full, Selective},
+        ScopeSelector,
+    };
+    let pick = || vec![ScopeSelector::Resource { id: "srv1".into() }];
+    let cases = [
+        (Full, false, vec![]),
+        (Full, true, vec![]),
+        (AllNamespaces, false, vec![]),
+        (AllNamespaces, true, vec![]),
+        (Selective, false, pick()),
+        (Selective, true, pick()),
+    ];
+    for (kind, ns, include) in cases {
+        let (carried, back) = daily_roundtrip(kind, ns, include).await;
         assert_eq!(back, "Ok(true)", "daily backup of kind {kind:?} (resource in namespace: {ns}) carried [{carried}]");
     }
 }

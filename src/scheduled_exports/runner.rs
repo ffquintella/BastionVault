@@ -203,19 +203,15 @@ pub async fn run_once(core: &Arc<Core>, sched: &Schedule) -> Result<(u64, Destin
     let __barrier = core.barrier();
     let storage = __barrier.as_storage();
 
-    // 1. Build the bvx.v1 document. A `full` or `all_namespaces` schedule fans
-    //    out over every tenant (each namespace's data lives under its own
-    //    barrier prefix, which the root mount index cannot reach): a nightly
-    //    "full vault" backup that stopped at the root namespace silently left
-    //    every tenant's data out. A selective scope resolves against the root
-    //    namespace as before.
-    let document = if matches!(sched.scope.kind, exchange::ScopeKind::Full | exchange::ScopeKind::AllNamespaces) {
-        exchange::export_all_namespaces(core, exchange::ExporterInfo::default(), sched.scope.clone()).await?
-    } else {
-        let mounts = exchange::scope::MountIndex::from_core(core)?;
-        exchange::scope::export_to_document(storage, &mounts, exchange::ExporterInfo::default(), sched.scope.clone())
-            .await?
-    };
+    // 1. Build the bvx.v1 document, across every namespace whatever the scope
+    //    kind: each namespace's data lives under its own barrier prefix, which
+    //    the root mount index cannot reach, and a schedule has no way to name
+    //    one. A backup that stopped at the root namespace silently left every
+    //    tenant's data out. A selective scope's selectors are resolved in each
+    //    namespace by name, so one that matches nothing there only adds a
+    //    warning to the file.
+    let document =
+        exchange::export_all_namespaces(core, exchange::ExporterInfo::default(), sched.scope.clone()).await?;
     let inner_bytes = exchange::canonical::to_canonical_vec(&document)?;
 
     // 2. Wrap or pass through.
