@@ -76,6 +76,16 @@ impl MemStorage {
     pub fn count_under(&self, prefix: &str) -> usize {
         self.map.lock().unwrap().keys().filter(|k| k.starts_with(prefix)).count()
     }
+
+    pub fn keys_under(&self, prefix: &str) -> Vec<String> {
+        self.map.lock().unwrap().keys().filter(|k| k.starts_with(prefix)).cloned().collect()
+    }
+
+    /// Whether any stored key or value contains `needle`.
+    pub fn holds(&self, needle: &[u8]) -> bool {
+        let found = |hay: &[u8]| hay.windows(needle.len()).any(|w| w == needle);
+        self.map.lock().unwrap().iter().any(|(k, v)| found(k.as_bytes()) || found(v))
+    }
 }
 
 // ─── Phase 5: a directory, the gate's fakes and the providers' audit ──

@@ -14,9 +14,15 @@ mod saml;
 mod ssh;
 
 /// Served without a vault token: discovery, JWKS and metadata are public,
-/// and the token endpoint authenticates the client by secret and PKCE.
-pub const UNAUTH_PATHS: &[&str] =
-    &["oidc/.well-known/openid-configuration", "oidc/jwks", "oidc/token", "saml/metadata"];
+/// the token endpoint authenticates the client by secret and PKCE, and the
+/// browser's authorization request by its single-use launch session.
+pub const UNAUTH_PATHS: &[&str] = &[
+    "oidc/.well-known/openid-configuration",
+    "oidc/jwks",
+    "oidc/token",
+    "oidc/launch-session/authorize",
+    "saml/metadata",
+];
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -136,6 +142,8 @@ impl IdpBackend {
         let h_oidc_client_write = self.inner.clone();
         let h_oidc_client_delete = self.inner.clone();
         let h_oidc_authorize = self.inner.clone();
+        let h_oidc_launch_session = self.inner.clone();
+        let h_oidc_launch_session_authorize = self.inner.clone();
         let h_oidc_token = self.inner.clone();
         let h_oidc_jwks = self.inner.clone();
         let h_oidc_discovery = self.inner.clone();
@@ -394,7 +402,7 @@ impl IdpBackend {
                     fields: {
                         "enabled": { field_type: FieldType::Bool, required: false, description: "Issue codes and tokens (default false)." },
                         "issuer": { field_type: FieldType::Str, required: false, description: "https issuer URL, no trailing slash; discovery is served under it." },
-                        "authorization_endpoint": { field_type: FieldType::Str, required: false, description: "Browser-facing page that relays to v2/idp/oidc/authorize (default <issuer>/authorize; \"\" clears)." },
+                        "authorization_endpoint": { field_type: FieldType::Str, required: false, description: "Browser-facing authorization endpoint discovery publishes (default <issuer>/authorize, which the vault serves on GET with a launch session; \"\" clears)." },
                         "id_token_ttl": { field_type: FieldType::Str, required: false, description: "ID token lifetime (default 5m, 1m-1h)." },
                         "code_ttl": { field_type: FieldType::Str, required: false, description: "Authorization code lifetime (default 60s, 10s-10m)." }
                     },
@@ -462,6 +470,37 @@ impl IdpBackend {
                         {op: Operation::Write, handler: h_oidc_authorize.handle_oidc_authorize}
                     ],
                     help: "Mint a single-use authorization code for the caller's own identity (self-service, gated)."
+                },
+                {
+                    pattern: r"oidc/launch-session$",
+                    fields: {
+                        "client_id": { field_type: FieldType::Str, required: false, description: "Registered client the browser will sign in to." },
+                        "launch_id": { field_type: FieldType::SecretStr, required: false, description: "The host's launch id (base64url, 22-128 characters); only its SHA-256 is kept." },
+                        "roles": { field_type: FieldType::Array, required: false, description: "Subset of the entitled roles; default all." },
+                        "ttl": { field_type: FieldType::Str, required: false, description: "Lifetime (default 2m, 10s-5m)." }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_oidc_launch_session.handle_oidc_launch_session}
+                    ],
+                    help: "Mint a single-use OP login (a cookie the host plants in its browser) for the caller's own identity, one client and one launch (self-service, gated)."
+                },
+                {
+                    pattern: r"oidc/launch-session/authorize$",
+                    fields: {
+                        "launch_session": { field_type: FieldType::SecretStr, required: false, description: "The launch session the browser carried as its cookie." },
+                        "client_id": { field_type: FieldType::Str, required: false, description: "Registered client; must be the session's." },
+                        "redirect_uri": { field_type: FieldType::Str, required: false, description: "One of the client's redirect_uris, exactly." },
+                        "response_type": { field_type: FieldType::Str, required: false, description: "code (the only one)." },
+                        "scope": { field_type: FieldType::Str, required: false, description: "Must include openid." },
+                        "state": { field_type: FieldType::Str, required: false, description: "Echoed to the redirect." },
+                        "nonce": { field_type: FieldType::Str, required: false, description: "Echoed into the ID token." },
+                        "code_challenge": { field_type: FieldType::Str, required: false, description: "PKCE challenge (required)." },
+                        "code_challenge_method": { field_type: FieldType::Str, required: false, description: "S256 (required)." }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_oidc_launch_session_authorize.handle_oidc_launch_session_authorize}
+                    ],
+                    help: "The browser's authorization request (no vault token): consumes the launch session and mints a code; GET /v2/idp/oidc/authorize relays here and answers the 302."
                 },
                 {
                     pattern: r"oidc/token$",

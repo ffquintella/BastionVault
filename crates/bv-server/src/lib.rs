@@ -60,6 +60,9 @@ use crate::{core::Core, errors::RvError, logical::Request};
 pub mod authz;
 pub mod batch;
 pub mod client_ip;
+/// `GET /v2/idp/oidc/authorize`: the OpenID Provider's browser-facing
+/// authorization endpoint, authenticated by a launch-session cookie.
+pub mod idp_routes;
 /// The `/v1/{path}` logical catch-all routes. Named `logical_routes`, not
 /// `logical`, so `crate::logical` unambiguously means the library's
 /// request/response types — this crate needs both.

@@ -435,7 +435,8 @@ verifier (whose C14N also signs, so a shared C14N bug would cancel out; the
 fixed-point test is the guard). Because the HTTP layer only speaks the JSON
 envelope, a standard RP cannot fetch discovery or metadata, POST a
 form-encoded token request or be redirected without a relay (the GUI,
-T107) or a bv-server adapter. No back-channel logout; outstanding ID tokens
+T107) or a bv-server adapter. (Since T545 the vault answers the browser
+redirect itself, below; the back channel is T546.) No back-channel logout; outstanding ID tokens
 and assertions expire on their own (5 min). Signing keys are not
 HSM-backed. Not run on a multi-node cluster. Testing this phase showed
 that `bv-auth-saml`'s inbound parser merges the attributes of an unsigned
@@ -560,6 +561,81 @@ reads one identity's grants per row, 20 rows a page. The SSH panel does not
 probe each namespace's SSH engine. A self-service page for people outside
 the Admin section is not provided.
 
+**Launch sessions and the browser authorization endpoint (T545).** Closes
+the gap that blocked Web Application Connect's `sso` mode (T107): a browser
+a relying party redirects to the OP had no way to say who the operator is.
+`src/provider/oidc_op/launch.rs` (decisions), `store.rs`
+(`idp/oidc/launch-sessions/`), `src/backend/oidc.rs`, and in bv-server
+`src/idp_routes.rs` (the HTTP adapter) plus a `PassThrough` resource
+fallback in `src/routes.rs`. Contract in [docs/api.md](../docs/api.md).
+
+- **Mint** (`POST v2/idp/oidc/launch-session`, self-service with the
+  operator's token, root refused): gated as provider `oidc-launch-session`
+  for the client's environment and the asked roles; stores a
+  `LaunchSession` record (`version: 1`, unknown fields refused) bound to
+  entity, client, environment, granted roles and the SHA-256 of the
+  caller's `launch_id`, keyed `<expiry>-<sha256(secret)>`. The secret
+  (`<expiry>.<256 random bits>`) is returned once, zeroized, with the
+  cookie attributes; neither it nor the launch id is stored or audited.
+  Lifetime 2 min by default, 10 s to 5 min.
+- **Consume** (`GET v2/idp/oidc/authorize` in bv-server, relaying to the
+  unauthenticated logical path `oidc/launch-session/authorize`): the
+  session is taken first (single use: any later outcome, success or
+  refusal, has already burned it), then expiry, then the client named in
+  the request must be the session's and still in the session's
+  environment, then the same request checks as `authorize` (exact
+  `redirect_uri`, `code`, `openid`, PKCE `S256`, bounded `state`/`nonce`),
+  then the gate again as `oidc-authorize` with the session's roles. The
+  adapter answers `302` to the registered URI built by the engine, or a
+  `text/plain` page; it never redirects a refusal and expires the cookie
+  on every answer. A miss is answered without the cluster-wide store lock.
+- **Audit**: `idp.oidc.launch-session` (mint), `idp.oidc.launch-session-
+  consumed` (code minted for it), refusals as `idp.oidc.refused` with
+  stage `launch-session` / `launch-session-authorize`; each carries
+  `session_id` and `launch_id_sha256`, never a secret, launch id or code.
+  A session or code whose event cannot be recorded is not returned.
+
+Decisions taken where this was open (T545):
+
+- *Where the browser lands*: `GET` on the existing `<issuer>/authorize`
+  (`/v2/idp/oidc/authorize`), so discovery's default needs no change; the
+  bv-server resource claims `GET` only and every other method falls
+  through to the logical API (the token-authenticated JSON `POST`).
+  Rejected: a separate URL, which would need either a changed discovery
+  default (a silent behaviour change for operators who rely on it for a
+  relay) or extra configuration; and a generic raw-response or cookie
+  channel in the logical catch-all, which would hand every backend a
+  redirect primitive.
+- *Cookie*: `__Host-bv-idp-launch`, `Secure`, `HttpOnly`, `SameSite=Lax`,
+  `Path=/`, no `Domain`. `__Host-` makes the browser enforce host-only
+  binding (no sibling subdomain can set or shadow it); `Lax` is the
+  strictest mode sent on the RP's top-level redirect (`Strict` drops it
+  there). Rejected: a narrow `Path` with `__Secure-` (path is not a
+  security boundary, and the prefix's host binding is worth more), and
+  setting the cookie from the vault (the host plants it with `set_cookie`
+  in its own ephemeral store; the mint response only names the attributes).
+- *Vault token*: never read on the browser route. The vault's `token`
+  cookie rides along on a cross-site top-level `GET`, so accepting it
+  would let any registered RP sign a logged-in operator in silently.
+- *Single use*: consumed before any other check, so a mistaken or hostile
+  request burns it; the host mints another (cheap) rather than a refused
+  request leaving a live credential behind. Errors are pages, never
+  RFC 6749 §4.1.2.1 error redirects, as for `authorize`.
+- *`launch_id`*: caller-asserted correlation data, validated for shape
+  (base64url, 22-128) and stored and audited only as its SHA-256 (the
+  digest Web Application Connect's own audit lines carry), not checked
+  against the resource engine's launch store: an engine may not depend on
+  another engine. The host enforces that it mints only for its own launch.
+- *Mount path*: the `GET` adapter targets the documented `idp/` mount, as
+  the GUI does; the JSON consume path works on any mount.
+
+Caveats (T545): not run in a real browser or against a real RP; the
+browser route is `GET` only (no form-`POST` authorization requests);
+`request`, `request_uri`, `response_mode`, `prompt` and `max_age` are
+ignored; actix keeps its own parsed copy of the cookie header, which this
+code cannot zeroize. A standard RP still needs T546 to finish the flow
+(form-encoded token request, raw discovery and JWKS).
+
 ### What is not yet implemented
 
 - A CLI for the `v2/idp` surface.
@@ -568,10 +644,12 @@ the Admin section is not provided.
   entries only); an ML-DSA-65 SSH CA; deny-feed key rotation; a
   single-certificate revoke route.
 - CHAP, EAP, Access-Challenge and Status-Server for RADIUS.
-- A browser-facing relay or HTTP adapter for standard OIDC/SAML relying
-  parties (discovery, form-encoded token requests, redirects; see T107), a
-  refresh token, userinfo, back-channel logout, signed Responses, encrypted
-  assertions and AuthnRequest signature checks.
+- An HTTP adapter for a standard relying party's back channel: raw
+  discovery, JWKS and SAML metadata, and form-encoded token requests with
+  raw OAuth responses (T546). The browser authorization endpoint and launch
+  sessions exist (T545); a form-`POST` authorization request does not.
+- A refresh token, userinfo, back-channel logout, signed Responses,
+  encrypted assertions and AuthnRequest signature checks.
 - HSM-backed IdP signing keys.
 - Any run against real targets (sshd, FortiGate/FreeRADIUS, a real SP or
   RP, sssd/nslcd) or a multi-node cluster, and a live-vault run of the GUI.
@@ -805,6 +883,8 @@ DELETE /v2/idp/entitlements/:entity_id/:environment
 POST   /v2/idp/ssh/sign/:environment         # identity-bound SSH cert (wraps ssh engine)
 GET    /v2/idp/ssh/krl                        # OpenSSH KRL for revoked certs
 GET    /v2/idp/deny-feed                       # signed, versioned revocation feed
+POST   /v2/idp/oidc/launch-session            # single-use OP login cookie for a host's browser (T545)
+GET    /v2/idp/oidc/authorize                 # browser authorization endpoint: launch-session cookie -> 302 (T545)
 
 # Provider metadata (consumed by downstream systems)
 GET    /v2/idp/oidc/.well-known/openid-configuration

@@ -320,6 +320,7 @@ POST   /v1/rustion/webhooks/recording-ready [signature-verified] -- Rustion reco
 POST   /v2/mcp/token [routed] -> sys/mcp/token
 POST   /v2/mcp [dispatch] -- JSON-RPC transport: 401 without a bearer token after the TLS, origin and size gates; each tools/call is a logical request judged by pre_route
 GET    /.well-known/oauth-protected-resource/v2/mcp [public-probe] -- RFC 9728 protected-resource metadata: an MCP client reads it before it can hold a token; names only the resource URL and its authorization servers
+GET    /v2/idp/oidc/authorize [routed-unauthenticated] -> idp/oidc/launch-session/authorize -- OIDC authorization endpoint a relying party redirects the browser to: no vault token is read; the single-use launch-session cookie minted by v2/idp/oidc/launch-session is the credential, and the engine checks client, exact redirect_uri, PKCE and the issue gate before the 302; other methods fall through to the logical API
 ANY    /v1/{path:.*} [dispatch] -- the logical API: every request is judged by pre_route on its own path; anonymous only where the mounted backend lists the path in unauth_paths (logins, for example)
 ANY    /v2/{path:.*} [dispatch] -- the logical API: every request is judged by pre_route on its own path; anonymous only where the mounted backend lists the path in unauth_paths (logins, for example)
 GET    /metrics [cluster-local] -- Prometheus scrape: a token with read on sys/metrics, a cluster-local socket peer (metrics.allow_cluster_local), or a source in metrics.allow_unauthenticated_cidrs; anyone else gets 403

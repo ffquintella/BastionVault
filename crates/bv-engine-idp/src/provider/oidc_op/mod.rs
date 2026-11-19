@@ -2,10 +2,12 @@
 //! PKCE S256 only, confidential clients (`client_secret_post`), RS256 ID
 //! tokens; no implicit/hybrid flow, refresh token or userinfo. The vault
 //! already knows the human: `authorize` is self-service with their token
-//! (gate provider `oidc-authorize`); `token` is the RP's unauthenticated
-//! call, gated again (provider `oidc`) so a disable in between denies.
+//! (gate provider `oidc-authorize`), or a browser presents a [`launch`]
+//! session instead; `token` is the RP's unauthenticated call, gated again
+//! (provider `oidc`) so a disable in between denies.
 
 pub mod jwt;
+pub mod launch;
 pub mod store;
 #[cfg(test)]
 mod tests;
@@ -20,11 +22,11 @@ use super::{
     Authorizer,
 };
 use crate::{
-    entitlement::gate::{DenyReason, IssueDenied, IssueRequest, MAX_EVENT_ARG_LEN},
+    entitlement::gate::{DenyReason, IssueDenied, IssueGrant, IssueRequest, MAX_EVENT_ARG_LEN},
     errors::RvError,
     logical::Request,
 };
-use store::{AuthCode, OidcConfig, OidcStore};
+use store::{AuthCode, OidcClient, OidcConfig, OidcStore};
 
 /// The provider name the gate records when a code is minted.
 pub const AUTHORIZE_PROVIDER: &str = "oidc-authorize";
@@ -34,8 +36,14 @@ pub const PROVIDER: &str = "oidc";
 pub mod events {
     /// An ID token was issued (audit event; carries the `jti`, never the token).
     pub const TOKEN: &str = "idp.oidc.token";
-    /// An authorize or token request was refused (audit event).
+    /// An authorize, token, launch-session or browser authorization request
+    /// was refused (audit event; `stage` says which).
     pub const REFUSED: &str = "idp.oidc.refused";
+    /// A launch session was minted (audit event; carries the `session_id`
+    /// and the launch id's SHA-256, never the session secret).
+    pub const LAUNCH_SESSION: &str = "idp.oidc.launch-session";
+    /// A launch session was consumed and a code minted for it (audit event).
+    pub const LAUNCH_SESSION_CONSUMED: &str = "idp.oidc.launch-session-consumed";
 }
 
 pub const SCOPES_SUPPORTED: &[&str] = &["openid", "profile", "groups"];
@@ -72,6 +80,8 @@ pub enum Refusal {
     InvalidScope,
     UnsupportedGrantType,
     InvalidGrant(&'static str),
+    /// The browser presented no usable launch session for this client.
+    LoginRequired(&'static str),
     Denied(DenyReason),
     Internal,
 }
@@ -87,6 +97,7 @@ impl Refusal {
             Self::InvalidScope => "invalid_scope",
             Self::UnsupportedGrantType => "unsupported_grant_type",
             Self::InvalidGrant(_) => "invalid_grant",
+            Self::LoginRequired(_) => "login_required",
             Self::Denied(_) => "access_denied",
         }
     }
@@ -95,7 +106,7 @@ impl Refusal {
     pub fn reason(self) -> &'static str {
         match self {
             Self::NotEnabled => "not_enabled",
-            Self::InvalidRequest(r) | Self::InvalidGrant(r) => r,
+            Self::InvalidRequest(r) | Self::InvalidGrant(r) | Self::LoginRequired(r) => r,
             Self::InvalidClient => "invalid_client",
             Self::InvalidRedirectUri => "redirect_uri_mismatch",
             Self::UnsupportedResponseType => "unsupported_response_type",
@@ -109,7 +120,7 @@ impl Refusal {
     pub fn status(self) -> u16 {
         match self {
             Self::NotEnabled => 404,
-            Self::InvalidClient => 401,
+            Self::InvalidClient | Self::LoginRequired(_) => 401,
             Self::Denied(reason) => match RvError::from(IssueDenied { reason }) {
                 RvError::ErrResponseStatus(s, _) => s,
                 _ => 403,
@@ -151,7 +162,21 @@ async fn refuse(
     entity_id: Option<&str>,
     http: Option<&Request>,
 ) -> Refusal {
-    let mut m = Map::new();
+    refuse_with(deps, stage, refusal, client_id, entity_id, Map::new(), http).await
+}
+
+/// [`refuse`] with extra non-secret fields (a launch session's ids).
+#[maybe_async::maybe_async]
+async fn refuse_with(
+    deps: &OidcDeps<'_>,
+    stage: &str,
+    refusal: Refusal,
+    client_id: &str,
+    entity_id: Option<&str>,
+    extra: Map<String, Value>,
+    http: Option<&Request>,
+) -> Refusal {
+    let mut m = extra;
     m.insert("decision".into(), "refuse".into());
     m.insert("stage".into(), stage.into());
     m.insert("reason".into(), refusal.reason().into());
@@ -274,6 +299,27 @@ async fn authorize_inner(
 ) -> Result<Authorized, Refusal> {
     let cfg = enabled(cfg)?;
     let client = lookup_client(deps.store, &ask.client_id).await?;
+    let checked = check_request(&client, ask)?;
+    let gate_ask = IssueRequest {
+        entity_id: entity_id.to_string(),
+        environment: client.environment.clone(),
+        roles: ask.roles.clone(),
+        caller_namespace: caller_namespace.to_string(),
+        provider: AUTHORIZE_PROVIDER.to_string(),
+    };
+    let grant = deps.authorizer.check(&gate_ask, http).await.map_err(|d| Refusal::Denied(d.reason))?;
+    issue_code(deps, cfg, &client, ask, checked, grant, now).await
+}
+
+/// An authorization request that passed [`check_request`].
+struct CheckedRequest {
+    scope: Vec<String>,
+    code_challenge: String,
+}
+
+/// The request checks every authorization path runs before the gate, in
+/// order: exact `redirect_uri`, response type, scope, state and nonce, PKCE.
+fn check_request(client: &OidcClient, ask: &AuthorizeRequest) -> Result<CheckedRequest, Refusal> {
     // Byte-for-byte match against the registration: no prefix, no
     // normalisation, so no other URI can receive a code.
     if !client.redirect_uris.iter().any(|u| u == &ask.redirect_uri) {
@@ -295,16 +341,21 @@ async fn authorize_inner(
     if !valid_challenge(challenge) {
         return Err(Refusal::InvalidRequest("malformed_code_challenge"));
     }
+    Ok(CheckedRequest { scope, code_challenge: challenge.to_string() })
+}
 
-    let gate_ask = IssueRequest {
-        entity_id: entity_id.to_string(),
-        environment: client.environment.clone(),
-        roles: ask.roles.clone(),
-        caller_namespace: caller_namespace.to_string(),
-        provider: AUTHORIZE_PROVIDER.to_string(),
-    };
-    let grant = deps.authorizer.check(&gate_ask, http).await.map_err(|d| Refusal::Denied(d.reason))?;
-
+/// Store a code for what the gate granted and build the redirect to the
+/// client's registered URI.
+#[maybe_async::maybe_async]
+async fn issue_code(
+    deps: &OidcDeps<'_>,
+    cfg: &OidcConfig,
+    client: &OidcClient,
+    ask: &AuthorizeRequest,
+    checked: CheckedRequest,
+    grant: IssueGrant,
+    now: DateTime<Utc>,
+) -> Result<Authorized, Refusal> {
     let ttl = chrono::Duration::seconds(i64::try_from(cfg.code_ttl_secs).unwrap_or(60));
     let rec = AuthCode {
         version: crate::posix::model::RECORD_VERSION,
@@ -313,9 +364,9 @@ async fn authorize_inner(
         environment: grant.environment.clone(),
         roles: grant.roles.clone(),
         redirect_uri: ask.redirect_uri.clone(),
-        code_challenge: challenge.to_string(),
+        code_challenge: checked.code_challenge,
         nonce: ask.nonce.clone(),
-        scope,
+        scope: checked.scope,
         created_at: now,
         expires_at: now + ttl,
     };
@@ -329,7 +380,7 @@ async fn authorize_inner(
     }
     let separator = if ask.redirect_uri.contains('?') { '&' } else { '?' };
     let redirect_to =
-        Zeroizing::new(format!("{}{separator}{}", client_redirect(&client, &ask.redirect_uri)?, params.finish()));
+        Zeroizing::new(format!("{}{separator}{}", client_redirect(client, &ask.redirect_uri)?, params.finish()));
     Ok(Authorized {
         code,
         redirect_to,
@@ -343,7 +394,7 @@ async fn authorize_inner(
 
 /// The client's own registered copy of `uri` (exact match), so the
 /// redirect is built from stored data, not from the request.
-fn client_redirect<'a>(client: &'a store::OidcClient, uri: &str) -> Result<&'a str, Refusal> {
+fn client_redirect<'a>(client: &'a OidcClient, uri: &str) -> Result<&'a str, Refusal> {
     client.redirect_uris.iter().find(|u| *u == uri).map(String::as_str).ok_or(Refusal::InvalidRedirectUri)
 }
 

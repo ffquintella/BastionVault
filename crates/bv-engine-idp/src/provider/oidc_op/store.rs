@@ -1,6 +1,7 @@
 //! `idp/oidc/` on the root system view: the OP configuration, registered
 //! clients (each bound for life to one environment, its secret stored only
-//! as a SHA-256), single-use authorization codes and the signing key ring.
+//! as a SHA-256), single-use authorization codes, single-use launch
+//! sessions (the browser's OP login, T545) and the signing key ring.
 //! Records are JSON `version: 1`, unknown versions and fields refused.
 
 use std::{any::Any, fmt, sync::Arc};
@@ -32,6 +33,7 @@ const CONFIG_KEY: &str = "config";
 const KEYS_KEY: &str = "keys";
 pub const CLIENT_PREFIX: &str = "clients/";
 pub const CODE_PREFIX: &str = "codes/";
+pub const LAUNCH_SESSION_PREFIX: &str = "launch-sessions/";
 const KEY_COMMON_NAME: &str = "BastionVault OpenID Provider signing key";
 
 pub const DEFAULT_ID_TOKEN_TTL_SECS: u64 = 300;
@@ -63,7 +65,9 @@ pub struct OidcConfig {
     /// The `iss` of every token; discovery is served at
     /// `<issuer>/.well-known/openid-configuration`.
     pub issuer: String,
-    /// The browser-facing page that relays to `v2/idp/oidc/authorize`.
+    /// The browser-facing authorization endpoint discovery publishes.
+    /// `None`: `<issuer>/authorize`, which with the documented issuer is the
+    /// vault's own `GET /v2/idp/oidc/authorize` (launch-session cookie).
     pub authorization_endpoint: Option<String>,
     pub id_token_ttl_secs: u64,
     pub code_ttl_secs: u64,
@@ -201,15 +205,47 @@ pub struct AuthCode {
     pub expires_at: DateTime<Utc>,
 }
 
-/// A code is `<expiry unix seconds>.<43 base64url characters>`.
-fn code_key(code: &str) -> Option<String> {
-    let (expiry, random) = code.split_once('.')?;
+// ─── Launch sessions ────────────────────────────────────────────────
+
+/// `idp/oidc/launch-sessions/<expiry>-<sha256(secret)>`: a single-use OP
+/// login for one browser, minted by `v2/idp/oidc/launch-session` with the
+/// caller's vault token and consumed by the browser-facing authorization
+/// endpoint. The secret itself is not stored, nor is the caller's launch
+/// id (only its SHA-256, the digest the launch's own audit lines carry).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchSession {
+    pub version: u32,
+    /// Random, non-secret identifier the mint, consume and refusal audit
+    /// events carry, so they can be tied together without the secret.
+    pub session_id: String,
+    pub client_id: String,
+    pub entity_id: String,
+    pub environment: String,
+    /// The roles the gate granted at mint; the authorization step asks for
+    /// exactly these again.
+    pub roles: Vec<String>,
+    /// SHA-256 (hex) of the launch id the session is bound to.
+    pub launch_id_sha256: String,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+/// Codes and launch-session secrets are `<expiry unix seconds>.<43
+/// base64url characters>`; the key is the expiry (for pruning by listing)
+/// and the secret's SHA-256.
+fn secret_key(prefix: &str, secret: &str) -> Option<String> {
+    let (expiry, random) = secret.split_once('.')?;
     let ok = !expiry.is_empty()
         && expiry.len() <= 12
         && expiry.bytes().all(|b| b.is_ascii_digit())
         && random.len() == 43
         && random.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
-    ok.then(|| format!("{CODE_PREFIX}{expiry:0>12}-{}", sha256_hex(code.as_bytes())))
+    ok.then(|| format!("{prefix}{expiry:0>12}-{}", sha256_hex(secret.as_bytes())))
+}
+
+fn code_key(code: &str) -> Option<String> {
+    secret_key(CODE_PREFIX, code)
 }
 
 fn key_expiry(key: &str) -> Option<i64> {
@@ -405,17 +441,31 @@ impl OidcStore {
         if rec.redirect_uri.len() > MAX_URL_LEN {
             return Err(PosixError::Invalid("redirect_uri is too long".into()).into());
         }
+        self.mint_secret(CODE_PREFIX, rec, rec.expires_at, now).await
+    }
+
+    /// Store `rec` under a fresh `<expiry>.<random>` secret below `prefix`
+    /// and return the secret, once. Expired entries under `prefix` are
+    /// pruned first.
+    async fn mint_secret<T: Serialize + Sync>(
+        &self,
+        prefix: &str,
+        rec: &T,
+        expires_at: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> Result<Zeroizing<String>, RvError> {
         let _lock = self.write_lock().await?;
-        for key in self.storage.list(CODE_PREFIX).await? {
+        for key in self.storage.list(prefix).await? {
             if key_expiry(&key).is_none_or(|e| e <= now.timestamp()) {
-                self.storage.delete(&format!("{CODE_PREFIX}{key}")).await?;
+                self.storage.delete(&format!("{prefix}{key}")).await?;
             }
         }
         let random = random_b64url(SECRET_BYTES);
-        let code = Zeroizing::new(format!("{}.{}", rec.expires_at.timestamp(), random.as_str()));
-        let key = code_key(&code).ok_or_else(|| PosixError::Corrupt("minted code is malformed".into()))?;
+        let secret = Zeroizing::new(format!("{}.{}", expires_at.timestamp(), random.as_str()));
+        let key =
+            secret_key(prefix, &secret).ok_or_else(|| PosixError::Corrupt("minted secret is malformed".into()))?;
         self.put_record(&key, rec).await?;
-        Ok(code)
+        Ok(secret)
     }
 
     /// Take a code: whatever happens next, it is gone (single use). `None`
@@ -426,6 +476,41 @@ impl OidcStore {
         };
         let _lock = self.write_lock().await?;
         let rec = self.get_record::<AuthCode>("oidc authorization code", &key).await?;
+        if rec.is_some() {
+            self.storage.delete(&key).await?;
+        }
+        Ok(rec)
+    }
+
+    // ─── Launch sessions ────────────────────────────────────────
+
+    /// Store a launch session for `rec` (the gate has already allowed it)
+    /// and return its secret, once. Expired sessions are pruned first.
+    pub async fn mint_launch_session(
+        &self,
+        rec: &LaunchSession,
+        now: DateTime<Utc>,
+    ) -> Result<Zeroizing<String>, RvError> {
+        validate_entity_id(&rec.entity_id)?;
+        self.mint_secret(LAUNCH_SESSION_PREFIX, rec, rec.expires_at, now).await
+    }
+
+    /// Take a launch session: whatever happens next, it is gone (single
+    /// use). `None` if there is no such session (malformed, never minted,
+    /// already used, or pruned).
+    pub async fn take_launch_session(&self, secret: &str) -> Result<Option<LaunchSession>, RvError> {
+        let Some(key) = secret_key(LAUNCH_SESSION_PREFIX, secret) else {
+            return Ok(None);
+        };
+        // The browser endpoint is unauthenticated: a miss is answered
+        // without the cluster-wide write lock, so guessing cannot contend
+        // it. A hit is read again under the lock before it is deleted, so
+        // two concurrent uses cannot both get it.
+        if self.storage.get(&key).await?.is_none() {
+            return Ok(None);
+        }
+        let _lock = self.write_lock().await?;
+        let rec = self.get_record::<LaunchSession>("oidc launch session", &key).await?;
         if rec.is_some() {
             self.storage.delete(&key).await?;
         }

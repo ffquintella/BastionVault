@@ -24,6 +24,9 @@ use crate::{
     test_support::{directory, Directory, FedEvents, MemStorage},
 };
 
+/// Launch sessions (T545), on this file's fixture.
+mod launch_sessions;
+
 const ISSUER: &str = "https://vault.example.com/v2/idp/oidc";
 const REDIRECT: &str = "https://app.example.com/oidc/callback";
 const VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";

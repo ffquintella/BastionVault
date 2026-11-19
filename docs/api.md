@@ -3086,10 +3086,11 @@ POST   /v2/idp/radius/passcode/{environment}  # {"roles", "ttl"}  (self-service)
 ### Identity Provider: OIDC OP and SAML IdP (`v2` only, root namespace)
 
 Phase 5 of [`features/identity-provider.md`](../features/identity-provider.md).
-Same mount, guard and error mapping as above. The four relying-party paths
-marked *no token* are the mount's unauthenticated paths; everything else
-needs a token. Responses use the normal `data` envelope: no raw JSON or XML
-body, no redirect, and request bodies are JSON (see the caveat below).
+Same mount, guard and error mapping as above. The paths marked *no token*
+are the mount's unauthenticated paths; everything else needs a token.
+Responses use the normal `data` envelope and request bodies are JSON (see the
+caveat below), except the browser authorization endpoint
+`GET /v2/idp/oidc/authorize`, which answers a `302` or a plain-text page.
 
 ~~~
 GET    /v2/idp/oidc/config                       # {"enabled": false} until written
@@ -3101,6 +3102,9 @@ POST   /v2/idp/oidc/clients/{client_id}          # {"environment", "redirect_uri
 GET    /v2/idp/oidc/clients/{client_id}          # never returns the secret
 DELETE /v2/idp/oidc/clients/{client_id}
 POST   /v2/idp/oidc/authorize                    # self-service, see below
+POST   /v2/idp/oidc/launch-session               # self-service: {"client_id", "launch_id", "roles", "ttl"}
+GET    /v2/idp/oidc/authorize                    # no token: the browser, with the launch-session cookie; 302 or a plain page
+POST   /v2/idp/oidc/launch-session/authorize     # no token: what the GET relays to (JSON, "launch_session" in the body)
 POST   /v2/idp/oidc/token                        # no token
 GET    /v2/idp/oidc/jwks                         # no token
 GET    /v2/idp/oidc/.well-known/openid-configuration   # no token
@@ -3126,10 +3130,11 @@ GET    /v2/idp/saml/metadata                     # no token
 - **OIDC config**: `issuer` is an `https` URL without trailing slash or
   query, the `iss` of every token; the discovery document lists
   `<issuer>/token` and `<issuer>/jwks`, so the issuer to configure is
-  `https://<vault>/v2/idp/oidc`. `authorization_endpoint` names the
-  browser-facing page that relays to `authorize` (default
-  `<issuer>/authorize`). `id_token_ttl` 5m (1m–1h), `code_ttl` 60s
-  (10s–10m). Off until `enabled: true` (discovery and JWKS answer `404`).
+  `https://<vault>/v2/idp/oidc`. `authorization_endpoint` is what discovery
+  publishes for browsers (default `<issuer>/authorize`, which with that
+  issuer is the vault's own `GET /v2/idp/oidc/authorize`; set it only to
+  front the vault with another page). `id_token_ttl` 5m (1m–1h), `code_ttl`
+  60s (10s–10m). Off until `enabled: true` (discovery and JWKS answer `404`).
 - **Clients**: creating one, or `rotate_secret: true`, returns
   `client_secret` once (256 random bits); only its SHA-256 is stored.
 - **Authorize** (the caller's own entity; a token without one is `403`):
@@ -3142,6 +3147,42 @@ GET    /v2/idp/saml/metadata                     # no token
   `code` and `state`), `expires_at`. A refusal is an error to the caller,
   never a redirect: `invalid_client` `401`, others `400`, a gate denial
   `403` (`access_denied`).
+- **Launch session** (the caller's own entity; T545): a single-use OP login
+  a host plants as a cookie in a browser it controls, so the browser can
+  follow a relying party's redirect to the authorization endpoint without a
+  vault token. Body: `client_id` (registered), `launch_id` (the host's
+  launch id, base64url, 22–128 characters; only its SHA-256 is kept),
+  optional `roles` (subset of the entitled roles) and `ttl` (default 2m,
+  10s–5m). Gated as provider `oidc-launch-session`. Returns, once,
+  `launch_session` (the cookie value: 256 random bits, stored only as a
+  SHA-256), `cookie` (`name` `__Host-bv-idp-launch`, `path` `/`, `secure`,
+  `http_only`, `same_site` `Lax`, `max_age`), `cookie_origin` (the origin
+  of `authorization_endpoint`, where the host plants it, host-only, no
+  `Domain`), `authorization_endpoint`, `session_id`, `client_id`,
+  `environment`, `roles`, `launch_id_sha256`, `expires_at`. Refusals as for
+  authorize, plus `invalid_request` `400` for a malformed `launch_id` or
+  `ttl`.
+- **Browser authorization** (`GET /v2/idp/oidc/authorize`, no token): the
+  standard query parameters (`client_id`, `redirect_uri`, `response_type`,
+  `scope`, `state`, `nonce`, `code_challenge`, `code_challenge_method`;
+  others ignored, a repeated one refused) and the `__Host-bv-idp-launch`
+  cookie (more than one refused). No vault token is read, from a header or
+  the `token` cookie. The session is consumed first, so it works once
+  whatever follows; then it must be unexpired and minted for this
+  `client_id` and the client's current environment, the request passes the
+  same checks as authorize (exact `redirect_uri`, `code`, `openid`, PKCE
+  `S256`, bounded `state`/`nonce`), and the gate is asked again (provider
+  `oidc-authorize`, the session's roles). Success is `302 Found` to the
+  registered `redirect_uri` with `code` and `state`, `Cache-Control:
+  no-store`, `Referrer-Policy: no-referrer`. A refusal is never a redirect:
+  a `text/plain` page (`nosniff`, `default-src 'none'`) with the error code
+  and reason, `login_required` `401` for a missing, unknown, used, expired
+  or other-client session, otherwise as for authorize. Every answer expires
+  the cookie. `POST /v2/idp/oidc/launch-session/authorize` is the same
+  decision as a JSON call (`launch_session` in the body), returning
+  `redirect_to` instead of redirecting. Only the mount path `idp/` has the
+  `GET` endpoint; other methods on `/v2/idp/oidc/authorize` are the
+  token-authenticated `POST` above.
 - **Token** (no token; `client_secret_post` only): `grant_type`
   `authorization_code`, `code`, `redirect_uri`, `client_id`,
   `client_secret`, `code_verifier`. The client authenticates first; the code
@@ -3192,13 +3233,19 @@ GET    /v2/idp/saml/metadata                     # no token
   `idp.saml.response` (`service_provider`, `acs_url`, `initiated_by`,
   `response_id`, `assertion_id`, `in_response_to`, `kid`, ...), and every
   refusal `idp.oidc.refused` / `idp.saml.refused` (`stage`, `reason`,
-  `gate_reason`). No event carries a code, secret, token or assertion. A
-  token or response whose event cannot be recorded is not returned.
-- **Caveat**: the vault's HTTP layer only speaks the JSON envelope, so a
-  standard relying party cannot yet fetch discovery, the JWKS or metadata
-  directly, POST a form-encoded token request, or be redirected; a
-  browser-facing relay (the GUI, Phase 7 / T107) or an HTTP adapter has to
-  carry these. Nothing has been run against a real SP or RP.
+  `gate_reason`). A launch session is `idp.oidc.launch-session` when minted
+  and `idp.oidc.launch-session-consumed` when a code is minted for it
+  (`session_id`, `launch_id_sha256`, `client_id`, `entity_id`,
+  `environment`, `roles`, expiries); its refusals are `idp.oidc.refused`
+  with `stage` `launch-session` or `launch-session-authorize`. No event
+  carries a code, session, launch id, secret, token or assertion. A token,
+  launch session, browser code or response whose event cannot be recorded
+  is not returned.
+- **Caveat**: apart from the browser authorization endpoint, the vault's
+  HTTP layer only speaks the JSON envelope, so a standard relying party
+  cannot yet fetch discovery, the JWKS or metadata directly or POST a
+  form-encoded token request (T546). Nothing has been run against a real SP,
+  RP or browser.
 
 ### Identity Provider: LDAP directory (`v2` only, root namespace)
 

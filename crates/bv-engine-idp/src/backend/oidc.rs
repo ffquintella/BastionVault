@@ -1,9 +1,9 @@
 //! Phase 5 OIDC handlers: `v2/idp/oidc/config`, `keys`, `keys/rotate`,
-//! `clients/...` (admin), `authorize` (self-service), and the relying
-//! party's unauthenticated `token`, `jwks` and
-//! `.well-known/openid-configuration`. Each runs the identity guard first.
-//! No response carries a stored secret; a minted client secret, a code and
-//! a token are each returned once.
+//! `clients/...` (admin), `authorize` and `launch-session` (self-service),
+//! the browser's `launch-session/authorize`, and the relying party's
+//! unauthenticated `token`, `jwks` and `.well-known/openid-configuration`.
+//! Each runs the identity guard first. No response carries a stored secret;
+//! a minted client secret, launch session, code and token are returned once.
 
 use std::sync::Arc;
 
@@ -22,6 +22,7 @@ use crate::{
         federation::{caller_entity, keys::DEFAULT_OVERLAP_SECS, BrokerFederationAudit},
         oidc_op::{
             self,
+            launch::{self, BrowserAuthorizeRequest, LaunchRequest},
             store::{ClientWrite, OidcConfigUpdate},
             AuthorizeRequest, OidcDeps, Refusal, TokenRequest,
         },
@@ -39,6 +40,21 @@ fn list_field(req: &Request, key: &str) -> Result<Option<Vec<String>>, RvError> 
 
 fn secret_field(req: &Request, key: &str) -> Result<Zeroizing<String>, RvError> {
     Ok(Zeroizing::new(str_field(req, key)?.unwrap_or_default()))
+}
+
+/// The authorization request's protocol fields, without `roles`.
+fn authorize_request(req: &Request) -> Result<AuthorizeRequest, RvError> {
+    Ok(AuthorizeRequest {
+        client_id: str_field(req, "client_id")?.unwrap_or_default(),
+        redirect_uri: str_field(req, "redirect_uri")?.unwrap_or_default(),
+        response_type: str_field(req, "response_type")?.unwrap_or_default(),
+        scope: str_field(req, "scope")?.unwrap_or_default(),
+        state: str_field(req, "state")?,
+        nonce: str_field(req, "nonce")?,
+        code_challenge: str_field(req, "code_challenge")?,
+        code_challenge_method: str_field(req, "code_challenge_method")?,
+        roles: None,
+    })
 }
 
 #[maybe_async::maybe_async]
@@ -190,17 +206,7 @@ impl IdpBackendInner {
     ) -> Result<Option<Response>, RvError> {
         let stores = self.guard_federation(req).await?;
         let entity_id = caller_entity(req, "OIDC authorization")?;
-        let ask = AuthorizeRequest {
-            client_id: str_field(req, "client_id")?.unwrap_or_default(),
-            redirect_uri: str_field(req, "redirect_uri")?.unwrap_or_default(),
-            response_type: str_field(req, "response_type")?.unwrap_or_default(),
-            scope: str_field(req, "scope")?.unwrap_or_default(),
-            state: str_field(req, "state")?,
-            nonce: str_field(req, "nonce")?,
-            code_challenge: str_field(req, "code_challenge")?,
-            code_challenge_method: str_field(req, "code_challenge_method")?,
-            roles: list_field(req, "roles")?,
-        };
+        let ask = AuthorizeRequest { roles: list_field(req, "roles")?, ..authorize_request(req)? };
         let caller_ns = caller_namespace(self.core.as_ref(), req).await?;
         let cfg = stores.oidc.config().await?;
         let gate = self.issue_gate();
@@ -211,6 +217,81 @@ impl IdpBackendInner {
             .map_err(RvError::from)?;
         let mut data = Map::new();
         data.insert("code".into(), ok.code.as_str().into());
+        data.insert("redirect_to".into(), ok.redirect_to.as_str().into());
+        data.insert("state".into(), ok.state.into());
+        data.insert("client_id".into(), ok.client_id.into());
+        data.insert("environment".into(), ok.environment.into());
+        data.insert("roles".into(), Value::from(ok.roles));
+        data.insert("expires_at".into(), ok.expires_at.to_rfc3339().into());
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    /// Self-service: a single-use launch session (the browser's OP login)
+    /// for the caller's own identity, one client and one launch.
+    pub async fn handle_oidc_launch_session(
+        &self,
+        _b: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let stores = self.guard_federation(req).await?;
+        let entity_id = caller_entity(req, "An OIDC launch session")?;
+        let ask = LaunchRequest {
+            client_id: str_field(req, "client_id")?.unwrap_or_default(),
+            launch_id: secret_field(req, "launch_id")?,
+            roles: list_field(req, "roles")?,
+            ttl_secs: duration_field(req, "ttl")?,
+        };
+        let caller_ns = caller_namespace(self.core.as_ref(), req).await?;
+        let cfg = stores.oidc.config().await?;
+        let gate = self.issue_gate();
+        let audit = self.federation_audit();
+        let deps = OidcDeps { authorizer: &gate, store: &stores.oidc, audit: &audit };
+        let ok = launch::mint(&deps, cfg.as_ref(), &ask, &entity_id, &caller_ns, Some(&*req), Utc::now())
+            .await
+            .map_err(RvError::from)?;
+        let mut cookie = Map::new();
+        cookie.insert("name".into(), launch::COOKIE_NAME.into());
+        cookie.insert("path".into(), launch::COOKIE_PATH.into());
+        cookie.insert("secure".into(), true.into());
+        cookie.insert("http_only".into(), true.into());
+        cookie.insert("same_site".into(), launch::COOKIE_SAME_SITE.into());
+        cookie.insert("max_age".into(), ok.max_age_secs.into());
+        let mut data = Map::new();
+        data.insert("launch_session".into(), ok.secret.as_str().into());
+        data.insert("cookie".into(), Value::Object(cookie));
+        data.insert("cookie_origin".into(), ok.cookie_origin.into());
+        data.insert("authorization_endpoint".into(), ok.authorization_endpoint.into());
+        data.insert("session_id".into(), ok.session_id.into());
+        data.insert("client_id".into(), ok.client_id.into());
+        data.insert("environment".into(), ok.environment.into());
+        data.insert("roles".into(), Value::from(ok.roles));
+        data.insert("launch_id_sha256".into(), ok.launch_id_sha256.into());
+        data.insert("expires_at".into(), ok.expires_at.to_rfc3339().into());
+        let mut resp = Response::data_response(Some(data));
+        resp.add_warning("launch_session is shown once and works once; plant it as the cookie, do not store it");
+        Ok(Some(resp))
+    }
+
+    /// The browser's authorization request, authenticated by the launch
+    /// session it carried (unauthenticated path: the session is the proof).
+    /// The HTTP layer turns `redirect_to` into the 302; nothing redirects
+    /// on a refusal.
+    pub async fn handle_oidc_launch_session_authorize(
+        &self,
+        _b: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let stores = self.guard_federation(req).await?;
+        let ask = BrowserAuthorizeRequest {
+            launch_session: secret_field(req, "launch_session")?,
+            authorize: authorize_request(req)?,
+        };
+        let cfg = stores.oidc.config().await?;
+        let gate = self.issue_gate();
+        let audit = self.federation_audit();
+        let deps = OidcDeps { authorizer: &gate, store: &stores.oidc, audit: &audit };
+        let ok = launch::authorize(&deps, cfg.as_ref(), &ask, Some(&*req), Utc::now()).await.map_err(RvError::from)?;
+        let mut data = Map::new();
         data.insert("redirect_to".into(), ok.redirect_to.as_str().into());
         data.insert("state".into(), ok.state.into());
         data.insert("client_id".into(), ok.client_id.into());

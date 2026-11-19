@@ -147,8 +147,9 @@ wiring is done but opens
 proxy mode **only on macOS 14+ in the opt-in `web_proxy_mode` build — not
 yet run in a live session window**; Linux's WebKitGTK path has been run
 under Xvfb in a container, not through a Tauri window, and Linux and Windows
-stay unavailable (see *Phase 6*). Phase 7 (`sso`) is T107, blocked by T52,
-and Phase 8 is future (T97). Every web
+stay unavailable (see *Phase 6*). Phase 7 (`sso`) is T107, todo: its
+vault-side prerequisites exist (T52, and T545 for OIDC launch sessions;
+see §9), and Phase 8 is future (T97). Every web
 session window also carries a native back / forward / reload / download bar at
 the bottom, in both builds (T459, in progress: compiled on all three platforms,
 **not yet run live**; see *Session navigation bar*).**
@@ -1365,8 +1366,10 @@ that must still happen before the first release that ships `form` mode:
   On the direct SSH/RDP path the GUI host resolves the credential itself,
   which needs `read` on the secret; the connect-only guarantee is hard only
   on the Rustion path. Phase 2's launch endpoint closes that for web.
-- The Identity Provider (S19, T52) is fully unimplemented. There is no `idp`
-  module.
+- The Identity Provider (S19, T52) was unimplemented when this was written.
+  It now exists (`crates/bv-engine-idp`), with `v2/idp/saml/initiate/<sp>`
+  and, since T545, the OIDC launch session and browser authorization
+  endpoint `sso` mode needs (§9).
 
 ## Scope
 
@@ -1885,12 +1888,13 @@ what is given up is ATS's minimums (TLS version, cipher suites) for web
 content. Verify with a packaged build (`make build`), not `make run-dev-gui`:
 an unbundled binary has no ATS.
 
-### 9. `sso` mode (Phase 7, blocked by T52)
+### 9. `sso` mode (Phase 7, T107)
 
-Once S19 ships the SAML IdP and OIDC OP:
+S19 ships the SAML IdP and OIDC OP (T52); the OIDC launch session and the
+browser authorization endpoint are T545:
 
 - `web.sso.idp_app` names a registered relying party.
-- **SAML.** The host asks `v2/idp/saml/initiate` (new, S19-side) for an
+- **SAML.** The host asks `v2/idp/saml/initiate/<sp>` for an
   IdP-initiated `SAMLResponse` for that SP. It opens the window on an
   auto-posting page served from the host's custom protocol, never from the vault
   UI webview, which posts to the SP's ACS URL. The ACS origin must be in the
@@ -1900,7 +1904,35 @@ Once S19 ships the SAML IdP and OIDC OP:
   OP needs a session for the operator in this *ephemeral* store, so the host
   first plants a single-use OP login cookie with `set_cookie` (tauri-runtime
   ≥ 2.8), scoped to the OP origin and minted by `v2/idp/oidc/launch-session`
-  bound to `launch_id`.
+  bound to `launch_id`. The contract T107 calls (full shape in
+  [docs/api.md](../docs/api.md)):
+  1. `POST v2/idp/oidc/launch-session` with the operator's token and
+     `{"client_id": <idp_app>, "launch_id": <launch_id>}` (optional
+     `roles`, `ttl` 10 s–5 min, default 2 min). Gated as
+     `oidc-launch-session`; root and entity-less tokens are refused.
+     Returns `launch_session` (once), `cookie` {`name`
+     `__Host-bv-idp-launch`, `path` `/`, `secure`, `http_only`, `same_site`
+     `Lax`, `max_age`}, `cookie_origin`, `authorization_endpoint`,
+     `session_id`, `launch_id_sha256` (= this feature's `launch_id_hash`),
+     `expires_at`. The host plants exactly that cookie, host-only (no
+     `Domain`), on `cookie_origin` in the session's own store, and drops
+     the value from memory.
+  2. The RP sends the window to `authorization_endpoint`
+     (`GET /v2/idp/oidc/authorize?...`). The vault consumes the session
+     (single use, also on a refusal), checks it was minted for that
+     `client_id` and environment, the exact registered `redirect_uri`,
+     `response_type=code`, `openid`, PKCE `S256`, and the gate (as
+     `oidc-authorize`), then answers `302` to the redirect URI with `code`
+     and `state`. A refusal is a `text/plain` page, never a redirect
+     (`login_required` `401` for a missing, used, expired or other-client
+     session); every answer expires the cookie.
+  3. The RP redeems the code at `<issuer>/token` with its secret and PKCE
+     verifier. Today that endpoint takes a JSON body in the vault envelope;
+     a standard RP's form-encoded request needs T546.
+
+  The `authorization_endpoint` origin must be in the profile's origin set.
+  A refused or expired session is not retried: the host mints a new one
+  (that is a new `launch-session` call, gated again).
 - Identity, entitlement checks and the `idp.issue` audit events are S19's. This
   feature contributes the launch plumbing and the profile mode only.
 - **Apps that do their own SSO against a corporate IdP** (Entra ID, Okta,
@@ -2643,9 +2675,11 @@ See *Current State → Phase 6 spike findings*.
   Residual: hyper's and rustls's own write buffers hold transient copies of
   the header that this code cannot zeroize, as for the substituted body.
 
-### Phase 7 — `sso` mode — **Todo, blocked by T52 (S19); tracked as T107**
+### Phase 7 — `sso` mode — **Todo; tracked as T107**
 
-IdP-initiated SAML and OIDC third-party-initiated login (§9).
+IdP-initiated SAML and OIDC third-party-initiated login (§9). The vault side
+exists: S19 (T52) and the OIDC launch session and browser authorization
+endpoint (T545). A standard RP also needs T546 to redeem the code.
 
 ### Phase 8 — Rustion browser isolation — **Future (cross-repo, not scheduled)**
 
@@ -2670,7 +2704,7 @@ as T97 in the roadmap backlog.
 - Native-handler work (Phases 3, 4 and 6) uses the `webview2-com`, `objc2` and
   `webkit2gtk` bindings already pulled in transitively by wry. Promoting them to
   direct dependencies needs the manifest justification §7 of AGENTS.md requires.
-- S19 / T52 for Phase 7.
+- S19 / T52 and T545 for Phase 7 (T546 for a standard RP's token request).
 - Rustion (S51, [rustion-integration.md](rustion-integration.md)) browser worker
   support and BVRG-v1 `web` payload additions for Phase 8.
 
@@ -2821,7 +2855,7 @@ a plain-`http://` load, and a login page that reflects the submitted password.
 Tracked as **T96** in `ROADMAP.md` (M5 Resources), spec **S105** — closed
 with Phases 1–5 and the Phase 6 spike, caveats carried in *Current State*.
 Building proxy mode (Phase 6) is **T106** and `sso` mode (Phase 7) is
-**T107**, blocked by T52, both in M5. The session navigation bar is **T459**
+**T107** (its OIDC prerequisite, launch sessions, is **T545**), both in M5. The session navigation bar is **T459**
 (M5, in progress). Phase 8
 (Rustion browser isolation) is tracked separately as backlog task **T97**,
 because it is cross-repo and unscheduled. When phases

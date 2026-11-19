@@ -28,6 +28,7 @@
 //! without one.
 
 use actix_web::{
+    guard,
     http::{Method, StatusCode},
     web, FromRequest, Handler, HttpResponse, Responder, Route,
 };
@@ -60,6 +61,18 @@ impl RouteMethod {
             RouteMethod::Delete => "DELETE",
             RouteMethod::List => "LIST",
             RouteMethod::Any => "ANY",
+        }
+    }
+
+    /// Whether a request with `method` is one this route answers.
+    fn matches(self, method: &Method) -> bool {
+        match self {
+            RouteMethod::Get => method == Method::GET,
+            RouteMethod::Post => method == Method::POST,
+            RouteMethod::Put => method == Method::PUT,
+            RouteMethod::Delete => method == Method::DELETE,
+            RouteMethod::List => *method == list_method(),
+            RouteMethod::Any => true,
         }
     }
 
@@ -199,6 +212,10 @@ pub enum Fallback {
     Default,
     /// An explicit empty `405`.
     MethodNotAllowed,
+    /// The resource claims only the methods its routes name; any other
+    /// method falls through to the next service matching the path (the
+    /// logical catch-all), as if this resource were not registered.
+    PassThrough,
 }
 
 pub struct ResourceSpec {
@@ -242,6 +259,9 @@ pub const RUSTION_WEBHOOK: &[Surface] = &[Surface::Resources(crate::rustion_webh
 /// `/v2/mcp` and its token exchange — [`crate::mcp_routes::init_mcp_service`].
 pub const MCP: &[Surface] = &[Surface::Resources(crate::mcp_routes::RESOURCES)];
 
+/// The OpenID Provider's browser authorization endpoint — [`crate::idp_routes::init_idp_service`].
+pub const IDP: &[Surface] = &[Surface::Resources(crate::idp_routes::RESOURCES)];
+
 /// The `/v1` and `/v2` logical catch-alls — [`crate::logical_routes::init_logical_service`].
 pub const LOGICAL: &[Surface] =
     &[Surface::CatchAll(&crate::logical_routes::V1_CATCH_ALL), Surface::CatchAll(&crate::logical_routes::V2_CATCH_ALL)];
@@ -251,9 +271,9 @@ pub const METRICS: &[Surface] = &[Surface::Resources(crate::metrics_routes::RESO
 
 /// The whole listener, in registration order. actix matches resources in
 /// registration order, so order is part of the contract: the exact-path
-/// webhook and MCP resources precede the `/v1` and `/v2` catch-alls they sit
-/// inside.
-pub static LISTENER: &[&[Surface]] = &[SYS, RUSTION_WEBHOOK, MCP, LOGICAL, METRICS];
+/// webhook, MCP and IdP resources precede the `/v1` and `/v2` catch-alls they
+/// sit inside.
+pub static LISTENER: &[&[Surface]] = &[SYS, RUSTION_WEBHOOK, MCP, IDP, LOGICAL, METRICS];
 
 /// Register the whole listener. [`crate::init_service`] is this.
 pub(crate) fn register_listener(cfg: &mut web::ServiceConfig) {
@@ -304,6 +324,12 @@ fn build_resource(spec: &ResourceSpec) -> actix_web::Resource {
     match spec.fallback {
         Fallback::Default => resource,
         Fallback::MethodNotAllowed => resource.default_service(web::route().to(method_not_allowed)),
+        Fallback::PassThrough => {
+            // A resource-level guard makes actix skip the resource, unlike a
+            // route guard, which would answer 405 from it.
+            let routes = spec.routes;
+            resource.guard(guard::fn_guard(move |ctx| routes.iter().any(|r| r.method.matches(&ctx.head().method))))
+        }
     }
 }
 
@@ -659,7 +685,10 @@ pub(crate) mod tests {
     /// `pre_route` demands a token for the shim's logical path.
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn routed_classes_agree_with_the_logical_unauth_paths() {
-        let (_bvault, core, _root) = crate::test_utils::new_unseal_test_bastion_vault("test_routes_unauth_paths").await;
+        let (_bvault, core, root) = crate::test_utils::new_unseal_test_bastion_vault("test_routes_unauth_paths").await;
+        // The identity provider is an opt-in mount; its shim targets the
+        // documented `idp/` path, so mount it there to judge that shim too.
+        crate::test_utils::test_mount_api(core.as_ref(), &root, "idp", "idp").await;
         for InventoryEntry { method, pattern, class } in inventory() {
             let (logical, expect_unauth) = match class {
                 RouteClass::Routed { logical } => (logical, false),
@@ -676,6 +705,54 @@ pub(crate) mod tests {
                 if expect_unauth { "is not" } else { "is" }
             );
         }
+    }
+
+    async fn claimed() -> HttpResponse {
+        HttpResponse::Ok().body("claimed")
+    }
+
+    async fn caught() -> HttpResponse {
+        HttpResponse::Ok().body("caught")
+    }
+
+    const PASS_THROUGH: &[super::ResourceSpec] = &[super::resource!("/v2/x/authorize", fallback: PassThrough => [
+        super::route!(public_probe Get => claimed, "test"),
+    ])];
+    const CLAIM_ALL: &[super::ResourceSpec] = &[super::resource!("/v2/x/authorize" => [
+        super::route!(public_probe Get => claimed, "test"),
+    ])];
+    const CATCH_ALL: super::CatchAllSpec = super::CatchAllSpec {
+        scope: "/v2",
+        path: "/{path:.*}",
+        body_limit: super::BodyLimit::ActixDefault,
+        route: super::route!(dispatch Any => caught, "test"),
+    };
+
+    /// A `PassThrough` resource answers only its own methods; every other
+    /// method reaches the catch-all behind it instead of a 405. Without it
+    /// the same resource swallows them.
+    #[actix_web::test]
+    async fn a_pass_through_resource_leaves_other_methods_to_the_catch_all() {
+        use actix_web::test::{call_service, init_service, read_body, TestRequest};
+
+        use super::{register, Surface};
+
+        let surfaces: &[Surface] = &[Surface::Resources(PASS_THROUGH), Surface::CatchAll(&CATCH_ALL)];
+        let app = init_service(App::new().configure(|cfg| register(cfg, surfaces))).await;
+        for (method, want) in [("GET", "claimed"), ("POST", "caught"), ("PUT", "caught"), ("LIST", "caught")] {
+            let req = TestRequest::default()
+                .method(actix_web::http::Method::from_bytes(method.as_bytes()).unwrap())
+                .uri("/v2/x/authorize")
+                .to_request();
+            let resp = call_service(&app, req).await;
+            assert_eq!(resp.status(), 200, "{method}");
+            assert_eq!(read_body(resp).await, want.as_bytes(), "{method}");
+        }
+
+        let surfaces: &[Surface] = &[Surface::Resources(CLAIM_ALL), Surface::CatchAll(&CATCH_ALL)];
+        let app = init_service(App::new().configure(|cfg| register(cfg, surfaces))).await;
+        let req = TestRequest::post().uri("/v2/x/authorize").to_request();
+        assert_eq!(call_service(&app, req).await.status(), 405, "the control: a plain resource claims the path");
     }
 
     /// Calls into actix's registration API.
