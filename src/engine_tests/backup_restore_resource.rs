@@ -208,3 +208,126 @@ async fn daily_backup_restores_a_deleted_resource_root_and_namespace() {
         assert_eq!(back, "Ok(true)", "daily backup of kind {kind:?} (resource in namespace: {ns}) carried [{carried}]");
     }
 }
+
+/// Every key a mount's engine stored (`…/logical/<mount-uuid>/…`), with its bytes.
+async fn logical_snapshot(core: &Arc<Core>) -> std::collections::BTreeMap<String, Vec<u8>> {
+    let barrier = &core.barrier;
+    let storage = barrier.as_storage();
+    let mut out = std::collections::BTreeMap::new();
+    let mut stack = vec![String::new()];
+    while let Some(prefix) = stack.pop() {
+        for k in storage.list(&prefix).await.unwrap_or_default() {
+            let full = format!("{prefix}{k}");
+            if k.ends_with('/') {
+                stack.push(full);
+            } else if full.contains("/logical/") {
+                if let Some(e) = storage.get(&full).await.unwrap() {
+                    out.insert(full, e.value);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// A daily `full` backup carries every engine's data, in root and in a
+/// namespace, across several mounts of a type: delete it all, restore, compare.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn daily_full_backup_restores_every_mount_type() {
+    use crate::{
+        exchange::{import_all_namespaces, ConflictPolicy, ExchangeDocument, ScopeKind, ScopeSpec},
+        scheduled_exports::{runner::run_once, schedule::ExportFormat, DestinationKind, Schedule},
+    };
+    use base64::Engine;
+
+    let (_bvault, core, root) = new_unseal_test_bastion_vault("daily_all_mounts").await;
+    send(&core, &root, Operation::Write, "sys/namespaces/a", json!({})).await.unwrap();
+
+    for ns in ["", "a"] {
+        for (path, ty) in [
+            ("kvx/", "kv"),
+            ("kv2x/", "kv-v2"),
+            ("pkix/", "pki"),
+            ("sshx/", "ssh"),
+            ("filesx/", "files"),
+            ("filesy/", "files"),
+            ("resx/", "resource"),
+        ] {
+            send_ns(&core, &root, Operation::Write, &format!("sys/mounts/{path}"), ns, json!({ "type": ty }))
+                .await
+                .unwrap_or_else(|e| panic!("mount {ty} in {ns:?}: {e:?}"));
+        }
+        let w = |p: &str, b: Value| {
+            let (core, root, p) = (core.clone(), root.clone(), p.to_string());
+            async move {
+                send_ns(&core, &root, Operation::Write, &p, ns, b)
+                    .await
+                    .unwrap_or_else(|e| panic!("{p} in {ns:?}: {e:?}"))
+            }
+        };
+        w("kvx/team/db", json!({ "v": "1" })).await;
+        w("kv2x/data/team/db", json!({ "data": { "v": "2" } })).await;
+        w("pkix/root/generate/internal", json!({ "common_name": "Root", "key_type": "ec", "ttl": "8760h" })).await;
+        w("sshx/config/ca", json!({})).await;
+        for mount in ["filesx", "filesy"] {
+            let b64 = base64::engine::general_purpose::STANDARD.encode(format!("blob-{mount}-{ns}"));
+            w(&format!("{mount}/files"), json!({ "name": format!("{mount}.pem"), "content_base64": b64 })).await;
+        }
+        w("resx/resources/srv9", json!({ "type": "server", "hostname": "h" })).await;
+        w("resx/secrets/srv9/login", json!({ "password": "pw" })).await;
+    }
+
+    let before = logical_snapshot(&core).await;
+    assert!(before.len() > 20, "the vault holds engine data: {}", before.len());
+
+    let dir = std::env::temp_dir().join(format!("bv-daily-mounts-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let sched = Schedule {
+        id: "d".into(),
+        name: "d".into(),
+        cron: "0 0 3 * * *".into(),
+        format: ExportFormat::Json,
+        scope: ScopeSpec { kind: ScopeKind::Full, include: vec![] },
+        destination: DestinationKind::LocalPath { path: dir.to_string_lossy().into() },
+        password_ref: None,
+        allow_plaintext: true,
+        comment: None,
+        created_at: "t".into(),
+        updated_at: "t".into(),
+        enabled: true,
+    };
+    run_once(&core, &sched).await.unwrap();
+    let file = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).next().unwrap().path();
+    let doc: ExchangeDocument = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let barrier = &core.barrier;
+    for k in before.keys() {
+        barrier.as_storage().delete(k).await.unwrap();
+    }
+    import_all_namespaces(&core, &doc, ConflictPolicy::Skip, false).await.unwrap();
+    let after = logical_snapshot(&core).await;
+
+    let strip = |k: &str| k.rsplit("/logical/").next().unwrap_or(k).to_string();
+    // Change history (`hist/…`) is audit data the exchange document does not carry.
+    let audit = |k: &str| k.contains("/hist/");
+    let same = |a: &[u8], b: &[u8]| match (serde_json::from_slice::<Value>(a), serde_json::from_slice::<Value>(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a == b,
+    };
+    let missing: Vec<String> =
+        before.keys().filter(|k| !audit(k) && !after.contains_key(*k)).map(|k| strip(k)).collect();
+    let differing: Vec<String> = before
+        .iter()
+        .filter(|(k, v)| !audit(k) && after.get(*k).is_some_and(|a| !same(a, v)))
+        .map(|(k, _)| strip(k))
+        .collect();
+    let extra: Vec<String> = after.keys().filter(|k| !before.contains_key(*k)).map(|k| strip(k)).collect();
+    eprintln!(
+        "ROUNDTRIP before={} after={}\nmissing={missing:#?}\ndiffering={differing:#?}\nextra={extra:#?}",
+        before.len(),
+        after.len()
+    );
+    assert!(missing.is_empty() && differing.is_empty() && extra.is_empty(), "round trip lost data");
+}

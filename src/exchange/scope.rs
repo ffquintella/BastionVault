@@ -810,7 +810,7 @@ async fn resolve_file(
         warnings.push(format!("file id={id} skipped: no mount of type \"files\""));
         return Ok(());
     }
-    for (_mount_path, uuid) in file_mounts {
+    for (mount_path, uuid) in file_mounts {
         let bp = mounts.barrier_prefix(uuid);
         let meta_key = format!("{bp}meta/{id}");
         if let Some(meta_entry) = storage.get(&meta_key).await? {
@@ -822,7 +822,7 @@ async fn resolve_file(
             } else {
                 String::new()
             };
-            items.files.push(FileItem { id: id.to_string(), metadata, content_b64 });
+            items.files.push(FileItem { id: id.to_string(), metadata, content_b64, mount_path: mount_path.clone() });
             return Ok(());
         }
     }
@@ -1140,9 +1140,18 @@ pub(crate) async fn apply_items(
     }
 
     // File blobs — metadata + raw blob bytes under the files mount.
-    let files_mount =
+    let default_files_mount =
         mounts.mounts_of_type("files").first().map(|(p, _)| p.clone()).unwrap_or_else(|| "files/".to_string());
     for file in &items.files {
+        // The mount the file was exported from, when this namespace still has
+        // it; a document that did not record one lands on the first files mount.
+        let files_mount = if !file.mount_path.is_empty()
+            && mounts.mounts_of_type("files").iter().any(|(p, _)| p == &file.mount_path)
+        {
+            file.mount_path.clone()
+        } else {
+            default_files_mount.clone()
+        };
         let meta_rel = format!("meta/{}", file.id);
         let meta_bytes = json_value_to_storage_bytes(&file.metadata)?;
         let full_path = mounts.resolve_raw_key(&files_mount, &meta_rel);

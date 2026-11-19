@@ -249,6 +249,7 @@ mod tests {
                 "size_bytes": bytes.len(),
             }),
             content_b64: base64::engine::general_purpose::STANDARD.encode(bytes),
+            mount_path: String::new(),
         }
     }
 

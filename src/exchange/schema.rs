@@ -190,6 +190,11 @@ pub struct FileItem {
     pub id: String,
     pub metadata: Value,
     pub content_b64: String,
+    /// The files mount the file lives on (e.g. `files/`). Absent in documents
+    /// written before it was recorded; the importer then uses the namespace's
+    /// first files mount, which is wrong when it has several.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub mount_path: String,
 }
 
 /// A single opaque barrier-storage entry for a non-KV secret engine. `mount`
