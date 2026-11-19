@@ -216,6 +216,11 @@ pub enum Fallback {
     /// method falls through to the next service matching the path (the
     /// logical catch-all), as if this resource were not registered.
     PassThrough,
+    /// As `PassThrough`, and a request whose `Content-Type` is
+    /// `application/json` also falls through: the resource serves another
+    /// wire format (an RFC 6749 form) on a path where the logical API takes
+    /// JSON, and the vault's own JSON callers keep reaching the logical API.
+    PassThroughJson,
 }
 
 pub struct ResourceSpec {
@@ -259,7 +264,8 @@ pub const RUSTION_WEBHOOK: &[Surface] = &[Surface::Resources(crate::rustion_webh
 /// `/v2/mcp` and its token exchange — [`crate::mcp_routes::init_mcp_service`].
 pub const MCP: &[Surface] = &[Surface::Resources(crate::mcp_routes::RESOURCES)];
 
-/// The OpenID Provider's browser authorization endpoint — [`crate::idp_routes::init_idp_service`].
+/// The OpenID Provider's browser authorization endpoint and its relying
+/// parties' back channel — [`crate::idp_routes::init_idp_service`].
 pub const IDP: &[Surface] = &[Surface::Resources(crate::idp_routes::RESOURCES)];
 
 /// The `/v1` and `/v2` logical catch-alls — [`crate::logical_routes::init_logical_service`].
@@ -330,7 +336,22 @@ fn build_resource(spec: &ResourceSpec) -> actix_web::Resource {
             let routes = spec.routes;
             resource.guard(guard::fn_guard(move |ctx| routes.iter().any(|r| r.method.matches(&ctx.head().method))))
         }
+        Fallback::PassThroughJson => {
+            let routes = spec.routes;
+            resource.guard(guard::fn_guard(move |ctx| {
+                routes.iter().any(|r| r.method.matches(&ctx.head().method)) && !has_json_body(ctx.head())
+            }))
+        }
     }
+}
+
+/// Whether the request declares an `application/json` body (any parameters).
+fn has_json_body(head: &actix_web::dev::RequestHead) -> bool {
+    head.headers()
+        .get(actix_web::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(';').next())
+        .is_some_and(|essence| essence.trim().eq_ignore_ascii_case("application/json"))
 }
 
 async fn method_not_allowed() -> HttpResponse {
@@ -753,6 +774,42 @@ pub(crate) mod tests {
         let app = init_service(App::new().configure(|cfg| register(cfg, surfaces))).await;
         let req = TestRequest::post().uri("/v2/x/authorize").to_request();
         assert_eq!(call_service(&app, req).await.status(), 405, "the control: a plain resource claims the path");
+    }
+
+    const PASS_THROUGH_JSON: &[super::ResourceSpec] = &[super::resource!("/v2/x/token", fallback: PassThroughJson => [
+        super::route!(public_probe Post => claimed, "test"),
+    ])];
+
+    /// A `PassThroughJson` resource also leaves a JSON body to the catch-all
+    /// (the vault's own JSON callers), and claims every other content type,
+    /// including none.
+    #[actix_web::test]
+    async fn a_pass_through_json_resource_leaves_json_bodies_to_the_catch_all() {
+        use actix_web::test::{call_service, init_service, read_body, TestRequest};
+
+        use super::{register, Surface};
+
+        let surfaces: &[Surface] = &[Surface::Resources(PASS_THROUGH_JSON), Surface::CatchAll(&CATCH_ALL)];
+        let app = init_service(App::new().configure(|cfg| register(cfg, surfaces))).await;
+        let cases = [
+            ("POST", Some("application/x-www-form-urlencoded"), "claimed"),
+            ("POST", Some("text/plain"), "claimed"),
+            ("POST", None, "claimed"),
+            ("POST", Some("application/json"), "caught"),
+            ("POST", Some("Application/JSON; charset=utf-8"), "caught"),
+            ("GET", None, "caught"),
+            ("PUT", Some("application/x-www-form-urlencoded"), "caught"),
+        ];
+        for (method, content_type, want) in cases {
+            let mut req = TestRequest::default()
+                .method(actix_web::http::Method::from_bytes(method.as_bytes()).unwrap())
+                .uri("/v2/x/token");
+            if let Some(ct) = content_type {
+                req = req.insert_header((actix_web::http::header::CONTENT_TYPE, ct));
+            }
+            let resp = call_service(&app, req.to_request()).await;
+            assert_eq!(read_body(resp).await, want.as_bytes(), "{method} {content_type:?}");
+        }
     }
 
     /// Calls into actix's registration API.

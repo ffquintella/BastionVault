@@ -1891,7 +1891,8 @@ an unbundled binary has no ATS.
 ### 9. `sso` mode (Phase 7, T107)
 
 S19 ships the SAML IdP and OIDC OP (T52); the OIDC launch session and the
-browser authorization endpoint are T545:
+browser authorization endpoint are T545, and the relying party's back
+channel (raw discovery and JWKS, form token requests) is T546:
 
 - `web.sso.idp_app` names a registered relying party.
 - **SAML.** The host asks `v2/idp/saml/initiate/<sp>` for an
@@ -1927,8 +1928,11 @@ browser authorization endpoint are T545:
      (`login_required` `401` for a missing, used, expired or other-client
      session); every answer expires the cookie.
   3. The RP redeems the code at `<issuer>/token` with its secret and PKCE
-     verifier. Today that endpoint takes a JSON body in the vault envelope;
-     a standard RP's form-encoded request needs T546.
+     verifier, as a standard RFC 6749 form request (`client_secret_basic`
+     or `client_secret_post`), and gets a plain OAuth JSON answer; it
+     verifies the ID token against `<issuer>/jwks`, which, like discovery,
+     is served as bare JSON (T546). Nothing in the host is involved in
+     this step.
 
   The `authorization_endpoint` origin must be in the profile's origin set.
   A refused or expired session is not retried: the host mints a new one
@@ -2679,7 +2683,8 @@ See *Current State → Phase 6 spike findings*.
 
 IdP-initiated SAML and OIDC third-party-initiated login (§9). The vault side
 exists: S19 (T52) and the OIDC launch session and browser authorization
-endpoint (T545). A standard RP also needs T546 to redeem the code.
+endpoint (T545), and the back channel a standard RP redeems the code on
+(T546).
 
 ### Phase 8 — Rustion browser isolation — **Future (cross-repo, not scheduled)**
 
@@ -2704,7 +2709,8 @@ as T97 in the roadmap backlog.
 - Native-handler work (Phases 3, 4 and 6) uses the `webview2-com`, `objc2` and
   `webkit2gtk` bindings already pulled in transitively by wry. Promoting them to
   direct dependencies needs the manifest justification §7 of AGENTS.md requires.
-- S19 / T52 and T545 for Phase 7 (T546 for a standard RP's token request).
+- S19 / T52, T545 and T546 (a standard RP's token request, discovery and
+  JWKS) for Phase 7.
 - Rustion (S51, [rustion-integration.md](rustion-integration.md)) browser worker
   support and BVRG-v1 `web` payload additions for Phase 8.
 

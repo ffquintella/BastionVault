@@ -24,6 +24,8 @@ use crate::{
     test_support::{directory, Directory, FedEvents, MemStorage},
 };
 
+/// The back channel's wire format (T546) under an RP library.
+mod back_channel;
 /// Launch sessions (T545), on this file's fixture.
 mod launch_sessions;
 

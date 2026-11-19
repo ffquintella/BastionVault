@@ -3088,9 +3088,12 @@ POST   /v2/idp/radius/passcode/{environment}  # {"roles", "ttl"}  (self-service)
 Phase 5 of [`features/identity-provider.md`](../features/identity-provider.md).
 Same mount, guard and error mapping as above. The paths marked *no token*
 are the mount's unauthenticated paths; everything else needs a token.
-Responses use the normal `data` envelope and request bodies are JSON (see the
-caveat below), except the browser authorization endpoint
-`GET /v2/idp/oidc/authorize`, which answers a `302` or a plain-text page.
+Responses use the normal `data` envelope and request bodies are JSON, except
+on the endpoints a standard relying party calls: the browser authorization
+endpoint `GET /v2/idp/oidc/authorize` (a `302` or a plain-text page), and
+the back channel (T546) — `GET` of discovery and the JWKS (bare JSON) and a
+form-encoded `POST /v2/idp/oidc/token` (RFC 6749 JSON answers). These
+HTTP adapters exist only on the mount path `idp/`.
 
 ~~~
 GET    /v2/idp/oidc/config                       # {"enabled": false} until written
@@ -3105,9 +3108,9 @@ POST   /v2/idp/oidc/authorize                    # self-service, see below
 POST   /v2/idp/oidc/launch-session               # self-service: {"client_id", "launch_id", "roles", "ttl"}
 GET    /v2/idp/oidc/authorize                    # no token: the browser, with the launch-session cookie; 302 or a plain page
 POST   /v2/idp/oidc/launch-session/authorize     # no token: what the GET relays to (JSON, "launch_session" in the body)
-POST   /v2/idp/oidc/token                        # no token
-GET    /v2/idp/oidc/jwks                         # no token
-GET    /v2/idp/oidc/.well-known/openid-configuration   # no token
+POST   /v2/idp/oidc/token                        # no token; a form body is RFC 6749 (raw JSON answer), a JSON body the vault API
+GET    /v2/idp/oidc/jwks                         # no token; the bare JWK Set
+GET    /v2/idp/oidc/.well-known/openid-configuration   # no token; the bare discovery document
 GET    /v2/idp/saml/config                       # {"enabled": false} until written
 POST   /v2/idp/saml/config                       # {"enabled", "entity_id", "sso_url", "assertion_ttl", "request_max_age"}
 GET    /v2/idp/saml/keys
@@ -3183,9 +3186,11 @@ GET    /v2/idp/saml/metadata                     # no token
   `redirect_to` instead of redirecting. Only the mount path `idp/` has the
   `GET` endpoint; other methods on `/v2/idp/oidc/authorize` are the
   token-authenticated `POST` above.
-- **Token** (no token; `client_secret_post` only): `grant_type`
-  `authorization_code`, `code`, `redirect_uri`, `client_id`,
-  `client_secret`, `code_verifier`. The client authenticates first; the code
+- **Token** (no token): `grant_type` `authorization_code`, `code`,
+  `redirect_uri`, `client_id`, `client_secret`, `code_verifier`, as the
+  RFC 6749 form below or, with `Content-Type: application/json`, as a JSON
+  body answered in the `data` envelope (`client_secret` in the body only;
+  `invalid_client` `401`). The client authenticates first; the code
   is then consumed whatever happens. The gate is asked again (provider
   `oidc`) with the roles granted at authorization, so a disable, removal or
   revoked role in between denies. Returns `id_token` (RS256, `kid` = RFC
@@ -3194,8 +3199,43 @@ GET    /v2/idp/saml/metadata                     # no token
   `name`, `uid`, `gid`, `roles`, `groups`, `environment`), `access_token`
   (an `at+jwt` no endpoint here accepts), `token_type` `Bearer`,
   `expires_in`, `scope`. No refresh token, no userinfo endpoint.
-- **JWKS**: the current RSA-3072 key, plus retired keys until their
-  rotation overlap ends.
+- **Token, as a standard relying party sends it** (T546; any `Content-Type`
+  but `application/json` is this endpoint): an RFC 6749 §4.1.3
+  `application/x-www-form-urlencoded` body (UTF-8; another charset or
+  content type is `invalid_request` `400`), at most 16 KiB (`413`). Client
+  authentication is `client_secret_basic` (`Authorization: Basic`, id and
+  secret form-encoded first, RFC 6749 §2.3.1) or `client_secret_post`
+  (`client_id` and `client_secret` in the body), never both
+  (`invalid_request`); a `client_id` in the body must equal the Basic one,
+  and another `Authorization` scheme is `invalid_client`. A known
+  parameter sent twice is `invalid_request`, an empty one counts as absent,
+  unknown ones are ignored; a missing `grant_type`, `code` or
+  `redirect_uri` is `invalid_request` before the code is touched, a missing
+  verifier `invalid_grant` (RFC 7636 §4.6). Success is `200`
+  `{"access_token", "token_type": "Bearer", "expires_in", "id_token",
+  "scope"}`; a refusal is RFC 6749 §5.2 `{"error", "error_description"}`
+  where the description is only the refusal's fixed reason:
+  `invalid_client` is `401` with `WWW-Authenticate: Basic
+  realm="oidc-token", charset="UTF-8"` when Basic was used and `400`
+  otherwise (an unknown client and a wrong secret read the same),
+  `invalid_grant` `400` (unknown, used or expired code, another client's
+  code, `redirect_uri` mismatch, PKCE failure, and a gate denial at
+  redemption), `unsupported_grant_type` `400`, `server_error` `404` while
+  OIDC is disabled and `500` on an internal failure. Every answer is
+  `application/json` with `Cache-Control: no-store` and `Pragma:
+  no-cache`. No vault token is read.
+- **Discovery** (`GET <issuer>/.well-known/openid-configuration`, T546):
+  the bare document (`application/json`, `Cache-Control: public,
+  max-age=3600`); `token_endpoint_auth_methods_supported` is
+  `client_secret_basic`, `client_secret_post`. A `404`
+  `{"error": "server_error", "error_description": "not enabled"}` while
+  OIDC is disabled, never cached. Other methods on the path are the
+  logical API's.
+- **JWKS** (`GET <issuer>/jwks`, bare, `Cache-Control: public,
+  max-age=300`): the current RSA-3072 key, plus retired keys until their
+  rotation overlap ends. `keys/rotate` signs with the new key at once, so a
+  relying party that does not refetch on an unknown `kid` fails for at most
+  those 5 minutes.
 - **SAML config**: `entity_id` (absolute URI, the `Issuer`), `sso_url` (the
   browser-facing page that relays to `sso`; an AuthnRequest `Destination`,
   if present, must equal it), `assertion_ttl` 5m (1m–10m),
@@ -3241,11 +3281,10 @@ GET    /v2/idp/saml/metadata                     # no token
   carries a code, session, launch id, secret, token or assertion. A token,
   launch session, browser code or response whose event cannot be recorded
   is not returned.
-- **Caveat**: apart from the browser authorization endpoint, the vault's
-  HTTP layer only speaks the JSON envelope, so a standard relying party
-  cannot yet fetch discovery, the JWKS or metadata directly or POST a
-  form-encoded token request (T546). Nothing has been run against a real SP,
-  RP or browser.
+- **Caveat**: SAML metadata is still served only in the JSON envelope.
+  Over HTTP, `GET` of discovery and the JWKS returns the bare document
+  since T546 (the envelope form remains the logical API's, for in-process
+  callers). Nothing has been run against a real SP, RP or browser.
 
 ### Identity Provider: LDAP directory (`v2` only, root namespace)
 

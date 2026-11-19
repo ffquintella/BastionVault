@@ -1,11 +1,12 @@
 //! The OpenID Provider (features/identity-provider.md §3d): code flow with
-//! PKCE S256 only, confidential clients (`client_secret_post`), RS256 ID
-//! tokens; no implicit/hybrid flow, refresh token or userinfo. The vault
-//! already knows the human: `authorize` is self-service with their token
-//! (gate provider `oidc-authorize`), or a browser presents a [`launch`]
-//! session instead; `token` is the RP's unauthenticated call, gated again
-//! (provider `oidc`) so a disable in between denies.
+//! PKCE S256 only, confidential clients (`client_secret_post`, and
+//! `client_secret_basic` on the [`back_channel`]), RS256 ID tokens; no
+//! implicit/hybrid flow, refresh token or userinfo. The vault already knows
+//! the human: `authorize` is self-service with their token (gate provider
+//! `oidc-authorize`), or a browser presents a [`launch`] session instead;
+//! `token` is the RP's unauthenticated call, gated again (provider `oidc`).
 
+pub mod back_channel;
 pub mod jwt;
 pub mod launch;
 pub mod store;
@@ -419,6 +420,20 @@ pub struct Issued {
     pub jti: String,
 }
 
+impl Issued {
+    /// The token response fields (RFC 6749 §5.1), as the logical
+    /// `oidc/token` path returns them and [`back_channel`] sends them.
+    pub fn response_data(&self) -> Map<String, Value> {
+        let mut data = Map::new();
+        data.insert("access_token".into(), self.access_token.as_str().into());
+        data.insert("token_type".into(), "Bearer".into());
+        data.insert("expires_in".into(), self.expires_in.into());
+        data.insert("id_token".into(), self.id_token.as_str().into());
+        data.insert("scope".into(), self.scope.clone().into());
+        data
+    }
+}
+
 /// Redeem a code. The client authenticates first, so a stranger cannot
 /// burn codes; from then on the code is consumed whatever the outcome.
 #[maybe_async::maybe_async]
@@ -567,7 +582,8 @@ pub fn discovery(cfg: &OidcConfig) -> Map<String, Value> {
     m.insert("grant_types_supported".into(), list(&["authorization_code"]));
     m.insert("subject_types_supported".into(), list(&["public"]));
     m.insert("id_token_signing_alg_values_supported".into(), list(&["RS256"]));
-    m.insert("token_endpoint_auth_methods_supported".into(), list(&["client_secret_post"]));
+    // Basic is the form endpoint's (bv-server); the JSON API takes the body.
+    m.insert("token_endpoint_auth_methods_supported".into(), list(&["client_secret_basic", "client_secret_post"]));
     m.insert("code_challenge_methods_supported".into(), list(&["S256"]));
     m.insert("scopes_supported".into(), list(SCOPES_SUPPORTED));
     m.insert("claims_supported".into(), list(CLAIMS_SUPPORTED));

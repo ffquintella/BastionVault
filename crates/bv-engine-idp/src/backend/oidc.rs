@@ -318,13 +318,7 @@ impl IdpBackendInner {
         let audit = self.federation_audit();
         let deps = OidcDeps { authorizer: &gate, store: &stores.oidc, audit: &audit };
         let issued = oidc_op::token(&deps, cfg.as_ref(), &ask, Some(&*req), Utc::now()).await.map_err(RvError::from)?;
-        let mut data = Map::new();
-        data.insert("access_token".into(), issued.access_token.as_str().into());
-        data.insert("token_type".into(), "Bearer".into());
-        data.insert("expires_in".into(), issued.expires_in.into());
-        data.insert("id_token".into(), issued.id_token.as_str().into());
-        data.insert("scope".into(), issued.scope.into());
-        Ok(Some(Response::data_response(Some(data))))
+        Ok(Some(Response::data_response(Some(issued.response_data()))))
     }
 
     pub async fn handle_oidc_jwks(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {

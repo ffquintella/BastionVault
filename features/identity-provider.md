@@ -379,7 +379,8 @@ decode and parse, `xml.rs` response, signature and metadata),
   and its registered `https` URLs are matched byte for byte. Client secrets
   are minted by the vault, shown once, stored as SHA-256; an SP entity ID
   maps to one SP (index checked against the record).
-- **OIDC.** Code flow only, PKCE `S256` required, `client_secret_post`,
+- **OIDC.** Code flow only, PKCE `S256` required, `client_secret_post`
+  (and `client_secret_basic` on the form token endpoint since T546),
   codes of 256 random bits stored hashed, single use, 60 s by default,
   consumed after client authentication whatever the outcome. ID tokens are
   RS256 (`sub` = entity id, `preferred_username` = login, `uid`, `gid`,
@@ -410,6 +411,7 @@ Decisions taken where this spec was open (Phase 5):
   bv-server change. Rejected for now: a bv-server adapter serving raw
   discovery/JWKS/metadata, form-encoded token requests and redirects (a
   Tier 4 change; needed before a standard RP can talk to the OP directly).
+  T545 then added the redirect and T546 the OIDC back channel, below.
 - *Signing*: the spec's "SAML-auth signing core" is verify-only; the IdP
   signs with aws-lc (constant time, already linked by rustls) over bytes
   canonicalised by `bv-auth-saml`'s exclusive C14N, made public for this.
@@ -436,7 +438,8 @@ fixed-point test is the guard). Because the HTTP layer only speaks the JSON
 envelope, a standard RP cannot fetch discovery or metadata, POST a
 form-encoded token request or be redirected without a relay (the GUI,
 T107) or a bv-server adapter. (Since T545 the vault answers the browser
-redirect itself, below; the back channel is T546.) No back-channel logout; outstanding ID tokens
+redirect itself and since T546 serves the OIDC back channel, below; SAML
+metadata is still envelope-only.) No back-channel logout; outstanding ID tokens
 and assertions expire on their own (5 min). Signing keys are not
 HSM-backed. Not run on a multi-node cluster. Testing this phase showed
 that `bv-auth-saml`'s inbound parser merges the attributes of an unsigned
@@ -633,8 +636,81 @@ Caveats (T545): not run in a real browser or against a real RP; the
 browser route is `GET` only (no form-`POST` authorization requests);
 `request`, `request_uri`, `response_mode`, `prompt` and `max_age` are
 ignored; actix keeps its own parsed copy of the cookie header, which this
-code cannot zeroize. A standard RP still needs T546 to finish the flow
-(form-encoded token request, raw discovery and JWKS).
+code cannot zeroize. T546, below, finishes the flow for a standard RP.
+
+**Back channel for standard relying parties (T546).** What an
+off-the-shelf RP does once the browser is back: read discovery and the
+JWKS, redeem the code, verify the ID token.
+`src/provider/oidc_op/back_channel.rs` is the wire format (form parsing,
+Basic credentials, RFC 6749 §5.1 / §5.2 answers, cache headers; no
+actix), `Issued::response_data` the token fields both shapes share; in
+bv-server, `src/idp_routes.rs` has the three adapters and
+`src/routes.rs` a `PassThroughJson` resource fallback. Contract in
+[docs/api.md](../docs/api.md).
+
+- **Discovery and JWKS** (`GET`): the logical read's `data` as the bare
+  JSON object, `application/json`, `Cache-Control: public, max-age=3600`
+  and `max-age=300`; an error is RFC 6749-shaped JSON, `no-store`.
+- **Token** (`POST`, any content type but `application/json`): the body
+  read with a 16 KiB cap (a declared length checked first), parsed by
+  `back_channel::parse_token_request`, relayed as the same fields to the
+  logical `oidc/token` path (so audit, `unauth_paths` and the `token` flow
+  are unchanged), answered per §5.1 / §5.2. The raw body, the logical body
+  and the logical response's token strings are zeroized after use.
+
+Decisions taken where this was open (T546):
+
+- *Same URLs*: the adapters sit at the URLs discovery advertises with the
+  documented issuer, and OIDC Discovery §4 fixes the discovery URL itself.
+  Rejected: separate raw URLs advertised in discovery (the discovery URL
+  cannot move, and two shapes of one document invite drift). So over HTTP
+  a `GET` of discovery or the JWKS no longer returns the envelope: no
+  in-tree HTTP caller read it, and the identity provider has not shipped
+  in a release, so the v2 shape may still change.
+- *JSON keeps the logical API*: the token resource claims `POST` unless
+  `Content-Type` is `application/json`, so the vault's own clients (which
+  always send it) keep the envelope API, and a request with no or another
+  content type is the form endpoint, refused unless it is a UTF-8 form.
+  Rejected: claiming only form bodies, which leaves `text/plain` or a
+  missing content type to the JSON parser and its envelope errors.
+- *`client_secret_basic`*: added, and advertised first, because it is the
+  OIDC default and many RP libraries' only default; it is small (base64,
+  one `:` split, RFC 6749 §2.3.1 form-decoding that refuses a stray `%`).
+  The secret is still compared by the flow (constant-time digest compare).
+  Basic plus a body secret, or a body `client_id` that differs, is
+  `invalid_request`; another scheme is `invalid_client`.
+- *Status mapping*: `invalid_client` is `401` with `WWW-Authenticate:
+  Basic` only when Basic was used, `400` otherwise (RFC 6749 §5.2), where
+  the JSON API says `401`. A gate denial at redemption is `invalid_grant`
+  (the grant was revoked), not the JSON API's `403 access_denied`, which
+  RFC 6749 does not define for this endpoint. `server_error` keeps the
+  flow's status (`404` while disabled, `500`).
+- *Error text*: only the flow's `Refusal` codes are translated, with their
+  fixed reason as `error_description` (dropped outside RFC 6749's
+  charset); any other error is a bare `invalid_request` or `server_error`
+  with its status, and a 5xx cause is logged, never sent. The adapter reads
+  the code back from the `Refusal`'s `<code>: <reason>` error text; a unit
+  test pins that round trip for every variant.
+- *Checks before the flow*: a repeated known parameter and a missing
+  `grant_type`, `code` or `redirect_uri` are refused before the engine,
+  so the code survives and nothing is audited (as for T545's malformed
+  browser requests). Missing client credentials and a missing verifier are
+  the flow's (`invalid_client`; `invalid_grant` per RFC 7636 §4.6) and are
+  audited.
+- *Cache*: discovery 1 h (it changes only with the config); JWKS 5 min,
+  because `keys/rotate` signs with the new key at once and an RP that does
+  not refetch on an unknown `kid` fails until its copy expires (5 min is
+  also the ID token lifetime). No CORS headers: confidential clients only.
+- *JWKS media type*: `application/json`, which every RP library accepts
+  (`application/jwk-set+json` is not universal).
+
+Caveats (T546): not run against a real RP. Verified with the
+`openidconnect` library driving discovery, the JWKS fetch and both client
+authentication methods over the exact answers bv-server sends, and an
+end-to-end HTTP test over a real vault that verifies the ID token against
+the raw JWKS (with the OP's own verifier). Only the `idp/` mount has the
+adapters. actix's own request buffers (headers, a chunked body's
+segments) cannot be zeroized here. Raw SAML metadata is not served.
 
 ### What is not yet implemented
 
@@ -644,10 +720,9 @@ code cannot zeroize. A standard RP still needs T546 to finish the flow
   entries only); an ML-DSA-65 SSH CA; deny-feed key rotation; a
   single-certificate revoke route.
 - CHAP, EAP, Access-Challenge and Status-Server for RADIUS.
-- An HTTP adapter for a standard relying party's back channel: raw
-  discovery, JWKS and SAML metadata, and form-encoded token requests with
-  raw OAuth responses (T546). The browser authorization endpoint and launch
-  sessions exist (T545); a form-`POST` authorization request does not.
+- Raw SAML metadata for a standard service provider (the OIDC back
+  channel is served raw since T546), and a form-`POST` authorization
+  request (the `GET` browser endpoint and launch sessions exist, T545).
 - A refresh token, userinfo, back-channel logout, signed Responses,
   encrypted assertions and AuthnRequest signature checks.
 - HSM-backed IdP signing keys.
@@ -929,7 +1004,7 @@ the page offers to mount `idp/` when the engine is missing.
 | **2 — Entitlements + gate** | `entitlement.rs` store, environment↔namespace mapping, role↔policy mapping, the fail-closed issue gate + `idp.issue`/`idp.issue-denied` audit events. | **Complete, with caveats** — `crates/bv-engine-idp/src/entitlement/`; `v2/idp/environments` + `v2/idp/entitlements`; the gate is a Rust API with no caller until Phase 3; policy existence unchecked; not run on a multi-node cluster (see Current State) |
 | **3 — SSH identity issue + revocation** | `provider/ssh.rs` identity-bound `sign` wrapping the SSH engine (principals=login, key-id attribution, uid/gid extensions), `GET /v2/idp/ssh/krl`, the signed/versioned `deny-feed`, and the reference `AuthorizedPrincipalsCommand` + NSS helper for Linux. | **Complete, with caveats** — `crates/bv-engine-idp/src/{provider/ssh,revoke}/`, `bin/bv-idp-host`; KRL checked with `ssh-keygen`; no real sshd/Linux host run; NSS helper generates entries from a certificate, no on-login materialization; PQC CA unsupported; feed key not rotated (see Current State) |
 | **4 — RADIUS provider** | `provider/radius.rs` (RadSec + opt-in UDP), per-vendor attribute templates (FortiGate first), entitlement-gated, Access-Reject for non-active. Live-tested against a FortiGate (or `freeradius`/`pyrad` harness). | **Complete, with caveats** — `crates/bv-engine-idp/src/provider/radius/`; one-time passcodes minted through the vault; RadSec with pinned NAS certificates, UDP opt-in; verified by the crate's own client over real sockets only: **no FortiGate, FreeRADIUS or pyrad run**; not run on a multi-node cluster (see Current State) |
-| **5 — SAML IdP + OIDC OP** | `provider/saml_idp.rs` (reusing the SAML-auth signing core) + `provider/oidc_op.rs` (discovery/JWKS/authz/token), both entitlement-gated, UID + role-set in assertions/claims. | **Complete, with caveats** — `crates/bv-engine-idp/src/provider/{saml_idp,oidc_op,federation}/`; aws-lc RS256 signing over `bv-auth-saml`'s C14N; verified with an RP library and the SAML auth verifier only: **no real SP, RP or browser run**; JSON envelope only, so standard RPs need a relay or HTTP adapter; not run on a multi-node cluster (see Current State) |
+| **5 — SAML IdP + OIDC OP** | `provider/saml_idp.rs` (reusing the SAML-auth signing core) + `provider/oidc_op.rs` (discovery/JWKS/authz/token), both entitlement-gated, UID + role-set in assertions/claims. | **Complete, with caveats** — `crates/bv-engine-idp/src/provider/{saml_idp,oidc_op,federation}/`; aws-lc RS256 signing over `bv-auth-saml`'s C14N; verified with an RP library and the SAML auth verifier only: **no real SP, RP or browser run**; OIDC back channel served raw for standard RPs since T546 (SAML metadata still envelope-only); not run on a multi-node cluster (see Current State) |
 | **6 — LDAP-compat directory** | `provider/ldap_dir.rs` read-only bind+search serving `posixAccount`/`posixGroup`; bind = live active-state check. | **Complete, with caveats** — `crates/bv-engine-idp/src/provider/ldap_dir/`; LDAPS with pinned client certificates, StartTLS, cleartext opt-in; one-time bind passcodes, gate-scoped visibility; verified with the ldap3 client over real sockets and OpenLDAP `ldapsearch` over cleartext only: **no sssd/nslcd/pam_ldap run**, no non-rustls TLS client; not run on a multi-node cluster (see Current State) |
 | **7 — GUI** | Identity Provider admin page (Identities / Entitlements / Providers / Revocations tabs) + Tauri commands + API wrappers. | **Complete, with caveats** — `gui/src/routes/IdentityProviderPage.tsx`, `gui/src/components/idp/`, `gui/src/lib/idp.ts`, `gui/src-tauri/src/commands/idp.rs`; embedded backend reads an explicit `/v2/` path; one-time secrets shown once and cleared, TLS keys write-only; unit-tested with a mocked backend plus one embedded-vault test: **not run against a live vault**; mount path fixed at `idp/` (see Current State) |
 
