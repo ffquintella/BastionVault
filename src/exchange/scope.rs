@@ -1179,6 +1179,12 @@ pub(crate) async fn apply_items(
         let display_path = format!("group/{canonical}");
         apply_entry(storage, &full_path, bytes, policy, dry_run, &qualify("resource-group/"), &display_path, result)
             .await?;
+        // A skipped group keeps its own record, but deleting a resource pruned
+        // it from its groups: bring back the memberships the backup holds.
+        let skipped = result.items.last().is_some_and(|i| matches!(i.action, ImportAction::Skipped));
+        if skipped && !dry_run {
+            restore_group_memberships(storage, &full_path, data).await?;
+        }
         group_items += 1;
     }
     // Clients revalidate their asset-group caches against this version, so a
@@ -1310,6 +1316,51 @@ async fn apply_entry(
         action,
         renamed_to,
     });
+    Ok(())
+}
+
+/// Add to the live group record at `key` the members and files `backup` lists
+/// that it lacks (and secrets, when both name them the same way). Additive
+/// only: nothing is removed and no other field is touched, so a conflict
+/// under the skip policy never loses a membership made since the backup.
+async fn restore_group_memberships(storage: &dyn Storage, key: &str, backup: &Value) -> Result<(), RvError> {
+    let Some(entry) = storage.get(key).await? else {
+        return Ok(());
+    };
+    let Ok(Value::Object(mut live)) = serde_json::from_slice::<Value>(&entry.value) else {
+        return Ok(());
+    };
+    let same_format = live.get("secrets_format") == backup.get("secrets_format")
+        || (live.get("secrets_format").is_none() && backup.get("secrets_format").and_then(Value::as_u64) == Some(0))
+        || (backup.get("secrets_format").is_none() && live.get("secrets_format").and_then(Value::as_u64) == Some(0));
+    let mut changed = false;
+    for field in ["members", "files", "secrets"] {
+        if field == "secrets" && !same_format {
+            continue;
+        }
+        let Some(Value::Array(wanted)) = backup.get(field) else {
+            continue;
+        };
+        let mut have: Vec<Value> = match live.get(field) {
+            Some(Value::Array(a)) => a.clone(),
+            _ => Vec::new(),
+        };
+        let before = have.len();
+        for w in wanted.iter().filter(|w| w.is_string()) {
+            if !have.contains(w) {
+                have.push(w.clone());
+            }
+        }
+        if have.len() != before {
+            have.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+            live.insert(field.to_string(), Value::Array(have));
+            changed = true;
+        }
+    }
+    if changed {
+        let value = serde_json::to_vec(&Value::Object(live)).map_err(|_| RvError::ErrRequestInvalid)?;
+        storage.put(&StorageEntry { key: key.to_string(), value }).await?;
+    }
     Ok(())
 }
 

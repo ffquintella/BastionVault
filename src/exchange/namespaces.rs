@@ -561,6 +561,30 @@ pub(crate) async fn import_document_gated(
         }
     }
 
+    // Groups were written as raw records, so their reverse indexes (by-resource
+    // lookups, access checks) are stale until rebuilt.
+    if !dry_run {
+        let mut scopes: Vec<&str> = Vec::new();
+        if !document.items.resource_groups.is_empty() || !document.items.asset_groups.is_empty() {
+            scopes.push("");
+        }
+        for b in &document.items.namespaces {
+            if !b.items.resource_groups.is_empty() || !b.items.asset_groups.is_empty() {
+                scopes.push(b.path.as_str());
+            }
+        }
+        if !scopes.is_empty() {
+            let module = core
+                .module_manager()
+                .get_module::<crate::modules::resource_group::ResourceGroupModule>("resource-group");
+            if let Some(store) = module.and_then(|m| m.store()) {
+                for scope in scopes {
+                    store.reindex(scope).await?;
+                }
+            }
+        }
+    }
+
     // Imported policies were written straight to the barrier, behind the policy
     // store's in-memory LRU. Without a flush, a token whose policy was just
     // overwritten keeps being authorized against the pre-import document until

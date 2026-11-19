@@ -80,4 +80,5 @@ mod namespace_transfer;
 // A namespace policy names only its own paths, imported ones included (T519, T520).
 mod namespace_policy_rule;
 // A deleted principal's entity aliases are forgotten in every namespace (T522).
+mod backup_restore_resource;
 mod principal_aliases;
