@@ -141,7 +141,7 @@ dependencies = [
 
 [[package]]
 name = "bastion-plugin-sdk"
-version = "0.41.3"
+version = "0.41.5"
 dependencies = [
  "serde",
  "serde_json",
@@ -149,7 +149,7 @@ dependencies = [
 
 [[package]]
 name = "bastion-plugin-testkit"
-version = "0.41.3"
+version = "0.41.5"
 dependencies = [
  "base64 0.22.1",
  "serde_json",
@@ -202,7 +202,7 @@ dependencies = [
 
 [[package]]
 name = "bv_plugin_manifest"
-version = "0.41.3"
+version = "0.41.4"
 dependencies = [
  "bv_plugin_surface",
  "serde",
@@ -212,7 +212,7 @@ dependencies = [
 
 [[package]]
 name = "bv_plugin_surface"
-version = "0.42.0"
+version = "0.42.1"
 dependencies = [
  "hex",
  "serde",
