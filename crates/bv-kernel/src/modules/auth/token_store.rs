@@ -2488,6 +2488,83 @@ mod mod_token_store_tests {
         assert_eq!(stored.mcp_binding.unwrap().policy_namespace, recorded, "persisted as minted");
     }
 
+    /// With `require_machine_identity` armed every authenticated request must
+    /// carry a machine-bound, root or exempt token, and an MCP call goes
+    /// through the same `pre_route` gate. An operator pairs from a combined
+    /// user+machine session, so the token minted from it must keep that
+    /// lineage or the exchange would succeed and every `tools/call` after it
+    /// would be refused.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn mint_mcp_token_from_a_machine_bound_parent_stays_machine_bound() {
+        let token_store = mock_token_store!();
+        let mut parent = TokenEntry {
+            policies: vec!["default".to_string()],
+            meta: HashMap::from([
+                (SPIFFE_ID_META.to_string(), "spiffe://fgv.br/ws/felipe".to_string()),
+                (USERNAME_META.to_string(), "felipe".to_string()),
+            ]),
+            ..TokenEntry::default()
+        };
+        token_store.create(&mut parent).await.unwrap();
+
+        let minted =
+            token_store.mint_mcp_token(&parent.id, &[], 600, "t".into(), test_mcp_binding(), None).await.unwrap();
+        assert!(machine_identity_satisfied(&minted), "the minted Auth must satisfy the machine gate");
+
+        // What the next request actually sees, read back from storage.
+        let seen = token_store.check_token("mcp/dispatch", &minted.client_token, "", true).await.unwrap().unwrap();
+        assert!(machine_identity_satisfied(&seen), "the stored MCP token must satisfy the machine gate");
+        assert_eq!(
+            seen.metadata.get(SPIFFE_ID_META).map(String::as_str),
+            Some("spiffe://fgv.br/ws/felipe"),
+            "the attesting machine is the one the operator's session named"
+        );
+        assert!(!seen.metadata.contains_key(USERNAME_META), "only the machine lineage is carried, never an identity");
+    }
+
+    /// The other direction, which is what keeps this from being a bypass: a
+    /// parent with no machine identity yields a token with none, so a server
+    /// that requires it still refuses that token.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn mint_mcp_token_never_adds_a_machine_identity() {
+        let token_store = mock_token_store!();
+        let mut parent = TokenEntry {
+            policies: vec!["default".to_string()],
+            meta: HashMap::from([(USERNAME_META.to_string(), "felipe".to_string())]),
+            ..TokenEntry::default()
+        };
+        token_store.create(&mut parent).await.unwrap();
+
+        let minted =
+            token_store.mint_mcp_token(&parent.id, &[], 600, "t".into(), test_mcp_binding(), None).await.unwrap();
+        assert!(!machine_identity_satisfied(&minted));
+        let seen = token_store.check_token("mcp/dispatch", &minted.client_token, "", true).await.unwrap().unwrap();
+        assert!(!machine_identity_satisfied(&seen), "no machine identity in, none out");
+        assert!(!seen.metadata.contains_key(SPIFFE_ID_META));
+        assert!(!seen.machine_identity_exempt);
+    }
+
+    /// Same inheritance an ordinary child token already has
+    /// (`test_child_token_inherits_the_machine_identity_exemption`): an exempt
+    /// parent yields an exempt MCP token, a non-exempt one does not.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn mint_mcp_token_inherits_the_machine_identity_exemption_like_a_child_token() {
+        for exempt in [true, false] {
+            let token_store = mock_token_store!();
+            let mut parent = TokenEntry {
+                policies: vec!["default".to_string()],
+                machine_identity_exempt: exempt,
+                ..TokenEntry::default()
+            };
+            token_store.create(&mut parent).await.unwrap();
+            let minted =
+                token_store.mint_mcp_token(&parent.id, &[], 600, "t".into(), test_mcp_binding(), None).await.unwrap();
+            assert_eq!(minted.machine_identity_exempt, exempt, "minted Auth, exempt={exempt}");
+            let seen = token_store.check_token("mcp/dispatch", &minted.client_token, "", true).await.unwrap().unwrap();
+            assert_eq!(seen.machine_identity_exempt, exempt, "stored token, exempt={exempt}");
+        }
+    }
+
     /// T457 forgery check: a namespace-bound, non-root caller cannot write
     /// `namespace_path` / `child_visible` through `auth/token/create`'s `meta`
     /// (both are reserved), and a plain create stays clamped to its parent.
