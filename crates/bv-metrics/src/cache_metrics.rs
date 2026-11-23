@@ -103,9 +103,13 @@ impl CacheMetrics {
     /// `Family`, which shares the underlying counter storage via `Arc`).
     /// Called from `MetricsManager::new`.
     pub fn register(&self, registry: &mut Registry) {
-        registry.register(CACHE_HITS_TOTAL, CACHE_HITS_TOTAL_HELP, self.hits.clone());
-        registry.register(CACHE_MISSES_TOTAL, CACHE_MISSES_TOTAL_HELP, self.misses.clone());
-        registry.register(CACHE_EVICTIONS_TOTAL, CACHE_EVICTIONS_TOTAL_HELP, self.evictions.clone());
+        registry.register(crate::counter_base_name(CACHE_HITS_TOTAL), CACHE_HITS_TOTAL_HELP, self.hits.clone());
+        registry.register(crate::counter_base_name(CACHE_MISSES_TOTAL), CACHE_MISSES_TOTAL_HELP, self.misses.clone());
+        registry.register(
+            crate::counter_base_name(CACHE_EVICTIONS_TOTAL),
+            CACHE_EVICTIONS_TOTAL_HELP,
+            self.evictions.clone(),
+        );
         registry.register(CACHE_SIZE, CACHE_SIZE_HELP, self.size.clone());
     }
 

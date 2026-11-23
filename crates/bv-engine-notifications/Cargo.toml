@@ -27,7 +27,7 @@ bv-kernel-api = { path = "../bv-kernel-api", version = "0.42.0", registry = "uox
 
 arc-swap = "1.7"
 async-trait = "0.1"
-base64 = "0.22"
+base64 = "0.23"
 chrono = "0.4"
 derive_more = "2.1.1"
 log = "0.4"

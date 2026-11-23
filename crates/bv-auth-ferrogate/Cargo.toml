@@ -36,7 +36,7 @@ arc-swap = "1.7"
 dashmap = "6.1"
 hyper-rustls = { version = "0.27", default-features = false, features = ["http2"] }
 hyper-util = "0.1"
-base64 = "0.22"
+base64 = "0.23"
 blake3 = "1.8"
 # `mia`'s two wire formats: the helper socket speaks length-delimited CBOR,
 # and the installed MIA's `mia.toml` is where its configured socket path and

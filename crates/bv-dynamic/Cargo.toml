@@ -27,7 +27,7 @@ bv-kernel-api = { path = "../bv-kernel-api", version = "0.42.0", registry = "uox
 # rest of the workspace; no new crate enters the graph.
 rand = "^0.10"
 # URL-safe rendering of the 24 password bytes.
-base64 = "0.22"
+base64 = "0.23"
 # Generated passwords and cached credentials are wiped on drop.
 zeroize = "1.8.2"
 # Pool admission (one semaphore per target) and checkout timeouts. The pool is

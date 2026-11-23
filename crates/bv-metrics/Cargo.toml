@@ -17,6 +17,6 @@ publish = ["uox-bastionvault"]
 # `bv-storage` depends on this crate for the cache counters, so anything
 # in here lands underneath every leaf engine, and actix must not.
 [dependencies]
-prometheus-client = "0.25"
-sysinfo = "0.39"
+prometheus-client = "0.26"
+sysinfo = "0.40"
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "time"] }

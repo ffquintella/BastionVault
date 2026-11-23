@@ -43,7 +43,7 @@ better_default = "1.0.5"
 chrono = "0.4"
 go-defer = "^0.1"
 hex = "0.4"
-hcl-rs = "0.19"
+hcl-rs = "0.20"
 log = { version = "0.4", features = ["std"] }
 maybe-async = "0.2"
 rand = "^0.10"

@@ -34,13 +34,13 @@ bv_plugin_surface = { version = "0.42.0", path = "../bv_plugin_surface", registr
 # `process` feature only: the stdio protocol carries payloads as base64, and
 # a released database credential must be zeroized once the plugin is done
 # with it. Both are already in the workspace graph at these versions.
-base64 = { version = "0.22", optional = true }
+base64 = { version = "0.23", optional = true }
 zeroize = { version = "1", optional = true }
 
 [dev-dependencies]
 # Serializes the host_test tests so the shared in-memory STATE in
 # bindings::tests doesn't get clobbered by interleaving test threads.
-serial_test = "3"
+serial_test = "4"
 
 [features]
 # Optional helpers for plugins that want to encode their request /

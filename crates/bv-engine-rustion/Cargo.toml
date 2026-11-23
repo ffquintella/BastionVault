@@ -28,7 +28,7 @@ arc-swap = "1.7"
 async-trait = "0.1"
 hex = "0.4"
 thiserror = "^2.0"
-base64 = "0.22"
+base64 = "0.23"
 chrono = { version = "0.4", features = ["serde"] }
 ciborium = "0.2"
 derive_more = "2.1.1"

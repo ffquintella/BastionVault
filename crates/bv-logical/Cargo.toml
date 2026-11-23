@@ -30,7 +30,7 @@ better_default = "1.0.5"
 # the root crate only gets away with a bare version because something else
 # in its graph turns them on. A Tier 0 crate has to stand alone.
 derive_more = { version = "2.1.1", features = ["display", "deref", "deref_mut"] }
-enum-map = "2.7.3"
+enum-map = "3"
 humantime = "2.3"
 lazy_static = "1.5.0"
 log = "0.4"

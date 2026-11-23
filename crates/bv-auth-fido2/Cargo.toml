@@ -28,7 +28,7 @@ log = "0.4"
 maybe-async = "0.2"
 serde = { version = "^1.0", features = ["derive", "rc", "alloc"] }
 serde_json = "^1.0"
-base64 = "0.22"
+base64 = "0.23"
 ciborium = "0.2"
 p256 = { version = "0.13", features = ["ecdsa", "ecdh"], default-features = false }
 rand = "^0.10"

@@ -46,7 +46,7 @@ derive_more = { version = "2.0", features = ["deref"] }
 lazy_static = "1.5"
 log = "0.4"
 maybe-async = "0.2"
-radix_trie = "0.2"
+radix_trie = "0.3"
 serde = { version = "^1.0", features = ["derive", "rc", "alloc"] }
 serde_json = "^1.0"
 # `Zeroizing` buffers for a released provider credential (provider.rs).

@@ -73,3 +73,11 @@ pub mod hsm_metrics;
 pub mod http_metrics;
 pub mod manager;
 pub mod system_metrics;
+
+/// prometheus-client appends `_total` to a counter when it encodes it and
+/// panics if the registered name already carries the suffix. The public
+/// `*_TOTAL` constants keep the exported name — dashboards and alerts key on
+/// it — so registration goes through this to get the base name.
+pub(crate) fn counter_base_name(exported: &'static str) -> &'static str {
+    exported.strip_suffix("_total").unwrap_or(exported)
+}

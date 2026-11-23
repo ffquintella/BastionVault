@@ -23,7 +23,7 @@ bv-storage = { path = "../bv-storage", version = "0.41.0", registry = "uox-basti
 bv-kernel-api = { path = "../bv-kernel-api", version = "0.42.0", registry = "uox-bastionvault" }
 
 async-trait = "0.1"
-pem = "3.0"
+pem = "4"
 ureq = { version = "3.3", features = ["json"] }
 derive_more = "2.1.1"
 log = "0.4"

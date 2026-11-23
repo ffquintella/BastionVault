@@ -38,7 +38,7 @@ tokio-util = { version = "0.7", features = ["io"] }
 # the page shape is fixed and auditable in one file, and there is no
 # server-side rendering on the request path at all (the index is rendered
 # once at startup and then served as a static string).
-askama = "0.14"
+askama = "0.16"
 # manifest.json parsing. The closed enums (`platform`/`arch`/`kind`) are
 # serde-derived, so an unknown value is a parse error rather than something
 # the renderer has to defend against.
@@ -51,7 +51,7 @@ sha2 = "0.10"
 # CLI parsing (--root/--addr/--static-dir).
 clap = { version = "4", features = ["derive", "env"] }
 # base64 for the CSP `'sha256-...'` source expressions.
-base64 = "0.22"
+base64 = "0.23"
 
 [dev-dependencies]
 tempfile = "3"

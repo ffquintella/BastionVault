@@ -213,7 +213,7 @@ rand = "^0.10"
 regex = "1.12"
 sysexits = { version = "0.13", features = ["std"] }
 build-time = "0.1"
-hcl-rs = "0.19"
+hcl-rs = "0.20"
 # Nine dependencies left this manifest in Phase 4 with `src/cli` and the
 # `bvault` binary -- clap, env_logger, prettytable, rpassword, serde_yaml,
 # toml -- plus ciborium, ipnetwork and uuid, which Phase 3's engine moves had
@@ -244,7 +244,7 @@ actix-rt = "2.11"
 # the code actually needs.
 log = { version = "0.4", features = ["std"] }
 hex = "0.4"
-pem = "3.0"
+pem = "4"
 chrono = "0.4"
 zeroize = { version = "1.8.2", features = ["zeroize_derive"] }
 ureq = { version = "3.3", features = ["json", "socks-proxy", "win-system-proxy", "platform-verifier"] }
@@ -263,13 +263,13 @@ rustls = { version = "0.23.37", features = ["aws_lc_rs"] }
 # unmaintained `rustls-pemfile` (RUSTSEC-2025-0134).
 rustls-pki-types = "1"
 webpki-roots = { version = "1.0", default-features = true }
-base64 = "0.22"
+base64 = "0.23"
 derive_more = "2.1.1"
 dashmap = "6.1"
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "process", "time", "io-util"] }
 ctor = "1.0"
 better_default = "1.0.5"
-prometheus-client = "0.25"
+prometheus-client = "0.26"
 async-trait = "0.1"
 maybe-async = { version = "0.2", optional = false }
 arc-swap = "1"
@@ -288,7 +288,7 @@ x509-parser = { version = "0.18", features = ["verify"] }
 # which is what we always accepted anyway. CBOR for COSE_Key /
 # attestationObject parsing comes from `ciborium`; signature verification
 # uses the existing `p256` and `ed25519-dalek` deps.
-zstd = "0.13"
+zstd = "0.14"
 # Exchange (import/export) module: password-encrypted .bvx files.
 # Argon2id is the OWASP-recommended memory-hard KDF; XChaCha20-Poly1305
 # pairs with it for AEAD with a 192-bit nonce so random-nonce collisions
@@ -412,7 +412,7 @@ bv-storage = { path = "crates/bv-storage", features = ["test-support"] }
 # real server stay where they are. See
 # roadmaps/workspace-decomposition.md § Phase 4.
 bv-server = { path = "crates/bv-server", features = ["test-support"] }
-serial_test = "3.4"
+serial_test = "4"
 # Already in the graph through hiqlite; the HA test counts its Raft-client events.
 tracing = "0.1"
 cucumber = "0.23"

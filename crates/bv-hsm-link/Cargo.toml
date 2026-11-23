@@ -40,7 +40,7 @@ x509-parser = "0.18"
 url = "2.5"
 # The `hsm_gateway { ... }` config block. Same crates and versions as the
 # server's config loader in bv-core.
-hcl-rs = "0.19"
+hcl-rs = "0.20"
 serde = { version = "^1.0", features = ["derive"] }
 # The link private-key PEM is wiped on drop.
 zeroize = "1.8.2"

@@ -51,7 +51,7 @@ bv-hsm-link = { path = "../bv-hsm-link", version = "0.41.0", registry = "uox-bas
 actix-web ={ version = "4.13", features = ["rustls-0_23"] }
 actix-rt = "2.11"
 anyhow = { version = "^1.0" }
-base64 = "0.22"
+base64 = "0.23"
 better_default = "1.0.5"
 # Pairing-token hashes for `bvault mcp` (spec §3: BLAKE3 of the random bearer
 # handed to a loopback-HTTP client). Same hash `bv-mcp` uses for its catalogue.
@@ -125,7 +125,7 @@ ureq = { version = "3.3", features = ["json", "socks-proxy", "win-system-proxy"]
 # out to the `bvault` binary they build. Both features are dev-only.
 bastion_vault = { path = "../..", features = ["test-support"] }
 bv-server = { path = "../bv-server", features = ["test-support"] }
-serial_test = "3.4"
+serial_test = "4"
 
 [features]
 default = ["storage_hiqlite", "ssh_pqc", "mcp_sessions_ssh"]

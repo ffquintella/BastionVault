@@ -52,7 +52,7 @@ argon2 = { version = "0.5", default-features = false, features = ["alloc", "std"
 # feature flags.
 keyring = "4"
 chrono = "0.4"
-dirs = "6"
+dirs = "7"
 hex = "0.4"
 sha2 = "0.11"
 # CBOR writer for the WebAuthn attestationObject built in
@@ -65,8 +65,8 @@ authenticator = { version = "0.5", default-features = false, features = ["crypto
 # `base64urlsafedata` (a small standalone crate, no OpenSSL) provides the
 # Base64UrlSafeData wrapper used in `commands/fido2_native.rs` for browser
 # WebAuthn JSON. We no longer pull `webauthn-rs-proto` here — it was unused.
-base64urlsafedata = "0.5"
-base64 = "0.22"
+base64urlsafedata = "0.6"
+base64 = "0.23"
 # AEAD + KDF + PQC primitives used by the local keystore
 # (`src-tauri/src/local_keystore.rs`). ChaCha20-Poly1305 wraps the
 # on-disk vault-keys file; HKDF derives sub-keys; ML-KEM provides
@@ -223,11 +223,11 @@ sspi = { version = "0.23", default-features = false, features = ["network_client
 # parsing. Pure-Rust PFX/PKCS#12 reader; `pbes1` feature covers the
 # legacy Windows-friendly cipher modes (RC2 / 3DES) that openssl had to
 # decrypt for us before we removed the C dep entirely.
-p12-keystore = { version = "0.3", features = ["pbes1"] }
+p12-keystore = { version = "0.4", features = ["pbes1"] }
 # PEM (RFC 7468) encoder for the cert / chain / PKCS#8 key blocks
 # the PKCS#12 import flow hands back to the server's `pem_bundle`
 # splitter. Mirrors the `pem` pin the host crate uses.
-pem = "3.0"
+pem = "4"
 # Used by `commands/pki.rs::pki_import_certs_file` to parse certs-only
 # PKCS#7 (`.p7b` / `.p7c`) `SignedData` envelopes on the cert-import
 # path. Mirrors the `cms` pin the host crate uses for PKCS#7 *export*

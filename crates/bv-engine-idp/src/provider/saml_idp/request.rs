@@ -82,13 +82,13 @@ fn resolve_ref(r: &BytesRef<'_>) -> Result<String, &'static str> {
     if let Some(ch) = r.resolve_char_ref().map_err(|_| "malformed_xml")? {
         return Ok(ch.to_string());
     }
-    let name = r.decode().map_err(|_| "malformed_xml")?;
+    let name = r.xml10_content();
     quick_xml::escape::resolve_predefined_entity(&name).map(str::to_string).ok_or("custom_entity")
 }
 
 fn owned_ns(r: &ResolveResult<'_>) -> Option<Vec<u8>> {
     match r {
-        ResolveResult::Bound(ns) => Some(ns.as_ref().to_vec()),
+        ResolveResult::Bound(ns) => Some(ns.as_ref().as_bytes().to_vec()),
         _ => None,
     }
 }
@@ -102,7 +102,7 @@ fn read_root(
     if roots > 1 {
         return Err("multiple_roots");
     }
-    if ns != Some(NS_PROTOCOL.as_bytes()) || e.local_name().as_ref() != b"AuthnRequest" {
+    if ns != Some(NS_PROTOCOL.as_bytes()) || e.local_name().as_ref() != "AuthnRequest" {
         return Err("not_an_authn_request");
     }
     for attr in e.attributes() {
@@ -112,14 +112,14 @@ fn read_root(
         }
         let value = attr.normalized_value(XmlVersion::Implicit1_0).map_err(|_| "malformed_xml")?.into_owned();
         match attr.key.local_name().as_ref() {
-            b"ID" => out.id = value,
-            b"Version" => out.version = value,
-            b"IssueInstant" => out.issue_instant = value,
-            b"Destination" => out.destination = Some(value),
-            b"AssertionConsumerServiceURL" => out.acs_url = Some(value),
-            b"AssertionConsumerServiceIndex" => out.acs_index = Some(value),
-            b"ProtocolBinding" => out.protocol_binding = Some(value),
-            b"ForceAuthn" => out.force_authn = value == "true" || value == "1",
+            "ID" => out.id = value,
+            "Version" => out.version = value,
+            "IssueInstant" => out.issue_instant = value,
+            "Destination" => out.destination = Some(value),
+            "AssertionConsumerServiceURL" => out.acs_url = Some(value),
+            "AssertionConsumerServiceIndex" => out.acs_index = Some(value),
+            "ProtocolBinding" => out.protocol_binding = Some(value),
+            "ForceAuthn" => out.force_authn = value == "true" || value == "1",
             _ => {}
         }
     }
@@ -160,8 +160,7 @@ pub fn parse(xml: &[u8]) -> Result<AuthnRequest, &'static str> {
                 if in_issuer {
                     return Err("malformed_issuer");
                 }
-                if depth == 1 && ns.as_deref() == Some(NS_ASSERTION.as_bytes()) && e.local_name().as_ref() == b"Issuer"
-                {
+                if depth == 1 && ns.as_deref() == Some(NS_ASSERTION.as_bytes()) && e.local_name().as_ref() == "Issuer" {
                     issuers += 1;
                     if issuers > 1 {
                         return Err("multiple_issuers");
@@ -172,8 +171,7 @@ pub fn parse(xml: &[u8]) -> Result<AuthnRequest, &'static str> {
                 depth += 1;
             }
             Event::Empty(e) => {
-                if depth == 1 && ns.as_deref() == Some(NS_ASSERTION.as_bytes()) && e.local_name().as_ref() == b"Issuer"
-                {
+                if depth == 1 && ns.as_deref() == Some(NS_ASSERTION.as_bytes()) && e.local_name().as_ref() == "Issuer" {
                     return Err("empty_issuer");
                 }
             }
@@ -186,7 +184,7 @@ pub fn parse(xml: &[u8]) -> Result<AuthnRequest, &'static str> {
             }
             Event::Text(t) => {
                 if in_issuer {
-                    text.push_str(&t.xml10_content().map_err(|_| "malformed_xml")?);
+                    text.push_str(&t.xml10_content());
                 }
             }
             Event::GeneralRef(r) => {
@@ -197,7 +195,7 @@ pub fn parse(xml: &[u8]) -> Result<AuthnRequest, &'static str> {
             }
             Event::CData(c) => {
                 if in_issuer {
-                    text.push_str(std::str::from_utf8(c.as_ref()).map_err(|_| "malformed_xml")?);
+                    text.push_str(c.as_ref());
                 }
             }
         }

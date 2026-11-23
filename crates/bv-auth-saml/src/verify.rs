@@ -301,11 +301,8 @@ fn ensure_unique_id(xml: &[u8], id: &str) -> Result<(), RvError> {
         match reader.read_event() {
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
                 for attr in e.attributes().flatten() {
-                    if attr.key.as_ref() == b"ID"
-                        && attr
-                            .decoded_and_normalized_value(quick_xml::XmlVersion::Implicit1_0, reader.decoder())
-                            .map(|v| v == id)
-                            .unwrap_or(false)
+                    if attr.key.as_ref() == "ID"
+                        && attr.normalized_value(quick_xml::XmlVersion::Implicit1_0).map(|v| v == id).unwrap_or(false)
                     {
                         hits += 1;
                     }
@@ -567,21 +564,16 @@ pub fn canonicalise_exclusive(xml: &[u8]) -> Result<Vec<u8>, RvError> {
             }
             Ok(Event::Start(e)) => {
                 // Pull the element's qualified name.
-                let raw = e.name().as_ref().to_vec();
-                let qname = std::str::from_utf8(&raw)
-                    .map_err(|err| RvError::ErrString(format!("saml: c14n qname utf-8: {err}")))?
-                    .to_string();
+                let qname = e.name().as_ref().to_string();
                 let (elem_prefix, _elem_local) = split_qname(&qname);
 
                 // Separate attributes into namespace decls + ordinary.
                 let mut ns_decls: Vec<(String, String)> = Vec::new();
                 let mut attrs: Vec<(String, String)> = Vec::new();
                 for attr in e.attributes().flatten() {
-                    let key = std::str::from_utf8(attr.key.as_ref())
-                        .map_err(|err| RvError::ErrString(format!("saml: c14n attr utf-8: {err}")))?
-                        .to_string();
+                    let key = attr.key.as_ref().to_string();
                     let val = attr
-                        .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
+                        .normalized_value(XmlVersion::Implicit1_0)
                         .map_err(|err| RvError::ErrString(format!("saml: c14n attr decode: {err}")))?
                         .into_owned();
                     if key == "xmlns" {
@@ -692,10 +684,9 @@ pub fn canonicalise_exclusive(xml: &[u8]) -> Result<Vec<u8>, RvError> {
                 ns_rendered_stack.push(rendered_frame);
             }
             Ok(Event::End(e)) => {
-                let raw = e.name().as_ref().to_vec();
                 out.push(b'<');
                 out.push(b'/');
-                out.extend_from_slice(&raw);
+                out.extend_from_slice(e.name().as_ref().as_bytes());
                 out.push(b'>');
                 ns_rendered_stack.pop();
             }
@@ -706,7 +697,7 @@ pub fn canonicalise_exclusive(xml: &[u8]) -> Result<Vec<u8>, RvError> {
                 // spec-mandated EOL normalization) is all that's
                 // left. The canonical output then re-escapes per
                 // c14n rules.
-                let s = t.xml10_content().map_err(|e| RvError::ErrString(format!("saml: c14n text decode: {e}")))?;
+                let s = t.xml10_content();
                 write_text(&mut out, &s);
             }
             Ok(Event::GeneralRef(r)) => {
@@ -717,9 +708,7 @@ pub fn canonicalise_exclusive(xml: &[u8]) -> Result<Vec<u8>, RvError> {
                 write_text(&mut out, &s);
             }
             Ok(Event::CData(c)) => {
-                let s = std::str::from_utf8(c.as_ref())
-                    .map_err(|e| RvError::ErrString(format!("saml: c14n cdata utf-8: {e}")))?;
-                write_text(&mut out, s);
+                write_text(&mut out, c.as_ref());
             }
             _ => {}
         }

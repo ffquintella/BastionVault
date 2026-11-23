@@ -38,7 +38,7 @@ bv-mcp = { path = "../bv-mcp", version = "0.3.0", registry = "uox-bastionvault" 
 
 actix-web = { version = "4.13", features = ["rustls-0_23"] }
 actix-tls = "3.5"
-base64 = "0.22"
+base64 = "0.23"
 blake3 = "1.8"
 chrono = "0.4"
 # Validating the `cron` field on a scheduled-export schedule at write time,
@@ -49,7 +49,7 @@ humantime = "2.3"
 ipnetwork = { version = "0.21", features = ["serde"] }
 log = "0.4"
 maybe-async = "0.2"
-prometheus-client = "0.25"
+prometheus-client = "0.26"
 rustls = { version = "0.23.37", features = ["aws_lc_rs"] }
 serde = { version = "^1.0", features = ["derive", "rc", "alloc"] }
 serde_json = "^1.0"
@@ -76,7 +76,7 @@ http = { version = "1", optional = true }
 # off when this crate is built as somebody else's dependency.
 bastion_vault = { path = "../..", features = ["test-support"] }
 bv-server = { path = ".", features = ["test-support"] }
-ctor = "0.6"
+ctor = "1.0"
 
 [features]
 default = []

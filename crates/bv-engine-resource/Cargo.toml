@@ -24,7 +24,7 @@ bv-kernel-api = { path = "../bv-kernel-api", version = "0.42.0", registry = "uox
 
 async-trait = "0.1"
 hex = "0.4"
-base64 = "0.22"
+base64 = "0.23"
 chrono = "0.4"
 derive_more = "2.1.1"
 log = "0.4"
@@ -81,7 +81,7 @@ russh = { version = "=0.62.7", optional = true, default-features = true }
 reqwest = { version = "0.12", optional = true, default-features = false, features = ["rustls-tls"] }
 rustls = { version = "0.23.37", optional = true, features = ["aws_lc_rs"] }
 rustls-native-certs = { version = "0.8", optional = true }
-html5ever = { version = "0.38", optional = true }
+html5ever = { version = "0.40", optional = true }
 # `agent_web::test_server`, an in-process HTTPS server the facade's
 # end-to-end tests dial through the destination policy's test seam: rcgen
 # mints its certificates, tokio-rustls terminates TLS. Only the

@@ -29,7 +29,7 @@ bv-kernel-api = { path = "../bv-kernel-api", version = "0.42.0", registry = "uox
 bv_crypto = { path = "../bv_crypto", version = "0.41.0", registry = "uox-bastionvault" }
 
 async-trait = "0.1"
-base64 = "0.22"
+base64 = "0.23"
 better_default = "1.0.5"
 cms = { version = "0.2", default-features = false, features = ["alloc", "pem", "std"] }
 const-oid = { version = "0.9", features = ["db"] }
@@ -42,7 +42,7 @@ humantime = "2.3"
 log = "0.4"
 maybe-async = "0.2"
 p256 = { version = "0.13", features = ["ecdsa", "ecdh"], default-features = false }
-pem = "3.0"
+pem = "4"
 pkcs12 = { version = "0.1", features = ["kdf"] }
 pkcs5 = { version = "0.7", features = ["alloc", "pbes2"] }
 pkcs8 = { version = "0.10", features = ["pem", "alloc"] }

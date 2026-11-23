@@ -51,7 +51,7 @@ ed25519-dalek = { version = "2", default-features = false, features = ["std", "r
 # extensions, signing CA) and the client public key; wire-encode the CA key
 # for the KRL. Same features as bv-kernel-api's.
 ssh-key = { version = "0.6", default-features = false, features = ["alloc", "ed25519", "ecdsa"] }
-base64 = "0.22"
+base64 = "0.23"
 # Content digest of the deny feed, so its version moves only on a change.
 sha2 = "0.11"
 humantime = "2.3"
@@ -91,7 +91,7 @@ rcgen = "0.14"
 # HTTP-Redirect binding: raw DEFLATE of an inbound AuthnRequest.
 flate2 = "1"
 # AuthnRequest parsing (namespace-aware), as bv-auth-saml.
-quick-xml = "0.41"
+quick-xml = "0.42"
 # Validates registered ACS and redirect URIs and builds the code redirect.
 url = "2"
 

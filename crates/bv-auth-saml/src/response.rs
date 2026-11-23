@@ -118,7 +118,7 @@ pub fn parse_response(xml: &[u8]) -> Result<ParsedResponse, RvError> {
                     for attr in e.attributes().flatten() {
                         let key = local_name(attr.key);
                         if key == "Value" {
-                            out.status_code = attr_value(&attr, &reader);
+                            out.status_code = attr_value(&attr);
                         }
                     }
                 }
@@ -137,7 +137,7 @@ pub fn parse_response(xml: &[u8]) -> Result<ParsedResponse, RvError> {
                 if local == "Response" && stack.len() == 1 {
                     for attr in e.attributes().flatten() {
                         let key = local_name(attr.key);
-                        let val = attr_value(&attr, &reader);
+                        let val = attr_value(&attr);
                         match key.as_str() {
                             "ID" => out.response_id = val,
                             "Destination" => out.destination = val,
@@ -162,7 +162,7 @@ pub fn parse_response(xml: &[u8]) -> Result<ParsedResponse, RvError> {
                     in_assertion_depth = Some(stack.len());
                     for attr in e.attributes().flatten() {
                         let key = local_name(attr.key);
-                        let val = attr_value(&attr, &reader);
+                        let val = attr_value(&attr);
                         if key == "ID" {
                             assertion.id = val;
                         }
@@ -170,7 +170,7 @@ pub fn parse_response(xml: &[u8]) -> Result<ParsedResponse, RvError> {
                 } else if local == "Conditions" && in_assertion_depth.is_some() {
                     for attr in e.attributes().flatten() {
                         let key = local_name(attr.key);
-                        let val = attr_value(&attr, &reader);
+                        let val = attr_value(&attr);
                         match key.as_str() {
                             "NotBefore" => assertion.not_before = val,
                             "NotOnOrAfter" => assertion.not_on_or_after = val,
@@ -181,14 +181,14 @@ pub fn parse_response(xml: &[u8]) -> Result<ParsedResponse, RvError> {
                     for attr in e.attributes().flatten() {
                         let key = local_name(attr.key);
                         if key == "Value" {
-                            out.status_code = attr_value(&attr, &reader);
+                            out.status_code = attr_value(&attr);
                         }
                     }
                 } else if local == "NameID" && in_assertion_depth.is_some() {
                     for attr in e.attributes().flatten() {
                         let key = local_name(attr.key);
                         if key == "Format" {
-                            assertion.name_id_format = attr_value(&attr, &reader);
+                            assertion.name_id_format = attr_value(&attr);
                         }
                     }
                     capture_text_into = Some(TextTarget::NameId);
@@ -206,7 +206,7 @@ pub fn parse_response(xml: &[u8]) -> Result<ParsedResponse, RvError> {
                     let mut name = String::new();
                     for attr in e.attributes().flatten() {
                         if local_name(attr.key) == "Name" {
-                            name = attr_value(&attr, &reader);
+                            name = attr_value(&attr);
                         }
                     }
                     current_attribute = Some((name, Vec::new()));
@@ -217,9 +217,7 @@ pub fn parse_response(xml: &[u8]) -> Result<ParsedResponse, RvError> {
 
             Ok(Event::Text(t)) => {
                 if capture_text_into.is_some() {
-                    let s =
-                        t.xml10_content().map_err(|e| RvError::ErrString(format!("saml: invalid text node: {e}")))?;
-                    text_buf.push_str(&s);
+                    text_buf.push_str(&t.xml10_content());
                 }
             }
 
@@ -312,17 +310,15 @@ enum TextTarget {
 /// vary by IdP while the local names are spec-fixed.
 fn local_name(q: QName<'_>) -> String {
     let raw = q.as_ref();
-    match raw.iter().position(|&b| b == b':') {
-        Some(i) => String::from_utf8_lossy(&raw[i + 1..]).into_owned(),
-        None => String::from_utf8_lossy(raw).into_owned(),
+    match raw.split_once(':') {
+        Some((_, local)) => local.to_string(),
+        None => raw.to_string(),
     }
 }
 
 /// Resolve an attribute's unescaped string value.
-fn attr_value(attr: &quick_xml::events::attributes::Attribute<'_>, reader: &Reader<&[u8]>) -> String {
-    attr.decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
-        .map(|c| c.into_owned())
-        .unwrap_or_default()
+fn attr_value(attr: &quick_xml::events::attributes::Attribute<'_>) -> String {
+    attr.normalized_value(XmlVersion::Implicit1_0).map(|c| c.into_owned()).unwrap_or_default()
 }
 
 /// Resolve a `GeneralRef` event (`&amp;`, `&#x41;`, …) to its
@@ -335,7 +331,7 @@ pub(crate) fn resolve_entity_ref(r: &BytesRef<'_>) -> Result<String, RvError> {
     {
         return Ok(ch.to_string());
     }
-    let name = r.decode().map_err(|e| RvError::ErrString(format!("saml: entity reference decode: {e}")))?;
+    let name = r.xml10_content();
     quick_xml::escape::resolve_predefined_entity(&name)
         .map(str::to_string)
         .ok_or_else(|| RvError::ErrString(format!("saml: unsupported entity reference '&{name};'")))

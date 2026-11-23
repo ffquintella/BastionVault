@@ -57,7 +57,7 @@ bv-engine-ssh = { path = "../bv-engine-ssh", version = "0.41.0", registry = "uox
 # one wrong conclusion from exactly that reasoning (the AppRole tidy race).
 actix-rt = "2.11"
 arc-swap = "1.7"
-base64 = "0.22"
+base64 = "0.23"
 async-trait = "0.1"
 better_default = "1.0.5"
 bcrypt = "0.19"
@@ -71,7 +71,7 @@ lazy_static = "1.5.0"
 log = { version = "0.4", features = ["std"] }
 maybe-async = "0.2"
 # The policy store parses HCL policy documents.
-hcl-rs = "0.19"
+hcl-rs = "0.20"
 # The lease queue the expiration manager sweeps.
 priority-queue = "2.7"
 radix_trie = "0.3.0"
@@ -95,7 +95,7 @@ bastion_vault = { path = "../..", features = ["test-support"] }
 # Two tests here drive a real server through `TestHttpServer`, which
 # configures `bv-server`'s own routes and so has to live there.
 bv-server = { path = "../bv-server", features = ["test-support"] }
-serial_test = "3.4"
+serial_test = "4"
 # Dev/CI only — never in a shipped binary. The differential suite
 # (src/modules/policy/differential) runs `ACL::allow_operation`, now a thin
 # host over bv-policy-core, against a frozen copy of the pre-delegation

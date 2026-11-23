@@ -46,7 +46,7 @@ zeroize = { version = "1.8.2", features = ["zeroize_derive"] }
 # in the server graph (the root crate's PKI and cert-auth code): x509-parser
 # reads a certificate's SubjectPublicKeyInfo, base64 the RFC 7469 pin form.
 x509-parser = "0.18"
-base64 = "0.22"
+base64 = "0.23"
 
 [dev-dependencies]
 # `salt.rs` and `token_util.rs` build a real barrier over a file backend.

@@ -1,5 +1,8 @@
 //! Define and implement operating system metrics, using [sysinfo](https://docs.rs/sysinfo/latest/sysinfo/) to capture.
-use std::sync::{atomic::AtomicU64, Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc, Mutex,
+};
 
 use prometheus_client::{metrics::gauge::Gauge, registry::Registry};
 use sysinfo::{Disks, System};
@@ -25,7 +28,12 @@ pub const LOAD_AVERAGE: &str = "load_average";
 pub const LOAD_AVERAGE_HELP: &str = "System load average";
 
 pub struct SystemMetrics {
-    system: Arc<Mutex<System>>,
+    /// `None` when sysinfo cannot read this platform at all (sysinfo 0.40
+    /// reports that as an error instead of returning zeros).
+    system: Option<Arc<Mutex<System>>>,
+    /// Set after the first collection failure is reported, so an
+    /// unsupported platform logs once instead of on every tick.
+    failure_reported: AtomicBool,
     collection_interval: u64,
     cpu_usage: Gauge<f64, AtomicU64>,
     total_memory: Gauge<f64, AtomicU64>,
@@ -67,10 +75,19 @@ impl SystemMetrics {
 
         registry.register(LOAD_AVERAGE, LOAD_AVERAGE_HELP, load_avg.clone());
 
-        let system = Arc::new(Mutex::new(System::new_all()));
+        let failure_reported = AtomicBool::new(false);
+        let system = match System::new_all() {
+            Ok(system) => Some(Arc::new(Mutex::new(system))),
+            Err(err) => {
+                eprintln!("system metrics disabled: sysinfo cannot read this platform: {err}");
+                failure_reported.store(true, Ordering::Relaxed);
+                None
+            }
+        };
 
         Self {
             system,
+            failure_reported,
             collection_interval,
             cpu_usage,
             total_memory,
@@ -93,8 +110,18 @@ impl SystemMetrics {
         }
     }
 
+    /// Report a collection failure once; the gauge keeps its last value.
+    fn report_failure(&self, what: &str, err: &sysinfo::Error) {
+        if !self.failure_reported.swap(true, Ordering::Relaxed) {
+            eprintln!("system metrics: cannot read {what}: {err}");
+        }
+    }
+
     fn collect_metrics(&self) {
-        let mut sys = self.system.lock().unwrap();
+        let Some(system) = &self.system else {
+            return;
+        };
+        let mut sys = system.lock().unwrap();
         sys.refresh_all();
 
         self.cpu_usage.set(sys.global_cpu_usage() as f64);
@@ -106,12 +133,17 @@ impl SystemMetrics {
         let mut total_available_space = 0;
         let mut total_disk_space = 0;
 
-        for disk in Disks::new_with_refreshed_list().list() {
-            total_available_space += disk.available_space();
-            total_disk_space += disk.total_space();
+        match Disks::new_with_refreshed_list() {
+            Ok(disks) => {
+                for disk in &disks {
+                    total_available_space += disk.available_space();
+                    total_disk_space += disk.total_space();
+                }
+                self.total_disk_available.set(total_available_space as f64);
+                self.total_disk_space.set(total_disk_space as f64);
+            }
+            Err(err) => self.report_failure("disks", &err),
         }
-        self.total_disk_available.set(total_available_space as f64);
-        self.total_disk_space.set(total_disk_space as f64);
 
         // let mut total_network_in = 0;
         // let mut total_network_out = 0;
@@ -125,6 +157,11 @@ impl SystemMetrics {
         // self.network_in.set(total_network_in as f64);
         // self.network_out.set(total_network_out as f64);
 
-        self.load_avg.set(System::load_average().one);
+        match System::load_average() {
+            Ok(load) => {
+                self.load_avg.set(load.one);
+            }
+            Err(err) => self.report_failure("load average", &err),
+        }
     }
 }

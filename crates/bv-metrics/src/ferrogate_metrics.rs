@@ -82,10 +82,14 @@ impl FerroGateMetrics {
     /// Register this instance's families with `registry`. Called from
     /// `MetricsManager::new`; idempotent across registries.
     pub fn register(&self, registry: &mut Registry) {
-        registry.register(LOGIN_TOTAL, LOGIN_TOTAL_HELP, self.login.clone());
-        registry.register(LOGIN_DENIED_TOTAL, LOGIN_DENIED_TOTAL_HELP, self.login_denied.clone());
-        registry.register(PENDING_TOTAL, PENDING_TOTAL_HELP, self.pending.clone());
-        registry.register(APPROVED_TOTAL, APPROVED_TOTAL_HELP, self.approved.clone());
+        registry.register(crate::counter_base_name(LOGIN_TOTAL), LOGIN_TOTAL_HELP, self.login.clone());
+        registry.register(
+            crate::counter_base_name(LOGIN_DENIED_TOTAL),
+            LOGIN_DENIED_TOTAL_HELP,
+            self.login_denied.clone(),
+        );
+        registry.register(crate::counter_base_name(PENDING_TOTAL), PENDING_TOTAL_HELP, self.pending.clone());
+        registry.register(crate::counter_base_name(APPROVED_TOTAL), APPROVED_TOTAL_HELP, self.approved.clone());
     }
 
     pub fn record_login(&self) {
