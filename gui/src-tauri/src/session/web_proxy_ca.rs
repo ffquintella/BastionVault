@@ -35,7 +35,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 use bastion_vault::utils::tls_pin::SpkiPin;
-use rand::RngCore;
+use rand::Rng;
 use rcgen::{
     BasicConstraints, CertificateParams, CidrSubnet, DistinguishedName, DnType, ExtendedKeyUsagePurpose,
     GeneralSubtree, IsCa, Issuer, KeyPair, KeyUsagePurpose, NameConstraints, SerialNumber,

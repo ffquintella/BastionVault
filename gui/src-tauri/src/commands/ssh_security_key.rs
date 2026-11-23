@@ -26,7 +26,7 @@ use authenticator::ctap2::server::{
 use authenticator::statecallback::StateCallback;
 use authenticator::StatusUpdate;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use rand::RngCore;
+use rand::Rng;
 use serde::Serialize;
 use serde_json::{Map, Value};
 use tauri::{AppHandle, Emitter, State};

@@ -243,6 +243,14 @@ fn unpack_two(buf: &[u8]) -> Result<(&[u8], &[u8]), RvError> {
 mod tests {
     use super::*;
 
+    fn to_hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    fn from_hex(s: &str) -> Vec<u8> {
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    }
+
     #[test]
     fn composite_sign_verify_round_trip() {
         let (material, pk) = generate_signing_keypair().unwrap();
@@ -285,6 +293,62 @@ mod tests {
         if let Ok(dk_recv) = result {
             assert_ne!(_dk_send, dk_recv, "tampered KEM produced matching datakey");
         }
+    }
+
+    // Old-data KATs. Expected values were written by commit 1ae9d7e1
+    // (x25519-dalek 2.0.1, ed25519-dalek 2.2.0, fips204 0.4.6); never
+    // regenerate them with a newer build.
+    fn kat_kem_material() -> (Vec<u8>, Vec<u8>) {
+        // RFC 7748 §6.1: Alice's private key and public key.
+        let alice = from_hex("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a");
+        let alice_pub = from_hex("8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a");
+        let ml = MlKem768Provider.keypair_from_seed(&[0x11; 64]).unwrap();
+        (pack_two(&alice, ml.secret_key()), pack_two(&alice_pub, ml.public_key()))
+    }
+
+    fn kat_sig_material() -> (Vec<u8>, Vec<u8>) {
+        let ed_seed = from_hex("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60");
+        let ed_pk = from_hex("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a");
+        let ml = bv_crypto::MlDsa65Provider.keypair_from_seed(&[0x5a; 32]).unwrap();
+        (pack_two(&ed_seed, ml.secret_seed()), pack_two(&ed_pk, ml.public_key()))
+    }
+
+    #[test]
+    fn x25519_matches_rfc7748() {
+        let alice: [u8; 32] =
+            from_hex("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a").try_into().unwrap();
+        let bob_pub: [u8; 32] =
+            from_hex("de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f").try_into().unwrap();
+        let alice = XStaticSecret::from(alice);
+        assert_eq!(
+            to_hex(&XPublicKey::from(&alice).to_bytes()),
+            "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a"
+        );
+        assert_eq!(
+            to_hex(alice.diffie_hellman(&XPublicKey::from(bob_pub)).as_bytes()),
+            "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742"
+        );
+    }
+
+    #[test]
+    fn hybrid_kem_blob_written_by_the_old_build_decapsulates() {
+        let (material, _pk) = kat_kem_material();
+        let blob = from_hex(include_str!("testdata/hybrid_kem_blob_v1.hex").trim());
+        let expected = include_str!("testdata/hybrid_kem_datakey_v1.hex").trim();
+        assert_eq!(to_hex(&decapsulate_hybrid_datakey(&material, &blob).unwrap()), expected);
+        // Malformed input: a truncated blob is an error.
+        assert!(decapsulate_hybrid_datakey(&material, &blob[..20]).is_err());
+    }
+
+    #[test]
+    fn composite_signature_written_by_the_old_build_verifies() {
+        let (material, pk) = kat_sig_material();
+        let old = from_hex(include_str!("testdata/hybrid_composite_sig_v1.hex").trim());
+        assert!(verify_composite(&pk, b"transit kat", &old).unwrap());
+        assert!(!verify_composite(&pk, b"transit kaT", &old).unwrap());
+        // The Ed25519 half is deterministic: a fresh signature reproduces it.
+        let fresh = sign_composite(&material, b"transit kat").unwrap();
+        assert_eq!(to_hex(&fresh[..66]), to_hex(&old[..66]));
     }
 
     #[test]

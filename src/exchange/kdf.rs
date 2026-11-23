@@ -141,6 +141,27 @@ mod tests {
         assert!(derive_key("x", &p).is_err());
     }
 
+    /// Argon2id output must not move across dependency upgrades: every `.bvx`
+    /// file ever written is decrypted through this derivation. Expected bytes
+    /// were written by commit 1ae9d7e1 (argon2 0.5.3); never regenerate them.
+    #[test]
+    fn argon2id_output_is_unchanged() {
+        use base64::Engine;
+        let mut p = fast_params();
+        p.salt_b64 = base64::engine::general_purpose::STANDARD.encode([0x5a; ARGON2_SALT_LEN]);
+        assert_eq!(
+            hex::encode(derive_key("correct-horse-battery-staple", &p).unwrap()),
+            "473f661546f86674cbf0c5d20b3375b5c8c243a7546992744153c76cb88355f4"
+        );
+
+        let mut p = KdfParams::fresh_default();
+        p.salt_b64 = base64::engine::general_purpose::STANDARD.encode([0xa5; ARGON2_SALT_LEN]);
+        assert_eq!(
+            hex::encode(derive_key("correct-horse-battery-staple", &p).unwrap()),
+            "c3bc551b6706f14948f7b505d96a679cac78b7df20c08c8b36fb00b2b5bc916c"
+        );
+    }
+
     #[test]
     fn rejects_dos_parameters() {
         let mut p = fast_params();

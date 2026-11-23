@@ -46,7 +46,7 @@ tokio = { version = "1.52", features = ["sync", "net", "io-util", "time", "rt", 
 bv_crypto = { path = "../bv_crypto", version = "0.41.0", registry = "uox-bastionvault" }
 # Rebuilds the stored Ed25519 half of the feed key (`SigningKey::from_bytes`),
 # the type bv_crypto's signer holds. Same features as bv_crypto's own.
-ed25519-dalek = { version = "2", default-features = false, features = ["std", "rand_core", "zeroize"] }
+ed25519-dalek = { version = "3", default-features = false, features = ["alloc", "rand_core", "zeroize"] }
 # Parse the certificate the SSH engine returns (principals, key id,
 # extensions, signing CA) and the client public key; wire-encode the CA key
 # for the KRL. Same features as bv-kernel-api's.

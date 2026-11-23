@@ -33,7 +33,10 @@ chrono = "0.4"
 humantime = "2.3"
 rand = "^0.10"
 sha2 = "0.11"
-ssh-encoding = "0.2"
+# `alloc` for the `Vec<u8>` writer and `String` / `Vec<u8>` decoders `pqc.rs`
+# uses. 0.2 got it by feature unification through `ssh-key` 0.6; 0.3 is a
+# separate crate in the graph, so it is named here.
+ssh-encoding = { version = "0.3", features = ["alloc"] }
 ssh-key = { version = "0.6", default-features = false, features = ["alloc", "ed25519", "ecdsa", "encryption"] }
 # Wipes the ML-DSA-65 CA seed held by `pqc::CaKeypair` on drop. Same crate
 # and version `bv_crypto` already uses; only the `ssh_pqc` build needs it.

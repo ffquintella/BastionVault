@@ -3347,9 +3347,8 @@ async fn sign_ssh_engine_ca(
     // Ephemeral Ed25519 keypair — never persisted; lives in
     // memory for the duration of the session and zeroizes on drop
     // via Zeroizing<String> wrappers below. ssh-key's `PrivateKey::random`
-    // wants a `rand_core::CryptoRng` 0.10; the gui otherwise uses rand
-    // 0.9, so we pull `rand_v10` solely for this call site.
-    let private_key = PrivateKey::random(&mut rand_v10::rng(), Algorithm::Ed25519)
+    // wants a `rand_core::CryptoRng` 0.10, which is the gui's `rand`.
+    let private_key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519)
         .map_err(|e| CommandError::from(format!("generate ephemeral ssh keypair: {e}")))?;
     let public_openssh = private_key
         .public_key()
@@ -3870,10 +3869,10 @@ mod tests {
 
     fn signed_user_cert(principals: &[&str]) -> String {
         use russh::keys::ssh_key::{certificate, Algorithm, PrivateKey};
-        let ca = PrivateKey::random(&mut rand_v10::rng(), Algorithm::Ed25519).unwrap();
-        let subject = PrivateKey::random(&mut rand_v10::rng(), Algorithm::Ed25519).unwrap();
+        let ca = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
+        let subject = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
         let mut builder =
-            certificate::Builder::new_with_random_nonce(&mut rand_v10::rng(), subject.public_key(), 0, u64::MAX >> 1)
+            certificate::Builder::new_with_random_nonce(&mut rand::rng(), subject.public_key(), 0, u64::MAX >> 1)
                 .unwrap();
         builder.cert_type(certificate::CertType::User).unwrap();
         builder.key_id("test").unwrap();

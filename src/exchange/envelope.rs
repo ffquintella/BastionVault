@@ -123,7 +123,7 @@ pub fn encrypt_bvx(
 
     let cipher = XChaCha20Poly1305::new_from_slice(&derived.0).map_err(|_| RvError::ErrRequestInvalid)?;
     let ciphertext = cipher
-        .encrypt(XNonce::from_slice(&nonce_bytes), Payload { msg: plaintext, aad: ENVELOPE_MAGIC.as_bytes() })
+        .encrypt(<&XNonce>::from(&nonce_bytes), Payload { msg: plaintext, aad: ENVELOPE_MAGIC.as_bytes() })
         .map_err(|_| RvError::ErrRequestInvalid)?;
 
     let envelope = Envelope {
@@ -175,8 +175,10 @@ pub fn decrypt_bvx(envelope_bytes: &[u8], password: &str) -> Result<Vec<u8>, RvE
     let derived = DerivedKey(derive_key(password, &envelope.kdf)?);
     let cipher = XChaCha20Poly1305::new_from_slice(&derived.0).map_err(|_| RvError::ErrRequestInvalid)?;
 
+    let nonce =
+        <&XNonce>::try_from(nonce_bytes.as_slice()).map_err(|_| EnvelopeError::Malformed("nonce wrong length"))?;
     let plaintext = cipher
-        .decrypt(XNonce::from_slice(&nonce_bytes), Payload { msg: &ciphertext, aad: ENVELOPE_MAGIC.as_bytes() })
+        .decrypt(nonce, Payload { msg: &ciphertext, aad: ENVELOPE_MAGIC.as_bytes() })
         .map_err(|_| EnvelopeError::DecryptionFailed)?;
 
     Ok(plaintext)
@@ -238,6 +240,34 @@ mod tests {
     fn refuses_short_password() {
         let plaintext = b"{}";
         assert!(encrypt_bvx(plaintext, "short", "", None).is_err());
+    }
+
+    /// A `.bvx` written by commit 1ae9d7e1 (argon2 0.5.3, chacha20poly1305
+    /// 0.10.1) must still open. Never regenerate this fixture.
+    const OLD_BVX: &str = r#"{
+  "magic": "BVX",
+  "version": 1,
+  "kdf": {
+    "alg": "argon2id",
+    "version": 19,
+    "m_cost_kib": 65536,
+    "t_cost": 3,
+    "p_cost": 1,
+    "salt_b64": "0avfudVQ7rJU4oBPYDE7Xg=="
+  },
+  "aead": {
+    "alg": "xchacha20-poly1305",
+    "nonce_b64": "Z51mBPhHq2+urkwt7Xx4NhRw6KWgv7Qj"
+  },
+  "ciphertext_b64": "OAqvVTyUpFRkI+uDcSVGKx001NvUaar+KtgRbHr/k2Xy48w=",
+  "created_at": "2026-11-23T14:14:08.483612+00:00"
+}"#;
+
+    #[test]
+    fn bvx_written_by_the_old_build_still_decrypts() {
+        let plaintext = decrypt_bvx(OLD_BVX.as_bytes(), test_password()).unwrap();
+        assert_eq!(plaintext, br#"{"compat":"bvx-v1"}"#);
+        assert!(decrypt_bvx(OLD_BVX.as_bytes(), "wrong-password-also-long").is_err());
     }
 
     #[test]

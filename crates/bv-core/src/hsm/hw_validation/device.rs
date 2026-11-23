@@ -262,9 +262,9 @@ impl<T> MapReading<T> for Reading<T> {
 /// A fixed P-256 point standing in for the cluster binding key, so the
 /// timed key creation runs the same device ECDH as custody `create`.
 fn binding_point() -> Result<Vec<u8>, RvError> {
-    use p256::elliptic_curve::sec1::ToEncodedPoint;
+    use p256::elliptic_curve::sec1::ToSec1Point;
     let secret = p256::SecretKey::from_slice(&[0x07; 32]).map_err(|e| harness_error(e.to_string()))?;
-    Ok(secret.public_key().to_encoded_point(false).as_bytes().to_vec())
+    Ok(secret.public_key().to_sec1_point(false).as_bytes().to_vec())
 }
 
 /// The barrier-KEK context the validate run wraps under.

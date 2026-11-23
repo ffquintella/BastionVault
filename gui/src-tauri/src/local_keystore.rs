@@ -70,7 +70,7 @@ use chacha20poly1305::{
     ChaCha20Poly1305, Nonce,
 };
 use hkdf::Hkdf;
-use rand::RngCore;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
@@ -257,7 +257,7 @@ fn seal_v2(plaintext: &[u8], slot_seeds: &[SlotSealInput]) -> Result<Vec<u8>, Co
     rand::rng().fill_bytes(&mut payload_nonce);
     let cipher = ChaCha20Poly1305::new((&content_key).into());
     let payload_ct = cipher
-        .encrypt(Nonce::from_slice(&payload_nonce), plaintext)
+        .encrypt(<&Nonce>::from(&payload_nonce), plaintext)
         .map_err(|e| CommandError::from(format!("aead encrypt payload: {e}")))?;
 
     // 3. For each slot: KEM-encapsulate to its public key, use the
@@ -273,7 +273,7 @@ fn seal_v2(plaintext: &[u8], slot_seeds: &[SlotSealInput]) -> Result<Vec<u8>, Co
         rand::rng().fill_bytes(&mut wrap_nonce);
         let cipher = ChaCha20Poly1305::new((&wrap_key).into());
         let wrapped = cipher
-            .encrypt(Nonce::from_slice(&wrap_nonce), content_key.as_ref())
+            .encrypt(<&Nonce>::from(&wrap_nonce), content_key.as_ref())
             .map_err(|e| CommandError::from(format!("aead wrap content key: {e}")))?;
 
         slots.push(SlotHeader {
@@ -363,7 +363,9 @@ fn try_open_slot(
         return Err(CommandError::from("slot wrap_nonce wrong length".to_string()));
     }
     let cipher = ChaCha20Poly1305::new((&wrap_key).into());
-    let content_key_vec = cipher.decrypt(Nonce::from_slice(&wrap_nonce), wrapped.as_slice()).map_err(|e| {
+    let wrap_nonce = <&Nonce>::try_from(wrap_nonce.as_slice())
+        .map_err(|_| CommandError::from("slot wrap_nonce wrong length".to_string()))?;
+    let content_key_vec = cipher.decrypt(wrap_nonce, wrapped.as_slice()).map_err(|e| {
         // This is the most common "something is wrong with the
         // local keystore" path: the KEM seed we derived from
         // the current OS keychain entry doesn't match what was
@@ -395,7 +397,11 @@ fn try_open_slot(
 
     let payload_cipher = ChaCha20Poly1305::new((&content_key).into());
     let plain = payload_cipher
-        .decrypt(Nonce::from_slice(payload_nonce), payload_ct)
+        .decrypt(
+            <&Nonce>::try_from(payload_nonce)
+                .map_err(|_| CommandError::from("payload nonce wrong length".to_string()))?,
+            payload_ct,
+        )
         .map_err(|e| CommandError::from(format!("aead decrypt payload: {e}")))?;
 
     content_key.fill(0);
@@ -474,7 +480,8 @@ fn decrypt_v1(blob: &[u8], key: &[u8; KEY_LEN]) -> Result<Vec<u8>, CommandError>
     }
     let nonce_start = MAGIC_V1.len();
     let nonce_end = nonce_start + NONCE_LEN;
-    let nonce = Nonce::from_slice(&blob[nonce_start..nonce_end]);
+    let nonce = <&Nonce>::try_from(&blob[nonce_start..nonce_end])
+        .map_err(|_| CommandError::from("v1 file nonce wrong length".to_string()))?;
     let cipher = ChaCha20Poly1305::new(key.into());
     cipher.decrypt(nonce, &blob[nonce_end..]).map_err(|e| CommandError::from(format!("v1 AEAD decrypt: {e}")))
 }
@@ -1230,7 +1237,7 @@ mod tests {
             let mut nonce = [0u8; NONCE_LEN];
             rand::rng().fill_bytes(&mut nonce);
             let cipher = ChaCha20Poly1305::new((&key).into());
-            let ct = cipher.encrypt(Nonce::from_slice(&nonce), plaintext.as_slice()).unwrap();
+            let ct = cipher.encrypt(<&Nonce>::from(&nonce), plaintext.as_slice()).unwrap();
             let mut v1 = Vec::with_capacity(4 + NONCE_LEN + ct.len());
             v1.extend_from_slice(MAGIC_V1);
             v1.extend_from_slice(&nonce);

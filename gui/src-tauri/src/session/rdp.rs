@@ -315,7 +315,7 @@ pub struct RdpOpenOutcome {
 }
 
 pub fn new_token() -> String {
-    use rand::Rng;
+    use rand::RngExt;
     let mut bytes = [0u8; 16];
     rand::rng().fill(&mut bytes[..]);
     let mut hex = String::with_capacity(32);

@@ -38,4 +38,4 @@ hex = "0.4"
 # publisher public key (same crate the host verifier uses — bv_crypto's
 # verify takes a seed, not a public key).
 bastion-plugin-testkit = { version = "0.41.0", path = "../bastion-plugin-testkit", registry = "uox-bastionvault" }
-fips204 = { version = "0.4", default-features = false, features = ["default-rng", "ml-dsa-65"] }
+fips204 = { version = "0.5", default-features = false, features = ["default-rng", "ml-dsa-65"] }

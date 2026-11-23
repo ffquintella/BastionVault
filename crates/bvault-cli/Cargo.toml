@@ -56,7 +56,7 @@ better_default = "1.0.5"
 # Pairing-token hashes for `bvault mcp` (spec §3: BLAKE3 of the random bearer
 # handed to a loopback-HTTP client). Same hash `bv-mcp` uses for its catalogue.
 blake3 = "1.8"
-chacha20poly1305 = "0.10"
+chacha20poly1305 = "0.11"
 clap = { version = "4.6", features = ["wrap_help", "derive", "env", "suggestions"] }
 dashmap = "6.1"
 derive_more = "2.1.1"

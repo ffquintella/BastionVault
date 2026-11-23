@@ -141,7 +141,6 @@ fn verify_rs256(jwk: &Value, msg: &[u8], sig: &[u8]) -> Result<(), JwsError> {
 
 fn verify_es256(jwk: &Value, msg: &[u8], sig: &[u8]) -> Result<(), JwsError> {
     use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
-    use p256::EncodedPoint;
 
     let x = jwk_b64_field(jwk, "x").ok_or(JwsError::Malformed("ec jwk missing `x`"))?;
     let y = jwk_b64_field(jwk, "y").ok_or(JwsError::Malformed("ec jwk missing `y`"))?;
@@ -151,8 +150,10 @@ fn verify_es256(jwk: &Value, msg: &[u8], sig: &[u8]) -> Result<(), JwsError> {
     let mut uncompressed = vec![0x04u8];
     uncompressed.extend_from_slice(&x);
     uncompressed.extend_from_slice(&y);
-    let point = EncodedPoint::from_bytes(&uncompressed).map_err(|_| JwsError::Malformed("ec jwk point invalid"))?;
-    let vk = VerifyingKey::from_encoded_point(&point).map_err(|_| JwsError::Malformed("ec jwk public key invalid"))?;
+    // `0x04 || x || y` is always a well-formed SEC1 encoding here, so the one
+    // failure left is a point that is not on P-256.
+    let vk =
+        VerifyingKey::from_sec1_bytes(&uncompressed).map_err(|_| JwsError::Malformed("ec jwk public key invalid"))?;
 
     // ES256 signatures are 64-byte raw r||s, exactly what `Signature::from_slice` wants.
     let parsed = Signature::from_slice(sig).map_err(|_| JwsError::Malformed("es256 signature parse"))?;
@@ -310,5 +311,40 @@ mod tests {
         assert_eq!(v.payload, b"{\"hello\":\"world\"}");
         assert_eq!(v.header.alg, "EdDSA");
         assert!(!v.thumbprint.is_empty());
+    }
+
+    // Old-data KATs: JWS signed by commit 1ae9d7e1 (p256 0.13.2,
+    // ed25519-dalek 2.2.0) must keep verifying. Never regenerate them.
+    fn kat_envelope(protected: &str, payload: &str, signature: &str) -> JwsEnvelope {
+        JwsEnvelope { protected: protected.into(), payload: payload.into(), signature: signature.into() }
+    }
+
+    #[test]
+    fn es256_jws_signed_by_the_old_build_verifies() {
+        let protected = "eyJhbGciOiJFUzI1NiIsImp3ayI6eyJjcnYiOiJQLTI1NiIsImt0eSI6IkVDIiwieCI6IkhoaFRMOVIxVEFMekJCMmNkYzZ6TzRQXzJCckh6a19vZ3N5eHlZdkZpVzQiLCJ5IjoicEd3eEhFNHY5QTNaYWpaVDV1UlVSZE10X2todXp0ZGNlcERHb1lpQndLTSJ9LCJub25jZSI6Im4iLCJ1cmwiOiJ1In0";
+        let sig = "FncKeVb9jT_Gh1HPGmezjhu4g7_yPas-nkFSp0OSrKbAwIzFV0XkimIgzzMXZwrtNUQSiNRIubDdbr_mGRlYOQ";
+        let v = verify(&kat_envelope(protected, "eyJrYXQiOiJlczI1NiJ9", sig), |_| None).unwrap();
+        assert_eq!(v.payload, br#"{"kat":"es256"}"#);
+        // Same signature over another payload, and a DER-encoded signature, are refused.
+        assert!(verify(&kat_envelope(protected, "eyJrYXQiOiJlZGRzYSJ9", sig), |_| None).is_err());
+        let der = B64.encode([0x30u8, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01]);
+        assert!(verify(&kat_envelope(protected, "eyJrYXQiOiJlczI1NiJ9", &der), |_| None).is_err());
+    }
+
+    #[test]
+    fn es256_jwk_off_the_curve_is_malformed() {
+        let x = B64.encode([0x1eu8; 32]);
+        let jwk = serde_json::json!({"kty": "EC", "crv": "P-256", "x": x, "y": x});
+        let sig = [0u8; 64];
+        assert!(matches!(verify_es256(&jwk, b"m", &sig), Err(JwsError::Malformed("ec jwk public key invalid"))));
+    }
+
+    #[test]
+    fn eddsa_jws_signed_by_the_old_build_verifies() {
+        let protected = "eyJhbGciOiJFZERTQSIsImp3ayI6eyJjcnYiOiJFZDI1NTE5Iiwia3R5IjoiT0tQIiwieCI6IjZrcHNZLUtjVWdxLTlWQjdFeTdGLVpWSGRxNi12bnVTUWg3cWFSUkcwaXcifSwibm9uY2UiOiJuIiwidXJsIjoidSJ9";
+        let sig = "hNXSo8KwInB_xsXIbOg2bOAXXExI1Jukeh2z8GmLu4lF7-RcmwOl1v6NfJWhGvKfRfZo8xBh-yXDqgq-9GOECw";
+        let v = verify(&kat_envelope(protected, "eyJrYXQiOiJlZGRzYSJ9", sig), |_| None).unwrap();
+        assert_eq!(v.payload, br#"{"kat":"eddsa"}"#);
+        assert!(verify(&kat_envelope(protected, "eyJrYXQiOiJlczI1NiJ9", sig), |_| None).is_err());
     }
 }

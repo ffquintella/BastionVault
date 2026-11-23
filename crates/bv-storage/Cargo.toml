@@ -23,7 +23,7 @@ bv-metrics = { path = "../bv-metrics", version = "0.41.0", registry = "uox-basti
 bv-sql-guard = { path = "../bv-sql-guard", version = "0.41.0", registry = "uox-bastionvault" }
 bv_crypto = { path = "../bv_crypto", version = "0.41.0", registry = "uox-bastionvault" }
 
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 arc-swap = "1"
 async-trait = "0.1"
 base64 = "0.23"

@@ -8,8 +8,8 @@ use std::{
 };
 
 use aes_gcm::{
-    aead::{AeadInPlace, KeyInit},
-    Aes256Gcm, Nonce, Tag,
+    aead::{AeadInOut, KeyInit, Nonce, Tag},
+    Aes256Gcm,
 };
 use arc_swap::ArcSwap;
 use better_default::Default;
@@ -295,12 +295,10 @@ impl AESGCMBarrier {
         let tag_start = ciphertext_start + plaintext.len();
         out[ciphertext_start..tag_start].copy_from_slice(plaintext);
 
+        let nonce = <&Nonce<Aes256Gcm>>::try_from(nonce.deref().as_slice())
+            .map_err(|_| RvError::ErrBarrierKeyGenerationFailed)?;
         let tag = cipher
-            .encrypt_in_place_detached(
-                Nonce::from_slice(nonce.deref().as_slice()),
-                aad,
-                &mut out[ciphertext_start..tag_start],
-            )
+            .encrypt_inout_detached(nonce, aad, (&mut out[ciphertext_start..tag_start]).into())
             .map_err(|_| RvError::ErrBarrierKeyGenerationFailed)?;
 
         out[tag_start..tag_start + AES_GCM_TAG_SIZE].copy_from_slice(tag.as_slice());
@@ -334,12 +332,16 @@ impl AESGCMBarrier {
         };
 
         let aad = if ciphertext[4] == AES_GCM_VERSION2 { path.as_bytes() } else { &[] };
-        let nonce = Nonce::from_slice(&ciphertext[5..5 + AES_GCM_NONCE_SIZE]);
+        let nonce = <&Nonce<Aes256Gcm>>::try_from(&ciphertext[5..5 + AES_GCM_NONCE_SIZE])
+            .map_err(|_| RvError::ErrBarrierUnsealFailed)?;
         let raw = &ciphertext[5 + AES_GCM_NONCE_SIZE..ciphertext.len() - AES_GCM_TAG_SIZE];
-        let tag = Tag::from_slice(&ciphertext[ciphertext.len() - AES_GCM_TAG_SIZE..]);
+        let tag = <&Tag<Aes256Gcm>>::try_from(&ciphertext[ciphertext.len() - AES_GCM_TAG_SIZE..])
+            .map_err(|_| RvError::ErrBarrierUnsealFailed)?;
         let mut out = raw.to_vec();
 
-        cipher.decrypt_in_place_detached(nonce, aad, &mut out, tag).map_err(|_| RvError::ErrBarrierUnsealFailed)?;
+        cipher
+            .decrypt_inout_detached(nonce, aad, out.as_mut_slice().into(), tag)
+            .map_err(|_| RvError::ErrBarrierUnsealFailed)?;
 
         Ok(out)
     }

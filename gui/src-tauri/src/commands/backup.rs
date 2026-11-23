@@ -29,7 +29,7 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},
     ChaCha20Poly1305, Key, Nonce,
 };
-use rand::{rngs::OsRng, TryRngCore};
+use rand::{rngs::SysRng, TryRng};
 use tauri::State;
 use tokio::fs;
 
@@ -91,11 +91,11 @@ fn derive_key(password: &str, salt: &[u8]) -> Result<[u8; 32], CommandError> {
 fn write_envelope(payload: &[u8], password: &str, out: &mut Vec<u8>) -> Result<(), CommandError> {
     let mut salt = [0u8; SALT_LEN];
     let mut nonce_bytes = [0u8; NONCE_LEN];
-    OsRng.try_fill_bytes(&mut salt).map_err(|e| CommandError::from(format!("rng: {e}")))?;
-    OsRng.try_fill_bytes(&mut nonce_bytes).map_err(|e| CommandError::from(format!("rng: {e}")))?;
+    SysRng.try_fill_bytes(&mut salt).map_err(|e| CommandError::from(format!("rng: {e}")))?;
+    SysRng.try_fill_bytes(&mut nonce_bytes).map_err(|e| CommandError::from(format!("rng: {e}")))?;
     let key_bytes = derive_key(password, &salt)?;
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(&key_bytes));
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    let cipher = ChaCha20Poly1305::new(<&Key>::from(&key_bytes));
+    let nonce = <&Nonce>::from(&nonce_bytes);
     // AAD = the file header (magic + argon2 params + salt + nonce) so
     // tampering with any of those bytes invalidates the AEAD tag.
     let mut header = Vec::with_capacity(HEADER_LEN);
@@ -134,8 +134,9 @@ fn read_envelope(blob: &[u8], password: &str) -> Result<Vec<u8>, CommandError> {
     let mut key_bytes = [0u8; 32];
     kdf.hash_password_into(password.as_bytes(), salt, &mut key_bytes)
         .map_err(|e| CommandError::from(format!("argon2 derive: {e}")))?;
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(&key_bytes));
-    let nonce = Nonce::from_slice(nonce_bytes);
+    let cipher = ChaCha20Poly1305::new(<&Key>::from(&key_bytes));
+    let nonce = <&Nonce>::try_from(nonce_bytes)
+        .map_err(|_| CommandError::from("backup file header is malformed".to_string()))?;
     cipher
         .decrypt(nonce, Payload { msg: ciphertext, aad: header })
         .map_err(|_| CommandError::from("decrypt failed — wrong password or corrupted file".to_string()))
@@ -201,6 +202,24 @@ mod tests {
         write_envelope(payload, pw, &mut env).unwrap();
         let out = read_envelope(&env, pw).unwrap();
         assert_eq!(out.as_slice(), payload);
+    }
+
+    /// A backup written by commit 1ae9d7e1 (argon2 0.5.3, chacha20poly1305
+    /// 0.10.1) must still restore. Never regenerate this fixture.
+    const OLD_ENVELOPE_HEX: &str = "4256424b50310000000001000300000004000000a43c0feaa56262eda576a1c6868ec4c558398493e1ef478ef231620395faf9bd5915889b3e3ee2826befbfceb5db42700b659133628b3241a11a8e69c6";
+
+    #[test]
+    fn envelope_written_by_the_old_build_still_reads() {
+        let env: Vec<u8> = (0..OLD_ENVELOPE_HEX.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&OLD_ENVELOPE_HEX[i..i + 2], 16).unwrap())
+            .collect();
+        let out = read_envelope(&env, "this-password-is-16+chars-long").unwrap();
+        assert_eq!(out.as_slice(), b"bvbkp1 compat kat");
+        // The header is authenticated: a changed Argon2 cost fails closed.
+        let mut tampered = env.clone();
+        tampered[12] ^= 0x01;
+        assert!(read_envelope(&tampered, "this-password-is-16+chars-long").is_err());
     }
 
     #[test]

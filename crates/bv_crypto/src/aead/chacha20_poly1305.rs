@@ -65,9 +65,9 @@ pub struct Chacha20Poly1305Cipher;
 
 impl AeadCipher for Chacha20Poly1305Cipher {
     fn encrypt(&self, key: &SymmetricKey, nonce: &Nonce, aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, CryptoError> {
-        let cipher = ChaCha20Poly1305::new(Key::from_slice(key.as_bytes()));
+        let cipher = ChaCha20Poly1305::new(<&Key>::from(key.as_bytes()));
         cipher
-            .encrypt(ChaChaNonce::from_slice(nonce.as_bytes()), Payload { msg: plaintext, aad })
+            .encrypt(<&ChaChaNonce>::from(nonce.as_bytes()), Payload { msg: plaintext, aad })
             .map_err(|_| CryptoError::EncryptFailed)
     }
 
@@ -78,9 +78,9 @@ impl AeadCipher for Chacha20Poly1305Cipher {
         aad: &[u8],
         ciphertext: &[u8],
     ) -> Result<Vec<u8>, CryptoError> {
-        let cipher = ChaCha20Poly1305::new(Key::from_slice(key.as_bytes()));
+        let cipher = ChaCha20Poly1305::new(<&Key>::from(key.as_bytes()));
         cipher
-            .decrypt(ChaChaNonce::from_slice(nonce.as_bytes()), Payload { msg: ciphertext, aad })
+            .decrypt(<&ChaChaNonce>::from(nonce.as_bytes()), Payload { msg: ciphertext, aad })
             .map_err(|_| CryptoError::DecryptFailed)
     }
 }

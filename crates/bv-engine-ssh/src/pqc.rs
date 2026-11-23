@@ -412,4 +412,64 @@ mod tests {
         let line = format!("{MLDSA65_ALGO} {} comment", B64.encode(&blob));
         assert!(parse_pqc_public_key(&line).is_none());
     }
+
+    // Old-data KATs: the SSH wire encoding of the ML-DSA-65 certificate
+    // and public key, as written by commit 1ae9d7e1 (ssh-encoding 0.2.0,
+    // fips204 0.4.6). Never regenerate the expected values.
+    fn kat_ca() -> CaKeypair {
+        let kp = MlDsa65Provider.keypair_from_seed(&[0x5a; ML_DSA_65_SEED_LEN]).unwrap();
+        CaKeypair::from_hex(&hex::encode(kp.secret_seed()), &hex::encode(kp.public_key())).unwrap()
+    }
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(bytes))
+    }
+
+    #[test]
+    fn certificate_tbs_and_public_key_encoding_are_unchanged() {
+        let ca = kat_ca();
+        let client = MlDsa65Provider.keypair_from_seed(&[0x33; ML_DSA_65_SEED_LEN]).unwrap();
+        let principals = vec!["alice".to_string(), "ops".to_string()];
+        let mut crit = BTreeMap::new();
+        crit.insert("force-command".to_string(), "/bin/true".to_string());
+        crit.insert("source-address".to_string(), "10.0.0.0/8".to_string());
+        let mut exts = BTreeMap::new();
+        exts.insert("permit-pty".to_string(), String::new());
+        let spec = CertSpec {
+            client_pubkey: client.public_key(),
+            serial: 0x0102_0304_0506_0708,
+            cert_type: 1,
+            key_id: "kat-key-id",
+            valid_principals: &principals,
+            valid_after: 1_700_000_000,
+            valid_before: 1_700_003_600,
+            critical_options: &crit,
+            extensions: &exts,
+            nonce: &[0x44; 32],
+        };
+        let tbs = build_tbs(&spec, &ca.public_key).unwrap();
+        assert_eq!(sha256_hex(&tbs), "2a64143a9db806635d74e978aeef26c7cbce69f9830eca96de4a41ca2e6bffef");
+        assert_eq!(
+            hex::encode(encode_options(&crit).unwrap()),
+            "0000000d666f7263652d636f6d6d616e640000000d000000092f62696e2f747275650000000e736f757263652d616464726573730000000e0000000a31302e302e302e302f38"
+        );
+        let public = ca.public_key_openssh().unwrap();
+        assert_eq!(sha256_hex(public.as_bytes()), "c811fd5a857effc6432de77f471e0c01f907e2903884efc376e12621a87a15ce");
+        assert_eq!(parse_pqc_public_key(&public).as_deref(), Some(ca.public_key.as_slice()));
+
+        // The signed cert is `TBS || string(string algo || string sig)`; the
+        // ML-DSA signature is hedged, so only its framing is pinned.
+        let line = sign_cert(&ca, &spec).unwrap();
+        assert_eq!(line.len(), 10069);
+        let body = B64.decode(line.split(' ').nth(1).unwrap()).unwrap();
+        assert_eq!(&body[..tbs.len()], tbs.as_slice());
+        let mut rest: &[u8] = &body[tbs.len()..];
+        let sig_blob = Vec::<u8>::decode(&mut rest).unwrap();
+        assert!(rest.is_empty());
+        let mut sig_reader: &[u8] = &sig_blob;
+        assert_eq!(String::decode(&mut sig_reader).unwrap(), MLDSA65_ALGO);
+        let sig = Vec::<u8>::decode(&mut sig_reader).unwrap();
+        assert!(MlDsa65Provider.verify(&ca.secret_seed, &tbs, &sig, &[]).unwrap());
+    }
 }

@@ -566,18 +566,18 @@ async fn pki_issue_one(
 fn extract_ed25519_seed_from_pkcs8(pem: &str) -> Result<[u8; 32], RvError> {
     use pkcs8::{
         der::{asn1::OctetString, Decode},
-        PrivateKeyInfo,
+        PrivateKeyInfoRef,
     };
     const OID_ED25519: pkcs8::ObjectIdentifier = pkcs8::ObjectIdentifier::new_unwrap("1.3.101.112");
     let der_bytes = pem_decode_block(pem, "PRIVATE KEY")?;
     let info =
-        PrivateKeyInfo::from_der(&der_bytes).map_err(|e| bv_error_string!(&format!("ed25519 pkcs8 decode: {e}")))?;
+        PrivateKeyInfoRef::from_der(&der_bytes).map_err(|e| bv_error_string!(&format!("ed25519 pkcs8 decode: {e}")))?;
     if info.algorithm.oid != OID_ED25519 {
         return Err(bv_error_string!(&format!("expected Ed25519 PKCS#8 OID 1.3.101.112, got {}", info.algorithm.oid)));
     }
     // RFC 8410 wraps the 32-byte seed in an inner OCTET STRING inside
     // the outer PKCS#8 privateKey field.
-    let inner = OctetString::from_der(info.private_key)
+    let inner = OctetString::from_der(info.private_key.as_bytes())
         .map_err(|e| bv_error_string!(&format!("ed25519 pkcs8 inner OCTET STRING decode: {e}")))?;
     let bytes = inner.as_bytes();
     if bytes.len() != 32 {
@@ -594,20 +594,20 @@ fn extract_ed25519_seed_from_pkcs8(pem: &str) -> Result<[u8; 32], RvError> {
 fn extract_mldsa65_seed_from_pkcs8(pem: &str) -> Result<[u8; 32], RvError> {
     use pkcs8::{
         der::{asn1::OctetString, Decode},
-        PrivateKeyInfo,
+        PrivateKeyInfoRef,
     };
     // ML-DSA-65 (IETF lamps draft).
     const OID_ML_DSA_65: pkcs8::ObjectIdentifier = pkcs8::ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.3.18");
     let der_bytes = pem_decode_block(pem, "PRIVATE KEY")?;
-    let info =
-        PrivateKeyInfo::from_der(&der_bytes).map_err(|e| bv_error_string!(&format!("ml-dsa-65 pkcs8 decode: {e}")))?;
+    let info = PrivateKeyInfoRef::from_der(&der_bytes)
+        .map_err(|e| bv_error_string!(&format!("ml-dsa-65 pkcs8 decode: {e}")))?;
     if info.algorithm.oid != OID_ML_DSA_65 {
         return Err(bv_error_string!(&format!(
             "expected ML-DSA-65 PKCS#8 OID {}, got {}",
             OID_ML_DSA_65, info.algorithm.oid
         )));
     }
-    let inner = OctetString::from_der(info.private_key)
+    let inner = OctetString::from_der(info.private_key.as_bytes())
         .map_err(|e| bv_error_string!(&format!("ml-dsa-65 pkcs8 inner OCTET STRING decode: {e}")))?;
     let bytes = inner.as_bytes();
     if bytes.len() != 32 {
@@ -1444,5 +1444,26 @@ mod tests {
             hint.contains("exactly one record"),
             "must say a key approved under another name does not count: {hint}"
         );
+    }
+
+    /// PKCS#8 parsing must keep accepting what older builds and the PKI
+    /// engine wrote. The Ed25519 key is RFC 8410 §10.3; the ML-DSA-65 key is
+    /// the seed-only form `MlDsaSigner::to_pkcs8_pem` emits.
+    #[test]
+    fn pkcs8_seed_extraction_known_answers() {
+        let ed = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEINTuctv5E1hK1bbY8fdp+K06/nwoy/HU++CXqI9EdVhC\n-----END PRIVATE KEY-----\n";
+        assert_eq!(
+            hex::encode(extract_ed25519_seed_from_pkcs8(ed).unwrap()),
+            "d4ee72dbf913584ad5b6d8f1f769f8ad3afe7c28cbf1d4fbe097a88f44755842"
+        );
+        let ml = "-----BEGIN PRIVATE KEY-----\nMDQCAQAwCwYJYIZIAWUDBAMSBCIEIFpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpa\n-----END PRIVATE KEY-----\n";
+        assert_eq!(extract_mldsa65_seed_from_pkcs8(ml).unwrap(), [0x5a; 32]);
+
+        // Malformed input: crossed algorithms, a truncated body and a bad label are refused.
+        assert!(extract_ed25519_seed_from_pkcs8(ml).is_err());
+        assert!(extract_mldsa65_seed_from_pkcs8(ed).is_err());
+        let truncated = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEINTuctv5E1hK\n-----END PRIVATE KEY-----\n";
+        assert!(extract_ed25519_seed_from_pkcs8(truncated).is_err());
+        assert!(extract_ed25519_seed_from_pkcs8(&ed.replace("PRIVATE KEY", "PUBLIC KEY")).is_err());
     }
 }

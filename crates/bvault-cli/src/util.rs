@@ -98,8 +98,7 @@ fn encrypt_with_key(token: &str, key: &[u8; 32]) -> Option<String> {
     let cipher = XChaCha20Poly1305::new_from_slice(key).ok()?;
     let mut nonce = [0u8; XCHACHA_NONCE_LEN];
     rand::rng().fill_bytes(&mut nonce);
-    let ciphertext =
-        cipher.encrypt(XNonce::from_slice(&nonce), Payload { msg: token.as_bytes(), aad: TOKEN_AAD }).ok()?;
+    let ciphertext = cipher.encrypt(<&XNonce>::from(&nonce), Payload { msg: token.as_bytes(), aad: TOKEN_AAD }).ok()?;
     let mut blob = Vec::with_capacity(nonce.len() + ciphertext.len());
     blob.extend_from_slice(&nonce);
     blob.extend_from_slice(&ciphertext);
@@ -116,7 +115,8 @@ fn decrypt_with_key(contents: &str, key: &[u8; 32]) -> Option<String> {
     }
     let (nonce, ciphertext) = blob.split_at(XCHACHA_NONCE_LEN);
     let cipher = XChaCha20Poly1305::new_from_slice(key).ok()?;
-    let plaintext = cipher.decrypt(XNonce::from_slice(nonce), Payload { msg: ciphertext, aad: TOKEN_AAD }).ok()?;
+    let nonce = <&XNonce>::try_from(nonce).ok()?;
+    let plaintext = cipher.decrypt(nonce, Payload { msg: ciphertext, aad: TOKEN_AAD }).ok()?;
     let s = String::from_utf8(plaintext).ok()?;
     let trimmed = s.trim();
     if trimmed.is_empty() {
@@ -210,6 +210,20 @@ mod tests {
         assert!(enc.starts_with(TOKEN_ENC_PREFIX));
         assert!(!enc.contains(token), "ciphertext must not leak the token");
         assert_eq!(decrypt_with_key(&enc, &key).as_deref(), Some(token));
+    }
+
+    /// A token file written by commit 1ae9d7e1 (chacha20poly1305 0.10.1)
+    /// must still decrypt. Never regenerate this fixture.
+    const OLD_TOKEN_FILE: &str =
+        "BVTOK1:tJwRO/MMpql2zSFvCYEo7NPL0A4efWVSdHzPHaG9kRN8fMUw9x2LfdgqqNUmxLAYAFtiLkSkZXnZUNfhNwCE234ets3SgREEW34K1g==";
+
+    #[test]
+    fn token_file_written_by_the_old_build_still_decrypts() {
+        assert_eq!(
+            decrypt_with_key(OLD_TOKEN_FILE, &test_key()).as_deref(),
+            Some("be170b06-4157-1f92-9add-603cae36ee53")
+        );
+        assert_eq!(decrypt_with_key(OLD_TOKEN_FILE, &[9u8; 32]), None);
     }
 
     #[test]

@@ -53,12 +53,12 @@ zeroize = { version = "1.8.2", features = ["zeroize_derive"] }
 
 # The seal path's HSM backends: envelope encryption, the custody-blob digest
 # and the Ed25519 authorization signatures on operator approvals.
-aes-gcm = "0.10"
-ed25519-dalek = "2"
+aes-gcm = "0.11"
+ed25519-dalek = "3"
 hkdf = "0.13"
 # `ecdh` as well as `ecdsa`: the HSM `bv-identity` key does ECDH for the
 # HSM-to-HSM replication channel and the hybrid-PQC seed derivation.
-p256 = { version = "0.13", features = ["ecdsa", "ecdh"], default-features = false }
+p256 = { version = "0.14", features = ["ecdsa", "ecdh"], default-features = false }
 
 # YubiHSM 2 client (feature `hsm_yubihsm2`). Pure-Rust, maintained by
 # iqlusion; `http` for the yubihsm-connector, `usb` for direct device access.

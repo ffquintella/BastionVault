@@ -26,7 +26,10 @@ use std::{
     time::Duration,
 };
 
-use aes_gcm::{aead::Aead, Aes256Gcm, KeyInit, Nonce};
+use aes_gcm::{
+    aead::{Aead, Nonce},
+    Aes256Gcm, KeyInit,
+};
 use ed25519_dalek::{Signer as _, SigningKey};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -1098,10 +1101,10 @@ fn authz_public(state: &MockState, id: u16) -> Result<Vec<u8>, RvError> {
 }
 
 fn identity_public(state: &MockState, id: u16) -> Result<Vec<u8>, RvError> {
-    use p256::elliptic_curve::sec1::ToEncodedPoint;
+    use p256::elliptic_curve::sec1::ToSec1Point;
     let obj = state.objects.get(&id).ok_or(RvError::ErrHsmUnavailable)?;
     let secret = p256::SecretKey::from_slice(&obj.material).map_err(|_| RvError::ErrHsm("bad identity key".into()))?;
-    Ok(secret.public_key().to_encoded_point(false).as_bytes().to_vec())
+    Ok(secret.public_key().to_sec1_point(false).as_bytes().to_vec())
 }
 
 fn load_state(path: &str) -> Result<MockState, RvError> {
@@ -1134,7 +1137,8 @@ fn persist_state(path: &str, state: &MockState) -> Result<(), RvError> {
 fn aes256_gcm_seal(key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, RvError> {
     let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| RvError::ErrHsm("bad wrap key length".into()))?;
     let nonce_bytes = random_bytes(AES_NONCE_LEN);
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    let nonce = <&Nonce<Aes256Gcm>>::try_from(nonce_bytes.as_slice())
+        .map_err(|_| RvError::ErrHsm("wrap encryption failed".into()))?;
     let mut out = cipher.encrypt(nonce, plaintext).map_err(|_| RvError::ErrHsm("wrap encryption failed".into()))?;
     let mut result = nonce_bytes;
     result.append(&mut out);
@@ -1147,7 +1151,7 @@ fn aes256_gcm_open(key: &[u8], wrapped: &[u8]) -> Result<Zeroizing<Vec<u8>>, RvE
     }
     let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| RvError::ErrHsm("bad wrap key length".into()))?;
     let (nonce_bytes, ct) = wrapped.split_at(AES_NONCE_LEN);
-    let nonce = Nonce::from_slice(nonce_bytes);
+    let nonce = <&Nonce<Aes256Gcm>>::try_from(nonce_bytes).map_err(|_| RvError::ErrHsmBlobInvalid)?;
     let pt = cipher.decrypt(nonce, ct).map_err(|_| RvError::ErrHsmContextMismatch)?;
     Ok(Zeroizing::new(pt))
 }
@@ -1530,5 +1534,83 @@ mod tests {
         assert!(!state.forced_audit && state.auth_keys.is_empty());
         let written = serde_json::to_value(&state).unwrap();
         assert!(written.get("forced_audit").is_none(), "off is not written: old readers see the same file");
+    }
+}
+
+/// Known-answer tests for the mock device's AES-256-GCM wrap, ECDSA-P256,
+/// Ed25519 and ECDH. Expected values were written by commit 1ae9d7e1
+/// (aes-gcm 0.10.3, p256 0.13.2, ed25519-dalek 2.2.0); never regenerate them.
+#[cfg(test)]
+mod compat_kat {
+    use super::*;
+
+    const WRAP_KEY: [u8; 32] = [0x24; 32];
+    const IDENTITY_SCALAR: [u8; 32] = [0x07; 32];
+    const PEER_SCALAR: [u8; 32] = [0x0b; 32];
+    const AUTHZ_SEED: [u8; 32] = [0x09; 32];
+    const PLAINTEXT: &[u8] = b"bastion-vault hsm wrap kat";
+    const OLD_WRAPPED: &str =
+        "e91ba61c5116e306ad74d20c8b2550246cbe7b4a87c11fd73e9cf338b04c85c16c23d782be2b4370a15429bc2ac3e939b25dd2f0b4bd";
+
+    fn state_with(id: u16, kind: MockKind, material: &[u8]) -> MockState {
+        let mut state = MockState::default();
+        state.objects.insert(id, StoredObject { kind, material: material.to_vec(), extra_capabilities: Vec::new() });
+        state
+    }
+
+    #[test]
+    fn wrap_blob_written_by_the_old_build_opens() {
+        let old = hex::decode(OLD_WRAPPED).unwrap();
+        assert_eq!(aes256_gcm_open(&WRAP_KEY, &old).unwrap().as_slice(), PLAINTEXT);
+        // Fresh blobs keep the nonce || ciphertext || tag layout and round-trip.
+        let fresh = aes256_gcm_seal(&WRAP_KEY, PLAINTEXT).unwrap();
+        assert_eq!(fresh.len(), old.len());
+        assert_eq!(aes256_gcm_open(&WRAP_KEY, &fresh).unwrap().as_slice(), PLAINTEXT);
+        // Malformed input: short, truncated and tampered blobs are refused.
+        assert!(aes256_gcm_open(&WRAP_KEY, &old[..AES_NONCE_LEN - 1]).is_err());
+        assert!(aes256_gcm_open(&WRAP_KEY, &old[..old.len() - 1]).is_err());
+        let mut bad = old.clone();
+        bad[AES_NONCE_LEN] ^= 0x01;
+        assert!(aes256_gcm_open(&WRAP_KEY, &bad).is_err());
+    }
+
+    #[test]
+    fn identity_key_signature_and_ecdh_are_unchanged() {
+        let state = state_with(1, MockKind::Identity, &IDENTITY_SCALAR);
+        let public = identity_public(&state, 1).unwrap();
+        assert_eq!(hex::encode(&public), "041e18532fd4754c02f3041d9c75ceb33b83ffd81ac7ce4fe882ccb1c98bc5896ea46c311c4e2ff40dd96a3653e6e45445d32dfe486eced75c7a90c6a18881c0a3");
+
+        // RFC 6979 makes ECDSA deterministic: the old build's bytes, exactly.
+        let signed = domain_separated("bv-kat", b"message");
+        let sig = ecdsa_sign(&IDENTITY_SCALAR, &signed).unwrap();
+        assert_eq!(
+            hex::encode(&sig),
+            "dbea7b626957a63c19634a857968454790bbe702d6d867285f3468c9e9e8615e8c71c092cba66ea7d366f705909be2cf53f5c807529a5ab2e73b4def6afbd6a9"
+        );
+        crate::hsm::verify_identity_signature(&public, "bv-kat", b"message", &sig).unwrap();
+        assert!(crate::hsm::verify_identity_signature(&public, "bv-kat", b"messagf", &sig).is_err());
+
+        let secret = p256::SecretKey::from_slice(&IDENTITY_SCALAR).unwrap();
+        let peer_public = identity_public(&state_with(2, MockKind::SeedEcdh, &PEER_SCALAR), 2).unwrap();
+        let peer = p256::PublicKey::from_sec1_bytes(&peer_public).unwrap();
+        let shared = p256::ecdh::diffie_hellman(secret.to_nonzero_scalar(), peer.as_affine());
+        assert_eq!(
+            hex::encode(shared.raw_secret_bytes()),
+            "e08fc15b1a4b9f298a6a40c3c2e730560b3bbb35cbb64115f4934e368a73f33a"
+        );
+    }
+
+    #[test]
+    fn authz_key_and_signature_are_unchanged() {
+        let state = state_with(3, MockKind::Authz, &AUTHZ_SEED);
+        assert_eq!(
+            hex::encode(authz_public(&state, 3).unwrap()),
+            "fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618"
+        );
+        let sig = SigningKey::from_bytes(&AUTHZ_SEED).sign(&domain_separated("bv-kat", b"message"));
+        assert_eq!(
+            hex::encode(sig.to_bytes()),
+            "ba4f4ae4591947e484480ce062be0d6c44520577d0c40079abbd0e8a04782738ea6898316d1f54f8bb5e5939a15dec701ecfac66461897524371e16b6b634f04"
+        );
     }
 }
