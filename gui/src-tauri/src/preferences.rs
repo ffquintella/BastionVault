@@ -202,6 +202,43 @@ pub struct McpLocalServerPrefs {
     pub enabled: bool,
 }
 
+/// How verbose the GUI's log is (stderr and the log file). A local UX
+/// preference, never a vault setting. A string on disk and validated
+/// strictly, like the other prefs: an unknown level is an error naming it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct LogPrefs {
+    pub level: String,
+}
+
+pub const LOG_LEVELS: [&str; 6] = ["off", "error", "warn", "info", "debug", "trace"];
+
+impl Default for LogPrefs {
+    fn default() -> Self {
+        Self { level: "info".to_string() }
+    }
+}
+
+impl LogPrefs {
+    /// The level to apply; a hand-edited unknown value falls back to `info`
+    /// at startup (the app must still open), and is refused on save.
+    pub fn filter(&self) -> log::LevelFilter {
+        parse_log_level(&self.level).unwrap_or(log::LevelFilter::Info)
+    }
+}
+
+pub fn parse_log_level(level: &str) -> Result<log::LevelFilter, String> {
+    match level {
+        "off" => Ok(log::LevelFilter::Off),
+        "error" => Ok(log::LevelFilter::Error),
+        "warn" => Ok(log::LevelFilter::Warn),
+        "info" => Ok(log::LevelFilter::Info),
+        "debug" => Ok(log::LevelFilter::Debug),
+        "trace" => Ok(log::LevelFilter::Trace),
+        other => Err(format!("log level `{other}` is not one of {}", LOG_LEVELS.join(", "))),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[derive(Default)]
 pub struct Preferences {
@@ -226,6 +263,9 @@ pub struct Preferences {
     /// The local MCP server's switch (T131). Absent in older files: off.
     #[serde(default)]
     pub mcp_local_server: McpLocalServerPrefs,
+    /// Log verbosity. Absent in older files: `info`.
+    #[serde(default)]
+    pub log: LogPrefs,
 
     // ── Legacy fields (pre-multi-vault preferences) ───────────────
     //

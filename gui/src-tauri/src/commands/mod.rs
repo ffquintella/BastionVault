@@ -129,6 +129,7 @@ pub mod groups;
 pub mod idp;
 pub mod ldap;
 pub mod leases;
+pub mod log_settings;
 pub mod mcp;
 pub mod namespaces;
 pub mod notifications;

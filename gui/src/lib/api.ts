@@ -3919,6 +3919,17 @@ export const setSessionWorkspacePrefs = (prefs: SessionWorkspacePrefs) =>
  *  at the identity provider as `http://127.0.0.1:<port>/callback`.
  *  `dynamic`: the OS picks a port per login (providers that allow any
  *  loopback port). */
+/** The GUI's log level and file. `env_override`: `RUST_LOG` is set, so it
+ *  decides the level and the saved setting is inert. */
+export type LogSettings = {
+  level: string;
+  levels: string[];
+  path: string | null;
+  env_override: boolean;
+};
+export const getLogSettings = () => invoke<LogSettings>("get_log_settings");
+export const setLogLevel = (level: string) => invoke<LogSettings>("set_log_level", { level });
+
 export type OidcCallbackPrefs = { mode: "fixed" | "dynamic"; ports: number[] };
 export const getOidcCallbackPrefs = () => invoke<OidcCallbackPrefs>("get_oidc_callback_prefs");
 export const setOidcCallbackPrefs = (prefs: OidcCallbackPrefs) =>

@@ -63,6 +63,11 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### Desktop app: log file and log level
+
+- **Write the desktop app's log to a file and choose its level in Settings → Logging** (T550)
+  -- The app logged to stderr only, so a launch from the Finder, the Dock or a Start-menu entry kept nothing to read. It now also appends to `bastion-vault-gui.log` in the platform log directory (macOS `~/Library/Logs/com.bastionvault.gui/`, Windows `%LOCALAPPDATA%\com.bastionvault.gui\logs\`, Linux `$XDG_STATE_HOME/com.bastionvault.gui/`), owner-only on macOS and Linux, rotated once at startup past 5 MiB. Settings → Logging sets the level (`off`, `error`, `warn`, `info` (default), `debug`, `trace`), applies it at once and keeps it across restarts; `RUST_LOG` still decides when set and the page says so. `BVAULT_GUI_LOG=off` keeps stderr only.
+
 #### Namespaces: copy or move a resource or KV secret to another namespace
 
 - **Copy or move one resource or KV secret to another namespace with every secret, every version, its change history and the shares that are still valid there** (T494, S120)

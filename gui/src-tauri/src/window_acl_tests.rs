@@ -199,6 +199,7 @@ const NEVER_IN_A_SESSION_WINDOW: &[&str] = &[
     "plugins_invoke",
     "save_preferences",
     "set_session_workspace_prefs",
+    "set_log_level",
     "session_workspace_open",
     "session_attach",
     "session_detach",

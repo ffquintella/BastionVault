@@ -2,6 +2,7 @@ mod backend;
 mod commands;
 mod embedded;
 mod error;
+mod file_log;
 mod local_keystore;
 mod mcp_host;
 mod plugin_apps;
@@ -85,9 +86,27 @@ pub fn run() {
     // features/rdp-clipboard-redirection.md §9). Our own clipboard logging
     // lives under `bastion_vault_gui::session::rdp_clipboard` and carries
     // counts, reasons and outcomes only.
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .filter_module("ironrdp_cliprdr", log::LevelFilter::Error)
-        .try_init();
+    //
+    // Output goes to stderr and the log file (`file_log`). Without
+    // `RUST_LOG` the filter is wide open and the saved level is applied as
+    // the global maximum, so Settings can change it at runtime; with
+    // `RUST_LOG` set the environment decides and the setting is inert.
+    let env_override = file_log::env_override();
+    let (log_target, log_file) = file_log::target();
+    let mut log_builder = env_logger::Builder::new();
+    if env_override {
+        log_builder.parse_env("RUST_LOG");
+    } else {
+        log_builder.filter_level(log::LevelFilter::Trace);
+    }
+    let _ = log_builder.filter_module("ironrdp_cliprdr", log::LevelFilter::Error).target(log_target).try_init();
+    if !env_override {
+        log::set_max_level(preferences::load().unwrap_or_default().log.filter());
+    }
+    match &log_file {
+        Some(path) => log::info!("logging to {}", path.display()),
+        None => log::info!("logging to stderr only"),
+    }
 
     // Best-effort Chromium-flag disable for autofill-related features. Runs
     // before Tauri initializes WebView2 so the runtime picks it up at launch.
@@ -728,6 +747,8 @@ pub fn run() {
             commands::connect::session_rustion_info,
             // Session Workspace (T38): layout preference, attachment
             // registry and liveness.
+            commands::log_settings::get_log_settings,
+            commands::log_settings::set_log_level,
             commands::oidc::get_oidc_callback_prefs,
             commands::oidc::set_oidc_callback_prefs,
             commands::session_workspace::get_session_workspace_prefs,
