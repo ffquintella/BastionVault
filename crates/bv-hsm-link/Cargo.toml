@@ -1,6 +1,6 @@
 [package]
 name = "bv-hsm-link"
-version = "0.41.0"
+version = "0.41.1"
 edition = "2021"
 description = "BastionVault's HSM link: the mTLS gateway in front of a localhost yubihsm-connector, and the node-side loopback relay"
 license = "Apache-2.0"
