@@ -134,6 +134,14 @@ russh = { version = "=0.62.7", default-features = true }
 # through `bv-engine-files`' `files_ssh_sync` feature (same version, same
 # russh ^0.62.5 requirement), so this adds no new crate to the graph.
 russh-sftp = "2.4"
+# SMB connection profiles (features/smb-connect.md): SMB2/3 client for the
+# dual-pane file window, NTLM with signing required. Pure Rust (no
+# libsmbclient, no OpenSSL) and already in the lockfile through
+# `bv-engine-files`' `files_smb` feature, so no new crate enters the graph.
+smolder-smb-core = "0.3"
+# Its wire types: the session drives CREATE / READ / WRITE directly so a
+# transfer streams in chunks (the facade's `File` moves whole files).
+smolder-proto = "0.3"
 async-trait = "0.1"
 log = "0.4"
 env_logger = "0.11"
@@ -513,3 +521,10 @@ wat = "1"
 # instantiated against the *real* `plugin_apps` linker so a drift
 # between the testkit mock and this runtime fails CI (Phase 6).
 bastion-plugin-testkit = { path = "../../crates/bastion-plugin-testkit" }
+
+[package.metadata.cargo-machete]
+ignored = [
+    # Package name != lib name (`smolder-smb-core` -> `smolder_core`), which a
+    # static `use` scan cannot follow.
+    "smolder-smb-core",
+]
