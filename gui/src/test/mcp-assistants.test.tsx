@@ -27,6 +27,8 @@ function renderWithProviders(ui: React.ReactNode) {
 }
 
 const NOW = Math.floor(Date.now() / 1000);
+const VAULT_A = "0f1e2d3c-4b5a-4968-8776-a5b4c3d2e1f0";
+const VAULT_B = "11111111-2222-4333-8444-555555555555";
 
 const PAIRING = {
   id: "0123456789abcdef0123456789abcdef",
@@ -45,6 +47,7 @@ const PAIRING = {
   expires_at: NOW + 86_400,
   last_used_at: NOW,
   expired: false,
+  vault_id: VAULT_A,
 };
 
 const BINARY = "/Applications/BastionVault.app/Contents/MacOS/bastion-vault-gui";
@@ -78,6 +81,7 @@ function calls(cmd: string) {
 describe("McpAssistantsPanel", () => {
   let pairings: unknown[];
   let status: McpServerStatus;
+  let vaultIdentity: () => Promise<unknown>;
   let setEnabled: (args: { enabled: boolean }) => Promise<unknown>;
 
   beforeEach(() => {
@@ -85,6 +89,7 @@ describe("McpAssistantsPanel", () => {
     for (const k of Object.keys(handlers)) delete handlers[k];
     pairings = [PAIRING];
     status = OFF;
+    vaultIdentity = () => Promise.resolve(VAULT_A);
     setEnabled = ({ enabled }) => {
       status = enabled ? RUNNING : OFF;
       return Promise.resolve(status);
@@ -103,6 +108,13 @@ describe("McpAssistantsPanel", () => {
           return setEnabled(args as { enabled: boolean });
         case "mcp_revoke_pairing":
           pairings = [];
+          return Promise.resolve();
+        case "mcp_vault_identity":
+          return vaultIdentity();
+        case "mcp_rebind_pairing":
+          pairings = (pairings as { id: string }[]).map((p) =>
+            p.id === (args as { id: string }).id ? { ...p, vault_id: VAULT_A } : p,
+          );
           return Promise.resolve();
         default:
           return Promise.resolve({});
@@ -270,9 +282,93 @@ describe("McpAssistantsPanel", () => {
   it("never asks for, or renders, a token", async () => {
     await mount();
     await screen.findByText("claude-desktop 1.2.3");
-    const read = new Set(["mcp_list_pairings", "mcp_pairings_path", "mcp_server_status", "mcp_client_setup"]);
+    const read = new Set([
+      "mcp_list_pairings",
+      "mcp_pairings_path",
+      "mcp_server_status",
+      "mcp_client_setup",
+      "mcp_vault_identity",
+    ]);
     const commands = mockInvoke.mock.calls.map((c) => c[0] as string);
     expect(commands.every((c) => read.has(c))).toBe(true);
     expect(document.body.textContent ?? "").not.toMatch(/bearer\s+[a-f0-9]{16,}/i);
+  });
+
+  // ── T548: one vault per pairing ─────────────────────────────────────────
+
+  const section = (name: RegExp | string) => screen.getByRole("region", { name });
+
+  it("groups assistants by vault, this vault first and highlighted, with each one's permissions", async () => {
+    pairings = [
+      { ...PAIRING, id: "a".repeat(32), client_name: "here", connect_allowed: true },
+      { ...PAIRING, id: "b".repeat(32), client_name: "there", vault_id: VAULT_B, destructive_allowed: true },
+      { ...PAIRING, id: "c".repeat(32), client_name: "legacy", vault_id: null },
+    ];
+    await mount();
+    await screen.findByText("here 1.2.3");
+    const regions = screen.getAllByRole("region");
+    expect(regions.map((r) => r.getAttribute("aria-label"))).toEqual([
+      `Vault ${VAULT_A}`,
+      `Vault ${VAULT_B}`,
+      "Unassigned assistants",
+    ]);
+    const here = section(`Vault ${VAULT_A}`);
+    expect(here).toHaveAttribute("data-active", "true");
+    expect(here).toHaveTextContent("This vault");
+    expect(here).toHaveTextContent("here 1.2.3");
+    expect(here).not.toHaveTextContent("there 1.2.3");
+    // Permissions: tools by name, scope, reveal, writes, sessions, expiry.
+    expect(here).toHaveTextContent("bv_kv_read_metadata, bv_kv_list");
+    expect(here).toHaveTextContent("secret/metadata/ai/*");
+    expect(here).toHaveTextContent("Sessions");
+    expect(here).toHaveTextContent("Until");
+    const there = section(`Vault ${VAULT_B}`);
+    expect(there).not.toHaveAttribute("data-active");
+    expect(there).toHaveTextContent("Another vault");
+    expect(there).toHaveTextContent("there 1.2.3");
+    const legacy = section("Unassigned assistants");
+    expect(legacy).toHaveTextContent("Not used");
+    expect(legacy).toHaveTextContent("legacy 1.2.3");
+    // Only an unassigned grant can be re-bound; a bound one cannot be moved.
+    expect(screen.getAllByRole("button", { name: /re-bind/i })).toHaveLength(1);
+  });
+
+  it("re-binds an unassigned assistant to this vault only after confirmation, naming no vault itself", async () => {
+    const user = userEvent.setup();
+    pairings = [{ ...PAIRING, id: "c".repeat(32), client_name: "legacy", vault_id: null }];
+    await mount();
+    await screen.findByText("legacy 1.2.3");
+    expect(section("Unassigned assistants")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /re-bind/i }));
+    expect(calls("mcp_rebind_pairing")).toHaveLength(0);
+    expect(screen.getByText(new RegExp(`signed in to \\(${VAULT_A}\\)`))).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /bind to this vault/i }));
+
+    await waitFor(() => expect(calls("mcp_rebind_pairing")).toHaveLength(1));
+    // The host picks the vault from the session; the window sends the id alone.
+    expect(calls("mcp_rebind_pairing")[0][1]).toEqual({ id: "c".repeat(32) });
+    await waitFor(() => expect(section(`Vault ${VAULT_A}`)).toHaveTextContent("legacy 1.2.3"));
+    expect(screen.queryByRole("region", { name: "Unassigned assistants" })).not.toBeInTheDocument();
+  });
+
+  it("highlights no vault and offers no re-bind when it cannot tell which vault this is", async () => {
+    vaultIdentity = () => Promise.reject({ message: "no vault session is unlocked" });
+    pairings = [PAIRING, { ...PAIRING, id: "c".repeat(32), client_name: "legacy", vault_id: null }];
+    await mount();
+    await screen.findByText("legacy 1.2.3");
+    expect(screen.getByText(/could not tell which vault you are signed in to/i)).toBeInTheDocument();
+    expect(screen.queryByText("This vault")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /re-bind/i })).toBeDisabled();
+  });
+
+  it("says a grant for another vault is only removed from this machine", async () => {
+    const user = userEvent.setup();
+    pairings = [{ ...PAIRING, vault_id: VAULT_B }];
+    await mount();
+    await screen.findByText("claude-desktop 1.2.3");
+    await user.click(screen.getByRole("button", { name: /^revoke$/i }));
+    await user.click(screen.getAllByRole("button", { name: /^revoke$/i }).pop()!);
+    expect(await screen.findByText(/removed claude-desktop from this machine/i)).toBeInTheDocument();
   });
 });

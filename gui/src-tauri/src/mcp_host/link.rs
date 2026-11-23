@@ -13,11 +13,10 @@
 //! started for (same mode, same vault, same token). If it is not -- signed
 //! out, locked, another vault -- the call is refused and the server is
 //! stopped: a server never carries one session's token to another vault, or
-//! mints from a session that has ended. Approvals are a different matter:
-//! a pairing is per client, uid and transport (as the CLI's are), not per
-//! vault, so an approved client is served under whichever session the app
-//! later runs -- within that session's own policies. The consent dialog says
-//! which vault is asking.
+//! mints from a session that has ended. Approvals are per vault too (T548):
+//! a pairing is matched only for the vault it was approved against (its MCP
+//! identity, [`vault_identity_of`]), so a client approved for one vault is
+//! asked about afresh when the app serves another.
 
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -31,9 +30,10 @@ use bv_client::{Backend, Operation};
 use bv_mcp::{
     local::{
         exchange_request_body, mfa_begin_body, mfa_begin_error, mfa_preflight_from_begin, mfa_verify_body,
-        minted_token_from_exchange, operator_namespace_from_lookup, ticket_from_verify, vault_error_text, ForwardError,
-        McpCallRef, MfaBeginError, MfaFactor, MfaPreflight, MintedToken, VaultLink, CONNECT_MFA_BEGIN_PATH,
-        CONNECT_MFA_VERIFY_PATH, NAMESPACE_HEADER, TOKEN_LOOKUP_SELF_PATH,
+        minted_token_from_exchange, operator_namespace_from_lookup, ticket_from_verify, vault_error_text,
+        vault_id_from_answer, vault_identity_request_body, ForwardError, McpCallRef, MfaBeginError, MfaFactor,
+        MfaPreflight, MintedToken, VaultLink, CONNECT_MFA_BEGIN_PATH, CONNECT_MFA_VERIFY_PATH, NAMESPACE_HEADER,
+        TOKEN_LOOKUP_SELF_PATH,
     },
     pairing::{hash_token, new_pairing_token, now_secs, PairingRecord},
     request_state::SingleUseGuard,
@@ -268,7 +268,48 @@ async fn operator_call_embedded(
     }
 }
 
+/// The MCP identity of the session's vault (T548), asked as the session:
+/// `POST /v2/mcp/token` with `vault_identity` on a remote vault (so its
+/// `mcp.enabled` and TLS gates apply, as for the exchange), the logical
+/// `sys/mcp/token` on an embedded one. Blocks; never call it from an async
+/// task.
+pub fn vault_identity_of(session: &SessionSnapshot) -> Result<String, String> {
+    let body = vault_identity_request_body();
+    match &session.route {
+        VaultRoute::Remote(client) => {
+            let mut client = client.clone().with_token(&session.token);
+            let answer = client.request_write("v2/mcp/token", Some(body));
+            client.token.zeroize();
+            let resp = answer.map_err(|e| format!("could not reach the vault: {e}"))?;
+            if resp.response_status != 200 {
+                return Err(vault_error_text(&resp.response_data, resp.response_status));
+            }
+            vault_id_from_answer(&resp.response_data.unwrap_or(Value::Null))
+        }
+        VaultRoute::Embedded { backend, .. } => {
+            let answer = tauri::async_runtime::block_on(backend.handle_with_namespace(
+                Operation::Write,
+                "sys/mcp/token",
+                Some(body),
+                &session.token,
+                None,
+            ));
+            match answer {
+                Err(e) => {
+                    Err(format!("the vault refused the identity request: {}", sanitize_for_model(&e.to_string())))
+                }
+                Ok(resp) => vault_id_from_answer(&Value::Object(resp.and_then(|r| r.data).unwrap_or_default())),
+            }
+        }
+    }
+}
+
 impl VaultLink for GuiVaultLink {
+    fn vault_id(&self) -> Result<String, String> {
+        let session = self.session()?;
+        self.note(vault_identity_of(&session))
+    }
+
     fn exchange_pairing(
         &self,
         record: &PairingRecord,

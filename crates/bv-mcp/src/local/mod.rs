@@ -48,8 +48,9 @@ pub mod uds;
 pub use link::{
     exchange_request_body, mfa_begin_body, mfa_begin_error, mfa_preflight_from_begin, mfa_verify_body,
     minted_token_from_exchange, normalize_namespace, operator_namespace_from_lookup, ticket_from_verify,
-    vault_error_text, ForwardError, McpCallRef, MfaBeginError, MfaPreflight, MintedToken, VaultLink,
-    CONNECT_MFA_BEGIN_PATH, CONNECT_MFA_VERIFY_PATH, NAMESPACE_HEADER, TOKEN_LOOKUP_SELF_PATH,
+    vault_error_text, vault_id_from_answer, vault_identity_request_body, ForwardError, McpCallRef, MfaBeginError,
+    MfaPreflight, MintedToken, VaultLink, CONNECT_MFA_BEGIN_PATH, CONNECT_MFA_VERIFY_PATH, NAMESPACE_HEADER,
+    TOKEN_LOOKUP_SELF_PATH, VAULT_IDENTITY_FIELD,
 };
 pub use operator::{
     build_record, normalize_grant, render_session_detail, ConfirmRequest, MfaChallenge, MfaFactor, MfaStep,

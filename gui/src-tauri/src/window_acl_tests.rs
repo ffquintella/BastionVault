@@ -219,6 +219,7 @@ const NEVER_IN_A_SESSION_WINDOW: &[&str] = &[
     "mcp_prompt_pending",
     "mcp_prompt_answer",
     "mcp_revoke_pairing",
+    "mcp_rebind_pairing",
 ];
 
 /// The main window's plugin permissions before T110, unchanged by it.

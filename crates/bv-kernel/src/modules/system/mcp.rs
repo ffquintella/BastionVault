@@ -254,6 +254,25 @@ pub struct McpPairingNamespace {
 
 pub const MCP_PAIRING_NAMESPACE_PREFIX: &str = "mcp/pairing-namespaces/";
 
+/// The vault's MCP identity (T548): a random, non-secret id generated the
+/// first time a gatekeeper asks for it and never changed. A local pairing
+/// names the vault it was approved for, and the exchange mints only for one
+/// that names this one. In the system barrier view, so every HA node shares it.
+pub const MCP_VAULT_IDENTITY_KEY: &str = "mcp/vault-identity";
+const MCP_VAULT_IDENTITY_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpVaultIdentity {
+    pub version: u32,
+    pub vault_id: String,
+    pub created_at: u64,
+}
+
+/// A pairing that names no vault (approved before pairings were bound).
+pub const MCP_PAIRING_VAULT_UNBOUND: &str = "mcp_pairing_vault_unbound";
+/// A pairing approved for another vault, or a vault with no identity yet.
+pub const MCP_PAIRING_VAULT_MISMATCH: &str = "mcp_pairing_vault_mismatch";
+
 /// The stable refusal for an MCP token whose namespace cannot be used: a
 /// binding that does not normalize, a namespace that was deleted or that the
 /// vault cannot resolve. Never answered by falling back to root.
@@ -359,6 +378,22 @@ fn check_pairing_connect_grant(pairing: &Map<String, Value>, tool_allowlist: &[S
         }
     }
     Ok(connect_allowed)
+}
+
+/// Whether `auth` is an operator session, the only kind a pairing exchange
+/// accepts: a login that names a human.
+///
+/// A human login stamps `entity_id` and/or `username`; tokens issued before
+/// entity resolution was wired through login carry only the latter. AppRole
+/// (`role_name`) tokens are never an operator session.
+// Behaviour-preserving extraction: the machine-identity rule is added in the
+// follow-up change, with its tests.
+fn is_operator_session(auth: &Auth) -> bool {
+    let has_human_identity =
+        [ENTITY_ID_META, USERNAME_META].iter().any(|k| auth.metadata.get(*k).is_some_and(|s| !s.is_empty()));
+    has_human_identity
+        && !auth.metadata.contains_key("role_name")
+        && auth.metadata.get(SPIFFE_ID_META).is_none_or(|s| s.is_empty())
 }
 
 /// The operator record a pairing binding carries (`McpBinding::operator`),
@@ -553,6 +588,76 @@ async fn get_app(req: &Request, name: &str) -> Result<Option<McpApp>, RvError> {
 async fn put_app(req: &Request, app: &McpApp) -> Result<(), RvError> {
     let entry = StorageEntry::new(&format!("{MCP_APP_PREFIX}{}", app.name), app)?;
     req.storage_put(&entry).await
+}
+
+/// This vault's MCP identity, if it has one. A record this build cannot read
+/// is an error, never "no identity": an exchange must not be judged against
+/// a record it misread.
+async fn read_vault_identity(req: &Request) -> Result<Option<String>, RvError> {
+    let Some(entry) = req.storage_get(MCP_VAULT_IDENTITY_KEY).await? else {
+        return Ok(None);
+    };
+    let unreadable = || crate::bv_error_response_status!(500, "the vault's MCP identity record is unreadable");
+    let record: McpVaultIdentity = serde_json::from_slice(&entry.value).map_err(|_| unreadable())?;
+    if record.version != MCP_VAULT_IDENTITY_VERSION || !valid_pairing_id(&record.vault_id) {
+        return Err(unreadable());
+    }
+    Ok(Some(record.vault_id))
+}
+
+/// This vault's MCP identity, generated and stored on first use. Re-read
+/// after the write, so a first use racing another node reports the record
+/// that was kept -- the one every exchange is compared against.
+async fn vault_identity_or_create(req: &Request) -> Result<String, RvError> {
+    if let Some(known) = read_vault_identity(req).await? {
+        return Ok(known);
+    }
+    let record = McpVaultIdentity {
+        version: MCP_VAULT_IDENTITY_VERSION,
+        vault_id: crate::utils::generate_uuid(),
+        created_at: now_secs(),
+    };
+    req.storage_put(&StorageEntry::new(MCP_VAULT_IDENTITY_KEY, &record)?).await?;
+    read_vault_identity(req)
+        .await?
+        .ok_or_else(|| crate::bv_error_response_status!(500, "the vault's MCP identity could not be stored"))
+}
+
+/// The optional `vault_identity` switch of an exchange body, read strictly.
+fn vault_identity_requested(req: &Request) -> Result<bool, RvError> {
+    match req.get_data("vault_identity") {
+        Ok(Value::Bool(b)) => Ok(b),
+        Ok(Value::Null) | Err(RvError::ErrRequestFieldNotFound | RvError::ErrRequestNoData) => Ok(false),
+        Ok(_) | Err(_) => Err(crate::bv_error_response_status!(400, "`vault_identity` must be a boolean")),
+    }
+}
+
+/// T548: the vault a pairing was approved for must be this one. Judged by
+/// the vault against its own stored identity, never by the gatekeeper's
+/// word alone: a pairing naming no vault, another vault, or a vault when
+/// this one has none, is refused, and nothing is written first.
+async fn check_pairing_vault(req: &Request, pairing: &Map<String, Value>) -> Result<String, RvError> {
+    let claimed = match pairing.get("vault_id") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) if valid_pairing_id(s) => Some(s.as_str()),
+        Some(_) => return Err(crate::bv_error_response_status!(400, "pairing.vault_id must be a vault identity")),
+    };
+    let Some(claimed) = claimed else {
+        return Err(crate::bv_error_response_status!(
+            403,
+            "{}: this pairing names no vault (it was approved before pairings were bound to one); re-bind it to \
+             this vault in the desktop app or pair the client again",
+            MCP_PAIRING_VAULT_UNBOUND
+        ));
+    };
+    match read_vault_identity(req).await? {
+        Some(own) if own == claimed => Ok(own),
+        _ => Err(crate::bv_error_response_status!(
+            403,
+            "{}: this pairing was approved for another vault; pair the client with this vault",
+            MCP_PAIRING_VAULT_MISMATCH
+        )),
+    }
 }
 
 async fn index_token(req: &Request, entry: &McpTokenIndexEntry) -> Result<(), RvError> {
@@ -998,6 +1103,21 @@ impl SystemBackend {
         if auth.mcp_binding.is_some() {
             return Err(crate::bv_error_response!("an MCP-bound token cannot itself exchange for another"));
         }
+        // T548: which vault this is, for a gatekeeper about to match or bind
+        // a pairing. Same grant as the exchange; mints nothing. Answered to
+        // root too, which may read it anyway.
+        if vault_identity_requested(req)? {
+            if req.get_data("app").is_ok() || req.get_data("pairing").is_ok() {
+                return Err(crate::bv_error_response_status!(
+                    400,
+                    "`vault_identity` cannot be combined with `app` or `pairing`"
+                ));
+            }
+            let vault_id = vault_identity_or_create(req).await?;
+            let mut data = Map::new();
+            data.insert("vault_id".to_string(), Value::String(vault_id));
+            return Ok(Some(Response::data_response(Some(data))));
+        }
         if auth.policies.iter().any(|p| p == "root") {
             return Err(crate::bv_error_response!("mcp/token may not be exchanged from a root token"));
         }
@@ -1065,16 +1185,7 @@ impl SystemBackend {
         catalogue_hash: String,
         requested_namespace: Option<String>,
     ) -> Result<Option<Response>, RvError> {
-        // A human login stamps `entity_id` and/or `username`; tokens issued
-        // before entity resolution was wired through login carry only the
-        // latter. AppRole (`role_name`) and machine (`spiffe_id`) tokens are
-        // excluded either way.
-        let has_human_identity =
-            [ENTITY_ID_META, USERNAME_META].iter().any(|k| auth.metadata.get(*k).is_some_and(|s| !s.is_empty()));
-        let is_operator_session = has_human_identity
-            && !auth.metadata.contains_key("role_name")
-            && auth.metadata.get(SPIFFE_ID_META).is_none_or(|s| s.is_empty());
-        if !is_operator_session {
+        if !is_operator_session(auth) {
             return Err(crate::bv_error_response_status!(
                 403,
                 "mcp_pairing_requires_operator_session: pairing needs an entity-bound user login, not an AppRole or machine token"
@@ -1099,6 +1210,8 @@ impl SystemBackend {
         // beside `reveal_allowed` (owner decision): such a grant holds the
         // whole lethal trifecta, and per-call confirmation is what bounds it.
         let connect_allowed = check_pairing_connect_grant(&pairing, &tool_allowlist)?;
+        // Before anything is resolved or written for this pairing.
+        let vault_id = check_pairing_vault(req, &pairing).await?;
         let mut operator = operator_ref_from_auth(auth)?;
         // Follow the operator's session (T457): the token is bound where the
         // exchanging session is, or where it asked to narrow to (Phase 2),
@@ -1192,7 +1305,7 @@ impl SystemBackend {
                 "accessor": token_accessor(&minted.client_token),
                 "policies": minted.policies,
                 "lease_duration": ttl_secs,
-                "metadata": { "mcp_kind": "pairing", "mcp_name": id, "namespace": namespace },
+                "metadata": { "mcp_kind": "pairing", "mcp_name": id, "namespace": namespace, "vault_id": vault_id },
             }),
         );
         Ok(Some(Response::data_response(Some(data))))
@@ -1501,6 +1614,55 @@ mod brokered_session_tests {
         // A session tool without the grant.
         let err = check_pairing_connect_grant(&grant(json!({})), &ssh).unwrap_err().to_string();
         assert!(err.contains("bv_resource_ssh_exec") && err.contains("requires pairing.connect_allowed"), "{err}");
+    }
+
+    fn session(meta: &[(&str, &str)]) -> Auth {
+        let mut auth = Auth::default();
+        for (k, v) in meta {
+            auth.metadata.insert((*k).to_string(), (*v).to_string());
+        }
+        auth
+    }
+
+    /// A server that requires FerroGate machine identity hands the operator a
+    /// combined session: the attesting machine (`spiffe_id`) *and* the user
+    /// (`username`, `entity_id`). That is still the operator, so it may pair.
+    /// Only a token with no human behind it, or an AppRole, may not.
+    #[test]
+    fn an_operator_session_may_also_be_machine_bound() {
+        let plain_user = session(&[(USERNAME_META, "felipe"), (ENTITY_ID_META, "e-1")]);
+        assert!(is_operator_session(&plain_user), "a plain user login is an operator session");
+
+        let user_on_machine = session(&[
+            (USERNAME_META, "felipe"),
+            (ENTITY_ID_META, "e-1"),
+            (SPIFFE_ID_META, "spiffe://fgv.br/ws/felipe"),
+        ]);
+        assert!(is_operator_session(&user_on_machine), "a user session attested by a machine is still the operator");
+
+        let legacy_username_only = session(&[(USERNAME_META, "felipe"), (SPIFFE_ID_META, "spiffe://fgv.br/ws/felipe")]);
+        assert!(is_operator_session(&legacy_username_only), "username alone names a human, machine-bound or not");
+    }
+
+    #[test]
+    fn a_session_with_no_human_behind_it_may_not_pair() {
+        let machine_only = session(&[(SPIFFE_ID_META, "spiffe://fgv.br/ws/felipe")]);
+        assert!(!is_operator_session(&machine_only), "a machine token names no human");
+
+        let blank_identity = session(&[(USERNAME_META, ""), (ENTITY_ID_META, ""), (SPIFFE_ID_META, "spiffe://x")]);
+        assert!(!is_operator_session(&blank_identity), "empty identity values do not count as a human");
+
+        assert!(!is_operator_session(&Auth::default()), "an anonymous token is not an operator");
+
+        let approle = session(&[("role_name", "ci"), (USERNAME_META, "ci-bot"), (ENTITY_ID_META, "e-9")]);
+        assert!(!is_operator_session(&approle), "an AppRole token never pairs, even with a human-looking name");
+
+        let approle_on_machine = session(&[
+            ("role_name", "ci"),
+            (USERNAME_META, "ci-bot"),
+            (SPIFFE_ID_META, "spiffe://fgv.br/ws/ci"),
+        ]);
+        assert!(!is_operator_session(&approle_on_machine), "machine binding does not turn an AppRole into an operator");
     }
 
     #[test]

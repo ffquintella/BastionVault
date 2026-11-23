@@ -159,6 +159,12 @@ pub struct McpPairing {
     /// Where this pairing's live token is bound, as the vault answered its
     /// exchange (`""` = root). `None`: no live token, or the vault did not say.
     pub token_namespace: Option<String>,
+    /// May open brokered sessions (`features/mcp-brokered-sessions.md` §9).
+    pub connect_allowed: bool,
+    /// The vault this pairing was approved for (T548), compared with
+    /// [`mcp_vault_identity`] to group the list. `None`: approved before
+    /// pairings were bound -- never used until re-bound or revoked.
+    pub vault_id: Option<String>,
 }
 
 fn str_list(v: Option<&Value>) -> Vec<String> {
@@ -359,20 +365,59 @@ pub fn mcp_list_pairings(state: State<'_, AppState>) -> CmdResult<Vec<McpPairing
             approved_at: r.approved_at,
             expires_at: r.expires_at,
             last_used_at: r.last_used_at,
+            connect_allowed: r.connect_allowed,
+            vault_id: r.vault_id,
         })
         .collect())
+}
+
+/// The MCP identity of the vault this window's session is signed in to,
+/// asked of that vault as the session (T548). Never chosen by the frontend:
+/// the commands below that need it ask for it themselves.
+async fn active_vault_identity(state: &AppState) -> Result<String, String> {
+    let (_, session) =
+        crate::mcp_host::link::current_session(state).await.ok_or("no vault session is unlocked".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || crate::mcp_host::link::vault_identity_of(&session))
+        .await
+        .map_err(|e| format!("could not ask the vault which vault it is: {e}"))?
+}
+
+/// Which vault the AI Assistants page is looking at, for grouping and
+/// highlighting. A non-secret identifier; the frontend never sends it back.
+#[tauri::command]
+pub async fn mcp_vault_identity(state: State<'_, AppState>) -> CmdResult<String> {
+    Ok(active_vault_identity(&state).await?)
+}
+
+/// Binds the unassigned pairing `id` to the vault this window is signed in
+/// to -- the operator's explicit decision (T548). The vault is the one the
+/// session reaches, asked here, never an id from the frontend; a pairing
+/// already bound to a vault is refused by the store.
+#[tauri::command]
+pub async fn mcp_rebind_pairing(webview: Webview, state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    main_window_only(&webview)?;
+    let vault_id = active_vault_identity(&state).await?;
+    PairingStore::at(PairingStore::default_path()?).rebind(&id, &vault_id)?;
+    Ok(())
 }
 
 /// Removes the local record first -- so no new token can be minted even if
 /// the vault is unreachable -- then revokes the pairing's tokens on the
 /// vault. A vault failure after the local removal is reported, not hidden:
-/// the orphaned tokens then simply expire.
+/// the orphaned tokens then simply expire. A pairing bound to another vault
+/// (T548) had nothing minted by this one, so this one is not asked; its
+/// tokens on its own vault live only in that server's memory and expire.
 #[tauri::command]
 pub async fn mcp_revoke_pairing(state: State<'_, AppState>, id: String) -> CmdResult<()> {
     let store = PairingStore::at(PairingStore::default_path()?);
     let Some(record) = store.remove(&id)? else {
         return Err(format!("no pairing with id `{id}`").into());
     };
+    if let Some(bound) = &record.vault_id {
+        if active_vault_identity(&state).await.is_ok_and(|active| active != *bound) {
+            return Ok(());
+        }
+    }
     make_request(&state, Operation::Delete, format!("sys/mcp/pairings/{id}"), None).await.map_err(|e| {
         format!(
             "the pairing is removed from this machine, but the vault did not revoke its tokens ({e}); they expire on their own within {} hours",

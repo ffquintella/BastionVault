@@ -9,7 +9,7 @@ use crate::{
     dispatcher::SessionCall,
     pairing::{
         hash_token, new_pairing_id, new_pairing_token, PairingRecord, Transport, DEFAULT_PAIRING_LIFETIME_SECS,
-        MAX_TOKEN_TTL_SECS,
+        MAX_TOKEN_TTL_SECS, RECORD_VERSION,
     },
     sanitize::{escape_for_display, sanitize_for_model},
 };
@@ -265,12 +265,19 @@ pub fn normalize_grant(grant: PairingGrant) -> Result<PairingGrant, String> {
     })
 }
 
-/// Builds the record for an approved pairing. Returns the loopback-HTTP
+/// Builds the record for an approved pairing, bound to `vault_id` -- the
+/// vault the approval was made against (T548). Returns the loopback-HTTP
 /// bearer too, which exists only here: the record stores its hash.
-pub fn build_record(request: &PairingRequest<'_>, grant: &PairingGrant, now: u64) -> (PairingRecord, Option<String>) {
+pub fn build_record(
+    request: &PairingRequest<'_>,
+    grant: &PairingGrant,
+    vault_id: &str,
+    now: u64,
+) -> (PairingRecord, Option<String>) {
     let token = (request.transport == Transport::LoopbackHttp).then(new_pairing_token);
     let record = PairingRecord {
-        version: 1,
+        version: RECORD_VERSION,
+        vault_id: Some(vault_id.to_string()),
         id: new_pairing_id(),
         client_name: request.client_name.to_string(),
         client_version: request.client_version.to_string(),
@@ -329,9 +336,9 @@ mod tests {
             peer_uid: None,
             namespace: Some("dti"),
         };
-        let (record, _) = build_record(&request, &normalized, 1);
+        let (record, _) = build_record(&request, &normalized, "vault-a", 1);
         assert_eq!(record.namespace.as_deref(), Some("dti/esi"), "the grant's choice, not the dialog's default");
-        let (record, _) = build_record(&request, &normalize_grant(grant()).unwrap(), 1);
+        let (record, _) = build_record(&request, &normalize_grant(grant()).unwrap(), "vault-a", 1);
         assert_eq!(record.namespace, None, "no choice: the tokens follow the session");
 
         g.namespace = Some("dti/../root".into());
@@ -369,7 +376,7 @@ mod tests {
             peer_uid: None,
             namespace: None,
         };
-        let (record, _) = build_record(&request, &both, 1);
+        let (record, _) = build_record(&request, &both, "vault-a", 1);
         assert!(record.connect_allowed && record.confirm_connect);
     }
 
@@ -484,10 +491,11 @@ mod tests {
             peer_uid: Some(7),
             namespace: None,
         };
-        let (record, bearer) = build_record(&request, &grant(), 100);
+        let (record, bearer) = build_record(&request, &grant(), "vault-a", 100);
         assert!(bearer.is_none() && record.pairing_token_hash.is_none());
         assert_eq!((record.peer_uid, record.transport.as_str()), (Some(7), "uds"));
         assert_eq!(record.expires_at, Some(100 + DEFAULT_PAIRING_LIFETIME_SECS));
+        assert_eq!((record.vault_id.as_deref(), record.version), (Some("vault-a"), RECORD_VERSION), "T548");
 
         let request = PairingRequest {
             client_name: "c",
@@ -496,7 +504,7 @@ mod tests {
             peer_uid: None,
             namespace: None,
         };
-        let (record, bearer) = build_record(&request, &grant(), 100);
+        let (record, bearer) = build_record(&request, &grant(), "vault-a", 100);
         let bearer = bearer.expect("loopback HTTP needs a bearer");
         assert_eq!(record.pairing_token_hash, Some(hash_token(&bearer)));
     }

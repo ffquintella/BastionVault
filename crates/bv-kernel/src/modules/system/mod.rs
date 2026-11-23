@@ -1511,7 +1511,8 @@ impl SystemBackend {
                     pattern: "mcp/token$",
                     fields: {
                         "app": { field_type: FieldType::Str, required: false, description: "MCP app name to exchange for (network mode). Mutually exclusive with `pairing`." },
-                        "pairing": { field_type: FieldType::Map, required: false, description: "Local-pairing grant: id, client_name, client_version, tool_allowlist, path_scope, reveal_allowed, destructive_allowed, ttl_secs. Mutually exclusive with `app`." },
+                        "pairing": { field_type: FieldType::Map, required: false, description: "Local-pairing grant: id, client_name, client_version, tool_allowlist, path_scope, reveal_allowed, destructive_allowed, ttl_secs, and vault_id (required: the vault identity the pairing was approved for; any other, or none, is refused with 403). Mutually exclusive with `app`." },
+                        "vault_identity": { field_type: FieldType::Bool, required: false, description: "true: answer this vault's MCP identity ({vault_id}) instead of minting; generated on first use. Not combinable with `app` or `pairing`." },
                         "policies": { field_type: FieldType::CommaStringSlice, required: false, description: "Requested policies; must be a subset of the caller's own." },
                         "ttl_secs": { field_type: FieldType::Int, required: false, description: "Requested TTL in seconds; clamped to the app's configured max." },
                         "catalogue_hash": { field_type: FieldType::Str, required: false, description: "BLAKE3 tools/list hash to stamp on the minted binding." },

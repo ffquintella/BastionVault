@@ -26,7 +26,9 @@ use crate::{
     catalogue::{self, ToolMeta},
     dispatcher,
     jsonrpc::{JsonRpcError, JsonRpcResponse, CONNECT_TICKET_META_KEY, OPERATOR_CONFIRMATION_META_KEY},
-    pairing::{find_matching, hash_token, now_secs, PairingRecord, PairingStore, Transport, MAX_TOKEN_TTL_SECS},
+    pairing::{
+        find_matching, hash_token, now_secs, valid_vault_id, PairingRecord, PairingStore, Transport, MAX_TOKEN_TTL_SECS,
+    },
     sanitize::sanitize_for_model,
 };
 
@@ -83,6 +85,10 @@ pub struct LocalServer {
     /// The host's narrowing request for every exchange (`bvault mcp serve
     /// --namespace`, T457 Phase 2), canonical. The vault validates it.
     requested_namespace: Option<String>,
+    /// The serving vault's MCP identity, asked of the link once (T548). A
+    /// server serves one vault for its whole life: both hosts stop it when
+    /// the session moves to another.
+    vault_id: Mutex<Option<String>>,
 }
 
 /// What one line-transport connection has established about its client.
@@ -306,7 +312,37 @@ impl LocalServer {
             notice: default_notice,
             closed: AtomicBool::new(false),
             requested_namespace: None,
+            vault_id: Mutex::new(None),
         }
+    }
+
+    /// The MCP identity of the vault this server serves, which every pairing
+    /// is matched against and every new one bound to (T548). Asked of the
+    /// vault once, as the operator; an answer that is not a vault identity
+    /// is refused, so nothing is matched against a guess.
+    pub fn active_vault_id(&self) -> Result<String, String> {
+        if let Some(known) = lock(&self.vault_id).clone() {
+            return Ok(known);
+        }
+        let asked = self.link.vault_id()?;
+        if !valid_vault_id(&asked) {
+            return Err("the vault reported a malformed identity".to_string());
+        }
+        *lock(&self.vault_id) = Some(asked.clone());
+        Ok(asked)
+    }
+
+    fn serving_vault(&self) -> Result<String, Refusal> {
+        self.active_vault_id().map_err(|e| {
+            Refusal::new(
+                -32603,
+                "mcp_vault_identity_unavailable",
+                format!(
+                    "could not learn which vault this server serves, so no pairing can be used: {}",
+                    sanitize_for_model(&e)
+                ),
+            )
+        })
     }
 
     /// Asks the vault to bind every token this server mints to `namespace`
@@ -511,6 +547,12 @@ impl LocalServer {
 
     fn resolve_pairing(&self, conn: &ConnInfo, identity: Option<(String, String)>) -> Result<PairingRecord, Refusal> {
         if let Some(record) = &conn.preauthenticated {
+            // The transport matched the bearer against this vault already;
+            // checked again here so no transport can hand over another's.
+            let vault_id = self.serving_vault()?;
+            if !record.is_bound_to(&vault_id) {
+                return Err(other_vault_refusal());
+            }
             return Ok(record.clone());
         }
         let Some((client_name, client_version)) = identity else {
@@ -520,11 +562,14 @@ impl LocalServer {
                 "request `_meta` must carry io.modelcontextprotocol/clientInfo with a name",
             ));
         };
+        // Before the store is read: a pairing is only ever matched, or
+        // created, for a vault this server has positively identified.
+        let vault_id = self.serving_vault()?;
 
         let _serialised = lock(&self.pairing_lock);
         let now = (self.clock)();
         let records = self.store.load().map_err(|e| Refusal::new(-32603, "mcp_pairing_store_error", e.to_string()))?;
-        if let Some(found) = find_matching(&records, &client_name, conn.peer_uid, conn.transport, now) {
+        if let Some(found) = find_matching(&records, &client_name, conn.peer_uid, conn.transport, &vault_id, now) {
             return Ok(found.clone());
         }
         if conn.transport == Transport::LoopbackHttp {
@@ -558,7 +603,7 @@ impl LocalServer {
                 Err(Refusal::new(-32001, "mcp_pairing_denied", "the operator declined to pair this client"))
             }
             Some(PairingDecision::Approved(grant)) => {
-                let (record, _no_inline_bearer) = build_record(&request, &grant, now);
+                let (record, _no_inline_bearer) = build_record(&request, &grant, &vault_id, now);
                 self.store
                     .upsert(record.clone())
                     .map_err(|e| Refusal::new(-32603, "mcp_pairing_store_error", e.to_string()))?;
@@ -778,6 +823,11 @@ impl LocalServer {
                 }
             }
         }
+        // Never ask the vault to mint for a pairing approved for another one
+        // (the vault refuses it too; this keeps the request from being sent).
+        if !record.is_bound_to(&self.serving_vault()?) {
+            return Err(other_vault_refusal());
+        }
         let requested = self.exchange_namespace(record)?;
         let ttl = exchange_ttl(record, now);
         let minted = self
@@ -817,6 +867,15 @@ impl LocalServer {
         let _ = self.store.touch(&record.id, now);
         Ok((token, namespace))
     }
+}
+
+fn other_vault_refusal() -> Refusal {
+    Refusal::new(
+        -32001,
+        "mcp_pairing_other_vault",
+        "this pairing was not approved for the vault this server serves; pair the client with this vault, \
+         or re-bind an unassigned pairing to it in the desktop app",
+    )
 }
 
 /// How a namespace is named to an operator or a client: `root` for `""`.
@@ -928,7 +987,15 @@ pub(super) mod tests {
         pub(crate) answer_namespace: Mutex<Option<Option<String>>>,
         /// The namespace each MFA begin and verify was sent in.
         pub(crate) mfa_namespaces: Mutex<Vec<Option<String>>>,
+        /// What `vault_id` answers; `None` is [`TEST_VAULT`].
+        pub(crate) vault_answer: Mutex<Option<Result<String, String>>>,
+        pub(crate) vault_asks: AtomicUsize,
     }
+
+    /// The identity of the vault a [`FakeLink`] stands for, unless told
+    /// otherwise.
+    pub(crate) const TEST_VAULT: &str = "0f1e2d3c-4b5a-4968-8776-a5b4c3d2e1f0";
+    pub(crate) const OTHER_VAULT: &str = "11111111-2222-4333-8444-555555555555";
 
     impl VaultLink for Arc<FakeLink> {
         fn exchange_pairing(
@@ -991,6 +1058,11 @@ pub(super) mod tests {
 
         fn operator_namespace(&self) -> Option<String> {
             lock(&self.namespace).clone()
+        }
+
+        fn vault_id(&self) -> Result<String, String> {
+            self.vault_asks.fetch_add(1, Ordering::SeqCst);
+            lock(&self.vault_answer).clone().unwrap_or_else(|| Ok(TEST_VAULT.to_string()))
         }
     }
 
@@ -1183,6 +1255,96 @@ pub(super) mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].client_name, "claude-desktop");
         assert_eq!(records[0].tool_allowlist, grant().tool_allowlist);
+        assert_eq!(records[0].vault_id.as_deref(), Some(TEST_VAULT), "bound to the vault it was approved against");
+        assert_eq!(rig.link.vault_asks.load(Ordering::SeqCst), 1, "the vault is identified once per server");
+    }
+
+    /// A stored grant for `claude-desktop` over stdio, bound to `vault_id`.
+    fn stored(rig: &Rig, id: &str, vault_id: Option<&str>) -> PairingRecord {
+        let request = PairingRequest {
+            client_name: "claude-desktop",
+            client_version: "9.9",
+            transport: Transport::Stdio,
+            peer_uid: None,
+            namespace: None,
+        };
+        let (mut record, _) = build_record(&request, &grant(), vault_id.unwrap_or(TEST_VAULT), (rig.server.clock)());
+        record.id = id.to_string();
+        record.vault_id = vault_id.map(str::to_string);
+        rig.server.store().upsert(record.clone()).unwrap();
+        record
+    }
+
+    /// T548 regression: a grant the operator approved while this store
+    /// served another vault is not used here. Nothing is minted on it; the
+    /// operator is asked afresh, and the new grant is bound to this vault
+    /// beside the old one.
+    #[test]
+    fn a_pairing_approved_for_another_vault_is_not_used() {
+        let rig = rig("other-vault");
+        stored(&rig, "in-b", Some(OTHER_VAULT));
+        let resp = rig.server.handle_message(&stdio(), &request(1, "tools/list", json!({}))).unwrap();
+        assert_eq!(data_code(&resp), "mcp_pairing_requires_operator", "not matched, so the operator is needed");
+        assert_eq!(rig.link.exchanges.load(Ordering::SeqCst), 0, "nothing minted on another vault's grant");
+
+        *lock(&rig.prompt.approve) = Some(Some(PairingDecision::Approved(grant())));
+        let ok = rig.server.handle_message(&stdio(), &request(2, "tools/list", json!({}))).unwrap();
+        assert_eq!(ok["result"]["relayed"], json!(true));
+        let records = rig.server.store().load().unwrap();
+        assert_eq!(records.len(), 2, "the other vault's grant is kept: {records:?}");
+        let bound: Vec<_> = records.iter().map(|r| (r.id.as_str(), r.vault_id.as_deref())).collect();
+        assert!(bound.contains(&("in-b", Some(OTHER_VAULT))), "{bound:?}");
+        assert!(records.iter().any(|r| r.id != "in-b" && r.is_bound_to(TEST_VAULT)), "{bound:?}");
+    }
+
+    /// T548: a record from before vault binding is never adopted by the
+    /// vault that happens to be serving -- not matched, not exchanged, not
+    /// rewritten to it.
+    #[test]
+    fn a_legacy_pairing_is_refused_and_left_unassigned() {
+        let rig = rig("legacy");
+        stored(&rig, "legacy", None);
+        let resp = rig.server.handle_message(&stdio(), &request(1, "tools/list", json!({}))).unwrap();
+        assert_eq!(data_code(&resp), "mcp_pairing_requires_operator");
+        assert_eq!(rig.link.exchanges.load(Ordering::SeqCst), 0);
+        let records = rig.server.store().load().unwrap();
+        assert_eq!((records.len(), records[0].vault_id.as_deref()), (1, None), "still unassigned");
+
+        // Re-bound by the operator, it is used -- in this vault.
+        rig.server.store().rebind("legacy", TEST_VAULT).unwrap();
+        let ok = rig.server.handle_message(&stdio(), &request(2, "tools/list", json!({}))).unwrap();
+        assert_eq!(ok["result"]["relayed"], json!(true));
+        assert_eq!(rig.prompt.approvals_asked.load(Ordering::SeqCst), 1, "only the first, unanswered ask");
+    }
+
+    /// A transport that authenticated a bearer still cannot hand over a
+    /// pairing for another vault, or an unassigned one.
+    #[test]
+    fn a_preauthenticated_pairing_must_be_this_vaults() {
+        let rig = rig("preauth");
+        for vault in [Some(OTHER_VAULT), None] {
+            let record = stored(&rig, "pre", vault);
+            let conn = ConnInfo { transport: Transport::LoopbackHttp, peer_uid: None, preauthenticated: Some(record) };
+            let resp = rig.server.handle_message(&conn, &request(1, "tools/list", json!({}))).unwrap();
+            assert_eq!(data_code(&resp), "mcp_pairing_other_vault", "{vault:?}");
+        }
+        assert_eq!(rig.link.exchanges.load(Ordering::SeqCst), 0);
+    }
+
+    /// Without the vault's identity nothing is matched, nobody is asked and
+    /// nothing is recorded: a grant is never bound to a guess.
+    #[test]
+    fn no_vault_identity_refuses_before_the_store_or_the_operator() {
+        for answer in [Err("vault unreachable".to_string()), Ok("Not/A Vault".to_string())] {
+            let rig = rig("no-identity");
+            *lock(&rig.link.vault_answer) = Some(answer.clone());
+            *lock(&rig.prompt.approve) = Some(Some(PairingDecision::Approved(grant())));
+            let resp = rig.server.handle_message(&stdio(), &request(1, "tools/list", json!({}))).unwrap();
+            assert_eq!(data_code(&resp), "mcp_vault_identity_unavailable", "{answer:?}");
+            assert_eq!(rig.prompt.approvals_asked.load(Ordering::SeqCst), 0);
+            assert!(rig.server.store().load().unwrap().is_empty());
+            assert_eq!(rig.link.exchanges.load(Ordering::SeqCst), 0);
+        }
     }
 
     #[test]
@@ -1704,6 +1866,9 @@ pub(super) mod tests {
             fn forward(&self, _token: &str, _message: &Value) -> Result<Value, ForwardError> {
                 panic!("a call refused at shutdown must never be forwarded");
             }
+            fn vault_id(&self) -> Result<String, String> {
+                Ok(TEST_VAULT.to_string())
+            }
         }
 
         let (entered_tx, entered_rx) = mpsc::channel();
@@ -2036,6 +2201,9 @@ pub(super) mod tests {
             fn forward(&self, token: &str, message: &Value) -> Result<Value, ForwardError> {
                 self.0.forward(token, message)
             }
+            fn vault_id(&self) -> Result<String, String> {
+                self.0.vault_id()
+            }
         }
         let dir = std::env::temp_dir().join(format!("bv-mcp-local-minimal-{}", new_pairing_id()));
         let prompt = Arc::new(Scripted::default());
@@ -2075,7 +2243,8 @@ pub(super) mod tests {
     #[test]
     fn exchange_ttl_never_outlives_the_pairing() {
         let mut record = PairingRecord {
-            version: 1,
+            version: crate::pairing::RECORD_VERSION,
+            vault_id: Some(TEST_VAULT.into()),
             id: "x".into(),
             client_name: "c".into(),
             client_version: "".into(),

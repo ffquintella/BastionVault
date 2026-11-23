@@ -4556,6 +4556,10 @@ export const mcpCatalogue = () => invoke<McpCatalogue>("mcp_catalogue");
 export const mcpPairingsPath = () => invoke<string>("mcp_pairings_path");
 export const mcpListPairings = () => invoke<McpPairing[]>("mcp_list_pairings");
 export const mcpRevokePairing = (id: string) => invoke<void>("mcp_revoke_pairing", { id });
+/** The MCP identity of the vault this window is signed in to (T548). Not secret. */
+export const mcpVaultIdentity = () => invoke<string>("mcp_vault_identity");
+/** Binds an unassigned pairing to the vault this window is signed in to; the host picks the vault. */
+export const mcpRebindPairing = (id: string) => invoke<void>("mcp_rebind_pairing", { id });
 // The AI-assistant server this app hosts (T131). None of these carries a token.
 export const mcpServerStatus = () => invoke<McpServerStatus>("mcp_server_status");
 export const mcpServerSetEnabled = (enabled: boolean) =>

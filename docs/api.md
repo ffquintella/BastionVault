@@ -3734,7 +3734,8 @@ loopback-only listener with `allow_plaintext_loopback`).
 ### `POST /v2/mcp/token`
 
 Send the login token in `X-BastionVault-Token`, `X-Vault-Token` or
-`Authorization: Bearer`. Exactly one of `app` and `pairing` is required.
+`Authorization: Bearer`. Exactly one of `app`, `pairing` and `vault_identity`
+is required.
 
 ```json
 { "app": "ci-secrets-reader", "policies": "ai-reader", "ttl_secs": 3600, "catalogue_hash": "<hash>" }
@@ -3744,9 +3745,22 @@ Send the login token in `X-BastionVault-Token`, `X-Vault-Token` or
 { "pairing": { "id": "<[a-z0-9-]{1,64}>", "client_name": "claude-desktop", "client_version": "1.0",
                "tool_allowlist": ["bv_kv_read_metadata"], "path_scope": ["secret/metadata/ai/*"],
                "reveal_allowed": false, "destructive_allowed": false, "ttl_secs": 28800,
-               "connect_allowed": false, "confirm_connect": true },
+               "connect_allowed": false, "confirm_connect": true,
+               "vault_id": "<this vault's identity>" },
   "namespace": "dti/esi" }
 ```
+
+```json
+{ "vault_identity": true }
+→ 200 { "data": { "vault_id": "0f1e2d3c-4b5a-4968-8776-a5b4c3d2e1f0" } }
+```
+
+- **`vault_identity: true`** (T548) answers this vault's MCP identity and mints
+  nothing: a random, non-secret UUID generated on first use, stored in the
+  vault (shared by every HA node) and never changed. It needs the same
+  `update` grant as the exchange; root may ask too. It cannot be combined with
+  `app` or `pairing` (`400`), and anything but a boolean is refused (`400`).
+  A local MCP server asks for it before it matches or records a pairing.
 
 - **App mode** requires the caller to be the app's AppID login, carrying a
   machine identity or an active waiver (`403 mcp_machine_identity_required`).
@@ -3757,6 +3771,14 @@ Send the login token in `X-BastionVault-Token`, `X-Vault-Token` or
 - **Pairing mode** requires an operator session: an entity- or
   username-bound login, never AppRole, machine, root or MCP-bound
   (`403 mcp_pairing_requires_operator_session`).
+- **`pairing.vault_id`** (T548, required in pairing mode) names the vault the
+  pairing was approved for. The vault compares it with its own stored identity
+  before anything is resolved or written: absent is `403
+  mcp_pairing_vault_unbound` (a pairing approved before pairings were bound to
+  a vault: re-bind it or pair again), a different one, or any one while this
+  vault has no identity yet, is `403 mcp_pairing_vault_mismatch`, and one that
+  is not `[a-z0-9-]{1,64}` is `400`. The success answer's
+  `auth.metadata.vault_id` names the minting vault.
 - **Brokered sessions** ([spec](../features/mcp-brokered-sessions.md) §9),
   pairing mode only. `connect_allowed` and `confirm_connect` are optional
   booleans, refused when present with any other type.

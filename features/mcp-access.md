@@ -189,6 +189,16 @@ serve, and `bv_whoami` reported no policies); they were fixed with a test that
 drives each through `/v2/mcp` against a real vault, which the unit tests'
 fake backend could not catch.
 
+On 2026-11-23 local pairings became **one vault each** (T548, § 3 "Vault
+binding"). The per-user store had no vault identity, so a pairing approved
+while serving vault A was matched, and minted for, by vault B. A record now
+names the vault it was approved for (record version 2), the gatekeeper
+matches only the serving vault's records, and the exchange refuses a pairing
+that names another vault or none. Records from before (version 1) still load
+and list as *unassigned* and are never used until the operator re-binds one
+(desktop app, or `bvault mcp pairings rebind`) or revokes it. The desktop
+page groups assistants by vault. `make test-release` has not been run for it.
+
 Deviations from the design below, all deliberate and disclosed:
 
 - **`bv_capabilities` is scoped by the path asked about.** The § 6 rule
@@ -551,11 +561,51 @@ Pairing flow (the "intentional permission from the user" requirement):
    and deletes the record. `mcp.local.unpaired` is emitted through the vault
    the same way the plugin grant events are.
 
-Pairing is per `(client_name, uid, transport)`; a same-user process claiming an
+Pairing is per `(client_name, uid, transport, vault)`; a same-user process claiming an
 already-paired name over UDS with a different `exe_path` triggers a
 re-pairing prompt, not silent reuse. This is the honest limit stated in the
 security model: it raises the bar against same-user malware, it does not
 sandbox it.
+
+#### Vault binding (T548)
+
+The store is per workstation user, and one user may serve several vaults
+(the desktop app switches between them; the CLI follows `VAULT_ADDR`). A
+pairing is the operator's decision about **one** vault, so:
+
+- **Vault identity.** Nothing the vault exposed was stable and non-secret,
+  so it gained one: a random UUID generated on first use and stored in the
+  system barrier view at `mcp/vault-identity` (`{version: 1, vault_id,
+  created_at}`), shared by every HA node and carried by a backup restore. It
+  is not derived from, and reveals nothing about, any key. A gatekeeper reads
+  it with `POST /v2/mcp/token {"vault_identity": true}` (same grant as the
+  exchange; mints nothing). Two nodes generating it at the same first moment
+  keep one: each re-reads after writing; a pairing bound to the lost id is
+  refused (fail closed), not adopted.
+- **Record.** `vault_id: Option<String>`; record version 2. Every new
+  pairing (dialog, TTY prompt, `bvault mcp pair`) is bound to the vault it
+  was approved against, learned before the operator is asked. Version-1
+  records load with no `vault_id` ("unassigned"); every write stores version
+  2 and keeps them unassigned. A record of an unknown version, a version-1
+  record naming a vault, or a malformed `vault_id` refuses the whole store.
+- **Matching.** `find_matching` and `find_by_token_hash` take the serving
+  vault's identity and match only records bound to it; an unassigned record
+  is never matched, never exchanged and never auto-bound. A gatekeeper that
+  cannot learn the identity refuses every request
+  (`mcp_vault_identity_unavailable`) before it reads the store or asks the
+  operator.
+- **Exchange.** The pairing grant carries `vault_id`; the vault compares it
+  with its own stored identity before anything is written:
+  `403 mcp_pairing_vault_unbound` when absent, `403
+  mcp_pairing_vault_mismatch` when it differs or the vault has none yet,
+  `400` when malformed. The answer's `auth.metadata.vault_id` names the vault.
+- **Re-bind.** `PairingStore::rebind` binds an *unassigned* record to the
+  vault the operator is signed in to (the host asks the vault; the window
+  never names one). A bound record cannot be moved, and a re-bind that would
+  give one client two grants for the same vault is refused. Scope, expiry and
+  loopback bearer are kept.
+- **Revoke** of a pairing bound to another vault removes it locally only:
+  this vault minted nothing for it.
 
 ### 4. Token exchange — `POST v2/mcp/token`
 
@@ -569,7 +619,9 @@ X-Vault-Token: <login token>
   "pairing":    { "id": "…", "client_name": "…", "client_version": "…",
                   "tool_allowlist": [...], "path_scope": [...],
                   "reveal_allowed": false, "destructive_allowed": false,
-                  "ttl_secs": 28800 },        // local mode
+                  "ttl_secs": 28800,
+                  "vault_id": "…" },          // local mode; must be this vault's (T548)
+  "vault_identity": true,                     // alone: answer {vault_id}, mint nothing (T548)
   "policies":   ["ai-reader"],                // optional; must be ⊆ caller policies
   "ttl_secs":   3600                          // optional; clamped to record max
 }
@@ -589,7 +641,8 @@ Checks, in order, all fail-closed:
    Rate-limit per source IP like FerroGate login.
 3. **Pairing mode:** caller token is a user session (has `entity_id`, is not
    an approle/ferrogate token); requested `tool_allowlist` ⊆ catalogue;
-   `ttl_secs` ≤ 86400.
+   `ttl_secs` ≤ 86400; `pairing.vault_id` equals this vault's stored
+   identity (§ 3 "Vault binding"), checked before anything is written.
 4. Effective policies = caller policies ∩ requested (`default` re-injected by
    the token store as usual). Never a superset — same rule as
    `auth/token/create`.

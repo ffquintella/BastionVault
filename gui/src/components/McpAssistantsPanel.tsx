@@ -6,6 +6,7 @@ import type { McpClientSetup, McpPairing, McpServerStatus } from "../lib/types";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
 import { namespaceLabel } from "../lib/mcpNamespace";
+import { groupPairingsByVault, type PairingGroup } from "../lib/mcpVaults";
 
 /** Broadcast by the Rust host whenever the server starts or stops. */
 const MCP_SERVER_STATUS_EVENT = "mcp-server-status";
@@ -48,6 +49,42 @@ function NamespaceCell({ p }: { p: McpPairing }) {
   );
 }
 
+/** A yes/no permission as a badge; `danger` colours a granted one. */
+function Flag({ on, danger }: { on: boolean; danger: "warning" | "error" }) {
+  return <Badge variant={on ? danger : "neutral"} label={on ? "allowed" : "off"} />;
+}
+
+/** The heading of one vault's group, with the active vault highlighted. */
+function GroupHeader({ group, activeKnown }: { group: PairingGroup; activeKnown: boolean }) {
+  if (group.kind === "unassigned") {
+    return (
+      <div className="space-y-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <h3 className="text-sm font-semibold">Unassigned</h3>
+          <Badge variant="warning" label="Not used" />
+        </div>
+        <p className="text-xs text-[var(--color-text-muted)]">
+          Approved before pairings were bound to a vault. They are not used with any vault: re-bind one to the vault
+          you are signed in to, or revoke it.
+        </p>
+      </div>
+    );
+  }
+  const active = group.kind === "active";
+  return (
+    <div className="flex min-w-0 flex-wrap items-center gap-2">
+      <h3 className="text-sm font-semibold">{active ? "This vault" : activeKnown ? "Another vault" : "Vault"}</h3>
+      {active && <Badge variant="success" dot label="Signed in" />}
+      <span className="block min-w-0 truncate font-mono text-xs text-[var(--color-text-muted)]" title={group.vaultId ?? ""}>
+        {group.vaultId}
+      </span>
+      {!active && activeKnown && (
+        <span className="text-xs text-[var(--color-text-muted)]">Used only while you are signed in to that vault.</span>
+      )}
+    </div>
+  );
+}
+
 function Snippet({ text, onCopy }: { text: string; onCopy: (text: string) => void }) {
   return (
     <div className="space-y-1">
@@ -76,6 +113,9 @@ export function McpAssistantsPanel() {
   const [storePath, setStorePath] = useState("");
   const [loading, setLoading] = useState(true);
   const [revokeTarget, setRevokeTarget] = useState<McpPairing | null>(null);
+  const [rebindTarget, setRebindTarget] = useState<McpPairing | null>(null);
+  const [activeVault, setActiveVault] = useState<string | null>(null);
+  const [vaultError, setVaultError] = useState<string | null>(null);
   const [status, setStatus] = useState<McpServerStatus | null>(null);
   const [setup, setSetup] = useState<McpClientSetup | null>(null);
   const [switching, setSwitching] = useState(false);
@@ -84,9 +124,20 @@ export function McpAssistantsPanel() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [list, path] = await Promise.all([api.mcpListPairings(), api.mcpPairingsPath()]);
+      const [list, path, vault] = await Promise.all([
+        api.mcpListPairings(),
+        api.mcpPairingsPath(),
+        // Which vault this window is signed in to; the list still shows when
+        // the vault cannot say (re-binding then waits until it can).
+        api.mcpVaultIdentity().then(
+          (id) => ({ id, error: null as string | null }),
+          (e: unknown) => ({ id: null as string | null, error: extractError(e) }),
+        ),
+      ]);
       setPairings(list);
       setStorePath(path);
+      setActiveVault(vault.id);
+      setVaultError(vault.error);
     } catch (e) {
       toast("error", extractError(e));
     } finally {
@@ -150,9 +201,12 @@ export function McpAssistantsPanel() {
     if (!revokeTarget) return;
     const target = revokeTarget;
     setRevokeTarget(null);
+    // A grant for another vault had nothing minted by this one: it is only
+    // removed from this machine, and said so.
+    const elsewhere = !!target.vault_id && !!activeVault && target.vault_id !== activeVault;
     try {
       await api.mcpRevokePairing(target.id);
-      toast("success", `Revoked ${target.client_name}`);
+      toast("success", elsewhere ? `Removed ${target.client_name} from this machine` : `Revoked ${target.client_name}`);
     } catch (e) {
       // The local record may already be gone even when the vault call failed;
       // reload so the list shows the truth either way.
@@ -160,6 +214,92 @@ export function McpAssistantsPanel() {
     }
     await load();
   }
+
+  async function doRebind() {
+    if (!rebindTarget) return;
+    const target = rebindTarget;
+    setRebindTarget(null);
+    try {
+      await api.mcpRebindPairing(target.id);
+      toast("success", `${target.client_name} is now bound to this vault`);
+    } catch (e) {
+      toast("error", extractError(e));
+    }
+    await load();
+  }
+
+  const groups = groupPairingsByVault(pairings, activeVault);
+  const columns = (group: PairingGroup) => [
+    {
+      key: "client",
+      header: "Client",
+      render: (p: McpPairing) => (
+        <span className="block min-w-0 truncate text-sm">{`${p.client_name} ${p.client_version}`.trim()}</span>
+      ),
+    },
+    {
+      key: "namespace",
+      header: "Namespace",
+      render: (p: McpPairing) => <NamespaceCell p={p} />,
+    },
+    {
+      key: "transport",
+      header: "Transport",
+      render: (p: McpPairing) => <Badge variant="neutral" label={p.transport} />,
+    },
+    {
+      key: "scope",
+      header: "Scope",
+      render: (p: McpPairing) => (
+        <span className="block min-w-0 max-w-xs truncate font-mono text-xs" title={p.path_scope.join("\n")}>
+          {p.path_scope.length ? p.path_scope.join(", ") : "none (denies all)"}
+        </span>
+      ),
+    },
+    {
+      key: "tools",
+      header: "Tools",
+      render: (p: McpPairing) => (
+        <span className="block min-w-0 max-w-xs truncate text-xs" title={p.tool_allowlist.join("\n")}>
+          {p.tool_allowlist.length ? `${p.tool_allowlist.length}: ${p.tool_allowlist.join(", ")}` : "none"}
+        </span>
+      ),
+    },
+    { key: "reveal", header: "Reveal", render: (p: McpPairing) => <Flag on={p.reveal_allowed} danger="warning" /> },
+    {
+      key: "writes",
+      header: "Writes",
+      render: (p: McpPairing) => <Flag on={p.destructive_allowed} danger="error" />,
+    },
+    {
+      key: "sessions",
+      header: "Sessions",
+      render: (p: McpPairing) => <Flag on={!!p.connect_allowed} danger="error" />,
+    },
+    { key: "state", header: "Approval", render: (p: McpPairing) => stateBadge(p) },
+    {
+      key: "actions",
+      header: "",
+      render: (p: McpPairing) => (
+        <div className="flex justify-end gap-2">
+          {group.kind === "unassigned" && (
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => setRebindTarget(p)}
+              disabled={!activeVault}
+              title={activeVault ? undefined : "Sign in to the vault this assistant should use first"}
+            >
+              Re-bind
+            </Button>
+          )}
+          <Button size="sm" variant="danger" onClick={() => setRevokeTarget(p)}>
+            Revoke
+          </Button>
+        </div>
+      ),
+    },
+  ];
 
   return (
     <div className="space-y-4">
@@ -256,78 +396,38 @@ export function McpAssistantsPanel() {
             description="An assistant is paired the first time it connects, when you approve it in the dialog this app shows."
           />
         ) : (
-          <Table
-            columns={[
-              {
-                key: "client",
-                header: "Client",
-                render: (p: McpPairing) => (
-                  <span className="block min-w-0 truncate text-sm">
-                    {`${p.client_name} ${p.client_version}`.trim()}
-                  </span>
-                ),
-              },
-              {
-                key: "namespace",
-                header: "Namespace",
-                render: (p: McpPairing) => <NamespaceCell p={p} />,
-              },
-              {
-                key: "transport",
-                header: "Transport",
-                render: (p: McpPairing) => <Badge variant="neutral" label={p.transport} />,
-              },
-              {
-                key: "scope",
-                header: "Scope",
-                render: (p: McpPairing) => (
-                  <span
-                    className="block min-w-0 max-w-xs truncate font-mono text-xs"
-                    title={p.path_scope.join("\n")}
-                  >
-                    {p.path_scope.length ? p.path_scope.join(", ") : "none (denies all)"}
-                  </span>
-                ),
-              },
-              {
-                key: "tools",
-                header: "Tools",
-                render: (p: McpPairing) => <span title={p.tool_allowlist.join(", ")}>{p.tool_allowlist.length}</span>,
-              },
-              {
-                key: "reveal",
-                header: "Reveal",
-                render: (p: McpPairing) => (
-                  <Badge variant={p.reveal_allowed ? "warning" : "neutral"} label={p.reveal_allowed ? "allowed" : "off"} />
-                ),
-              },
-              {
-                key: "writes",
-                header: "Writes",
-                render: (p: McpPairing) => (
-                  <Badge
-                    variant={p.destructive_allowed ? "error" : "neutral"}
-                    label={p.destructive_allowed ? "allowed" : "off"}
+          <div className="space-y-6">
+            {vaultError && (
+              <p className="min-w-0 break-words text-xs text-[var(--color-text-muted)]">
+                Could not tell which vault you are signed in to, so none is highlighted and nothing can be re-bound:{" "}
+                {vaultError}
+              </p>
+            )}
+            {groups.map((group) => (
+              <section
+                key={group.vaultId ?? "unassigned"}
+                aria-label={group.kind === "unassigned" ? "Unassigned assistants" : `Vault ${group.vaultId}`}
+                data-active={group.kind === "active" ? "true" : undefined}
+                className={
+                  group.kind === "active"
+                    ? "min-w-0 space-y-2 rounded border border-[var(--color-primary)] p-3"
+                    : "min-w-0 space-y-2 rounded border border-[var(--color-border)] p-3"
+                }
+              >
+                <GroupHeader group={group} activeKnown={!!activeVault} />
+                {group.pairings.length === 0 ? (
+                  <p className="text-xs text-[var(--color-text-muted)]">No assistant is paired with this vault yet.</p>
+                ) : (
+                  <Table
+                    columns={columns(group)}
+                    data={group.pairings}
+                    rowKey={(p: McpPairing) => p.id}
+                    emptyMessage="No assistants paired"
                   />
-                ),
-              },
-              { key: "state", header: "Approval", render: (p: McpPairing) => stateBadge(p) },
-              {
-                key: "actions",
-                header: "",
-                render: (p: McpPairing) => (
-                  <div className="flex justify-end">
-                    <Button size="sm" variant="danger" onClick={() => setRevokeTarget(p)}>
-                      Revoke
-                    </Button>
-                  </div>
-                ),
-              },
-            ]}
-            data={pairings}
-            rowKey={(p: McpPairing) => p.id}
-            emptyMessage="No assistants paired"
-          />
+                )}
+              </section>
+            ))}
+          </div>
         )}
         {storePath && (
           <p className="mt-3 min-w-0 truncate text-xs text-[var(--color-text-muted)]" title={storePath}>
@@ -335,6 +435,15 @@ export function McpAssistantsPanel() {
           </p>
         )}
       </Card>
+
+      <ConfirmModal
+        open={!!rebindTarget}
+        onClose={() => setRebindTarget(null)}
+        onConfirm={() => void doRebind()}
+        title="Bind to this vault"
+        message={`Bind ${rebindTarget?.client_name ?? ""} to the vault you are signed in to (${activeVault ?? ""})? It keeps its scope and expiry, and is then used with this vault only. This cannot be moved to another vault later.`}
+        confirmLabel="Bind to this vault"
+      />
 
       <ConfirmModal
         open={!!revokeTarget}

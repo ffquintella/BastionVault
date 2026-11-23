@@ -634,6 +634,12 @@ EXAMPLE ENTRY:
 
 ### Security
 
+#### MCP Access: an AI-assistant pairing belongs to one vault
+
+- **Use an AI-assistant pairing only with the vault it was approved for: a client approved while serving one vault is no longer accepted, or minted a token, by another** (T548, S26, S104)
+  -- The pairing store is per workstation user and its records named no vault, so `bvault mcp serve` or the desktop app serving vault B matched, and exchanged, a pairing the operator approved for vault A, by client name or by loopback bearer. Every pairing now names its vault's MCP identity (a random, non-secret id the vault generates on first use; `POST /v2/mcp/token {"vault_identity": true}`), the local server matches only the serving vault's pairings, and the vault itself refuses an exchange whose `pairing.vault_id` is absent (`403 mcp_pairing_vault_unbound`) or another vault's (`403 mcp_pairing_vault_mismatch`) before anything is written. `bvault mcp pair` now needs a vault sign-in, and Settings > AI Assistants lists assistants grouped by vault (the one you are signed in to highlighted) with their tools, scope, reveal, write and session grants, namespace and expiry.
+  -- **Upgrade note:** pairings made before this release are listed as `unassigned` and are not used with any vault: re-bind one to the vault you are signed in to (the desktop app's **Re-bind**, or `bvault mcp pairings rebind <id>`), pair the client again, or revoke it. A `bvault mcp serve` or desktop app from before this release cannot exchange against an upgraded vault (it sends no `vault_id`), and an upgraded one refuses to serve an older vault (it cannot learn the vault's identity): upgrade both.
+
 #### Namespaces: a namespace policy names only its own paths
 
 - **Refuse a namespace policy rule whose glob ends inside the namespace's own name (`path "a*"` in `a`), which also matched the sibling `ab/...` and root mounts such as `apps/...`** (T519, S27)

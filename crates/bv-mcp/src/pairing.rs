@@ -15,6 +15,9 @@
 //! permissions remain the confidentiality boundary, and a store that is
 //! readable by anyone else is refused rather than used.
 
+// One vault per pairing (T548): see `PairingRecord::vault_id` and
+// features/mcp-access.md §3 "Vault binding".
+
 use std::{
     fs,
     io::Write,
@@ -33,7 +36,12 @@ fn err(message: impl Into<String>) -> RvError {
 }
 
 const STORE_VERSION: u32 = 1;
-const RECORD_VERSION: u32 = 1;
+/// Version 2 (T548) added `vault_id`. Every record is written at this
+/// version; [`MIN_RECORD_VERSION`]..=this is read.
+pub const RECORD_VERSION: u32 = 2;
+/// Version 1: written before pairings were bound to a vault. Read, never
+/// matched until re-bound.
+pub const MIN_RECORD_VERSION: u32 = 1;
 /// Binds the envelope to this file format so a sealed blob from another
 /// BastionVault feature cannot be dropped in as a pairing store.
 const AAD: &[u8] = b"bastionvault/mcp-pairings/v1";
@@ -106,16 +114,63 @@ pub struct PairingRecord {
     /// tokens follow the operator's session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
+    /// The vault this pairing was approved for: that vault's MCP identity
+    /// (`sys/mcp/token` with `vault_identity`, T548). `None` on a record
+    /// written before pairings were bound to a vault: such a record is
+    /// "unassigned", never matched and never exchanged, until the operator
+    /// re-binds it ([`PairingStore::rebind`]) or revokes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault_id: Option<String>,
 }
 
+/// A record that does not say is read as the oldest format: absent never
+/// claims a newer one's guarantees.
 fn record_version() -> u32 {
-    RECORD_VERSION
+    MIN_RECORD_VERSION
 }
 
 impl PairingRecord {
     pub fn is_expired(&self, now: u64) -> bool {
         self.expires_at.is_some_and(|t| t <= now)
     }
+
+    /// Approved for exactly this vault. An unassigned record is bound to no
+    /// vault, and an empty identity matches nothing.
+    pub fn is_bound_to(&self, vault_id: &str) -> bool {
+        !vault_id.is_empty() && self.vault_id.as_deref() == Some(vault_id)
+    }
+}
+
+/// `[a-z0-9-]{1,64}`: what a vault identity looks like (the vault generates a
+/// lowercase UUID). Anything else is refused, never compared.
+pub fn valid_vault_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// Refuses a store whose records this build cannot read faithfully: a
+/// version outside [`MIN_RECORD_VERSION`]..=[`RECORD_VERSION`] (rewriting it
+/// would drop whatever a newer build added), a version-1 record that claims a
+/// vault (no such writer existed), or a vault identity that is not one.
+fn check_records(records: &[PairingRecord]) -> Result<(), RvError> {
+    for r in records {
+        if !(MIN_RECORD_VERSION..=RECORD_VERSION).contains(&r.version) {
+            return Err(err(format!(
+                "pairing store holds a record of version {}; this bvault reads versions {MIN_RECORD_VERSION} to \
+                 {RECORD_VERSION} (was it written by a newer bvault?)",
+                r.version
+            )));
+        }
+        match r.vault_id.as_deref() {
+            Some(_) if r.version < 2 => {
+                return Err(err("pairing store holds a version-1 record that names a vault; the store is corrupt"))
+            }
+            Some(v) if !valid_vault_id(v) => {
+                return Err(err("pairing store holds a record with a malformed vault identity; the store is corrupt"))
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 #[derive(Serialize, Deserialize)]
@@ -160,24 +215,38 @@ pub fn hash_token(token: &str) -> String {
     blake3::hash(token.as_bytes()).to_hex().to_string()
 }
 
+/// The unexpired pairing for this client, peer and transport that was
+/// approved for `vault_id` -- the vault the caller serves. A pairing approved
+/// for another vault, or never bound to one, is not a match.
 pub fn find_matching<'a>(
     records: &'a [PairingRecord],
     client_name: &str,
     peer_uid: Option<u32>,
     transport: Transport,
+    vault_id: &str,
     now: u64,
 ) -> Option<&'a PairingRecord> {
     records.iter().find(|r| {
         !r.is_expired(now)
+            && r.is_bound_to(vault_id)
             && r.client_name == client_name
             && r.peer_uid == peer_uid
             && r.transport == transport.as_str()
     })
 }
 
-pub fn find_by_token_hash<'a>(records: &'a [PairingRecord], hash: &str, now: u64) -> Option<&'a PairingRecord> {
+/// The unexpired loopback-HTTP pairing whose bearer hashes to `hash`, if it
+/// was approved for `vault_id`. A bearer from a pairing for another vault, or
+/// an unassigned one, authenticates nobody here.
+pub fn find_by_token_hash<'a>(
+    records: &'a [PairingRecord],
+    hash: &str,
+    vault_id: &str,
+    now: u64,
+) -> Option<&'a PairingRecord> {
     records.iter().find(|r| {
         !r.is_expired(now)
+            && r.is_bound_to(vault_id)
             && r.transport == Transport::LoopbackHttp.as_str()
             && r.pairing_token_hash.as_deref() == Some(hash)
     })
@@ -237,7 +306,10 @@ impl PairingStore {
             .envelope
             .open(&MlKem768Provider, &secret, AAD)
             .map_err(|_| err("pairing store is corrupt or has been tampered with"))?;
-        serde_json::from_slice(&plaintext).map_err(|_| err("pairing store contents are corrupt"))
+        let records: Vec<PairingRecord> =
+            serde_json::from_slice(&plaintext).map_err(|_| err("pairing store contents are corrupt"))?;
+        check_records(&records)?;
+        Ok(records)
     }
 
     pub fn save(&self, records: &[PairingRecord]) -> Result<(), RvError> {
@@ -253,7 +325,12 @@ impl PairingStore {
                 (kp.public_key().to_vec(), B64.encode(kp.secret_key()))
             }
         };
-        let plaintext = Zeroizing::new(serde_json::to_vec(records)?);
+        // Write-new: every record at the current format. An unassigned one
+        // stays unassigned (`vault_id` absent); only `rebind` assigns it.
+        let current: Vec<PairingRecord> =
+            records.iter().cloned().map(|r| PairingRecord { version: RECORD_VERSION, ..r }).collect();
+        check_records(&current)?;
+        let plaintext = Zeroizing::new(serde_json::to_vec(&current)?);
         let envelope = KemDemEnvelopeV1::seal(&provider, &public, AAD, &plaintext)
             .map_err(|e| err(format!("could not seal pairing store: {e:?}")))?;
         let file =
@@ -267,16 +344,51 @@ impl PairingStore {
         self.save(&records)
     }
 
-    /// Pairing the same `(client, uid, transport)` again replaces the old
-    /// grant rather than stacking a second one beside it -- otherwise an
-    /// expired or superseded scope could be matched first.
+    /// Pairing the same `(client, uid, transport)` with the same vault again
+    /// replaces the old grant rather than stacking a second one beside it --
+    /// otherwise an expired or superseded scope could be matched first. The
+    /// same client's grant for another vault, and an unassigned record, are
+    /// kept: each is the operator's own decision about its own vault.
     pub fn upsert(&self, record: PairingRecord) -> Result<(), RvError> {
         let mut records = self.load()?;
-        records.retain(|r| {
-            !(r.client_name == record.client_name && r.peer_uid == record.peer_uid && r.transport == record.transport)
-        });
+        records.retain(|r| !same_slot(r, &record));
         records.push(record);
         self.save(&records)
+    }
+
+    /// Binds the unassigned record `id` to `vault_id` -- the operator's
+    /// explicit decision, made against the vault they are signed in to; never
+    /// done implicitly. Refused for a record already bound to another vault
+    /// (pair the client with that vault instead), and when the same client
+    /// already has a grant for `vault_id` (one would shadow the other). The
+    /// grant, its expiry and its loopback bearer are kept as they were.
+    pub fn rebind(&self, id: &str, vault_id: &str) -> Result<PairingRecord, RvError> {
+        if !valid_vault_id(vault_id) {
+            return Err(err("cannot bind a pairing to a malformed vault identity"));
+        }
+        let mut records = self.load()?;
+        let pos = records.iter().position(|r| r.id == id).ok_or_else(|| err(format!("no pairing with id `{id}`")))?;
+        match records[pos].vault_id.as_deref() {
+            Some(bound) if bound == vault_id => return Ok(records[pos].clone()),
+            Some(_) => {
+                return Err(err(format!(
+                    "pairing `{id}` is bound to another vault; it cannot be moved -- pair the client with this vault instead"
+                )))
+            }
+            None => {}
+        }
+        let mut rebound = records[pos].clone();
+        rebound.vault_id = Some(vault_id.to_string());
+        rebound.version = RECORD_VERSION;
+        if let Some(existing) = records.iter().find(|r| r.id != id && same_slot(r, &rebound)) {
+            return Err(err(format!(
+                "`{}` is already paired with this vault (pairing id {}); revoke one of the two first",
+                existing.client_name, existing.id
+            )));
+        }
+        records[pos] = rebound.clone();
+        self.save(&records)?;
+        Ok(rebound)
     }
 
     pub fn remove(&self, id: &str) -> Result<Option<PairingRecord>, RvError> {
@@ -297,6 +409,11 @@ impl PairingStore {
         }
         Ok(())
     }
+}
+
+/// One grant per client, peer, transport and vault.
+fn same_slot(a: &PairingRecord, b: &PairingRecord) -> bool {
+    a.client_name == b.client_name && a.peer_uid == b.peer_uid && a.transport == b.transport && a.vault_id == b.vault_id
 }
 
 #[cfg(unix)]
@@ -355,11 +472,17 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), RvError> {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::{json, Value};
+
     use super::*;
+
+    const VAULT_A: &str = "0f1e2d3c-4b5a-4968-8776-a5b4c3d2e1f0";
+    const VAULT_B: &str = "11111111-2222-4333-8444-555555555555";
 
     fn record(id: &str, name: &str, uid: Option<u32>, transport: Transport) -> PairingRecord {
         PairingRecord {
             version: RECORD_VERSION,
+            vault_id: Some(VAULT_A.to_string()),
             id: id.to_string(),
             client_name: name.to_string(),
             client_version: "1.0".to_string(),
@@ -515,13 +638,14 @@ mod tests {
     }
 
     #[test]
-    fn find_matching_requires_name_uid_transport_and_unexpired() {
+    fn find_matching_requires_name_uid_transport_vault_and_unexpired() {
         let records = vec![record("a", "claude", Some(501), Transport::Uds)];
-        assert!(find_matching(&records, "claude", Some(501), Transport::Uds, 500).is_some());
-        assert!(find_matching(&records, "other", Some(501), Transport::Uds, 500).is_none());
-        assert!(find_matching(&records, "claude", Some(502), Transport::Uds, 500).is_none());
-        assert!(find_matching(&records, "claude", Some(501), Transport::Stdio, 500).is_none());
-        assert!(find_matching(&records, "claude", Some(501), Transport::Uds, 1_000).is_none(), "expired");
+        assert!(find_matching(&records, "claude", Some(501), Transport::Uds, VAULT_A, 500).is_some());
+        assert!(find_matching(&records, "other", Some(501), Transport::Uds, VAULT_A, 500).is_none());
+        assert!(find_matching(&records, "claude", Some(502), Transport::Uds, VAULT_A, 500).is_none());
+        assert!(find_matching(&records, "claude", Some(501), Transport::Stdio, VAULT_A, 500).is_none());
+        assert!(find_matching(&records, "claude", Some(501), Transport::Uds, VAULT_A, 1_000).is_none(), "expired");
+        assert!(find_matching(&records, "claude", Some(501), Transport::Uds, "", 500).is_none(), "no vault");
     }
 
     #[test]
@@ -532,8 +656,163 @@ mod tests {
         let mut uds = record("u", "sock", Some(1), Transport::Uds);
         uds.pairing_token_hash = Some(hash_token(&token));
         let records = vec![uds, http];
-        assert_eq!(find_by_token_hash(&records, &hash_token(&token), 500).unwrap().id, "h");
-        assert!(find_by_token_hash(&records, &hash_token("wrong"), 500).is_none());
+        assert_eq!(find_by_token_hash(&records, &hash_token(&token), VAULT_A, 500).unwrap().id, "h");
+        assert!(find_by_token_hash(&records, &hash_token("wrong"), VAULT_A, 500).is_none());
+    }
+
+    /// T548 regression: the store is per user, so a pairing approved while
+    /// serving vault A was accepted by vault B. It must not be, by client
+    /// identity or by bearer.
+    #[test]
+    fn a_pairing_approved_for_one_vault_is_not_matched_for_another() {
+        let token = new_pairing_token();
+        let mut http = record("h", "web", None, Transport::LoopbackHttp);
+        http.pairing_token_hash = Some(hash_token(&token));
+        let records = vec![record("a", "claude", Some(501), Transport::Uds), http];
+        assert!(find_matching(&records, "claude", Some(501), Transport::Uds, VAULT_B, 500).is_none());
+        assert!(find_by_token_hash(&records, &hash_token(&token), VAULT_B, 500).is_none());
+        assert!(find_matching(&records, "claude", Some(501), Transport::Uds, VAULT_A, 500).is_some());
+        assert!(find_by_token_hash(&records, &hash_token(&token), VAULT_A, 500).is_some());
+    }
+
+    /// Seals `plaintext` as the store's contents exactly as written, so a
+    /// test can plant a record a current build would never write.
+    fn seal_raw(store: &PairingStore, plaintext: &[u8]) {
+        let kp = MlKem768Provider.generate_keypair().unwrap();
+        let envelope = KemDemEnvelopeV1::seal(&MlKem768Provider, kp.public_key(), AAD, plaintext).unwrap();
+        let file = StoreFile {
+            version: STORE_VERSION,
+            kem_public_key: B64.encode(kp.public_key()),
+            kem_secret_key: B64.encode(kp.secret_key()),
+            envelope,
+        };
+        write_private(store.path(), &serde_json::to_vec(&file).unwrap()).unwrap();
+    }
+
+    /// A record exactly as a version-1 build wrote it: no `vault_id`.
+    fn legacy_json(id: &str, name: &str) -> Value {
+        let mut v = serde_json::to_value(record(id, name, Some(501), Transport::Uds)).unwrap();
+        v["version"] = json!(1);
+        v.as_object_mut().unwrap().remove("vault_id");
+        v
+    }
+
+    /// T548: a record written before vaults were named loads, lists and
+    /// round-trips (written as version 2, still unassigned), but is matched
+    /// for no vault -- not even the one serving when it is read.
+    #[test]
+    fn a_legacy_record_loads_and_round_trips_but_is_never_matched() {
+        let (store, dir) = temp_store("legacy");
+        seal_raw(&store, &serde_json::to_vec(&json!([legacy_json("old", "claude")])).unwrap());
+        let loaded = store.load().unwrap();
+        assert_eq!((loaded.len(), loaded[0].version, loaded[0].vault_id.as_deref()), (1, 1, None));
+        for vault in [VAULT_A, VAULT_B] {
+            assert!(find_matching(&loaded, "claude", Some(501), Transport::Uds, vault, 500).is_none());
+        }
+
+        // Saving it (any write does) keeps it unassigned: never auto-bound.
+        store.touch("old", 600).unwrap();
+        let reread = store.load().unwrap();
+        assert_eq!((reread[0].version, reread[0].vault_id.as_deref()), (RECORD_VERSION, None));
+        assert_eq!(reread[0].last_used_at, 600);
+        assert!(find_matching(&reread, "claude", Some(501), Transport::Uds, VAULT_A, 700).is_none());
+
+        // A new approval for vault A sits beside it; the legacy one is kept
+        // for the operator to re-bind or revoke.
+        store.upsert(record("new", "claude", Some(501), Transport::Uds)).unwrap();
+        let both = store.load().unwrap();
+        assert_eq!(both.len(), 2);
+        assert_eq!(find_matching(&both, "claude", Some(501), Transport::Uds, VAULT_A, 700).unwrap().id, "new");
+        fs::remove_dir_all(dir).ok();
+    }
+
+    /// T548: re-binding is explicit and one-way: it makes the record usable
+    /// in exactly the chosen vault, never moves a bound one, and never
+    /// creates a second grant for a slot that already has one.
+    #[test]
+    fn rebinding_makes_a_legacy_record_usable_only_in_the_chosen_vault() {
+        let (store, dir) = temp_store("rebind");
+        seal_raw(&store, &serde_json::to_vec(&json!([legacy_json("old", "claude")])).unwrap());
+
+        assert!(store.rebind("old", "Not A Vault!").is_err(), "a malformed identity is refused");
+        assert!(store.rebind("missing", VAULT_B).is_err());
+        let rebound = store.rebind("old", VAULT_B).unwrap();
+        assert_eq!((rebound.vault_id.as_deref(), rebound.version), (Some(VAULT_B), RECORD_VERSION));
+        let loaded = store.load().unwrap();
+        assert!(find_matching(&loaded, "claude", Some(501), Transport::Uds, VAULT_B, 500).is_some());
+        assert!(find_matching(&loaded, "claude", Some(501), Transport::Uds, VAULT_A, 500).is_none());
+
+        assert_eq!(store.rebind("old", VAULT_B).unwrap().id, "old", "idempotent for its own vault");
+        let moved = store.rebind("old", VAULT_A).unwrap_err().to_string();
+        assert!(moved.contains("another vault"), "{moved}");
+
+        // A second legacy record for the same client cannot shadow the grant.
+        let mut both = vec![legacy_json("old2", "claude")];
+        both.push(serde_json::to_value(store.load().unwrap().remove(0)).unwrap());
+        seal_raw(&store, &serde_json::to_vec(&both).unwrap());
+        let clash = store.rebind("old2", VAULT_B).unwrap_err().to_string();
+        assert!(clash.contains("already paired with this vault"), "{clash}");
+        assert!(store.load().unwrap().iter().any(|r| r.id == "old2" && r.vault_id.is_none()), "left unassigned");
+        fs::remove_dir_all(dir).ok();
+    }
+
+    /// T548: a record this build cannot read faithfully refuses the store
+    /// rather than being dropped or rewritten without its newer fields.
+    #[test]
+    fn unknown_versions_and_malformed_vault_identities_are_refused() {
+        let (store, dir) = temp_store("versions");
+        let mut newer = serde_json::to_value(record("n", "x", None, Transport::Stdio)).unwrap();
+        newer["version"] = json!(RECORD_VERSION + 1);
+        let mut zero = serde_json::to_value(record("z", "x", None, Transport::Stdio)).unwrap();
+        zero["version"] = json!(0);
+        let mut v1_with_vault = legacy_json("v1", "x");
+        v1_with_vault["vault_id"] = json!(VAULT_A);
+        let mut bad_vault = serde_json::to_value(record("b", "x", None, Transport::Stdio)).unwrap();
+        bad_vault["vault_id"] = json!("../../etc");
+        let mut not_a_string = serde_json::to_value(record("s", "x", None, Transport::Stdio)).unwrap();
+        not_a_string["vault_id"] = json!(7);
+        for (label, bad) in [
+            ("newer", newer),
+            ("zero", zero),
+            ("v1 with vault", v1_with_vault),
+            ("bad vault", bad_vault),
+            ("not a string", not_a_string),
+        ] {
+            seal_raw(&store, &serde_json::to_vec(&json!([bad])).unwrap());
+            assert!(store.load().is_err(), "{label}");
+        }
+        seal_raw(&store, b"{\"not\": \"a list\"}");
+        assert!(store.load().is_err());
+
+        // A record with no `version` at all reads as the oldest format.
+        let mut unversioned = legacy_json("u", "x");
+        unversioned.as_object_mut().unwrap().remove("version");
+        seal_raw(&store, &serde_json::to_vec(&json!([unversioned])).unwrap());
+        assert_eq!(store.load().unwrap()[0].version, MIN_RECORD_VERSION);
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_bound_record_round_trips_and_names_its_vault_on_disk() {
+        let written = serde_json::to_value(record("a", "claude", None, Transport::Stdio)).unwrap();
+        assert_eq!(written["vault_id"], json!(VAULT_A));
+        assert_eq!(written["version"], json!(RECORD_VERSION));
+        let back: PairingRecord = serde_json::from_value(written).unwrap();
+        assert!(back.is_bound_to(VAULT_A) && !back.is_bound_to(VAULT_B) && !back.is_bound_to(""));
+    }
+
+    #[test]
+    fn upsert_keeps_the_same_clients_grant_for_another_vault() {
+        let (store, dir) = temp_store("upsert-vaults");
+        store.upsert(record("a", "claude", Some(501), Transport::Uds)).unwrap();
+        let mut in_b = record("b", "claude", Some(501), Transport::Uds);
+        in_b.vault_id = Some(VAULT_B.to_string());
+        store.upsert(in_b).unwrap();
+        assert_eq!(store.load().unwrap().len(), 2, "one grant per vault");
+        store.upsert(record("a2", "claude", Some(501), Transport::Uds)).unwrap();
+        let ids: Vec<String> = store.load().unwrap().into_iter().map(|r| r.id).collect();
+        assert_eq!(ids, vec!["b".to_string(), "a2".to_string()], "vault A's grant replaced, vault B's kept");
+        fs::remove_dir_all(dir).ok();
     }
 
     #[test]

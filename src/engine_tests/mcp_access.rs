@@ -203,6 +203,7 @@ mod mod_test {
     /// Mounts userpass and a policy letting a human operator run the pairing
     /// exchange and revoke a pairing, then returns a fresh login token.
     async fn operator_token(core: &crate::core::Core, root_token: &str, user: &str) -> String {
+        seed_vault_identity(core).await;
         test_mount_auth_api(core, root_token, "userpass", "userpass").await;
         let policy_hcl = r#"
             path "sys/mcp/token" { capabilities = ["update"] }
@@ -237,6 +238,28 @@ mod mod_test {
             .client_token
     }
 
+    /// The MCP identity the in-process fixtures give their vault (T548), so
+    /// the grant bodies below can name it. Generation itself is proven by
+    /// `test_mcp_vault_identity_is_generated_once_and_gates_the_exchange`.
+    const TEST_VAULT_ID: &str = "0f1e2d3c-4b5a-4968-8776-a5b4c3d2e1f0";
+
+    /// Stores [`TEST_VAULT_ID`] as this vault's MCP identity, in the record
+    /// the vault writes when it generates one.
+    async fn seed_vault_identity(core: &crate::core::Core) {
+        use crate::modules::system::mcp::{McpVaultIdentity, MCP_VAULT_IDENTITY_KEY};
+        use crate::storage::{Storage as _, StorageEntry};
+        let view = core.router.matching_view("sys/mcp/config").unwrap().expect("the sys mount has a view");
+        let record = McpVaultIdentity { version: 1, vault_id: TEST_VAULT_ID.to_string(), created_at: 1 };
+        view.put(&StorageEntry::new(MCP_VAULT_IDENTITY_KEY, &record).unwrap()).await.unwrap();
+    }
+
+    /// Asks the vault which vault it is, as `token`, over the exchange path.
+    async fn vault_identity(core: &crate::core::Core, token: &str) -> Result<String, RvError> {
+        let body = json!({ "vault_identity": true }).as_object().cloned();
+        let data = test_write_api(core, token, "sys/mcp/token", true, body).await?.unwrap().data.unwrap();
+        Ok(data["vault_id"].as_str().expect("the answer names the vault").to_string())
+    }
+
     fn pairing_body(id: &str) -> Option<serde_json::Map<String, Value>> {
         json!({
             "pairing": {
@@ -247,11 +270,106 @@ mod mod_test {
                 "path_scope": ["secret/metadata/ai/*"],
                 "reveal_allowed": false,
                 "destructive_allowed": false,
+                "vault_id": TEST_VAULT_ID,
             },
             "catalogue_hash": "deadbeef",
         })
         .as_object()
         .cloned()
+    }
+
+    /// `pairing_body(id)` naming `vault_id` instead, or no vault at all (a
+    /// grant approved before pairings were bound).
+    fn pairing_body_for(id: &str, vault_id: Option<&str>) -> Option<serde_json::Map<String, Value>> {
+        let mut body = pairing_body(id).unwrap();
+        let pairing = body["pairing"].as_object_mut().unwrap();
+        match vault_id {
+            Some(v) => pairing.insert("vault_id".into(), json!(v)),
+            None => pairing.remove("vault_id"),
+        };
+        Some(body)
+    }
+
+    /// T548: the vault generates its MCP identity once, answers it to anyone
+    /// who may exchange, and mints for a pairing only when the pairing names
+    /// that identity -- not one naming none, another vault's, or a malformed
+    /// one. Nothing is minted or recorded for a refused pairing.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_mcp_vault_identity_is_generated_once_and_gates_the_exchange() {
+        use crate::storage::Storage as _;
+
+        let (_bvault, core, root_token) = new_unseal_test_bastion_vault("test_mcp_vault_identity").await;
+        let core: &crate::core::Core = &core;
+        // `operator_token` seeds a fixture identity; replace it with a fresh
+        // vault's state: none until first asked.
+        let op = operator_token(core, &root_token, "felipe").await;
+        let view = core.router.matching_view("sys/mcp/config").unwrap().unwrap();
+        view.delete(crate::modules::system::mcp::MCP_VAULT_IDENTITY_KEY).await.unwrap();
+
+        // No identity yet: even a pairing naming one is refused, and asking
+        // does not happen as a side effect of a refused exchange.
+        let early = test_write_api(core, &op, "sys/mcp/token", false, pairing_body("early")).await;
+        assert!(early.unwrap_err().to_string().contains("mcp_pairing_vault_mismatch"));
+
+        let first = vault_identity(core, &op).await.unwrap();
+        assert!(bv_mcp::pairing::valid_vault_id(&first) && first != TEST_VAULT_ID, "{first}");
+        assert_eq!(vault_identity(core, &op).await.unwrap(), first, "generated once, then stable");
+        assert_eq!(vault_identity(core, &root_token).await.unwrap(), first, "root may ask, though not exchange");
+
+        // Asking for the identity never mints, and does not mix with a grant.
+        let mut both = pairing_body_for("both", Some(&first)).unwrap();
+        both.insert("vault_identity".into(), json!(true));
+        let mixed = test_write_api(core, &op, "sys/mcp/token", false, Some(both)).await.unwrap_err().to_string();
+        assert!(mixed.contains("cannot be combined"), "{mixed}");
+        let mut not_bool = serde_json::Map::new();
+        not_bool.insert("vault_identity".into(), json!("yes"));
+        assert!(test_write_api(core, &op, "sys/mcp/token", false, Some(not_bool)).await.is_err());
+
+        let refusals = [
+            (pairing_body_for("legacy", None), "mcp_pairing_vault_unbound"),
+            (pairing_body_for("other", Some("11111111-2222-4333-8444-555555555555")), "mcp_pairing_vault_mismatch"),
+            (pairing_body_for("malformed", Some("../../etc")), "vault identity"),
+        ];
+        for (body, code) in refusals {
+            let id = body.as_ref().unwrap()["pairing"]["id"].as_str().unwrap().to_string();
+            let err = test_write_api(core, &op, "sys/mcp/token", false, body).await.unwrap_err().to_string();
+            assert!(err.contains(code), "{id}: {err}");
+            let index = format!("mcp/app-tokens/pairing_{id}/");
+            assert!(view.list(&index).await.unwrap().is_empty(), "{id}: nothing minted");
+            assert!(view.get(&format!("mcp/pairing-namespaces/{id}")).await.unwrap().is_none(), "{id}: nothing noted");
+        }
+
+        let ok = test_write_api(core, &op, "sys/mcp/token", true, pairing_body_for("mine", Some(&first))).await;
+        let data = ok.unwrap().unwrap().data.unwrap();
+        assert_eq!(data["auth"]["metadata"]["vault_id"], json!(first), "the answer names the minting vault");
+    }
+
+    /// T548 regression at the vault: a grant approved against vault A is
+    /// refused by vault B even when the gatekeeper presents it, so B never
+    /// trusts the gatekeeper's word for which vault approved it.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_mcp_pairing_from_one_vault_is_refused_by_another() {
+        let (_a, core_a, root_a) = new_unseal_test_bastion_vault("test_mcp_vault_a").await;
+        let (_b, core_b, root_b) = new_unseal_test_bastion_vault("test_mcp_vault_b").await;
+        let (core_a, core_b): (&crate::core::Core, &crate::core::Core) = (&core_a, &core_b);
+        let op_a = operator_token(core_a, &root_a, "felipe").await;
+        let op_b = operator_token(core_b, &root_b, "felipe").await;
+        // Two real vaults, two generated identities (not the fixture's).
+        for core in [core_a, core_b] {
+            use crate::storage::Storage as _;
+            let view = core.router.matching_view("sys/mcp/config").unwrap().unwrap();
+            view.delete(crate::modules::system::mcp::MCP_VAULT_IDENTITY_KEY).await.unwrap();
+        }
+        let vault_a = vault_identity(core_a, &op_a).await.unwrap();
+        let vault_b = vault_identity(core_b, &op_b).await.unwrap();
+        assert_ne!(vault_a, vault_b, "every vault has its own identity");
+
+        let approved_in_a = pairing_body_for("roams", Some(&vault_a));
+        let err = test_write_api(core_b, &op_b, "sys/mcp/token", false, approved_in_a.clone()).await.unwrap_err();
+        assert!(err.to_string().contains("mcp_pairing_vault_mismatch"), "{err}");
+        let listed = test_list_api(core_b, &root_b, "sys/mcp/tokens", true).await.unwrap().unwrap().data.unwrap();
+        assert_eq!(listed["tokens"], json!([]), "vault B minted nothing");
+        assert!(test_write_api(core_a, &op_a, "sys/mcp/token", true, approved_in_a).await.is_ok(), "A still mints");
     }
 
     /// Pairing mode (Phase 4): an operator session exchanges for a
@@ -401,6 +519,7 @@ mod mod_test {
                 "client_name": "claude-code",
                 "tool_allowlist": ["bv_whoami", "bv_kv_list", "bv_capabilities", "bv_resource_list", "bv_resource_describe"],
                 "path_scope": ["mcpkv/*", "resources/*"],
+                "vault_id": TEST_VAULT_ID,
             },
         })
         .as_object()
@@ -518,7 +637,7 @@ mod mod_test {
             true,
             json!({
                 "pairing": { "id": "short-lived", "client_name": "c", "client_version": "1",
-                             "tool_allowlist": [], "path_scope": [] },
+                             "tool_allowlist": [], "path_scope": [], "vault_id": TEST_VAULT_ID },
                 "ttl_secs": 1,
             })
             .as_object()
@@ -666,8 +785,12 @@ mod mod_test {
         let op = login["auth"]["client_token"].as_str().unwrap().to_string();
 
         let list = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {} });
+        // T548: the gatekeeper's first question, over real HTTP.
+        let (status, identity) = http_post(&addr, "/v2/mcp/token", Some(&op), json!({ "vault_identity": true }));
+        assert_eq!(status, 200, "{identity}");
+        let vault = bv_mcp::local::vault_id_from_answer(&identity).expect("the vault names itself");
         let mint = |id: &str| {
-            let body = pairing_body(id).map(Value::Object).unwrap();
+            let body = pairing_body_for(id, Some(&vault)).map(Value::Object).unwrap();
             let (status, resp) = http_post(&addr, "/v2/mcp/token", Some(&op), body);
             assert_eq!(status, 200, "{resp}");
             (
@@ -1121,6 +1244,7 @@ mod mod_test {
                 "client_version": "2.1",
                 "tool_allowlist": ["bv_kv_list"],
                 "path_scope": ["mcpkv/*"],
+                "vault_id": TEST_VAULT_ID,
             },
         })
         .as_object()
@@ -1359,6 +1483,7 @@ mod mod_test {
     /// `mcp-tenant` in both tenants (granting nothing since T520); `felipe`
     /// holds the root-namespace equivalent.
     async fn tenants(core: &crate::core::Core, root: &str) {
+        seed_vault_identity(core).await;
         for ns in ["tenant-a", "tenant-b"] {
             ns_call(core, root, Operation::Write, "", &format!("sys/namespaces/{ns}"), Some(json!({}))).await.unwrap();
             tenant_policy(core, ns, "mcp-tenant", &tenant_operator_policy(ns)).await;
@@ -1451,6 +1576,7 @@ mod mod_test {
                 "client_version": "2.1",
                 "tool_allowlist": ["bv_whoami", "bv_resource_list", "bv_resource_describe"],
                 "path_scope": ["resources/*"],
+                "vault_id": TEST_VAULT_ID,
             },
         })
         .as_object()

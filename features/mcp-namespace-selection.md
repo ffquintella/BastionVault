@@ -176,6 +176,10 @@ Tenant policies holding bare `sys/mcp/...` rules (planted past the guard by an i
 - **Behaviour change.** Same-named policies authored in a target namespace no longer apply to narrowed tokens; operators grant the target's paths in their own policies (a root sign-in: rules on `dti/esi/...`). Tokens minted before the change have no `policy_namespace` and keep resolving in the target until they expire (≤ 24 h). During a rolling upgrade an older node ignores the field and evaluates a new narrowed token as before.
 - **Tests.** `a_narrowed_mcp_token_records_the_parents_policy_namespace`, `mint_mcp_token_derives_the_policy_namespace_from_stored_entries_only` (token store); `a_narrowed_mcp_token_carries_the_sessions_policies_not_the_targets`, `the_policy_namespace_cannot_be_forged_or_malformed` (policy store); `the_policy_namespace_reads_old_and_round_trips` (`bv-logical`); `test_mcp_narrowed_token_carries_the_signed_in_users_permissions` and the rewritten `test_mcp_pairing_narrows_to_a_descendant` (engine).
 
+## Amendment: one vault per pairing (T548, 2026-11-23)
+
+The pairing exchange re-validates the pairing's **vault** the way it re-validates the namespace: `pairing.vault_id` must equal the vault's own stored MCP identity, or the exchange answers `403 mcp_pairing_vault_unbound` (none named) or `403 mcp_pairing_vault_mismatch`, before the namespace is resolved, the move noted or anything written. A narrowing request does not change which vault a pairing belongs to; a pairing's `namespace` is its narrowing in that one vault. Design and formats: [mcp-access.md](mcp-access.md) § 3 "Vault binding".
+
 ## Dependencies
 
 [namespaces-multitenancy.md](namespaces-multitenancy.md) (token binding, `token_may_operate`), [mcp-access.md](mcp-access.md), [mcp-brokered-sessions.md](mcp-brokered-sessions.md) (operator reference, MFA ticket binding).

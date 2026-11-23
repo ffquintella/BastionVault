@@ -5,7 +5,15 @@ use serde_json::{json, Map, Value};
 use zeroize::{Zeroize, Zeroizing};
 
 use super::operator::{MfaChallenge, MfaFactor};
-use crate::{catalogue, pairing::PairingRecord, sanitize::sanitize_for_model};
+use crate::{
+    catalogue,
+    pairing::{valid_vault_id, PairingRecord},
+    sanitize::sanitize_for_model,
+};
+
+/// The `mcp/token` body key that asks the vault for its MCP identity instead
+/// of a token (T548). Answered with `{"vault_id": ...}`; mints nothing.
+pub const VAULT_IDENTITY_FIELD: &str = "vault_identity";
 
 /// `resources/v2/connect/mfa/begin`, the logical path of the operator's
 /// step-up preflight (`features/mcp-brokered-sessions.md` §3.1 step 1).
@@ -135,6 +143,35 @@ pub trait VaultLink: Send + Sync {
     fn operator_namespace(&self) -> Option<String> {
         None
     }
+
+    /// The serving vault's MCP identity ([`vault_identity_request_body`],
+    /// read with [`vault_id_from_answer`]), asked as the operator. Every
+    /// pairing is matched against it, and every new one bound to it (T548).
+    /// The default cannot ask, so nothing is matched and nobody is paired.
+    fn vault_id(&self) -> Result<String, String> {
+        Err("this host cannot ask the vault which vault it is, so no pairing can be matched".to_string())
+    }
+}
+
+/// The body of the identity request on the `mcp/token` exchange path (T548).
+/// Needs the same grant as the exchange itself, and nothing else.
+pub fn vault_identity_request_body() -> Map<String, Value> {
+    let mut body = Map::new();
+    body.insert(VAULT_IDENTITY_FIELD.into(), Value::Bool(true));
+    body
+}
+
+/// The vault identity out of an identity answer (bare or under `data`). An
+/// answer without one, or with one that is not a vault identity, is refused:
+/// a pairing is never matched against a guess.
+pub fn vault_id_from_answer(answer: &Value) -> Result<String, String> {
+    let id = response_data(answer).get("vault_id").and_then(Value::as_str).ok_or_else(|| {
+        "the vault's identity answer carried no `vault_id` (does it predate vault binding?)".to_string()
+    })?;
+    if !valid_vault_id(id) {
+        return Err("the vault's identity answer named a malformed `vault_id`".to_string());
+    }
+    Ok(id.to_string())
 }
 
 /// The operator session's namespace out of a [`TOKEN_LOOKUP_SELF_PATH`]
@@ -267,6 +304,11 @@ pub fn exchange_request_body(record: &PairingRecord, ttl_secs: u64, namespace: O
         "destructive_allowed": record.destructive_allowed,
         "ttl_secs": ttl_secs,
     });
+    // T548: the vault compares this with its own identity and refuses a
+    // mismatch, or a pairing that names none.
+    if let Some(vault_id) = &record.vault_id {
+        pairing["vault_id"] = json!(vault_id);
+    }
     if record.connect_allowed {
         pairing["connect_allowed"] = json!(true);
         pairing["confirm_connect"] = json!(true);
@@ -326,7 +368,7 @@ mod tests {
 
     fn record() -> PairingRecord {
         PairingRecord {
-            version: 1,
+            version: crate::pairing::RECORD_VERSION,
             id: "0123456789abcdef0123456789abcdef".into(),
             client_name: "claude-code".into(),
             client_version: "2.1".into(),
@@ -346,6 +388,35 @@ mod tests {
             expires_at: None,
             last_used_at: 0,
             namespace: None,
+            vault_id: Some("0f1e2d3c-4b5a-4968-8776-a5b4c3d2e1f0".into()),
+        }
+    }
+
+    /// T548: the exchange names the vault the pairing was approved for, so
+    /// the vault can refuse a pairing approved for another; an unassigned
+    /// record (never exchanged by the gatekeeper) names none.
+    #[test]
+    fn the_exchange_body_names_the_pairings_vault() {
+        let body = exchange_request_body(&record(), 600, None);
+        assert_eq!(body["pairing"]["vault_id"], json!("0f1e2d3c-4b5a-4968-8776-a5b4c3d2e1f0"));
+        let mut legacy = record();
+        legacy.vault_id = None;
+        assert!(exchange_request_body(&legacy, 600, None)["pairing"].get("vault_id").is_none());
+    }
+
+    #[test]
+    fn the_vault_identity_is_asked_for_and_read_strictly() {
+        assert_eq!(Value::Object(vault_identity_request_body()), json!({ "vault_identity": true }));
+        let id = "0f1e2d3c-4b5a-4968-8776-a5b4c3d2e1f0";
+        assert_eq!(vault_id_from_answer(&json!({ "data": { "vault_id": id } })).unwrap(), id);
+        assert_eq!(vault_id_from_answer(&json!({ "vault_id": id })).unwrap(), id);
+        for bad in [
+            json!({}),
+            json!({ "data": { "vault_id": "" } }),
+            json!({ "vault_id": "A/../b" }),
+            json!({ "vault_id": 7 }),
+        ] {
+            assert!(vault_id_from_answer(&bad).is_err(), "{bad}");
         }
     }
 

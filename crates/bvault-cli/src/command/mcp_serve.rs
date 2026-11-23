@@ -29,9 +29,10 @@ use bv_mcp::{
     local::{
         exchange_request_body, mfa_begin_body, mfa_begin_error, mfa_preflight_from_begin, mfa_verify_body,
         minted_token_from_exchange, normalize_grant, operator_namespace_from_lookup, ticket_from_verify,
-        ConfirmRequest, ConnInfo, ConnectionSlot, ForwardError, LocalServer, McpCallRef, MfaBeginError, MfaFactor,
-        MfaPreflight, MintedToken, PairingDecision, PairingGrant, PairingRequest, Prompter, VaultLink,
-        CONNECT_MFA_BEGIN_PATH, CONNECT_MFA_VERIFY_PATH, MAX_MESSAGE_BYTES, NAMESPACE_HEADER, TOKEN_LOOKUP_SELF_PATH,
+        vault_id_from_answer, vault_identity_request_body, ConfirmRequest, ConnInfo, ConnectionSlot, ForwardError,
+        LocalServer, McpCallRef, MfaBeginError, MfaFactor, MfaPreflight, MintedToken, PairingDecision, PairingGrant,
+        PairingRequest, Prompter, VaultLink, CONNECT_MFA_BEGIN_PATH, CONNECT_MFA_VERIFY_PATH, MAX_MESSAGE_BYTES,
+        NAMESPACE_HEADER, TOKEN_LOOKUP_SELF_PATH,
     },
     pairing::{
         self, find_by_token_hash, hash_token, now_secs, PairingRecord, Transport, DEFAULT_TOKEN_TTL_SECS,
@@ -135,6 +136,18 @@ impl VaultLink for HttpVaultLink {
         }
         let data = resp.response_data.ok_or_else(|| "vault returned an empty exchange response".to_string())?;
         minted_token_from_exchange(&data, ttl_secs, now_secs())
+    }
+
+    /// T548: `POST /v2/mcp/token` with `vault_identity`, as the operator.
+    fn vault_id(&self) -> Result<String, String> {
+        let resp = self
+            .client
+            .request_write("v2/mcp/token", Some(vault_identity_request_body()))
+            .map_err(|e| format!("could not reach the vault: {e}"))?;
+        if resp.response_status != 200 {
+            return Err(vault_error_text(&resp.response_data, resp.response_status));
+        }
+        vault_id_from_answer(&resp.response_data.unwrap_or(Value::Null))
     }
 
     fn forward(&self, token: &str, message: &Value) -> Result<Value, ForwardError> {
@@ -793,12 +806,17 @@ fn handle_http_connection(server: &LocalServer, mut stream: TcpStream, local_por
         }
     }
 
-    // Only now does anything touch the pairing store or the vault.
+    // Only now does anything touch the pairing store or the vault. A
+    // bearer authenticates only a pairing approved for the vault this
+    // server serves (T548); without that vault's identity, nobody.
     let now = server.now();
+    let Ok(vault_id) = server.active_vault_id() else {
+        return HttpReply::status(503, "Service Unavailable").write_to(&mut stream);
+    };
     let Ok(records) = server.store().load() else {
         return HttpReply::status(500, "Internal Server Error").write_to(&mut stream);
     };
-    let Some(record) = find_by_token_hash(&records, &hash_token(&bearer), now).cloned() else {
+    let Some(record) = find_by_token_hash(&records, &hash_token(&bearer), &vault_id, now).cloned() else {
         let mut r = HttpReply::status(401, "Unauthorized");
         r.extra_headers.push(("WWW-Authenticate", "Bearer".to_string()));
         return r.write_to(&mut stream);
@@ -854,7 +872,11 @@ mod tests {
     struct FakeLink {
         exchanges: AtomicUsize,
         forwards: Mutex<Vec<(String, Value)>>,
+        /// Which vault this fake is; `None` is [`TEST_VAULT`].
+        vault: Mutex<Option<String>>,
     }
+
+    const TEST_VAULT: &str = "0f1e2d3c-4b5a-4968-8776-a5b4c3d2e1f0";
 
     /// The trait is `bv-mcp`'s, so the test double needs a local type.
     struct SharedLink(Arc<FakeLink>);
@@ -873,6 +895,10 @@ mod tests {
         fn forward(&self, token: &str, message: &Value) -> Result<Value, ForwardError> {
             lock(&self.0.forwards).push((token.to_string(), message.clone()));
             Ok(json!({ "jsonrpc": "2.0", "id": message["id"], "result": { "relayed": true } }))
+        }
+
+        fn vault_id(&self) -> Result<String, String> {
+            Ok(lock(&self.0.vault).clone().unwrap_or_else(|| TEST_VAULT.to_string()))
         }
     }
 
@@ -1108,6 +1134,7 @@ mod tests {
                 namespace: None,
             },
             &grant(),
+            TEST_VAULT,
             now_secs(),
         )
         .0;
@@ -1226,6 +1253,8 @@ mod tests {
                 json!({ "data": { "required": true, "methods": ["totp"] } })
             } else if path.ends_with("/connect/mfa/verify") {
                 json!({ "data": { "connect_ticket": "ticket-1" } })
+            } else if path.ends_with("/v2/mcp/token") && sent.get("vault_identity") == Some(&json!(true)) {
+                json!({ "data": { "vault_id": TEST_VAULT } })
             } else if path.ends_with("/v2/mcp/token") {
                 // Bound where it was asked to narrow to, else the session's.
                 let bound = sent.get("namespace").cloned().unwrap_or_else(|| json!(namespace.unwrap_or("")));
@@ -1323,9 +1352,26 @@ mod tests {
         }
     }
 
+    /// T548: the CLI learns which vault it serves by asking the exchange
+    /// path, as the operator, with no namespace header; and the exchange
+    /// then names that vault in the grant.
+    #[test]
+    fn the_vault_identity_is_asked_on_the_exchange_path() {
+        let (addr, seen) = fake_vault(vault_answering(Some("dti")));
+        let link = HttpVaultLink::new(Client::new().with_addr(&addr).with_token("operator-session-token").build());
+        assert_eq!(link.vault_id().unwrap(), TEST_VAULT);
+        let seen = lock(&seen);
+        let (method, path, headers) = seen.last().unwrap();
+        assert_eq!((method.as_str(), path.as_str()), ("POST", "/v2/mcp/token"));
+        assert_eq!(header(headers, "x-bastionvault-namespace"), None);
+        let body = exchange_request_body(&pairing_record_for_tests(), 60, None);
+        assert_eq!(body["pairing"]["vault_id"], json!(TEST_VAULT));
+    }
+
     fn pairing_record_for_tests() -> PairingRecord {
         PairingRecord {
-            version: 1,
+            version: bv_mcp::pairing::RECORD_VERSION,
+            vault_id: Some(TEST_VAULT.into()),
             id: "0123456789abcdef0123456789abcdef".into(),
             client_name: "claude-code".into(),
             client_version: "2.1".into(),
@@ -1371,6 +1417,18 @@ mod tests {
         assert!(body.contains("\"relayed\":true"));
         assert!(!body.contains(MINTED), "the minted token never reaches the client");
         assert_eq!(lock(&h.link.forwards)[0].0, MINTED);
+    }
+
+    /// T548: a bearer paired while this store served another vault
+    /// authenticates nobody here, and nothing is minted for it.
+    #[test]
+    fn http_refuses_a_bearer_paired_with_another_vault() {
+        let h = http_rig("http-other-vault", vec![]);
+        *lock(&h.link.vault) = Some("11111111-2222-4333-8444-555555555555".into());
+        let host = format!("127.0.0.1:{}", h.addr.port());
+        assert_eq!(post(h.addr, Some(&host), None, Some(&h.bearer), &list_body()).0, 401);
+        assert_eq!(h.link.exchanges.load(Ordering::SeqCst), 0);
+        assert!(lock(&h.link.forwards).is_empty());
     }
 
     #[test]

@@ -495,15 +495,17 @@ Protocol. The operator guide is [`mcp.md`](mcp.md).
 bvault mcp pair --client-name <name> [--transport stdio|uds|loopback-http]
 bvault mcp serve [--stdio | --socket <path> | --listen 127.0.0.1:<port>] [--namespace <ns>]
 bvault mcp pairings list
+bvault mcp pairings rebind <id>
 bvault mcp pairings revoke <id>
 bvault mcp token --app <name> [--ttl-secs N] [--policies a,b]
 bvault mcp catalogue
 ```
 
 - `pair` needs an interactive terminal (a non-interactive environment cannot
-  pair). It asks for the path scope, tools, and whether the client may reveal
-  values or make changes. For `--transport loopback-http` it prints a pairing
-  token once.
+  pair) and a vault sign-in (`VAULT_ADDR` and a token): the pairing is bound to
+  that vault and `serve` uses it only against it. It asks for the path scope,
+  tools, and whether the client may reveal values or make changes. For
+  `--transport loopback-http` it prints a pairing token once.
 - `serve` runs the local MCP server. The three transports are mutually
   exclusive; stdio is the default. `--listen` accepts only a loopback address
   (`0.0.0.0:…` is a usage error), and `--socket` creates an owner-only socket.
@@ -518,6 +520,12 @@ bvault mcp catalogue
   for your own namespace, one beneath it from a child-visible sign-in, or one
   assigned to you (`mcp_namespace_not_permitted` otherwise). A malformed path is a usage
   error. See [Namespaces](mcp.md#namespaces).
+- `pairings list` shows the vault each pairing is bound to (the first 8
+  characters of its identity), or `unassigned` for one approved before
+  pairings were bound to a vault: such a pairing is never used.
+- `pairings rebind <id>` binds an `unassigned` pairing, scope, expiry and
+  bearer unchanged, to the vault you are signed in to. A pairing already bound
+  to a vault cannot be moved.
 - `pairings revoke` removes the pairing locally and revokes its tokens on the
   vault; it exits non-zero if the vault could not be reached.
 - `token --app` exchanges the current login for an MCP-bound token for a

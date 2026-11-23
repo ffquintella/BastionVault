@@ -2620,4 +2620,12 @@ export interface McpPairing {
   namespace?: string | null;
   /** Where its live token is bound, from the vault's answer (`""` = root); absent: no live token. */
   token_namespace?: string | null;
+  /** May open brokered sessions (SSH/web), each confirmed by you. */
+  connect_allowed?: boolean;
+  /**
+   * The vault this pairing was approved for (its MCP identity, T548). Used only
+   * with that vault. `null`/absent: approved before pairings were bound — never
+   * used until re-bound to a vault or revoked.
+   */
+  vault_id?: string | null;
 }

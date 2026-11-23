@@ -3,7 +3,7 @@
 //!
 //! - `serve`     -- the local MCP server for this workstation's assistants.
 //! - `pair`      -- approve a local client by hand (interactive).
-//! - `pairings`  -- list or revoke approved clients.
+//! - `pairings`  -- list, re-bind or revoke approved clients.
 //! - `token`     -- exchange the current login for an MCP-bound token (apps).
 //! - `catalogue` -- print the tool catalogue and its pinnable hash.
 
@@ -15,7 +15,9 @@ use derive_more::Deref;
 use serde_json::{json, Map, Value};
 use sysexits::ExitCode;
 
-use bv_mcp::local::{build_record, vault_error_text, LocalServer, PairingDecision, PairingRequest, Prompter};
+use bv_mcp::local::{
+    build_record, vault_error_text, LocalServer, PairingDecision, PairingRequest, Prompter, VaultLink as _,
+};
 
 use super::mcp_serve::{
     self, bind_http, delete_status, parse_loopback_addr, serve_stdio, HttpConfig, HttpVaultLink, TtyPrompter, HTTP_PATH,
@@ -58,7 +60,7 @@ pub enum Commands {
     Serve(Serve),
     /// Approve a local MCP client by hand (needs a terminal).
     Pair(Pair),
-    /// List or revoke approved local clients.
+    /// List, re-bind or revoke approved local clients.
     Pairings(Pairings),
     /// Exchange the current login for an MCP-bound token for an MCP app.
     Token(Token),
@@ -226,7 +228,7 @@ impl CommandExecutor for Serve {
 
 // ── pair ─────────────────────────────────────────────────────────────────
 
-#[derive(Parser)]
+#[derive(Parser, Deref)]
 #[command(
     about = "Approve a local MCP client by hand (needs a terminal)",
     long_about = r#"Approve a local MCP client and record what it may do. You are shown who is
@@ -236,6 +238,9 @@ cannot pair.
 
 The --client-name must match the name the client sends in its MCP `clientInfo`
 (for Claude Desktop, the name shown in its MCP server list).
+
+The pairing is bound to the vault this command is signed in to (VAULT_ADDR and
+your token): `bvault mcp serve` uses it only against that vault.
 
 For --transport loopback-http a pairing token is generated and shown ONCE:
 configure it as the client's `Authorization: Bearer` value."#
@@ -259,6 +264,23 @@ pub struct Pair {
     /// Pairing store location (default: $XDG_CONFIG_HOME/bvault/mcp-pairings.json).
     #[arg(long, value_name = "PATH", env = "BVAULT_MCP_PAIRINGS_FILE")]
     pairings_file: Option<PathBuf>,
+
+    #[deref]
+    #[command(flatten, next_help_heading = "HTTP Options")]
+    http_options: command::HttpOptions,
+}
+
+/// The MCP identity of the vault this command is signed in to (T548), asked
+/// as the operator: what a new grant is bound to.
+fn signed_in_vault(client: crate::api::Client) -> Result<String, RvError> {
+    if client.token.is_empty() {
+        return Err(bv_error_string!(
+            "no vault token: a pairing is bound to one vault, so sign in to it first (`bvault login`, --token or VAULT_TOKEN)"
+        ));
+    }
+    HttpVaultLink::new(client)
+        .vault_id()
+        .map_err(|e| bv_error_string!(format!("could not learn which vault you are signed in to: {e}")))
 }
 
 impl CommandExecutor for Pair {
@@ -281,8 +303,10 @@ impl CommandExecutor for Pair {
             _ => None,
         };
         let store = pairing_store(&self.pairings_file)?;
-        // Offline pairing: no vault session is asked, so the dialog cannot
-        // name the namespace; `mcp serve`'s per-call confirmations do.
+        // Before the operator is asked: a grant is never bound to a guess.
+        let vault_id = signed_in_vault(self.client()?)?;
+        // The session's namespace is not looked up here, so the dialog
+        // cannot name it; `mcp serve`'s per-call confirmations do.
         let request = PairingRequest {
             client_name: name,
             client_version: self.client_version.trim(),
@@ -299,10 +323,10 @@ impl CommandExecutor for Pair {
             return Ok(());
         };
 
-        let (record, bearer) = build_record(&request, &grant, now_secs());
+        let (record, bearer) = build_record(&request, &grant, &vault_id, now_secs());
         let id = record.id.clone();
         store.upsert(record)?;
-        println!("Paired `{name}` over {} (pairing id {id}).", transport.as_str());
+        println!("Paired `{name}` over {} with vault {vault_id} (pairing id {id}).", transport.as_str());
         if let Some(token) = bearer {
             println!();
             println!("Pairing token (shown once -- it is not stored):");
@@ -316,7 +340,7 @@ impl CommandExecutor for Pair {
 // ── pairings ─────────────────────────────────────────────────────────────
 
 #[derive(Parser)]
-#[command(about = "List or revoke approved local clients")]
+#[command(about = "List, re-bind or revoke approved local clients")]
 pub struct Pairings {
     #[command(subcommand)]
     command: Option<PairingsCommands>,
@@ -328,6 +352,8 @@ pub enum PairingsCommands {
     List(PairingsList),
     /// Revoke one approved client, including its tokens on the vault.
     Revoke(PairingsRevoke),
+    /// Bind an unassigned (pre-binding) pairing to the vault you are signed in to.
+    Rebind(PairingsRebind),
 }
 
 impl Pairings {
@@ -339,6 +365,7 @@ impl Pairings {
         match cmd {
             PairingsCommands::List(c) => c.execute(),
             PairingsCommands::Revoke(c) => c.execute(),
+            PairingsCommands::Rebind(c) => c.execute(),
         }
     }
 }
@@ -373,7 +400,10 @@ impl CommandExecutor for PairingsList {
             println!("No paired clients.");
             return Ok(());
         }
-        println!("{:<34} {:<24} {:<14} {:<6} {:<7} {:<7} STATE", "ID", "CLIENT", "TRANSPORT", "UID", "REVEAL", "WRITE");
+        println!(
+            "{:<34} {:<24} {:<14} {:<6} {:<7} {:<7} {:<12} STATE",
+            "ID", "CLIENT", "TRANSPORT", "UID", "REVEAL", "WRITE", "VAULT"
+        );
         for r in &records {
             let uid = r.peer_uid.map(|u| u.to_string()).unwrap_or_else(|| "-".into());
             let state = match r.expires_at {
@@ -381,14 +411,20 @@ impl CommandExecutor for PairingsList {
                 Some(t) => format!("{}d left", (t - now) / 86400),
                 None => "no expiry".to_string(),
             };
+            // A pre-binding record is listed, never used: re-bind or revoke it.
+            let vault = match &r.vault_id {
+                Some(v) => v.chars().take(8).collect::<String>(),
+                None => "unassigned".to_string(),
+            };
             println!(
-                "{:<34} {:<24} {:<14} {:<6} {:<7} {:<7} {}",
+                "{:<34} {:<24} {:<14} {:<6} {:<7} {:<7} {:<12} {}",
                 r.id,
                 r.client_name.chars().take(24).collect::<String>(),
                 r.transport,
                 uid,
                 if r.reveal_allowed { "yes" } else { "no" },
                 if r.destructive_allowed { "yes" } else { "no" },
+                vault,
                 state
             );
         }
@@ -441,6 +477,39 @@ impl CommandExecutor for PairingsRevoke {
                 record.ttl_secs / 3600
             ))),
         }
+    }
+}
+
+#[derive(Parser, Deref)]
+#[command(
+    about = "Bind an unassigned pairing to the vault you are signed in to",
+    long_about = r#"A pairing approved before pairings were bound to a vault is listed as
+`unassigned` and is never used. This binds it -- its scope, expiry and, for
+loopback HTTP, its bearer unchanged -- to the vault this command is signed in
+to, and to no other. A pairing already bound to a vault cannot be moved: pair
+the client with the other vault instead."#
+)]
+pub struct PairingsRebind {
+    /// The pairing id (from `bvault mcp pairings list`).
+    id: String,
+
+    /// Pairing store location (default: $XDG_CONFIG_HOME/bvault/mcp-pairings.json).
+    #[arg(long, value_name = "PATH", env = "BVAULT_MCP_PAIRINGS_FILE")]
+    pairings_file: Option<PathBuf>,
+
+    #[deref]
+    #[command(flatten, next_help_heading = "HTTP Options")]
+    http_options: command::HttpOptions,
+}
+
+impl CommandExecutor for PairingsRebind {
+    fn main(&self) -> Result<(), RvError> {
+        let id = self.id.trim();
+        let store = pairing_store(&self.pairings_file)?;
+        let vault_id = signed_in_vault(self.client()?)?;
+        let record = store.rebind(id, &vault_id)?;
+        println!("Bound pairing {id} (`{}`) to vault {vault_id}.", record.client_name);
+        Ok(())
     }
 }
 

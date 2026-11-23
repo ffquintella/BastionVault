@@ -25,10 +25,11 @@ mod mod_test {
     use bv_mcp::{
         local::{
             exchange_request_body, mfa_begin_body, mfa_begin_error, mfa_preflight_from_begin, mfa_verify_body,
-            minted_token_from_exchange, operator_namespace_from_lookup, ticket_from_verify, ConfirmRequest, ConnInfo,
-            ForwardError, LocalServer, McpCallRef, MfaBeginError, MfaFactor, MfaPreflight, MintedToken,
-            PairingDecision, PairingGrant, PairingRequest, Prompter, VaultLink, CONNECT_MFA_BEGIN_PATH,
-            CONNECT_MFA_VERIFY_PATH, NAMESPACE_HEADER, TOKEN_LOOKUP_SELF_PATH,
+            minted_token_from_exchange, operator_namespace_from_lookup, ticket_from_verify, vault_id_from_answer,
+            vault_identity_request_body, ConfirmRequest, ConnInfo, ForwardError, LocalServer, McpCallRef,
+            MfaBeginError, MfaFactor, MfaPreflight, MintedToken, PairingDecision, PairingGrant, PairingRequest,
+            Prompter, VaultLink, CONNECT_MFA_BEGIN_PATH, CONNECT_MFA_VERIFY_PATH, NAMESPACE_HEADER,
+            TOKEN_LOOKUP_SELF_PATH,
         },
         pairing::{PairingRecord, PairingStore, Transport},
         request_state::SingleUseGuard,
@@ -310,6 +311,16 @@ mod mod_test {
         }
 
         async fn pair(&self, id: &str, scope: Value) -> String {
+            // T548: the grant names the vault it is approved for, as the
+            // gatekeeper learns it: by asking the vault, as the operator.
+            let asked = test_write_api(
+                self.core.as_ref(),
+                &self.op,
+                "sys/mcp/token",
+                true,
+                Some(vault_identity_request_body()),
+            );
+            let vault_id = vault_id_from_answer(&Value::Object(asked.await.unwrap().unwrap().data.unwrap())).unwrap();
             let mut body = json!({
                 "pairing": {
                     "id": id,
@@ -319,6 +330,7 @@ mod mod_test {
                     "path_scope": scope,
                     "connect_allowed": true,
                     "confirm_connect": true,
+                    "vault_id": vault_id,
                 },
             });
             if !self.ns.is_empty() {
@@ -1196,6 +1208,10 @@ mod mod_test {
         ) -> Result<MintedToken, String> {
             let data = self.write_as_operator("sys/mcp/token", exchange_request_body(record, ttl_secs, namespace))?;
             minted_token_from_exchange(&data, ttl_secs, now_secs())
+        }
+
+        fn vault_id(&self) -> Result<String, String> {
+            vault_id_from_answer(&self.write_as_operator("sys/mcp/token", vault_identity_request_body())?)
         }
 
         fn forward(&self, token: &str, message: &Value) -> Result<Value, ForwardError> {

@@ -550,6 +550,10 @@ pub fn run() {
             commands::mcp::mcp_pairings_path,
             commands::mcp::mcp_list_pairings,
             commands::mcp::mcp_revoke_pairing,
+            // T548: which vault this window is signed in to, and binding a
+            // pre-binding pairing to it (the main window's alone).
+            commands::mcp::mcp_vault_identity,
+            commands::mcp::mcp_rebind_pairing,
             // The desktop-hosted local MCP server (T131): lifecycle, client
             // setup, and the operator's answers to its prompts.
             commands::mcp::mcp_server_status,

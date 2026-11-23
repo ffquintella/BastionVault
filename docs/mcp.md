@@ -544,7 +544,16 @@ List and revoke clients:
 ```bash
 bvault mcp pairings list
 bvault mcp pairings revoke <id>     # removes it here, then revokes its tokens on the vault
+bvault mcp pairings rebind <id>     # binds an `unassigned` pairing to the vault you are signed in to
 ```
+
+Each pairing belongs to **one vault**: the one it was approved against
+(`bvault mcp pair` and the server ask the vault you are signed in to for its
+identity first). A server serving another vault does not use it and asks you
+to approve the client for that vault. A pairing approved before this rule
+(listed as `unassigned`) is not used with any vault until you re-bind it or
+revoke it. The desktop app lists assistants grouped by vault, the vault you
+are signed in to first, with a **Re-bind** action for unassigned ones.
 
 The same list, with revoke, is in the desktop app under Settings → AI Assistants.
 If the vault cannot be reached during a revoke the local record is still removed
@@ -706,6 +715,9 @@ CSS, so text a page hides is returned.
 | `mcp_hybrid_kex_unverifiable` | `require_hybrid_kex` is set; it cannot be verified yet |
 | `mcp_machine_identity_required` | No FerroGate identity on the login and no active waiver |
 | `mcp_pairing_requires_operator` | Client not paired and nobody approved it: no terminal (CLI; run `bvault mcp pair`), or the app's dialog was not answered in time, its window was closed or the vault locked |
+| `mcp_pairing_other_vault` | The pairing (or loopback bearer) was approved for another vault, or is `unassigned`; pair the client with this vault, or re-bind the unassigned one |
+| `mcp_pairing_vault_unbound` / `mcp_pairing_vault_mismatch` (403 from the vault) | The exchange named no vault, or another vault: the vault refuses to mint for it |
+| `mcp_vault_identity_unavailable` | The server could not ask the vault which vault it is (unreachable, no `update` on `sys/mcp/token`, or a vault older than vault binding); nothing is matched or paired |
 | `mcp_server_stopped` | The server stopped while the call was in flight (turned off, lock, sign-out, vault switch); reconnect once it runs |
 | "cannot be served from a root session" | The desktop app refuses to serve under a root token; sign in as a regular user |
 | `--mcp-stdio` exits 69 | The app is not serving: open it, unlock, turn on Settings → AI Assistants |
