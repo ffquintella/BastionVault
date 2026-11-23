@@ -107,7 +107,11 @@ lazy_static! {
 ///   [`machine_identity_satisfied`], so inheriting it would make every child of
 ///   a machine-bound token pass the server-wide `require_machine_identity`
 ///   gate with no attestation of its own — the gate would be satisfied by
-///   descent instead of by proof.
+///   descent instead of by proof. The one deliberate exception is
+///   [`TokenStore::mint_mcp_token`] (T549): it is the only writer of an
+///   MCP-bound token, refuses a root or MCP-bound parent, is revoked with its
+///   parent and carries no `mount_path` or identity. Do not copy the pattern
+///   into `handle_create`.
 /// * `mount_path` = `"ferrogate/"` is what `bv-auth-approle`'s login checks
 ///   before accepting a token as a `machine_token`; inheriting it would make
 ///   any child of a FerroGate token replayable as a machine credential.
@@ -1258,7 +1262,14 @@ impl TokenStore {
         )?
         .as_secs();
 
-        let meta = mcp_namespace_binding(&parent.meta, target)?;
+        let mut meta = mcp_namespace_binding(&parent.meta, target)?;
+        // Machine lineage, never identity: an MCP call crosses the same
+        // `require_machine_identity` gate as any request, so a token minted
+        // from a machine-bound parent stays machine-bound. Nothing is added
+        // for a parent that has none, and no username or entity is carried.
+        if let Some(spiffe_id) = parent.meta.get(SPIFFE_ID_META).filter(|s| !s.is_empty()) {
+            meta.insert(SPIFFE_ID_META.to_string(), spiffe_id.clone());
+        }
         // The only writer of `policy_namespace`: whatever the caller put on
         // the binding is replaced by what the stored entries say.
         let mut binding = binding;
@@ -1272,6 +1283,8 @@ impl TokenStore {
             num_uses: 0,
             bound_cidrs: parent.bound_cidrs.clone(),
             meta,
+            // Same inheritance as an ordinary child token (`create_child`).
+            machine_identity_exempt: parent.machine_identity_exempt,
             mcp_binding: Some(binding),
             ..TokenEntry::default()
         };
@@ -1283,6 +1296,7 @@ impl TokenStore {
             display_name: te.display_name.clone(),
             policies: te.policies.clone(),
             metadata: te.meta.clone(),
+            machine_identity_exempt: te.machine_identity_exempt,
             mcp_binding: te.mcp_binding.clone(),
             ..Default::default()
         };

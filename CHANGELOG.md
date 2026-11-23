@@ -426,6 +426,11 @@ EXAMPLE ENTRY:
 
 ### Fixed
 
+#### MCP: pairing on a server that requires machine identity
+
+- **Pair an AI assistant from a session that is both a user and an attested machine, instead of getting no tools** (T549, S115, S26)
+  -- On a server with FerroGate `require_machine_identity` on, the signed-in operator holds a combined session (the machine's `spiffe_id` plus the user's `username` and `entity_id`). `POST /v2/mcp/token` refused it with HTTP 403 `mcp_pairing_requires_operator_session`, so the assistant connected but listed 0 tools. The exchange now accepts any session that names a human and is not an AppRole; a machine-only token and an AppRole token are still refused. The token minted for the assistant keeps the session's machine lineage (the attesting `spiffe_id`, never a username or entity, and the exemption an AppRole bypass carries), so its calls still pass the machine gate. A server that does not require machine identity behaves as before. Servers running 0.46.25 or earlier need this release.
+
 #### Namespaces: mounts keep routing after a seal and unseal
 
 - **Reach a child namespace's engines after the vault is sealed and unsealed** (T547, S27)

@@ -386,14 +386,14 @@ fn check_pairing_connect_grant(pairing: &Map<String, Value>, tool_allowlist: &[S
 /// A human login stamps `entity_id` and/or `username`; tokens issued before
 /// entity resolution was wired through login carry only the latter. AppRole
 /// (`role_name`) tokens are never an operator session.
-// Behaviour-preserving extraction: the machine-identity rule is added in the
-// follow-up change, with its tests.
+///
+/// `spiffe_id` is not a reason to refuse: a server that requires machine
+/// identity hands the operator a combined session (machine plus the bound
+/// user). A machine-only token has no human identity and fails the first test.
 fn is_operator_session(auth: &Auth) -> bool {
     let has_human_identity =
         [ENTITY_ID_META, USERNAME_META].iter().any(|k| auth.metadata.get(*k).is_some_and(|s| !s.is_empty()));
-    has_human_identity
-        && !auth.metadata.contains_key("role_name")
-        && auth.metadata.get(SPIFFE_ID_META).is_none_or(|s| s.is_empty())
+    has_human_identity && !auth.metadata.contains_key("role_name")
 }
 
 /// The operator record a pairing binding carries (`McpBinding::operator`),
@@ -1168,11 +1168,12 @@ impl SystemBackend {
     }
 
     /// Pairing mode (spec §4 step 3): the caller must be an operator session
-    /// (an entity-bound login that is neither an AppRole nor a machine
+    /// (an entity-bound login that is not an AppRole and not a machine-only
     /// token), and the minted token's rights are the caller's policies
     /// narrowed by the pairing grant — `mint_mcp_token` enforces the subset
-    /// rule. No machine-identity requirement: the operator is the attested
-    /// party here, present at a TTY or GUI when they approved the pairing.
+    /// rule. A combined user+machine session is an operator session: the
+    /// operator is the attested party here, present at a TTY or GUI when they
+    /// approved the pairing, and the minted token keeps the machine lineage.
     #[allow(clippy::too_many_arguments)]
     async fn exchange_pairing(
         &self,
@@ -1188,7 +1189,7 @@ impl SystemBackend {
         if !is_operator_session(auth) {
             return Err(crate::bv_error_response_status!(
                 403,
-                "mcp_pairing_requires_operator_session: pairing needs an entity-bound user login, not an AppRole or machine token"
+                "mcp_pairing_requires_operator_session: pairing needs an entity-bound user login, not an AppRole or a machine-only token"
             ));
         }
 
@@ -1657,11 +1658,8 @@ mod brokered_session_tests {
         let approle = session(&[("role_name", "ci"), (USERNAME_META, "ci-bot"), (ENTITY_ID_META, "e-9")]);
         assert!(!is_operator_session(&approle), "an AppRole token never pairs, even with a human-looking name");
 
-        let approle_on_machine = session(&[
-            ("role_name", "ci"),
-            (USERNAME_META, "ci-bot"),
-            (SPIFFE_ID_META, "spiffe://fgv.br/ws/ci"),
-        ]);
+        let approle_on_machine =
+            session(&[("role_name", "ci"), (USERNAME_META, "ci-bot"), (SPIFFE_ID_META, "spiffe://fgv.br/ws/ci")]);
         assert!(!is_operator_session(&approle_on_machine), "machine binding does not turn an AppRole into an operator");
     }
 
