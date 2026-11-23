@@ -989,7 +989,7 @@ dependencies = [
 
 [[package]]
 name = "bastion-vault-gui"
-version = "0.46.33"
+version = "0.46.34"
 dependencies = [
  "arboard",
  "argon2",
@@ -1043,6 +1043,8 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.1",
+ "smolder-proto",
+ "smolder-smb-core",
  "sspi",
  "tauri",
  "tauri-build",
@@ -1070,7 +1072,7 @@ dependencies = [
 
 [[package]]
 name = "bastion_vault"
-version = "0.46.33"
+version = "0.46.34"
 dependencies = [
  "actix-rt",
  "anyhow",
@@ -2600,7 +2602,7 @@ dependencies = [
 
 [[package]]
 name = "bvault-cli"
-version = "0.46.33"
+version = "0.46.34"
 dependencies = [
  "actix-rt",
  "actix-web",
