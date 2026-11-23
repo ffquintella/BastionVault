@@ -503,7 +503,7 @@ export interface ResourceTypeDef {
 export type ResourceTypeConfig = Record<string, ResourceTypeDef>;
 
 /** Connect protocols a resource type can offer. */
-export type ConnectProtocol = "ssh" | "rdp" | "web" | "sftp";
+export type ConnectProtocol = "ssh" | "rdp" | "web" | "sftp" | "smb";
 
 /**
  * How far a `web` login mode lets the credential travel, least to most
@@ -524,7 +524,7 @@ export type WebExposure = "none" | "isolated" | "handler" | "proxy" | "dom";
  * anything read from storage must go through `parseSessionProtocol` — an
  * unknown value is refused, never defaulted to `ssh`.
  */
-export type SessionProtocol = "ssh" | "rdp" | "web" | "sftp";
+export type SessionProtocol = "ssh" | "rdp" | "web" | "sftp" | "smb";
 
 /** Login modes a `web` profile can declare (spec §1). `open`, `form` and
  *  `http-auth` launch; `sso` is refused at save and at connect with "not
@@ -907,6 +907,12 @@ export interface ConnectionProfile {
   login_class?: SshLoginClass;
   /** `protocol: "web"` only — see `WebProfileSettings`. */
   web?: WebProfileSettings;
+  /** `protocol: "smb"` only — the share name (`files`, not a UNC path);
+   *  required. See features/smb-connect.md. */
+  share?: string;
+  /** `protocol: "smb"` only — NTLM domain for a bare username. A domain in
+   *  the login itself (`CORP\user`, `user@corp`) wins. Optional. */
+  domain?: string;
 }
 
 /**

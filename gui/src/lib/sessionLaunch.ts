@@ -54,6 +54,16 @@ export async function openProfileSession(
         connect_ticket: request.connect_ticket,
       });
       return;
+    case "smb":
+      // Same dual-pane window as SFTP, over an SMB share
+      // (features/smb-connect.md): own window, no placement, no restore.
+      await api.sessionOpenSmb({
+        resource_name: request.resource_name,
+        profile_id: request.profile_id,
+        operator_credential: request.operator_credential,
+        connect_ticket: request.connect_ticket,
+      });
+      return;
     case "web":
       // No placement: a web session is never pooled into the workspace.
       // Never forward an operator credential: `open` releases none, and a

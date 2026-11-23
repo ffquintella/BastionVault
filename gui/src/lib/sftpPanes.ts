@@ -153,6 +153,43 @@ export function isValidEntryName(name: string): boolean {
   return name !== "" && name !== "." && name !== ".." && !/[\\/\0]/.test(name);
 }
 
+/** The window's remote side: an SFTP session or an SMB share
+ *  (features/smb-connect.md). Same window, same commands. */
+export type FileProtocol = "sftp" | "smb";
+
+const WINDOWS_RESERVED = /^(CON|PRN|AUX|NUL|COM[0-9¹²³]|LPT[0-9¹²³])$/i;
+
+/** A valid Windows file name, the rule an SMB share applies to every name
+ *  (mirrors the host's `is_windows_file_name`): no `< > : " | ? *` or
+ *  control character, no trailing dot or space, no device name. */
+export function isWindowsFileName(name: string): boolean {
+  if (/[<>:"|?*\u0000-\u001f]/.test(name)) return false;
+  if (/[. ]$/.test(name)) return false;
+  const stem = (name.split(".")[0] ?? name).replace(/ +$/, "");
+  return !WINDOWS_RESERVED.test(stem);
+}
+
+/** A name the remote side accepts for a new folder or a rename. */
+export function isValidRemoteName(protocol: FileProtocol, name: string): boolean {
+  return isValidEntryName(name) && (protocol !== "smb" || isWindowsFileName(name));
+}
+
+/** The host part of the window label (`sftp op@host:22` → `op@host:22`,
+ *  `smb op@host:445/files` → `op@host:445/files`). */
+export function sessionHost(label: string): string {
+  return label.replace(/^(sftp|smb)\s+/, "");
+}
+
+/** The remote pane's title: the host for SFTP, `\\host\share` for SMB. */
+export function remotePaneTitle(protocol: FileProtocol, label: string): string {
+  const target = sessionHost(label).split(" via ")[0];
+  const afterUser = target.slice(target.lastIndexOf("@") + 1);
+  const host = afterUser.split(/[:/]/)[0] || "remote";
+  if (protocol !== "smb") return host;
+  const share = afterUser.includes("/") ? afterUser.slice(afterUser.indexOf("/") + 1) : "";
+  return share ? `\\\\${host}\\${share}` : host;
+}
+
 let transferSeq = 0;
 
 /** A transfer id the host accepts (`[A-Za-z0-9_-]{1,64}`). */

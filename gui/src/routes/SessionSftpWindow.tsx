@@ -1,9 +1,13 @@
 /**
- * Resource Connect — SFTP session window (features/sftp-connect.md).
+ * Resource Connect — SFTP / SMB session window (features/sftp-connect.md,
+ * features/smb-connect.md).
  *
- * Loaded into the WebviewWindow `session_open_sftp` builds
- * (`sftp-<token>`). Two file panes side by side — this machine on the left,
- * the resource on the right — and a transfer list underneath. URL params:
+ * Loaded into the WebviewWindow `session_open_sftp` (`sftp-<token>`) or
+ * `session_open_smb` (`smb-<token>`) builds: one component, mounted at
+ * `/session/sftp` and `/session/smb`, calling the same `sftp_*` commands —
+ * the host dispatches them on the session's kind. Two file panes side by
+ * side — this machine on the left, the resource on the right — and a
+ * transfer list underneath. URL params:
  *   token  — the session id every `sftp_*` command names
  *   closed — the event the host emits when the connection drops
  *   label  — operator-visible title (`sftp felipe@host:22`, with
@@ -50,8 +54,16 @@ import type { SftpDirection, SftpTransferProgress } from "../lib/api";
 import { extractError } from "../lib/error";
 import { useSessionHeartbeat } from "../lib/sessionHeartbeat";
 import { useWindowCloseGuard } from "../lib/sessionWindowClose";
-import { existsConflict, formatSize, isValidEntryName, newTransferId } from "../lib/sftpPanes";
-import type { PaneSide } from "../lib/sftpPanes";
+import {
+  existsConflict,
+  formatSize,
+  isValidEntryName,
+  isValidRemoteName,
+  newTransferId,
+  remotePaneTitle,
+  sessionHost,
+} from "../lib/sftpPanes";
+import type { FileProtocol, PaneSide } from "../lib/sftpPanes";
 import { RustionSessionChip } from "../components/RustionSessionChip";
 import { WindowCloseConfirm } from "../components/session/CloseConfirm";
 import { SftpFilePane } from "../components/session/SftpFilePane";
@@ -70,7 +82,7 @@ interface TransferRow {
 type Dialog =
   | { kind: "overwrite"; name: string; run: () => void }
   | { kind: "delete"; paths: string[] }
-  | { kind: "name"; title: string; initial: string; submit: (name: string) => Promise<void> }
+  | { kind: "name"; title: string; side: PaneSide; initial: string; submit: (name: string) => Promise<void> }
   | null;
 
 interface Menu {
@@ -87,11 +99,11 @@ function baseName(path: string): string {
   return t.slice(Math.max(t.lastIndexOf("/"), t.lastIndexOf("\\")) + 1) || t;
 }
 
-export function SessionSftpWindow() {
+export function SessionSftpWindow({ protocol = "sftp" }: { protocol?: FileProtocol }) {
   const [params] = useSearchParams();
   const token = params.get("token") ?? "";
   const closedEvent = params.get("closed") ?? "";
-  const label = params.get("label") ?? "sftp session";
+  const label = params.get("label") ?? `${protocol} session`;
 
   const [closedReason, setClosedReason] = useState<string | null>(null);
   const [paths, setPaths] = useState<Record<PaneSide, string>>({ local: "", remote: "" });
@@ -225,6 +237,7 @@ export function SessionSftpWindow() {
     setDialog({
       kind: "name",
       title: side === "local" ? "New folder on this machine" : "New folder on the server",
+      side,
       initial: "",
       submit: async (name) => {
         if (side === "local") await sftpLocalMkdir(token, dir, name);
@@ -240,6 +253,7 @@ export function SessionSftpWindow() {
     setDialog({
       kind: "name",
       title: "Rename",
+      side: "remote",
       initial: baseName(sel[0]),
       submit: async (name) => {
         await sftpRename(token, sel[0], name);
@@ -286,8 +300,8 @@ export function SessionSftpWindow() {
   const activeSel = selection[active];
   const copyLabel = active === "local" ? "Upload" : "Download";
   const CopyIcon = active === "local" ? ArrowRight : ArrowLeft;
-  const host = useMemo(() => label.replace(/^sftp\s+/, ""), [label]);
-  const remoteTitle = host.split("@").pop()?.split(":")[0] ?? "remote";
+  const host = useMemo(() => sessionHost(label), [label]);
+  const remoteTitle = useMemo(() => remotePaneTitle(protocol, label), [protocol, label]);
 
   useEffect(() => {
     if (!menu) return;
@@ -332,6 +346,12 @@ export function SessionSftpWindow() {
           className={`h-2.5 w-2.5 shrink-0 rounded-full ${live ? "bg-[var(--color-success)]" : "bg-[var(--color-danger)]"}`}
           aria-hidden
         />
+        <span
+          className="shrink-0 rounded border border-[var(--color-border)] px-1.5 py-0.5 text-[10px] font-semibold tracking-wide text-[var(--color-text-muted)]"
+          data-testid="file-protocol"
+        >
+          {protocol === "smb" ? "SMB" : "SFTP"}
+        </span>
         <span className="min-w-0 truncate text-sm font-medium" title={label}>
           {host}
         </span>
@@ -448,6 +468,12 @@ export function SessionSftpWindow() {
         <NameDialog
           title={dialog.title}
           initial={dialog.initial}
+          isValid={(n) => (dialog.side === "remote" ? isValidRemoteName(protocol, n) : isValidEntryName(n))}
+          rule={
+            dialog.side === "remote" && protocol === "smb"
+              ? "A name cannot be empty, \u201c.\u201d, \u201c..\u201d, contain / \\ < > : \" | ? * or end in a dot or space, or be a device name such as CON."
+              : "A name cannot be empty, \u201c.\u201d, \u201c..\u201d, or contain / or \\."
+          }
           onCancel={() => setDialog(null)}
           onSubmit={dialog.submit}
           onDone={() => setDialog(null)}
@@ -623,6 +649,8 @@ function ConfirmDialog(props: {
 function NameDialog(props: {
   title: string;
   initial: string;
+  isValid: (name: string) => boolean;
+  rule: string;
   onCancel: () => void;
   onSubmit: (name: string) => Promise<void>;
   onDone: () => void;
@@ -630,7 +658,7 @@ function NameDialog(props: {
   const [name, setName] = useState(props.initial);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const valid = isValidEntryName(name.trim());
+  const valid = props.isValid(name.trim());
   const submit = async () => {
     if (!valid || busy) return;
     setBusy(true);
@@ -659,7 +687,7 @@ function NameDialog(props: {
           aria-label="Name"
         />
         {name !== "" && !valid && (
-          <p className="mb-2 text-xs text-[var(--color-danger)]">A name cannot be empty, “.”, “..”, or contain / or \.</p>
+          <p className="mb-2 text-xs text-[var(--color-danger)]">{props.rule}</p>
         )}
         {error && <p className="mb-2 text-xs text-[var(--color-danger)]">{error}</p>}
         <div className="flex justify-end gap-2">

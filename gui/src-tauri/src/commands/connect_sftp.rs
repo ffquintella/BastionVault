@@ -24,12 +24,17 @@
 //! Every other command here is called by that window, takes the session
 //! token, and is refused unless the calling window holds that session
 //! (`require_session_window`). The local-filesystem commands are therefore
-//! unusable without a live SFTP session in the calling window.
+//! unusable without a live SFTP or SMB session in the calling window.
+//!
+//! **One API for both protocols.** An SMB session (`session_open_smb`,
+//! features/smb-connect.md) renders in the same window, which calls these
+//! same `sftp_*` commands; each dispatches on the session's kind through
+//! [`RemoteFs`], so the window, its ACL set and the transfer engine are one.
 
+use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use russh_sftp::client::SftpSession;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, State, Webview};
@@ -48,7 +53,8 @@ use crate::error::{CmdResult, CommandError};
 use crate::session::{
     self,
     attachments::SessionDescriptor,
-    sftp::{self as sftp_session, Direction, Listing, SftpOpenArgs, SftpOpenOutcome, TransferOutcome, TransferRequest},
+    file_transfer::{self, Direction, Listing, RemoteFs, TransferOutcome, TransferRequest},
+    sftp::{self as sftp_session, SftpOpenArgs, SftpOpenOutcome},
     ssh::{SshCredential, CONNECT_TIMEOUT},
     workspace::Placement,
     SessionState,
@@ -450,14 +456,34 @@ pub async fn session_open_sftp(
     Ok(SftpOpenResponse { token: outcome.token, closed_event: outcome.closed_event, window_label })
 }
 
-/// The live SFTP session behind `token`, for the window that holds it.
-async fn session_for(state: &State<'_, AppState>, webview: &Webview, token: &str) -> CmdResult<Arc<SftpSession>> {
+type TransferFlags = Arc<std::sync::Mutex<HashMap<String, Arc<AtomicBool>>>>;
+
+/// The remote side and the transfer registry of a file session (SFTP or
+/// SMB), or `None` for any other kind of session.
+fn file_session(session: &SessionState) -> Option<(Arc<dyn RemoteFs>, TransferFlags)> {
+    match session {
+        SessionState::Sftp(s) => Some((Arc::clone(&s.sftp) as Arc<dyn RemoteFs>, Arc::clone(&s.transfers))),
+        SessionState::Smb(s) => Some((Arc::clone(&s.fs) as Arc<dyn RemoteFs>, Arc::clone(&s.transfers))),
+        _ => None,
+    }
+}
+
+/// The live file session behind `token`, for the window that holds it.
+async fn session_for(
+    state: &State<'_, AppState>,
+    webview: &Webview,
+    token: &str,
+) -> CmdResult<(Arc<dyn RemoteFs>, TransferFlags)> {
     require_session_window(state, webview, token).await?;
     match state.connect_sessions.lock().await.get(token) {
-        Some(SessionState::Sftp(s)) => Ok(Arc::clone(&s.sftp)),
-        Some(_) => Err(CommandError::from(format!("session `{token}` is not an SFTP session"))),
-        None => Err(CommandError::from("the SFTP session has ended".to_string())),
+        Some(s) => file_session(s)
+            .ok_or_else(|| CommandError::from(format!("session `{token}` is not an SFTP or SMB session"))),
+        None => Err(CommandError::from("the file session has ended".to_string())),
     }
+}
+
+async fn remote_for(state: &State<'_, AppState>, webview: &Webview, token: &str) -> CmdResult<Arc<dyn RemoteFs>> {
+    Ok(session_for(state, webview, token).await?.0)
 }
 
 #[derive(Deserialize)]
@@ -482,31 +508,32 @@ pub struct SftpNameRequest {
 
 #[tauri::command]
 pub async fn sftp_home(state: State<'_, AppState>, webview: Webview, request: SftpTokenRequest) -> CmdResult<String> {
-    let sftp = session_for(&state, &webview, &request.token).await?;
-    sftp.canonicalize(".").await.map_err(|e| CommandError::from(format!("sftp: {e}")))
+    let fs = remote_for(&state, &webview, &request.token).await?;
+    fs.home().await.map_err(CommandError::from)
 }
 
 #[tauri::command]
 pub async fn sftp_list(state: State<'_, AppState>, webview: Webview, request: SftpPathRequest) -> CmdResult<Listing> {
-    let sftp = session_for(&state, &webview, &request.token).await?;
-    sftp_session::remote_list(&sftp, &request.path).await.map_err(CommandError::from)
+    let fs = remote_for(&state, &webview, &request.token).await?;
+    fs.list(&request.path).await.map_err(CommandError::from)
 }
 
 #[tauri::command]
 pub async fn sftp_mkdir(state: State<'_, AppState>, webview: Webview, request: SftpNameRequest) -> CmdResult<String> {
-    let sftp = session_for(&state, &webview, &request.token).await?;
-    let path = sftp_session::remote_mkdir(&sftp, &request.path, &request.name).await.map_err(CommandError::from)?;
-    log::info!(target: "audit", "sftp.mkdir: token={} path={}", request.token, path.escape_debug());
+    let fs = remote_for(&state, &webview, &request.token).await?;
+    let path = fs.mkdir(&request.path, &request.name).await.map_err(CommandError::from)?;
+    log::info!(target: "audit", "{}.mkdir: token={} path={}", fs.protocol(), request.token, path.escape_debug());
     Ok(path)
 }
 
 #[tauri::command]
 pub async fn sftp_rename(state: State<'_, AppState>, webview: Webview, request: SftpNameRequest) -> CmdResult<String> {
-    let sftp = session_for(&state, &webview, &request.token).await?;
-    let path = sftp_session::remote_rename(&sftp, &request.path, &request.name).await.map_err(CommandError::from)?;
+    let fs = remote_for(&state, &webview, &request.token).await?;
+    let path = fs.rename(&request.path, &request.name).await.map_err(CommandError::from)?;
     log::info!(
         target: "audit",
-        "sftp.rename: token={} from={} to={}",
+        "{}.rename: token={} from={} to={}",
+        fs.protocol(),
         request.token,
         request.path.escape_debug(),
         path.escape_debug()
@@ -516,11 +543,12 @@ pub async fn sftp_rename(state: State<'_, AppState>, webview: Webview, request: 
 
 #[tauri::command]
 pub async fn sftp_remove(state: State<'_, AppState>, webview: Webview, request: SftpPathRequest) -> CmdResult<()> {
-    let sftp = session_for(&state, &webview, &request.token).await?;
-    let result = sftp_session::remote_remove(&sftp, &request.path).await;
+    let fs = remote_for(&state, &webview, &request.token).await?;
+    let result = fs.remove(&request.path).await;
     log::info!(
         target: "audit",
-        "sftp.remove: token={} path={} outcome={}",
+        "{}.remove: token={} path={} outcome={}",
+        fs.protocol(),
         request.token,
         request.path.escape_debug(),
         if result.is_ok() { "ok" } else { "failed" }
@@ -560,12 +588,8 @@ pub async fn sftp_transfer(
     if !transfer_id_ok(&request.transfer_id) {
         return Err(CommandError::from("sftp: invalid transfer id".to_string()));
     }
-    require_session_window(&state, &webview, &request.token).await?;
-    let (sftp, transfers) = match state.connect_sessions.lock().await.get(&request.token) {
-        Some(SessionState::Sftp(s)) => (Arc::clone(&s.sftp), Arc::clone(&s.transfers)),
-        Some(_) => return Err(CommandError::from(format!("session `{}` is not an SFTP session", request.token))),
-        None => return Err(CommandError::from("the SFTP session has ended".to_string())),
-    };
+    let (fs, transfers) = session_for(&state, &webview, &request.token).await?;
+    let protocol = fs.protocol();
     let cancel = Arc::new(AtomicBool::new(false));
     {
         let mut map =
@@ -576,10 +600,10 @@ pub async fn sftp_transfer(
         map.insert(request.transfer_id.clone(), Arc::clone(&cancel));
     }
     let events = crate::session::routing::SessionEvents::new(app, request.token.clone());
-    let progress_event = sftp_session::progress_event_name(&request.token);
+    let progress_event = file_transfer::progress_event_name(&request.token);
     let sources_for_audit = request.sources.iter().map(|s| s.escape_debug().to_string()).collect::<Vec<_>>().join(",");
-    let outcome = sftp_session::run_transfer(
-        sftp,
+    let outcome = file_transfer::run_transfer(
+        fs,
         cancel,
         events,
         progress_event,
@@ -598,8 +622,9 @@ pub async fn sftp_transfer(
     // Paths, counts and the outcome — never file contents.
     log::info!(
         target: "audit",
-        "sftp.transfer: token={} direction={} sources=[{}] dest={} overwrite={} outcome={} files={} bytes={} \
+        "{}.transfer: token={} direction={} sources=[{}] dest={} overwrite={} outcome={} files={} bytes={} \
          skipped={}{}",
+        protocol,
         request.token,
         request.direction.as_str(),
         sources_for_audit,
@@ -627,8 +652,8 @@ pub async fn sftp_cancel_transfer(
     request: SftpCancelRequest,
 ) -> CmdResult<()> {
     require_session_window(&state, &webview, &request.token).await?;
-    if let Some(SessionState::Sftp(s)) = state.connect_sessions.lock().await.get(&request.token) {
-        if let Ok(map) = s.transfers.lock() {
+    if let Some((_, transfers)) = state.connect_sessions.lock().await.get(&request.token).and_then(file_session) {
+        if let Ok(map) = transfers.lock() {
             if let Some(flag) = map.get(&request.transfer_id) {
                 flag.store(true, std::sync::atomic::Ordering::SeqCst);
             }
@@ -657,7 +682,7 @@ pub async fn sftp_local_list(
     request: SftpPathRequest,
 ) -> CmdResult<Listing> {
     session_for(&state, &webview, &request.token).await?;
-    sftp_session::local_list(&request.path).await.map_err(CommandError::from)
+    file_transfer::local_list(&request.path).await.map_err(CommandError::from)
 }
 
 #[tauri::command]
@@ -667,7 +692,7 @@ pub async fn sftp_local_mkdir(
     request: SftpNameRequest,
 ) -> CmdResult<String> {
     session_for(&state, &webview, &request.token).await?;
-    sftp_session::local_mkdir(&request.path, &request.name).await.map_err(CommandError::from)
+    file_transfer::local_mkdir(&request.path, &request.name).await.map_err(CommandError::from)
 }
 
 #[cfg(test)]

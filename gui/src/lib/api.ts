@@ -3474,9 +3474,20 @@ export type SessionOpenSftpResponse = {
 export const sessionOpenSftp = (request: SessionOpenSftpRequest) =>
   invoke<SessionOpenSftpResponse>("session_open_sftp", { request });
 
-// ── SFTP session window (features/sftp-connect.md) ───────────────────
+/** Open an SMB session (features/smb-connect.md): the SFTP dual-pane window
+ *  over an SMB share. Always its own window; direct transport only. The
+ *  password is resolved by the host and never returned. */
+export type SessionOpenSmbRequest = SessionOpenSftpRequest;
+
+export type SessionOpenSmbResponse = SessionOpenSftpResponse;
+
+export const sessionOpenSmb = (request: SessionOpenSmbRequest) =>
+  invoke<SessionOpenSmbResponse>("session_open_smb", { request });
+
+// ── SFTP / SMB session window (features/sftp-connect.md) ─────────────
 // Every call names the session token; the host refuses it unless the
-// calling window holds that live SFTP session.
+// calling window holds that live SFTP or SMB session, and dispatches it on
+// the session's kind (one remote-pane API for both protocols).
 
 export type SftpEntryKind = "file" | "dir" | "symlink" | "other";
 

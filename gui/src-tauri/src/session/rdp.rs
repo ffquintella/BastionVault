@@ -3090,6 +3090,12 @@ pub async fn drop_session(state: &crate::state::AppState, token: &str) -> Option
             s.shut_down();
             on_close
         }
+        Some(SessionState::Smb(s)) => {
+            log::info!("resource-connect/rdp: closed SMB session token={token}");
+            let on_close = s.on_close.clone();
+            s.shut_down();
+            on_close
+        }
         // The plugin holds the session; its close hook `DELETE`s it there.
         Some(SessionState::Sql(s)) => {
             log::info!("resource-connect/rdp: dropped SQL session token={token}");

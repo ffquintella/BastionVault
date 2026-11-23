@@ -66,6 +66,7 @@ import {
   isSshTransport,
   loginClassGate,
   needsOperatorPrompt,
+  SMB_CREDENTIAL_SOURCES,
   pickDefaultProfile,
   profileConnectHints,
   protocolForOsType,
@@ -1869,7 +1870,7 @@ function ConnectionProfilesPanel({
   const osTypeProtocol = protocolForOsType(osType);
   // The OS-type hints only concern SSH/RDP; a web-only type has no os_type.
   const offersShellProtocols =
-    protocols.includes("ssh") || protocols.includes("sftp") || protocols.includes("rdp");
+    protocols.includes("ssh") || protocols.includes("sftp") || protocols.includes("smb") || protocols.includes("rdp");
   const [editTarget, setEditTarget] = useState<ConnectionProfile | null>(null);
   const [creating, setCreating] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<ConnectionProfile | null>(null);
@@ -2299,7 +2300,9 @@ function ConnectionProfilesPanel({
                             ? "RDP: Standard Security with password, or NLA / CredSSP smartcard with PKI."
                             : p.protocol === "sftp"
                               ? "SFTP: opens a dual-pane file transfer window (this computer \u2194 the resource). Direct connections only."
-                              : undefined
+                              : p.protocol === "smb"
+                                ? "SMB: opens the dual-pane file transfer window on a Windows / Samba share (signed SMB2/3). Direct connections only."
+                                : undefined
                     }
                   >
                     {connecting === p.id ? "Connecting…" : "Connect"}
@@ -2612,7 +2615,7 @@ function describeCredentialSource(c: CredentialSource): string {
  * fully; the other three sources show a stub panel pointing at the
  * spec until their phases ship.
  */
-function ConnectionProfileEditor({
+export function ConnectionProfileEditor({
   open,
   resource,
   protocols,
@@ -2778,16 +2781,37 @@ function ConnectionProfileEditor({
         require_mfa: p.require_mfa,
       };
       if (next === "web") return { ...blankWebProfile(resourceUrl), ...keep };
-      if (p.protocol === "web") return { ...blankProfile(osType), ...keep, protocol: next };
-      return { ...p, protocol: next };
+      const base: ConnectionProfile = p.protocol === "web" ? { ...blankProfile(osType), ...keep } : { ...p };
+      if (next === "smb") {
+        // NTLM needs a username and a password: keep a source that gives
+        // both, else start from an empty resource secret. No host key.
+        const credential_source = SMB_CREDENTIAL_SOURCES.includes(base.credential_source.kind)
+          ? base.credential_source
+          : blankCredentialSource("secret");
+        const next_: ConnectionProfile = { ...base, protocol: "smb", credential_source, share: base.share ?? "" };
+        delete next_.host_key_pin;
+        return next_;
+      }
+      // The SMB-only fields do not travel to another protocol.
+      const out: ConnectionProfile = { ...base, protocol: next };
+      delete out.share;
+      delete out.domain;
+      return out;
     });
   }
 
-  const protocolOptions = (["ssh", "sftp", "rdp", "web"] as const)
+  const protocolOptions = (["ssh", "sftp", "smb", "rdp", "web"] as const)
     .filter((p) => protocols.includes(p) || p === profile.protocol || p === existing?.protocol)
     .map((p) => ({
       value: p,
-      label: p === "web" ? "Web" : p === "sftp" ? "SFTP (file transfer)" : p.toUpperCase(),
+      label:
+        p === "web"
+          ? "Web"
+          : p === "sftp"
+            ? "SFTP (file transfer)"
+            : p === "smb"
+              ? "SMB (file share)"
+              : p.toUpperCase(),
     }));
 
   // Unparseable text in the recipe's JSON view holds Save: the profile
@@ -2825,7 +2849,8 @@ function ConnectionProfileEditor({
     validateProfile(profile) ??
     validateProfileForLoginClass(
       profile,
-      isSshTransport(profile.protocol) ? loginClass?.login_class : undefined,
+      // SMB is refused on a brokered resource (features/smb-connect.md).
+      isSshTransport(profile.protocol) || profile.protocol === "smb" ? loginClass?.login_class : undefined,
     );
   const canSave = validationError === null;
 
@@ -2941,6 +2966,25 @@ function ConnectionProfileEditor({
           />
         </div>
 
+        {profile.protocol === "smb" && (
+          <div className="grid grid-cols-2 gap-3">
+            <Input
+              label="Share"
+              value={profile.share ?? ""}
+              onChange={(e) => update("share", e.target.value)}
+              placeholder="files"
+              hint="The share name alone (for \\host\files, type files). Required."
+            />
+            <Input
+              label="Domain (optional)"
+              value={profile.domain ?? ""}
+              onChange={(e) => update("domain", e.target.value || undefined)}
+              placeholder="CORP"
+              hint="NTLM domain for a bare username. A login that carries its own (CORP\user, user@corp.example) wins."
+            />
+          </div>
+        )}
+
         {/* A provider profile has no username: the account the operator
             picks at connect supplies it (spec §6 step 6). */}
         {profile.credential_source.kind !== "provider" && (
@@ -2949,7 +2993,7 @@ function ConnectionProfileEditor({
             value={profile.username ?? ""}
             onChange={(e) => update("username", e.target.value || undefined)}
             placeholder={
-              profile.protocol === "rdp" ? "Administrator" : "root"
+              profile.protocol === "rdp" || profile.protocol === "smb" ? "Administrator" : "root"
             }
             hint={
               profile.credential_source.kind === "secret"
@@ -2990,7 +3034,9 @@ function ConnectionProfileEditor({
             )
               .filter((o) => credGate.allowedKinds.includes(o.value))
               // FIDO2 authenticates SSH only; RDP has no equivalent method.
-              .filter((o) => o.value !== "fido2" || isSshTransport(profile.protocol)),
+              .filter((o) => o.value !== "fido2" || isSshTransport(profile.protocol))
+              // SMB (NTLM) takes a username and a password only.
+              .filter((o) => profile.protocol !== "smb" || SMB_CREDENTIAL_SOURCES.includes(o.value)),
             // Approved credential providers for this protocol, by their
             // display name; a brokered SSH resource allows none.
             ...(credGate.allowedKinds.includes("provider")
@@ -3067,19 +3113,26 @@ function ConnectionProfileEditor({
 
         <hr className="border-[var(--color-border)]" />
 
-        <Input
-          label="Host-key pin (optional)"
-          value={profile.host_key_pin ?? ""}
-          onChange={(e) =>
-            update("host_key_pin", e.target.value || undefined)
-          }
-          placeholder={
-            isSshTransport(profile.protocol)
-              ? "SHA256:abc123…"
-              : "RDP cert thumbprint"
-          }
-          hint="Leave empty for TOFU on first connect. The session window will surface the observed fingerprint so you can pin it on the next save."
-        />
+        {profile.protocol === "smb" ? (
+          <p className="text-xs text-[var(--color-text-muted)]">
+            SMB has no host key to pin. The connection requires SMB message signing (SMB2/3, NTLM), and a guest or
+            anonymous login is refused, so a server that cannot verify this account&rsquo;s password is never used.
+          </p>
+        ) : (
+          <Input
+            label="Host-key pin (optional)"
+            value={profile.host_key_pin ?? ""}
+            onChange={(e) =>
+              update("host_key_pin", e.target.value || undefined)
+            }
+            placeholder={
+              isSshTransport(profile.protocol)
+                ? "SHA256:abc123…"
+                : "RDP cert thumbprint"
+            }
+            hint="Leave empty for TOFU on first connect. The session window will surface the observed fingerprint so you can pin it on the next save."
+          />
+        )}
         {isSshTransport(profile.protocol) && (
           <div className="flex flex-wrap items-center gap-2 min-w-0">
             <Button
@@ -3984,7 +4037,8 @@ function DefaultAccountCredentialEditor({
       </p>
     );
   }
-  if (protocol === "rdp") {
+  // SMB (features/smb-connect.md) logs in exactly as RDP does.
+  if (protocol === "rdp" || protocol === "smb") {
     return (
       <p className="text-xs text-[var(--color-text-muted)]">
         The login user is the connecting operator's <strong>Windows</strong>{" "}

@@ -178,8 +178,8 @@ describe("parseTypeConfig / mergeTypeConfig — additive merge with tombstones",
 // ── Protocol gate ─────────────────────────────────────────────────────
 
 describe("connectProtocols — the single Connect gate", () => {
-  it("keeps today's SSH/RDP behaviour, plus SFTP on the same transport", () => {
-    expect(connectProtocols(DEFAULT_RESOURCE_TYPES.server)).toEqual(["ssh", "sftp", "rdp"]);
+  it("keeps today's SSH/RDP behaviour, plus SFTP on the same transport and SMB file shares", () => {
+    expect(connectProtocols(DEFAULT_RESOURCE_TYPES.server)).toEqual(["ssh", "sftp", "smb", "rdp"]);
     // firewall / switch carry `connect.enabled: true` but never had a
     // Connect chip (it was gated on `type === "server"`); still none.
     expect(connectProtocols(DEFAULT_RESOURCE_TYPES.firewall)).toEqual([]);
@@ -253,6 +253,7 @@ describe("connectProtocols — the single Connect gate", () => {
     expect(connectProtocols({ id: "server", label: "server", color: "neutral", fields: [] })).toEqual([
       "ssh",
       "sftp",
+      "smb",
       "rdp",
     ]);
   });

@@ -182,9 +182,17 @@ const SESSION_ROUTE_MODULES = [
 // ── Tests ───────────────────────────────────────────────────────────────
 
 describe("session.html route table", () => {
-  it("mounts the six session routes and nothing else", () => {
+  it("mounts the seven session routes and nothing else", () => {
     expect(sorted(SESSION_ROUTES.map((r) => r.path))).toEqual(
-      sorted(["/session/ssh", "/session/rdp", "/session/sftp", "/session/sql", "/workspace", "/session-replay"]),
+      sorted([
+        "/session/ssh",
+        "/session/rdp",
+        "/session/sftp",
+        "/session/smb",
+        "/session/sql",
+        "/workspace",
+        "/session-replay",
+      ]),
     );
   });
 
@@ -256,9 +264,16 @@ describe("each session window's command set is exactly what its routes call", ()
     expect(sorted(new Set([...ssh, ...rdp]))).toEqual(sorted(granted("session-window")));
   });
 
-  it("own SFTP window: sftp-window", () => {
+  it("own SFTP and SMB windows: sftp-window", () => {
     const used = walk(["/src/routes/SessionSftpWindow.tsx"]).commands;
     expect(sorted(used)).toEqual(sorted(granted("sftp-window")));
+    // The SMB window is the same component (features/smb-connect.md), so
+    // the one set covers it; the host dispatches each call on the session.
+    const app = SOURCES["/src/sessionApp/SessionApp.tsx"];
+    expect(app).toMatch(/path: "\/session\/smb", element: <SessionSftpWindow protocol="smb" \/>/);
+    expect(app).toMatch(/path: "\/session\/sftp", element: <SessionSftpWindow \/>/);
+    // Neither window can open a session, of its own protocol or another.
+    expect([...used].filter((c) => c.startsWith("session_open"))).toEqual([]);
   });
 
   it("the Session Workspace (with its ⌘K palette): session-workspace", () => {

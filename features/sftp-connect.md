@@ -53,7 +53,10 @@ offers `ssh`, `rdp` and `sftp`.
 - `session/sftp.rs` — opens the russh connection (shared connect + auth with
   `session/ssh.rs`), requests the `sftp` subsystem, holds the `SftpSession`
   and the client handle in `SessionState::Sftp`, and implements the
-  operations and the transfer engine.
+  operations as the SFTP side of the `RemoteFs` trait. The transfer engine
+  and the local pane live in `session/file_transfer.rs`, shared with SMB
+  profiles ([smb-connect.md](smb-connect.md), T552), whose window calls the
+  same `sftp_*` commands.
 - `commands/connect_sftp.rs` — `session_open_sftp` plus the per-window
   commands `sftp_list`, `sftp_home`, `sftp_mkdir`, `sftp_rename`,
   `sftp_remove`, `sftp_transfer`, `sftp_cancel_transfer`, `sftp_local_list`,

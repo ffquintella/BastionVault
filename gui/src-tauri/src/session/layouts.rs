@@ -202,7 +202,9 @@ fn convert(
                 ProfileProtocol::Rdp => PaneProtocol::Rdp,
                 // A SQL pane is not saved: restoring it would reopen a database
                 // session (and a released login) the operator did not ask for.
-                ProfileProtocol::Web | ProfileProtocol::Sftp | ProfileProtocol::Sql => return Ok(None),
+                ProfileProtocol::Web | ProfileProtocol::Sftp | ProfileProtocol::Smb | ProfileProtocol::Sql => {
+                    return Ok(None)
+                }
             };
             vaults.insert(src.vault_id);
             Ok(Some(SavedNode::Pane(SavedPane {

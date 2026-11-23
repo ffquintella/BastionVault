@@ -205,9 +205,10 @@ impl AttachError {
 /// workspace, never `main`, a plugin, a web window or another session's
 /// window. The one rule `attach` and `transfer` share.
 fn may_render(protocol: ProfileProtocol, token: &str, label: &str) -> bool {
-    // An SFTP session has no workspace pane kind: only its own window may
-    // render it (features/sftp-connect.md), so it can never be moved there.
-    if protocol == ProfileProtocol::Sftp {
+    // An SFTP or SMB session has no workspace pane kind: only its own
+    // window may render it (features/sftp-connect.md, smb-connect.md), so
+    // it can never be moved there.
+    if matches!(protocol, ProfileProtocol::Sftp | ProfileProtocol::Smb) {
         return label == own_window_label(protocol, token);
     }
     label == WORKSPACE_WINDOW_LABEL || label == own_window_label(protocol, token)
@@ -660,6 +661,7 @@ pub async fn stop_all_sessions(state: &crate::state::AppState) -> Vec<(String, O
                     super::SessionState::Ssh(_)
                         | super::SessionState::Rdp(_)
                         | super::SessionState::Sftp(_)
+                        | super::SessionState::Smb(_)
                         | super::SessionState::Sql(_)
                 )
             })
@@ -1099,6 +1101,12 @@ mod tests {
         assert!(may_render(ProfileProtocol::Sftp, "sess_ab", "sftp-sess_ab"));
         assert!(!may_render(ProfileProtocol::Sftp, "sess_ab", WORKSPACE_WINDOW_LABEL));
         assert!(!may_render(ProfileProtocol::Sftp, "sess_ab", "ssh-sess_ab"));
+        // An SMB session likewise renders only in its own `smb-` window —
+        // not the workspace, and not an SFTP window holding the same token.
+        assert_eq!(own_window_label(ProfileProtocol::Smb, "sess_ab"), "smb-sess_ab");
+        assert!(may_render(ProfileProtocol::Smb, "sess_ab", "smb-sess_ab"));
+        assert!(!may_render(ProfileProtocol::Smb, "sess_ab", WORKSPACE_WINDOW_LABEL));
+        assert!(!may_render(ProfileProtocol::Smb, "sess_ab", "sftp-sess_ab"));
         // A SQL session renders in its own window or as a workspace pane.
         assert_eq!(own_window_label(ProfileProtocol::Sql, "sess_ab"), "sql-sess_ab");
         assert!(may_render(ProfileProtocol::Sql, "sess_ab", "sql-sess_ab"));

@@ -76,6 +76,8 @@ const WORKSPACE_EXTRA: &[&str] = &[
     "session_open_rdp",
     // Opens its own `sftp-*` window, never a workspace pane.
     "session_open_sftp",
+    // Opens its own `smb-*` window, never a workspace pane.
+    "session_open_smb",
     "session_open_ssh",
     "session_open_web",
     // T109: replay panes — the hand-off queue (workspace only), and the
@@ -106,8 +108,9 @@ const WORKSPACE_EXTRA: &[&str] = &[
     "sql_step_up_verify",
 ];
 
-/// An SFTP session's own window (features/sftp-connect.md): its session's
-/// lifecycle and the file operations — no keystroke or RDP input, no move.
+/// An SFTP or SMB session's own window (features/sftp-connect.md,
+/// features/smb-connect.md): its session's lifecycle and the file
+/// operations — no keystroke or RDP input, no move. One set for both.
 /// The three Rustion commands drive the lifecycle chip of a brokered
 /// session (T141), the same three an SSH window has, bound to its token
 /// (T145).
@@ -451,15 +454,23 @@ fn the_workspace_gets_exactly_its_set() {
     );
 }
 
+fn file_window_labels() -> Vec<String> {
+    vec![format!("sftp-{TOKEN}"), format!("smb-{TOKEN}")]
+}
+
 #[test]
-fn an_sftp_window_gets_exactly_its_set() {
+fn an_sftp_or_smb_window_gets_exactly_its_set() {
     let acl = Acl::load();
-    let label = format!("sftp-{TOKEN}");
-    assert_eq!(acl.window(&label), set_of(&[SFTP_WINDOW]));
-    assert_eq!(
-        acl.plugin_permissions(&label, &label),
-        set_of(&[&["core:event:allow-listen", "core:event:allow-unlisten"]])
-    );
+    for label in file_window_labels() {
+        assert_eq!(acl.window(&label), set_of(&[SFTP_WINDOW]), "{label}");
+        assert_eq!(
+            acl.plugin_permissions(&label, &label),
+            set_of(&[&["core:event:allow-listen", "core:event:allow-unlisten"]]),
+            "{label}"
+        );
+        // A file window opens nothing: not even its own protocol.
+        assert!(acl.window(&label).iter().all(|c| !c.starts_with("session_open")), "{label}");
+    }
     // The SFTP file commands reach no other session window.
     for other in session_window_labels() {
         assert!(acl.window(&other).iter().all(|c| !c.starts_with("sftp_")), "{other}");
@@ -481,7 +492,7 @@ fn a_sql_window_gets_exactly_its_set() {
     assert!(granted.iter().all(|c| !c.starts_with("session_open") && c != "sql_session_open"));
     assert!(granted.iter().all(|c| !c.starts_with("sftp_") && !c.starts_with("session_input")));
     // And the SQL commands reach no SSH, RDP or SFTP window.
-    for other in session_window_labels().into_iter().chain([format!("sftp-{TOKEN}")]) {
+    for other in session_window_labels().into_iter().chain(file_window_labels()) {
         assert!(acl.window(&other).iter().all(|c| !c.starts_with("sql_")), "{other}");
     }
 }
@@ -511,7 +522,7 @@ fn no_session_window_reaches_a_sensitive_command() {
     let mut labels = session_window_labels();
     labels.push(crate::session::workspace::WORKSPACE_WINDOW_LABEL.to_string());
     labels.push("replay-rec_01".to_string());
-    labels.push(format!("sftp-{TOKEN}"));
+    labels.extend(file_window_labels());
     labels.push(format!("sql-{TOKEN}"));
     for label in labels {
         let granted = acl.window(&label);
@@ -526,7 +537,7 @@ fn no_session_window_reaches_a_sensitive_command() {
 fn an_unknown_window_gets_nothing() {
     let acl = Acl::load();
     for label in
-        ["evil", "workspace", "session-workspace2", "sessions", "replay", "ssh", "sftp", "sql", "sqlx", "web-x"]
+        ["evil", "workspace", "session-workspace2", "sessions", "replay", "ssh", "sftp", "smb", "smbx", "sql", "web-x"]
     {
         assert!(acl.window(label).is_empty(), "{label}");
         assert!(acl.plugin_permissions(label, label).is_empty(), "{label}");
@@ -587,6 +598,7 @@ fn session_windows_load_the_session_page_at_a_session_route() {
         (crate::commands::connect::own_window_url(&descriptor(ProfileProtocol::Ssh)), "/session/ssh"),
         (crate::commands::connect::own_window_url(&descriptor(ProfileProtocol::Rdp)), "/session/rdp"),
         (crate::commands::connect::own_window_url(&descriptor(ProfileProtocol::Sftp)), "/session/sftp"),
+        (crate::commands::connect::own_window_url(&descriptor(ProfileProtocol::Smb)), "/session/smb"),
         (crate::commands::connect::own_window_url(&descriptor(ProfileProtocol::Sql)), "/session/sql"),
         (crate::commands::rustion::replay_window_url("rec_01", Some(5)), "/session-replay"),
     ];
@@ -647,7 +659,7 @@ fn tauri_resolves_the_same_acl_from_the_build_inputs() {
         .map(|l| (l.to_string(), l.to_string()))
         .collect();
     views.extend(session_window_labels().into_iter().map(|l| (l.clone(), l)));
-    views.push((format!("sftp-{TOKEN}"), format!("sftp-{TOKEN}")));
+    views.extend(file_window_labels().into_iter().map(|l| (l.clone(), l)));
     views.push((format!("sql-{TOKEN}"), format!("sql-{TOKEN}")));
     views.push((web_window.clone(), web_window.clone()));
     views.push((web_window.clone(), toolbar.clone()));

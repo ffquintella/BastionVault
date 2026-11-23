@@ -1,7 +1,7 @@
 //! `POST resources/v2/connect/session/open` — the vault-side audit row for a
 //! session that is about to dial its target.
 //!
-//! A direct SSH, RDP or SFTP session is dialled by the desktop host without a
+//! A direct SSH, RDP, SFTP or SMB session is dialled by the desktop host without a
 //! vault request, so the request pipeline never sees the connection. The host
 //! posts the open here before it dials; the pipeline then writes the row to
 //! every audit device like any other request. The post is fail-closed: if the
@@ -15,7 +15,8 @@ use serde_json::{Map, Value};
 
 use crate::{bv_error_response_status, errors::RvError, logical::Request};
 
-const PROTOCOLS: &[&str] = &["ssh", "rdp", "sftp", "web"];
+/// `smb`: the desktop host's SMB file window (features/smb-connect.md).
+const PROTOCOLS: &[&str] = &["ssh", "rdp", "sftp", "smb", "web"];
 const TRANSPORTS: &[&str] = &["direct", "rustion"];
 const MAX_HOST_LEN: usize = 255;
 
@@ -49,8 +50,8 @@ impl super::ResourceBackendInner {
             })?;
 
         let protocol = str_field(req, "protocol")?;
-        if !PROTOCOLS.contains(&protocol.as_str()) {
-            return Err(bv_error_response_status!(400, "`protocol` must be one of ssh, rdp, sftp, web"));
+        if !is_known_protocol(&protocol) {
+            return Err(bv_error_response_status!(400, "`protocol` must be one of ssh, rdp, sftp, smb, web"));
         }
         if profile.get("protocol").and_then(|v| v.as_str()) != Some(protocol.as_str()) {
             return Err(bv_error_response_status!(400, "`protocol` does not match the connection profile"));
@@ -77,6 +78,10 @@ impl super::ResourceBackendInner {
     }
 }
 
+fn is_known_protocol(protocol: &str) -> bool {
+    PROTOCOLS.contains(&protocol)
+}
+
 fn str_field(req: &Request, key: &str) -> Result<String, RvError> {
     req.get_data(key)
         .ok()
@@ -88,6 +93,18 @@ fn str_field(req: &Request, key: &str) -> Result<String, RvError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A closed vocabulary: `smb` joins it (features/smb-connect.md);
+    /// anything else, including a different spelling, is refused.
+    #[test]
+    fn protocol_vocabulary_is_closed() {
+        for p in ["ssh", "rdp", "sftp", "smb", "web"] {
+            assert!(is_known_protocol(p), "{p}");
+        }
+        for p in ["", "SMB", "cifs", "sql", "telnet", "smb "] {
+            assert!(!is_known_protocol(p), "{p:?}");
+        }
+    }
 
     #[test]
     fn host_accepts_hostnames_and_addresses() {

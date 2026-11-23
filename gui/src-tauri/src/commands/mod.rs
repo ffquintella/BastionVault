@@ -107,6 +107,7 @@ pub mod connect;
 pub mod connect_mfa;
 pub mod connect_provider;
 pub mod connect_sftp;
+pub mod connect_smb;
 pub mod connect_web;
 pub mod connect_web_chrome;
 pub mod connect_web_http_auth;

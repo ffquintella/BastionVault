@@ -12,6 +12,7 @@
 
 pub mod attachments;
 pub mod close_guard;
+pub mod file_transfer;
 pub mod layouts;
 pub mod output;
 pub mod rdp;
@@ -20,6 +21,7 @@ pub mod replays;
 pub mod routing;
 pub mod sftp;
 pub mod sk_signer;
+pub mod smb;
 pub mod sql;
 pub mod ssh;
 pub mod web;
@@ -58,6 +60,9 @@ pub enum ProfileProtocol {
     /// SSH transport with the `sftp` subsystem: the dual-pane file
     /// transfer window (features/sftp-connect.md).
     Sftp,
+    /// An SMB2/3 share in the same dual-pane file window as SFTP
+    /// (features/smb-connect.md). No SSH anywhere: NTLM, signing required.
+    Smb,
     /// A SQL browser session held by the `dbms-management` plugin on the
     /// server (features/sql-browser.md §10). Opened only by
     /// `sql_session_open`, never by a `session_open_*` command.
@@ -71,6 +76,7 @@ impl ProfileProtocol {
             Self::Rdp => "rdp",
             Self::Web => "web",
             Self::Sftp => "sftp",
+            Self::Smb => "smb",
             Self::Sql => "sql",
         }
     }
@@ -84,10 +90,11 @@ impl ProfileProtocol {
                 "rdp" => Ok(Self::Rdp),
                 "web" => Ok(Self::Web),
                 "sftp" => Ok(Self::Sftp),
+                "smb" => Ok(Self::Smb),
                 "sql" => Ok(Self::Sql),
                 other => Err(format!(
                     "connection profile has unknown protocol `{other}`; refusing to guess (this client \
-                     supports ssh, sftp, rdp, web and sql)"
+                     supports ssh, sftp, smb, rdp, web and sql)"
                 )),
             },
             Some(_) => Err("connection profile `protocol` is not a string".to_string()),
@@ -135,6 +142,9 @@ pub enum SessionState {
     /// the dual-pane window's `sftp_*` commands drive, and the SSH
     /// connection under it.
     Sftp(sftp::SftpSessionState),
+    /// SMB session (features/smb-connect.md) — the share connection the
+    /// same dual-pane window drives through the same `sftp_*` commands.
+    Smb(smb::SmbSessionState),
     /// SQL browser session: the host's handle on a session the plugin holds
     /// on the server. No connection or credential lives here.
     Sql(sql::SqlSessionState),
@@ -148,6 +158,7 @@ impl SessionState {
             Self::Rdp(_) => ProfileProtocol::Rdp,
             Self::Web(_) => ProfileProtocol::Web,
             Self::Sftp(_) => ProfileProtocol::Sftp,
+            Self::Smb(_) => ProfileProtocol::Smb,
             Self::Sql(_) => ProfileProtocol::Sql,
         }
     }
@@ -186,8 +197,8 @@ pub type WebRdpConflict = WebChannelConflict;
 /// (§"T111").
 ///
 /// `opening` is the kind of session about to start; `live` are the kinds
-/// already registered. SFTP sessions never conflict — their transport is
-/// SSH but no `tauri::ipc::Channel` carries any of their data.
+/// already registered. SFTP and SMB sessions never conflict — no
+/// `tauri::ipc::Channel` carries any of their data.
 pub fn web_channel_conflict(
     opening: ProfileProtocol,
     live: impl IntoIterator<Item = ProfileProtocol>,
@@ -240,7 +251,7 @@ pub fn web_channel_conflict(
             })
         }
         // Neither carries data over a `tauri::ipc::Channel`.
-        ProfileProtocol::Sftp | ProfileProtocol::Sql => None,
+        ProfileProtocol::Sftp | ProfileProtocol::Smb | ProfileProtocol::Sql => None,
     }
 }
 
@@ -360,6 +371,7 @@ mod profile_protocol_tests {
         assert_eq!(ProfileProtocol::of_profile(&json!({ "protocol": "web" })), Ok(ProfileProtocol::Web));
         assert_eq!(ProfileProtocol::of_profile(&json!({ "protocol": "sftp" })), Ok(ProfileProtocol::Sftp));
         assert_eq!(ProfileProtocol::of_profile(&json!({ "protocol": "sql" })), Ok(ProfileProtocol::Sql));
+        assert_eq!(ProfileProtocol::of_profile(&json!({ "protocol": "smb" })), Ok(ProfileProtocol::Smb));
     }
 
     /// A `sql` profile is never opened by a `session_open_*` command: each
@@ -367,9 +379,33 @@ mod profile_protocol_tests {
     #[test]
     fn sql_profiles_open_no_terminal_desktop_or_web_session() {
         let sql = json!({ "protocol": "sql" });
-        for p in [ProfileProtocol::Ssh, ProfileProtocol::Rdp, ProfileProtocol::Web, ProfileProtocol::Sftp] {
+        for p in [
+            ProfileProtocol::Ssh,
+            ProfileProtocol::Rdp,
+            ProfileProtocol::Web,
+            ProfileProtocol::Sftp,
+            ProfileProtocol::Smb,
+        ] {
             assert!(ProfileProtocol::require(&sql, p).is_err(), "{p:?}");
         }
+    }
+
+    /// An `smb` profile opens only as SMB: never through the SFTP (SSH)
+    /// path, whose credential resolution and host-key rules differ, and an
+    /// `sftp` profile never as SMB. Same for every other protocol.
+    #[test]
+    fn smb_and_sftp_profiles_are_not_interchangeable() {
+        let smb = json!({ "protocol": "smb" });
+        assert!(ProfileProtocol::require(&smb, ProfileProtocol::Smb).is_ok());
+        for other in [ProfileProtocol::Sftp, ProfileProtocol::Ssh, ProfileProtocol::Rdp, ProfileProtocol::Web] {
+            assert!(ProfileProtocol::require(&smb, other).is_err(), "{other:?}");
+        }
+        for p in ["sftp", "ssh", "rdp", "web", "sql"] {
+            assert!(ProfileProtocol::require(&json!({ "protocol": p }), ProfileProtocol::Smb).is_err(), "{p}");
+        }
+        // Strict spelling: no case folding into a known protocol.
+        assert!(ProfileProtocol::of_profile(&json!({ "protocol": "SMB" })).is_err());
+        assert!(ProfileProtocol::of_profile(&json!({ "protocol": "cifs" })).is_err());
     }
 
     /// An `sftp` profile is never opened as an SSH shell, nor the reverse:
@@ -465,7 +501,9 @@ mod web_channel_exclusion_tests {
         assert_eq!(web_channel_conflict(Ssh, []), None);
         // SFTP has no Channel; nothing it does conflicts.
         assert_eq!(web_channel_conflict(Sftp, [Web, Rdp, Ssh]), None);
-        // Nor does SQL: its replies travel as command results.
+        // Nor does SMB, nor SQL: their replies travel as command results.
+        assert_eq!(web_channel_conflict(Smb, [Web, Rdp, Ssh]), None);
+        assert_eq!(web_channel_conflict(Web, [Smb]), None);
         assert_eq!(web_channel_conflict(Sql, [Web, Rdp, Ssh]), None);
         assert_eq!(web_channel_conflict(Web, [Sql]), None);
     }

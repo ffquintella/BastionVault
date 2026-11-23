@@ -890,9 +890,14 @@ pub async fn session_open_rdp(
         )
         .await?;
 
-        let resolved =
-            resolve_rdp_credential(&state, &request.resource_name, &profile, request.operator_credential.as_ref())
-                .await?;
+        let resolved = resolve_rdp_credential(
+            &state,
+            &request.resource_name,
+            &profile,
+            request.operator_credential.as_ref(),
+            "RDP",
+        )
+        .await?;
         let username = resolved.effective_username.unwrap_or(username);
         if username.is_empty() {
             return Err(CommandError::from(
@@ -1304,23 +1309,27 @@ pub async fn session_attach_rdp_frames(
         .map_err(CommandError::from)
 }
 
-struct ResolvedRdpCredential {
-    credential: session::rdp::RdpCredential,
+pub(super) struct ResolvedRdpCredential {
+    pub(super) credential: session::rdp::RdpCredential,
     /// LDAP bind modes return the canonical username; the caller
     /// swaps it in over the profile's username field.
-    effective_username: Option<String>,
+    pub(super) effective_username: Option<String>,
     /// LDAP operator-bind can encode `DOMAIN\username` or
     /// `user@realm` — we surface the parsed domain part here so
     /// the RDP connector can put it in the right slot.
-    domain: Option<String>,
-    on_close: Option<crate::session::SessionCleanup>,
+    pub(super) domain: Option<String>,
+    pub(super) on_close: Option<crate::session::SessionCleanup>,
 }
 
-async fn resolve_rdp_credential(
+/// The username + password (or smartcard) login of an RDP profile; SMB
+/// profiles (features/smb-connect.md) reuse it for their password sources,
+/// `protocol` (`RDP` | `SMB`) naming the session in its refusals.
+pub(super) async fn resolve_rdp_credential(
     state: &State<'_, AppState>,
     resource_name: &str,
     profile: &Value,
     operator_credential: Option<&OperatorCredential>,
+    protocol: &'static str,
 ) -> Result<ResolvedRdpCredential, CommandError> {
     let cs = profile
         .get("credential_source")
@@ -1338,8 +1347,9 @@ async fn resolve_rdp_credential(
                 resp.and_then(|r| r.data).map(|m| m.into_iter().collect()).unwrap_or_default();
             let password = data.get("password").and_then(|v| v.as_str()).map(String::from).unwrap_or_default();
             if password.is_empty() {
+                let login = if protocol == "RDP" { "RDP CredSSP" } else { protocol };
                 return Err(CommandError::from(format!(
-                    "secret `{secret_id}` carries no `password` field — RDP CredSSP requires a password"
+                    "secret `{secret_id}` carries no `password` field — {login} requires a password"
                 )));
             }
             Ok(ResolvedRdpCredential {
@@ -1481,11 +1491,10 @@ async fn resolve_rdp_credential(
             } else if let Some(oc) = operator_credential.filter(|o| !o.password.is_empty()) {
                 oc.password.clone()
             } else {
-                return Err(CommandError::from(
-                    "default-account RDP needs a password: set a stored Windows password under \
+                return Err(CommandError::from(format!(
+                    "default-account {protocol} needs a password: set a stored Windows password under \
                      Users → Edit User → Default Resource Account, or supply one at connect."
-                        .to_string(),
-                ));
+                )));
             };
             let (effective_user, domain) = split_domain_user(&username);
             Ok(ResolvedRdpCredential {
@@ -1847,6 +1856,13 @@ pub(crate) fn own_window_url(d: &SessionDescriptor) -> String {
             urlencoding::encode(&d.closed_event),
             urlencoding::encode(&d.label),
         ),
+        // The same dual-pane window over an SMB share (features/smb-connect.md).
+        session::ProfileProtocol::Smb => format!(
+            "{SESSION_PAGE}#/session/smb?token={}&closed={}&label={}",
+            urlencoding::encode(&d.token),
+            urlencoding::encode(&d.closed_event),
+            urlencoding::encode(&d.label),
+        ),
         // The SQL workspace (features/sql-browser.md §10): every call names
         // the token; there is no output stream or closed event.
         session::ProfileProtocol::Sql => format!(
@@ -1873,7 +1889,7 @@ fn own_window_size(d: &SessionDescriptor) -> (f64, f64) {
         session::ProfileProtocol::Rdp => {
             (f64::from(d.width.unwrap_or(1024)) + 8.0, f64::from(d.height.unwrap_or(768)) + 50.0)
         }
-        session::ProfileProtocol::Sftp => (1200.0, 760.0),
+        session::ProfileProtocol::Sftp | session::ProfileProtocol::Smb => (1200.0, 760.0),
         session::ProfileProtocol::Sql => (1280.0, 800.0),
         _ => (900.0, 540.0),
     }
@@ -2363,7 +2379,7 @@ pub(super) struct EffectiveLoginClassView {
 /// `brokered`) for a resource by calling `ssh-broker/policy/effective`.
 /// Defaults to `shared-credential` when the broker policy is unset, so a
 /// deployment that never configures brokering is unaffected.
-async fn read_effective_login_class(
+pub(super) async fn read_effective_login_class(
     state: &State<'_, AppState>,
     resource_id: &str,
     resource_type: &str,
@@ -3748,6 +3764,7 @@ pub(super) enum SessionProtocolTag {
     Rdp,
     Web,
     Sftp,
+    Smb,
 }
 
 impl SessionProtocolTag {
@@ -3757,6 +3774,7 @@ impl SessionProtocolTag {
             Self::Rdp => "rdp",
             Self::Web => "web",
             Self::Sftp => "sftp",
+            Self::Smb => "smb",
         }
     }
 }

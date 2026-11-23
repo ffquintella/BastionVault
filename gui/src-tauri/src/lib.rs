@@ -702,6 +702,9 @@ pub fn run() {
             commands::connect::session_open_rdp,
             commands::connect_web::session_open_web,
             commands::connect_sftp::session_open_sftp,
+            // SMB opens the same dual-pane window; its window calls the
+            // `sftp_*` commands below (features/smb-connect.md).
+            commands::connect_smb::session_open_smb,
             commands::connect_sftp::sftp_home,
             commands::connect_sftp::sftp_list,
             commands::connect_sftp::sftp_mkdir,

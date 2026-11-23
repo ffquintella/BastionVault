@@ -1,0 +1,11 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicerdicer/tauri-docs/refs/heads/v2/tooling/cli/schema.json",
+  "identifier": "smb-window",
+  "description": "An SMB session's own window (session.html#/session/smb): the same dual-pane file window as SFTP. Event subscription for its session's progress and close events and the `sftp-window` command set, which the host dispatches on the session's kind — nothing else (features/smb-connect.md).",
+  "windows": ["smb-*"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "sftp-window"
+  ]
+}

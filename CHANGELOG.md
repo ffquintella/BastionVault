@@ -63,6 +63,11 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### Resource Connect: SMB file shares in the dual-pane window
+
+- **Copy files and folders to and from a Windows or Samba share with a connection profile of protocol `smb`** (T552, S122, S112)
+  -- Connect opens the SFTP dual-pane window (this computer on the left, the share on the right) in its own `smb-<token>` window: browse, new folder, rename, delete a file or an empty folder, and recursive upload and download with progress, cancel, overwrite confirmation and `.bvpart` partial files, under the same unsafe-name, depth and entry limits as SFTP. The profile names the `share` (required), an optional NTLM `domain` and port 445 by default, and logs in with a stored secret, LDAP (operator, static role, library check-out) or the connecting operator's Windows default account; `pki`, `ssh-engine`, `fido2` and `provider` sources are refused. SMB 2.1 to 3.1.1 with signing required: a guest, anonymous or unsigned session is refused, and there is no host key to pin. Names sent to the share follow Windows rules, so `a:b` (an NTFS stream) or `CON` is refused before anything is written; reparse points (symlinks, junctions) are listed but never followed. Direct only: a `rustion` profile, a `rustion-required` resource and a `brokered` login class refuse SMB rather than dial it some other way. Connect-time MFA applies as for SSH and RDP, and the password never reaches the window. The built-in `server` type offers SMB with SSH, SFTP and RDP; a type with its own protocol list offers it once Settings → Resource Types ticks SMB. The vault's `resources/v2/connect/session/open` audit route now accepts `protocol: "smb"`; an older vault refuses the connect. Not yet run against a live SMB server; see `features/smb-connect.md` for what the client library cannot open.
+
 #### OIDC auth: reach an identity provider that offers only TLS 1.2 CBC cipher suites
 
 - **Let one OIDC mount reach an IdP that speaks only TLS 1.2 with ECDHE-RSA AES-CBC suites, with `oidc_discovery_legacy_tls = true` on `auth/<mount>/config`** (T551, S121, S29)

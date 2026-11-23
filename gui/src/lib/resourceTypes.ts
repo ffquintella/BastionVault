@@ -365,7 +365,7 @@ export function mergeTypeConfig(saved: ResourceTypeConfig | null): ResourceTypeC
 
 // ── Connect protocols ────────────────────────────────────────────────
 
-const CONNECT_PROTOCOLS: readonly ConnectProtocol[] = ["ssh", "sftp", "rdp", "web"];
+const CONNECT_PROTOCOLS: readonly ConnectProtocol[] = ["ssh", "sftp", "smb", "rdp", "web"];
 
 function isConnectProtocol(v: unknown): v is ConnectProtocol {
   return typeof v === "string" && (CONNECT_PROTOCOLS as readonly string[]).includes(v);
@@ -374,8 +374,9 @@ function isConnectProtocol(v: unknown): v is ConnectProtocol {
 /**
  * The type that offered SSH/RDP Connect before `connect.protocols` existed.
  * Absent `protocols` keeps that behaviour: `server` offers SSH, SFTP (the
- * same SSH transport, features/sftp-connect.md) and RDP; every other type
- * offers nothing.
+ * same SSH transport, features/sftp-connect.md), SMB file shares
+ * (features/smb-connect.md) and RDP; every other type offers nothing. A
+ * type with its own `protocols` list offers SMB only when it names it.
  */
 const LEGACY_CONNECT_TYPE_ID = "server";
 
@@ -396,7 +397,7 @@ export function connectProtocols(typeDef: ResourceTypeDef | undefined | null): C
     if (!Array.isArray(declared)) return [];
     return CONNECT_PROTOCOLS.filter((p) => declared.some((d) => isConnectProtocol(d) && d === p));
   }
-  return typeDef.id === LEGACY_CONNECT_TYPE_ID ? ["ssh", "sftp", "rdp"] : [];
+  return typeDef.id === LEGACY_CONNECT_TYPE_ID ? ["ssh", "sftp", "smb", "rdp"] : [];
 }
 
 // ── Web exposure policy (spec §6) ───────────────────────────────────

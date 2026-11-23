@@ -31,6 +31,8 @@ export function defaultPort(protocol: SessionProtocol): number {
       return 3389;
     case "web":
       return 443;
+    case "smb":
+      return 445;
   }
 }
 
@@ -47,6 +49,7 @@ export function parseSessionProtocol(raw: unknown): SessionProtocol | null {
     case "rdp":
     case "web":
     case "sftp":
+    case "smb":
       return raw;
     default:
       return null;
@@ -61,6 +64,48 @@ export function parseSessionProtocol(raw: unknown): SessionProtocol | null {
  */
 export function isSshTransport(protocol: unknown): boolean {
   return protocol === "ssh" || protocol === "sftp";
+}
+
+// ── SMB profiles (features/smb-connect.md) ──────────────────────────
+
+/** Credential sources an SMB (NTLM) login can use: the ones that yield a
+ *  username and a password. The host refuses every other source. */
+export const SMB_CREDENTIAL_SOURCES: readonly CredentialSource["kind"][] = ["secret", "ldap", "default-account"];
+
+/** A share name as the host accepts it (`session::smb::is_valid_share_name`):
+ *  1-80 characters, no separator, wildcard or control character, no
+ *  surrounding space, not `.` / `..`. */
+export function isValidSmbShareName(share: string): boolean {
+  return (
+    share.length > 0 &&
+    [...share].length <= 80 &&
+    share.trim() === share &&
+    share !== "." &&
+    share !== ".." &&
+    !/[\\/:*?"<>|\u0000-\u001f\u007f]/.test(share)
+  );
+}
+
+/** Save-time checks for an `smb` profile's own fields and source. */
+function validateSmbProfile(p: ConnectionProfile): string | null {
+  if (p.kind === "rustion") {
+    return "SMB sessions can't be brokered through a Rustion bastion \u2014 use the direct transport.";
+  }
+  const share = p.share ?? "";
+  if (!share) return "Share name is required (for example `files`)";
+  if (!isValidSmbShareName(share)) {
+    return "Share name: 1-80 characters, no \\ / : * ? \" < > | and no leading or trailing spaces (the share alone, not \\\\host\\share)";
+  }
+  const domain = (p.domain ?? "").trim();
+  if (domain && (domain.length > 255 || /[\\/:*?"<>|\u0000-\u001f\u007f]/.test(domain))) {
+    return "Domain is not a valid domain name";
+  }
+  if (!SMB_CREDENTIAL_SOURCES.includes(p.credential_source.kind)) {
+    return p.credential_source.kind === "provider"
+      ? "SMB profiles can't use a credential provider yet; pick a stored secret, LDAP or the connecting user's default account"
+      : "SMB logins need a username and a password: pick a stored secret, LDAP or the connecting user's default account";
+  }
+  return null;
 }
 
 /** Map structured `os_type` to the protocol the Connect button
@@ -252,6 +297,10 @@ export function validateProfile(p: ConnectionProfile): string | null {
   const protocol = parseSessionProtocol(p.protocol);
   if (protocol === null) return "Invalid protocol";
   if (protocol === "web") return validateWebProfile(p);
+  if (protocol === "smb") {
+    const smbError = validateSmbProfile(p);
+    if (smbError) return smbError;
+  }
   if (p.target_port !== undefined) {
     if (
       !Number.isInteger(p.target_port) ||
@@ -311,8 +360,8 @@ export function validateProfile(p: ConnectionProfile): string | null {
       return null;
     case "default-account":
       // SSH brokers a cert/OTP from the engine, so it needs the same
-      // mount/role as `ssh-engine`. RDP carries no extra fields (the
-      // password is prompted at connect).
+      // mount/role as `ssh-engine`. RDP and SMB carry no extra fields (the
+      // password is stored or prompted at connect).
       if (isSshTransport(p.protocol)) {
         if (!p.credential_source.ssh_mount?.trim()) {
           return "SSH-engine mount is required for the default-account source";
@@ -603,6 +652,10 @@ export function isLaunchableProfile(p: ConnectProfileHint): boolean {
   // `sftp` subsystem (features/sftp-connect.md, Phase 4), so a profile pinned
   // to the Rustion transport has nothing to launch.
   if (protocol === "sftp" && p.kind === "rustion") return false;
+  // SMB: direct only, password sources only (features/smb-connect.md).
+  if (protocol === "smb") {
+    return p.kind !== "rustion" && SMB_CREDENTIAL_SOURCES.includes(p.credential_source.kind);
+  }
   switch (p.credential_source.kind) {
     case "secret":
     case "ldap":
@@ -830,6 +883,11 @@ export function validateProfileForLoginClass(
   p: ConnectionProfile,
   loginClass: SshLoginClass | undefined,
 ): string | null {
+  // A brokered resource takes only logins the SSH engine mints per connect;
+  // an SMB password never is one, so the host refuses SMB there.
+  if (p.protocol === "smb" && loginClass === "brokered") {
+    return "This resource is brokered: every login must be minted per-connect from the SSH engine, which SMB cannot use. SMB sessions are refused on it.";
+  }
   if (!isSshTransport(p.protocol)) return null;
   if (loginClass !== "brokered") return null;
   if (
@@ -860,7 +918,7 @@ export function needsOperatorPrompt(p: ConnectionProfile): boolean {
   }
   // RDP default-account resolves the login name server-side but still needs a
   // password, which a username-only account can't carry — prompt for it.
-  if (p.credential_source.kind === "default-account" && p.protocol === "rdp") {
+  if (p.credential_source.kind === "default-account" && (p.protocol === "rdp" || p.protocol === "smb")) {
     return true;
   }
   // A `provider` profile's account picker is not a credential prompt: it is

@@ -792,6 +792,13 @@ pub async fn drop_session(state: &crate::state::AppState, token: &str) -> Option
             s.shut_down();
             on_close
         }
+        // Cancels any transfer in flight, disconnects the share, logs off.
+        Some(SessionState::Smb(s)) => {
+            log::info!("resource-connect/smb: closed SMB session token={token}");
+            let on_close = s.on_close.clone();
+            s.shut_down();
+            on_close
+        }
         // The plugin holds the session; its close hook `DELETE`s it there.
         Some(SessionState::Sql(s)) => {
             log::info!("resource-connect/ssh: dropped SQL session token={token}");
