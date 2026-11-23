@@ -23,12 +23,13 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use openidconnect::{
     core::{CoreClient, CoreProviderMetadata},
-    AuthorizationCode, ClientId, ClientSecret, IssuerUrl, Nonce, PkceCodeVerifier, RedirectUrl, TokenResponse,
+    AuthorizationCode, ClientId, ClientSecret, IssuerUrl, Nonce, PkceCodeVerifier, RedirectUrl, RequestTokenError,
+    TokenResponse,
 };
 use serde_json::{Map, Value};
 
 use super::{
-    http_client::{error_chain, reqwest_http_client},
+    http_client::{error_chain, oidc_http_client},
     path_auth_url::{OidcAuthState, STATE_PREFIX},
     path_config::OidcConfig,
     path_roles::OidcRoleEntry,
@@ -127,7 +128,8 @@ impl OidcBackendInner {
         // rediscover every callback so an IdP-side key rotation
         // between `auth_url` and `callback` is picked up without a
         // vault restart.
-        let http = reqwest_http_client(&cfg.oidc_discovery_ca_pem)?;
+        let http =
+            oidc_http_client(&cfg.oidc_discovery_ca_pem, cfg.oidc_discovery_legacy_tls, &cfg.oidc_discovery_url)?;
         let issuer = IssuerUrl::new(cfg.oidc_discovery_url.clone())
             .map_err(|e| RvError::ErrString(format!("oidc: bad discovery URL: {e}")))?;
         let provider_metadata = CoreProviderMetadata::discover_async(issuer, &http)
@@ -155,7 +157,15 @@ impl OidcBackendInner {
             .set_pkce_verifier(pkce_verifier)
             .request_async(&http)
             .await
-            .map_err(|e| RvError::ErrString(format!("oidc: code exchange: {e}")))?;
+            .map_err(|e| match &e {
+                // A transport failure carries its cause (the TLS alert, the
+                // certificate error); it never contains the request body.
+                // Parse errors are not chained: serde can echo response values.
+                RequestTokenError::Request(inner) => {
+                    RvError::ErrString(format!("oidc: code exchange: {e}: {}", error_chain(inner)))
+                }
+                _ => RvError::ErrString(format!("oidc: code exchange: {e}")),
+            })?;
 
         let id_token = token_response
             .id_token()

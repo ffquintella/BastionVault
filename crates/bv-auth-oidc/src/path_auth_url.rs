@@ -27,7 +27,7 @@ use super::{path_config::OidcConfig, path_roles::OidcRoleEntry, OidcBackend, Oid
 use crate::{
     context::Context,
     errors::RvError,
-    http_client::{error_chain, reqwest_http_client},
+    http_client::{error_chain, oidc_http_client},
     logical::{Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
     new_fields, new_fields_internal, new_path, new_path_internal,
     storage::StorageEntry,
@@ -129,7 +129,8 @@ impl OidcBackendInner {
         // discovery document + JWKS on every `auth_url` call is
         // wasteful but correct; a cache belongs behind the backend
         // state, not here. First-cut keeps the flow understandable.
-        let http = reqwest_http_client(&cfg.oidc_discovery_ca_pem)?;
+        let http =
+            oidc_http_client(&cfg.oidc_discovery_ca_pem, cfg.oidc_discovery_legacy_tls, &cfg.oidc_discovery_url)?;
         let issuer = IssuerUrl::new(cfg.oidc_discovery_url.clone())
             .map_err(|e| RvError::ErrString(format!("oidc: bad discovery URL: {e}")))?;
         // The cause chain names a TLS failure ("invalid peer certificate:

@@ -27,6 +27,7 @@ import { SessionLayoutCard } from "../components/SessionLayoutCard";
 import { OidcCallbackCard } from "../components/OidcCallbackCard";
 import { LogSettingsCard } from "../components/LogSettingsCard";
 import { SsoTestModal } from "../components/SsoTestModal";
+import { OidcLegacyTlsToggle } from "../components/OidcLegacyTlsToggle";
 import { SessionKeyboardCard } from "../components/SessionKeyboardCard";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
@@ -100,6 +101,9 @@ export function SettingsPage() {
   const [editingProvider, setEditingProvider] = useState<SsoAdminProvider | null>(null);
   const [testingProvider, setTestingProvider] = useState<SsoAdminProvider | null>(null);
   const [showAddProvider, setShowAddProvider] = useState(false);
+  // The vault's message for the last refused provider save, shown in the
+  // editor (e.g. legacy TLS requested from a build without it).
+  const [providerSaveError, setProviderSaveError] = useState<string | null>(null);
   const [deletingMount, setDeletingMount] = useState<string | null>(null);
 
   // YubiKey failsafe — list of cards that can unlock the local
@@ -263,11 +267,14 @@ export function SettingsPage() {
         "success",
         isEdit ? "SSO provider updated" : "SSO provider created",
       );
+      setProviderSaveError(null);
       setEditingProvider(null);
       setShowAddProvider(false);
       await reloadSsoProviders();
     } catch (e: unknown) {
-      toast("error", extractError(e));
+      const message = extractError(e);
+      setProviderSaveError(message);
+      toast("error", message);
     }
   }
 
@@ -703,6 +710,11 @@ export function SettingsPage() {
                         {p.kind === "oidc" && !p.config.client_secret_set && (
                           <Badge label="PKCE" variant="neutral" />
                         )}
+                        {p.kind === "oidc" && p.config.discovery_legacy_tls && (
+                          <span title="Reaches this IdP over the legacy TLS 1.2 CBC client (weaker than the default)">
+                            <Badge label="Legacy TLS 1.2" variant="warning" />
+                          </span>
+                        )}
                         {p.kind === "saml" && !p.config.idp_cert_set && (
                           <Badge label="No cert" variant="warning" />
                         )}
@@ -793,7 +805,9 @@ export function SettingsPage() {
             onSave={(input) =>
               handleSaveProvider(input, editingProvider !== null)
             }
+            saveError={providerSaveError}
             onClose={() => {
+              setProviderSaveError(null);
               setEditingProvider(null);
               setShowAddProvider(false);
             }}
@@ -1165,14 +1179,17 @@ function requiredGroupBadges(p: PasswordPolicy): string[] {
 
 const COMMON_OIDC_SCOPES = ["openid", "profile", "email", "groups"];
 
-function SsoProviderModal({
+export function SsoProviderModal({
   provider,
   onSave,
   onClose,
+  saveError,
 }: {
   provider: SsoAdminProvider | null;
-  onSave: (input: SsoAdminInput) => void;
+  onSave: (input: SsoAdminInput) => void | Promise<void>;
   onClose: () => void;
+  /** The vault's message when the last save was refused. */
+  saveError?: string | null;
 }) {
   const isEdit = provider !== null;
 
@@ -1199,6 +1216,7 @@ function SsoProviderModal({
   const [discoveryCaPem, setDiscoveryCaPem] = useState(
     oidcCfg?.discovery_ca_pem ?? "",
   );
+  const [legacyTls, setLegacyTls] = useState(oidcCfg?.discovery_legacy_tls ?? false);
   const [scopes, setScopes] = useState(
     (oidcCfg?.scopes ?? COMMON_OIDC_SCOPES.slice(0, 3)).join(", "),
   );
@@ -1324,6 +1342,7 @@ function SsoProviderModal({
               scopes: splitList(scopes),
               allowed_redirect_uris: splitList(allowedRedirectUris),
               discovery_ca_pem: discoveryCaPem.trim(),
+              discovery_legacy_tls: legacyTls,
             },
             role: {
               kind: "oidc",
@@ -1508,6 +1527,12 @@ function SsoProviderModal({
               Empty removes them.
             </span>
           </label>
+          <OidcLegacyTlsToggle
+            checked={legacyTls}
+            onChange={setLegacyTls}
+            available={oidcCfg?.legacy_tls_available}
+            error={saveError}
+          />
         </section>
         )}
 

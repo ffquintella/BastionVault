@@ -5,9 +5,9 @@
 //! place; certificate and hostname verification stay on. The client is
 //! built per call, so one mount's anchors reach no other HTTP client.
 
-use std::time::Duration;
+use std::{fmt, future::Future, pin::Pin, time::Duration};
 
-use openidconnect::reqwest;
+use openidconnect::{reqwest, AsyncHttpClient, HttpClientError, HttpRequest, HttpResponse};
 
 use crate::errors::RvError;
 
@@ -18,6 +18,125 @@ pub(crate) const MAX_DISCOVERY_CA_CERTS: usize = 8;
 
 const FIELD: &str = "oidc_discovery_ca_pem";
 const CERTIFICATE_LABEL: &str = "CERTIFICATE";
+/// The per-mount opt-in to the legacy TLS 1.2 CBC client (T551).
+pub(crate) const LEGACY_TLS_FIELD: &str = "oidc_discovery_legacy_tls";
+
+/// Whether this build carries the legacy TLS 1.2 CBC client.
+pub(crate) const fn legacy_tls_compiled_in() -> bool {
+    cfg!(feature = "legacy-tls")
+}
+
+/// The error for a mount that asks for the legacy client in a build without
+/// it: refused, never silently served over rustls instead.
+pub(crate) fn legacy_tls_not_compiled_in() -> RvError {
+    RvError::ErrString(format!(
+        "oidc: `{LEGACY_TLS_FIELD}` is true, but this vault was built without the legacy TLS 1.2 CBC client \
+         (cargo feature `oidc_legacy_tls`); rebuild with it or set `{LEGACY_TLS_FIELD}` to false"
+    ))
+}
+
+/// The HTTP client one OIDC call uses: reqwest over rustls, or, for a mount
+/// that opted in, the legacy TLS 1.2 CBC client. Discovery, JWKS and the
+/// token exchange of that call all go through the same one.
+pub(crate) enum OidcHttpClient {
+    Modern(reqwest::Client),
+    #[cfg(feature = "legacy-tls")]
+    Legacy(LegacyHttpClient),
+}
+
+/// Pick and build the client for a mount's config. `issuer` only names the
+/// mount in the warning the legacy client logs.
+pub(crate) fn oidc_http_client(extra_ca_pem: &str, legacy_tls: bool, issuer: &str) -> Result<OidcHttpClient, RvError> {
+    if !legacy_tls {
+        return Ok(OidcHttpClient::Modern(reqwest_http_client(extra_ca_pem)?));
+    }
+    #[cfg(feature = "legacy-tls")]
+    {
+        let client = LegacyHttpClient::new(extra_ca_pem)?;
+        log::warn!(
+            target: "security",
+            "oidc: the mount for issuer `{issuer}` reaches its IdP over the legacy TLS 1.2 CBC client \
+             (`{LEGACY_TLS_FIELD}` = true): discovery, JWKS and the token exchange use AES-CBC + HMAC \
+             cipher suites, weaker than the AEAD suites of every other TLS connection"
+        );
+        Ok(OidcHttpClient::Legacy(client))
+    }
+    #[cfg(not(feature = "legacy-tls"))]
+    {
+        let _ = issuer;
+        Err(legacy_tls_not_compiled_in())
+    }
+}
+
+/// The legacy client: built-in webpki roots plus the mount's extra anchors,
+/// same as the reqwest client; verification cannot be turned off.
+#[cfg(feature = "legacy-tls")]
+pub(crate) struct LegacyHttpClient {
+    trust: bv_tls_legacy::TrustAnchors,
+    limits: bv_tls_legacy::http::HttpLimits,
+}
+
+#[cfg(feature = "legacy-tls")]
+impl LegacyHttpClient {
+    fn new(extra_ca_pem: &str) -> Result<Self, RvError> {
+        let mut trust = bv_tls_legacy::TrustAnchors::with_webpki_roots();
+        if !extra_ca_pem.trim().is_empty() {
+            // The stored value was validated on write; a value that no longer
+            // loads fails the call rather than dropping the anchors.
+            trust.add_pem(extra_ca_pem).map_err(|e| {
+                RvError::ErrString(format!("oidc: `{FIELD}`: {e}; rewrite `{FIELD}` at the mount's `config`"))
+            })?;
+        }
+        Ok(Self { trust, limits: bv_tls_legacy::http::HttpLimits::default() })
+    }
+}
+
+/// The error of either client, transparent: its message and cause chain are
+/// the inner client's, so `error_chain` reads as before for the reqwest path.
+#[derive(Debug)]
+pub(crate) enum OidcHttpError {
+    Modern(HttpClientError<reqwest::Error>),
+    #[cfg(feature = "legacy-tls")]
+    Legacy(bv_tls_legacy::http::HttpError),
+}
+
+impl fmt::Display for OidcHttpError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            OidcHttpError::Modern(e) => fmt::Display::fmt(e, f),
+            #[cfg(feature = "legacy-tls")]
+            OidcHttpError::Legacy(e) => fmt::Display::fmt(e, f),
+        }
+    }
+}
+
+impl std::error::Error for OidcHttpError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            OidcHttpError::Modern(e) => e.source(),
+            #[cfg(feature = "legacy-tls")]
+            OidcHttpError::Legacy(e) => e.source(),
+        }
+    }
+}
+
+impl<'c> AsyncHttpClient<'c> for OidcHttpClient {
+    type Error = OidcHttpError;
+    type Future = Pin<Box<dyn Future<Output = Result<HttpResponse, OidcHttpError>> + Send + 'c>>;
+
+    fn call(&'c self, request: HttpRequest) -> Self::Future {
+        match self {
+            OidcHttpClient::Modern(client) => {
+                let response = AsyncHttpClient::call(client, request);
+                Box::pin(async move { response.await.map_err(OidcHttpError::Modern) })
+            }
+            #[cfg(feature = "legacy-tls")]
+            OidcHttpClient::Legacy(client) => Box::pin(async move {
+                bv_tls_legacy::http::send(request, &client.trust, &client.limits).await.map_err(OidcHttpError::Legacy)
+            }),
+        }
+    }
+}
 
 /// The client for discovery, JWKS and the token exchange: built-in roots
 /// plus every certificate in `extra_ca_pem` (empty: none). A stored value
@@ -519,6 +638,69 @@ mod tests {
         let ca = normalize_discovery_ca_pem(&chain.intermediate_pem).unwrap();
         let with_ca = reqwest_http_client(&ca).expect("client with the intermediate");
         assert_eq!(get(&with_ca, server.addr).await, Ok(200));
+    }
+
+    // ── client selection per mount (T551) ───────────────────────────
+
+    /// One GET through whichever client `oidc_http_client` picked.
+    async fn call(client: &OidcHttpClient, addr: SocketAddr) -> Result<u16, String> {
+        let mut request = HttpRequest::new(Vec::new());
+        *request.uri_mut() = format!("https://{addr}/").parse().unwrap();
+        client.call(request).await.map(|r| r.status().as_u16()).map_err(|e| error_chain(&e))
+    }
+
+    /// With the flag off (every existing mount) the rustls client is used,
+    /// with the mount's anchors, exactly as before.
+    #[tokio::test]
+    async fn the_default_path_is_the_rustls_client() {
+        let chain = test_pki::chain(&["127.0.0.1"]);
+        let server = start_tls_server(vec![chain.leaf_der.clone()], chain.leaf_key_der.clone()).await;
+        let ca = normalize_discovery_ca_pem(&chain.intermediate_pem).unwrap();
+        let client = oidc_http_client(&ca, false, "https://idp.test").unwrap();
+        assert!(matches!(client, OidcHttpClient::Modern(_)));
+        assert_eq!(call(&client, server.addr).await, Ok(200));
+    }
+
+    /// With the flag on, every call of the mount (discovery included) goes
+    /// through the legacy client: against a rustls server, which has no CBC
+    /// suite, it fails with the legacy client's own error, where the default
+    /// client above succeeds.
+    #[cfg(feature = "legacy-tls")]
+    #[tokio::test]
+    async fn the_legacy_flag_routes_every_call_through_the_legacy_client() {
+        use openidconnect::{core::CoreProviderMetadata, IssuerUrl};
+
+        let chain = test_pki::chain(&["127.0.0.1"]);
+        let server = start_tls_server(vec![chain.leaf_der.clone()], chain.leaf_key_der.clone()).await;
+        let ca = normalize_discovery_ca_pem(&chain.intermediate_pem).unwrap();
+        let client = oidc_http_client(&ca, true, "https://idp.test").unwrap();
+        assert!(matches!(client, OidcHttpClient::Legacy(_)));
+        let e = call(&client, server.addr).await.expect_err("rustls offers no CBC suite");
+        assert!(e.contains("legacy TLS 1.2 (CBC) client") && e.contains("handshake_failure"), "{e}");
+
+        let issuer = IssuerUrl::new(format!("https://{}/", server.addr)).unwrap();
+        let e = CoreProviderMetadata::discover_async(issuer, &client).await.expect_err("same failure");
+        assert!(error_chain(&e).contains("legacy TLS 1.2 (CBC) client"), "{}", error_chain(&e));
+    }
+
+    #[cfg(feature = "legacy-tls")]
+    #[test]
+    fn the_legacy_client_keeps_the_mount_anchors_and_refuses_bad_ones() {
+        let ca = normalize_discovery_ca_pem(&test_pki::ca_pem()).unwrap();
+        assert!(oidc_http_client(&ca, true, "https://idp.test").is_ok());
+        assert!(oidc_http_client("", true, "https://idp.test").is_ok());
+        assert!(oidc_http_client("garbage", true, "https://idp.test").is_err(), "no fallback without the anchors");
+        assert!(legacy_tls_compiled_in());
+    }
+
+    /// Flag on in a build without the client: refused, never served over
+    /// rustls instead.
+    #[cfg(not(feature = "legacy-tls"))]
+    #[test]
+    fn the_legacy_flag_without_the_feature_is_refused() {
+        let e = oidc_http_client("", true, "https://idp.test").err().expect("refused");
+        assert!(e.to_string().contains("built without the legacy TLS 1.2 CBC client"), "{e}");
+        assert!(!legacy_tls_compiled_in());
     }
 
     /// Adding an anchor must not relax hostname verification.

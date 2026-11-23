@@ -3,7 +3,7 @@
 
 ##@ Tests
 
-.PHONY: require-nextest test-bin test-unit test-changed test-plan ci-plan check-isolated check-hsm test-pki-composite test-pki-composite-lib test-pki-composite-integration test-integration test-doc test-cucumber test-hiqlite test-all test-release
+.PHONY: require-nextest test-bin test-unit test-changed test-plan ci-plan check-isolated check-hsm test-pki-composite test-pki-composite-lib test-pki-composite-integration test-oidc-legacy-tls test-integration test-doc test-cucumber test-hiqlite test-all test-release
 
 # ── Test runner: cargo-nextest ────────────────────────────────────
 #
@@ -240,6 +240,16 @@ test-pki-composite-lib: require-nextest prune-stale ## Run bv-engine-pki unit te
 test-pki-composite-integration: require-nextest prune-stale ## Run tests/test_pki_composite.rs with the root crate's pki_pqc_composite feature on
 	cargo nextest run $(if $(NEXTEST_PROFILE),--profile $(NEXTEST_PROFILE)) $(TEST_SCOPE) --features bastion_vault/pki_pqc_composite --test test_pki_composite
 
+# ── OIDC legacy TLS 1.2 CBC client (feature-gated) ────────────────
+#
+# `bv-auth-oidc/legacy-tls` is off by default, so the tests that route a
+# mount's calls through `bv-tls-legacy` compile in no other target (the
+# default run only checks that the flag is refused without the feature).
+# bv-tls-legacy's own tests run in every planned run; repeated here so this
+# one target covers the whole feature (T551, features/legacy-tls-cbc.md).
+test-oidc-legacy-tls: require-nextest prune-stale ## Run bv-tls-legacy + bv-auth-oidc unit tests with the legacy-tls feature on
+	cargo nextest run $(if $(NEXTEST_PROFILE),--profile $(NEXTEST_PROFILE)) -p bv-tls-legacy -p bv-auth-oidc --lib --features bv-auth-oidc/legacy-tls
+
 test-integration: require-nextest prune-stale ## Run the tests/ integration suite with nextest (links ~30 binaries; slow)
 	cargo nextest run $(TEST_SCOPE) --tests
 
@@ -292,18 +302,19 @@ test-all: test-unit test-integration test-doc ## Run unit + integration + doctes
 # `tests/e2e/rustion-ssh` (needs real remote hosts, cannot be hermetic).
 # `tests/test_pki_composite.rs` compiles to nothing in step 2; step 8 runs it.
 test-release: require-nextest ## Every suite, for a release or a high-risk merge (slow: tens of minutes)
-	@echo "==> [1/9] unit tests (lib + bins)"      && $(MAKE) --no-print-directory test-unit
-	@echo "==> [2/9] integration tests (tests/)"   && $(MAKE) --no-print-directory test-integration
-	@echo "==> [3/9] doctests"                     && $(MAKE) --no-print-directory test-doc
-	@echo "==> [4/9] hiqlite storage + HA"         && $(MAKE) --no-print-directory test-hiqlite
-	@echo "==> [5/9] cucumber features"            && $(MAKE) --no-print-directory test-cucumber
-	@echo "==> [6/9] plugin ABI + substrate"       && $(MAKE) --no-print-directory plugins-test
-	@echo "==> [7/9] GUI typecheck + vitest"       && $(MAKE) --no-print-directory gui-check gui-test
-	@echo "==> [8/9] composite PKI issuance"       && $(MAKE) --no-print-directory test-pki-composite
+	@echo "==> [1/10] unit tests (lib + bins)"      && $(MAKE) --no-print-directory test-unit
+	@echo "==> [2/10] integration tests (tests/)"   && $(MAKE) --no-print-directory test-integration
+	@echo "==> [3/10] doctests"                     && $(MAKE) --no-print-directory test-doc
+	@echo "==> [4/10] hiqlite storage + HA"         && $(MAKE) --no-print-directory test-hiqlite
+	@echo "==> [5/10] cucumber features"            && $(MAKE) --no-print-directory test-cucumber
+	@echo "==> [6/10] plugin ABI + substrate"       && $(MAKE) --no-print-directory plugins-test
+	@echo "==> [7/10] GUI typecheck + vitest"       && $(MAKE) --no-print-directory gui-check gui-test
+	@echo "==> [8/10] composite PKI issuance"       && $(MAKE) --no-print-directory test-pki-composite
+	@echo "==> [9/10] OIDC legacy TLS client"       && $(MAKE) --no-print-directory test-oidc-legacy-tls
 	@# DEEP=1, not the cheap per-change variant: a release cuts the container
 	@# image, and the image builds `-p bvault-cli` with both HSM backends. This
 	@# is the one place that is worth paying for the image's real graph.
-	@echo "==> [9/9] HSM seal backends (image graph)" && $(MAKE) --no-print-directory check-hsm DEEP=1
+	@echo "==> [10/10] HSM seal backends (image graph)" && $(MAKE) --no-print-directory check-hsm DEEP=1
 	@echo ""
 	@echo "==> test-release complete: every suite in this repo passed."
 	@echo "    Not covered (needs real hosts, run by hand): tests/e2e/rustion-ssh"

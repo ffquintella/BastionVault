@@ -1,0 +1,79 @@
+[package]
+name = "bv-tls-legacy"
+version = "0.41.0"
+edition = "2021"
+description = "BastionVault's opt-in legacy TLS 1.2 client: ECDHE-RSA AES-CBC suites only, for OIDC providers that offer nothing else"
+license = "Apache-2.0"
+repository = "https://github.com/ffquintella/BastionVault"
+
+publish = ["uox-bastionvault"]
+
+# Tier 0 (features/legacy-tls-cbc.md, T551). It depends on no workspace crate
+# at all -- it carries its own error type -- so `bv-auth-oidc` (Tier 3) can use
+# it without bending the dependency direction. Client only, TLS 1.2 only, four
+# ECDHE-RSA AES-CBC cipher suites on secp256r1. Every primitive below is a
+# vetted crate; this crate only composes them. Every crate below is already in
+# the lockfile at these versions, and none of them is OpenSSL or aws-lc.
+[dependencies]
+# The record layer: AES-128/256 in CBC mode. `aes/zeroize` (already on in the
+# workspace graph) wipes the key schedule on drop. `cbc` without its default
+# `block-padding`: TLS padding is not PKCS#7 and is checked here, in constant
+# time (src/record.rs).
+aes = { version = "0.9", features = ["zeroize"] }
+cbc = { version = "0.2", default-features = false }
+# HMAC-SHA1/SHA256/SHA384 record MACs and the TLS 1.2 PRF (RFC 5246 §5).
+# Same majors as the rest of the workspace (bv-audit, bv-engine-resource).
+hmac = "0.13"
+sha1 = "0.11"
+sha2 = "0.11"
+# ECDHE on secp256r1. Same declaration as bv-core and bv-auth-fido2; the
+# server's point is decoded and on-curve checked by `PublicKey::from_sec1_bytes`.
+p256 = { version = "0.14", default-features = false, features = ["ecdh"] }
+# Client random, record IVs and the ECDH ephemeral key, straight from the OS.
+getrandom = { version = "0.4", features = ["sys_rng"] }
+# Constant-time padding / MAC / Finished checks.
+subtle = "2.6"
+# Pre-master secret, master secret, key block and record keys are wiped on drop.
+zeroize = "1.8.2"
+# Server certificate chain, hostname and ServerKeyExchange signature
+# verification: the verifier rustls uses, with its `ring` algorithms (both
+# providers are already enabled on it in the OIDC graph; `ring` needs no C
+# toolchain). There is deliberately no way to turn verification off.
+rustls-webpki = { version = "0.103", default-features = false, features = ["std", "ring"] }
+rustls-pki-types = { version = "1", features = ["std"] }
+webpki-roots = "1.0"
+# The async stream (AsyncRead + AsyncWrite), timeouts and the TCP connect of
+# the HTTP client.
+tokio = { version = "1.52", features = ["net", "io-util", "time"] }
+# The HTTP client's request/response types: the same `http` 1.x types
+# `openidconnect`'s `AsyncHttpClient` takes and returns.
+http = "1"
+# Response-head and chunk-size tokenizing, so the HTTP client carries no
+# hand-rolled parser. Same crate and use as bv-hsm-link.
+httparse = "1.10"
+
+[dev-dependencies]
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "process"] }
+# Throwaway CA and server certificates for the loopback and interop tests.
+# Default (ring) features, as the root and every other dev-dependency declare
+# it, so no crate's rcgen feature set changes.
+rcgen = "0.14"
+# The test server half's RSA-2048 key generation and ServerKeyExchange
+# signatures (PKCS#1 v1.5 and PSS). Already in the graph through rustls;
+# test-only, never a production dependency of this crate. Same use as
+# bv-engine-idp.
+aws-lc-rs = "1"
+
+[features]
+default = []
+
+[package.metadata.cargo-machete]
+ignored = [
+    # Used: its library name is `webpki` (src/verify.rs), which a static
+    # scan for `rustls_webpki` does not see.
+    "rustls-webpki",
+]
+
+[lints.clippy]
+# The record and handshake code index fixed-size TLS structures on purpose.
+needless_range_loop = "allow"

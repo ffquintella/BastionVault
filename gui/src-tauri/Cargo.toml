@@ -381,7 +381,7 @@ gtk = "0.18"
 # of the four providers without a custom build flag. Server-only
 # operators who want a leaner binary can override by disabling the
 # cloud_* features at their own workspace level.
-default = ["embedded_vault", "storage_hiqlite", "cloud_targets", "ssh_pqc"]
+default = ["embedded_vault", "storage_hiqlite", "cloud_targets", "ssh_pqc", "oidc_legacy_tls"]
 # Enables the in-process `EmbeddedBackend` adapter that wraps
 # `bastion_vault::core::Core::handle_request`. With this feature off,
 # the GUI is a pure remote client (Phase 3 of the decoupling will
@@ -394,6 +394,12 @@ cloud_targets = ["bastion_vault/cloud_targets"]
 # the PQC code path is gated at sign time, so a build that never
 # selects ML-DSA-65 pays no runtime cost.
 ssh_pqc = ["bastion_vault/ssh_pqc"]
+# The legacy TLS 1.2 CBC client for OIDC (T551, features/legacy-tls-cbc.md),
+# for the EMBEDDED vault. On by default here, unlike `bastion_vault` and
+# `bvault-cli`, so a desktop admin can opt an SSO provider in from the SSO
+# dialog: compiling it in changes nothing until a mount sets
+# `oidc_discovery_legacy_tls`. A remote vault answers from its own build.
+oidc_legacy_tls = ["bastion_vault/oidc_legacy_tls"]
 # MCP brokered sessions: the vault-side SSH executor behind
 # `bv_resource_ssh_exec`, for the EMBEDDED vault only
 # (features/mcp-brokered-sessions.md §5.3: off by default on `bastion_vault`,

@@ -71,6 +71,11 @@ pub struct OidcAdminConfig {
     /// Extra CA certificate(s), PEM, the vault trusts for this IdP (T493).
     /// Public material, so it is returned as stored.
     pub discovery_ca_pem: String,
+    /// The mount reaches its IdP over the legacy TLS 1.2 CBC client (T551).
+    pub discovery_legacy_tls: bool,
+    /// Whether the vault answering (embedded or remote) was built with that
+    /// client; `None` when it predates the field and does not say.
+    pub legacy_tls_available: Option<bool>,
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
@@ -156,6 +161,10 @@ pub struct OidcAdminInputConfig {
     /// (an older caller) leaves the stored value alone.
     #[serde(default)]
     pub discovery_ca_pem: Option<String>,
+    /// Always sent by the editor, `false` included, so turning the toggle off
+    /// really clears it. `None` (an older caller) leaves it alone.
+    #[serde(default)]
+    pub discovery_legacy_tls: Option<bool>,
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -468,14 +477,7 @@ async fn load_oidc_detail(
     display_name: &str,
 ) -> Result<SsoAdminProvider, CommandError> {
     let cfg_data = sys_read(state, &format!("auth/{mount}/config")).await.unwrap_or_default();
-    let config = OidcAdminConfig {
-        discovery_url: str_field(&cfg_data, "oidc_discovery_url"),
-        client_id: str_field(&cfg_data, "oidc_client_id"),
-        client_secret_set: cfg_data.get("oidc_client_secret_set").and_then(|v| v.as_bool()).unwrap_or(false),
-        scopes: string_list(&cfg_data, "oidc_scopes"),
-        allowed_redirect_uris: string_list(&cfg_data, "allowed_redirect_uris"),
-        discovery_ca_pem: str_field(&cfg_data, "oidc_discovery_ca_pem"),
-    };
+    let config = oidc_admin_config_from_data(&cfg_data);
     let default_role = str_field(&cfg_data, "default_role");
     let role = if !default_role.is_empty() {
         match sys_read(state, &format!("auth/{mount}/role/{default_role}")).await {
@@ -640,6 +642,7 @@ async fn write_provider_config(
             if let Some(pem) = &cfg.discovery_ca_pem {
                 body.insert("oidc_discovery_ca_pem".into(), Value::String(pem.clone()));
             }
+            insert_legacy_tls(&mut body, cfg.discovery_legacy_tls);
             sys_write(state, &format!("auth/{}/config", input.mount), body).await?;
         }
         SsoAdminInputConfig::Saml(cfg) => {
@@ -730,6 +733,29 @@ async fn write_provider_role(state: &State<'_, AppState>, input: &SsoAdminInput)
     Ok(())
 }
 
+/// The OIDC provider config as the editor shows it, from `auth/<mount>/config`.
+fn oidc_admin_config_from_data(cfg_data: &Map<String, Value>) -> OidcAdminConfig {
+    OidcAdminConfig {
+        discovery_url: str_field(cfg_data, "oidc_discovery_url"),
+        client_id: str_field(cfg_data, "oidc_client_id"),
+        client_secret_set: cfg_data.get("oidc_client_secret_set").and_then(|v| v.as_bool()).unwrap_or(false),
+        scopes: string_list(cfg_data, "oidc_scopes"),
+        allowed_redirect_uris: string_list(cfg_data, "allowed_redirect_uris"),
+        discovery_ca_pem: str_field(cfg_data, "oidc_discovery_ca_pem"),
+        discovery_legacy_tls: cfg_data.get("oidc_discovery_legacy_tls").and_then(|v| v.as_bool()).unwrap_or(false),
+        legacy_tls_available: cfg_data.get("oidc_legacy_tls_available").and_then(|v| v.as_bool()),
+    }
+}
+
+/// `oidc_discovery_legacy_tls` as a JSON boolean when the editor sent it —
+/// an explicit `false` is written, so switching it off clears it. The vault
+/// refuses `true` in a build without the legacy client; no fallback here.
+fn insert_legacy_tls(body: &mut Map<String, Value>, value: Option<bool>) {
+    if let Some(v) = value {
+        body.insert("oidc_discovery_legacy_tls".into(), Value::Bool(v));
+    }
+}
+
 fn oidc_role_from_data(name: &str, data: &Map<String, Value>) -> OidcAdminRole {
     OidcAdminRole {
         name: name.to_string(),
@@ -791,4 +817,39 @@ async fn sys_write(state: &State<'_, AppState>, path: &str, body: Map<String, Va
 async fn sys_delete(state: &State<'_, AppState>, path: &str) -> Result<(), CommandError> {
     make_request(state, Operation::Delete, path.to_string(), None).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod legacy_tls_tests {
+    use super::*;
+
+    #[test]
+    fn the_legacy_tls_flag_and_build_support_are_read_back() {
+        let data: Map<String, Value> = serde_json::from_str(
+            r#"{"oidc_discovery_url":"https://idp.example","oidc_client_id":"cid",
+                "oidc_discovery_legacy_tls":true,"oidc_legacy_tls_available":true}"#,
+        )
+        .unwrap();
+        let cfg = oidc_admin_config_from_data(&data);
+        assert!(cfg.discovery_legacy_tls);
+        assert_eq!(cfg.legacy_tls_available, Some(true));
+
+        // A vault that predates the field: off, support unknown.
+        let old: Map<String, Value> = serde_json::from_str(r#"{"oidc_discovery_url":"https://idp.example"}"#).unwrap();
+        let cfg = oidc_admin_config_from_data(&old);
+        assert!(!cfg.discovery_legacy_tls);
+        assert_eq!(cfg.legacy_tls_available, None);
+    }
+
+    #[test]
+    fn the_editor_writes_an_explicit_false() {
+        let mut body = Map::new();
+        insert_legacy_tls(&mut body, Some(false));
+        assert_eq!(body.get("oidc_discovery_legacy_tls"), Some(&Value::Bool(false)));
+        insert_legacy_tls(&mut body, Some(true));
+        assert_eq!(body.get("oidc_discovery_legacy_tls"), Some(&Value::Bool(true)));
+        let mut untouched = Map::new();
+        insert_legacy_tls(&mut untouched, None);
+        assert!(untouched.is_empty());
+    }
 }

@@ -425,8 +425,8 @@ make test-release   # every suite in the repo, in order (tens of minutes)
 Required before cutting a release, and before merging anything that touches a
 persisted format, a storage barrier, authn/authz, or the plugin ABI. Runs
 `test`, `test-integration`, `test-doc`, `test-hiqlite`, `test-cucumber`,
-`plugins-test`, `gui-check`, `gui-test`, `test-pki-composite` and
-`check-hsm DEEP=1`. Only `tests/e2e/rustion-ssh` is left out — it needs real
+`plugins-test`, `gui-check`, `gui-test`, `test-pki-composite`,
+`test-oidc-legacy-tls` and `check-hsm DEEP=1`. Only `tests/e2e/rustion-ssh` is left out — it needs real
 remote hosts.
 
 The pieces, when you want one of them on its own:
@@ -438,6 +438,7 @@ make test-cucumber      # harness = false, fixed ports 28100/28200
 make plugins-test       # testkit + host ABI parity + plugin substrate
 make check-hsm          # the HSM seal backends; DEEP=1 for the container image's own graph
 make test-pki-composite # pki_pqc_composite, which no other target enables: engine unit tests + tests/test_pki_composite.rs
+make test-oidc-legacy-tls # bv-auth-oidc/legacy-tls (T551), which no other target enables: bv-tls-legacy + bv-auth-oidc unit tests
 make test-all           # test + test-integration + test-doc
 make build              # release build
 ```

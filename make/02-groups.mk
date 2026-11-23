@@ -39,7 +39,7 @@ build.subs     := release:build-release gui:gui-build timings:build-timings benc
 
 test.desc      := Run tests
 test.default   := unit
-test.subs      := unit:test-unit bin:test-bin changed:test-changed plan:test-plan integration:test-integration doc:test-doc cucumber:test-cucumber hiqlite:test-hiqlite all:test-all release:test-release pki-composite:test-pki-composite pki-composite-lib:test-pki-composite-lib pki-composite-integration:test-pki-composite-integration dbms:test-dbms gui:gui-test
+test.subs      := unit:test-unit bin:test-bin changed:test-changed plan:test-plan integration:test-integration doc:test-doc cucumber:test-cucumber hiqlite:test-hiqlite all:test-all release:test-release pki-composite:test-pki-composite pki-composite-lib:test-pki-composite-lib pki-composite-integration:test-pki-composite-integration oidc-legacy-tls:test-oidc-legacy-tls dbms:test-dbms gui:gui-test
 
 check.desc     := Static checks and plans (nothing is built or changed)
 check.default  :=

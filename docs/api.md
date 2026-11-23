@@ -3694,6 +3694,8 @@ POST /v1/auth/{mount}/config
 | `allowed_redirect_uris` | Comma list or array |
 | `oidc_scopes` | Defaults to `openid,profile,email` |
 | `oidc_discovery_ca_pem` | Extra CA certificate(s), PEM, trusted **in addition to** the built-in roots for discovery, JWKS and the token exchange |
+| `oidc_discovery_legacy_tls` | Boolean, default `false`. `true` sends this mount's discovery, JWKS and token-exchange calls through the legacy TLS 1.2 client with AES-CBC suites (T551) — only for an IdP that offers nothing else. Needs a vault built with the `oidc_legacy_tls` feature |
+| `oidc_legacy_tls_available` | Read only: whether this vault was built with that client |
 
 A write merges onto the stored config: an omitted field keeps its value.
 `oidc_discovery_ca_pem` takes 1 to 8 `CERTIFICATE` blocks (at most 64 KiB),
@@ -3703,6 +3705,26 @@ refused and nothing is stored. It is stored as the certificate blocks alone
 clears it. Use it when discovery fails with `invalid peer certificate:
 UnknownIssuer` because the IdP does not send its intermediate, or chains to a
 private CA — see `features/oidc-auth.md`.
+
+`oidc_discovery_legacy_tls` is for an IdP whose TLS offers only
+`TLS_ECDHE_RSA_WITH_AES_{128,256}_CBC_SHA{,256,384}`, which the default client
+(rustls) refuses by design (discovery then fails with `received fatal alert:
+HandshakeFailure`). It takes a JSON boolean or the strings `"true"` /
+`"false"`; anything else is refused. Omitted keeps the stored value; `false`
+clears it. `true` is refused — and nothing is stored — by a vault built without
+the `oidc_legacy_tls` feature (`... built without the legacy TLS 1.2 CBC
+client ...`), and a stored `true` read by such a build fails the login with the
+same message rather than falling back to rustls. It also requires an `https`
+`oidc_discovery_url`. The client is TLS 1.2 only, ECDHE-RSA on P-256, verifies
+the certificate chain, host name and key-exchange signature against the
+built-in roots plus `oidc_discovery_ca_pem`, and every use is logged as a
+`security` warning naming the issuer. Spec and threat model:
+`features/legacy-tls-cbc.md`.
+
+~~~bash
+bvault write auth/oidc/config oidc_discovery_legacy_tls=true   # opt in
+bvault write auth/oidc/config oidc_discovery_legacy_tls=false  # back to rustls
+~~~
 
 ~~~json
 {

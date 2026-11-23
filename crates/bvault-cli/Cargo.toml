@@ -142,6 +142,9 @@ storage_hiqlite = ["bastion_vault/storage_hiqlite", "bv-server/storage_hiqlite"]
 cloud_targets = ["bastion_vault/cloud_targets", "bv-server/cloud_targets"]
 ssh_pqc = ["bastion_vault/ssh_pqc"]
 pki_pqc_composite = ["bastion_vault/pki_pqc_composite"]
+# The opt-in legacy TLS 1.2 CBC client for OIDC (T551,
+# features/legacy-tls-cbc.md). Off by default.
+oidc_legacy_tls = ["bastion_vault/oidc_legacy_tls"]
 transit_byok = ["bastion_vault/transit_byok"]
 transit_pqc_hybrid = ["bastion_vault/transit_pqc_hybrid"]
 files_smb = ["bastion_vault/files_smb"]

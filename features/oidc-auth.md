@@ -10,6 +10,8 @@ Add an OIDC authentication backend that allows users to authenticate with Bastio
 
 **Phase 5 (IdP trust anchors, T493) — done with caveats.** `oidc_discovery_ca_pem` on `config` adds operator-supplied CA certificates to the built-in roots of the client used for discovery, JWKS and the token exchange (now in `crates/bv-auth-oidc/src/http_client.rs`). Validated on write, stored normalised, returned on read; proven by a loopback TLS handshake that fails without the missing intermediate and passes with it, plus a whole-vault write/read/clear test. Not yet run against the production IdP that prompted it. The GUI dialog exposes the field since Phase 6 (T495).
 
+**Phase 7 (legacy TLS 1.2 CBC IdPs, T551) — done with caveats.** `oidc_discovery_legacy_tls` on `config` (default `false`) sends one mount's discovery, JWKS and token exchange through the opt-in legacy TLS 1.2 client in `crates/bv-tls-legacy` (four ECDHE-RSA AES-CBC suites, P-256, rustls-webpki verification), for an IdP that offers nothing else. Compiled in only with the `oidc_legacy_tls` build feature (default on for the desktop app, off for `bvault`); `true` in a build without it is refused on write and at login, never a fallback. Editable from the SSO provider dialog. Spec and threat model: `features/legacy-tls-cbc.md`. Not yet run against the production IdP.
+
 ## Motivation
 
 BastionVault currently supports token, userpass, approle, and certificate authentication. Enterprise environments require SSO integration with centralized identity providers. OIDC is the modern standard for federated authentication, supported by virtually all major IdPs. Without OIDC support, organizations must manage vault-specific credentials separately from their existing identity infrastructure, increasing operational overhead and security risk.
@@ -211,6 +213,21 @@ The Add/Edit SSO Provider dialog surfaces the callback URL(s) to register with t
   vault step and success path (vitest).
 - Not done: SAML test; cancelling a waiting test frees the callback port only
   when the 2-minute wait ends; a run against a real IdP.
+
+### Phase 7: legacy TLS 1.2 CBC IdPs (T551) — done with caveats
+- `oidc_discovery_legacy_tls` on `config`: boolean (JSON or the CLI's
+  `"true"`/`"false"`), omitted keeps, `false` clears, needs an https discovery
+  URL; `oidc_legacy_tls_available` on read says whether the build has the client.
+- `http_client.rs` picks the client per call (`oidc_http_client`): reqwest over
+  rustls unless the flag is set; the flag in a build without the
+  `legacy-tls` feature is an explicit error. A `security` warning names the
+  issuer each time the legacy client is built. Code-exchange transport errors
+  now carry their cause chain, as discovery errors already did.
+- GUI: the SSO provider dialog's "Use legacy TLS 1.2 (CBC)" switch with its
+  warning and a compiled-out state; a "Legacy TLS 1.2" badge in the provider list.
+- Tests: config read-old/round-trip/merge rules, client routing with and
+  without the feature, a whole-vault lifecycle test, GUI host and vitest tests.
+- Not done: a run against the production IdP (see `features/legacy-tls-cbc.md`).
 
 ## Key Reference Files
 

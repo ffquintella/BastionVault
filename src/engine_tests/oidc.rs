@@ -185,6 +185,66 @@ mod integration_tests {
         assert_eq!(read_pem(&data).as_deref(), Some(""));
     }
 
+    /// `oidc_discovery_legacy_tls` through the real routing/field path (T551):
+    /// off on a fresh config, kept when omitted, a non-boolean refused,
+    /// `true` stored only in a build with the legacy client (refused and
+    /// nothing changed otherwise), an explicit `false` clears it, and the
+    /// CLI's `"true"` / `"false"` strings count as booleans.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn oidc_config_legacy_tls_lifecycle() {
+        let (_bvault, core, root_token) = new_unseal_test_bastion_vault("test_oidc_legacy_tls").await;
+        test_mount_auth_api(&core, &root_token, "oidc", "oidc").await;
+        let compiled_in = cfg!(feature = "oidc_legacy_tls");
+
+        let read =
+            |data: &serde_json::Map<String, serde_json::Value>, key: &str| data.get(key).and_then(|v| v.as_bool());
+        let body =
+            json!({ "oidc_discovery_url": "https://issuer.example.com", "oidc_client_id": "cid" }).as_object().cloned();
+        test_write_api(&core, &root_token, "auth/oidc/config", true, body).await.unwrap();
+        let data = test_read_api(&core, &root_token, "auth/oidc/config", true).await.unwrap().unwrap().data.unwrap();
+        assert_eq!(read(&data, "oidc_discovery_legacy_tls"), Some(false));
+        assert_eq!(read(&data, "oidc_legacy_tls_available"), Some(compiled_in));
+
+        for bad in [json!("maybe"), json!(7)] {
+            let body = json!({ "oidc_discovery_legacy_tls": bad }).as_object().cloned();
+            let err = test_write_api(&core, &root_token, "auth/oidc/config", false, body).await.unwrap_err();
+            assert!(format!("{err}").contains("must be a boolean"), "{err}");
+        }
+
+        let set = |v: serde_json::Value| json!({ "oidc_discovery_legacy_tls": v }).as_object().cloned();
+        if compiled_in {
+            test_write_api(&core, &root_token, "auth/oidc/config", true, set(json!(true))).await.unwrap();
+            // Omitted: kept.
+            let body = json!({ "oidc_client_id": "cid2" }).as_object().cloned();
+            test_write_api(&core, &root_token, "auth/oidc/config", true, body).await.unwrap();
+            let data =
+                test_read_api(&core, &root_token, "auth/oidc/config", true).await.unwrap().unwrap().data.unwrap();
+            assert_eq!(read(&data, "oidc_discovery_legacy_tls"), Some(true));
+            // The legacy client speaks only TLS.
+            let body = json!({ "oidc_discovery_url": "http://issuer.example.com" }).as_object().cloned();
+            let err = test_write_api(&core, &root_token, "auth/oidc/config", false, body).await.unwrap_err();
+            assert!(format!("{err}").contains("https"), "{err}");
+            // The CLI's strings.
+            test_write_api(&core, &root_token, "auth/oidc/config", true, set(json!("false"))).await.unwrap();
+            let data =
+                test_read_api(&core, &root_token, "auth/oidc/config", true).await.unwrap().unwrap().data.unwrap();
+            assert_eq!(read(&data, "oidc_discovery_legacy_tls"), Some(false));
+            test_write_api(&core, &root_token, "auth/oidc/config", true, set(json!("true"))).await.unwrap();
+        } else {
+            let err =
+                test_write_api(&core, &root_token, "auth/oidc/config", false, set(json!(true))).await.unwrap_err();
+            assert!(format!("{err}").contains("built without the legacy TLS 1.2 CBC client"), "{err}");
+            let data =
+                test_read_api(&core, &root_token, "auth/oidc/config", true).await.unwrap().unwrap().data.unwrap();
+            assert_eq!(read(&data, "oidc_discovery_legacy_tls"), Some(false), "refused, nothing stored");
+        }
+
+        // An explicit false clears it, in every build.
+        test_write_api(&core, &root_token, "auth/oidc/config", true, set(json!(false))).await.unwrap();
+        let data = test_read_api(&core, &root_token, "auth/oidc/config", true).await.unwrap().unwrap().data.unwrap();
+        assert_eq!(read(&data, "oidc_discovery_legacy_tls"), Some(false));
+    }
+
     /// Auth-URL generation requires a reachable discovery endpoint,
     /// which we don't have in CI. Marked `#[ignore]`; run explicitly
     /// against a live IdP (Keycloak / Auth0 / etc.) with the

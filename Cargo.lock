@@ -1671,6 +1671,7 @@ dependencies = [
  "bv-kernel-api",
  "bv-logical",
  "bv-storage",
+ "bv-tls-legacy",
  "bv-utils",
  "derive_more 2.1.1",
  "log",
@@ -2500,6 +2501,29 @@ dependencies = [
  "tokio",
  "ureq",
  "url",
+ "zeroize",
+]
+
+[[package]]
+name = "bv-tls-legacy"
+version = "0.41.0"
+dependencies = [
+ "aes 0.9.4",
+ "aws-lc-rs",
+ "cbc 0.2.1",
+ "getrandom 0.4.3",
+ "hmac 0.13.0",
+ "http 1.5.0",
+ "httparse",
+ "p256 0.14.0",
+ "rcgen",
+ "rustls-pki-types",
+ "rustls-webpki",
+ "sha1 0.11.0",
+ "sha2 0.11.1",
+ "subtle",
+ "tokio",
+ "webpki-roots",
  "zeroize",
 ]
 

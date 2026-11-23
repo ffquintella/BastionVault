@@ -1669,6 +1669,10 @@ export interface OidcAdminConfig {
   allowed_redirect_uris: string[];
   /** Extra CA certificate(s) (PEM) trusted for this IdP (T493). */
   discovery_ca_pem: string;
+  /** Reach this IdP over the legacy TLS 1.2 CBC client (T551). */
+  discovery_legacy_tls: boolean;
+  /** Whether the vault was built with that client; `null` if it does not say. */
+  legacy_tls_available: boolean | null;
 }
 
 export interface OidcAdminRole {
@@ -1691,6 +1695,8 @@ export interface OidcAdminInputConfig {
   allowed_redirect_uris: string[];
   /** Sent on every save; an empty string clears the stored value. */
   discovery_ca_pem: string;
+  /** Sent on every save, `false` included, so switching it off clears it. */
+  discovery_legacy_tls: boolean;
 }
 
 // ── SAML shapes ─────────────────────────────────────────────────────

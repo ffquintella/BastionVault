@@ -54,6 +54,10 @@ members = [
     # Tier 0: the HSM link's mTLS gateway and node-side relay (T454 phase 3);
     # bv-errors only. features/hsm-pool-ha.md § HSM link.
     "crates/bv-hsm-link",
+    # Tier 0: the opt-in legacy TLS 1.2 CBC client an OIDC mount may use for
+    # an IdP that offers nothing else (T551); no workspace dependency.
+    # features/legacy-tls-cbc.md.
+    "crates/bv-tls-legacy",
     "crates/bv-storage",
     "crates/bv-logical",
     "crates/bv-utils",
@@ -525,6 +529,11 @@ cloud_targets = ["cloud_s3", "cloud_onedrive", "cloud_gdrive", "cloud_dropbox", 
 # an opt-in preview rather than a stable interop guarantee. See
 # `features/pki-secret-engine.md`.
 pki_pqc_composite = ["bv-engine-pki/pki_pqc_composite"]
+# OIDC: the opt-in legacy TLS 1.2 CBC client (crates/bv-tls-legacy, T551) for
+# an IdP that offers only ECDHE-RSA AES-CBC suites. Off by default; even when
+# compiled in, only a mount with `oidc_discovery_legacy_tls = true` uses it.
+# See `features/legacy-tls-cbc.md`.
+oidc_legacy_tls = ["bv-auth-oidc/legacy-tls"]
 
 # File Resources — SMB sync transport. Off by default because the
 # `smb` crate carries its own (pure-Rust) SMB2/3 + NTLM stack and a

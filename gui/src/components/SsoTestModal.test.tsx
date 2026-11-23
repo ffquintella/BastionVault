@@ -104,6 +104,20 @@ describe("SsoTestModal", () => {
     expect(mockOpen).not.toHaveBeenCalled();
   });
 
+  it("shows the vault's TLS error text verbatim, legacy TLS client included (T551)", async () => {
+    const message =
+      "oidc: discovery: Request failed: legacy TLS 1.2 (CBC) client: server sent fatal alert handshake_failure (40)";
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "oidc_login_start") throw message;
+      throw new Error(`unexpected ${cmd}`);
+    });
+    setup();
+    await userEvent.click(screen.getByRole("button", { name: "Start test" }));
+
+    await screen.findByText(/would not work/i);
+    expect(screen.getByText(message)).toBeInTheDocument();
+  });
+
   it("cancels the pending session when the browser cannot be opened", async () => {
     mockOpen.mockRejectedValue(new Error("no browser"));
     mockInvoke.mockImplementation(async (cmd: string) => {

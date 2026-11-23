@@ -17,8 +17,8 @@ use super::{OidcBackend, OidcBackendInner};
 use crate::{
     context::Context,
     errors::RvError,
-    http_client::normalize_discovery_ca_pem,
-    logical::{Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
+    http_client::{legacy_tls_compiled_in, legacy_tls_not_compiled_in, normalize_discovery_ca_pem, LEGACY_TLS_FIELD},
+    logical::{field::FieldTrait, Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
     new_fields, new_fields_internal, new_path, new_path_internal,
     storage::StorageEntry,
 };
@@ -62,6 +62,12 @@ pub struct OidcConfig {
     /// returned on read. Absent in configs written before it existed.
     #[serde(default)]
     pub oidc_discovery_ca_pem: String,
+    /// Reach this IdP over the legacy TLS 1.2 CBC client instead of rustls
+    /// (T551): for an IdP that offers only ECDHE-RSA AES-CBC suites. Needs a
+    /// build with the `oidc_legacy_tls` feature; never a fallback. Absent
+    /// (false) in configs written before it existed.
+    #[serde(default)]
+    pub oidc_discovery_legacy_tls: bool,
 }
 
 impl OidcConfig {
@@ -90,6 +96,9 @@ impl OidcConfig {
         m.insert("oidc_scopes".into(), Value::Array(self.oidc_scopes.iter().cloned().map(Value::String).collect()));
         // Public CA certificates, not a secret: returned as stored.
         m.insert("oidc_discovery_ca_pem".into(), Value::String(self.oidc_discovery_ca_pem.clone()));
+        m.insert(LEGACY_TLS_FIELD.into(), Value::Bool(self.oidc_discovery_legacy_tls));
+        // Lets a client tell "off" from "cannot be turned on in this build".
+        m.insert("oidc_legacy_tls_available".into(), Value::Bool(legacy_tls_compiled_in()));
         m
     }
 }
@@ -129,6 +138,10 @@ impl OidcBackend {
                 "oidc_discovery_ca_pem": {
                     field_type: FieldType::Str,
                     description: "Extra CA certificate(s), PEM, trusted in addition to the built-in roots for discovery, JWKS and token exchange (e.g. the intermediate an IdP does not send). At most 8 certificates and 64 KiB; no private keys. Empty clears; omit to keep."
+                },
+                "oidc_discovery_legacy_tls": {
+                    field_type: FieldType::Bool,
+                    description: "Reach this IdP (discovery, JWKS, token exchange) over the legacy TLS 1.2 client with AES-CBC suites, for an IdP that offers nothing else. Weaker than the default; needs a build with the oidc_legacy_tls feature. Omit to keep."
                 }
             },
             operations: [
@@ -187,6 +200,8 @@ impl OidcBackendInner {
             Err(e) => return Err(e),
         };
         cfg.oidc_discovery_ca_pem = merge_discovery_ca_pem(&cfg.oidc_discovery_ca_pem, ca_pem_input.as_ref())?;
+        cfg.oidc_discovery_legacy_tls =
+            merge_legacy_tls(cfg.oidc_discovery_legacy_tls, legacy_tls_input(req)?.as_ref(), legacy_tls_compiled_in())?;
 
         // Minimum-viable validation: discovery URL and client id
         // are both required for the backend to function at all.
@@ -195,6 +210,11 @@ impl OidcBackendInner {
         }
         if cfg.oidc_client_id.trim().is_empty() {
             return Err(RvError::ErrString("oidc: `oidc_client_id` is required".into()));
+        }
+        if cfg.oidc_discovery_legacy_tls && !cfg.oidc_discovery_url.trim().starts_with("https://") {
+            return Err(RvError::ErrString(format!(
+                "oidc: `{LEGACY_TLS_FIELD}` needs an https `oidc_discovery_url`; the legacy client speaks only TLS"
+            )));
         }
 
         // Default scopes — the RFC-standard minimum for an OIDC
@@ -220,6 +240,40 @@ fn merge_discovery_ca_pem(current: &str, input: Option<&Value>) -> Result<String
         Some(Value::String(pem)) => normalize_discovery_ca_pem(pem),
         Some(_) => Err(discovery_ca_pem_not_a_string()),
     }
+}
+
+/// The raw `oidc_discovery_legacy_tls` input: a JSON boolean, or the string
+/// `"true"` / `"false"` the CLI sends for `key=value`. `None` when absent.
+fn legacy_tls_input(req: &Request) -> Result<Option<Value>, RvError> {
+    match req.get_data(LEGACY_TLS_FIELD) {
+        Ok(v) => Ok(Some(v)),
+        Err(RvError::ErrRequestFieldNotFound) | Err(RvError::ErrRequestNoData) => Ok(None),
+        // `FieldType::Bool` refuses a string; take it raw and parse it below.
+        Err(RvError::ErrRequestFieldInvalid) => Ok(req
+            .data
+            .as_ref()
+            .and_then(|d| d.get(LEGACY_TLS_FIELD))
+            .or_else(|| req.body.as_ref().and_then(|b| b.get(LEGACY_TLS_FIELD)))
+            .cloned()),
+        Err(e) => Err(e),
+    }
+}
+
+/// New value of `oidc_discovery_legacy_tls` after a write: absent keeps
+/// `current`; a value that is not a boolean is refused (never ignored); `true`
+/// in a build without the client is refused, so the write cannot store a
+/// setting the vault would then quietly not honour.
+fn merge_legacy_tls(current: bool, input: Option<&Value>, compiled_in: bool) -> Result<bool, RvError> {
+    let Some(value) = input else {
+        return Ok(current);
+    };
+    let wanted = value
+        .as_bool_ex()
+        .ok_or_else(|| RvError::ErrString(format!("oidc: `{LEGACY_TLS_FIELD}` must be a boolean (true or false)")))?;
+    if wanted && !compiled_in {
+        return Err(legacy_tls_not_compiled_in());
+    }
+    Ok(wanted)
 }
 
 fn discovery_ca_pem_not_a_string() -> RvError {
@@ -255,6 +309,7 @@ mod tests {
             allowed_redirect_uris: vec!["http://localhost/cb".into()],
             oidc_scopes: vec!["openid".into()],
             oidc_discovery_ca_pem: String::new(),
+            oidc_discovery_legacy_tls: false,
         };
         let m = cfg.to_public_map();
         // The secret must never appear in the serialized output.
@@ -332,6 +387,53 @@ mod tests {
         }
         assert!(merge_discovery_ca_pem(&stored, Some(&Value::from(5))).is_err());
         assert!(merge_discovery_ca_pem(&stored, Some(&Value::Null)).is_err());
+    }
+
+    /// A config persisted before `oidc_discovery_legacy_tls` existed loads
+    /// with it off (the rustls client), and is written back with it present.
+    #[test]
+    fn config_written_before_the_legacy_tls_field_loads_with_it_off() {
+        let old = br#"{"oidc_discovery_url":"https://idp.example.com","oidc_client_id":"cid",
+            "oidc_client_secret":"s","default_role":"user","allowed_redirect_uris":[],
+            "oidc_scopes":["openid"],"oidc_discovery_ca_pem":""}"#;
+        let cfg: OidcConfig = serde_json::from_slice(old).unwrap();
+        assert!(!cfg.oidc_discovery_legacy_tls);
+        let rewritten: Value = serde_json::from_slice(&serde_json::to_vec(&cfg).unwrap()).unwrap();
+        assert_eq!(rewritten.get(LEGACY_TLS_FIELD).and_then(Value::as_bool), Some(false));
+
+        let on = OidcConfig { oidc_discovery_legacy_tls: true, ..Default::default() };
+        let back: OidcConfig = serde_json::from_slice(&serde_json::to_vec(&on).unwrap()).unwrap();
+        assert!(back.oidc_discovery_legacy_tls);
+    }
+
+    #[test]
+    fn to_public_map_returns_the_legacy_tls_flag_and_build_support() {
+        let m = OidcConfig { oidc_discovery_legacy_tls: true, ..Default::default() }.to_public_map();
+        assert_eq!(m.get(LEGACY_TLS_FIELD).and_then(Value::as_bool), Some(true));
+        assert_eq!(m.get("oidc_legacy_tls_available").and_then(Value::as_bool), Some(legacy_tls_compiled_in()));
+        let m = OidcConfig::default().to_public_map();
+        assert_eq!(m.get(LEGACY_TLS_FIELD).and_then(Value::as_bool), Some(false));
+    }
+
+    #[test]
+    fn legacy_tls_merge_keeps_sets_clears_and_refuses() {
+        // Absent keeps, whatever is stored.
+        assert!(merge_legacy_tls(true, None, true).unwrap());
+        assert!(!merge_legacy_tls(false, None, false).unwrap());
+        // Explicit false always clears, even in a build without the client.
+        assert!(!merge_legacy_tls(true, Some(&Value::Bool(false)), true).unwrap());
+        assert!(!merge_legacy_tls(true, Some(&Value::Bool(false)), false).unwrap());
+        assert!(!merge_legacy_tls(true, Some(&Value::String("false".into())), false).unwrap());
+        // True sets it, as a JSON bool or the CLI's string.
+        assert!(merge_legacy_tls(false, Some(&Value::Bool(true)), true).unwrap());
+        assert!(merge_legacy_tls(false, Some(&Value::String("true".into())), true).unwrap());
+        // ...but never in a build that cannot honour it.
+        let e = merge_legacy_tls(false, Some(&Value::Bool(true)), false).unwrap_err().to_string();
+        assert!(e.contains("built without the legacy TLS 1.2 CBC client"), "{e}");
+        // Anything else is refused, not ignored.
+        for bad in [Value::from(1), Value::String("yes".into()), Value::Null, Value::Array(vec![])] {
+            assert!(merge_legacy_tls(false, Some(&bad), true).is_err(), "{bad:?}");
+        }
     }
 
     #[test]
