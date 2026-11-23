@@ -105,6 +105,10 @@ ifneq ($(BUILDER_BASE),)
 _BUILDER_BASE_FLAG := --build-arg BUILDER_BASE=$(BUILDER_BASE)
 endif
 
+# Runtime base image of the final stage; must match `FROM ... AS runtime` in
+# deploy/container/Containerfile. Pre-pulled with retry by `container-image`.
+RUNTIME_BASE     ?= cgr.dev/chainguard/wolfi-base:latest
+
 # Registry TLS for the dependency-image pull/push and for a `FROM` that resolves
 # to a registry. Only podman takes the flag; docker configures insecure
 # registries at the daemon instead, so the flag is dropped there rather than
@@ -200,6 +204,20 @@ container-image: ## Build the server OCI image (auto-detects podman/docker, over
 			fi; \
 		fi; \
 	fi
+	@# The runtime base is only pulled by the LAST stage, after the whole cargo
+	@# build. A transient registry 5xx there (cgr.dev answered 500 in CI run
+	@# 2488) threw away ~15 minutes of work. Pull it up front with a bounded,
+	@# visible retry; the build then finds it in local storage. A persistent
+	@# failure still fails the target, loudly, before any compilation.
+	@for plat in $$(echo "$(PLATFORM)" | tr ',' ' '); do \
+		ok=0; \
+		for attempt in 1 2 3 4 5; do \
+			echo "==> Pulling $(RUNTIME_BASE) ($$plat), attempt $$attempt/5"; \
+			if $(CONTAINER_TOOL) pull --platform $$plat $(RUNTIME_BASE); then ok=1; break; fi; \
+			sleep $$((attempt * 10)); \
+		done; \
+		[ "$$ok" = 1 ] || { echo "ERROR: could not pull $(RUNTIME_BASE) for $$plat after 5 attempts"; exit 1; }; \
+	done
 	@echo "==> Building $(IMAGE_NAME):$(IMAGE_TAG) ($(PLATFORM), INCLUDE_SHELL=$(INCLUDE_SHELL), CACHE=$(CACHE)) with $(CONTAINER_TOOL)"
 	$(_BUILD_CMD) $(_CACHE_FLAGS) $(_BUILDER_BASE_FLAG) $(_TLS_FLAG) $(_FEATURES_FLAG) \
 		--build-arg INCLUDE_SHELL=$(INCLUDE_SHELL) \

@@ -438,6 +438,10 @@ EXAMPLE ENTRY:
 
 ### Fixed
 
+#### Container image: transient registry failure on the runtime base
+
+- Pull the Wolfi runtime base image up front in `make container-image`, with up to five attempts and a growing delay, so a transient registry 5xx no longer fails the build in its last stage after the whole cargo compile has run; a persistent failure still stops the target before any compilation. (T83, S32)
+
 #### MCP: pairing on a server that requires machine identity
 
 - **Pair an AI assistant from a session that is both a user and an attested machine, instead of getting no tools** (T549, S115, S26)
