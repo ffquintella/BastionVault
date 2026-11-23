@@ -443,6 +443,11 @@ EXAMPLE ENTRY:
 
 ### Fixed
 
+#### FerroGate: SQL privileges lost in a machine login bound to a user
+
+- **Keep a machine's policy in a combined machine and user login when the user holds it through an identity group** (T553, S89, S109) -- the intersection used only the policies stored on the user's token, so a `sql-full` the user inherits from a group was dropped and the SQL browser answered `no_sql_privilege`; it now uses the user's effective policies, still bounded by what the machine is approved for.
+- **Apply policies written with `{{request.namespace}}` to SQL checks on a resource in the root namespace** (T553, S89, S109) -- the SQL privilege check passed no namespace for root, so every such rule, the shipped `default` share rule included, was discarded there.
+
 #### Container image: transient registry failure on the runtime base
 
 - Pull the Wolfi runtime base image up front in `make container-image`, with up to five attempts and a growing delay, so a transient registry 5xx no longer fails the build in its last stage after the whole cargo compile has run; a persistent failure still stops the target before any compilation. (T83, S32)

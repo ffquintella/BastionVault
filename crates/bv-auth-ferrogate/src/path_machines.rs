@@ -98,6 +98,47 @@ fn enroll_list_matches(list: &[String], ip: &str, spiffe_id: &str, machine_id: &
     })
 }
 
+/// Named policies present in BOTH the machine's approved set and the user
+/// token's set. `default` is excluded on both sides: the token store
+/// re-injects it. A machine policy the user token lacks is dropped, so a
+/// combined login never holds more than the narrower of the two.
+pub fn intersect_policies(machine: &[String], user: &[String]) -> Vec<String> {
+    let user_named: std::collections::HashSet<&str> =
+        user.iter().map(String::as_str).filter(|p| *p != "default").collect();
+    machine.iter().filter(|p| p.as_str() != "default" && user_named.contains(p.as_str())).cloned().collect()
+}
+
+/// `direct` plus every policy `username` inherits from identity user-groups of
+/// `ns_path` (its binding namespace). Only adds, and only ever narrows what a
+/// machine login can reach: the result is still intersected with the machine's
+/// approved set. An unknown user, no identity service or a lookup error returns
+/// `direct` unchanged, which is the fail-closed direction.
+#[maybe_async::maybe_async]
+pub async fn user_effective_policies(
+    core: &dyn VaultCtx,
+    direct: &[String],
+    username: &str,
+    ns_path: &str,
+) -> Vec<String> {
+    if username.is_empty() {
+        return direct.to_vec();
+    }
+    let Some(identity) = core.identity() else {
+        return direct.to_vec();
+    };
+    match identity.expand_group_policies(crate::kernel_api::identity::GroupKind::User, username, direct, ns_path).await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!(
+                target: "security",
+                "ferrogate: identity group expansion failed for '{username}': {e}; using the token's policies only"
+            );
+            direct.to_vec()
+        }
+    }
+}
+
 impl FerroGateBackend {
     pub fn register_path(&self) -> Path {
         let r = self.inner.clone();
@@ -594,13 +635,19 @@ impl FerroGateBackendInner {
 
         // Intersect named policies; `default` is baseline and re-injected by the
         // token store, so exclude it from the comparison on both sides.
-        let user_named: std::collections::HashSet<&str> =
-            te.policies.iter().map(String::as_str).filter(|p| *p != "default").collect();
-        let policies: Vec<String> = machine_policies
-            .iter()
-            .filter(|p| p.as_str() != "default" && user_named.contains(p.as_str()))
-            .cloned()
-            .collect();
+        // The user's EFFECTIVE policies: the token's own plus those inherited
+        // from identity user-groups, read now. A token can lack a group-derived
+        // policy the user holds (group edited after the token was minted, or a
+        // login path that did not carry it), and the intersection must not
+        // strip a machine policy the user genuinely holds.
+        let user_effective = user_effective_policies(
+            self.core.as_ref(),
+            &te.policies,
+            &te.meta_or_empty("username"),
+            &te.meta_or_empty(crate::kernel_api::namespace::NS_PATH_META),
+        )
+        .await;
+        let policies = intersect_policies(machine_policies, &user_effective);
 
         let entity_id = te.meta_or_empty("entity_id");
         let username = te.meta_or_empty("username");

@@ -286,3 +286,200 @@ async fn test_sql_privileges_for_a_root_bound_principal_in_a_namespace() {
     let bob = principal("bob", &["default", "test-sql"]);
     assert_eq!(allowed(&g.sql_privileges(&bob, SqlPurpose::Display, DB, &batch).await.unwrap()), [false]);
 }
+
+/// The FerroGate incident: a machine (`ferrogate/host/…`) approved with
+/// `administrator` + `sql-full` works in tenant `dti/esi`, where the SQL
+/// browser answered `no_sql_privilege`. Drives the gate with the three tokens
+/// the login can mint: machine only, machine bound to a user who holds
+/// `sql-full`, and machine bound to a user who does not.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn test_sql_privileges_for_a_ferrogate_machine_token_in_a_namespace() {
+    use std::str::FromStr;
+
+    use crate::modules::{
+        namespace::{store::NamespaceQuotas, NamespaceModule, NAMESPACE_MODULE_NAME},
+        policy::Policy,
+    };
+
+    const DB: &str = "apldc1vds0044-db";
+    const SPIFFE: &str = "spiffe://ferrogate/host/0260e3ee-96ca-8a40-8985-17a2b1ac99b7";
+    let (_bvault, core, _root) = new_unseal_test_bastion_vault("test_sql_privileges_ferrogate_machine").await;
+    let ns_store =
+        core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME).and_then(|m| m.store()).unwrap();
+    ns_store.create("dti", NamespaceQuotas::default(), false).await.unwrap();
+    ns_store.create("dti/esi", NamespaceQuotas::default(), false).await.unwrap();
+    ns_store.create("dti/esi/sub", NamespaceQuotas::default(), false).await.unwrap();
+    ns_store.create("other", NamespaceQuotas::default(), false).await.unwrap();
+
+    // The policy exactly as the operator wrote it, in the root namespace.
+    let mut sql_full = Policy::from_str(
+        r#"path "{{request.namespace}}/resources/resources/+/sql/*" {
+            capabilities = ["sql_select", "sql_insert", "sql_update", "sql_delete", "sql_alter",
+                            "sql_create", "sql_drop", "sql_execute", "sql_admin", "sql_export", "sql_script"]
+        }"#,
+    )
+    .unwrap();
+    sql_full.name = "sql-full".into();
+    gate(&core).policy_store.load().set_policy(sql_full).await.unwrap();
+
+    // The token a login mints: policies as `login` builds them, metadata as
+    // `path_machines` stamps it (no namespace binding, so root-bound).
+    let token_in = |ns: &str, policies: &[String], user: Option<(&str, &str)>| {
+        let mut auth = Auth { policies: policies.to_vec(), ..Default::default() };
+        auth.display_name = SPIFFE.into();
+        auth.metadata.insert("spiffe_id".into(), SPIFFE.into());
+        auth.metadata.insert("mount_path".into(), "ferrogate/".into());
+        if let Some((entity, username)) = user {
+            auth.metadata.insert("entity_id".into(), entity.into());
+            auth.metadata.insert("username".into(), username.into());
+        }
+        let mut req = Request::new("dbms/v2/sessions/s1/execute");
+        req.auth = Some(auth);
+        req.namespace_path = (!ns.is_empty()).then(|| ns.to_string());
+        req
+    };
+    let token = |policies: &[String], user: Option<(&str, &str)>| token_in("dti/esi", policies, user);
+    let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let machine = names(&["administrator", "sql-full"]);
+    let batch = checks(&[(SqlCapability::Select, SqlTarget::Server), (SqlCapability::Drop, SqlTarget::Server)]);
+    let g = gate(&core);
+
+    // 1. Machine only: the approved set is the token's policies.
+    let v = g.sql_privileges(&token(&machine, None), SqlPurpose::Display, DB, &batch).await.unwrap();
+    assert_eq!(allowed(&v), [true, true], "machine-only token with sql-full");
+
+    // 2. Bound to a user who also holds `sql-full`: the intersection keeps it.
+    let felipe = names(&["administrator", "sql-full", "default"]);
+    let combined = bv_auth_ferrogate::path_machines::intersect_policies(&machine, &felipe);
+    assert_eq!(combined, names(&["administrator", "sql-full"]));
+    let v = g.sql_privileges(&token(&combined, Some(("ent-felipe", "felipe"))), SqlPurpose::Display, DB, &batch).await;
+    assert_eq!(allowed(&v.unwrap()), [true, true], "combined token, user holds sql-full");
+
+    // 3. Bound to a user who lacks it (the audit's `administrator,default`).
+    let narrow = names(&["administrator", "default"]);
+    let combined = bv_auth_ferrogate::path_machines::intersect_policies(&machine, &narrow);
+    assert_eq!(combined, names(&["administrator"]), "the machine's sql-full is dropped by the intersection");
+    let v = g.sql_privileges(&token(&combined, Some(("ent-felipe", "felipe"))), SqlPurpose::Display, DB, &batch).await;
+    assert_eq!(allowed(&v.unwrap()), [false, false], "this is the reported no_sql_privilege");
+}
+
+/// The same three FerroGate tokens in every namespace the resource can live
+/// in: root, a parent, a child, a nested child and an unrelated sibling. The
+/// root-keyspace `sql-full`, written with `{{request.namespace}}`, must follow
+/// the request namespace in each, and a token without it must be refused in
+/// all of them.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn test_sql_privileges_for_a_ferrogate_machine_token_across_namespaces() {
+    use std::str::FromStr;
+
+    use crate::modules::{
+        namespace::{store::NamespaceQuotas, NamespaceModule, NAMESPACE_MODULE_NAME},
+        policy::Policy,
+    };
+
+    let (_bvault, core, _root) = new_unseal_test_bastion_vault("test_sql_privileges_ferrogate_namespaces").await;
+    let ns_store =
+        core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME).and_then(|m| m.store()).unwrap();
+    let all_ns = ["", "dti", "dti/esi", "dti/esi/sub", "other"];
+    for ns in &all_ns[1..] {
+        ns_store.create(ns, NamespaceQuotas::default(), false).await.unwrap();
+    }
+    let mut sql_full = Policy::from_str(
+        r#"path "{{request.namespace}}/resources/resources/+/sql/*" { capabilities = ["sql_select", "sql_drop"] }"#,
+    )
+    .unwrap();
+    sql_full.name = "sql-full".into();
+    gate(&core).policy_store.load().set_policy(sql_full).await.unwrap();
+
+    let token_in = |ns: &str, policies: &[&str]| {
+        let mut auth = Auth { policies: policies.iter().map(|p| p.to_string()).collect(), ..Default::default() };
+        auth.display_name = "spiffe://ferrogate/host/0260e3ee".into();
+        auth.metadata.insert("spiffe_id".into(), "spiffe://ferrogate/host/0260e3ee".into());
+        auth.metadata.insert("mount_path".into(), "ferrogate/".into());
+        let mut req = Request::new("dbms/v2/sessions/s1/execute");
+        req.auth = Some(auth);
+        req.namespace_path = (!ns.is_empty()).then(|| ns.to_string());
+        req
+    };
+    let batch = checks(&[(SqlCapability::Select, SqlTarget::Server), (SqlCapability::Drop, SqlTarget::Server)]);
+    let g = gate(&core);
+
+    for ns in all_ns {
+        let held = token_in(ns, &["administrator", "sql-full"]);
+        let v = g.sql_privileges(&held, SqlPurpose::Display, "db", &batch).await.unwrap();
+        assert_eq!(allowed(&v), [true, true], "sql-full in namespace {ns:?}");
+        let expect = if ns.is_empty() {
+            "resources/resources/db/sql/server".to_string()
+        } else {
+            format!("{ns}/resources/resources/db/sql/server")
+        };
+        assert_eq!(v[0].path, expect, "probed path in namespace {ns:?}");
+
+        let lacking = token_in(ns, &["administrator"]);
+        let v = g.sql_privileges(&lacking, SqlPurpose::Display, "db", &batch).await.unwrap();
+        assert_eq!(allowed(&v), [false, false], "no sql-full in namespace {ns:?}");
+    }
+}
+
+/// The combined login's intersection uses the user's EFFECTIVE policies: a
+/// `sql-full` the user holds only through an identity group (absent from the
+/// user token's own policies, as in the audit's `administrator,default`) must
+/// survive, and a user outside the group still loses it.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn test_ferrogate_combined_login_uses_the_users_group_policies() {
+    use std::str::FromStr;
+
+    use bv_auth_ferrogate::path_machines::{intersect_policies, user_effective_policies};
+
+    use crate::modules::{
+        namespace::{store::NamespaceQuotas, NamespaceModule, NAMESPACE_MODULE_NAME},
+        policy::Policy,
+    };
+
+    let (_bvault, core, root) = new_unseal_test_bastion_vault("test_ferrogate_combined_group_policies").await;
+    let ns_store =
+        core.module_manager().get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME).and_then(|m| m.store()).unwrap();
+    ns_store.create("dti", NamespaceQuotas::default(), false).await.unwrap();
+    ns_store.create("dti/esi", NamespaceQuotas::default(), false).await.unwrap();
+
+    let mut sql_full = Policy::from_str(
+        r#"path "{{request.namespace}}/resources/resources/+/sql/*" { capabilities = ["sql_select", "sql_drop"] }"#,
+    )
+    .unwrap();
+    sql_full.name = "sql-full".into();
+    gate(&core).policy_store.load().set_policy(sql_full).await.unwrap();
+    write(&core, &root, "identity/group/user/sql-admins", json!({ "members": ["felipe"], "policies": ["sql-full"] }))
+        .await;
+
+    let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let machine = names(&["administrator", "sql-full"]);
+    let token_policies = names(&["administrator", "default"]); // as in the audit
+    let ctx: &dyn crate::kernel_api::VaultCtx = core.as_ref();
+
+    // felipe is in the group: effective policies carry sql-full.
+    let effective = user_effective_policies(ctx, &token_policies, "felipe", "").await;
+    assert!(effective.iter().any(|p| p == "sql-full"), "group policy missing: {effective:?}");
+    let combined = intersect_policies(&machine, &effective);
+    assert_eq!(combined, names(&["administrator", "sql-full"]));
+
+    // ana is not: still dropped, nothing widens.
+    let effective = user_effective_policies(ctx, &token_policies, "ana", "").await;
+    assert_eq!(intersect_policies(&machine, &effective), names(&["administrator"]));
+
+    // No username (a machine-only token) and an unknown namespace change nothing.
+    assert_eq!(user_effective_policies(ctx, &token_policies, "", "").await, token_policies);
+
+    // The combined token works against the resource in root and in a tenant.
+    let batch = checks(&[(SqlCapability::Select, SqlTarget::Server)]);
+    for ns in ["", "dti/esi"] {
+        let mut auth = Auth { policies: combined.clone(), ..Default::default() };
+        auth.metadata.insert("mount_path".into(), "ferrogate/".into());
+        auth.metadata.insert("username".into(), "felipe".into());
+        auth.metadata.insert("entity_id".into(), "ent-felipe".into());
+        let mut req = Request::new("dbms/v2/sessions/s1/execute");
+        req.auth = Some(auth);
+        req.namespace_path = (!ns.is_empty()).then(|| ns.to_string());
+        let v = gate(&core).sql_privileges(&req, SqlPurpose::Display, "db", &batch).await.unwrap();
+        assert_eq!(allowed(&v), [true], "combined token in namespace {ns:?}");
+    }
+}

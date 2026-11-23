@@ -63,7 +63,11 @@ impl PolicyStore {
         let ns_opt = if ns.is_empty() { None } else { Some(ns.as_str()) };
         let paths = checks.iter().map(|c| sql_check_path(&ns, resource, &c.target)).collect::<Result<Vec<_>, _>>()?;
 
-        let acl = self.new_acl_for_request(&auth.policies, None, auth, ns_opt).await?;
+        // The resolved namespace, root included: `{{request.namespace}}` is ""
+        // at root (a legitimate value) and fails closed on `None`, which would
+        // drop every templated rule, the shipped `default` baseline's SQL share
+        // rule among them, for a resource in the root namespace.
+        let acl = self.new_acl_for_request(&auth.policies, None, auth, Some(ns.as_str())).await?;
 
         let server_path = sql_check_path(&ns, resource, &SqlTarget::Server)?;
         let mut probe = Request::new(server_path.as_str());
