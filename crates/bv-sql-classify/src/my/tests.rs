@@ -940,3 +940,109 @@ fn the_browsers_open_statement_needs_only_sql_select() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// sqlparser 0.63 -> 0.64 (see the same section in pg/tests.rs).
+// ---------------------------------------------------------------------------
+
+fn set<const N: usize>(items: [&str; N]) -> BTreeSet<String> {
+    items.iter().map(|s| s.to_string()).collect()
+}
+
+/// The analyzer alone, on a statement any dialect's parser built.
+#[track_caller]
+fn analyze_as(dialect: &dyn sqlparser::dialect::Dialect, sql: &str) -> Result<BTreeSet<String>, Reason> {
+    let stmts = sqlparser::parser::Parser::parse_sql(dialect, sql).unwrap_or_else(|e| panic!("{sql:?}: {e}"));
+    let [stmt] = stmts.as_slice() else { panic!("{sql:?}: not one statement") };
+    let ctx = ctx();
+    let names = super::names::Names { ctx: &ctx, fold_tables: false, mariadb: false };
+    super::analyze::analyze(stmt, &names)
+        .map(|a| a.required.iter().map(|(c, t)| format!("{c} {}", target(t))).collect())
+}
+
+/// `IN (subquery)` is one `Expr::In` node in 0.64: the subquery is still
+/// walked, and `IN UNNEST`, SQLite's `IN table` and `GLOBAL IN` refuse.
+#[test]
+fn sqlparser_064_in_subquery_is_still_classified() {
+    requires(
+        "SELECT * FROM t WHERE a NOT IN (SELECT b FROM u WHERE c IN (SELECT d FROM v))",
+        &["sql_select rel:app.t", "sql_select rel:app.u", "sql_select rel:app.v"],
+    );
+    requires("SELECT * FROM t WHERE a IN ((SELECT b FROM u), 2)", &["sql_select rel:app.t", "sql_select rel:app.u"]);
+    requires(
+        "SELECT * FROM t WHERE a IN (SELECT a FROM u FOR UPDATE)",
+        &["sql_select rel:app.t", "sql_select rel:app.u", "sql_update rel:app.u"],
+    );
+    requires(
+        "DELETE t FROM t JOIN u ON t.id = u.id WHERE u.a IN (SELECT a FROM v)",
+        &[
+            "sql_delete rel:app.t",
+            "sql_delete rel:app.u",
+            "sql_select rel:app.t",
+            "sql_select rel:app.u",
+            "sql_select rel:app.v",
+        ],
+    );
+    never("SELECT * FROM t WHERE a IN (SELECT LOAD_FILE('/etc/passwd'))", Reason::ServerFileOrOsAccess);
+    refused("SELECT * FROM t WHERE a IN UNNEST(arr)", Reason::UnsupportedConstruct, Refusal::Unknown);
+    refused("SELECT * FROM t WHERE a IN u", Reason::ParseFailed, Refusal::Unknown);
+    use sqlparser::dialect::{ClickHouseDialect, SQLiteDialect};
+    for (dialect, sql) in [
+        (&SQLiteDialect {} as &dyn sqlparser::dialect::Dialect, "SELECT * FROM t WHERE a IN u"),
+        (&SQLiteDialect {}, "SELECT * FROM t WHERE a IN u(1)"),
+        (&ClickHouseDialect {}, "SELECT * FROM t WHERE a GLOBAL IN (SELECT b FROM u)"),
+    ] {
+        assert_eq!(analyze_as(dialect, sql), Err(Reason::UnsupportedConstruct), "{sql:?}");
+    }
+    assert_eq!(
+        analyze_as(&SQLiteDialect {}, "SELECT * FROM t WHERE a IN (SELECT b FROM u)"),
+        Ok(set(["sql_select rel:app.t", "sql_select rel:app.u"]))
+    );
+}
+
+/// 0.64's `AlterView` struct: MySQL's `ALTER VIEW v [(cols)] AS query`, the
+/// only form 0.63 read, is classified as before; the forms 0.64 adds refuse.
+#[test]
+fn sqlparser_064_alter_view_keeps_the_mysql_form() {
+    requires(
+        "ALTER VIEW v AS SELECT * FROM t WHERE a IN (SELECT b FROM u)",
+        &["sql_alter rel:app.v", "sql_select rel:app.t", "sql_select rel:app.u"],
+    );
+    requires("ALTER VIEW v (a, b) AS SELECT x, y FROM t", &["sql_alter rel:app.v", "sql_select rel:app.t"]);
+    for text in [
+        "ALTER VIEW v RENAME TO w",
+        "ALTER VIEW v OWNER TO bob",
+        "ALTER VIEW v SET SCHEMA s",
+        "ALTER VIEW IF EXISTS v AS SELECT 1",
+    ] {
+        refused(text, Reason::UnsupportedConstruct, Refusal::Unknown);
+    }
+}
+
+/// Constructs 0.64 newly parses on nodes the analyzer guards: refused.
+/// MySQL index hints (`index_directives` in 0.64) are still accepted.
+#[test]
+fn sqlparser_064_new_constructs_fail_closed() {
+    for text in [
+        "CREATE TABLE t (a int) WITHOUT ROWID",
+        "CREATE TABLE t (a int) STRICT",
+        "CREATE TABLE t (a int), STRICT",
+        "INSERT INTO t OVERRIDING SYSTEM VALUE VALUES (1)",
+        "INSERT INTO t BY NAME SELECT * FROM u",
+        "DELETE FROM t ON CLUSTER c",
+    ] {
+        refused(text, Reason::UnsupportedConstruct, Refusal::Unknown);
+    }
+    requires(
+        "SELECT * FROM t USE INDEX (i) WHERE a IN (SELECT b FROM u)",
+        &["sql_select rel:app.t", "sql_select rel:app.u"],
+    );
+    use sqlparser::dialect::{PostgreSqlDialect, SQLiteDialect};
+    for (dialect, sql) in [
+        (&SQLiteDialect {} as &dyn sqlparser::dialect::Dialect, "SELECT * FROM t INDEXED BY i"),
+        (&SQLiteDialect {}, "SELECT * FROM t NOT INDEXED"),
+        (&PostgreSqlDialect {}, "SELECT * FROM ONLY t"),
+    ] {
+        assert_eq!(analyze_as(dialect, sql), Err(Reason::UnsupportedConstruct), "{sql:?}");
+    }
+}

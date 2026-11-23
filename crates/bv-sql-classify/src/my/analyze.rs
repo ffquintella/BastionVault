@@ -12,9 +12,10 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::ControlFlow;
 
 use sqlparser::ast::{
-    AlterTableOperation, ColumnOption, DescribeAlias, Expr, FromTable, Function, FunctionArg, FunctionArgExpr,
-    FunctionArguments, ObjectName, ObjectNamePart, OnInsert, Query, Select, Set, SetExpr, Statement, TableConstraint,
-    TableFactor, TableObject, TableWithJoins, Value, Visit, Visitor,
+    AlterTableOperation, AlterView, AlterViewOperation, ColumnOption, DescribeAlias, Expr, FromTable, Function,
+    FunctionArg, FunctionArgExpr, FunctionArguments, InTarget, ObjectName, ObjectNamePart, OnInsert, Query, Select,
+    Set, SetExpr, SqliteTableOptions, Statement, TableConstraint, TableFactor, TableIndexDirective, TableObject,
+    TableWithJoins, Value, Visit, Visitor,
 };
 
 use super::functions::{self, FnClass};
@@ -339,6 +340,8 @@ impl<'n, 'c> Walker<'n, 'c> {
                     || ins.has_table_keyword
                     || ins.table_alias.is_some()
                     || !ins.optimizer_hints.is_empty()
+                    || ins.by_name
+                    || ins.overriding.is_some()
                 {
                     return brk(Reason::UnsupportedConstruct);
                 }
@@ -365,7 +368,12 @@ impl<'n, 'c> Walker<'n, 'c> {
                 Kind::Insert
             }
             Statement::Update(up) => {
-                if up.or.is_some() || up.output.is_some() || !up.optimizer_hints.is_empty() {
+                if up.or.is_some()
+                    || up.output.is_some()
+                    || !up.optimizer_hints.is_empty()
+                    || up.on_cluster.is_some()
+                    || up.settings.is_some()
+                {
                     return brk(Reason::UnsupportedConstruct);
                 }
                 let single = up.table.joins.is_empty()
@@ -407,7 +415,8 @@ impl<'n, 'c> Walker<'n, 'c> {
                 Kind::Update
             }
             Statement::Delete(d) => {
-                if d.output.is_some() || !d.optimizer_hints.is_empty() {
+                if d.output.is_some() || !d.optimizer_hints.is_empty() || d.on_cluster.is_some() || d.settings.is_some()
+                {
                     return brk(Reason::UnsupportedConstruct);
                 }
                 let (FromTable::WithFromKeyword(from) | FromTable::WithoutKeyword(from)) = &d.from;
@@ -466,8 +475,8 @@ impl<'n, 'c> Walker<'n, 'c> {
                     || ct.snapshot
                     || ct.transient
                     || ct.volatile
-                    || ct.without_rowid
-                    || ct.strict
+                    // SQLite's `WITHOUT ROWID` / `STRICT`.
+                    || ct.sqlite_table_options != SqliteTableOptions::default()
                     || ct.copy_grants
                     || ct.clone.is_some()
                     || ct.version.is_some()
@@ -584,12 +593,20 @@ impl<'n, 'c> Walker<'n, 'c> {
                 }
                 Kind::Alter
             }
-            Statement::AlterView { name, .. } => {
+            // sqlparser 0.63 read only `ALTER VIEW v [(cols)] AS query`, the
+            // MySQL form; the other 0.64 forms are refused.
+            Statement::AlterView(AlterView {
+                materialized: false,
+                name,
+                if_exists: false,
+                operation: AlterViewOperation::As { .. },
+            }) => {
                 self.exclude(name);
                 let v = self.object(K::Relation, name)?;
                 self.need_obj(Cap::Alter, v);
                 Kind::Alter
             }
+            Statement::AlterView(_) => return brk(Reason::UnsupportedConstruct),
             Statement::Set(set) => {
                 // Only user variables reach the parser (system variables are
                 // judged from tokens first, fallback.rs).
@@ -734,12 +751,18 @@ impl Visitor for Walker<'_, '_> {
 
     fn pre_visit_table_factor(&mut self, tf: &TableFactor) -> Flow {
         match tf {
-            TableFactor::Table { args, with_hints, version, json_path, sample, .. } => {
+            TableFactor::Table {
+                args, with_hints, version, json_path, sample, index_directives, inheritance, ..
+            } => {
+                // MySQL index hints only choose an index, as in sqlparser 0.63;
+                // SQLite's `INDEXED BY` and PostgreSQL's `ONLY` (0.64) refuse.
                 if args.is_some()
                     || !with_hints.is_empty()
                     || version.is_some()
                     || json_path.is_some()
                     || sample.is_some()
+                    || index_directives.iter().any(|d| !matches!(d, TableIndexDirective::MySql(_)))
+                    || inheritance.is_some()
                 {
                     return brk(Reason::UnsupportedConstruct);
                 }
@@ -774,8 +797,10 @@ impl Visitor for Walker<'_, '_> {
             | Expr::Like { .. }
             | Expr::RLike { .. }
             | Expr::Between { .. }
-            | Expr::InList { .. }
-            | Expr::InSubquery { .. }
+            // sqlparser 0.63's `InList` / `InSubquery`; the subquery is
+            // walked like any other. `IN UNNEST(…)`, SQLite's `IN table` and
+            // ClickHouse's `GLOBAL IN` fall through to the refusal below.
+            | Expr::In { target: InTarget::List(_) | InTarget::Subquery(_), global: false, .. }
             | Expr::IsDistinctFrom(..)
             | Expr::IsNotDistinctFrom(..)
             | Expr::IsFalse(_)

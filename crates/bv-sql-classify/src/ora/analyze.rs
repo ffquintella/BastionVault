@@ -19,10 +19,10 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::ControlFlow;
 
 use sqlparser::ast::{
-    AlterTableOperation, ColumnOption, Delete, Expr, FromTable, Function, FunctionArguments, Ident, Insert,
+    AlterTableOperation, ColumnOption, Delete, Expr, FromTable, Function, FunctionArguments, Ident, InTarget, Insert,
     JoinOperator, LockType, Merge, MergeAction, ObjectName, ObjectNamePart, OrderBy, Query, RenameTableNameKind,
-    Select, SelectItem, SelectItemQualifiedWildcardKind, SetExpr, Statement, TableAlias, TableConstraint, TableFactor,
-    TableObject, TableWithJoins, Update, Value, Visit, Visitor,
+    Select, SelectItem, SelectItemQualifiedWildcardKind, SetExpr, SqliteTableOptions, Statement, TableAlias,
+    TableConstraint, TableFactor, TableObject, TableWithJoins, Update, Value, Visit, Visitor,
 };
 use sqlparser::dialect::OracleDialect;
 use sqlparser::keywords::Keyword;
@@ -499,6 +499,8 @@ impl<'n, 'c> Walker<'n, 'c> {
             || ins.insert_alias.is_some()
             || !ins.assignments.is_empty()
             || ins.source.is_none()
+            || ins.by_name
+            || ins.overriding.is_some()
         {
             return brk(Reason::UnsupportedConstruct);
         }
@@ -526,6 +528,8 @@ impl<'n, 'c> Walker<'n, 'c> {
             || up.from.is_some()
             || !up.table.joins.is_empty()
             || !up.order_by.is_empty()
+            || up.on_cluster.is_some()
+            || up.settings.is_some()
         {
             return brk(Reason::UnsupportedConstruct);
         }
@@ -554,6 +558,8 @@ impl<'n, 'c> Walker<'n, 'c> {
             || d.limit.is_some()
             || !d.order_by.is_empty()
             || !d.tables.is_empty()
+            || d.on_cluster.is_some()
+            || d.settings.is_some()
         {
             return brk(Reason::UnsupportedConstruct);
         }
@@ -632,8 +638,8 @@ impl<'n, 'c> Walker<'n, 'c> {
                     || ct.snapshot
                     || ct.transient
                     || ct.volatile
-                    || ct.without_rowid
-                    || ct.strict
+                    // SQLite's `WITHOUT ROWID` / `STRICT`.
+                    || ct.sqlite_table_options != SqliteTableOptions::default()
                     || ct.copy_grants
                     || ct.or_replace
                     || ct.clone.is_some()
@@ -951,10 +957,24 @@ impl Visitor for Walker<'_, '_> {
 
     fn pre_visit_table_factor(&mut self, tf: &TableFactor) -> Flow {
         match tf {
-            TableFactor::Table { alias, args, with_hints, json_path, index_hints, with_ordinality, .. } => {
-                if args.is_some() || !with_hints.is_empty() || json_path.is_some() || !index_hints.is_empty() {
+            TableFactor::Table {
+                alias,
+                args,
+                with_hints,
+                json_path,
+                index_directives,
+                inheritance,
+                with_ordinality,
+                ..
+            } => {
+                if args.is_some()
+                    || !with_hints.is_empty()
+                    || json_path.is_some()
+                    || !index_directives.is_empty()
+                    || inheritance.is_some()
+                {
                     // `FROM f(…)` (SQL macros, polymorphic table functions)
-                    // and other dialects' hints: not classified.
+                    // and other dialects' hints and `ONLY`: not classified.
                     return brk(Reason::UnsupportedConstruct);
                 }
                 if *with_ordinality {
@@ -1025,8 +1045,10 @@ impl Visitor for Walker<'_, '_> {
             Expr::UnaryOp { .. }
             | Expr::Like { .. }
             | Expr::Between { .. }
-            | Expr::InList { .. }
-            | Expr::InSubquery { .. }
+            // sqlparser 0.63's `InList` / `InSubquery`; the subquery is
+            // walked like any other. `IN UNNEST(…)`, SQLite's `IN table` and
+            // ClickHouse's `GLOBAL IN` fall through to the refusal below.
+            | Expr::In { target: InTarget::List(_) | InTarget::Subquery(_), global: false, .. }
             | Expr::IsNull(_)
             | Expr::IsNotNull(_)
             | Expr::Cast { .. }

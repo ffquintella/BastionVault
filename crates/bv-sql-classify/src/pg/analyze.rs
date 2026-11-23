@@ -9,11 +9,12 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::ControlFlow;
 
 use sqlparser::ast::{
-    AccessExpr, AlterTableOperation, BinaryOperator, CascadeOption, ColumnOption, CommentObject, CopySource,
-    CopyTarget, CreateFunctionBody, DataType, DeclareType, DescribeAlias, DiscardObject, DropBehavior, Expr, FromTable,
-    Function, FunctionArg, FunctionArgExpr, FunctionArguments, MergeAction, ObjectName, ObjectType, OnConflictAction,
-    OnInsert, Query, ReferentialAction, Reset, Select, Set, SetExpr, Statement, TableConstraint, TableFactor,
-    TableObject, TransactionAccessMode, TransactionMode, Value, Visit, Visitor,
+    AccessExpr, AlterTableOperation, AlterView, AlterViewOperation, BinaryOperator, CascadeOption, ColumnOption,
+    CommentObject, ConflictTarget, CopySource, CopyTarget, CreateFunctionBody, CreateProcedureBody, DataType,
+    DeclareType, DescribeAlias, DiscardObject, DropBehavior, Expr, FromTable, Function, FunctionArg, FunctionArgExpr,
+    FunctionArguments, InTarget, MergeAction, ObjectName, ObjectType, OnConflictAction, OnInsert, Query,
+    ReferentialAction, Reset, Select, SequenceOptions, Set, SetExpr, SqliteTableOptions, Statement, TableConstraint,
+    TableFactor, TableObject, TransactionAccessMode, TransactionMode, Value, Visit, Visitor,
 };
 
 use super::functions::{self, FnClass};
@@ -402,7 +403,10 @@ impl<'n, 'c> Walker<'n, 'c> {
             | BinaryOperator::Match
             | BinaryOperator::Regexp
             | BinaryOperator::Glob
-            | BinaryOperator::Assignment => return brk(Reason::UnsupportedConstruct),
+            | BinaryOperator::Assignment
+            // SQLite's `IS` / `IS NOT` between expressions (sqlparser 0.64).
+            | BinaryOperator::Is
+            | BinaryOperator::IsNot => return brk(Reason::UnsupportedConstruct),
             BinaryOperator::PGCustomBinaryOperator(parts) => {
                 if !(parts.len() == 2 && parts[0].eq_ignore_ascii_case("pg_catalog")) || !self.names.catalog_first() {
                     self.user_operator();
@@ -450,6 +454,8 @@ impl<'n, 'c> Walker<'n, 'c> {
                     || !ins.multi_table_when_clauses.is_empty()
                     || ins.multi_table_else_clause.is_some()
                     || ins.has_table_keyword
+                    || ins.by_name
+                    || ins.overriding.is_some()
                 {
                     return brk(Reason::UnsupportedConstruct);
                 }
@@ -463,6 +469,11 @@ impl<'n, 'c> Walker<'n, 'c> {
                 match &ins.on {
                     None => {}
                     Some(OnInsert::OnConflict(oc)) => {
+                        // `ON CONFLICT (a) WHERE pred` is new in sqlparser 0.64,
+                        // which is all that lets it parse: refused, as under 0.63.
+                        if matches!(oc.conflict_target, Some(ConflictTarget::Columns { predicate: Some(_), .. })) {
+                            return brk(Reason::UnsupportedConstruct);
+                        }
                         // The arbiter and any DO UPDATE expressions read the target.
                         self.need_obj(Cap::Select, t.clone());
                         if matches!(oc.action, OnConflictAction::DoUpdate(_)) {
@@ -474,7 +485,13 @@ impl<'n, 'c> Walker<'n, 'c> {
                 Kind::Insert
             }
             Statement::Update(up) => {
-                if up.or.is_some() || up.output.is_some() || !up.order_by.is_empty() || up.limit.is_some() {
+                if up.or.is_some()
+                    || up.output.is_some()
+                    || !up.order_by.is_empty()
+                    || up.limit.is_some()
+                    || up.on_cluster.is_some()
+                    || up.settings.is_some()
+                {
                     return brk(Reason::UnsupportedConstruct);
                 }
                 if !up.table.joins.is_empty() {
@@ -496,7 +513,13 @@ impl<'n, 'c> Walker<'n, 'c> {
                 Kind::Update
             }
             Statement::Delete(d) => {
-                if !d.tables.is_empty() || d.output.is_some() || !d.order_by.is_empty() || d.limit.is_some() {
+                if !d.tables.is_empty()
+                    || d.output.is_some()
+                    || !d.order_by.is_empty()
+                    || d.limit.is_some()
+                    || d.on_cluster.is_some()
+                    || d.settings.is_some()
+                {
                     return brk(Reason::UnsupportedConstruct);
                 }
                 let (FromTable::WithFromKeyword(from) | FromTable::WithoutKeyword(from)) = &d.from;
@@ -536,8 +559,10 @@ impl<'n, 'c> Walker<'n, 'c> {
                 }
                 Kind::Merge
             }
-            Statement::Copy { source, to, target, values, .. } => {
-                if !values.is_empty() {
+            Statement::Copy { source, to, target, payload, .. } => {
+                // Inline `COPY … FROM STDIN` data (sqlparser 0.64 `payload`,
+                // 0.63 `values`): rows the classifier never sees as rows.
+                if payload.is_some() {
                     return brk(Reason::UnsupportedConstruct);
                 }
                 match target {
@@ -673,8 +698,8 @@ impl<'n, 'c> Walker<'n, 'c> {
                     || ct.snapshot
                     || ct.transient
                     || ct.volatile
-                    || ct.without_rowid
-                    || ct.strict
+                    // SQLite's `WITHOUT ROWID` / `STRICT`.
+                    || ct.sqlite_table_options != SqliteTableOptions::default()
                     || ct.copy_grants
                     || ct.clone.is_some()
                     || ct.version.is_some()
@@ -744,10 +769,16 @@ impl<'n, 'c> Walker<'n, 'c> {
                 self.need_obj(Cap::Create, t);
                 Kind::CreateIndex
             }
-            Statement::CreateSequence { temporary, name, owned_by, .. } => {
+            Statement::CreateSequence { temporary, name, sequence_options, .. } => {
                 let seq = self.created(K::Sequence, name, *temporary)?;
                 self.need_obj(Cap::Create, seq);
-                if let Some(owner) = owned_by {
+                // sqlparser 0.64 keeps `OWNED BY` among the options, in any
+                // position and possibly repeated; bare `NONE` is `OwnedBy(None)`.
+                let owners = sequence_options.iter().filter_map(|o| match o {
+                    SequenceOptions::OwnedBy(owner) => owner.as_ref(),
+                    _ => None,
+                });
+                for owner in owners {
                     let parts = match self.names.parts(owner) {
                         Ok(p) => p,
                         Err(e) => return brk(e),
@@ -788,6 +819,11 @@ impl<'n, 'c> Walker<'n, 'c> {
                 if matches!(cf.function_body, Some(CreateFunctionBody::AsBeginEnd(_))) && cf.language.is_none() {
                     return brk(Reason::UnsupportedConstruct);
                 }
+                // `BEGIN ATOMIC … END` (sqlparser 0.64): its statements would be
+                // walked as if they ran now, transaction control included.
+                if matches!(cf.function_body, Some(CreateFunctionBody::BeginAtomic(_))) {
+                    return brk(Reason::UnsupportedConstruct);
+                }
                 let f = self.created(K::Routine, &cf.name, cf.temporary)?;
                 self.need_obj(Cap::Create, f.clone());
                 if cf.or_replace || cf.or_alter {
@@ -795,7 +831,11 @@ impl<'n, 'c> Walker<'n, 'c> {
                 }
                 Kind::CreateRoutine
             }
-            Statement::CreateProcedure { or_alter, name, language, .. } => {
+            Statement::CreateProcedure { or_alter, name, language, body, .. } => {
+                // See CreateFunction: a `BEGIN ATOMIC` body is not walked.
+                if matches!(body, CreateProcedureBody::BeginAtomic(_)) {
+                    return brk(Reason::UnsupportedConstruct);
+                }
                 if let Some(lang) = language {
                     if let Err(r) = check_language(&lang.value) {
                         return brk(r);
@@ -900,12 +940,21 @@ impl<'n, 'c> Walker<'n, 'c> {
                 self.need_obj(Cap::Alter, i);
                 Kind::Alter
             }
-            Statement::AlterView { name, .. } => {
+            // sqlparser 0.63 read only `ALTER VIEW v [(cols)] AS query`; the
+            // other 0.64 forms (and `ALTER VIEW` here at all: fallback.rs
+            // decides it from tokens) are refused.
+            Statement::AlterView(AlterView {
+                materialized: false,
+                name,
+                if_exists: false,
+                operation: AlterViewOperation::As { .. },
+            }) => {
                 self.exclude(name);
                 let v = self.existing(K::Relation, name)?;
                 self.need_obj(Cap::Alter, v);
                 Kind::Alter
             }
+            Statement::AlterView(_) => return brk(Reason::UnsupportedConstruct),
             Statement::AlterSchema(a) => {
                 self.need(Cap::Alter, server.clone());
                 if a.operations.iter().any(|o| matches!(o, sqlparser::ast::AlterSchemaOperation::OwnerTo { .. })) {
@@ -951,6 +1000,8 @@ impl<'n, 'c> Walker<'n, 'c> {
                         self.need(Cap::Alter, server.clone());
                         return ControlFlow::Continue(Kind::Comment);
                     }
+                    // New in sqlparser 0.64; 0.63 could not parse it.
+                    CommentObject::ForeignTable => Err(Reason::UnsupportedConstruct),
                 };
                 match r {
                     Ok(r) => self.need_obj(Cap::Alter, r),
@@ -998,7 +1049,8 @@ impl<'n, 'c> Walker<'n, 'c> {
                 self.need(Cap::Select, server.clone());
                 Kind::Deallocate
             }
-            Statement::Declare { stmts } => {
+            // `separator` only says how sqlparser prints the list.
+            Statement::Declare { stmts, separator: _ } => {
                 for d in stmts {
                     if d.declare_type != Some(DeclareType::Cursor) || d.for_query.is_none() || d.assignment.is_some() {
                         return brk(Reason::UnsupportedConstruct);
@@ -1242,12 +1294,25 @@ impl Visitor for Walker<'_, '_> {
 
     fn pre_visit_table_factor(&mut self, tf: &TableFactor) -> Flow {
         match tf {
-            TableFactor::Table { name, args, with_hints, version, partitions, json_path, index_hints, .. } => {
+            TableFactor::Table {
+                name,
+                args,
+                with_hints,
+                version,
+                partitions,
+                json_path,
+                index_directives,
+                inheritance,
+                ..
+            } => {
+                // `inheritance` is `ONLY t` / `t *` (sqlparser 0.64), which 0.63
+                // read as table `only` aliased `t`: refused, as it was then.
                 if !with_hints.is_empty()
                     || version.is_some()
                     || !partitions.is_empty()
                     || json_path.is_some()
-                    || !index_hints.is_empty()
+                    || !index_directives.is_empty()
+                    || inheritance.is_some()
                 {
                     return brk(Reason::UnsupportedConstruct);
                 }
@@ -1286,8 +1351,10 @@ impl Visitor for Walker<'_, '_> {
             | Expr::ILike { .. }
             | Expr::SimilarTo { .. }
             | Expr::Between { .. }
-            | Expr::InList { .. }
-            | Expr::InSubquery { .. }
+            // sqlparser 0.63's `InList` / `InSubquery`; the subquery is
+            // walked like any other. `IN UNNEST(…)`, SQLite's `IN table` and
+            // ClickHouse's `GLOBAL IN` fall through to the refusal below.
+            | Expr::In { target: InTarget::List(_) | InTarget::Subquery(_), global: false, .. }
             | Expr::IsDistinctFrom(..)
             | Expr::IsNotDistinctFrom(..) => {
                 if !self.names.catalog_first() {
@@ -1342,8 +1409,9 @@ impl Visitor for Walker<'_, '_> {
 }
 
 impl Walker<'_, '_> {
-    /// `TABLE name` carries its name as bare strings, quoting lost. It is
-    /// accepted only when no case folding could change it.
+    /// `TABLE name` is not visited as a relation. Its parts are accepted only
+    /// when no case folding could change them, as with sqlparser 0.63, which
+    /// kept them as bare strings with the quoting lost.
     fn table_set_exprs(&mut self, body: &SetExpr) -> Flow {
         match body {
             SetExpr::SetOperation { left, right, .. } => {
@@ -1354,6 +1422,7 @@ impl Walker<'_, '_> {
                 let Some(table) = &t.table_name else { return brk(Reason::UnsupportedConstruct) };
                 let mut parts = Vec::new();
                 for p in t.schema_name.iter().chain(std::iter::once(table)) {
+                    let p = &p.value;
                     if p.is_empty() || p.chars().any(|c| c.is_ascii_uppercase()) {
                         return brk(Reason::UnresolvableName);
                     }

@@ -60,7 +60,10 @@ fn theirs(t: &Token, starts_with_digit: bool) -> Option<Opaque> {
         | Token::TripleDoubleQuotedRawStringLiteral(_)
         | Token::QuoteDelimitedStringLiteral(_)
         | Token::NationalQuoteDelimitedStringLiteral(_)
-        | Token::UnicodeStringLiteral(_) => Opaque::Foreign,
+        | Token::UnicodeStringLiteral(_)
+        // sqlparser 0.64 swallows the text after `COPY … FROM STDIN;` as
+        // inline data; to the server that text is statements.
+        | Token::CopyData { .. } => Opaque::Foreign,
         _ => return None,
     })
 }

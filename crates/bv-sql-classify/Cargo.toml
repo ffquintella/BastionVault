@@ -23,7 +23,7 @@ exclude = ["fuzz"]
 # counter (always on) bounds depth, and this crate lowers it further. `visitor`
 # is what lets the classifier walk every node rather than the leading keyword
 # (§4.3 data-modifying CTEs).
-sqlparser = { version = "0.63", default-features = false, features = ["std", "visitor"] }
+sqlparser = { version = "0.64", default-features = false, features = ["std", "visitor"] }
 
 [dev-dependencies]
 # Property tests (Phase 2): every input yields classified statements with a

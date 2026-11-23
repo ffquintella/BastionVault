@@ -1121,3 +1121,75 @@ fn hostile_shapes_are_refused_in_bounded_time_and_stack() {
     assert!(redact(Dialect::Oracle, LexerSettings::Oracle, &text).is_ok());
     assert!(start.elapsed() < std::time::Duration::from_secs(60), "{:?}", start.elapsed());
 }
+
+// ---------------------------------------------------------------------------
+// sqlparser 0.63 -> 0.64 (see the same section in pg/tests.rs).
+// ---------------------------------------------------------------------------
+
+/// The analyzer alone, on a statement any dialect's parser built.
+#[track_caller]
+fn analyze_as(dialect: &dyn sqlparser::dialect::Dialect, sql: &str) -> Result<BTreeSet<String>, Reason> {
+    let stmts = sqlparser::parser::Parser::parse_sql(dialect, sql).unwrap_or_else(|e| panic!("{sql:?}: {e}"));
+    let [stmt] = stmts.as_slice() else { panic!("{sql:?}: not one statement") };
+    let ctx = ctx();
+    let names = super::names::Names { ctx: &ctx };
+    super::analyze::analyze(stmt, &names)
+        .map(|a| a.required.iter().map(|(c, t)| format!("{c} {}", target(t))).collect())
+}
+
+/// `IN (subquery)` is one `Expr::In` node in 0.64: the subquery is still
+/// walked (a sequence write in it is caught), and `IN UNNEST`, SQLite's
+/// `IN table` and `GLOBAL IN` refuse.
+#[test]
+fn sqlparser_064_in_subquery_is_still_classified() {
+    requires(
+        "SELECT * FROM t WHERE a NOT IN (SELECT b FROM u WHERE c IN (SELECT d FROM v))",
+        &["sql_select rel:PDB.?.T", "sql_select rel:PDB.?.U", "sql_select rel:PDB.?.V"],
+    );
+    requires(
+        "SELECT * FROM t WHERE a IN ((SELECT b FROM u), 2)",
+        &["sql_select rel:PDB.?.T", "sql_select rel:PDB.?.U"],
+    );
+    requires(
+        "SELECT * FROM t WHERE a IN (SELECT seq.nextval FROM dual)",
+        &["sql_select rel:PDB.?.T", "sql_update seq:PDB.?.SEQ"],
+    );
+    requires(
+        "UPDATE t SET a = 1 WHERE b IN (SELECT b FROM u)",
+        &["sql_update rel:PDB.?.T", "sql_select rel:PDB.?.T", "sql_select rel:PDB.?.U"],
+    );
+    refused("SELECT * FROM t WHERE a IN UNNEST(arr)", Reason::UnsupportedConstruct, Refusal::Unknown);
+    refused("SELECT * FROM t WHERE a IN u", Reason::ParseFailed, Refusal::Unknown);
+    use sqlparser::dialect::{ClickHouseDialect, SQLiteDialect};
+    for (dialect, sql) in [
+        (&SQLiteDialect {} as &dyn sqlparser::dialect::Dialect, "SELECT * FROM t WHERE a IN u"),
+        (&SQLiteDialect {}, "SELECT * FROM t WHERE a IN u(1)"),
+        (&ClickHouseDialect {}, "SELECT * FROM t WHERE a GLOBAL IN (SELECT b FROM u)"),
+    ] {
+        assert_eq!(analyze_as(dialect, sql), Err(Reason::UnsupportedConstruct), "{sql:?}");
+    }
+    assert!(analyze_as(&SQLiteDialect {}, "SELECT * FROM t WHERE a IN (SELECT b FROM u)").is_ok());
+}
+
+/// Constructs 0.64 newly parses on nodes the analyzer guards: refused.
+#[test]
+fn sqlparser_064_new_constructs_fail_closed() {
+    for text in [
+        "CREATE TABLE t (a int) WITHOUT ROWID",
+        "CREATE TABLE t (a int) STRICT",
+        "CREATE TABLE t (a int), STRICT",
+        "INSERT INTO t OVERRIDING SYSTEM VALUE VALUES (1)",
+        "INSERT INTO t BY NAME SELECT * FROM u",
+        "DELETE FROM t ON CLUSTER c",
+    ] {
+        refused(text, Reason::UnsupportedConstruct, Refusal::Unknown);
+    }
+    use sqlparser::dialect::{MySqlDialect, PostgreSqlDialect, SQLiteDialect};
+    for (dialect, sql) in [
+        (&SQLiteDialect {} as &dyn sqlparser::dialect::Dialect, "SELECT * FROM t INDEXED BY i"),
+        (&MySqlDialect {}, "SELECT * FROM t USE INDEX (i)"),
+        (&PostgreSqlDialect {}, "SELECT * FROM ONLY t"),
+    ] {
+        assert_eq!(analyze_as(dialect, sql), Err(Reason::UnsupportedConstruct), "{sql:?}");
+    }
+}

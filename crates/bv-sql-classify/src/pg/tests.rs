@@ -652,12 +652,15 @@ fn session_settings() {
 #[test]
 fn unknown_statements_are_refused_but_runnable_by_admin() {
     for text in [
-        "CREATE AGGREGATE myagg (int) (sfunc = f, stype = int)",
         "SELECT * FROM ROWS FROM (generate_series(1, 2))",
         "CREATE PROCEDURE p() LANGUAGE plpgsql AS $$ BEGIN END $$",
         "TABLE t",
     ] {
         refused(text, Reason::ParseFailed, Refusal::Unknown);
+    }
+    // sqlparser 0.64 parses these; the statement table does not know them.
+    for text in ["CREATE AGGREGATE myagg (int) (sfunc = f, stype = int)", "ALTER TRIGGER trg ON t RENAME TO trg2"] {
+        refused(text, Reason::UnsupportedStatement, Refusal::Unknown);
     }
     // String continuation and Unicode escapes are refused before parsing.
     refused("SELECT 'a'\n'b'", Reason::StringContinuation, Refusal::Unknown);
@@ -713,7 +716,12 @@ fn regression_reserved_word_parsed_as_a_name_is_refused() {
             }
         }
     }
-    refused("DELETE FROM ONLY t WHERE a = 1", Reason::ReservedWordAsName, Refusal::Unknown);
+    // sqlparser 0.63 read `ONLY` as a name (`ReservedWordAsName`); 0.64 reads
+    // it as an inheritance marker, which the classifier does not review.
+    // Either way the statement is refused, never read as table `only`.
+    for text in ["DELETE FROM ONLY t WHERE a = 1", "SELECT * FROM ONLY (t)", "SELECT * FROM t *"] {
+        refused(text, Reason::UnsupportedConstruct, Refusal::Unknown);
+    }
     // Quoted, it is an ordinary name.
     requires("DELETE FROM \"only\"", &["sql_delete rel:?.only"]);
     // SQL value functions are reserved words the grammar calls as functions.
@@ -959,4 +967,181 @@ mod props {
             prop_assert_eq!(spans, want);
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// sqlparser 0.63 -> 0.64. Every construct whose AST changed keeps its 0.63
+// classification; what 0.64 newly parses on a node the analyzer guards is
+// refused, as it was when 0.63 could not parse it.
+// ---------------------------------------------------------------------------
+
+fn set<const N: usize>(items: [&str; N]) -> BTreeSet<String> {
+    items.iter().map(|s| s.to_string()).collect()
+}
+
+/// The analyzer alone, on a statement any dialect's parser built: forms the
+/// PostgreSQL parser does not produce must still refuse.
+#[track_caller]
+fn analyze_as(dialect: &dyn sqlparser::dialect::Dialect, sql: &str) -> Result<BTreeSet<String>, Reason> {
+    let stmts = sqlparser::parser::Parser::parse_sql(dialect, sql).unwrap_or_else(|e| panic!("{sql:?}: {e}"));
+    let [stmt] = stmts.as_slice() else { panic!("{sql:?}: not one statement") };
+    let ctx = ctx();
+    let names = super::names::Names { ctx: &ctx };
+    super::analyze::analyze(stmt, &names)
+        .map(|a| a.required.iter().map(|(c, t)| format!("{c} {}", target(t))).collect())
+}
+
+/// `IN (subquery)` is one `Expr::In` node in 0.64 (0.63: `InSubquery`). The
+/// subquery is still walked: a read, a locking read, a sequence write, a
+/// data-modifying CTE or a refused function inside it is still caught.
+#[test]
+fn sqlparser_064_in_subquery_is_still_classified() {
+    requires("SELECT * FROM t WHERE a IN (SELECT b FROM u)", &["sql_select rel:?.t", "sql_select rel:?.u"]);
+    requires(
+        "SELECT * FROM t WHERE a NOT IN (SELECT b FROM u WHERE c IN (SELECT d FROM v))",
+        &["sql_select rel:?.t", "sql_select rel:?.u", "sql_select rel:?.v"],
+    );
+    // A subquery as one item of a list: 0.64 parses it, and walks it.
+    requires("SELECT * FROM t WHERE a IN ((SELECT b FROM u), 2)", &["sql_select rel:?.t", "sql_select rel:?.u"]);
+    requires("SELECT * FROM t WHERE a IN (1, 2, 3)", &["sql_select rel:?.t"]);
+    requires(
+        "UPDATE t SET a = 1 WHERE b IN (SELECT b FROM u)",
+        &["sql_update rel:?.t", "sql_select rel:?.t", "sql_select rel:?.u"],
+    );
+    requires("SELECT * FROM t WHERE a IN (SELECT nextval('s'))", &["sql_select rel:?.t", "sql_update seq:?.s"]);
+    requires(
+        "SELECT * FROM t WHERE a IN (SELECT a FROM u FOR UPDATE)",
+        &["sql_select rel:?.t", "sql_select rel:?.u", "sql_update rel:?.u"],
+    );
+    requires(
+        "SELECT 1 WHERE 1 IN (WITH d AS (DELETE FROM t RETURNING a) SELECT a FROM d)",
+        &["sql_delete rel:?.t", "sql_select rel:?.t"],
+    );
+    refused("SELECT * FROM t WHERE a IN (SELECT pg_read_file('x'))", Reason::ServerFileOrOsAccess, Refusal::Never);
+}
+
+/// The other targets of 0.64's `Expr::In`: `IN UNNEST(…)` (0.63's
+/// `InUnnest`, refused then too), SQLite's `IN table` / `IN f(…)` (a
+/// relation read, visited as one) and ClickHouse's `GLOBAL IN`. The
+/// PostgreSQL parser produces only the first; the analyzer refuses all of
+/// them, which asks for more than a read of the table would.
+#[test]
+fn sqlparser_064_in_table_unnest_and_global_are_refused() {
+    use sqlparser::dialect::{ClickHouseDialect, PostgreSqlDialect, SQLiteDialect};
+    refused("SELECT * FROM t WHERE a IN UNNEST(arr)", Reason::UnsupportedConstruct, Refusal::Unknown);
+    for text in ["SELECT * FROM t WHERE a IN u", "SELECT * FROM t WHERE a GLOBAL IN (SELECT b FROM u)"] {
+        refused(text, Reason::ParseFailed, Refusal::Unknown);
+    }
+    let sqlite = SQLiteDialect {};
+    let parsed = sqlparser::parser::Parser::parse_sql(&sqlite, "SELECT * FROM t WHERE a IN u").unwrap();
+    assert!(format!("{parsed:?}").contains("target: Table {"), "{parsed:?}");
+    for (dialect, sql) in [
+        (&sqlite as &dyn sqlparser::dialect::Dialect, "SELECT * FROM t WHERE a IN u"),
+        (&sqlite, "SELECT * FROM t WHERE a NOT IN u(1)"),
+        (&PostgreSqlDialect {}, "SELECT * FROM t WHERE a IN UNNEST(arr)"),
+        (&ClickHouseDialect {}, "SELECT * FROM t WHERE a GLOBAL IN (SELECT b FROM u)"),
+    ] {
+        assert_eq!(analyze_as(dialect, sql), Err(Reason::UnsupportedConstruct), "{sql:?}");
+    }
+    // The same parsers' list and subquery forms are read as before.
+    let read = Ok(set(["sql_select rel:?.t", "sql_select rel:?.u"]));
+    assert_eq!(analyze_as(&sqlite, "SELECT * FROM t WHERE a IN (SELECT b FROM u)"), read);
+    assert_eq!(analyze_as(&ClickHouseDialect {}, "SELECT * FROM t WHERE a IN (SELECT b FROM u)"), read);
+}
+
+/// `ALTER VIEW` is `Statement::AlterView(AlterView)` in 0.64, with
+/// PostgreSQL's operations, which 0.63 could not parse. From text,
+/// fallback.rs decides it from tokens as before; the parser's node keeps
+/// 0.63's one form (`AS query`, the query walked) and refuses the rest.
+#[test]
+fn sqlparser_064_alter_view() {
+    requires("ALTER VIEW v RENAME TO w", &["sql_alter rel:?.v"]);
+    requires("ALTER VIEW v OWNER TO bob", &["sql_alter rel:?.v", "sql_admin server"]);
+    let pg = sqlparser::dialect::PostgreSqlDialect {};
+    assert_eq!(
+        analyze_as(&pg, "ALTER VIEW v AS SELECT * FROM t WHERE a IN (SELECT b FROM u)"),
+        Ok(set(["sql_alter rel:?.v", "sql_select rel:?.t", "sql_select rel:?.u"]))
+    );
+    for sql in [
+        "ALTER VIEW v RENAME TO w",
+        "ALTER VIEW v OWNER TO bob",
+        "ALTER VIEW v SET SCHEMA s",
+        "ALTER VIEW v ALTER COLUMN a SET DEFAULT 1",
+        "ALTER VIEW IF EXISTS v AS SELECT 1",
+        "ALTER MATERIALIZED VIEW mv RENAME TO w",
+    ] {
+        assert_eq!(analyze_as(&pg, sql), Err(Reason::UnsupportedConstruct), "{sql:?}");
+    }
+}
+
+/// `COPY … FROM STDIN` inline data is `payload` in 0.64 (0.63: `values`),
+/// and is refused. From text it never reaches the parser: the splitter ends
+/// the statement at `;`, and the data is a statement of its own. Inside a
+/// `BEGIN ATOMIC` body, where `;` does not split, 0.64's tokenizer would
+/// swallow the code that follows as data; the lexers then disagree.
+#[test]
+fn sqlparser_064_copy_inline_data_is_refused() {
+    requires("COPY t FROM STDIN", &["sql_insert rel:?.t"]);
+    requires("COPY t (a, b) FROM STDIN WITH (FORMAT csv)", &["sql_insert rel:?.t"]);
+    let each = classify_each(Dialect::PostgreSql, pg(true), "COPY t FROM STDIN;\nab\n", &ctx()).unwrap();
+    assert!(matches!(each.as_slice(), [Ok(_), Err(_)]), "{each:?}");
+    let pg = sqlparser::dialect::PostgreSqlDialect {};
+    let parsed = sqlparser::parser::Parser::parse_sql(&pg, "COPY t FROM STDIN;\nab\n").unwrap();
+    assert!(matches!(parsed.as_slice(), [sqlparser::ast::Statement::Copy { payload: Some(_), .. }]), "{parsed:?}");
+    assert_eq!(analyze_as(&pg, "COPY t FROM STDIN;\nab\n"), Err(Reason::UnsupportedConstruct));
+    refused(
+        "CREATE FUNCTION f() RETURNS void LANGUAGE sql BEGIN ATOMIC; COPY t FROM STDIN;\nEND",
+        Reason::LexerDisagreement,
+        Refusal::Never,
+    );
+}
+
+/// `OWNED BY` is a sequence option in 0.64, in any position (0.63: a field
+/// after the options). It still costs `sql_alter` on the owning table.
+#[test]
+fn sqlparser_064_create_sequence_owned_by() {
+    let owned = ["sql_create seq:public.s", "sql_alter rel:?.t"];
+    requires("CREATE SEQUENCE s OWNED BY t.a", &owned);
+    requires("CREATE SEQUENCE s AS bigint OWNED BY t.a", &owned);
+    requires("CREATE SEQUENCE s OWNED BY t.a INCREMENT BY 2", &owned);
+    requires("CREATE SEQUENCE s INCREMENT BY 2 OWNED BY s2.t.a", &["sql_create seq:public.s", "sql_alter rel:s2.t"]);
+    requires("CREATE TEMPORARY SEQUENCE s OWNED BY t.a", &["sql_create seq:pg_temp.s", "sql_alter rel:?.t"]);
+    // `NONE`, bare (0.64: no owner) or quoted (one part `none`, as the
+    // server reads it), ties the sequence to nothing.
+    for text in ["CREATE SEQUENCE s OWNED BY NONE", "CREATE SEQUENCE s OWNED BY \"none\""] {
+        requires(text, &["sql_create seq:public.s"]);
+    }
+    refused("CREATE SEQUENCE s OWNED BY a", Reason::UnresolvableName, Refusal::Unknown);
+}
+
+/// Constructs 0.64 newly parses on nodes the analyzer guards field by field:
+/// each is refused, as it was when 0.63 could not parse it.
+#[test]
+fn sqlparser_064_new_constructs_fail_closed() {
+    use sqlparser::dialect::SQLiteDialect;
+    for text in [
+        // SQLite table options (0.63: `without_rowid` / `strict`).
+        "CREATE TABLE t (a int) WITHOUT ROWID",
+        "CREATE TABLE t (a int) STRICT",
+        "CREATE TABLE t (a int), STRICT",
+        "INSERT INTO t OVERRIDING SYSTEM VALUE VALUES (1)",
+        "INSERT INTO t BY NAME SELECT * FROM u",
+        "INSERT INTO t VALUES (1) ON CONFLICT (a) WHERE b > 0 DO NOTHING",
+        "DELETE FROM t ON CLUSTER c",
+        // A `BEGIN ATOMIC` body would be walked as if it ran now; the
+        // `COMMIT` in it must not make the CREATE transaction control.
+        "CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1; END",
+        "CREATE PROCEDURE p() BEGIN ATOMIC COMMIT; END",
+        "COMMENT ON FOREIGN TABLE ft IS 'x'",
+        "ALTER TABLE t ATTACH PARTITION p FOR VALUES IN (1)",
+    ] {
+        refused(text, Reason::UnsupportedConstruct, Refusal::Unknown);
+    }
+    // Without the new clause, as before.
+    requires("INSERT INTO t VALUES (1) ON CONFLICT (a) DO NOTHING", &["sql_insert rel:?.t", "sql_select rel:?.t"]);
+    // SQLite's `IS` between expressions and its index directives.
+    for sql in ["SELECT a IS b FROM t", "SELECT * FROM t INDEXED BY i", "SELECT * FROM t NOT INDEXED"] {
+        assert_eq!(analyze_as(&SQLiteDialect {}, sql), Err(Reason::UnsupportedConstruct), "{sql:?}");
+    }
+    assert_eq!(analyze_as(&SQLiteDialect {}, "SELECT a = b FROM t"), Ok(set(["sql_select rel:?.t"])));
 }

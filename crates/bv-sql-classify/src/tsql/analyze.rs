@@ -18,10 +18,10 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::ControlFlow;
 
 use sqlparser::ast::{
-    AlterTableOperation, ColumnOption, Delete, Expr, ForClause, FromTable, Function, FunctionArg, FunctionArgExpr,
-    FunctionArguments, Insert, Merge, MergeAction, ObjectName, ObjectNamePart, OutputClause, Query, RaisErrorOption,
-    Select, SelectInto, SelectItem, Set, SetExpr, Statement, TableConstraint, TableFactor, TableObject, TableWithJoins,
-    Update, Value, Visit, Visitor,
+    AlterTableOperation, AlterView, AlterViewOperation, ColumnOption, Delete, Expr, ForClause, FromTable, Function,
+    FunctionArg, FunctionArgExpr, FunctionArguments, InTarget, Insert, Merge, MergeAction, ObjectName, ObjectNamePart,
+    OutputClause, Query, RaisErrorOption, Select, SelectInto, SelectItem, Set, SetExpr, SqliteTableOptions, Statement,
+    TableConstraint, TableFactor, TableObject, TableWithJoins, Update, Value, Visit, Visitor,
 };
 
 use super::functions::{self, FnClass};
@@ -375,6 +375,8 @@ impl<'n, 'c> Walker<'n, 'c> {
             || !ins.optimizer_hints.is_empty()
             || ins.on.is_some()
             || ins.returning.is_some()
+            || ins.by_name
+            || ins.overriding.is_some()
         {
             return brk(Reason::UnsupportedConstruct);
         }
@@ -388,7 +390,13 @@ impl<'n, 'c> Walker<'n, 'c> {
     }
 
     fn update(&mut self, up: &Update) -> ControlFlow<Reason, Kind> {
-        if up.or.is_some() || !up.optimizer_hints.is_empty() || up.returning.is_some() || up.limit.is_some() {
+        if up.or.is_some()
+            || !up.optimizer_hints.is_empty()
+            || up.returning.is_some()
+            || up.limit.is_some()
+            || up.on_cluster.is_some()
+            || up.settings.is_some()
+        {
             return brk(Reason::UnsupportedConstruct);
         }
         if up.from.is_none() && up.table.joins.is_empty() {
@@ -446,7 +454,13 @@ impl<'n, 'c> Walker<'n, 'c> {
     }
 
     fn delete(&mut self, d: &Delete) -> ControlFlow<Reason, Kind> {
-        if !d.optimizer_hints.is_empty() || d.returning.is_some() || d.using.is_some() || d.limit.is_some() {
+        if !d.optimizer_hints.is_empty()
+            || d.returning.is_some()
+            || d.using.is_some()
+            || d.limit.is_some()
+            || d.on_cluster.is_some()
+            || d.settings.is_some()
+        {
             return brk(Reason::UnsupportedConstruct);
         }
         let (FromTable::WithFromKeyword(from) | FromTable::WithoutKeyword(from)) = &d.from;
@@ -552,8 +566,8 @@ impl<'n, 'c> Walker<'n, 'c> {
                     || ct.snapshot
                     || ct.transient
                     || ct.volatile
-                    || ct.without_rowid
-                    || ct.strict
+                    // SQLite's `WITHOUT ROWID` / `STRICT`.
+                    || ct.sqlite_table_options != SqliteTableOptions::default()
                     || ct.copy_grants
                     || ct.or_replace
                     || ct.clone.is_some()
@@ -634,12 +648,20 @@ impl<'n, 'c> Walker<'n, 'c> {
                 }
                 Kind::Alter
             }
-            Statement::AlterView { name, .. } => {
+            // sqlparser 0.63 read only `ALTER VIEW v [(cols)] [WITH …] AS
+            // query`, the T-SQL form; the other 0.64 forms are refused.
+            Statement::AlterView(AlterView {
+                materialized: false,
+                name,
+                if_exists: false,
+                operation: AlterViewOperation::As { .. },
+            }) => {
                 self.exclude(name);
                 let v = ok(self.relation(name)?.ok_or(Reason::UnsupportedConstruct))?;
                 self.need_obj(Cap::Alter, v);
                 Kind::Alter
             }
+            Statement::AlterView(_) => return brk(Reason::UnsupportedConstruct),
             Statement::Set(set) => {
                 // Only variables reach the parser (options are read from
                 // tokens first, fallback.rs).
@@ -658,7 +680,8 @@ impl<'n, 'c> Walker<'n, 'c> {
                 self.need(Cap::Select, SqlTarget::Server);
                 Kind::SetSession
             }
-            Statement::Declare { stmts } => {
+            // `separator` only says how sqlparser prints the list.
+            Statement::Declare { stmts, separator: _ } => {
                 let mut kind = Kind::Declare;
                 for d in stmts {
                     if d.binary.is_some() || d.hold.is_some() {
@@ -869,14 +892,16 @@ impl Visitor for Walker<'_, '_> {
                 json_path,
                 sample,
                 partitions,
-                index_hints,
+                index_directives,
+                inheritance,
                 with_ordinality,
             } => {
                 if version.is_some()
                     || json_path.is_some()
                     || sample.is_some()
                     || !partitions.is_empty()
-                    || !index_hints.is_empty()
+                    || !index_directives.is_empty()
+                    || inheritance.is_some()
                     || *with_ordinality
                 {
                     return brk(Reason::UnsupportedConstruct);
@@ -978,8 +1003,10 @@ impl Visitor for Walker<'_, '_> {
             Expr::UnaryOp { .. }
             | Expr::Like { .. }
             | Expr::Between { .. }
-            | Expr::InList { .. }
-            | Expr::InSubquery { .. }
+            // sqlparser 0.63's `InList` / `InSubquery`; the subquery is
+            // walked like any other. `IN UNNEST(…)`, SQLite's `IN table` and
+            // ClickHouse's `GLOBAL IN` fall through to the refusal below.
+            | Expr::In { target: InTarget::List(_) | InTarget::Subquery(_), global: false, .. }
             | Expr::IsDistinctFrom(..)
             | Expr::IsNotDistinctFrom(..)
             | Expr::IsNull(_)
