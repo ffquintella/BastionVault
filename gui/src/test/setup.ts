@@ -20,6 +20,16 @@ beforeEach(() => {
   clearCache();
 });
 
+// Download buttons build a `blob:` URL and click a hidden `<a download>`.
+// jsdom cannot navigate, so it logs "Not implemented: navigation to another
+// Document" for each one. Swallow only that click — a download anchor or a
+// blob URL — and leave every other anchor click to jsdom's own behaviour.
+const nativeAnchorClick = HTMLAnchorElement.prototype.click;
+HTMLAnchorElement.prototype.click = function click(this: HTMLAnchorElement) {
+  if (this.hasAttribute("download") || this.href.startsWith("blob:")) return;
+  nativeAnchorClick.call(this);
+};
+
 // Mock Tauri invoke API globally so tests don't need a running Tauri backend.
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn().mockRejectedValue(new Error("invoke not mocked for this call")),
