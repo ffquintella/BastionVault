@@ -128,7 +128,7 @@ bv-server = { path = "../bv-server", features = ["test-support"] }
 serial_test = "4"
 
 [features]
-default = ["storage_hiqlite", "ssh_pqc", "mcp_sessions_ssh"]
+default = ["storage_hiqlite", "ssh_pqc", "mcp_sessions_ssh", "oidc_legacy_tls"]
 # The storage backends. Every one of these has to reach `bv-server` as well
 # as the library: `bv-server`'s `sys/health`, `sys/info` and
 # `sys/cluster-status` handlers name the backend type behind a
@@ -143,7 +143,10 @@ cloud_targets = ["bastion_vault/cloud_targets", "bv-server/cloud_targets"]
 ssh_pqc = ["bastion_vault/ssh_pqc"]
 pki_pqc_composite = ["bastion_vault/pki_pqc_composite"]
 # The opt-in legacy TLS 1.2 CBC client for OIDC (T551,
-# features/legacy-tls-cbc.md). Off by default.
+# features/legacy-tls-cbc.md). On by default so every `bvault` build (make
+# targets, container image, packages) can serve an SSO provider whose mount
+# sets `oidc_discovery_legacy_tls`; compiling it in changes nothing until a
+# mount opts in.
 oidc_legacy_tls = ["bastion_vault/oidc_legacy_tls"]
 transit_byok = ["bastion_vault/transit_byok"]
 transit_pqc_hybrid = ["bastion_vault/transit_pqc_hybrid"]
