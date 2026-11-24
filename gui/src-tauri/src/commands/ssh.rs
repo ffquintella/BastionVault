@@ -353,6 +353,7 @@ pub struct SshSignRequest {
     pub ttl: Option<String>,
     pub cert_type: Option<String>,
     pub key_id: Option<String>,
+    pub target_host: Option<String>,
 }
 
 #[derive(Serialize, Default)]
@@ -381,6 +382,9 @@ pub async fn ssh_sign(state: State<'_, AppState>, request: SshSignRequest) -> Cm
     }
     if let Some(k) = request.key_id.filter(|s| !s.is_empty()) {
         body.insert("key_id".into(), Value::String(k));
+    }
+    if let Some(h) = request.target_host.filter(|s| !s.is_empty()) {
+        body.insert("target_host".into(), Value::String(h));
     }
     let resp = make_request(&state, Operation::Write, path, Some(body)).await?;
     let map = data_to_map(resp);

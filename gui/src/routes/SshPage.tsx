@@ -52,6 +52,8 @@ function blankRole(): SshRoleConfig {
     exclude_cidr_list: "",
     port: 22,
     pqc_only: false,
+    require_target_host: false,
+    allowed_hosts: "",
   };
 }
 
@@ -683,6 +685,33 @@ function RoleForm({
       </div>
 
       {!isOtp && (
+        <div className="grid grid-cols-2 gap-3">
+          <div className="col-span-2 flex items-center gap-2">
+            <input
+              id="require_target_host"
+              type="checkbox"
+              checked={config.require_target_host}
+              onChange={(e) => set("require_target_host", e.target.checked)}
+            />
+            <label htmlFor="require_target_host" className="text-sm">
+              Bind certificate to the destination host — principals become user@host (the target needs an
+              AuthorizedPrincipalsFile listing them)
+            </label>
+          </div>
+          {config.require_target_host && (
+            <div className="col-span-2">
+              <Input
+                label="Allowed hosts"
+                value={config.allowed_hosts}
+                onChange={(e) => set("allowed_hosts", e.target.value)}
+                hint="Comma-separated: srv01.example.com, *.lab.example.com. Empty refuses every sign request."
+              />
+            </div>
+          )}
+        </div>
+      )}
+
+      {!isOtp && (
         <div className="flex items-center gap-2">
           <input
             id="pqc_only"
@@ -817,6 +846,7 @@ function SignTab({ mount }: { mount: string }) {
   const [validPrincipals, setValidPrincipals] = useState("");
   const [ttl, setTtl] = useState("");
   const [keyId, setKeyId] = useState("");
+  const [targetHost, setTargetHost] = useState("");
   const [result, setResult] = useState<SshSignResult | null>(null);
 
   const onSign = async () => {
@@ -829,6 +859,7 @@ function SignTab({ mount }: { mount: string }) {
         valid_principals: validPrincipals || undefined,
         ttl: ttl || undefined,
         key_id: keyId || undefined,
+        target_host: targetHost || undefined,
       });
       setResult(r);
       toast("success", "Certificate signed");
@@ -866,6 +897,12 @@ function SignTab({ mount }: { mount: string }) {
             value={keyId}
             onChange={(e) => setKeyId(e.target.value)}
             placeholder="overrides role.key_id_format"
+          />
+          <Input
+            label="Target host (if role binds to host)"
+            value={targetHost}
+            onChange={(e) => setTargetHost(e.target.value)}
+            placeholder="srv01.example.com"
           />
         </div>
         <Textarea

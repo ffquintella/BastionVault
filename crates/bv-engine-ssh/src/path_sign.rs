@@ -106,6 +106,7 @@ impl SshBackend {
                 "role": { field_type: FieldType::Str, required: true, description: "Role name." },
                 "public_key": { field_type: FieldType::Str, required: true, description: "OpenSSH-format client public key to sign." },
                 "valid_principals": { field_type: FieldType::Str, default: "", description: "Comma-separated subset of `allowed_users`. Empty falls back to role's `default_user`." },
+                "target_host": { field_type: FieldType::Str, default: "", description: "Destination machine. Required when the role sets `require_target_host`; principals become `<user>@<target_host>`." },
                 "ttl": { field_type: FieldType::Str, default: "", description: "Requested validity (e.g. `30m`). Clamped to role's `max_ttl`." },
                 "cert_type": { field_type: FieldType::Str, default: "", description: "`user` or `host`; empty inherits role default." },
                 "key_id": { field_type: FieldType::Str, default: "", description: "Override for the cert's `key id` field." },
@@ -235,6 +236,9 @@ impl SshBackendInner {
                 }
             }
         }
+
+        // ── Destination binding (role.require_target_host) ─────────
+        let requested = role.scope_principals_to_host(&requested, target_host_arg(req).as_deref(), &cert_type_str)?;
 
         // ── TTL (request → role.ttl), clamped to max_ttl ───────────
         let req_ttl_str = req.get_data("ttl").ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
@@ -420,6 +424,7 @@ impl SshBackendInner {
             "host" => 2,
             other => return Err(RvError::ErrString(format!("cert_type must be `user` or `host`, got `{other}`"))),
         };
+        let requested = role.scope_principals_to_host(&requested, target_host_arg(req).as_deref(), &cert_type_str)?;
 
         // ── TTL / validity window ──────────────────────────────────
         let req_ttl_str = req.get_data("ttl").ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
@@ -511,6 +516,12 @@ impl SshBackendInner {
         data.insert("algorithm".into(), Value::String(super::pqc::MLDSA65_ALGO.into()));
         Ok(Some(Response::data_response(Some(data))))
     }
+}
+
+/// Caller-supplied `target_host`, if any (trimmed; validated later by
+/// `RoleEntry::scope_principals_to_host`).
+fn target_host_arg(req: &Request) -> Option<String> {
+    req.get_data("target_host").ok().and_then(|v| v.as_str().map(|s| s.to_string()))
 }
 
 /// Expand a role's `key_id_format`. `{{role}}` is the role name and

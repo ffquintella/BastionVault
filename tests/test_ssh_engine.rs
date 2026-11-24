@@ -159,3 +159,89 @@ async fn test_ssh_phase1_end_to_end() {
     let err = core.handle_request(&mut req).await.unwrap_err();
     assert!(format!("{err}").contains("carol"), "expected disallowed-principal error, got: {err}");
 }
+
+/// A role with `require_target_host` issues certs whose principals are
+/// `<user>@<host>` and refuses a missing or unlisted destination, so the
+/// cert is useless on any machine whose authorized principals do not list it.
+#[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+async fn test_ssh_sign_binds_certificate_to_target_host() {
+    let dir = env::temp_dir().join("bastion_vault_ssh_target_host");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    defer! ( let _ = fs::remove_dir_all(&dir); );
+
+    let mut conf: HashMap<String, Value> = HashMap::new();
+    conf.insert("path".into(), Value::String(dir.to_string_lossy().into_owned()));
+    let backend = storage::new_backend("file", &conf).unwrap();
+    let bvault = BastionVault::new(backend, None).unwrap();
+    let core = bvault.core.load();
+    let seal = SealConfig { secret_shares: 5, secret_threshold: 3 };
+    let init = bvault.init(&seal).await.unwrap();
+    for i in 0..seal.secret_threshold {
+        bvault.unseal(&[&init.secret_shares[i as usize]]).await.unwrap();
+    }
+    let token = init.root_token.clone();
+
+    write(&core, &token, "sys/mounts/ssh/", json!({"type": "ssh"}).as_object().unwrap().clone()).await;
+    write(&core, &token, "ssh/config/ca", Map::new()).await.expect("CA generate returned no data");
+    write(
+        &core,
+        &token,
+        "ssh/roles/bound",
+        json!({
+            "key_type": "ca",
+            "allowed_users": "ubuntu",
+            "default_user": "ubuntu",
+            "require_target_host": true,
+            "allowed_hosts": "srv01.example.com,*.lab.example.com"
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    )
+    .await;
+
+    let role_back = read(&core, &token, "ssh/roles/bound").await.expect("role read returned nothing");
+    assert_eq!(role_back["require_target_host"].as_bool(), Some(true));
+    assert_eq!(role_back["allowed_hosts"].as_str(), Some("srv01.example.com,*.lab.example.com"));
+
+    let client_priv = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+    let pubkey = client_priv.public_key().to_openssh().unwrap();
+
+    // Allowed host → principal is bound to it.
+    let ok = write(
+        &core,
+        &token,
+        "ssh/sign/bound",
+        json!({"public_key": pubkey, "target_host": "SRV01.example.com"}).as_object().unwrap().clone(),
+    )
+    .await
+    .expect("sign returned no data");
+    let cert = ssh_key::Certificate::from_openssh(ok["signed_key"].as_str().unwrap()).unwrap();
+    assert_eq!(cert.valid_principals(), &vec!["ubuntu@srv01.example.com".to_string()]);
+
+    // Wildcard host.
+    let ok = write(
+        &core,
+        &token,
+        "ssh/sign/bound",
+        json!({"public_key": pubkey, "target_host": "a.lab.example.com"}).as_object().unwrap().clone(),
+    )
+    .await
+    .unwrap();
+    let cert = ssh_key::Certificate::from_openssh(ok["signed_key"].as_str().unwrap()).unwrap();
+    assert_eq!(cert.valid_principals(), &vec!["ubuntu@a.lab.example.com".to_string()]);
+
+    // Missing, unlisted and malformed destinations are all refused.
+    for body in [
+        json!({"public_key": pubkey}),
+        json!({"public_key": pubkey, "target_host": "srv02.example.com"}),
+        json!({"public_key": pubkey, "target_host": "srv01.example.com,root@x"}),
+    ] {
+        let mut req = Request::new("ssh/sign/bound");
+        req.operation = Operation::Write;
+        req.client_token = token.clone();
+        req.body = Some(body.as_object().unwrap().clone());
+        assert!(core.handle_request(&mut req).await.is_err(), "sign must be refused for {body}");
+    }
+}

@@ -3316,7 +3316,7 @@ async fn resolve_ssh_engine_ssh(
     let mode = cs.get("mode").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).unwrap_or("ca");
 
     match mode {
-        "ca" => sign_ssh_engine_ca(state, &ssh_mount, &ssh_role, profile).await,
+        "ca" => sign_ssh_engine_ca(state, &ssh_mount, &ssh_role, profile, meta).await,
         "otp" => mint_ssh_engine_otp(state, &ssh_mount, &ssh_role, profile, meta).await,
         "pqc" => Err(CommandError::from(
             "ssh-engine pqc mode is not supported by the in-app SSH client today \
@@ -3357,6 +3357,7 @@ async fn sign_ssh_engine_ca(
     ssh_mount: &str,
     ssh_role: &str,
     profile: &Value,
+    meta: &Map<String, Value>,
 ) -> Result<ResolvedSshCredential, CommandError> {
     use russh::keys::ssh_key::{Algorithm, LineEnding, PrivateKey};
 
@@ -3382,6 +3383,19 @@ async fn sign_ssh_engine_ca(
     body.insert("public_key".into(), Value::String(public_openssh));
     if let Some(user) = profile.get("username").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
         body.insert("valid_principals".into(), Value::String(user.to_string()));
+    }
+    // The machine being dialled, in the order the session dials it
+    // (profile override, ip_address, hostname). A role with
+    // `require_target_host` binds the certificate's principals to it; any
+    // other role ignores the field.
+    let target_host = profile
+        .get("target_host")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .or_else(|| meta.get("ip_address").and_then(|v| v.as_str()).filter(|s| !s.is_empty()))
+        .or_else(|| meta.get("hostname").and_then(|v| v.as_str()).filter(|s| !s.is_empty()));
+    if let Some(host) = target_host {
+        body.insert("target_host".into(), Value::String(host.to_string()));
     }
 
     let path = format!("{ssh_mount}sign/{ssh_role}");

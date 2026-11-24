@@ -10,7 +10,10 @@ use std::{collections::BTreeMap, time::Duration};
 
 use serde::{Deserialize, Serialize};
 
-use crate::utils::{deserialize_duration, serialize_duration};
+use crate::{
+    errors::RvError,
+    utils::{deserialize_duration, serialize_duration},
+};
 
 /// Keys for the SSH engine inside its mount's barrier view.
 pub const CA_CONFIG_KEY: &str = "config/ca";
@@ -202,6 +205,24 @@ pub struct RoleEntry {
     /// this flag (it has no PQC chain to enforce in the first place).
     #[serde(default)]
     pub pqc_only: bool,
+
+    // ── Destination binding (user certs) ──────────────────────────
+    //
+    /// When true, `sign` refuses a request without `target_host` and
+    /// rewrites every principal to `<user>@<target_host>`, so the cert
+    /// is only accepted by a machine whose `AuthorizedPrincipalsFile`
+    /// lists that exact principal. Only meaningful for `user` certs.
+    /// Default false: existing roles keep issuing plain-username
+    /// principals, which every host trusting the CA accepts.
+    #[serde(default)]
+    pub require_target_host: bool,
+
+    /// Comma-separated hosts a `target_host` may name: exact names/IPs,
+    /// or `*.example.com` (one or more labels under the suffix). Empty
+    /// with `require_target_host` set refuses every sign request; `*`
+    /// allows any host (the cert is still bound to the one requested).
+    #[serde(default)]
+    pub allowed_hosts: String,
 }
 
 impl Default for RoleEntry {
@@ -224,6 +245,8 @@ impl Default for RoleEntry {
             exclude_cidr_list: String::new(),
             port: default_port(),
             pqc_only: false,
+            require_target_host: false,
+            allowed_hosts: String::new(),
         }
     }
 }
@@ -254,6 +277,37 @@ impl RoleEntry {
 
     pub fn allowed_critical_options_list(&self) -> Vec<String> {
         comma_split(&self.allowed_critical_options)
+    }
+
+    pub fn allowed_hosts_list(&self) -> Vec<String> {
+        comma_split(&self.allowed_hosts)
+    }
+
+    /// Bind `users` to one destination. A no-op unless the role sets
+    /// `require_target_host` and the cert is a `user` cert. Otherwise
+    /// `target_host` is mandatory, must be a plain hostname/IP that the
+    /// role's `allowed_hosts` admits, and each user becomes
+    /// `<user>@<host>`. Fails closed on every ambiguity.
+    pub fn scope_principals_to_host(
+        &self,
+        users: &[String],
+        target_host: Option<&str>,
+        cert_type: &str,
+    ) -> Result<Vec<String>, RvError> {
+        if !self.require_target_host || cert_type != "user" {
+            return Ok(users.to_vec());
+        }
+        let host = normalize_host(target_host.unwrap_or(""))?;
+        let allowed = self.allowed_hosts_list();
+        if allowed.is_empty() {
+            return Err(RvError::ErrString(
+                "role requires target_host but has empty allowed_hosts; sign refused".into(),
+            ));
+        }
+        if !allowed.iter().any(|pat| host_matches(pat, &host)) {
+            return Err(RvError::ErrString(format!("target_host `{host}` is not in role's allowed_hosts")));
+        }
+        Ok(users.iter().map(|u| format!("{u}@{host}")).collect())
     }
 
     /// Returns true if `ip` falls inside `cidr_list` and outside
@@ -335,6 +389,35 @@ fn default_port() -> u16 {
     22
 }
 
+/// Lower-case and validate a destination. Rejects anything that is not a
+/// plain DNS name / IP literal, so a caller cannot smuggle `,` `@` `*` or
+/// whitespace into the principal.
+fn normalize_host(raw: &str) -> Result<String, RvError> {
+    let h = raw.trim().to_ascii_lowercase();
+    let ok = !h.is_empty()
+        && h.len() <= 253
+        && h.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '_'))
+        && !h.starts_with('.')
+        && !h.ends_with('.');
+    if !ok {
+        return Err(RvError::ErrString("target_host is required and must be a plain hostname or IP address".into()));
+    }
+    Ok(h)
+}
+
+fn host_matches(pattern: &str, host: &str) -> bool {
+    let pat = pattern.to_ascii_lowercase();
+    if pat == "*" {
+        return true;
+    }
+    match pat.strip_prefix("*.") {
+        Some(suffix) => {
+            host.len() > suffix.len() + 1 && host.ends_with(suffix) && host[..host.len() - suffix.len()].ends_with('.')
+        }
+        None => pat == host,
+    }
+}
+
 fn comma_split(s: &str) -> Vec<String> {
     let mut out: Vec<String> = s.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect();
     out.sort();
@@ -380,6 +463,45 @@ mod tests {
     fn comma_split_normalises() {
         let r = RoleEntry { allowed_users: "alice, bob, ,alice ,carol".to_string(), ..Default::default() };
         assert_eq!(r.allowed_users_list(), vec!["alice".to_string(), "bob".to_string(), "carol".to_string()]);
+    }
+
+    fn bound_role(hosts: &str) -> RoleEntry {
+        RoleEntry { require_target_host: true, allowed_hosts: hosts.to_string(), ..Default::default() }
+    }
+
+    #[test]
+    fn host_binding_off_keeps_plain_principals() {
+        let r = RoleEntry::default();
+        let out = r.scope_principals_to_host(&["ubuntu".into()], None, "user").unwrap();
+        assert_eq!(out, vec!["ubuntu".to_string()]);
+    }
+
+    #[test]
+    fn host_binding_scopes_principal_to_host() {
+        let r = bound_role("srv01.example.com, *.lab.example.com");
+        let out = r.scope_principals_to_host(&["ubuntu".into()], Some(" SRV01.example.com "), "user").unwrap();
+        assert_eq!(out, vec!["ubuntu@srv01.example.com".to_string()]);
+        assert!(r.scope_principals_to_host(&["a".into()], Some("x.lab.example.com"), "user").is_ok());
+    }
+
+    #[test]
+    fn host_binding_fails_closed() {
+        let r = bound_role("srv01.example.com,*.lab.example.com");
+        let u = ["ubuntu".to_string()];
+        assert!(r.scope_principals_to_host(&u, None, "user").is_err(), "missing host");
+        assert!(r.scope_principals_to_host(&u, Some("srv02.example.com"), "user").is_err(), "not allowed");
+        assert!(r.scope_principals_to_host(&u, Some("lab.example.com"), "user").is_err(), "bare suffix");
+        assert!(r.scope_principals_to_host(&u, Some("evilxlab.example.com"), "user").is_err(), "label boundary");
+        assert!(r.scope_principals_to_host(&u, Some("srv01.example.com,root@b"), "user").is_err(), "injection");
+        assert!(bound_role("").scope_principals_to_host(&u, Some("srv01"), "user").is_err(), "empty allowed_hosts");
+        assert!(bound_role("*").scope_principals_to_host(&u, Some("a@b"), "user").is_err(), "bad chars even with *");
+    }
+
+    #[test]
+    fn role_without_new_fields_deserialises_unbound() {
+        let r: RoleEntry = serde_json::from_slice(br#"{"allowed_users":"a"}"#).unwrap();
+        assert!(!r.require_target_host);
+        assert!(r.allowed_hosts.is_empty());
     }
 
     #[test]

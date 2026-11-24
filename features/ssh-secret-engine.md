@@ -82,6 +82,11 @@ A role configures *what kind of certificate the engine will issue*:
 | `not_before_duration` | duration | Allows for client-server clock skew. Default 30s. |
 | `pqc_only` | bool | Reject signing requests where the **client** key is classical, even if the role's CA is PQC. Forces an end-to-end PQC chain. |
 
+| `require_target_host` | bool | User certs only. `sign` then requires `target_host` and issues principals `<user>@<target_host>`, so the cert is accepted only by a machine whose `AuthorizedPrincipalsFile` lists that principal. Default false. |
+| `allowed_hosts` | string | Comma-separated hosts `target_host` may name: exact names/IPs or `*.example.com` (the bare suffix does not match). Empty with `require_target_host` refuses every sign; `*` allows any host. `target_host` must be a plain hostname/IP. |
+
+Destination binding exists because an OpenSSH user certificate has no destination field: without it, a cert for `ubuntu` signed for host A is accepted by every host that trusts the CA and has `ubuntu`. Tests: `policy.rs` unit tests and `tests/test_ssh_engine.rs::test_ssh_sign_binds_certificate_to_target_host`. Not yet bound: agent (MCP) sessions and Rustion-brokered certs, which do not pass a host and are refused by a bound role.
+
 ### OTP-Mode Roles
 
 | Field | Type | Description |

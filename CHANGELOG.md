@@ -63,6 +63,11 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### SSH certificates bound to the destination host
+
+- **Bind an SSH CA certificate to the one machine it was signed for, so it is useless on any other host that trusts the CA** (T556, S58)
+  -- A role with `require_target_host` refuses `ssh/sign` without a `target_host` listed in its `allowed_hosts` (exact names or IPs, or `*.example.com`) and signs the principal as `<user>@<host>`; the target accepts it only if that principal is in its `AuthorizedPrincipalsFile`. Resource Connect passes the host it dials, and the Roles and Sign tabs of the SSH page gain the fields. Off by default, so existing roles keep plain-username principals. Agent (MCP) and Rustion-brokered sessions do not pass a host yet and are refused by a bound role.
+
 #### SSO users on the Users page
 
 - **List everyone who signed in through OIDC or SAML on a new Users → SSO Users tab, set the namespaces each may sign in to and an e-mail, and share resources with them** (T555, S123)

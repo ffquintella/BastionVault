@@ -216,6 +216,8 @@ bv write ssh/roles/pqc-deploy \
 | `not_before_duration` | `30s` | Backdates `valid_after` for client–server clock skew. |
 | `key_id_format` | `vault-{{identity.entity.id}}-{{role}}-{{token_display_name}}` | Template for the cert's `key id`. |
 | `pqc_only` | `false` | Reject classical client keys, even if the CA is PQC. |
+| `require_target_host` | `false` | Bind user certs to one machine: `sign` needs `target_host` and signs the principal `<user>@<host>`. The target must list that principal in an `AuthorizedPrincipalsFile` (e.g. `ubuntu@srv01.example.com`). |
+| `allowed_hosts` | `""` | Hosts `target_host` may name: exact names/IPs or `*.example.com`. Empty refuses every sign when binding is on. |
 
 ### List / read / delete roles
 

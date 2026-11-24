@@ -2164,6 +2164,8 @@ export interface SshRoleConfig {
   exclude_cidr_list: string;
   port: number;
   pqc_only: boolean;
+  require_target_host: boolean;
+  allowed_hosts: string;
 }
 
 export interface SshSignRequest {
@@ -2174,6 +2176,7 @@ export interface SshSignRequest {
   ttl?: string;
   cert_type?: string;
   key_id?: string;
+  target_host?: string;
 }
 
 export interface SshSignResult {

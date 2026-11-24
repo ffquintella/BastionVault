@@ -61,6 +61,8 @@ impl SshBackend {
                 "cidr_list": { field_type: FieldType::Str, default: "", description: "OTP mode: comma-separated CIDRs the OTP is valid for." },
                 "exclude_cidr_list": { field_type: FieldType::Str, default: "", description: "OTP mode: CIDRs to subtract from `cidr_list`." },
                 "port": { field_type: FieldType::Int, default: 22, description: "OTP mode: default SSH port surfaced to the helper / UI." },
+                "require_target_host": { field_type: FieldType::Bool, default: false, description: "User certs: require `target_host` on sign and bind principals to `<user>@<host>` so the cert only works on that machine (needs AuthorizedPrincipalsFile on the target)." },
+                "allowed_hosts": { field_type: FieldType::Str, default: "", description: "Comma-separated hosts `target_host` may name: exact names/IPs or `*.example.com`. `*` = any." },
                 "pqc_only": { field_type: FieldType::Bool, default: false, description: "PQC mode: reject sign requests where the client key is classical, even if the CA is PQC. Forces an end-to-end PQC chain." }
             },
             operations: [
@@ -210,6 +212,7 @@ impl SshBackendInner {
             ("default_user", &mut role.default_user),
             ("allowed_extensions", &mut role.allowed_extensions),
             ("allowed_critical_options", &mut role.allowed_critical_options),
+            ("allowed_hosts", &mut role.allowed_hosts),
             ("key_id_format", &mut role.key_id_format),
         ] {
             if let Ok(v) = req.get_data(key) {
@@ -278,6 +281,12 @@ impl SshBackendInner {
                     return Err(RvError::ErrString(format!("port must be 1..=65535, got {n}")));
                 }
                 role.port = n as u16;
+            }
+        }
+
+        if let Ok(v) = req.get_data("require_target_host") {
+            if let Some(b) = v.as_bool() {
+                role.require_target_host = b;
             }
         }
 
