@@ -161,6 +161,7 @@ VAULT_CLIENT_KEY environment variable."#
         long,
         next_line_help = true,
         value_name = "string",
+        env = "VAULT_TLS_SERVER_NAME",
         long_help = r#"Name to use as the SNI host when connecting to the Vault server via TLS.
 This can also be specified via the VAULT_TLS_SERVER_NAME environment variable."#
     )]
@@ -615,6 +616,16 @@ mod header_tests {
             argv.extend_from_slice(&["--header", header]);
         }
         Cli::try_parse_from(argv).expect("parses").http
+    }
+
+    /// `--tls-server-name` documents `VAULT_TLS_SERVER_NAME`; the binding
+    /// must exist or the variable is silently ignored.
+    #[test]
+    fn tls_server_name_reads_vault_tls_server_name_env() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        let arg = cmd.get_arguments().find(|a| a.get_id() == "tls_server_name").expect("arg exists");
+        assert_eq!(arg.get_env().and_then(|e| e.to_str()), Some("VAULT_TLS_SERVER_NAME"));
     }
 
     fn refusal(client: Result<Client, RvError>) -> String {
