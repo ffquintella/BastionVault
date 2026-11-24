@@ -32,6 +32,13 @@ pub struct ScriptedReply {
     /// Try to open an agent channel back to the client first, and record
     /// whether the client accepted it.
     pub probe_agent_channel: bool,
+    /// Answer the `exec` the way a Rustion bastion refuses one: this line on
+    /// stderr, then `CHANNEL_FAILURE` instead of `CHANNEL_SUCCESS`, then
+    /// close. Nothing else of the reply is sent.
+    pub refuse_with: Option<String>,
+    /// After the output, report this signal (`exit-signal`) instead of an
+    /// exit status.
+    pub exit_signal: Option<Sig>,
 }
 
 type Responder = Arc<dyn Fn(&str) -> ScriptedReply + Send + Sync>;
@@ -327,8 +334,17 @@ impl server::Handler for Handler {
     ) -> Result<(), Self::Error> {
         let command = String::from_utf8_lossy(data).into_owned();
         self.record(format!("exec:{command}"));
-        session.channel_success(channel)?;
         let reply = (self.config.responder)(&command);
+        if let Some(line) = reply.refuse_with.clone() {
+            session.extended_data(channel, 1, format!("{line}\r\n").into_bytes())?;
+            session.channel_failure(channel)?;
+            let handle = session.handle();
+            tokio::spawn(async move {
+                let _ = handle.close(channel).await;
+            });
+            return Ok(());
+        }
+        session.channel_success(channel)?;
         let handle = session.handle();
         let events = self.events.clone();
         tokio::spawn(async move {
@@ -353,6 +369,9 @@ impl server::Handler for Handler {
             }
             if let Some(status) = reply.exit_status {
                 let _ = handle.exit_status_request(channel, status).await;
+            }
+            if let Some(signal) = reply.exit_signal {
+                let _ = handle.exit_signal_request(channel, signal, false, String::new(), String::new()).await;
             }
             let _ = handle.eof(channel).await;
             let _ = handle.close(channel).await;

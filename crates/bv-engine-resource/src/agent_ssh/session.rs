@@ -27,7 +27,8 @@ use serde_json::{Map, Value};
 use tokio::{sync::watch, time::Instant};
 
 use super::{
-    exec::{self, ExecError, ExecReport, ExecSpec, SshLogin, TranscriptCapture, STDERR, STDOUT},
+    bastion::{self, BastionRecord, BastionSessionRef, BastionSshExecEvent},
+    exec::{self, BastionExecSpec, ExecError, ExecReport, ExecSpec, SshLogin, TranscriptCapture, STDERR, STDOUT},
     CallError, Gated, SessionRefusal, CERT_VALIDITY_SECS, CONNECT_BUDGET, DRAIN_LIMIT_BYTES, SSH_EXEC_TOOL,
 };
 use crate::{
@@ -35,7 +36,7 @@ use crate::{
     agent_limits::{binding_limit_key, SessionPermit},
     agent_session::{
         aborted_refusal, cause_str, check_transport, destination_policy, now_ms, redeem_agent_ticket, refused,
-        resource_type, str_field, watch_revocation, without_code, ScrubberAdapter,
+        resource_type, str_field, watch_revocation, without_code, ScrubberAdapter, TransportRoute,
     },
     connect_mfa::{caller_namespace, find_profile},
     errors::RvError,
@@ -53,7 +54,7 @@ const CERT_SKEW_SECS: u64 = 5;
 
 /// How the session will log in, decided from the stored profile before any
 /// secret is touched.
-enum LoginPlan {
+pub(crate) enum LoginPlan {
     Secret { secret_id: String, profile_username: Option<String> },
     Certificate { ssh_mount: String, ssh_role: String, username: String },
 }
@@ -143,7 +144,7 @@ async fn check_destination(gated: &Gated, host: String, port: u16) -> Result<Che
 /// What a signed certificate must say before it is used (§5.2): the
 /// confirmed command as `force-command`, the configured `source-address`,
 /// no extension at all, a validity of at most a minute, and the login.
-fn verify_certificate(
+pub(crate) fn verify_certificate(
     facts: &SshCertificateFacts,
     command: &str,
     source_address: &str,
@@ -299,15 +300,17 @@ pub(crate) async fn prepare_and_run(
     agent_access::check_agent_enabled(types.type_def(type_id), &profile)
         .map_err(|r| refused(r.code(), r.status(), r.to_string()))?;
 
+    // 7. The route, before MFA: a refusal here costs the operator no ticket.
+    //    A bastion route is never bypassed (`features/rustion-agent-exec.md`).
+    let route = check_transport(backend, req, &resource, &meta, &profile).await?;
+
     // 6. MFA: the operator's ticket for this exact call, redeemed once.
-    let mfa_method = if profile_gate_flag(&profile) {
+    let mfa = if profile_gate_flag(&profile) {
         Some(redeem_agent_ticket(backend, req, &gated.binding, &resource, &profile_id, SSH_EXEC_TOOL).await?)
     } else {
         None
     };
-
-    // 7. No bastion route is bypassed.
-    check_transport(backend, req, &resource, &meta, &profile).await?;
+    let mfa_method = mfa.as_ref().map(|t| t.method.clone());
 
     let plan = LoginPlan::from_profile(&profile)?;
     let host_key_sha256 = pinned_digest(&profile)?;
@@ -319,8 +322,9 @@ pub(crate) async fn prepare_and_run(
         .try_acquire(&binding_limit_key(&gated.binding))
         .map_err(|r| refused(r.code(), 429, without_code(&r.to_string(), r.code())))?;
 
-    // 9. The destination: resolved once, every address checked.
-    let target = check_destination(&gated, host, port).await?;
+    // 9. The destination: resolved once, every address checked. Through a
+    //    bastion too: the allow-list says where an agent's command may land.
+    let target = check_destination(&gated, host.clone(), port).await?;
 
     // Only now, the credential.
     let ns = caller_namespace(&backend.core, req)
@@ -328,51 +332,112 @@ pub(crate) async fn prepare_and_run(
         .map_err(|error| CallError::Vault { reason: "namespace_unresolvable", error })?;
     let ns_prefix = if ns.is_empty() { String::new() } else { format!("{ns}/") };
     let actor = gated.binding.operator.as_ref().map(|o| o.username.clone()).unwrap_or_default();
-    let (login, scrubber, cert_serial) =
-        resolve_login(backend.core.as_ref(), &ns_prefix, &resource, plan, &gated, &actor).await?;
 
     let mut who = req.clone();
     who.body = None;
     who.data = None;
     let session_id = format!("as_{:016x}", rand::rng().random::<u64>());
+    let deadline = Instant::now() + std::time::Duration::from_secs(gated.timeout_secs);
+    let output_limit = usize::try_from(gated.settings.max_output_bytes).unwrap_or(usize::MAX);
     let target_label = target.primary().to_string();
-    let login_kind = login.kind();
-    let spec = ExecSpec {
-        target,
-        host_key_sha256,
-        login,
-        command: gated.command.clone(),
-        connect_budget: CONNECT_BUDGET,
-        deadline: Instant::now() + std::time::Duration::from_secs(gated.timeout_secs),
-        output_limit: usize::try_from(gated.settings.max_output_bytes).unwrap_or(usize::MAX),
-        drain_limit: DRAIN_LIMIT_BYTES,
-        transcript_stream_limit: MAX_TRANSCRIPT_STREAM_BYTES,
-    };
-    let task = SessionTask {
+    let task = |login_kind, cert_serial, scrubber, bastion| SessionTask {
         ctx: backend.core.clone(),
         env: gated.env.clone(),
         token: req.client_token.clone(),
-        who,
-        binding: gated.binding,
+        who: who.clone(),
+        binding: gated.binding.clone(),
         operator_confirmation: req.mcp_audit.as_ref().and_then(|a| a.operator_confirmation.clone()),
-        mfa_method,
-        resource,
-        profile_id,
-        command: gated.command,
-        target_label,
+        mfa_method: mfa_method.clone(),
+        resource: resource.clone(),
+        profile_id: profile_id.clone(),
+        command: gated.command.clone(),
+        target_label: target_label.clone(),
+        target_pin: exec::sha256_fingerprint(&host_key_sha256),
         login_kind,
         cert_serial,
         scrubber,
-        session_id,
+        session_id: session_id.clone(),
         started_at_ms: now_ms(),
-        namespace: ns,
-        _permit: permit,
+        namespace: ns.clone(),
+        bastion,
     };
-    // The session runs in its own task: when the MCP endpoint's timeout
-    // drops this request, the task still closes the connection and records
-    // its transcript and events.
-    match tokio::spawn(task.run(spec)).await {
-        Ok(outcome) => outcome.map_err(CallError::Ended),
+
+    let outcome = match route {
+        TransportRoute::Direct => {
+            let (login, scrubber, cert_serial) =
+                resolve_login(backend.core.as_ref(), &ns_prefix, &resource, plan, &gated, &actor).await?;
+            let login_kind = login.kind();
+            let spec = ExecSpec {
+                target,
+                host_key_sha256,
+                login,
+                command: gated.command.clone(),
+                connect_budget: CONNECT_BUDGET,
+                deadline,
+                output_limit,
+                drain_limit: DRAIN_LIMIT_BYTES,
+                transcript_stream_limit: MAX_TRANSCRIPT_STREAM_BYTES,
+            };
+            let task = task(login_kind, cert_serial, scrubber, None);
+            // The session runs in its own task: when the MCP endpoint's
+            // timeout drops this request, the task still closes the
+            // connection and records its transcript and events.
+            tokio::spawn(async move { task.run(spec, permit).await.map_err(CallError::Ended) }).await
+        }
+        TransportRoute::Bastion(route) => {
+            let (credential, scrubber) =
+                bastion::resolve_sealed_credential(backend.core.as_ref(), &ns_prefix, &resource, plan, &gated, &actor)
+                    .await?;
+            let body = bastion::open_body(&bastion::OpenParams {
+                resource: &resource,
+                profile_id: &profile_id,
+                command: &gated.command,
+                target_host: &host,
+                target_port: port,
+                target_pin: &exec::sha256_fingerprint(&host_key_sha256),
+                credential: &credential,
+                route: &route,
+                ttl_secs: gated.timeout_secs + CONNECT_BUDGET.as_secs(),
+            });
+            let login_kind = credential.login_kind();
+            let cert_serial = credential.serial.clone();
+            drop(credential);
+            let template = task(login_kind, cert_serial, scrubber, None);
+            let (ctx, opener) = (backend.core.clone(), who.clone());
+            let username = gated.binding.operator.as_ref().map(|o| o.username.clone()).unwrap_or_default();
+            let command = gated.command.clone();
+            // The open, the dial and the exec run in one task, so a request
+            // the MCP endpoint drops still ends the bastion session it opened.
+            let leg = async move {
+                let ticket = bastion::open(ctx.as_ref(), &opener, body, mfa).await?;
+                let session = BastionSessionRef::new(&ticket, route.why);
+                let addrs = match bastion::resolve_listener(&ticket.dial_host, ticket.dial_port).await {
+                    Ok(addrs) => addrs,
+                    Err(refusal) => {
+                        bastion::kill(ctx.as_ref(), &opener, &session).await;
+                        return Err(CallError::Refused(refusal));
+                    }
+                };
+                let spec = BastionExecSpec {
+                    addrs,
+                    host_key_sha256: ticket.host_key_sha256,
+                    username: if username.is_empty() { "bastionvault".into() } else { username },
+                    ticket: ticket.ticket,
+                    command,
+                    connect_budget: CONNECT_BUDGET,
+                    deadline,
+                    output_limit,
+                    drain_limit: DRAIN_LIMIT_BYTES,
+                    transcript_stream_limit: MAX_TRANSCRIPT_STREAM_BYTES,
+                };
+                let task = SessionTask { bastion: Some(session), ..template };
+                task.run_bastion(spec, permit).await.map_err(CallError::Ended)
+            };
+            tokio::spawn(leg).await
+        }
+    };
+    match outcome {
+        Ok(outcome) => outcome,
         Err(e) => Err(CallError::Ended(SessionRefusal::new(
             "mcp_session_failed",
             500,
@@ -398,6 +463,8 @@ struct SessionTask {
     profile_id: String,
     command: String,
     target_label: String,
+    /// The profile's pin on the target, `SHA256:<base64>`.
+    target_pin: String,
     login_kind: &'static str,
     cert_serial: Option<String>,
     scrubber: CredentialScrubber,
@@ -405,8 +472,8 @@ struct SessionTask {
     started_at_ms: u64,
     /// The namespace the session ran in and resolved its credential from.
     namespace: String,
-    /// Held for the life of the session; dropping it frees the slot.
-    _permit: SessionPermit,
+    /// The bastion session, when the call went through one.
+    bastion: Option<BastionSessionRef>,
 }
 
 /// One stream for the transcript: what was kept for it (up to 1 MiB, not
@@ -452,7 +519,9 @@ impl SessionTask {
         }
     }
 
-    async fn run(self, spec: ExecSpec) -> Result<Map<String, Value>, SessionRefusal> {
+    /// `_permit` is held for the life of the session; dropping it frees
+    /// the slot.
+    async fn run(self, spec: ExecSpec, _permit: SessionPermit) -> Result<Map<String, Value>, SessionRefusal> {
         let started = Instant::now();
         let (abort_tx, abort_rx) = watch::channel(None);
         let watcher = tokio::spawn(watch_revocation(self.ctx.clone(), self.env.clone(), self.token.clone(), abort_tx));
@@ -488,6 +557,162 @@ impl SessionTask {
                 self.emit_aborted(AbortCause::ExecutorError).await;
                 Err(SessionRefusal::new("mcp_session_failed", 502, other.to_string()))
             }
+        }
+    }
+
+    /// The bastion leg: redeem the ticket at the bastion's listener, then
+    /// account for the call by Rustion's result contract. Whatever happens
+    /// after the open, the call leaves one exec record naming the bastion
+    /// session, and a session that did not end with a result is ended
+    /// through the bastion's control plane.
+    async fn run_bastion(
+        self,
+        spec: BastionExecSpec,
+        _permit: SessionPermit,
+    ) -> Result<Map<String, Value>, SessionRefusal> {
+        let started = Instant::now();
+        let (abort_tx, abort_rx) = watch::channel(None);
+        let watcher = tokio::spawn(watch_revocation(self.ctx.clone(), self.env.clone(), self.token.clone(), abort_tx));
+        let outcome = exec::run_via_bastion(spec, abort_rx).await;
+        watcher.abort();
+        let duration_ms = started.elapsed().as_millis() as u64;
+        let report = match outcome {
+            Ok(report) => report,
+            Err(error) => return self.bastion_not_run(error, duration_ms).await,
+        };
+        let completed = report.exit_status.is_some() || report.exit_signal.is_some();
+        if !completed {
+            if let Some(session) = &self.bastion {
+                bastion::kill(self.ctx.as_ref(), &self.who, session).await;
+            }
+        }
+        self.finish(report, duration_ms).await
+    }
+
+    /// The bastion leg ended before the command could start, or refused it:
+    /// one exec record (`refused` or `not_run`), the bastion session ended,
+    /// and the answer.
+    async fn bastion_not_run(self, error: ExecError, duration_ms: u64) -> Result<Map<String, Value>, SessionRefusal> {
+        if let Some(session) = &self.bastion {
+            bastion::kill(self.ctx.as_ref(), &self.who, session).await;
+        }
+        let (outcome, reason, refusal) = match &error {
+            ExecError::BastionRefused { reason } => {
+                ("refused", reason.clone(), SessionRefusal::new("mcp_session_failed", 502, error.to_string()))
+            }
+            ExecError::HostKeyMismatch { observed } => {
+                log::warn!(
+                    target: "security",
+                    "connect.agent.ssh bastion listener host key mismatch: resource={} listener={} observed={observed}",
+                    self.resource,
+                    self.bastion.as_ref().map(|b| b.listener.as_str()).unwrap_or_default()
+                );
+                (
+                    "not_run",
+                    Some("listener_host_key_mismatch".to_string()),
+                    SessionRefusal::new(
+                        "mcp_session_host_key_mismatch",
+                        403,
+                        format!(
+                            "the bastion's SSH listener presented host key {observed}, not the one pinned at \
+                             enrolment; the ticket was not sent"
+                        ),
+                    ),
+                )
+            }
+            ExecError::AuthRejected => (
+                "not_run",
+                Some("ticket_refused".to_string()),
+                SessionRefusal::new(
+                    "mcp_session_failed",
+                    502,
+                    "the bastion refused the exec ticket at its SSH listener; nothing ran",
+                ),
+            ),
+            ExecError::Aborted(cause) => ("aborted", Some(cause_str(*cause).to_string()), aborted_refusal(*cause)),
+            ExecError::ConnectTimeout => (
+                "not_run",
+                Some("connect_timeout".to_string()),
+                SessionRefusal::new("mcp_session_timeout", 504, error.to_string()),
+            ),
+            ExecError::BastionNoAnswer => (
+                "failed",
+                Some("no_answer".to_string()),
+                SessionRefusal::new("mcp_session_failed", 502, error.to_string()),
+            ),
+            _ => ("not_run", None, SessionRefusal::new("mcp_session_failed", 502, error.to_string())),
+        };
+        let exec = self.exec_event(None, None, false, 0, 0, false, false, duration_ms, None, String::new());
+        self.emit_bastion_event(exec, String::new(), outcome, reason).await;
+        match &error {
+            ExecError::HostKeyMismatch { .. } => self.emit_refused("mcp_session_host_key_mismatch").await,
+            ExecError::Aborted(cause) => self.emit_aborted(*cause).await,
+            ExecError::ConnectTimeout => self.emit_aborted(AbortCause::Timeout).await,
+            _ => self.emit_aborted(AbortCause::ExecutorError).await,
+        }
+        Err(refusal)
+    }
+
+    /// The direct path's exec record, from what is known of the call.
+    #[allow(clippy::too_many_arguments)]
+    fn exec_event(
+        &self,
+        exit_status: Option<u32>,
+        exit_signal: Option<String>,
+        timed_out: bool,
+        stdout_bytes: u64,
+        stderr_bytes: u64,
+        truncated: bool,
+        credential_echo_redacted: bool,
+        duration_ms: u64,
+        transcript_id: Option<String>,
+        host_key_fingerprint: String,
+    ) -> SshExecEvent {
+        SshExecEvent {
+            session_id: self.session_id.clone(),
+            operator: self.binding.operator.clone(),
+            pairing_id: self.pairing_id(),
+            client_name: self.binding.client_name.clone(),
+            namespace: self.namespace.clone(),
+            binding_reveal_allowed: self.binding.reveal_allowed,
+            resource: self.resource.clone(),
+            profile_id: self.profile_id.clone(),
+            target: self.target_label.clone(),
+            host_key_fingerprint,
+            login: self.login_kind.to_string(),
+            cert_serial: self.cert_serial.clone(),
+            mfa_method: self.mfa_method.clone(),
+            command_hmac: mcp_events::audit_hmac(self.ctx.as_ref(), self.command.as_bytes()),
+            command_bytes: self.command.len() as u64,
+            exit_status,
+            exit_signal,
+            timed_out,
+            stdout_bytes,
+            stderr_bytes,
+            truncated,
+            credential_echo_redacted,
+            duration_ms,
+            transcript_id,
+            operator_confirmation: self.operator_confirmation.clone(),
+        }
+    }
+
+    /// `connect.agent.ssh.exec`, with the bastion block when the call went
+    /// through one.
+    async fn emit_bastion_event(
+        &self,
+        exec: SshExecEvent,
+        listener_key: String,
+        outcome: &'static str,
+        reason: Option<String>,
+    ) {
+        let Some(session) = self.bastion.clone() else { return };
+        let event = BastionSshExecEvent {
+            exec,
+            bastion: BastionRecord { session, listener_host_key_fingerprint: listener_key, outcome, reason },
+        };
+        if let Err(e) = mcp_events::emit(self.ctx.as_ref(), &event, Some(&self.who)).await {
+            log::warn!(target: "security", "connect.agent.ssh.exec could not be written to the audit log: {e}");
         }
     }
 
@@ -528,6 +753,11 @@ impl SessionTask {
     /// events, and answer.
     async fn finish(self, report: ExecReport, duration_ms: u64) -> Result<Map<String, Value>, SessionRefusal> {
         let finished_at_ms = now_ms();
+        // Through a bastion the vault checked the listener's key; the
+        // target's key was checked by the bastion against the profile's pin,
+        // so that pin is what the record names for the target.
+        let target_key =
+            if self.bastion.is_some() { self.target_pin.clone() } else { report.host_key_fingerprint.clone() };
         let out_capture = report.model.stream(STDOUT);
         let err_capture = report.model.stream(STDERR);
         let out = shape_stream(out_capture, &self.scrubber);
@@ -555,7 +785,7 @@ impl SessionTask {
             body: TranscriptBody::Ssh(SshTranscript {
                 command: self.command.clone(),
                 target: self.target_label.clone(),
-                host_key_fingerprint: report.host_key_fingerprint.clone(),
+                host_key_fingerprint: target_key.clone(),
                 login: self.login_kind.to_string(),
                 cert_serial: self.cert_serial.clone(),
                 exit_status: report.exit_status,
@@ -593,34 +823,36 @@ impl SessionTask {
         // Whether the writer found the credential too (it scrubs again).
         let credential_echo_redacted = out.credential_redacted || err.credential_redacted;
 
-        let event = SshExecEvent {
-            session_id: self.session_id.clone(),
-            operator: self.binding.operator.clone(),
-            pairing_id: self.pairing_id(),
-            client_name: self.binding.client_name.clone(),
-            namespace: self.namespace.clone(),
-            binding_reveal_allowed: self.binding.reveal_allowed,
-            resource: self.resource.clone(),
-            profile_id: self.profile_id.clone(),
-            target: self.target_label.clone(),
-            host_key_fingerprint: report.host_key_fingerprint.clone(),
-            login: self.login_kind.to_string(),
-            cert_serial: self.cert_serial.clone(),
-            mfa_method: self.mfa_method.clone(),
-            command_hmac: mcp_events::audit_hmac(self.ctx.as_ref(), self.command.as_bytes()),
-            command_bytes: self.command.len() as u64,
-            exit_status: report.exit_status,
-            exit_signal: report.exit_signal.clone(),
-            timed_out: report.timed_out,
-            stdout_bytes: out.bytes,
-            stderr_bytes: err.bytes,
+        let exec_event = self.exec_event(
+            report.exit_status,
+            report.exit_signal.clone(),
+            report.timed_out,
+            out.bytes,
+            err.bytes,
             truncated,
             credential_echo_redacted,
             duration_ms,
             transcript_id,
-            operator_confirmation: self.operator_confirmation.clone(),
-        };
-        if let Err(e) = mcp_events::emit(self.ctx.as_ref(), &event, Some(&self.who)).await {
+            target_key.clone(),
+        );
+        // Rustion's result contract (`docs/rustion-agent-exec.md` in Rustion):
+        // a result is an exit status or a signal; anything else after the
+        // command started is a failure that may have run, never a success.
+        let bastion_hint = exec::bastion_outcome_hint(&report.transcript[STDERR].bytes);
+        let no_result = report.exit_status.is_none() && report.exit_signal.is_none();
+        if self.bastion.is_some() {
+            let outcome = if report.timed_out {
+                "timed_out"
+            } else if report.aborted.is_some() {
+                "aborted"
+            } else if no_result {
+                "failed"
+            } else {
+                "completed"
+            };
+            let reason = if outcome == "failed" { bastion_hint.clone() } else { None };
+            self.emit_bastion_event(exec_event, report.host_key_fingerprint.clone(), outcome, reason).await;
+        } else if let Err(e) = mcp_events::emit(self.ctx.as_ref(), &exec_event, Some(&self.who)).await {
             log::warn!(target: "security", "connect.agent.ssh.exec could not be written to the audit log: {e}");
         }
         if report.timed_out {
@@ -629,6 +861,18 @@ impl SessionTask {
         if let Some(cause) = report.aborted {
             self.emit_aborted(cause).await;
             return Err(aborted_refusal(cause));
+        }
+        if self.bastion.is_some() && no_result && !report.timed_out {
+            self.emit_aborted(AbortCause::ExecutorError).await;
+            let why = bastion_hint.map(|h| format!(" ({h})")).unwrap_or_default();
+            return Err(SessionRefusal::new(
+                "mcp_session_failed",
+                502,
+                format!(
+                    "the bastion reported no exit status{why}: the command started, or may have, and its result is \
+                     unknown; it is not retried. The bastion's recording has what ran"
+                ),
+            ));
         }
 
         let mut data = Map::new();
@@ -646,8 +890,27 @@ impl SessionTask {
         data.insert("binary_output".into(), Value::Bool(binary));
         data.insert("credential_echo_redacted".into(), Value::Bool(credential_echo_redacted));
         data.insert("duration_ms".into(), Value::from(duration_ms));
-        data.insert("host_key_fingerprint".into(), Value::String(report.host_key_fingerprint.clone()));
+        data.insert("host_key_fingerprint".into(), Value::String(target_key));
         data.insert("login".into(), Value::String(self.login_kind.to_string()));
+        if let Some(signal) = &report.exit_signal {
+            data.insert("outcome".into(), Value::String(format!("killed by SIG{signal}")));
+        } else if let Some(status) = report.exit_status {
+            data.insert("outcome".into(), Value::String(format!("exit status {status}")));
+        }
+        match &self.bastion {
+            None => {
+                data.insert("route".into(), Value::String("direct".into()));
+            }
+            Some(session) => {
+                data.insert("route".into(), Value::String("bastion".into()));
+                let mut b = Map::new();
+                b.insert("name".into(), Value::String(session.bastion_name.clone()));
+                b.insert("session_id".into(), Value::String(session.session_id.clone()));
+                b.insert("recording_id".into(), Value::String(session.recording_id.clone()));
+                b.insert("listener_host_key_fingerprint".into(), Value::String(report.host_key_fingerprint.clone()));
+                data.insert("bastion".into(), Value::Object(b));
+            }
+        }
         Ok(data)
     }
 }

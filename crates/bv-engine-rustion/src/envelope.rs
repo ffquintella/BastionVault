@@ -118,9 +118,84 @@ fn build_credential_extra(credential: &CredentialMaterial) -> Option<ciborium::v
     None
 }
 
-/// Build an `open` envelope. Phase 3 calls this once the operator's
-/// credential source has been resolved and the dispatcher has picked
-/// the destination Rustion target.
+/// Longest command an `exec` open may seal (Rustion
+/// `docs/rustion-agent-exec.md` § Envelope; 4 KiB so a command plus a
+/// password credential still fits the frozen 16 KiB envelope).
+pub const MAX_EXEC_COMMAND_BYTES: usize = 4096;
+
+/// What an `open` envelope asks the bastion to start
+/// (`features/rustion-agent-exec.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenKind<'a> {
+    /// A shell or desktop. Seals neither `kind` nor `command`, so the
+    /// envelope is byte-for-byte what earlier releases built.
+    Interactive,
+    /// One operator-confirmed command, bound into the sealed payload.
+    Exec { command: &'a str },
+}
+
+/// Why an `open` envelope was not built. Every variant is decided before
+/// anything is posted.
+#[derive(Debug, thiserror::Error)]
+pub enum OpenEnvelopeError {
+    /// The exec form breaks one of the bastion's open rules. `code` and
+    /// `detail` are Rustion's own (`exec_command_invalid` /
+    /// `command_too_long`, …), so the vault refuses with the answer the
+    /// bastion would have given, without the round trip.
+    #[error("{code}: {detail}")]
+    ExecForm { code: &'static str, detail: &'static str },
+    /// The sealed envelope would exceed [`bv_crypto::MAX_ENVELOPE_BYTES`];
+    /// the bastion refuses it before decrypting, so it is never posted.
+    #[error(
+        "envelope_too_large: the sealed open envelope exceeds the bastion's {} byte limit; the command plus the \
+         credential is too long (shorten the command)",
+        bv_crypto::MAX_ENVELOPE_BYTES
+    )]
+    TooLarge,
+    #[error(transparent)]
+    Bvrg(BvrgError),
+}
+
+impl From<BvrgError> for OpenEnvelopeError {
+    fn from(e: BvrgError) -> Self {
+        match e {
+            // Both caps are size caps on what would be sent: the payload's
+            // inner budget and the frame's.
+            BvrgError::EnvelopeTooLong | BvrgError::PayloadTooLong => Self::TooLarge,
+            other => Self::Bvrg(other),
+        }
+    }
+}
+
+/// The bastion's open rules for the exec form, checked before anything is
+/// sealed: a command of 1-4096 UTF-8 bytes that is not all whitespace and
+/// has no NUL, an SSH target, and a non-empty host-key pin (an exec has no
+/// operator to judge a trust-on-first-use prompt).
+pub fn validate_exec_form(command: &str, protocol: &str, hostkey_pin: Option<&str>) -> Result<(), OpenEnvelopeError> {
+    let invalid = |detail| OpenEnvelopeError::ExecForm { code: "exec_command_invalid", detail };
+    if command.trim().is_empty() {
+        return Err(invalid("command_empty"));
+    }
+    if command.len() > MAX_EXEC_COMMAND_BYTES {
+        return Err(invalid("command_too_long"));
+    }
+    if command.contains('\0') {
+        return Err(invalid("command_contains_nul"));
+    }
+    if protocol != "ssh" {
+        return Err(OpenEnvelopeError::ExecForm { code: "exec_protocol_unsupported", detail: "exec_requires_ssh" });
+    }
+    if hostkey_pin.map(str::trim).is_none_or(str::is_empty) {
+        return Err(OpenEnvelopeError::ExecForm { code: "exec_hostkey_pin_required", detail: "hostkey_pin_required" });
+    }
+    Ok(())
+}
+
+/// Build an `open` envelope once the credential is resolved and the
+/// dispatcher has picked the Rustion target. [`OpenKind::Exec`] seals
+/// `kind = "exec"` and the command (after [`validate_exec_form`]); an
+/// envelope past the bastion's cap is [`OpenEnvelopeError::TooLarge`].
+#[allow(clippy::too_many_arguments)]
 pub fn build_open(
     master: &BvrgMasterSigningKey,
     target: &RustionTarget,
@@ -133,7 +208,15 @@ pub fn build_open(
     ttl_secs: u32,
     max_renewals: u8,
     recording: &str,
-) -> Result<BuiltEnvelope, BvrgError> {
+    kind: OpenKind<'_>,
+) -> Result<BuiltEnvelope, OpenEnvelopeError> {
+    let (kind, command) = match kind {
+        OpenKind::Interactive => (None, None),
+        OpenKind::Exec { command } => {
+            validate_exec_form(command, op_target_protocol, op_target_hostkey_pin.as_deref())?;
+            (Some("exec".to_string()), Some(command.to_string()))
+        }
+    };
     let nonce = bvrg::fresh_nonce();
     let correlation_id = Uuid::new_v4().to_string();
     let issued_at = bvrg::unix_now();
@@ -175,10 +258,18 @@ pub fn build_open(
             deployment_id: operator.deployment_id.clone(),
         },
         correlation_id: correlation_id.clone(),
+        kind,
+        command,
     };
 
     let rustion_pub = resolve_kem_pubkey(target)?;
     let bytes = bvrg::build(&payload, master, &rustion_pub)?;
+    // `build` already refuses past the cap; checked again here, where the
+    // bytes are handed out to be posted, so no later change to the builder
+    // can send the bastion an envelope it would only refuse.
+    if bytes.len() > bv_crypto::MAX_ENVELOPE_BYTES {
+        return Err(OpenEnvelopeError::TooLarge);
+    }
     let fingerprint = envelope_fingerprint(&bytes)?;
     Ok(BuiltEnvelope { bytes, fingerprint, nonce, correlation_id })
 }
@@ -212,6 +303,8 @@ pub fn build_renew(
             deployment_id: operator.deployment_id.clone(),
         },
         correlation_id: correlation_id.to_string(),
+        kind: None,
+        command: None,
     };
 
     let rustion_pub = resolve_kem_pubkey(target)?;
@@ -248,6 +341,8 @@ pub fn build_kill(
             deployment_id: operator.deployment_id.clone(),
         },
         correlation_id: correlation_id.to_string(),
+        kind: None,
+        command: None,
     };
 
     let rustion_pub = resolve_kem_pubkey(target)?;
@@ -287,6 +382,8 @@ pub fn build_deenrol(
             deployment_id: operator.deployment_id.clone(),
         },
         correlation_id: correlation_id.clone(),
+        kind: None,
+        command: None,
     };
 
     let rustion_pub = resolve_kem_pubkey(target)?;
@@ -327,6 +424,8 @@ pub fn build_attest(
             deployment_id: operator.deployment_id.clone(),
         },
         correlation_id: correlation_id.clone(),
+        kind: None,
+        command: None,
     };
 
     let rustion_pub = resolve_kem_pubkey(target)?;
@@ -506,6 +605,7 @@ mod tests {
             3600,
             3,
             "always",
+            OpenKind::Interactive,
         )
         .expect("build_open");
 
@@ -546,6 +646,7 @@ mod tests {
             900,
             0,
             "always",
+            OpenKind::Interactive,
         )
         .expect("build_open ssh-cert");
 
@@ -601,6 +702,7 @@ mod tests {
             900,
             0,
             "always",
+            OpenKind::Interactive,
         )
         .expect("build_open");
 
@@ -632,6 +734,128 @@ mod tests {
             .and_then(|(_, v)| v.as_text())
             .expect("domain in extra");
         assert_eq!(domain, "CORP");
+    }
+
+    const PIN: &str = "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU";
+
+    fn password(material: &[u8]) -> CredentialMaterial {
+        CredentialMaterial {
+            kind: "ssh-password".into(),
+            username: "ops".into(),
+            material: material.to_vec(),
+            cert: None,
+            rdp_cert: None,
+        }
+    }
+
+    fn open_exec(
+        master: &BvrgMasterSigningKey,
+        target: &RustionTarget,
+        protocol: &str,
+        pin: Option<&str>,
+        credential: CredentialMaterial,
+        command: &str,
+    ) -> Result<BuiltEnvelope, OpenEnvelopeError> {
+        build_open(
+            master,
+            target,
+            &op_ctx(),
+            "web-01.internal",
+            22,
+            protocol,
+            pin.map(str::to_string),
+            credential,
+            90,
+            0,
+            "always",
+            OpenKind::Exec { command },
+        )
+    }
+
+    /// T483: the exec form seals `kind = "exec"` and exactly the confirmed
+    /// command bytes; an interactive open seals neither.
+    #[test]
+    fn build_open_exec_seals_the_command_byte_for_byte() {
+        let master = BvrgMasterSigningKey::generate().unwrap();
+        let kp = MlKem768Provider.generate_keypair().unwrap();
+        let target = synthetic_target_with_kem_pub(kp.public_key());
+        let command = "journalctl -u nginx -n 20 --no-pager | grep -v 'ok' ; echo \"é ✓\"";
+        let built = open_exec(&master, &target, "ssh", Some(PIN), password(b"pw"), command).unwrap();
+        let verified = bvrg::verify(&built.bytes, &master.public_key(), kp.secret_key()).unwrap();
+        assert_eq!(verified.payload.kind.as_deref(), Some("exec"));
+        assert_eq!(verified.payload.command.as_deref().map(str::as_bytes), Some(command.as_bytes()));
+        assert_eq!(verified.payload.target.unwrap().hostkey_pin.as_deref(), Some(PIN));
+
+        let interactive = build_open(
+            &master,
+            &target,
+            &op_ctx(),
+            "web-01.internal",
+            22,
+            "ssh",
+            None,
+            password(b"pw"),
+            90,
+            0,
+            "always",
+            OpenKind::Interactive,
+        )
+        .unwrap();
+        let verified = bvrg::verify(&interactive.bytes, &master.public_key(), kp.secret_key()).unwrap();
+        assert_eq!((verified.payload.kind, verified.payload.command), (None, None));
+    }
+
+    /// The bastion's open rules are applied before anything is sealed, with
+    /// the bastion's own codes.
+    #[test]
+    fn build_open_exec_refuses_what_the_bastion_would_refuse() {
+        let master = BvrgMasterSigningKey::generate().unwrap();
+        let kp = MlKem768Provider.generate_keypair().unwrap();
+        let target = synthetic_target_with_kem_pub(kp.public_key());
+        let refused = |protocol: &str, pin: Option<&str>, command: &str| match open_exec(
+            &master,
+            &target,
+            protocol,
+            pin,
+            password(b"pw"),
+            command,
+        ) {
+            Err(OpenEnvelopeError::ExecForm { code, detail }) => (code, detail),
+            Err(other) => panic!("expected an exec-form refusal, got {other}"),
+            Ok(_) => panic!("expected an exec-form refusal for {command:?}"),
+        };
+        assert_eq!(refused("ssh", Some(PIN), ""), ("exec_command_invalid", "command_empty"));
+        assert_eq!(refused("ssh", Some(PIN), " \t\n"), ("exec_command_invalid", "command_empty"));
+        assert_eq!(refused("ssh", Some(PIN), "id\0x"), ("exec_command_invalid", "command_contains_nul"));
+        let long = "x".repeat(MAX_EXEC_COMMAND_BYTES + 1);
+        assert_eq!(refused("ssh", Some(PIN), &long), ("exec_command_invalid", "command_too_long"));
+        assert_eq!(refused("rdp", Some(PIN), "id"), ("exec_protocol_unsupported", "exec_requires_ssh"));
+        assert_eq!(refused("ssh", None, "id"), ("exec_hostkey_pin_required", "hostkey_pin_required"));
+        assert_eq!(refused("ssh", Some("  "), "id"), ("exec_hostkey_pin_required", "hostkey_pin_required"));
+        // The limit is inclusive.
+        assert!(open_exec(&master, &target, "ssh", Some(PIN), password(b"pw"), &"x".repeat(4096)).is_ok());
+    }
+
+    /// An envelope past the bastion's 16 KiB cap is refused here as
+    /// `envelope_too_large`, never posted to be refused there: a 4 KiB
+    /// command with a large credential does not fit.
+    #[test]
+    fn build_open_exec_refuses_an_envelope_past_the_cap() {
+        let master = BvrgMasterSigningKey::generate().unwrap();
+        let kp = MlKem768Provider.generate_keypair().unwrap();
+        let target = synthetic_target_with_kem_pub(kp.public_key());
+        let command = "y".repeat(MAX_EXEC_COMMAND_BYTES);
+        let big_key = vec![b'k'; 5 * 1024];
+        match open_exec(&master, &target, "ssh", Some(PIN), password(&big_key), &command) {
+            Err(e @ OpenEnvelopeError::TooLarge) => {
+                assert!(e.to_string().starts_with("envelope_too_large: "), "{e}")
+            }
+            Err(other) => panic!("expected envelope_too_large, got {other}"),
+            Ok(built) => panic!("built a {} byte envelope past the cap", built.bytes.len()),
+        }
+        // A short command with the same credential fits.
+        let built = open_exec(&master, &target, "ssh", Some(PIN), password(b"pw"), "uptime").unwrap();
+        assert!(built.bytes.len() <= bv_crypto::MAX_ENVELOPE_BYTES);
     }
 
     #[test]

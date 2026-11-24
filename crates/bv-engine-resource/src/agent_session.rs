@@ -252,6 +252,72 @@ pub(crate) fn check_timeout(req: &Request, settings: &BrokeredSessionSettings) -
     }
 }
 
+/// Where an agent's session goes (step 7, `features/rustion-agent-exec.md`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    not(all(any(feature = "mcp_sessions_ssh", feature = "mcp_sessions_web"), not(feature = "sync_handler"))),
+    allow(dead_code)
+)]
+pub(crate) enum TransportRoute {
+    /// The vault dials the target itself.
+    Direct,
+    /// Through a Rustion bastion, which dials the target, records the
+    /// session and enforces its own policy.
+    Bastion(BastionRoute),
+}
+
+/// Why a session goes through a bastion, and the resolver hints the
+/// bastion open re-resolves the policy from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    not(all(any(feature = "mcp_sessions_ssh", feature = "mcp_sessions_web"), not(feature = "sync_handler"))),
+    allow(dead_code)
+)]
+pub(crate) struct BastionRoute {
+    /// `profile` (a `rustion` profile), `rustion-required` or
+    /// `rustion-preferred`.
+    pub why: &'static str,
+    pub resource_type: Option<String>,
+    pub asset_group_ids: Vec<String>,
+}
+
+/// The routing rule of step 7: `None` is direct, `Some(why)` through a
+/// bastion, `Err` a refusal. A `rustion` profile and `rustion-required`
+/// always take the bastion; `rustion-preferred` does whenever the policy
+/// names one and then never falls back to direct (decision 2 of
+/// `features/rustion-agent-exec.md`: a bastion outage must not take the
+/// recording off an agent's command); an unknown transport is refused.
+#[cfg_attr(
+    not(all(any(feature = "mcp_sessions_ssh", feature = "mcp_sessions_web"), not(feature = "sync_handler"))),
+    allow(dead_code)
+)]
+pub(crate) fn decide_route(
+    profile_is_rustion: bool,
+    rustion_mounted: bool,
+    transport: Option<&str>,
+    has_bastion: bool,
+) -> Result<Option<&'static str>, String> {
+    match (profile_is_rustion, rustion_mounted) {
+        (true, false) => Err("this profile routes through a Rustion bastion and this server has no Rustion engine \
+                              mounted; an agent session is never dialed direct instead"
+            .into()),
+        (true, true) => Ok(Some("profile")),
+        (false, false) => Ok(None),
+        (false, true) => match transport {
+            Some("rustion-required") => Ok(Some("rustion-required")),
+            Some("rustion-preferred") if has_bastion => Ok(Some("rustion-preferred")),
+            Some("rustion-preferred") | Some("direct") => Ok(None),
+            Some(other) => Err(format!(
+                "the resource's transport policy `{}` is not one this server knows; refusing rather than guessing",
+                crate::kernel_api::mcp_events::bounded_arg(other)
+            )),
+            None => {
+                Err("the Rustion transport policy answered without a transport; refusing rather than guessing".into())
+            }
+        },
+    }
+}
+
 #[cfg(all(any(feature = "mcp_sessions_ssh", feature = "mcp_sessions_web"), not(feature = "sync_handler")))]
 pub(crate) use executor::*;
 
@@ -274,7 +340,7 @@ mod executor {
     use serde_json::{Map, Value};
     use tokio::{sync::watch, time::MissedTickBehavior};
 
-    use super::{CallError, SessionRefusal, REVALIDATE_EVERY};
+    use super::{decide_route, BastionRoute, CallError, SessionRefusal, TransportRoute, REVALIDATE_EVERY};
     use crate::{
         agent_limits::{SessionLimiter, SessionLimits},
         connect_mfa::{caller_namespace, ConnectMfaTicketStore, McpCallBinding, TicketBinding},
@@ -348,7 +414,7 @@ mod executor {
     ///   tool, resource, profile, pairing or operator burns the ticket and is
     ///   refused.
     ///
-    /// Runs before any credential is resolved. Returns the factor proved.
+    /// Runs before any credential is resolved. Returns the redeemed record.
     pub async fn redeem_agent_ticket(
         backend: &ResourceBackendInner,
         req: &Request,
@@ -356,7 +422,7 @@ mod executor {
         resource: &str,
         profile_id: &str,
         tool: &str,
-    ) -> Result<String, CallError> {
+    ) -> Result<crate::connect_mfa::ConnectMfaTicket, CallError> {
         let Some(operator) = userpass_operator(binding) else {
             return Err(refused(
                 "mcp_session_mfa_unavailable",
@@ -433,37 +499,38 @@ mod executor {
             record.principal,
             record.method
         );
-        Ok(record.method)
+        Ok(record)
     }
 
-    /// Step 7: a session must not bypass a bastion. A `rustion` profile, a
+    /// Step 7: which route the session takes, and a session never bypasses
+    /// a bastion (`features/rustion-agent-exec.md`). A `rustion` profile, a
     /// `rustion-required` transport policy, and `rustion-preferred` with a
-    /// bastion available all route through Rustion, which cannot run an
-    /// agent's session, so they are refused rather than dialed direct. An
-    /// unresolvable policy is refused too: guessing "direct" is how a lock
-    /// gets bypassed.
+    /// bastion available all route through Rustion; an unresolvable policy
+    /// is refused: guessing "direct" is how a lock gets bypassed. A route
+    /// that cannot take an agent session (the web tool) refuses
+    /// [`TransportRoute::Bastion`] itself.
     pub async fn check_transport(
         backend: &ResourceBackendInner,
         req: &Request,
         resource: &str,
         meta: &Map<String, Value>,
         profile: &Value,
-    ) -> Result<(), CallError> {
+    ) -> Result<TransportRoute, CallError> {
         let bastion = |m: String| refused("mcp_session_requires_bastion", 403, m);
-        if str_field(profile, "kind") == Some("rustion") {
-            return Err(bastion(
-                "this profile routes through a Rustion bastion, which cannot run an agent's session".into(),
-            ));
-        }
+        let profile_is_rustion = str_field(profile, "kind") == Some("rustion");
         let path = "rustion/policy/effective";
         let router = backend.core.router();
-        if router
+        let mounted = router
             .matching_mount(path)
             .map_err(|e| bastion(format!("the transport policy could not be resolved: {e}")))?
-            != "rustion/"
-        {
-            // No Rustion engine mounted: direct is the only transport there is.
-            return Ok(());
+            == "rustion/";
+        if !mounted {
+            // No Rustion engine mounted: direct is the only transport there
+            // is, unless the profile itself names a bastion.
+            return match decide_route(profile_is_rustion, false, None, false).map_err(bastion)? {
+                None => Ok(TransportRoute::Direct),
+                Some(_) => Err(bastion("no Rustion engine is mounted to route this session through".into())),
+            };
         }
         let groups = match backend.core.resource_groups() {
             Some(index) => index
@@ -472,13 +539,14 @@ mod executor {
                 .map_err(|e| bastion(format!("the resource's asset groups could not be read: {e}")))?,
             None => Vec::new(),
         };
+        let resource_type = meta.get("type").and_then(Value::as_str).filter(|t| !t.is_empty()).map(str::to_string);
         let mut body = Map::new();
         body.insert("resource_id".into(), Value::String(resource.to_string()));
-        if let Some(t) = meta.get("type").and_then(Value::as_str).filter(|t| !t.is_empty()) {
-            body.insert("resource_type".into(), Value::String(t.to_string()));
+        if let Some(t) = &resource_type {
+            body.insert("resource_type".into(), Value::String(t.clone()));
         }
         if !groups.is_empty() {
-            body.insert("asset_group_ids".into(), Value::Array(groups.into_iter().map(Value::String).collect()));
+            body.insert("asset_group_ids".into(), Value::Array(groups.iter().cloned().map(Value::String).collect()));
         }
         let mut sub = Request::new_write_request(path, Some(body));
         sub.operation = crate::logical::Operation::Write;
@@ -494,19 +562,12 @@ mod executor {
             })?
             .and_then(|r| r.data)
             .unwrap_or_default();
-        let transport = data.get("transport").and_then(Value::as_str).unwrap_or_default();
+        let transport = data.get("transport").and_then(Value::as_str);
         let has_bastion = data.get("bastions").and_then(Value::as_array).is_some_and(|b| !b.is_empty());
-        match transport {
-            "rustion-required" => Err(bastion(
-                "the resource's transport policy is rustion-required; agent sessions are never dialed direct".into(),
-            )),
-            "rustion-preferred" if has_bastion => Err(bastion(
-                "the resource's transport policy prefers a Rustion bastion and one is configured; agent sessions \
-                 are not downgraded to direct"
-                    .into(),
-            )),
-            _ => Ok(()),
-        }
+        Ok(match decide_route(profile_is_rustion, true, transport, has_bastion).map_err(bastion)? {
+            None => TransportRoute::Direct,
+            Some(why) => TransportRoute::Bastion(BastionRoute { why, resource_type, asset_group_ids: groups }),
+        })
     }
 
     /// The destination policy in force for this call: the runtime (or
@@ -710,6 +771,33 @@ mod tests {
         let mut half = request(Some(pairing()), true, true);
         half.mcp_audit.as_mut().unwrap().operator_confirmation = None;
         assert_eq!(code(check_dispatch_and_binding(&half)), "mcp_confirmation_required");
+    }
+
+    /// Every transport policy yields its route, and nothing that names a
+    /// bastion is ever read as direct (T483).
+    #[test]
+    fn each_transport_policy_yields_its_route() {
+        let route = |rustion: bool, mounted: bool, transport: Option<&str>, has: bool| {
+            decide_route(rustion, mounted, transport, has)
+        };
+        // No Rustion engine: direct, unless the profile names a bastion.
+        assert_eq!(route(false, false, None, false), Ok(None));
+        assert!(route(true, false, None, false).unwrap_err().contains("never dialed direct"));
+        // A `rustion` profile goes through the bastion whatever the policy.
+        for t in [Some("direct"), Some("rustion-preferred"), Some("rustion-required"), None] {
+            assert_eq!(route(true, true, t, false), Ok(Some("profile")), "{t:?}");
+        }
+        // rustion-required: always the bastion, with or without one named
+        // (the open then fails closed when none is reachable).
+        assert_eq!(route(false, true, Some("rustion-required"), true), Ok(Some("rustion-required")));
+        assert_eq!(route(false, true, Some("rustion-required"), false), Ok(Some("rustion-required")));
+        // rustion-preferred: the bastion when one is named, else direct.
+        assert_eq!(route(false, true, Some("rustion-preferred"), true), Ok(Some("rustion-preferred")));
+        assert_eq!(route(false, true, Some("rustion-preferred"), false), Ok(None));
+        assert_eq!(route(false, true, Some("direct"), true), Ok(None));
+        // Unresolvable: refused, never guessed.
+        assert!(route(false, true, None, true).is_err());
+        assert!(route(false, true, Some("rustion-sometimes"), true).unwrap_err().contains("rustion-sometimes"));
     }
 
     #[test]

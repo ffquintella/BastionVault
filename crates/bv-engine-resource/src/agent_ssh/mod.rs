@@ -23,8 +23,8 @@
 //!    relayed by the gatekeeper and redeemed once (`mcp_session_mfa_required`
 //!    without one, `mcp_session_mfa_ticket_refused` for one bound to anything
 //!    else, `mcp_session_mfa_unavailable` for a non-userpass operator);
-//! 7. no bastion route is bypassed: a `rustion` profile, a
-//!    `rustion-required` policy, or `rustion-preferred` with a bastion;
+//! 7. the route, checked before 6: a `rustion` profile, `rustion-required`
+//!    or `rustion-preferred` with a bastion go through Rustion, never direct;
 //! 8. the rate and concurrency limits;
 //! 9. the destination policy on every resolved address.
 //!
@@ -51,6 +51,8 @@ use crate::{
     logical::{Backend, McpBinding, Request, Response},
 };
 
+#[cfg(all(feature = "mcp_sessions_ssh", not(feature = "sync_handler")))]
+mod bastion;
 #[cfg(all(feature = "mcp_sessions_ssh", not(feature = "sync_handler")))]
 pub mod exec;
 #[cfg(all(feature = "mcp_sessions_ssh", not(feature = "sync_handler")))]

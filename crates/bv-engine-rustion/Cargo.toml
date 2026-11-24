@@ -68,3 +68,10 @@ type_complexity = "allow"
 # tests stayed with the code instead of moving to the root crate.
 bv-storage = { path = "../bv-storage", version = "0.41.0", registry = "uox-bastionvault", features = ["test-support"] }
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros"] }
+# The exec-form tests of `session::open_on_candidates` (T483) post to an
+# in-process HTTPS stand-in for a bastion's control plane: rcgen mints its
+# certificate (pinned on the synthetic target), tokio-rustls terminates TLS.
+# Same versions and features as bv-engine-resource's dev-dependencies, so
+# they add no crate and no feature variant to the graph.
+rcgen = "0.14"
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs"] }

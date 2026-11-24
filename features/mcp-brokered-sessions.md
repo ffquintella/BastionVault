@@ -135,7 +135,9 @@ record of that decision and of what replaces the old guarantee. Plainly:
   With no operator reachable, the call is refused
   (`crates/bv-mcp/src/local/server.rs:508-514`). This is permanent (§9).
 - **Bypassing a bastion.** A profile whose effective transport is
-  `rustion-required` is refused, not silently dialed direct (§5.6).
+  `rustion-required` is never dialed direct (§5.6): SSH runs through the
+  bastion since T483 ([rustion-agent-exec.md](rustion-agent-exec.md)), and
+  anything the bastion cannot take is refused.
 - **Bypassing MFA.**
   - A `require_mfa` profile needs a step-up the **operator** completes. It
     yields a ticket bound to the operator principal, the resource, the
@@ -307,8 +309,9 @@ this design reuses or must work around:
     (`mint_brokered_ssh_cert`, `:2486-2543`);
   - seals both for the bastion (`brokered_session_open`, `:1784-2149`).
 
-  Rustion records asciicast. Its exec request is a **no-op**
-  (`tests/e2e/rustion-ssh/run.sh:292-300`).
+  Rustion records asciicast. Its exec request was a **no-op**
+  (`tests/e2e/rustion-ssh/run.sh:292-300`) until Rustion 0.20.0, which runs
+  one sealed command per exec ticket (T483).
 - **Server-side SSH exists, but not for Connect:**
   - The files engine pushes over SFTP/SCP with russh from the vault process
     (`crates/bv-engine-files/src/ssh_sync.rs`).
@@ -409,8 +412,8 @@ this design reuses or must work around:
 - **SSH credential sources other than `ssh-engine` certificates, `secret`
   passwords and `secret` stored keys:** `ldap`, `pki`, `fido2`,
   `default-account`, `provider` (§5.2).
-- **Rustion-routed agent sessions**, until Rustion supports `exec` and an
-  agent RDP mode (cross-repo).
+- **Rustion-routed agent RDP and web sessions** (cross-repo). Rustion-routed
+  SSH exec is built (T483, [rustion-agent-exec.md](rustion-agent-exec.md)).
 - **Web `form` and `sso` login modes.** They need a browser engine; the routes
   are T106 (proxy) and T97 (Rustion browser isolation).
 - **A desktop-app fallback for RDP** (Decided 2026-10-14 by the owner, §7.1).
@@ -532,9 +535,10 @@ In order; each step fails closed with a stable `data.code`:
       - `mcp_session_mfa_unavailable` when the binding's operator is not a
         userpass principal;
       - the existing ticket errors otherwise.
-   7. The effective transport is not `rustion-required`. Refused:
-      `mcp_session_requires_bastion`. `rustion-preferred` with a bastion
-      available is also refused, not downgraded to direct.
+   7. The route. `rustion-required`, `rustion-preferred` with a bastion
+      and a `rustion` profile go through the bastion for SSH (T483) and are
+      refused for web, never downgraded to direct; an unresolvable policy
+      is refused (`mcp_session_requires_bastion`). Checked before step 6.
    8. Protocol-specific profile checks (§§5.2, 6.2, 7.2).
    9. Rate limit and concurrency (§11). Refused: `mcp_rate_limited` /
       `mcp_session_busy`.
@@ -837,7 +841,7 @@ See §8. Specific to SSH:
 
 | Situation | Refusal | Reason |
 |---|---|---|
-| Effective transport `rustion-required` | `mcp_session_requires_bastion` | Rustion's exec is a no-op (`tests/e2e/rustion-ssh/run.sh:294-297`); dialing direct would bypass the transport policy |
+| Effective transport `rustion-required`, and no bastion can take the exec (none available, none advertises `ssh_exec`, or the open failed) | `mcp_session_requires_bastion` | Dialing direct would bypass the transport policy (T483 routes the exec through the bastion when one can) |
 | Unsupported credential source | `mcp_session_login_class_unsupported` | §5.2 |
 | Unpinned host key | `mcp_session_host_key_unpinned` | §5.2 |
 | Target address not allowed | `mcp_session_destination_refused` | §11 |

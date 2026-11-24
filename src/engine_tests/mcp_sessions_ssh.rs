@@ -698,6 +698,36 @@ mod mod_test {
         }
     }
 
+    /// T483: a transport that routes through Rustion is never dialed direct.
+    /// With no bastion able to take the session, `rustion-required` and
+    /// `rustion-preferred` naming a bastion refuse with
+    /// `mcp_session_requires_bastion` and the target sees nothing;
+    /// `rustion-preferred` naming none stays direct.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_ssh_exec_bastion_routes_never_dial_direct() {
+        let rig = Rig::new("ssh_exec_bastion_route").await;
+        let policy = |body: Value| {
+            test_write_api(rig.core.as_ref(), &rig.root, "rustion/policy/resource/web-01", true, obj(body))
+        };
+        policy(json!({ "transport": "rustion-required" })).await.unwrap();
+        let refused = rig.call("uptime").await;
+        assert_eq!(code(&refused), "mcp_session_requires_bastion", "{refused}");
+        assert!(refused["error"]["message"].as_str().unwrap().contains("not dialed direct"), "{refused}");
+        policy(json!({ "transport": "rustion-preferred", "bastions": ["rt_gone"] })).await.unwrap();
+        assert_eq!(code(&rig.call("uptime").await), "mcp_session_requires_bastion");
+        assert!(rig.server.events().is_empty(), "never dialed direct: {:?}", rig.server.events());
+        assert!(rig.transcripts().await.is_empty());
+        let reasons: Vec<Value> =
+            events(&rig.audit_log, "connect.agent.refused").iter().map(|e| e["reason"].clone()).collect();
+        assert_eq!(reasons, vec![json!("mcp_session_requires_bastion"); 2], "{reasons:?}");
+
+        policy(json!({ "transport": "rustion-preferred" })).await.unwrap();
+        let answer = rig.call("uptime").await;
+        let sc = structured(&answer);
+        assert_eq!((sc["exit_status"].clone(), sc["route"].clone()), (json!(0), json!("direct")));
+        assert_eq!(count(&rig.server.events(), "exec:"), 1);
+    }
+
     /// The pin is checked before authentication: a mismatch is refused and
     /// the password never reaches the host.
     #[tokio::test(flavor = "multi_thread")]

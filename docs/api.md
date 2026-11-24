@@ -1434,6 +1434,33 @@ kinds are resolved server-side; `provider` takes `provider_account_id` (see
 *Credential providers at Connect* below). v1 `POST /v1/rustion/session/open`
 (raw `credential_material`) is unchanged.
 
+**Exec form (T483, [rustion-agent-exec](../features/rustion-agent-exec.md)).**
+`"kind": "exec"` with `"command": "<1-4096 bytes, no NUL>"` asks for a ticket
+that runs exactly that command once. It needs `"target_protocol": "ssh"` and a
+`target_hostkey_pin`; the command is sealed into the BVRG-v1 envelope next to
+the credential, recording is forced to `always` and `max_renewals` to `0`, and
+the ticket is not bound to the caller's address (the vault, not the caller's
+machine, redeems it). An `ssh-engine` (`ca`) source is minted with
+`force-command=<command>`, at most 60 s, and must carry no extension.
+Only bastions that list `ssh_exec` in `capabilities` on
+`GET /v1/authorities/self` and carry an SSH listener pin are tried; a bastion
+that answers the open without `"kind": "exec"` has its session ended with a
+`kill` envelope. Refusals: `400 exec_kind_invalid`, `400 exec_command_invalid`
+(`command_empty`, `command_too_long`, `command_contains_nul`,
+`command_without_exec_kind`, `command_not_text`), `400
+exec_protocol_unsupported`, `400 exec_hostkey_pin_required`, `400
+envelope_too_large` (the sealed envelope would pass the bastion's 16384-byte
+cap; nothing is posted), `409 exec_unsupported` (no candidate advertises
+`ssh_exec`, has a listener pin, or answered the capability read), `502
+exec_kind_not_echoed`, `422 exec_certificate_refused`. The `201` adds:
+
+~~~json
+{ "kind": "exec", "ssh_dial_host": "bastion-1.internal", "ssh_dial_port": 2222,
+  "ssh_host_key_pin": "SHA256:…", "credential_kind": "ssh-password" }
+~~~
+
+`kind` is not accepted on v1, which is frozen.
+
 ### SQL privileges (policy and share vocabulary)
 
 Eleven capabilities grant SQL privileges on a database resource for the SQL
@@ -4119,7 +4146,7 @@ passes:
 | The connect gate on `resources/secrets/<resource>/` | `403 permission denied` (`reason: permission_denied`) |
 | Type `agent_sessions_max` and profile `agent_access` both `"allow"`; an SSH profile with a supported source and a host-key pin | `mcp_session_profile_not_agent_enabled`, `mcp_session_login_class_unsupported`, `mcp_session_host_key_unpinned` |
 | An MFA-gated profile (`require_mfa`) carries the operator's ticket for this exact call, redeemed once | `mcp_session_mfa_required` (no ticket); `mcp_session_mfa_ticket_refused` (unknown, spent, expired, a human ticket, or bound to another operator, resource, profile, pairing, tool or arguments hash — the ticket is burnt); `mcp_session_mfa_unavailable` (the pairing's operator is not a userpass user, or signed in to another namespace than the call runs in) |
-| No bastion route: a `rustion` profile, a `rustion-required` policy, or `rustion-preferred` with a bastion | `mcp_session_requires_bastion` |
+| The route (checked before MFA, so it never costs a ticket): a `rustion` profile, a `rustion-required` policy, or `rustion-preferred` with a bastion go **through Rustion** (below), never direct; an unresolvable policy is refused | `mcp_session_requires_bastion` |
 | Rate (per pairing per minute) and concurrency (one per pairing, `max_concurrent` per node) | `mcp_rate_limited`, `mcp_session_busy` |
 | Destination policy on every resolved address of the target | `mcp_session_destination_refused` |
 
@@ -4194,6 +4221,31 @@ Every session that ran is recorded in a transcript
 ([`v2/sys/mcp/transcripts`](#get-v2sysmcptranscripts)): the command, both
 streams as captured (up to 1 MiB each, credential-scrubbed, not sanitized),
 the exit status and the host key.
+
+**Through a Rustion bastion (T483).** When the route is a bastion, the vault
+resolves (or mints) the credential as above, without `source-address`, and
+asks `rustion/v2/session/open` for an exec ticket with the confirmed command
+(see *Connect-only session open*). It then dials the bastion's SSH listener,
+pinned by the host key discovered at enrolment, with the operator's name and
+the ticket as the password, and sends one `exec` with the same bytes. The
+destination policy still applies to the target. There is no fallback to a
+direct dial, including for `rustion-preferred`. Results follow Rustion's
+contract: a refused `exec` means nothing ran (`502 mcp_session_failed`, the
+bastion's reason code in the message); after the bastion accepted it, an exit
+status or a signal is returned, and **no exit status is a failure**
+(`502 mcp_session_failed`: the command may have run, it is not retried). A
+bastion without `ssh_exec` (Rustion older than 0.20.0, or exec switched off)
+refuses with `mcp_session_requires_bastion`; an envelope too large for the
+bastion with `mcp_invalid_argument` (`envelope_too_large`). On a timeout, an
+abort or a missing result the bastion session is ended through
+`rustion/session/kill`. The response adds `"route": "bastion"` (`"direct"`
+otherwise), `"outcome"` (`exit status N` / `killed by SIG<name>`) and
+`"bastion": { "name", "session_id", "recording_id",
+"listener_host_key_fingerprint" }`; `host_key_fingerprint` is the profile's
+pin, which the bastion enforced on the target. The call's one
+`connect.agent.ssh.exec` event carries a `bastion` block (`bastion_id`,
+`bastion_name`, `session_id`, `correlation_id`, `recording_id`, `route`,
+`listener`, `listener_host_key_fingerprint`, `outcome`, `reason`).
 
 ### `POST resources/v2/connect/agent/web/fetch` (MCP only)
 

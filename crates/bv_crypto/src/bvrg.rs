@@ -174,6 +174,21 @@ pub struct BvrgPayload {
     pub operator: BvrgOperator,
     /// UUID linking this envelope to BV's own audit chain entries.
     pub correlation_id: String,
+    /// What an `open` starts (`features/rustion-agent-exec.md`): `"exec"`
+    /// for one operator-confirmed command, `"interactive"` (or absent) for
+    /// a shell. Absent means interactive, and it is **not written** when
+    /// absent, so an interactive envelope's payload is byte-for-byte what
+    /// earlier releases sealed and what a Rustion older than 0.20.0 decodes.
+    /// Kept as text on purpose: Rustion refuses an unknown kind with
+    /// `exec_kind_invalid`, and this crate is only the wire format.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// The operator-confirmed command of an `exec` open, verbatim (UTF-8,
+    /// 1-4096 bytes, no NUL). Rustion runs only a byte-identical `exec`
+    /// request. Sealed and signed like every other field; not written when
+    /// absent, for the same compatibility reason as `kind`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -231,6 +246,14 @@ pub fn build(
     // 1. CBOR-encode the payload.
     let mut cbor_buf = Vec::with_capacity(512);
     ciborium::ser::into_writer(payload, &mut cbor_buf).map_err(|_| BvrgError::PayloadDecode)?;
+    seal_frame(&cbor_buf, master, rustion_kem_pub)
+}
+
+/// Steps 2-6 of [`build`]: encrypt an already-encoded CBOR payload, sign it
+/// and frame it. Separate so the tests can seal a payload no
+/// [`BvrgPayload`] can express (a malformed one) and prove `verify` refuses
+/// it; `build` is the only production caller.
+fn seal_frame(cbor_buf: &[u8], master: &BvrgMasterSigningKey, rustion_kem_pub: &[u8]) -> Result<Vec<u8>, BvrgError> {
     if cbor_buf.len() > MAX_PAYLOAD_BYTES {
         return Err(BvrgError::PayloadTooLong);
     }
@@ -243,7 +266,7 @@ pub fn build(
         &MlKem768Provider,
         rustion_kem_pub,
         BVRG_MAGIC, // AAD: binds the ciphertext to this format version
-        &cbor_buf,
+        cbor_buf,
     )?;
     let ct = encode_kem_envelope(&kem_envelope)?;
     let ct_len = u32::try_from(ct.len()).map_err(|_| BvrgError::EnvelopeTooLong)?;
@@ -563,5 +586,188 @@ impl BvrgMasterSigningKey {
     pub fn public_key(&self) -> BvrgMasterPublicKey {
         let (ml_pk, _ml_sk) = ml_dsa_65::KG::keygen_from_seed(&self.mldsa65_seed);
         BvrgMasterPublicKey { ed25519: self.ed25519.verifying_key(), mldsa65: ml_pk.into_bytes().to_vec() }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Compatibility of the `kind` / `command` extension (T483): an
+    //! interactive payload must stay byte-for-byte what earlier releases
+    //! sealed, an old payload must still decode, and a malformed exec key
+    //! must fail the decode rather than be ignored.
+
+    use ciborium::value::Value as Cbor;
+
+    use super::*;
+    use crate::KemProvider;
+
+    /// `BvrgPayload` exactly as it was before `kind` / `command` existed:
+    /// the reference every interactive envelope must still encode to.
+    #[derive(Serialize, Deserialize)]
+    struct LegacyPayload {
+        v: u32,
+        op: String,
+        #[serde(with = "serde_bytes_wrapper")]
+        nonce: Vec<u8>,
+        issued_at: i64,
+        not_after: i64,
+        #[serde(default)]
+        target: Option<BvrgTarget>,
+        #[serde(default)]
+        credential: Option<BvrgCredential>,
+        #[serde(default)]
+        session: Option<BvrgSession>,
+        operator: BvrgOperator,
+        correlation_id: String,
+    }
+
+    fn operator() -> BvrgOperator {
+        BvrgOperator {
+            vault_user_id: "uuid-op".into(),
+            vault_user_name: "alice".into(),
+            vault_session_id: "uuid-sess".into(),
+            src_ip: String::new(),
+            deployment_id: "uuid-deploy".into(),
+        }
+    }
+
+    fn target() -> BvrgTarget {
+        BvrgTarget {
+            host: "web-01.internal".into(),
+            port: 22,
+            protocol: "ssh".into(),
+            hostkey_pin: Some("SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU".into()),
+        }
+    }
+
+    fn credential() -> BvrgCredential {
+        BvrgCredential { kind: "ssh-password".into(), username: "ops".into(), material: b"pw".to_vec(), extra: None }
+    }
+
+    fn session() -> BvrgSession {
+        BvrgSession { ttl_secs: 90, max_renewals: 0, recording: "always".into() }
+    }
+
+    fn payload(kind: Option<&str>, command: Option<&str>) -> BvrgPayload {
+        BvrgPayload {
+            v: 1,
+            op: "open".into(),
+            nonce: vec![7; 16],
+            issued_at: 1_700_000_000,
+            not_after: 1_700_000_300,
+            target: Some(target()),
+            credential: Some(credential()),
+            session: Some(session()),
+            operator: operator(),
+            correlation_id: "corr-1".into(),
+            kind: kind.map(str::to_string),
+            command: command.map(str::to_string),
+        }
+    }
+
+    fn legacy() -> LegacyPayload {
+        LegacyPayload {
+            v: 1,
+            op: "open".into(),
+            nonce: vec![7; 16],
+            issued_at: 1_700_000_000,
+            not_after: 1_700_000_300,
+            target: Some(target()),
+            credential: Some(credential()),
+            session: Some(session()),
+            operator: operator(),
+            correlation_id: "corr-1".into(),
+        }
+    }
+
+    fn cbor<T: Serialize>(value: &T) -> Vec<u8> {
+        let mut out = Vec::new();
+        ciborium::ser::into_writer(value, &mut out).unwrap();
+        out
+    }
+
+    fn top_level_keys(bytes: &[u8]) -> Vec<String> {
+        let Cbor::Map(pairs) = ciborium::de::from_reader::<Cbor, _>(bytes).unwrap() else { panic!("a CBOR map") };
+        pairs.into_iter().filter_map(|(k, _)| k.into_text().ok()).collect()
+    }
+
+    /// The compatibility promise: without `kind` and `command` the payload
+    /// encodes to the very bytes the pre-extension struct produced, so a
+    /// Rustion that predates exec sees nothing new in an interactive open.
+    #[test]
+    fn an_interactive_payload_encodes_exactly_as_before() {
+        let new = cbor(&payload(None, None));
+        assert_eq!(new, cbor(&legacy()), "byte-for-byte the pre-T483 encoding");
+        let keys = top_level_keys(&new);
+        assert!(!keys.iter().any(|k| k == "kind" || k == "command"), "{keys:?}");
+    }
+
+    /// Read-old: a payload sealed by an earlier release decodes, as
+    /// interactive.
+    #[test]
+    fn an_old_payload_decodes_as_interactive() {
+        let decoded: BvrgPayload = ciborium::de::from_reader(cbor(&legacy()).as_slice()).unwrap();
+        assert_eq!((decoded.kind, decoded.command), (None, None));
+        assert_eq!(decoded.correlation_id, "corr-1");
+        assert_eq!(decoded.target.unwrap().hostkey_pin.as_deref(), Some(target().hostkey_pin.unwrap().as_str()));
+    }
+
+    /// Write-new: an exec payload carries both keys as CBOR text, after the
+    /// old ones, and the command survives the seal byte for byte.
+    #[test]
+    fn an_exec_payload_seals_the_command_byte_for_byte() {
+        let command = "systemctl status nginx --no-pager | head -n 5; echo 'ação ✓'";
+        let bytes = cbor(&payload(Some("exec"), Some(command)));
+        let keys = top_level_keys(&bytes);
+        assert_eq!(&keys[keys.len() - 2..], ["kind", "command"], "{keys:?}");
+
+        let master = BvrgMasterSigningKey::generate().unwrap();
+        let kp = MlKem768Provider.generate_keypair().unwrap();
+        let envelope = build(&payload(Some("exec"), Some(command)), &master, kp.public_key()).unwrap();
+        let verified = verify(&envelope, &master.public_key(), kp.secret_key()).unwrap();
+        assert_eq!(verified.payload.kind.as_deref(), Some("exec"));
+        assert_eq!(verified.payload.command.as_deref().map(str::as_bytes), Some(command.as_bytes()));
+    }
+
+    /// Malformed exec keys fail the decode (`PayloadDecode` through
+    /// `verify`), never decode to "interactive": a non-text `kind`, a
+    /// byte-string `command`, a repeated key.
+    #[test]
+    fn malformed_exec_keys_are_refused_not_ignored() {
+        let base = || {
+            let Cbor::Map(pairs) = ciborium::de::from_reader::<Cbor, _>(cbor(&legacy()).as_slice()).unwrap() else {
+                panic!("a CBOR map")
+            };
+            pairs
+        };
+        let text = |s: &str| Cbor::Text(s.into());
+        let malformed = [
+            vec![(text("kind"), Cbor::Integer(1.into()))],
+            vec![(text("kind"), text("exec")), (text("command"), Cbor::Bytes(b"uptime".to_vec()))],
+            vec![(text("kind"), text("exec")), (text("kind"), text("interactive"))],
+            vec![(text("command"), text("id")), (text("command"), text("rm -rf /"))],
+        ];
+        let master = BvrgMasterSigningKey::generate().unwrap();
+        let kp = MlKem768Provider.generate_keypair().unwrap();
+        for extra in malformed {
+            let mut pairs = base();
+            pairs.extend(extra.clone());
+            let bytes = cbor(&Cbor::Map(pairs));
+            assert!(ciborium::de::from_reader::<BvrgPayload, _>(bytes.as_slice()).is_err(), "{extra:?}");
+            let envelope = seal_frame(&bytes, &master, kp.public_key()).unwrap();
+            let err = verify(&envelope, &master.public_key(), kp.secret_key()).unwrap_err();
+            assert!(matches!(err, BvrgError::PayloadDecode), "{extra:?}: {err:?}");
+        }
+    }
+
+    /// The frame cap holds for exec envelopes: a payload past the inner
+    /// budget is refused at build time, before anything could be posted.
+    #[test]
+    fn an_oversized_exec_payload_is_refused_at_build() {
+        let master = BvrgMasterSigningKey::generate().unwrap();
+        let kp = MlKem768Provider.generate_keypair().unwrap();
+        let huge = "x".repeat(MAX_PAYLOAD_BYTES);
+        let err = build(&payload(Some("exec"), Some(&huge)), &master, kp.public_key()).unwrap_err();
+        assert!(matches!(err, BvrgError::PayloadTooLong | BvrgError::EnvelopeTooLong), "{err:?}");
     }
 }

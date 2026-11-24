@@ -49,6 +49,8 @@ fn sample_payload(op: &str) -> BvrgPayload {
             deployment_id: "uuid-deployment".into(),
         },
         correlation_id: "uuid-corr".into(),
+        kind: None,
+        command: None,
     }
 }
 

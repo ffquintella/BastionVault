@@ -136,13 +136,26 @@ pub(crate) async fn prepare_and_run(
 
     // 6. MFA: the operator's ticket for this exact call, redeemed once.
     let mfa_method = if profile_gate_flag(&profile) {
-        Some(redeem_agent_ticket(backend, req, &gated.binding, &resource, &profile_id, WEB_FETCH_TOOL).await?)
+        Some(redeem_agent_ticket(backend, req, &gated.binding, &resource, &profile_id, WEB_FETCH_TOOL).await?.method)
     } else {
         None
     };
 
-    // 7. No bastion route is bypassed.
-    check_transport(backend, req, &resource, &meta, &profile).await?;
+    // 7. No bastion route is bypassed: a web session through Rustion is not
+    //    built (T97), so a bastion route is refused, never dialed direct.
+    if let crate::agent_session::TransportRoute::Bastion(route) =
+        check_transport(backend, req, &resource, &meta, &profile).await?
+    {
+        return Err(refused(
+            "mcp_session_requires_bastion",
+            403,
+            format!(
+                "this resource's transport goes through a Rustion bastion ({}), which cannot run an agent's web \
+                 session; it is not dialed direct",
+                route.why
+            ),
+        ));
+    }
 
     // The URL is fixed now, before anything is dialed: the confirmed bytes
     // or a refusal.

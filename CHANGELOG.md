@@ -63,6 +63,13 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### MCP brokered sessions: SSH commands through a Rustion bastion
+
+- **Run `bv_resource_ssh_exec` on a resource whose transport routes through Rustion, through the bastion and recorded there, instead of refusing it with `mcp_session_requires_bastion`** (T483, S119)
+  -- A `rustion-required` resource, a `rustion-preferred` one whose policy names a bastion, and a `rustion` profile now run the operator-confirmed command through the bastion: the vault resolves the credential as on the direct path (a certificate keeps `force-command`, no extensions and 60 s, without `source-address`), asks `rustion/v2/session/open` for an exec ticket with the command sealed into the envelope, dials the bastion's SSH listener pinned by the host key discovered at enrolment, and sends one `exec` with the same bytes. Only a bastion that advertises `ssh_exec` on `/v1/authorities/self` (Rustion 0.20.0 or later, exec on) is used; an older one is refused by name, and one that opens an interactive session instead has it ended. It never falls back to a direct dial, `rustion-preferred` included. A refused exec means nothing ran; an exec that ends without an exit status is reported as a failure that may have run and is never retried; a timeout, an abort or a missing result ends the bastion session. The result adds `route`, `outcome` and a `bastion` block (name, session id, recording id); the `connect.agent.ssh.exec` event gains a `bastion` block with the same join keys. The transport is now checked before the MFA ticket is redeemed, so that refusal no longer burns it. Not yet run against a real Rustion (Rustion's T484).
+- **Open an exec session with `kind: "exec"` and `command` on `rustion/v2/session/open`** (T483, S119)
+  -- The command (1-4096 bytes) is sealed into the BVRG-v1 envelope as two new optional payload keys, which an interactive open does not write, so its envelope is byte-for-byte unchanged for older bastions. Refusals use the bastion's own codes (`exec_kind_invalid`, `exec_command_invalid`, `exec_protocol_unsupported`, `exec_hostkey_pin_required`), plus `400 envelope_too_large` before anything is posted when the command and credential would pass the 16384-byte envelope cap, `409 exec_unsupported` and `502 exec_kind_not_echoed`. v1 does not take the exec form.
+
 #### Resource Connect: SMB file shares in the dual-pane window
 
 - **Copy files and folders to and from a Windows or Samba share with a connection profile of protocol `smb`** (T552, S122, S112)

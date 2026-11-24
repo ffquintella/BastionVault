@@ -774,7 +774,9 @@ impl RustionBackend {
                         "bastions": { field_type: FieldType::CommaStringSlice, required: false, description: "Pinned ordered target ids; empty = random global pool." },
                         "resource_id": { field_type: FieldType::Str, required: false, description: "Resource id for per-resource policy lookup." },
                         "resource_type": { field_type: FieldType::Str, required: false, description: "Resource type for per-type policy lookup." },
-                        "asset_group_ids": { field_type: FieldType::CommaStringSlice, required: false, description: "Asset group ids the resource belongs to (for per-AG resolution)." }
+                        "asset_group_ids": { field_type: FieldType::CommaStringSlice, required: false, description: "Asset group ids the resource belongs to (for per-AG resolution)." },
+                        "kind": { field_type: FieldType::Str, required: false, description: "`interactive` (the default) or `exec`: one operator-confirmed command, sealed into the envelope (features/rustion-agent-exec.md). Exec needs target_protocol `ssh`, a target_hostkey_pin and a bastion advertising `ssh_exec`." },
+                        "command": { field_type: FieldType::Str, required: false, description: "The exec form's command, 1-4096 bytes, no NUL. Required with kind `exec`, refused with any other kind. The bastion runs only these bytes." }
                     },
                     operations: [
                         {op: Operation::Write, handler: h_session_open_v2.handle_session_open_v2}
@@ -1749,14 +1751,24 @@ impl RustionBackendInner {
             return Err(RvError::ErrPermissionDenied);
         }
 
-        self.brokered_session_open(b, req).await
+        // v1 is frozen: it never has the exec form (its route declares no
+        // `kind` / `command`).
+        self.brokered_session_open(b, req, None).await
     }
 
     /// The shared brokering engine: resolve policy, run the dispatcher, build
     /// and sign the BVRG-v1 envelope, POST it at the chosen bastion, and
     /// return the ticket bundle. Runs **no** authorization of its own — both
     /// entry points gate before they call it.
-    async fn brokered_session_open(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+    ///
+    /// `exec` is the exec form's validated command
+    /// ([`Self::exec_form`]); only v2 passes one.
+    async fn brokered_session_open(
+        &self,
+        _b: &dyn Backend,
+        req: &mut Request,
+        exec: Option<String>,
+    ) -> Result<Option<Response>, RvError> {
         use base64::{engine::general_purpose::STANDARD, Engine as _};
         let store = self.resolve_store()?;
         let master_store = self.resolve_master_store()?;
@@ -1894,7 +1906,12 @@ impl RustionBackendInner {
         };
         let caller_recording = pick("recording");
         // Pick whichever is stricter (default to resolver's value).
-        let recording_choice = if caller_recording.is_empty() {
+        let recording_choice = if exec.is_some() {
+            // An exec is recorded whatever the tier says: the recording is
+            // the evidence of what an assistant ran (the bastion refuses an
+            // exec it cannot record).
+            "always".to_string()
+        } else if caller_recording.is_empty() {
             effective_recording
         } else {
             // Defer to resolver since that's what the policy says.
@@ -1921,11 +1938,13 @@ impl RustionBackendInner {
             credential_pin: pick("credential_pin"),
             credential_domain: pick("credential_domain"),
             ttl_secs: u32::try_from(pick_u("ttl_secs", 3600)).unwrap_or(3600),
-            max_renewals: u8::try_from(pick_u("max_renewals", 3)).unwrap_or(3),
+            // An exec runs once and is never renewed.
+            max_renewals: if exec.is_some() { 0 } else { u8::try_from(pick_u("max_renewals", 3)).unwrap_or(3) },
             recording: recording_choice,
             bastions: effective_bastions,
             bastion_group: resolved_bastion_group,
             bastion_shuffle: group_shuffle,
+            exec_command: exec.clone(),
         };
 
         // Operator context from the calling token's metadata. Source-IP
@@ -1934,10 +1953,13 @@ impl RustionBackendInner {
         let auth = req.auth.as_ref().ok_or_else(|| bv_error_response_status!(401, "no authenticated caller"))?;
         let operator = envelope::OperatorContext {
             vault_user_id: auth.metadata.get("entity_id").cloned().unwrap_or_default(),
-            vault_user_name: auth.metadata.get("username").cloned().unwrap_or_default(),
+            vault_user_name: operator_user_name(auth),
             vault_session_id: auth.metadata.get("session_id").cloned().unwrap_or_default(),
-            // See operator_context() — same source-of-truth.
-            src_ip: operator_src_ip(req),
+            // See operator_context() — same source-of-truth. An exec ticket
+            // is redeemed by this vault process, not by the caller's
+            // machine, so it is not bound to the caller's address (which
+            // the vault's own dial would never match).
+            src_ip: if exec.is_some() { String::new() } else { operator_src_ip(req) },
             // Phase 9.1 — the deployment_id field is sourced from BV's
             // master store (a stable UUID minted on first PKI init),
             // not from the caller's auth metadata. Rustion authorities
@@ -1986,6 +2008,19 @@ impl RustionBackendInner {
                     "correlation_id".into(),
                     Value::String(resp.correlation_id),
                 );
+                // The exec form: the bastion's echo, where to redeem the
+                // ticket and which host key to require there, and the
+                // credential kind sealed for the target (never the
+                // credential).
+                if let Some(kind) = resp.kind {
+                    data.insert("kind".into(), Value::String(kind));
+                }
+                if let Some(dial) = resp.exec_dial {
+                    data.insert("ssh_dial_host".into(), Value::String(dial.host));
+                    data.insert("ssh_dial_port".into(), Value::Number(dial.port.into()));
+                    data.insert("ssh_host_key_pin".into(), Value::String(dial.host_key_pin));
+                    data.insert("credential_kind".into(), Value::String(brokered_kind.clone()));
+                }
                 // Phase 7.2: stamp the effective policy on the
                 // response so the GUI can show the resolution chain
                 // (which tier produced each effective value).
@@ -2119,11 +2154,64 @@ impl RustionBackendInner {
                     &format!("bastion_rejected: {detail}")
                 ))
             }
+            Err(session::SessionOpenError::ExecUnavailable { attempts }) => {
+                let detail = attempts
+                    .iter()
+                    .map(|a| format!("{}: {}", a.bastion_name, a.outcome))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                Err(bv_error_response_status!(
+                    409,
+                    &format!("exec_unsupported: no candidate bastion can run an agent command ({detail})")
+                ))
+            }
+            Err(e @ session::SessionOpenError::ExecKindNotEchoed { .. }) => {
+                log::warn!(target: "security", "rustion: {e}");
+                Err(bv_error_response_status!(502, &format!("exec_kind_not_echoed: {e}; nothing ran")))
+            }
+            Err(session::SessionOpenError::Refused(e)) => Err(bv_error_response_status!(400, &e.to_string())),
             Err(e) => Err(bv_error_string!(&format!("{e}"))),
         }
     }
 
     // ─── Connect-only session-open (v2) ─────────────────────────────
+
+    /// The exec form of `rustion/v2/session/open`
+    /// (`features/rustion-agent-exec.md`): `Some(command)` for `kind =
+    /// "exec"`, `None` for an interactive open. Refused with the bastion's
+    /// own codes (Rustion `docs/rustion-agent-exec.md` § Open refusals): a
+    /// non-text or unknown `kind`, a `command` without the exec kind, and an
+    /// exec that breaks [`envelope::validate_exec_form`].
+    fn exec_form(req: &Request) -> Result<Option<String>, RvError> {
+        let text = |key: &str, not_text: &str| -> Result<String, RvError> {
+            match req.get_data(key) {
+                Ok(Value::String(s)) => Ok(s),
+                Ok(Value::Null) => Ok(String::new()),
+                Ok(_) | Err(RvError::ErrRequestFieldInvalid) => {
+                    let code = if key == "kind" { "exec_kind_invalid" } else { "exec_command_invalid" };
+                    Err(bv_error_response_status!(400, &format!("{code}: {not_text}")))
+                }
+                Err(_) => Ok(String::new()),
+            }
+        };
+        let kind = text("kind", "kind_not_text")?;
+        let command = text("command", "command_not_text")?;
+        match kind.as_str() {
+            "" | "interactive" if command.is_empty() => Ok(None),
+            "" | "interactive" => {
+                Err(bv_error_response_status!(400, "exec_command_invalid: command_without_exec_kind"))
+            }
+            "exec" => {
+                let pick = |k: &str| req.get_data(k).ok().and_then(|v| v.as_str().map(str::to_string));
+                let protocol = pick("target_protocol").unwrap_or_default();
+                let pin = pick("target_hostkey_pin");
+                envelope::validate_exec_form(&command, &protocol, pin.as_deref())
+                    .map_err(|e| bv_error_response_status!(400, &e.to_string()))?;
+                Ok(Some(command))
+            }
+            _ => Err(bv_error_response_status!(400, "exec_kind_invalid: unknown_kind")),
+        }
+    }
 
     /// `POST rustion/v2/session/open` — the connect-only entry point.
     ///
@@ -2151,6 +2239,10 @@ impl RustionBackendInner {
         if resource_name.is_empty() {
             return Err(bv_error_response_status!(400, "v2 session/open requires `resource_name`"));
         }
+        // (0) The exec form (features/rustion-agent-exec.md), checked against
+        // the bastion's own open rules before the connect gate, MFA and any
+        // credential resolver, so a malformed request costs nothing.
+        let exec = Self::exec_form(req)?;
 
         // Namespace split for this request (see
         // [`Self::namespace_sub_request_prefix`]): the bastion fleet, the
@@ -2320,7 +2412,13 @@ impl RustionBackendInner {
                                 .and_then(|v| v.as_str().map(|s| s.to_string()))
                                 .filter(|s| !s.is_empty());
                             let minted = self
-                                .mint_brokered_ssh_cert(&ns_prefix, &ssh_mount, &ssh_role, principal.as_deref())
+                                .mint_brokered_ssh_cert(
+                                    &ns_prefix,
+                                    &ssh_mount,
+                                    &ssh_role,
+                                    principal.as_deref(),
+                                    exec.as_deref(),
+                                )
                                 .await?;
                             let data = req.data.get_or_insert_with(Map::new);
                             data.insert("credential_kind".into(), Value::String("ssh-cert".into()));
@@ -2382,7 +2480,7 @@ impl RustionBackendInner {
         // (3) Delegate to the shared brokering engine. Deliberately NOT
         // `handle_session_open` — that is the v1 entry point's own gate, and
         // the connect check above has already run.
-        let opened = self.brokered_session_open(b, req).await;
+        let opened = self.brokered_session_open(b, req, exec).await;
         if is_provider {
             provider_source::scrub_material(req);
         }
@@ -2488,17 +2586,32 @@ impl RustionBackendInner {
         ssh_mount: &str,
         ssh_role: &str,
         principal: Option<&str>,
+        exec: Option<&str>,
     ) -> Result<MintedSshCert, RvError> {
         use base64::{engine::general_purpose::STANDARD, Engine as _};
 
+        let mut request = kernel_api::ssh_credentials::BrokeredCertRequest { principal, ..Default::default() };
+        // The exec form: the certificate binds the command as
+        // `force-command`, lives at most a minute and carries no extension,
+        // as the direct agent path's does (features/mcp-brokered-sessions.md
+        // §5.2); a role that signs anything else is refused, not used.
+        if let Some(command) = exec {
+            request.critical_options.insert("force-command".to_string(), command.to_string());
+            request.ttl_secs = Some(EXEC_CERT_VALIDITY_SECS);
+        }
         let minted = kernel_api::ssh_credentials::mint_brokered_ssh_cert(
             self.core.as_ref(),
             ns_prefix,
             ssh_mount,
             ssh_role,
-            &kernel_api::ssh_credentials::BrokeredCertRequest { principal, ..Default::default() },
+            &request,
         )
         .await?;
+        if let Some(command) = exec {
+            let facts = kernel_api::ssh_credentials::inspect_ssh_certificate(&minted.certificate)?;
+            check_exec_certificate(&facts, command, ssh_role, chrono::Utc::now().timestamp().max(0) as u64)
+                .map_err(|m| bv_error_response_status!(422, &m))?;
+        }
         // Base64 the private key; the minter's zeroizing buffer drops with
         // `minted`. From here the key lives only inside the sealed envelope
         // ciphertext.
@@ -4046,6 +4159,61 @@ fn operator_src_ip(req: &Request) -> String {
     req.connection.as_ref().map(|conn| conn.client_ip()).unwrap_or_default()
 }
 
+/// The operator name stamped into an envelope: the token's own `username`,
+/// else -- for an MCP token, whose metadata is empty -- the operator who
+/// paired the assistant, so the bastion's audit names a person.
+fn operator_user_name(auth: &crate::logical::Auth) -> String {
+    auth.metadata
+        .get("username")
+        .filter(|u| !u.is_empty())
+        .cloned()
+        .or_else(|| auth.mcp_binding.as_ref().and_then(|b| b.operator.as_ref()).map(|o| o.username.clone()))
+        .unwrap_or_default()
+}
+
+/// Longest validity of a certificate minted for an exec through a bastion:
+/// the direct agent path's limit (`features/mcp-brokered-sessions.md` §5.2).
+const EXEC_CERT_VALIDITY_SECS: u64 = 60;
+
+/// Clock skew allowed between the SSH engine's `valid_before` and this
+/// check, both on this host's clock.
+const EXEC_CERT_SKEW_SECS: u64 = 5;
+
+/// What a certificate minted for an exec must say before it is sealed: the
+/// command as `force-command`, no extension (so the target refuses a PTY
+/// and every forwarding), and at most a minute of validity. The twin of the
+/// direct agent path's check (`bv-engine-resource`, `agent_ssh/session.rs`
+/// `verify_certificate`); an engine may not depend on another engine, so it
+/// is restated here.
+fn check_exec_certificate(
+    facts: &kernel_api::ssh_credentials::SshCertificateFacts,
+    command: &str,
+    role: &str,
+    now: u64,
+) -> Result<(), String> {
+    if facts.critical_options.get("force-command").map(String::as_str) != Some(command) {
+        return Err(format!(
+            "exec_certificate_refused: SSH role `{role}` must list `force-command` in allowed_critical_options: a \
+             certificate minted for an exec must bind the confirmed command"
+        ));
+    }
+    if !facts.extensions.is_empty() {
+        let names: Vec<&str> = facts.extensions.keys().map(String::as_str).collect();
+        return Err(format!(
+            "exec_certificate_refused: SSH role `{role}` adds extensions ({}) to every certificate; a role used \
+             for an exec must add none",
+            names.join(", ")
+        ));
+    }
+    if facts.valid_before > now + EXEC_CERT_VALIDITY_SECS + EXEC_CERT_SKEW_SECS {
+        return Err(format!(
+            "exec_certificate_refused: SSH role `{role}` signed a certificate valid past {EXEC_CERT_VALIDITY_SECS} \
+             s; lower its max_ttl"
+        ));
+    }
+    Ok(())
+}
+
 fn target_response(t: &RustionTarget) -> Response {
     let mut data: HashMap<String, Value> = HashMap::new();
     data.insert("id".into(), Value::String(t.id.clone()));
@@ -4264,5 +4432,73 @@ mod clipboard_knob_tests {
                 parse_clipboard_knob("clipboard", Some(&bad), Some(ClipboardPolicy::Off)).expect_err("must be refused");
             assert!(err.to_string().contains("clipboard"), "{err}");
         }
+    }
+}
+
+#[cfg(test)]
+mod exec_form_tests {
+    //! The exec form of `rustion/v2/session/open` (T483): the certificate a
+    //! server-side mint must yield, and who an MCP-driven envelope names.
+
+    use std::collections::BTreeMap;
+
+    use super::{check_exec_certificate, operator_user_name, EXEC_CERT_VALIDITY_SECS};
+    use crate::kernel_api::ssh_credentials::SshCertificateFacts;
+
+    fn facts(command: &str, valid_for: u64) -> SshCertificateFacts {
+        let mut critical_options = BTreeMap::new();
+        critical_options.insert("force-command".to_string(), command.to_string());
+        SshCertificateFacts {
+            serial: 1,
+            key_id: "agent".into(),
+            valid_principals: vec!["ops".into()],
+            valid_after: 1_000,
+            valid_before: 1_000 + valid_for,
+            critical_options,
+            extensions: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn an_exec_certificate_binds_the_command_and_nothing_else() {
+        assert_eq!(check_exec_certificate(&facts("uptime", 60), "uptime", "agent", 1_000), Ok(()));
+        // Another command bound, or none (the role dropped force-command).
+        assert!(check_exec_certificate(&facts("id", 60), "uptime", "agent", 1_000).is_err());
+        let mut f = facts("uptime", 60);
+        f.critical_options.clear();
+        let err = check_exec_certificate(&f, "uptime", "agent", 1_000).unwrap_err();
+        assert!(err.starts_with("exec_certificate_refused: ") && err.contains("force-command"), "{err}");
+        // A default extension such as permit-pty.
+        let mut f = facts("uptime", 60);
+        f.extensions.insert("permit-pty".into(), String::new());
+        assert!(check_exec_certificate(&f, "uptime", "agent", 1_000).unwrap_err().contains("permit-pty"));
+        // Longer than a minute.
+        let err = check_exec_certificate(&facts("uptime", 3_600), "uptime", "agent", 1_000).unwrap_err();
+        assert!(err.contains(&format!("{EXEC_CERT_VALIDITY_SECS} s")), "{err}");
+    }
+
+    #[test]
+    fn an_mcp_token_names_the_operator_who_paired_it() {
+        let mut auth = crate::logical::Auth::default();
+        assert_eq!(operator_user_name(&auth), "");
+        auth.mcp_binding = Some(crate::logical::McpBinding {
+            policy_namespace: None,
+            policy_namespaces: Vec::new(),
+            kind: crate::logical::McpBindingKind::Pairing("p".into()),
+            catalogue_hash: String::new(),
+            tool_allowlist: vec![],
+            path_scope: vec![],
+            reveal_allowed: false,
+            destructive_allowed: false,
+            client_name: String::new(),
+            client_version: String::new(),
+            waived_until: None,
+            connect_allowed: true,
+            confirm_connect: true,
+            operator: Some(crate::logical::McpOperatorRef { username: "felipe".into(), ..Default::default() }),
+        });
+        assert_eq!(operator_user_name(&auth), "felipe");
+        auth.metadata.insert("username".into(), "alice".into());
+        assert_eq!(operator_user_name(&auth), "alice", "a token's own username wins");
     }
 }

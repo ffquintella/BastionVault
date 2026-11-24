@@ -560,6 +560,21 @@ pub async fn enforce(
         return Ok(None);
     }
 
+    // The agent route's bastion leg: the operator's ticket for this exact
+    // call was redeemed by `resources/v2/connect/agent/ssh/exec` before it
+    // resolved any credential, and the proof rides in-process on the
+    // sub-request it sends to `rustion/v2/session/open`. Spent once, and
+    // only for the resource, profile and namespace it was redeemed for.
+    if let Some(record) = take_agent_mfa_grant(req, resource, profile_id) {
+        if record.namespace == caller_namespace(core, req).await? {
+            return Ok(Some(record));
+        }
+        return Err(bv_error_response_status!(
+            403,
+            "mfa_required: the agent call's MFA was completed in another namespace than this open runs in"
+        ));
+    }
+
     let ticket = ticket.map(str::trim).filter(|t| !t.is_empty()).ok_or_else(|| {
         bv_error_response_status!(
             403,
@@ -585,6 +600,43 @@ pub async fn enforce(
     let store = ConnectMfaTicketStore::new(core)?;
     let record = store.consume(ticket, &binding).await?;
     Ok(Some(record))
+}
+
+/// Where [`AgentMfaGrant`] travels in a request's context.
+const AGENT_MFA_GRANT_KEY: &str = "bv-engine-resource/agent-mfa-grant";
+
+/// Proof that the agent route redeemed the operator's MFA ticket for one
+/// call before resolving the credential it seals (`features/rustion-agent-exec.md`),
+/// carried to the gate ([`enforce`]) of its `rustion/v2/session/open`
+/// sub-request, which would otherwise demand the spent ticket again. Not
+/// forgeable from outside: a value in the request's context of a type
+/// private to this crate, never a body field; bound to one resource and
+/// profile; spent once.
+pub(crate) struct AgentMfaGrant {
+    record: ConnectMfaTicket,
+    spent: std::sync::atomic::AtomicBool,
+}
+
+/// Attach the redeemed agent ticket to the sub-request about to open the
+/// bastion session.
+#[cfg_attr(not(all(feature = "mcp_sessions_ssh", not(feature = "sync_handler"))), allow(dead_code))]
+pub(crate) fn attach_agent_mfa_grant(req: &Request, record: ConnectMfaTicket) {
+    let grant = AgentMfaGrant { record, spent: std::sync::atomic::AtomicBool::new(false) };
+    req.ctx.set(AGENT_MFA_GRANT_KEY, std::sync::Arc::new(grant));
+}
+
+/// Spend the grant on `req`, when there is one for this resource and
+/// profile and it has not been spent.
+fn take_agent_mfa_grant(req: &Request, resource: &str, profile_id: &str) -> Option<ConnectMfaTicket> {
+    let value = req.ctx.get(AGENT_MFA_GRANT_KEY)?;
+    let grant = value.downcast_ref::<AgentMfaGrant>()?;
+    if !grant.record.resource.eq_ignore_ascii_case(resource) || grant.record.profile_id != profile_id {
+        return None;
+    }
+    if grant.spent.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return None;
+    }
+    Some(grant.record.clone())
 }
 
 /// Redeem a SQL browser step-up ticket for exactly `action`
@@ -1156,6 +1208,31 @@ mod tests {
         // Deterministic, and distinct per ticket.
         assert_eq!(k, ticket_key("some-ticket-value"));
         assert_ne!(k, ticket_key("some-ticket-valuf"));
+    }
+
+    /// The agent route's in-process MFA grant (T483) is spent once, and only
+    /// for the resource and profile it was redeemed for; a request without
+    /// one has none, whatever its body says.
+    #[test]
+    fn the_agent_mfa_grant_is_spent_once_for_its_own_profile() {
+        let record = ConnectMfaTicket {
+            resource: "web-01".into(),
+            profile_id: "p_agent".into(),
+            method: "totp".into(),
+            ..Default::default()
+        };
+        let req = Request::new("rustion/v2/session/open");
+        assert!(take_agent_mfa_grant(&req, "web-01", "p_agent").is_none());
+
+        attach_agent_mfa_grant(&req, record.clone());
+        assert!(take_agent_mfa_grant(&req, "web-02", "p_agent").is_none(), "another resource");
+        assert!(take_agent_mfa_grant(&req, "web-01", "p_other").is_none(), "another profile");
+        assert_eq!(take_agent_mfa_grant(&req, "WEB-01", "p_agent"), Some(record));
+        assert!(take_agent_mfa_grant(&req, "web-01", "p_agent").is_none(), "spent once");
+
+        let mut forged = Request::new("rustion/v2/session/open");
+        forged.body = Some(serde_json::json!({ "agent_mfa_grant": true }).as_object().cloned().unwrap());
+        assert!(take_agent_mfa_grant(&forged, "web-01", "p_agent").is_none());
     }
 
     #[test]

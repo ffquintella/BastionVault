@@ -1,17 +1,20 @@
 # Feature: Rustion-routed agent exec
 
-Status: **design, not approved.** Nothing here is built. Companion to
-[mcp-brokered-sessions.md](mcp-brokered-sessions.md) (S111) and
+Status: **phases 0-2 done.** Phase 1 shipped in Rustion 0.20.0
+(`docs/rustion-agent-exec.md` there, which fixes the wire contract); phase 2,
+the vault side, is built and tested against a simulated bastion (T483).
+Phase 3, the end-to-end run against a real Rustion, is Rustion's T484.
+Companion to [mcp-brokered-sessions.md](mcp-brokered-sessions.md) (S111) and
 [rustion-integration.md](rustion-integration.md) (S51). The work spans two
 repositories: this one and `../Rustion`.
 
 ## Summary
 
 Let an MCP assistant run one confirmed command on a resource whose transport
-policy routes through a Rustion bastion. Today the vault refuses every such
-call with `mcp_session_requires_bastion`, because Rustion's `exec_request` is a
-no-op: it answers success and runs nothing (`crates/rustion-ssh/src/server.rs:1066`
-in Rustion, `tests/e2e/rustion-ssh/run.sh:292-300` here).
+policy routes through a Rustion bastion. Before this the vault refused every
+such call with `mcp_session_requires_bastion`, because Rustion's
+`exec_request` was a no-op: it answered success and ran nothing
+(`tests/e2e/rustion-ssh/run.sh:292-300` here).
 
 The vault asks Rustion for a ticket that already carries the confirmed command,
 dials Rustion over SSH with the ticket in the password slot, and sends an
@@ -38,7 +41,7 @@ Decided by the owner on 2026-10-30:
    bastion. It is no longer refused. It never dials direct while a bastion
    exists, so the recording cannot be bypassed.
 
-My calls (not yet confirmed; change them here before building):
+Confirmed by the Rustion implementation (0.20.0) and built here:
 
 3. **The command is bound into the ticket.** The envelope sealed for Rustion
    carries the confirmed command. Rustion runs only a byte-identical command, so
@@ -48,9 +51,44 @@ My calls (not yet confirmed; change them here before building):
    ticket refuses `shell`, `pty` and `subsystem`. An interactive ticket that
    receives `exec` is refused, where today it is accepted and ignored.
 5. **Capability negotiation.** The vault routes through Rustion only when that
-   Rustion advertises exec support. Against an older Rustion the refusal stays
-   `mcp_session_requires_bastion`, with a message saying the bastion needs an
-   update. No silent fallback to direct.
+   Rustion advertises exec support (`"ssh_exec"` in `capabilities` on
+   `GET /v1/authorities/self`, read fresh for every exec open). Against an
+   older Rustion the refusal stays `mcp_session_requires_bastion`, with a
+   message saying the bastion needs an update. No silent fallback to direct.
+   Second line: an open whose `201` lacks `kind: "exec"` has its session
+   ended (`kill` envelope) and is refused.
+
+Decided while building phase 2 (T483):
+
+6. **`rustion-preferred` never falls back to direct once a bastion is
+   named,** even where Rustion's contract would allow it (open failed, or
+   `CHANNEL_FAILURE`, so nothing ran). Decision 2 already says the route
+   never dials direct while a bastion exists, and a fallback would let a
+   bastion outage take the recording off an agent's command.
+7. **The vault resolves the credential, the bastion seals it.** The agent
+   route resolves or mints the credential with the direct path's functions
+   and passes it as `credential_material` to `rustion/v2/session/open`, so
+   its scrubber redacts an echoed secret as on the direct path. A
+   certificate keeps `force-command`, no extensions and 60 s validity, without
+   `source-address` (the bastion dials the target from an address the vault
+   does not know). A passphrase-protected key is refused (the envelope has no
+   passphrase channel).
+8. **MFA is redeemed once, before the credential.** The agent route redeems
+   the operator's call-bound ticket, then carries the redeemed record to the
+   gate `rustion/v2/session/open` runs as an in-process grant (a value of a
+   type private to the resource engine in the sub-request's context, bound to
+   the resource and profile, spent once), never as a request field.
+9. **Destination policy on the target, pinning on the bastion.** The agents'
+   allow-list still applies to the target, where the command lands. The
+   bastion's listener is enrolled infrastructure: it is not held to that
+   list, and is authenticated by the host key discovered from it at
+   enrolment (the pin the desktop app's interactive path uses), required
+   before the ticket is sent. A bastion without that pin is not tried.
+10. **No exit status is a failure.** After `CHANNEL_SUCCESS`, an exit status
+    or signal is the result; anything else is `mcp_session_failed` with the
+    bastion's hint, and the command is not retried. `CHANNEL_FAILURE` is
+    "nothing ran". On a timeout, an abort or a missing result, the bastion
+    session is ended through `rustion/session/kill`.
 
 ## Goals
 
@@ -77,12 +115,17 @@ My calls (not yet confirmed; change them here before building):
 
 ## Design
 
-### Vault side
+### Vault side (built, T483)
 
-- `check_transport` (`crates/bv-engine-resource/src/agent_session.rs:442`)
-  stops refusing a `rustion` profile, `rustion-required`, and `rustion-preferred`
-  with a bastion. It returns the route (direct or bastion). An unresolvable
-  policy is still refused.
+- `check_transport` (`crates/bv-engine-resource/src/agent_session.rs`)
+  returns the route (`decide_route`, unit-tested per policy) and is checked
+  before MFA, so a refusal costs no ticket. An unresolvable or unknown
+  policy is refused. The web route refuses a bastion route.
+- The bastion leg is `crates/bv-engine-resource/src/agent_ssh/bastion.rs`;
+  the executor's bastion mode is `exec::run_via_bastion`; the exec form of
+  the open is in `crates/bv-engine-rustion/src/{lib,session,envelope}.rs`;
+  the envelope keys are `bv_crypto::BvrgPayload::{kind, command}`, not
+  written when absent (an interactive envelope is byte-for-byte unchanged).
 - The SSH executor gains a bastion route beside the direct one. It reuses the
   one-command contract, limits, sanitizer and `Zeroizing` handling already
   there.
@@ -112,7 +155,11 @@ My calls (not yet confirmed; change them here before building):
 
 One audit record per call, as on the direct path, naming the resource, profile,
 command hash, bastion, session id and recording pointer. The command text and
-output follow the existing transcript rules (S111 §10).
+output follow the existing transcript rules (S111 §10). Built as the direct
+path's `connect.agent.ssh.exec` record plus a `bastion` block (`bastion_id`,
+`bastion_name`, `session_id`, `correlation_id`, `recording_id`, `route`,
+`listener`, `listener_host_key_fingerprint`, `outcome`, `reason`); the
+transcript format is unchanged.
 
 ## Threat table
 
@@ -127,27 +174,31 @@ output follow the existing transcript rules (S111 §10).
 
 ## Phases
 
-| Phase | Where | Delivers |
-|---|---|---|
-| 0 | both | Read-only spike: how the ticket, envelope and relay fit; settle the open items below; fix the wire shape |
-| 1 | Rustion | Exec ticket kind, bound command, relay with recording, capability flag, tests |
-| 2 | vault | Exec form of `session/open`, bastion route in the SSH executor, `check_transport` change, tests |
-| 3 | both | End-to-end test with a real Rustion, docs, changelog |
+| Phase | Where | Delivers | State |
+|---|---|---|---|
+| 0 | both | Read-only spike: how the ticket, envelope and relay fit; settle the open items below; fix the wire shape | Done (Rustion `docs/rustion-agent-exec.md`) |
+| 1 | Rustion | Exec ticket kind, bound command, relay with recording, capability flag, tests | Done (Rustion 0.20.0, its T478-T483) |
+| 2 | vault | Exec form of `session/open`, bastion route in the SSH executor, `check_transport` change, tests | Done (T483) |
+| 3 | both | End-to-end test with a real Rustion, docs, changelog | Docs and changelog done here; the real-Rustion run is Rustion's T484 |
 
 Phase 2 depends on a Rustion release from phase 1. They are separate
 branches in separate repositories.
 
-## Open items for phase 0
+## Phase 0 items (resolved)
 
-- Exact shape of the capability flag and how the vault reads it.
-- How an exec result (exit status, stderr, truncation) maps onto Rustion's
-  existing relay and recording.
-- Whether the command filter's current blocklist can break a legitimate
-  confirmed command, and what the operator sees when it does.
-- Whether `rustion-preferred` needs the vault to check bastion health before
-  choosing the route, or can rely on `session/open`'s candidate selection.
-- Compatibility of the envelope change with Rustion versions that predate it
-  (read-old/write-new, per the persisted-format rule).
+All five are answered by Rustion's `docs/rustion-agent-exec.md`:
+
+- Capability flag: `capabilities: ["ssh_exec"]` on `GET /v1/authorities/self`
+  (decision 5 above).
+- Result mapping: `CHANNEL_FAILURE` = nothing ran; `CHANNEL_SUCCESS` then
+  exit status, exit signal, or neither (= failure); output capped per
+  stream, truncation hinted in-band (decision 10).
+- Command filter: refuse-only, may refuse a confirmed `ssh`/`scp`/`sftp`
+  command; surfaces as `CHANNEL_FAILURE` with `exec_command_filtered`.
+- `rustion-preferred` health: no pre-check; the open is authoritative
+  (decision 6 above for what the vault does with a failure).
+- Envelope compatibility: `kind` and `command` are optional top-level keys,
+  absent on an interactive open; tested byte for byte in `bv_crypto`.
 
 ## Testing requirements
 
@@ -155,9 +206,15 @@ branches in separate repositories.
   a reused ticket is refused; shell and subsystem on an exec ticket are
   refused; exec on an interactive ticket is refused; recording contains the
   command.
-- Vault: each transport policy yields the right route; an old Rustion yields
-  the named refusal; a down bastion refuses and never dials direct; the
-  confirmed command and the bound command are the same bytes.
+- Vault (built): each transport policy yields the right route
+  (`agent_session::tests`); an old Rustion yields the named refusal and is
+  never posted to (`bv-engine-rustion` `session::exec_tests`, HTTPS stand-in);
+  an open without `kind: "exec"` is killed; a down bastion refuses and never
+  dials direct (`src/engine_tests/mcp_sessions_ssh.rs`); the confirmed, sealed
+  and sent bytes are the same (`bastion::tests`, `envelope::tests`,
+  `exec::tests`); `CHANNEL_FAILURE` vs `SUCCESS` without a status vs a signal
+  (`exec::tests`, test server as listener); envelope over 16384 bytes;
+  `BvrgPayload` compatibility and malformed keys (`bv_crypto` `bvrg::tests`).
 - End to end: `bv_resource_ssh_exec` against a `rustion-required` resource
   returns the command's output and exit status, and the recording exists.
 

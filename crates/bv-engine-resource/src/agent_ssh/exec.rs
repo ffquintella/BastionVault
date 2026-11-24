@@ -23,6 +23,7 @@
 //! revoked, kill switch) ends the session the same way, from any phase.
 
 use std::{
+    net::SocketAddr,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -104,6 +105,29 @@ pub struct TranscriptCapture {
     pub truncated: bool,
 }
 
+/// One session to run through a Rustion bastion's SSH listener
+/// (`features/rustion-agent-exec.md`).
+pub struct BastionExecSpec {
+    /// The bastion listener's addresses, resolved once; nothing else is
+    /// dialed.
+    pub addrs: Vec<SocketAddr>,
+    /// SHA-256 of the listener's pinned host key, from the bastion's enrolled
+    /// target record. Checked before the ticket is sent.
+    pub host_key_sha256: [u8; 32],
+    /// Any user name works on a ticket login; the operator's, for the
+    /// bastion's logs.
+    pub username: String,
+    /// The single-use ticket from the exec open, wiped on drop.
+    pub ticket: Zeroizing<String>,
+    /// The confirmed command, byte-identical to the one sealed in the open.
+    pub command: String,
+    pub connect_budget: Duration,
+    pub deadline: Instant,
+    pub output_limit: usize,
+    pub drain_limit: usize,
+    pub transcript_stream_limit: usize,
+}
+
 /// What a session that reached the target did.
 pub struct ExecReport {
     /// `SHA256:<base64>` of the server key, as checked.
@@ -115,6 +139,9 @@ pub struct ExecReport {
     /// Cut short by revocation or the kill switch (`None` for a timeout,
     /// which `timed_out` reports).
     pub aborted: Option<AbortCause>,
+    /// The server answered the `exec` with `CHANNEL_SUCCESS`. Through a
+    /// bastion: the command started on the target, or may have.
+    pub confirmed: bool,
     /// The model's copy: both streams, capped jointly.
     pub model: CappedStreams,
     /// The transcript's copy, per stream.
@@ -138,6 +165,12 @@ pub enum ExecError {
     Aborted(AbortCause),
     /// Anything else the SSH layer reported.
     Protocol(String),
+    /// The bastion answered the `exec` with `CHANNEL_FAILURE`: by its
+    /// contract nothing ran on the target. `reason` is the code from its
+    /// `rustion: exec refused (<reason>)` line, when it sent one.
+    BastionRefused { reason: Option<String> },
+    /// The bastion closed the channel without answering the `exec` at all.
+    BastionNoAnswer,
 }
 
 impl std::fmt::Display for ExecError {
@@ -152,6 +185,17 @@ impl std::fmt::Display for ExecError {
             Self::ExecRejected => write!(f, "the target refused to run the command"),
             Self::Aborted(cause) => write!(f, "the session was aborted before the command ran ({cause:?})"),
             Self::Protocol(e) => write!(f, "SSH protocol error: {e}"),
+            Self::BastionRefused { reason: Some(reason) } => {
+                write!(f, "the bastion refused the command ({reason}); nothing ran on the target")
+            }
+            Self::BastionRefused { reason: None } => {
+                write!(f, "the bastion refused the command; nothing ran on the target")
+            }
+            Self::BastionNoAnswer => write!(
+                f,
+                "the bastion closed the channel without answering the exec request; the outcome is unknown and \
+                 the command is not retried"
+            ),
         }
     }
 }
@@ -288,7 +332,7 @@ fn signal_name(sig: &Sig) -> String {
 /// Takes the login by value: it is dropped — its secret wiped — as soon as
 /// authentication is over, whatever the outcome.
 async fn connect_and_login(
-    target: &CheckedTarget,
+    addrs: &[SocketAddr],
     pinned: [u8; 32],
     login: SshLogin,
     deadline: Instant,
@@ -296,7 +340,7 @@ async fn connect_and_login(
 ) -> Result<client::Handle<Client>, ExecError> {
     let mut last_err = String::from("no address to dial");
     let mut stream = None;
-    for addr in target.addrs() {
+    for addr in addrs {
         match tokio::net::TcpStream::connect(addr).await {
             Ok(s) => {
                 stream = Some(s);
@@ -359,7 +403,7 @@ fn fingerprint_matches(fp: &str, pinned: &[u8; 32]) -> bool {
 
 /// Run one session. `abort` carries a cause when the caller's watcher finds
 /// the token revoked or the kill switch off.
-pub async fn run(spec: ExecSpec, mut abort: watch::Receiver<Option<AbortCause>>) -> Result<ExecReport, ExecError> {
+pub async fn run(spec: ExecSpec, abort: watch::Receiver<Option<AbortCause>>) -> Result<ExecReport, ExecError> {
     let ExecSpec {
         target,
         host_key_sha256,
@@ -371,9 +415,68 @@ pub async fn run(spec: ExecSpec, mut abort: watch::Receiver<Option<AbortCause>>)
         drain_limit,
         transcript_stream_limit,
     } = spec;
+    let limits = ChannelLimits { deadline, transcript_stream_limit, mode: ChannelMode::Direct };
+    run_session(
+        target.addrs(),
+        host_key_sha256,
+        login,
+        &command,
+        connect_budget,
+        output_limit,
+        drain_limit,
+        limits,
+        abort,
+    )
+    .await
+}
+
+/// One session through a Rustion bastion (`features/rustion-agent-exec.md`):
+/// the same client at the bastion's SSH listener, its host key pinned, the
+/// single-use ticket as the password, one `exec` of the sealed bytes. Read
+/// per Rustion's contract: `CHANNEL_FAILURE` means nothing ran,
+/// `CHANNEL_SUCCESS` that it started or may have; at the deadline or on an
+/// abort the channel is closed without a signal (the caller ends the
+/// bastion session through its control plane).
+pub async fn run_via_bastion(
+    spec: BastionExecSpec,
+    abort: watch::Receiver<Option<AbortCause>>,
+) -> Result<ExecReport, ExecError> {
+    let BastionExecSpec {
+        addrs,
+        host_key_sha256,
+        username,
+        ticket,
+        command,
+        connect_budget,
+        deadline,
+        output_limit,
+        drain_limit,
+        transcript_stream_limit,
+    } = spec;
+    // The ticket is a one-use password; it is wiped when the login drops,
+    // right after authentication.
+    let login = SshLogin::Password { username, password: ticket };
+    let limits = ChannelLimits { deadline, transcript_stream_limit, mode: ChannelMode::Bastion };
+    run_session(&addrs, host_key_sha256, login, &command, connect_budget, output_limit, drain_limit, limits, abort)
+        .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_session(
+    addrs: &[SocketAddr],
+    host_key_sha256: [u8; 32],
+    login: SshLogin,
+    command: &str,
+    connect_budget: Duration,
+    output_limit: usize,
+    drain_limit: usize,
+    limits: ChannelLimits,
+    mut abort: watch::Receiver<Option<AbortCause>>,
+) -> Result<ExecReport, ExecError> {
+    let deadline = limits.deadline;
     let observed = Arc::new(Mutex::new(None));
     let connect_deadline = (Instant::now() + connect_budget).min(deadline);
-    let login_fut = connect_and_login(&target, host_key_sha256, login, deadline, observed.clone());
+    let login_fut = connect_and_login(addrs, host_key_sha256, login, deadline, observed.clone());
     let handle = tokio::select! {
         biased;
         cause = aborted(&mut abort) => return Err(ExecError::Aborted(cause)),
@@ -392,15 +495,22 @@ pub async fn run(spec: ExecSpec, mut abort: watch::Receiver<Option<AbortCause>>)
         exit_signal: None,
         timed_out: false,
         aborted: None,
+        confirmed: false,
         model: CappedStreams::new(2, output_limit, drain_limit),
         transcript: Default::default(),
     };
 
-    let limits = ChannelLimits { deadline, transcript_stream_limit };
-    let outcome = exec_on_one_channel(&handle, &command, &limits, &mut abort, &mut report).await;
+    let outcome = exec_on_one_channel(&handle, command, &limits, &mut abort, &mut report).await;
     // Whatever happened, the connection ends here.
     let _ = handle.disconnect(Disconnect::ByApplication, "", "en").await;
     outcome.map(|()| report)
+}
+
+/// Who answers the `exec`: the target itself, or a Rustion bastion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChannelMode {
+    Direct,
+    Bastion,
 }
 
 /// The single channel: open, `exec`, `EOF`, read until the server closes
@@ -408,6 +518,40 @@ pub async fn run(spec: ExecSpec, mut abort: watch::Receiver<Option<AbortCause>>)
 struct ChannelLimits {
     deadline: Instant,
     transcript_stream_limit: usize,
+    mode: ChannelMode,
+}
+
+/// The reason code of a bastion's refusal line, `rustion: exec refused
+/// (<reason>)[: <detail>]`, from the stderr it sent before
+/// `CHANNEL_FAILURE`: the last such line, the code only (`[a-z0-9_]`, at
+/// most 64 bytes), never its free-text detail.
+pub fn bastion_refusal_reason(stderr: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(stderr);
+    text.lines().rev().find_map(|line| {
+        let rest = line.trim().strip_prefix("rustion: exec refused (")?;
+        let reason = &rest[..rest.find(')')?];
+        let well_formed = !reason.is_empty()
+            && reason.len() <= 64
+            && reason.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+        well_formed.then(|| reason.to_string())
+    })
+}
+
+/// The reason in a bastion's last `rustion: <what> (<reason>)` stderr line,
+/// for a command that ended without an exit status (`no exit status
+/// (<reason>)`, `exec outcome unknown (<detail>)`). A hint only: the target
+/// can print a look-alike line, so it only ever words a failure, never
+/// turns one into a success.
+pub fn bastion_outcome_hint(stderr: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(stderr);
+    text.lines().rev().find_map(|line| {
+        let rest = line.trim().strip_prefix("rustion: ")?;
+        let (what, after) = rest.split_once(" (")?;
+        let reason = &after[..after.find(')')?];
+        let what_ok = matches!(what, "no exit status" | "exec outcome unknown");
+        let reason_ok = !reason.is_empty() && reason.len() <= 64 && reason.bytes().all(|b| b.is_ascii_graphic());
+        (what_ok && reason_ok).then(|| format!("{what} ({reason})"))
+    })
 }
 
 async fn exec_on_one_channel(
@@ -426,23 +570,41 @@ async fn exec_on_one_channel(
         tokio::select! {
             biased;
             cause = aborted(abort) => {
-                let _ = channel.signal(Sig::KILL).await;
+                // A bastion relays no signal; the caller ends the bastion
+                // session through its control plane instead.
+                if limits.mode == ChannelMode::Direct {
+                    let _ = channel.signal(Sig::KILL).await;
+                }
                 let _ = channel.close().await;
                 report.aborted = Some(cause);
                 return Ok(());
             }
             _ = tokio::time::sleep_until(limits.deadline) => {
-                let _ = channel.signal(Sig::KILL).await;
+                if limits.mode == ChannelMode::Direct {
+                    let _ = channel.signal(Sig::KILL).await;
+                }
                 let _ = channel.close().await;
                 report.timed_out = true;
                 return Ok(());
             }
             msg = channel.wait() => {
-                let Some(msg) = msg else { return Ok(()) };
+                let Some(msg) = msg else {
+                    return if limits.mode == ChannelMode::Bastion && !confirmed {
+                        Err(ExecError::BastionNoAnswer)
+                    } else {
+                        Ok(())
+                    };
+                };
                 let state = match msg {
                     ChannelMsg::Success => {
                         confirmed = true;
+                        report.confirmed = true;
                         CaptureState::Capturing
+                    }
+                    ChannelMsg::Failure if !confirmed && limits.mode == ChannelMode::Bastion => {
+                        return Err(ExecError::BastionRefused {
+                            reason: bastion_refusal_reason(&report.transcript[STDERR].bytes),
+                        });
                     }
                     ChannelMsg::Failure if !confirmed => return Err(ExecError::ExecRejected),
                     ChannelMsg::Data { data } => record(report, limits, STDOUT, &data),
@@ -454,6 +616,9 @@ async fn exec_on_one_channel(
                     ChannelMsg::ExitSignal { signal_name: sig, .. } => {
                         report.exit_signal = Some(signal_name(&sig));
                         CaptureState::Capturing
+                    }
+                    ChannelMsg::Close if limits.mode == ChannelMode::Bastion && !confirmed => {
+                        return Err(ExecError::BastionNoAnswer);
                     }
                     ChannelMsg::Close => return Ok(()),
                     // EOF, window adjustments, other extended-data types:
@@ -685,6 +850,157 @@ mod tests {
         let report = run(spec(&server, password("hunter2"), "sleep 30", Duration::from_secs(20)), rx).await.unwrap();
         assert_eq!(report.aborted, Some(AbortCause::TokenRevoked));
         assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+    }
+
+    // ── Through a bastion (T483) ────────────────────────────────────────
+    // The test server plays a Rustion SSH listener: a ticket login, then
+    // `exec` answered per Rustion's result contract.
+
+    const TICKET: &str = "tkt-7f3a";
+
+    fn bastion_server(reply: ScriptedReply) -> TestServerConfig {
+        let mut config = TestServerConfig::new(move |_| reply.clone());
+        config.passwords.push(("felipe".into(), TICKET.into()));
+        config
+    }
+
+    fn bastion_spec(server: &TestSshServer, command: &str, timeout: Duration) -> BastionExecSpec {
+        BastionExecSpec {
+            addrs: vec![server.addr()],
+            host_key_sha256: server.host_key_sha256(),
+            username: "felipe".into(),
+            ticket: Zeroizing::new(TICKET.into()),
+            command: command.to_string(),
+            connect_budget: Duration::from_secs(10),
+            deadline: Instant::now() + timeout,
+            output_limit: 64 * 1024,
+            drain_limit: 1 << 20,
+            transcript_stream_limit: 1 << 20,
+        }
+    }
+
+    /// The ticket goes in the password slot, once; one channel carries one
+    /// `exec` whose bytes are the confirmed command, then EOF; no PTY,
+    /// shell, subsystem or data. An exit status is forwarded verbatim.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn through_a_bastion_one_exec_with_the_sealed_bytes() {
+        let command = "systemctl is-active nginx; echo \"ação ✓\"";
+        let server = TestSshServer::start(bastion_server(ScriptedReply {
+            stdout: b"active\n".to_vec(),
+            exit_status: Some(3),
+            ..Default::default()
+        }))
+        .await;
+        let (_tx, rx) = no_abort();
+        let report = run_via_bastion(bastion_spec(&server, command, Duration::from_secs(10)), rx).await.unwrap();
+        assert!(report.confirmed);
+        assert_eq!((report.exit_status, report.exit_signal.as_deref()), (Some(3), None));
+        assert_eq!(report.model.stream(STDOUT).kept(), b"active\n");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let events = server.events();
+        assert_eq!(count(&events, "auth_password:"), 1, "{events:?}");
+        assert!(events.contains(&format!("auth_password:felipe:{TICKET}")), "{events:?}");
+        assert_eq!(count(&events, "channel_open_session"), 1, "{events:?}");
+        let execs: Vec<&String> = events.iter().filter(|e| e.starts_with("exec:")).collect();
+        assert_eq!(execs, vec![&format!("exec:{command}")], "the exec carries the confirmed bytes");
+        for forbidden in FORBIDDEN {
+            assert_eq!(count(&events, forbidden), 0, "{forbidden} in {events:?}");
+        }
+    }
+
+    /// `CHANNEL_FAILURE` means nothing ran: an error naming the bastion's
+    /// reason code, never a result, and no retry.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_bastion_refusal_is_nothing_ran() {
+        let server = TestSshServer::start(bastion_server(ScriptedReply {
+            refuse_with: Some(
+                "rustion: exec refused (exec_command_filtered): ssh, scp, sftp and SSH tunnels are not allowed".into(),
+            ),
+            ..Default::default()
+        }))
+        .await;
+        let (_tx, rx) = no_abort();
+        match run_via_bastion(bastion_spec(&server, "ssh -V", Duration::from_secs(10)), rx).await {
+            Err(e @ ExecError::BastionRefused { .. }) => {
+                assert!(matches!(&e, ExecError::BastionRefused { reason: Some(r) } if r == "exec_command_filtered"));
+                assert!(e.to_string().contains("nothing ran"), "{e}");
+            }
+            Err(other) => panic!("expected a bastion refusal, got {other}"),
+            Ok(_) => panic!("a refused exec must not produce a report"),
+        }
+        assert_eq!(count(&server.events(), "exec:"), 1, "sent once, never retried");
+    }
+
+    /// `CHANNEL_SUCCESS` and then no exit status is a report with no
+    /// result, which the session turns into a failure; an `exit-signal` is
+    /// a result, reported as the signal.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn success_without_a_status_is_no_result_and_a_signal_is_one() {
+        let server = TestSshServer::start(bastion_server(ScriptedReply {
+            stderr: b"rustion: no exit status (target_connection_lost)\r\n".to_vec(),
+            ..Default::default()
+        }))
+        .await;
+        let (_tx, rx) = no_abort();
+        let report = run_via_bastion(bastion_spec(&server, "reboot", Duration::from_secs(10)), rx).await.unwrap();
+        assert!(report.confirmed && report.exit_status.is_none() && report.exit_signal.is_none());
+        assert!(!report.timed_out && report.aborted.is_none());
+        assert_eq!(
+            bastion_outcome_hint(&report.transcript[STDERR].bytes).as_deref(),
+            Some("no exit status (target_connection_lost)")
+        );
+
+        let server =
+            TestSshServer::start(bastion_server(ScriptedReply { exit_signal: Some(Sig::TERM), ..Default::default() }))
+                .await;
+        let (_tx, rx) = no_abort();
+        let report = run_via_bastion(bastion_spec(&server, "sleep 9", Duration::from_secs(10)), rx).await.unwrap();
+        assert_eq!((report.exit_status, report.exit_signal.as_deref()), (None, Some("TERM")));
+    }
+
+    /// The bastion listener's key is pinned like a target's: a mismatch
+    /// sends no ticket.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_bastion_key_mismatch_sends_no_ticket() {
+        let server = TestSshServer::start(bastion_server(ScriptedReply::default())).await;
+        let mut spec = bastion_spec(&server, "uptime", Duration::from_secs(10));
+        spec.host_key_sha256 = [9u8; 32];
+        let (_tx, rx) = no_abort();
+        assert!(matches!(run_via_bastion(spec, rx).await, Err(ExecError::HostKeyMismatch { .. })));
+        assert_eq!(count(&server.events(), "auth_"), 0, "{:?}", server.events());
+    }
+
+    /// At the deadline the bastion channel is closed without a signal (the
+    /// session is then ended through the control plane).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_bastion_deadline_closes_without_a_signal() {
+        let server = TestSshServer::start(bastion_server(ScriptedReply {
+            delay: Some(Duration::from_secs(30)),
+            exit_status: Some(0),
+            ..Default::default()
+        }))
+        .await;
+        let (_tx, rx) = no_abort();
+        let report = run_via_bastion(bastion_spec(&server, "sleep 30", Duration::from_secs(2)), rx).await.unwrap();
+        assert!(report.timed_out && report.exit_status.is_none());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(count(&server.events(), "signal:"), 0, "{:?}", server.events());
+    }
+
+    #[test]
+    fn bastion_lines_yield_codes_only() {
+        assert_eq!(
+            bastion_refusal_reason(b"noise\nrustion: exec refused (session_expired): the ticket lapsed\r\n").as_deref(),
+            Some("session_expired")
+        );
+        for bad in [&b"rustion: exec refused (Bad Code)"[..], b"rustion: exec refused (", b"refused (x)", b""] {
+            assert_eq!(bastion_refusal_reason(bad), None, "{:?}", String::from_utf8_lossy(bad));
+        }
+        assert_eq!(
+            bastion_outcome_hint(b"rustion: exec outcome unknown (timeout): the target did not confirm").as_deref(),
+            Some("exec outcome unknown (timeout)")
+        );
+        assert_eq!(bastion_outcome_hint(b"rustion: stdout truncated after 1048576 bytes"), None);
     }
 
     /// stdout and stderr share one cap; past it, reading stops at the drain

@@ -98,6 +98,13 @@ receives a password, key or certificate. The design, and what it does not
 protect against, is in
 [`features/mcp-brokered-sessions.md`](../features/mcp-brokered-sessions.md).
 
+**Through a bastion.** A resource whose transport policy routes through
+Rustion (`rustion-required`, `rustion-preferred` with a bastion, or a
+`rustion` profile) runs the command through the bastion: the vault seals the
+command into the session ticket, the bastion runs only those bytes, records
+the session and returns the result. It is never dialed direct instead. It
+needs Rustion 0.20.0 or later with exec enabled and a pinned SSH listener.
+
 **You approve every call.** The desktop app or `bvault mcp serve` shows each
 session call before anything is dialed — resource, profile, protocol and the
 exact command — and it runs only if you allow it. There is no setting or grant
@@ -738,7 +745,7 @@ CSS, so text a page hides is returned.
 | `mcp_namespace_mismatch` | The vault bound a narrowed token somewhere else (a vault without narrowing ignores the field); the token was discarded |
 | `mcp_session_mfa_ticket_refused` | Your MFA ticket was for another call, expired (60 s) or already used; it is burnt, and the assistant's retry asks you again |
 | `mcp_session_mfa_check_failed` | The gatekeeper could not ask the vault whether the profile is gated (unreachable, or your session may not read the resource or profile) |
-| `mcp_session_requires_bastion` | The resource must be reached through Rustion, which cannot run an agent's command |
+| `mcp_session_requires_bastion` | The resource must be reached through Rustion and no bastion could take the command: none is available, none advertises `ssh_exec` (update the bastion to Rustion 0.20.0 or later, with exec on), or the transport policy could not be resolved. The vault never dials such a resource direct. Web fetches through Rustion are not built |
 | `mcp_session_destination_refused` | The target address is outside `allowed_target_cidrs`, or always denied |
 | `mcp_session_host_key_unpinned` / `mcp_session_host_key_mismatch` | No pin on the profile / the server's key is not the pinned one |
 | `mcp_session_login_class_unsupported` | The credential source cannot be used for sessions, or the SSH role cannot bind the command (named in the message) |
