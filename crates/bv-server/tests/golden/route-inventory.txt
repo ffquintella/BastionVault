@@ -103,6 +103,10 @@ DELETE /v1/sys/identity/ns-assignment/{path:.*} [routed] -> sys/identity/ns-assi
 GET    /v1/sys/dos/config [routed] -> sys/dos/config
 POST   /v1/sys/dos/config [routed] -> sys/dos/config
 PUT    /v1/sys/dos/config [routed] -> sys/dos/config
+GET    /v1/sys/sso/settings [routed] -> sys/sso/settings
+POST   /v1/sys/sso/settings [routed] -> sys/sso/settings
+PUT    /v1/sys/sso/settings [routed] -> sys/sso/settings
+GET    /v1/sys/sso/providers [routed-unauthenticated] -> sys/sso/providers -- In the system backend's unauth_paths; the login page lists SSO providers before it has a token, and the handler exposes display metadata only
 GET    /v1/sys/dos/stats [routed] -> sys/dos/stats
 POST   /v1/sys/dos/bans/{ip:.*} [routed] -> sys/dos/bans/{ip}
 PUT    /v1/sys/dos/bans/{ip:.*} [routed] -> sys/dos/bans/{ip}
@@ -228,6 +232,10 @@ DELETE /v2/sys/identity/ns-assignment/{path:.*} [routed] -> sys/identity/ns-assi
 GET    /v2/sys/dos/config [routed] -> sys/dos/config
 POST   /v2/sys/dos/config [routed] -> sys/dos/config
 PUT    /v2/sys/dos/config [routed] -> sys/dos/config
+GET    /v2/sys/sso/settings [routed] -> sys/sso/settings
+POST   /v2/sys/sso/settings [routed] -> sys/sso/settings
+PUT    /v2/sys/sso/settings [routed] -> sys/sso/settings
+GET    /v2/sys/sso/providers [routed-unauthenticated] -> sys/sso/providers -- In the system backend's unauth_paths; the login page lists SSO providers before it has a token, and the handler exposes display metadata only
 GET    /v2/sys/dos/stats [routed] -> sys/dos/stats
 POST   /v2/sys/dos/bans/{ip:.*} [routed] -> sys/dos/bans/{ip}
 PUT    /v2/sys/dos/bans/{ip:.*} [routed] -> sys/dos/bans/{ip}

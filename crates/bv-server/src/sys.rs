@@ -783,6 +783,45 @@ async fn sys_ns_assignment_path_request_handler(
     handle_request(core, &mut r).await
 }
 
+/// GET / POST|PUT `/sys/sso/settings` — read or flip the global SSO enable bit.
+/// HTTP shim over the sys-backend logical route `sso/settings` (root-gated).
+/// Without it the `/v1/sys` and `/v2/sys` scopes 404 the request, so the GUI's
+/// SSO toggle only worked in embedded vault mode.
+async fn sys_sso_settings_request_handler(
+    req: HttpRequest,
+    mut body: web::Bytes,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, HttpError> {
+    let mut r = request_auth(&req);
+    r.path = "sys/sso/settings".to_string();
+    copy_namespace_header(&req, &mut r);
+    match *req.method() {
+        actix_web::http::Method::POST | actix_web::http::Method::PUT => {
+            r.operation = Operation::Write;
+            if !body.is_empty() {
+                r.body = Some(serde_json::from_slice(&body)?);
+                body.clear();
+            }
+        }
+        _ => r.operation = Operation::Read,
+    }
+    handle_request(core, &mut r).await
+}
+
+/// GET `/sys/sso/providers` — unauthenticated SSO discovery for the login page.
+/// HTTP shim over the sys-backend logical route `sso/providers`, which is in
+/// that backend's `unauth_paths`.
+async fn sys_sso_providers_request_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, HttpError> {
+    let mut r = request_auth(&req);
+    r.path = "sys/sso/providers".to_string();
+    r.operation = Operation::Read;
+    copy_namespace_header(&req, &mut r);
+    handle_request(core, &mut r).await
+}
+
 /// GET / POST|PUT `/sys/dos/config` — read or update the IP-based
 /// DoS-protection thresholds. HTTP shim over the sys-backend logical route
 /// `dos/config`.

@@ -9,6 +9,7 @@ GET    /v1/sys/info [tiered] -- initialized and sealed are needed before a token
 GET    /v1/sys/cluster-status [cluster-local] -- Raft role and membership: a live token, or a cluster-local socket peer (loopback or a configured node, never X-Forwarded-For); anyone else gets 403
 POST   /v1/sys/unseal [public-probe] -- the unseal key share is the credential: no token can be validated while the barrier is sealed
 PUT    /v1/sys/unseal [public-probe] -- the unseal key share is the credential: no token can be validated while the barrier is sealed
+GET    /v1/sys/sso/providers [routed-unauthenticated] -> sys/sso/providers -- In the system backend's unauth_paths; the login page lists SSO providers before it has a token, and the handler exposes display metadata only
 GET    /v1/sys/internal/ui/mounts [routed-unauthenticated] -> sys/internal/ui/mounts -- Vault-compatible UI bootstrap in the system backend's unauth_paths; the handler judges any token itself and lists no mount to an anonymous caller
 GET    /v1/sys/internal/ui/mounts/{name:.*} [routed-unauthenticated] -> sys/internal/ui/mounts/{name} -- Vault-compatible UI bootstrap in the system backend's unauth_paths; the handler refuses an anonymous caller and checks mount access for a token
 GET    /v2/sys/init [public-probe] -- bootstrap: whether the vault is initialized is needed before any token can exist
@@ -20,6 +21,7 @@ GET    /v2/sys/info [tiered] -- initialized and sealed are needed before a token
 GET    /v2/sys/cluster-status [cluster-local] -- Raft role and membership: a live token, or a cluster-local socket peer (loopback or a configured node, never X-Forwarded-For); anyone else gets 403
 POST   /v2/sys/unseal [public-probe] -- the unseal key share is the credential: no token can be validated while the barrier is sealed
 PUT    /v2/sys/unseal [public-probe] -- the unseal key share is the credential: no token can be validated while the barrier is sealed
+GET    /v2/sys/sso/providers [routed-unauthenticated] -> sys/sso/providers -- In the system backend's unauth_paths; the login page lists SSO providers before it has a token, and the handler exposes display metadata only
 GET    /v2/sys/internal/ui/mounts [routed-unauthenticated] -> sys/internal/ui/mounts -- Vault-compatible UI bootstrap in the system backend's unauth_paths; the handler judges any token itself and lists no mount to an anonymous caller
 GET    /v2/sys/internal/ui/mounts/{name:.*} [routed-unauthenticated] -> sys/internal/ui/mounts/{name} -- Vault-compatible UI bootstrap in the system backend's unauth_paths; the handler refuses an anonymous caller and checks mount access for a token
 POST   /v2/sys/batch [dispatch] -- carries caller-chosen logical operations; each is judged by pre_route on its own path through Core::handle_request

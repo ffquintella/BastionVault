@@ -662,18 +662,28 @@ export function SettingsPage() {
                 Add Provider
               </Button>
               {ssoLoaded && (
-                <label className="flex items-center gap-2 cursor-pointer select-none text-sm">
-                  <input
-                    type="checkbox"
-                    checked={ssoEnabled}
-                    disabled={ssoSaving}
-                    onChange={(e) => handleToggleSso(e.target.checked)}
-                    className="accent-[var(--color-primary)] w-4 h-4"
-                  />
-                  <span className="text-[var(--color-text-muted)]">
-                    {ssoEnabled ? "Enabled" : "Disabled"}
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={ssoEnabled}
+                  aria-label="Single Sign-On"
+                  disabled={ssoSaving}
+                  onClick={() => handleToggleSso(!ssoEnabled)}
+                  className="flex items-center gap-2 select-none text-sm disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
+                >
+                  <span
+                    className={`relative inline-block h-5 w-9 rounded-full transition-colors ${
+                      ssoEnabled ? "bg-[var(--color-primary)]" : "bg-[var(--color-border)]"
+                    }`}
+                  >
+                    <span
+                      className={`absolute top-0.5 left-0.5 h-4 w-4 rounded-full bg-white transition-transform ${
+                        ssoEnabled ? "translate-x-4" : ""
+                      }`}
+                    />
                   </span>
-                </label>
+                  <span className="text-[var(--color-text-muted)]">{ssoEnabled ? "On" : "Off"}</span>
+                </button>
               )}
             </div>
           }

@@ -270,6 +270,17 @@ pub(crate) const SHARED: &[ResourceSpec] = &[
         route!(routed Post => sys_dos_config_request_handler, "sys/dos/config"),
         route!(routed Put => sys_dos_config_request_handler, "sys/dos/config"),
     ]),
+    // Global SSO toggle (root-gated) and the unauthenticated discovery list
+    // the login page reads before the operator has a token.
+    resource!("/sso/settings" => [
+        route!(routed Get => sys_sso_settings_request_handler, "sys/sso/settings"),
+        route!(routed Post => sys_sso_settings_request_handler, "sys/sso/settings"),
+        route!(routed Put => sys_sso_settings_request_handler, "sys/sso/settings"),
+    ]),
+    resource!("/sso/providers" => [
+        route!(routed_unauthenticated Get => sys_sso_providers_request_handler, "sys/sso/providers",
+            "In the system backend's unauth_paths; the login page lists SSO providers before it has a token, and the handler exposes display metadata only"),
+    ]),
     resource!("/dos/stats" => [route!(routed Get => sys_dos_stats_request_handler, "sys/dos/stats")]),
     resource!("/dos/bans/{ip:.*}" => [
         route!(routed Post => sys_dos_ban_request_handler, "sys/dos/bans/{ip}"),

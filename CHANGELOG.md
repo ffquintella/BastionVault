@@ -450,6 +450,14 @@ EXAMPLE ENTRY:
 
 ### Fixed
 
+#### GUI: the Settings → Identity SSO toggle returned `HTTP 404` against a remote server
+
+- **Serve `sys/sso/settings` and `sys/sso/providers` over HTTP, and render the SSO toggle as an On/Off switch** -- the routes existed only in the logical backend, so the `/v1/sys` and `/v2/sys` scopes 404'd them and the toggle worked only in embedded mode; the login page's provider discovery had the same gap. (T551)
+
+#### CLI: `VAULT_TLS_SERVER_NAME` was documented but never read
+
+- **Make `--tls-server-name` read the `VAULT_TLS_SERVER_NAME` environment variable, as `docs/cli-reference.md` already said** -- the flag had no environment binding, so setting the variable had no effect and the certificate was verified against the address host. An explicit flag still wins.
+
 #### FerroGate: SQL privileges lost in a machine login bound to a user
 
 - **Keep a machine's policy in a combined machine and user login when the user holds it through an identity group** (T553, S89, S109) -- the intersection used only the policies stored on the user's token, so a `sql-full` the user inherits from a group was dropped and the SQL browser answered `no_sql_privilege`; it now uses the user's effective policies, still bounded by what the machine is approved for.
