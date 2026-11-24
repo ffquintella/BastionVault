@@ -322,6 +322,82 @@ pub async fn delete_user(state: State<'_, AppState>, mount_path: String, usernam
     Ok(())
 }
 
+/// One SSO user directory record (`sys/sso/users`, T555): a principal that
+/// has completed an OIDC or SAML login. Passwordless; never a credential.
+#[derive(Serialize, Default, Debug, PartialEq)]
+pub struct SsoUserInfo {
+    pub username: String,
+    /// `oidc/` or `saml/`: the mount the namespace assignment is keyed by.
+    pub mount: String,
+    pub auth_method: String,
+    pub role: String,
+    pub subject: String,
+    pub email: String,
+    /// `none`, `idp` or `admin`.
+    pub email_source: String,
+    pub first_login: String,
+    pub last_login: String,
+    pub login_count: u64,
+}
+
+fn sso_user_from_map(data: &Map<String, Value>) -> SsoUserInfo {
+    let get_str = |k: &str| data.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    SsoUserInfo {
+        username: get_str("username"),
+        mount: get_str("mount"),
+        auth_method: get_str("auth_method"),
+        role: get_str("role"),
+        subject: get_str("subject"),
+        email: get_str("email"),
+        email_source: get_str("email_source"),
+        first_login: get_str("first_login"),
+        last_login: get_str("last_login"),
+        login_count: data.get("login_count").and_then(|v| v.as_u64()).unwrap_or(0),
+    }
+}
+
+/// `sys/sso/users/<mount>/<name>`; `mount` may carry its trailing slash.
+fn sso_user_path(mount: &str, username: &str) -> String {
+    format!("sys/sso/users/{}/{username}", mount.trim_end_matches('/'))
+}
+
+/// `v2/sys/sso/users`: the whole SSO user directory. Root-namespace scoped,
+/// like the namespace assignments it is edited alongside.
+#[tauri::command]
+pub async fn list_sso_users(state: State<'_, AppState>) -> CmdResult<Vec<SsoUserInfo>> {
+    let resp = make_request_root(&state, Operation::Read, "sys/sso/users".to_string(), None).await?;
+    let data = resp.and_then(|r| r.data).unwrap_or_default();
+    Ok(data
+        .get("records")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_object()).map(sso_user_from_map).collect())
+        .unwrap_or_default())
+}
+
+/// Set (or, with `""`, clear) an SSO user's contact e-mail. An admin-set
+/// address is kept across later logins.
+#[tauri::command]
+pub async fn update_sso_user(
+    state: State<'_, AppState>,
+    mount: String,
+    username: String,
+    email: String,
+) -> CmdResult<SsoUserInfo> {
+    let mut body = Map::new();
+    body.insert("email".to_string(), Value::String(email));
+    let resp = make_request_root(&state, Operation::Write, sso_user_path(&mount, &username), Some(body)).await?;
+    let data = resp.and_then(|r| r.data).ok_or("sys/sso/users returned no record")?;
+    Ok(sso_user_from_map(&data))
+}
+
+/// Remove an SSO user's directory record. Their namespace assignment and
+/// identity entity are kept; the next SSO login recreates the record.
+#[tauri::command]
+pub async fn delete_sso_user(state: State<'_, AppState>, mount: String, username: String) -> CmdResult<()> {
+    make_request_root(&state, Operation::Delete, sso_user_path(&mount, &username), None).await?;
+    Ok(())
+}
+
 /// A principal's per-OS default resource accounts (Resource Connect). Empty
 /// login-name fields mean "unconfigured" for that OS family. The Windows RDP
 /// password is never returned as plaintext on this admin path — only

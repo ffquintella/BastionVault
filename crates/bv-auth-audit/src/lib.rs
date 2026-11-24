@@ -27,6 +27,9 @@ use bv_storage as storage;
 
 pub use bv_errors::{bv_error_response, bv_error_response_status, bv_error_string};
 
+/// The SSO user directory (T555): one record per OIDC/SAML principal.
+pub mod sso_users;
+
 use std::sync::Arc;
 
 use chrono::Utc;

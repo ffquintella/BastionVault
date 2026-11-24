@@ -215,6 +215,10 @@ impl OidcBackendInner {
         // No record ⇒ unrestricted; fails closed otherwise.
         crate::kernel_api::namespace::enforce_login_assignment(&self.core, "oidc/", &display_name, &ns_path).await?;
 
+        // The login is decided. Give the principal an identity entity so shares
+        // and owner-scoped rules apply to it (T555); never refuses the login.
+        let entity_id = bv_auth_audit::sso_users::ensure_sso_entity(&self.core, "oidc/", &display_name, &ns_path).await;
+
         let mut metadata: HashMap<String, String> = HashMap::new();
         metadata.insert("role".to_string(), auth_state.role_name.clone());
         metadata.insert("subject".to_string(), claims.subject().as_str().to_string());
@@ -234,6 +238,11 @@ impl OidcBackendInner {
         // claim mappings so an IdP-supplied claim cannot rename the mount an
         // assignment is looked up under.
         metadata.insert("mount_path".to_string(), "oidc/".to_string());
+        if let Some(entity_id) = entity_id {
+            metadata.insert("entity_id".to_string(), entity_id);
+        }
+
+        let sso_login = sso_login_event(&display_name, &auth_state.role_name, claims.subject().as_str(), &claims_map);
 
         let mut auth = Auth::default();
         auth.display_name = display_name;
@@ -249,6 +258,11 @@ impl OidcBackendInner {
         }
         if role.token_max_ttl_secs > 0 {
             auth.lease.max_ttl = Duration::from_secs(role.token_max_ttl_secs);
+        }
+
+        // Users page directory (T555). Best-effort: logs, never fails the login.
+        if let Some(login) = &sso_login {
+            bv_auth_audit::sso_users::record_sso_login(&self.core, login).await;
         }
 
         Ok(Some(Response { auth: Some(auth), ..Default::default() }))
@@ -321,6 +335,24 @@ fn project_claim_mappings(
             metadata.insert(meta_key.clone(), claim_to_string(v));
         }
     }
+}
+
+/// The SSO user directory entry of a successful login (T555), or `None` when
+/// the principal name is unusable. The e-mail comes from the standard `email`
+/// claim, skipped when the IdP says `email_verified` is false.
+fn sso_login_event(
+    display_name: &str,
+    role_name: &str,
+    subject: &str,
+    claims: &Map<String, Value>,
+) -> Option<bv_auth_audit::sso_users::SsoLogin> {
+    let verified = match claims.get("email_verified") {
+        Some(Value::Bool(b)) => *b,
+        Some(Value::String(s)) => !s.eq_ignore_ascii_case("false"),
+        _ => true,
+    };
+    let email = claims.get("email").and_then(Value::as_str).filter(|_| verified);
+    bv_auth_audit::sso_users::SsoLogin::new("oidc/", "oidc", display_name, role_name, subject, email)
 }
 
 /// Flatten a claim value into a single string suitable for Vault
@@ -430,5 +462,29 @@ mod tests {
         let mut metadata = HashMap::new();
         project_claim_mappings("user", &mappings(&[("email", "email")]), &claims(&[]), &mut metadata);
         assert!(metadata.is_empty());
+    }
+
+    #[test]
+    fn a_successful_login_becomes_a_directory_entry_under_oidc() {
+        let c = claims(&[("email", "felipe.quintella@fgv.br"), ("sub", "abc")]);
+        let login = sso_login_event("felipe.quintella@fgv.br", "default", "abc", &c).unwrap();
+        assert_eq!(login.mount(), "oidc/");
+        assert_eq!(login.username(), "felipe.quintella@fgv.br");
+        assert_eq!(login.email(), Some("felipe.quintella@fgv.br"));
+    }
+
+    #[test]
+    fn an_empty_principal_name_is_not_recorded() {
+        assert!(sso_login_event("", "default", "abc", &claims(&[])).is_none());
+        assert!(sso_login_event("(unknown)", "default", "abc", &claims(&[])).is_none());
+    }
+
+    #[test]
+    fn an_unverified_email_is_not_recorded() {
+        let mut c = claims(&[("email", "x@example.com")]);
+        c.insert("email_verified".into(), Value::Bool(false));
+        assert_eq!(sso_login_event("x", "r", "s", &c).unwrap().email(), None);
+        c.insert("email_verified".into(), Value::Bool(true));
+        assert_eq!(sso_login_event("x", "r", "s", &c).unwrap().email(), Some("x@example.com"));
     }
 }

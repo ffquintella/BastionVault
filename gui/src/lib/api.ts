@@ -19,6 +19,7 @@ import type {
   SecretListResult,
   UserListResult,
   UserInfo,
+  SsoUserInfo,
   LockoutConfig,
   MfaConfig,
   PolicyListResult,
@@ -677,6 +678,13 @@ export const deleteUser = (mountPath: string, username: string) =>
   invoke<void>("delete_user", { mountPath, username });
 export const unlockUser = (mountPath: string, username: string) =>
   invoke<void>("unlock_user", { mountPath, username });
+
+// SSO user directory (T555): principals that signed in through OIDC / SAML.
+export const listSsoUsers = () => invoke<SsoUserInfo[]>("list_sso_users");
+export const updateSsoUser = (mount: string, username: string, email: string) =>
+  invoke<SsoUserInfo>("update_sso_user", { mount, username, email });
+export const deleteSsoUser = (mount: string, username: string) =>
+  invoke<void>("delete_sso_user", { mount, username });
 
 // Account-security config (userpass mount-level)
 export const getLockoutConfig = (mountPath: string) =>

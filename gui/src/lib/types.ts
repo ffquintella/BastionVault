@@ -276,6 +276,23 @@ export interface UserInfo {
   phone: string;
 }
 
+/** One SSO user directory record (`v2/sys/sso/users`, T555): a principal
+ *  that has completed an OIDC or SAML login. Passwordless. `mount` (`oidc/`
+ *  or `saml/`) is the key its namespace assignment is stored under. */
+export interface SsoUserInfo {
+  username: string;
+  mount: string;
+  auth_method: string;
+  role: string;
+  subject: string;
+  email: string;
+  /** `none`, `idp` (refreshed at each login) or `admin` (kept). */
+  email_source: string;
+  first_login: string;
+  last_login: string;
+  login_count: number;
+}
+
 export interface LockoutConfig {
   enabled: boolean;
   max_failed_attempts: number;

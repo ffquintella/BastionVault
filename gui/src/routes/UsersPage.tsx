@@ -11,8 +11,11 @@ import {
   Modal,
   ConfirmModal,
   EmptyState,
+  Tabs,
   useToast,
 } from "../components/ui";
+import { NamespaceAccessSelector } from "../components/users/NamespaceAccessSelector";
+import { SsoUsersTab } from "../components/users/SsoUsersTab";
 import { useWebAuthn } from "../hooks/useWebAuthn";
 import { usePasswordPolicyStore } from "../stores/passwordPolicyStore";
 import { useEntityDirectoryStore } from "../stores/entityDirectoryStore";
@@ -92,6 +95,8 @@ export function UsersPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [editUser, setEditUser] = useState<string | null>(null);
   const [deleteUser, setDeleteUser] = useState<string | null>(null);
+  // "users": userpass accounts + Account Security; "sso": the SSO directory.
+  const [tab, setTab] = useState<"users" | "sso">("users");
 
   // Available policies (fetched from vault, excluding "root")
   const [availablePolicies, setAvailablePolicies] = useState<string[]>([]);
@@ -626,43 +631,14 @@ export function UsersPage() {
     );
   }
 
-  // Namespace login-restriction picker. Hidden on single-tenant installs (no
-  // child namespaces). An empty selection means the user may authenticate into
-  // any namespace; selecting one or more restricts login to those (and their
-  // descendants). The root namespace is offered as the "root" chip (value "").
+  // Namespace login-restriction picker (shared with the SSO Users tab).
   function NamespaceSelector() {
-    if (availableNamespaces.length === 0) return null;
-    const options = ["", ...availableNamespaces];
     return (
-      <div>
-        <label className="block text-sm text-[var(--color-text-muted)] mb-1">
-          Allowed namespaces
-        </label>
-        <div className="flex flex-wrap gap-2">
-          {options.map((ns) => {
-            const selected = formSelectedNamespaces.includes(ns);
-            return (
-              <button
-                key={ns || "__root__"}
-                type="button"
-                onClick={() => toggleNamespace(ns)}
-                className={`px-3 py-1.5 rounded-lg text-sm border transition-colors ${
-                  selected
-                    ? "bg-[var(--color-primary)] border-[var(--color-primary)] text-white"
-                    : "bg-[var(--color-bg)] border-[var(--color-border)] text-[var(--color-text-muted)] hover:border-[var(--color-text-muted)]"
-                }`}
-              >
-                {ns === "" ? "root" : ns}
-              </button>
-            );
-          })}
-        </div>
-        <p className="text-xs text-[var(--color-text-muted)] mt-1.5">
-          {formSelectedNamespaces.length === 0
-            ? "No restriction — this user may log in to any namespace."
-            : `Login restricted to: ${formSelectedNamespaces.map((n) => n || "root").join(", ")} (and descendants).`}
-        </p>
-      </div>
+      <NamespaceAccessSelector
+        available={availableNamespaces}
+        selected={formSelectedNamespaces}
+        onToggle={toggleNamespace}
+      />
     );
   }
 
@@ -705,94 +681,111 @@ export function UsersPage() {
       <div className="space-y-4">
         <div className="flex items-center justify-between">
           <h1 className="text-2xl font-bold">Users</h1>
-          <Button size="sm" onClick={openCreate}>
-            Create User
-          </Button>
+          {tab === "users" && (
+            <Button size="sm" onClick={openCreate}>
+              Create User
+            </Button>
+          )}
         </div>
 
-        <Card>
-          {loading ? (
-            <p className="text-sm text-[var(--color-text-muted)] py-4">Loading...</p>
-          ) : users.length === 0 ? (
-            <EmptyState
-              title="No users"
-              description="Create your first user to enable username/password authentication"
-              action={
-                <Button size="sm" onClick={openCreate}>
-                  Create User
-                </Button>
-              }
-            />
-          ) : (
-            <Table columns={columns} data={users} rowKey={(u) => u} />
-          )}
-        </Card>
+        <Tabs
+          tabs={[
+            { id: "users", label: "Users" },
+            { id: "sso", label: "SSO Users" },
+          ]}
+          active={tab}
+          onChange={(id) => setTab(id as "users" | "sso")}
+        />
 
-        {/* Mount-level account-security policy (lockout + TOTP MFA). */}
-        <Card>
-          <div className="flex items-center justify-between mb-3">
-            <h2 className="text-lg font-semibold">Account Security</h2>
-            <Button size="sm" onClick={handleSaveSecurity} loading={savingSecurity}>
-              Save
-            </Button>
-          </div>
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            {/* Lockout */}
-            <div className="space-y-3">
-              <label className="flex items-center gap-2 text-sm font-medium">
-                <input
-                  type="checkbox"
-                  checked={lockoutEnabled}
-                  onChange={(e) => setLockoutEnabled(e.target.checked)}
+        {tab === "sso" && <SsoUsersTab availableNamespaces={availableNamespaces} />}
+
+        {tab === "users" && (
+          <>
+            <Card>
+              {loading ? (
+                <p className="text-sm text-[var(--color-text-muted)] py-4">Loading...</p>
+              ) : users.length === 0 ? (
+                <EmptyState
+                  title="No users"
+                  description="Create your first user to enable username/password authentication"
+                  action={
+                    <Button size="sm" onClick={openCreate}>
+                      Create User
+                    </Button>
+                  }
                 />
-                Temporary account lockout
-              </label>
-              <p className="text-xs text-[var(--color-text-muted)]">
-                Lock an account after too many consecutive failed password attempts.
-              </p>
-              <div className="grid grid-cols-2 gap-3">
-                <Input
-                  label="Max failed attempts"
-                  type="number"
-                  min={0}
-                  value={String(lockoutMaxAttempts)}
-                  onChange={(e) => setLockoutMaxAttempts(Number(e.target.value) || 0)}
-                  disabled={!lockoutEnabled}
-                />
-                <Input
-                  label="Lockout duration (seconds)"
-                  type="number"
-                  min={0}
-                  value={String(lockoutDurationSecs)}
-                  onChange={(e) => setLockoutDurationSecs(Number(e.target.value) || 0)}
-                  disabled={!lockoutEnabled}
-                />
+              ) : (
+                <Table columns={columns} data={users} rowKey={(u) => u} />
+              )}
+            </Card>
+
+            {/* Mount-level account-security policy (lockout + TOTP MFA). */}
+            <Card>
+              <div className="flex items-center justify-between mb-3">
+                <h2 className="text-lg font-semibold">Account Security</h2>
+                <Button size="sm" onClick={handleSaveSecurity} loading={savingSecurity}>
+                  Save
+                </Button>
               </div>
-            </div>
-            {/* TOTP MFA */}
-            <div className="space-y-3">
-              <label className="flex items-center gap-2 text-sm font-medium">
-                <input
-                  type="checkbox"
-                  checked={mfaEnabled}
-                  onChange={(e) => setMfaEnabled(e.target.checked)}
-                />
-                TOTP multi-factor authentication
-              </label>
-              <p className="text-xs text-[var(--color-text-muted)]">
-                Master switch. When on, users with MFA enabled must present a TOTP code
-                at login. When off, TOTP is not required for anyone.
-              </p>
-              <Input
-                label="Default TOTP engine mount"
-                value={mfaDefaultMount}
-                onChange={(e) => setMfaDefaultMount(e.target.value)}
-                placeholder="totp/"
-                disabled={!mfaEnabled}
-              />
-            </div>
-          </div>
-        </Card>
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                {/* Lockout */}
+                <div className="space-y-3">
+                  <label className="flex items-center gap-2 text-sm font-medium">
+                    <input
+                      type="checkbox"
+                      checked={lockoutEnabled}
+                      onChange={(e) => setLockoutEnabled(e.target.checked)}
+                    />
+                    Temporary account lockout
+                  </label>
+                  <p className="text-xs text-[var(--color-text-muted)]">
+                    Lock an account after too many consecutive failed password attempts.
+                  </p>
+                  <div className="grid grid-cols-2 gap-3">
+                    <Input
+                      label="Max failed attempts"
+                      type="number"
+                      min={0}
+                      value={String(lockoutMaxAttempts)}
+                      onChange={(e) => setLockoutMaxAttempts(Number(e.target.value) || 0)}
+                      disabled={!lockoutEnabled}
+                    />
+                    <Input
+                      label="Lockout duration (seconds)"
+                      type="number"
+                      min={0}
+                      value={String(lockoutDurationSecs)}
+                      onChange={(e) => setLockoutDurationSecs(Number(e.target.value) || 0)}
+                      disabled={!lockoutEnabled}
+                    />
+                  </div>
+                </div>
+                {/* TOTP MFA */}
+                <div className="space-y-3">
+                  <label className="flex items-center gap-2 text-sm font-medium">
+                    <input
+                      type="checkbox"
+                      checked={mfaEnabled}
+                      onChange={(e) => setMfaEnabled(e.target.checked)}
+                    />
+                    TOTP multi-factor authentication
+                  </label>
+                  <p className="text-xs text-[var(--color-text-muted)]">
+                    Master switch. When on, users with MFA enabled must present a TOTP code
+                    at login. When off, TOTP is not required for anyone.
+                  </p>
+                  <Input
+                    label="Default TOTP engine mount"
+                    value={mfaDefaultMount}
+                    onChange={(e) => setMfaDefaultMount(e.target.value)}
+                    placeholder="totp/"
+                    disabled={!mfaEnabled}
+                  />
+                </div>
+              </div>
+            </Card>
+          </>
+        )}
 
         {/* Create user modal */}
         <Modal

@@ -63,6 +63,16 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### SSO users on the Users page
+
+- **List everyone who signed in through OIDC or SAML on a new Users → SSO Users tab, set the namespaces each may sign in to and an e-mail, and share resources with them** (T555, S123)
+  -- Each successful SSO login now upserts a passwordless directory record (provider, role, subject, e-mail, first and last login, count) and gives the user an identity entity, so their tokens carry `entity_id` and shares or `scopes = ["owner"]` rules apply to them. The record is not a credential: the login decision is unchanged, a userpass login under the same name still fails, and a failure to write the record or create the entity is logged and never blocks the sign-in. New `v2/sys/sso/users` routes (list, read, edit e-mail, remove), ACL-gated like `auth/<mount>/users-info` and root-namespace only; namespace access uses the existing `sys/identity/ns-assignment/{oidc|saml}/<name>`. Removing a record keeps the user's namespace restriction and shares; their next sign-in recreates it. SSO users' policies still come from the SSO role.
+
+#### Policy and machine-identity behaviour suite
+
+- **Pin policy evaluation, user profiles and the machine-identity gates with 152 end-to-end cases** (T554, S89)
+  -- Drives real logins through the request pipeline: capabilities, globs, `+` segments, deny precedence, parameter constraints, admin/reader/dropbox/auditor/team profiles, token create and revoke, the server-wide `require_machine_identity` gate, combined machine+user binding, and AppRole/AppID logins with and without a machine token (binding, environment scopes, source IPs, bypass). Refusals are paired with a granting control.
+
 #### MCP brokered sessions: SSH commands through a Rustion bastion
 
 - **Run `bv_resource_ssh_exec` on a resource whose transport routes through Rustion, through the bastion and recorded there, instead of refusing it with `mcp_session_requires_bastion`** (T483, S119)
@@ -449,6 +459,11 @@ EXAMPLE ENTRY:
 - Store lease records as format version 1, which adds the lease's max_ttl and its revoke state: records written by earlier versions load unchanged and are rewritten on their next update, and an older server reading a new record ignores the new fields. (T62, S13)
 
 ### Fixed
+
+#### Tokens
+
+- **Revoking a token now revokes the children it minted with `auth/token/create`** (T554)
+  -- `TokenStore::post_route` minted a second, parentless token for every `auth/token/create` response and handed that one to the caller, so the child the handler had created (with its parent link) was never the one in use: revoking the parent, `revoke-self` included, left every child live until it expired. The route now registers the token the handler created, which also keeps the restrictions `handle_create` set on it (source-address binding, machine-identity exemption). Regression: `c11_revoking_a_parent_revokes_its_children` in `src/engine_tests/policy_machine_behavior.rs`.
 
 #### GUI: the Settings → Identity SSO toggle returned `HTTP 404` against a remote server
 

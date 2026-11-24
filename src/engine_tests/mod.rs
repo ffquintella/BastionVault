@@ -91,3 +91,5 @@ mod namespace_policy_rule;
 // A deleted principal's entity aliases are forgotten in every namespace (T522).
 mod backup_restore_resource;
 mod principal_aliases;
+// Policy evaluation x user profiles x machine identity, end to end.
+mod policy_machine_behavior;

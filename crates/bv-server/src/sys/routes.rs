@@ -354,6 +354,19 @@ pub(crate) const V2_ONLY: &[ResourceSpec] = &[
         route!(routed Post => sys_audit_retention_request_handler, "sys/audit-retention"),
         route!(routed Put => sys_audit_retention_request_handler, "sys/audit-retention"),
     ]),
+    // SSO user directory (T555, features/sso-user-directory.md): one record
+    // per OIDC/SAML principal that has logged in. ACL-gated, root namespace
+    // only (the handler refuses a namespace header).
+    resource!("/sso/users" => [
+        route!(routed List => sys_sso_users_list_request_handler, "sys/sso/users"),
+        route!(routed Get => sys_sso_users_list_request_handler, "sys/sso/users"),
+    ]),
+    resource!("/sso/users/{path:.*}" => [
+        route!(routed Get => sys_sso_user_path_request_handler, "sys/sso/users/{path}"),
+        route!(routed Post => sys_sso_user_path_request_handler, "sys/sso/users/{path}"),
+        route!(routed Put => sys_sso_user_path_request_handler, "sys/sso/users/{path}"),
+        route!(routed Delete => sys_sso_user_path_request_handler, "sys/sso/users/{path}"),
+    ]),
     // Effective-capabilities lookup.
     resource!("/capabilities-self" => [
         route!(routed Post => sys_capabilities_self_request_handler, "sys/capabilities-self"),

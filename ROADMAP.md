@@ -268,6 +268,8 @@ Next-up list recorded before the migration, in its order:
   - note: [SMB Connect](features/smb-connect.md) Phases 1–3: `smb` connection-profile protocol (`share` required, optional `domain`, port 445; `secret` / `ldap` / `default-account` sources only), the SFTP window mounted at `/session/smb` in its own `smb-*` window, and a host session on `smolder-smb-core` (NTLM, SMB 2.1–3.1.1, signing required, guest and unsigned sessions refused). The transfer engine moved to `session/file_transfer.rs` behind a `RemoteFs` trait both protocols implement; the window's `sftp_*` commands dispatch on the session kind. Direct only (`rustion-required` and brokered resources refuse it). Unit- and vitest-tested; not yet exercised against a live SMB server in a desktop build.
 - [x] T553 Keep a machine's SQL privileges in a FerroGate login bound to a user, and resolve them at the root namespace (S89, S109)
   - note: the combined login intersects the machine's policies with the user's effective policies (identity-group inherited ones included, read at login); `sql_privileges` builds the ACL with the root namespace as `""` so `{{request.namespace}}` rules apply there
+- [x] T554 Pin policy evaluation, user profiles and machine-identity gates with an end-to-end behaviour suite (S89, S109)
+  - note: `src/engine_tests/policy_machine_behavior.rs`, 152 cases over real logins (userpass, FerroGate machine tokens with DPoP, AppRole/AppID with a machine token); it found and pins the orphaned-child defect of `auth/token/create` (fixed in `post_route`)
 - [x] T460 Resume an RDP session after a transport drop with the auto-reconnect cookie (S46)
   - note: [Resource Connect](features/resource-connect.md) Phase 7.7: direct password sessions redial up to twice (1 s, 4 s) with the Server Auto-Reconnect Cookie through the same `dial()` and pin checks as the open; brokered and smart-card sessions are not retried. Not yet exercised by hand against a Windows host.
 - [x] T37 Use a per-user, per-OS default resource account as a credential (S11)
@@ -525,6 +527,9 @@ Next-up list recorded before the migration, in its order:
   - source: roadmap.md feature row "Auth: SAML 2.0", status `[x]` Done
   - initiative: [SAML 2.0 Authentication](features/saml-auth.md) — pure-Rust SP-initiated SSO; AuthnRequest, streaming `quick-xml` parsing, RSA-SHA256/SHA1 verify, hand-rolled Exclusive C14N. Zero libxml2 / xmlsec / OpenSSL footprint. 46 tests.
   - old-notes: [spec](features/saml-auth.md) — pure-Rust SP-initiated SSO, no libxml2 / xmlsec.
+- [x] T555 List OIDC and SAML users on the Users page and give them an identity entity (S123, S29, S52)
+  - source: operator request — an SSO sign-in (`felipe.quintella@fgv.br`) left no user on the Users page to share resources with or restrict to namespaces
+  - note: done with caveats. Each successful OIDC/SAML callback upserts a passwordless `sys/sso-users/` record (store in `bv-auth-audit`) and stamps `entity_id` on the token; neither can refuse the login (storage failure logged at ERROR, exhausted `max_entities` skips the entity). `v2/sys/sso/users` list/read/edit-email/remove, ACL-gated, root namespace only; namespace access reuses `sys/identity/ns-assignment`. GUI Users page split into Users / SSO Users tabs. Not run against a live IdP; SSO policies still come from the role only (no identity-group expansion).
 - [x] T492 Close the SAML response signature-wrapping hole (S52)
   - source: found while writing the T52 SAML IdP — an unsigned forged `Assertion` before the signed one verified and its attributes were merged into `groups` metadata and bound-attribute checks
   - note: `crates/bv-auth-saml` now rejects any Response with more than one Assertion, a non-unique signed ID, or a signature that is not a direct child of the referenced element; regression tests in `verify.rs`
@@ -968,3 +973,4 @@ Next-up list recorded before the migration, in its order:
 | S120 | Feature: Cross-namespace copy and move of resources and secrets (versions, history, validated shares) | features/cross-namespace-copy-move.md |
 | S121 | Feature: Legacy TLS 1.2 CBC client for OIDC providers (`bv-tls-legacy`) | features/legacy-tls-cbc.md |
 | S122 | Feature: SMB Connect — the dual-pane file window over an SMB share | features/smb-connect.md |
+| S123 | Feature: SSO User Directory — OIDC/SAML principals on the Users page | features/sso-user-directory.md |

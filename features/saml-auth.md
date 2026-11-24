@@ -108,6 +108,11 @@ All three phases shipped. SP-initiated SAML 2.0 SSO works end-to-end
 under `src/modules/credential/saml/` using a pure-Rust stack — no
 libxml2 / libxmlsec1 / samael C-dependency footprint.
 
+SSO user directory (T555, done with caveats): a successful callback stamps
+the principal's identity `entity_id` on the token and upserts a passwordless
+record listed on the GUI's Users → SSO Users tab; neither can refuse the
+login. Spec: `features/sso-user-directory.md`.
+
 Signature wrapping (T492): a Response is accepted only with exactly one
 `Assertion` element, a signed `ID` that identifies exactly one element, and
 an enveloped `Signature` that is a direct child of the element it references.

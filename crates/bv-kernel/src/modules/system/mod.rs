@@ -10,6 +10,7 @@ pub mod housekeeping;
 mod leases;
 pub mod mcp;
 pub mod self_profile;
+mod sso_users;
 mod transfer;
 
 use std::{
@@ -199,6 +200,11 @@ impl SystemBackend {
         let sys_backend_sso_settings_read = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_sso_settings_write = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_sso_providers = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_sso_users_list = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_sso_users_read_all = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_sso_user_read = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_sso_user_write = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_sso_user_delete = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_namespace_list = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_namespaces_self = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_namespace_list_info = self.self_ptr.upgrade().unwrap().clone();
@@ -1061,6 +1067,43 @@ impl SystemBackend {
                     operations: [
                         {op: Operation::Read, handler: sys_backend_sso_providers.handle_sso_providers}
                     ]
+                },
+                {
+                    // SSO user directory (T555, sso_users.rs): one record per
+                    // OIDC/SAML principal that has logged in. ACL-gated like
+                    // `auth/<mount>/users-info`. HTTP shim under /v2/sys only.
+                    pattern: "sso/users/?$",
+                    operations: [
+                        {op: Operation::List, handler: sys_backend_sso_users_list.handle_sso_users_list},
+                        {op: Operation::Read, handler: sys_backend_sso_users_read_all.handle_sso_users_list}
+                    ],
+                    help: "List the SSO user directory."
+                },
+                {
+                    pattern: r"sso/users/(?P<mount>[^/]+)/(?P<name>.+)$",
+                    fields: {
+                        "mount": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "SSO auth mount the principal logged in through (oidc or saml)."
+                        },
+                        "name": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Principal name, as the login recorded it."
+                        },
+                        "email": {
+                            field_type: FieldType::Str,
+                            required: false,
+                            description: "Contact e-mail; an admin-set address is kept across logins. Empty clears it."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Read,   handler: sys_backend_sso_user_read.handle_sso_user_read},
+                        {op: Operation::Write,  handler: sys_backend_sso_user_write.handle_sso_user_write},
+                        {op: Operation::Delete, handler: sys_backend_sso_user_delete.handle_sso_user_delete}
+                    ],
+                    help: "Read, edit the e-mail of, or remove one SSO user directory record."
                 },
                 {
                     // Multi-tenancy: operate on the caller's *own* namespace —

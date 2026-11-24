@@ -263,6 +263,12 @@ POST   /v2/sys/batch [dispatch] -- carries caller-chosen logical operations; eac
 GET    /v2/sys/audit-retention [routed] -> sys/audit-retention
 POST   /v2/sys/audit-retention [routed] -> sys/audit-retention
 PUT    /v2/sys/audit-retention [routed] -> sys/audit-retention
+LIST   /v2/sys/sso/users [routed] -> sys/sso/users
+GET    /v2/sys/sso/users [routed] -> sys/sso/users
+GET    /v2/sys/sso/users/{path:.*} [routed] -> sys/sso/users/{path}
+POST   /v2/sys/sso/users/{path:.*} [routed] -> sys/sso/users/{path}
+PUT    /v2/sys/sso/users/{path:.*} [routed] -> sys/sso/users/{path}
+DELETE /v2/sys/sso/users/{path:.*} [routed] -> sys/sso/users/{path}
 POST   /v2/sys/capabilities-self [routed] -> sys/capabilities-self
 POST   /v2/sys/namespace-transfer/{op} [routed] -> sys/namespace-transfer/{op}
 GET    /v2/sys/policy-tests/{name:.*} [routed] -> sys/policy-tests/{name}

@@ -822,6 +822,48 @@ async fn sys_sso_providers_request_handler(
     handle_request(core, &mut r).await
 }
 
+/// LIST / GET `/v2/sys/sso/users` — the SSO user directory (T555). Shim over
+/// the ACL-gated logical route; the namespace header is forwarded so the
+/// handler can refuse a namespace-scoped request explicitly.
+async fn sys_sso_users_list_request_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, HttpError> {
+    let mut r = request_auth(&req);
+    r.path = "sys/sso/users".to_string();
+    r.operation = match *req.method() {
+        actix_web::http::Method::GET => Operation::Read,
+        _ => Operation::List,
+    };
+    copy_namespace_header(&req, &mut r);
+    handle_request(core, &mut r).await
+}
+
+/// GET / POST|PUT / DELETE `/v2/sys/sso/users/{mount}/{name}` — read, edit the
+/// e-mail of, or remove one SSO user directory record (T555).
+async fn sys_sso_user_path_request_handler(
+    req: HttpRequest,
+    mut body: web::Bytes,
+    path: web::Path<String>,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, HttpError> {
+    let mut r = request_auth(&req);
+    r.path = format!("sys/sso/users/{}", path.into_inner());
+    copy_namespace_header(&req, &mut r);
+    match *req.method() {
+        actix_web::http::Method::POST | actix_web::http::Method::PUT => {
+            r.operation = Operation::Write;
+            if !body.is_empty() {
+                r.body = Some(serde_json::from_slice(&body)?);
+                body.clear();
+            }
+        }
+        actix_web::http::Method::DELETE => r.operation = Operation::Delete,
+        _ => r.operation = Operation::Read,
+    }
+    handle_request(core, &mut r).await
+}
+
 /// GET / POST|PUT `/sys/dos/config` — read or update the IP-based
 /// DoS-protection thresholds. HTTP shim over the sys-backend logical route
 /// `dos/config`.

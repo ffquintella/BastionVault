@@ -12,6 +12,8 @@ Add an OIDC authentication backend that allows users to authenticate with Bastio
 
 **Phase 7 (legacy TLS 1.2 CBC IdPs, T551) — done with caveats.** `oidc_discovery_legacy_tls` on `config` (default `false`) sends one mount's discovery, JWKS and token exchange through the opt-in legacy TLS 1.2 client in `crates/bv-tls-legacy` (four ECDHE-RSA AES-CBC suites, P-256, rustls-webpki verification), for an IdP that offers nothing else. Compiled in only with the `oidc_legacy_tls` build feature (default on for the desktop app, off for `bvault`); `true` in a build without it is refused on write and at login, never a fallback. Editable from the SSO provider dialog. Spec and threat model: `features/legacy-tls-cbc.md`. Not yet run against the production IdP.
 
+**SSO user directory (T555) — done with caveats.** A successful `callback` now stamps the principal's identity `entity_id` on the token (so shares and owner-scoped rules apply) and upserts a passwordless record listed on the GUI's Users → SSO Users tab; neither can refuse the login. Spec: `features/sso-user-directory.md`.
+
 ## Motivation
 
 BastionVault currently supports token, userpass, approle, and certificate authentication. Enterprise environments require SSO integration with centralized identity providers. OIDC is the modern standard for federated authentication, supported by virtually all major IdPs. Without OIDC support, organizations must manage vault-specific credentials separately from their existing identity infrastructure, increasing operational overhead and security risk.

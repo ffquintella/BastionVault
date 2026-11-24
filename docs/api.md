@@ -3759,6 +3759,50 @@ bvault write auth/oidc/config oidc_discovery_legacy_tls=false  # back to rustls
 }
 ~~~
 
+### SSO User Directory (`v2` only, root namespace)
+
+Every successful OIDC or SAML login upserts one passwordless record for the
+principal it was decided for (T555, `features/sso-user-directory.md`), so the
+GUI's **Users → SSO Users** tab can list the people who have signed in through
+an identity provider. The record is not a credential: no password, no IdP
+token, and no login reads it. A userpass login under the same name does not
+authenticate.
+
+~~~
+LIST|GET  /v2/sys/sso/users                    # { keys, records, total }
+GET       /v2/sys/sso/users/{mount}/{name}     # one record; 404 if none
+POST|PUT  /v2/sys/sso/users/{mount}/{name}     # { "email": "..." }; "" clears
+DELETE    /v2/sys/sso/users/{mount}/{name}     # remove the record; 404 if none
+~~~
+
+`{mount}` is `oidc` or `saml` — the `mount_path` the login stamps on the token
+and the key its namespace assignment is stored under. `{name}` is the
+principal name as the login recorded it (OIDC: the role's `user_claim`, `sub`
+by default; SAML: the NameID or the role's `username` mapping), e.g.
+`/v2/sys/sso/users/oidc/felipe.quintella@fgv.br`.
+
+A record carries `username`, `mount`, `auth_method`, `role` and `subject` of
+the latest login, `email` with `email_source` (`idp`: refreshed by each login
+that carries an `email` claim or attribute; `admin`: set here and kept across
+logins; `none`), `first_login`, `last_login` (RFC 3339) and `login_count`.
+A write takes only `email` and edits only a record that exists. `DELETE`
+removes the directory record alone: the principal's namespace assignment
+(removing it would widen where it may log in) and identity entity (shares stay
+attached) are kept, and its next login recreates the record.
+
+**Gating.** Plain ACL, like `auth/<mount>/users-info`: `read`/`list` on
+`sys/sso/users`, `update` and `delete` on `sys/sso/users/*`. The directory
+spans every tenant, so a request carrying an `X-BastionVault-Namespace` other
+than root is refused with `400`. Which namespaces an SSO user may sign in to is
+set with the existing `sys/identity/ns-assignment/{oidc|saml}/{name}` route.
+
+**Login side effects.** Besides the record, a successful OIDC or SAML login now
+resolves the principal's identity entity and stamps its `entity_id` on the
+token (as userpass and AppRole do), so shares and `scopes = ["owner"]` rules
+apply to SSO users. Neither step can refuse the login: a storage failure is
+logged at `ERROR` (target `sso`, mount and error only) and an exhausted
+namespace `max_entities` quota issues the token without `entity_id`.
+
 ## MCP Endpoints
 
 MCP Access (see [`mcp.md`](mcp.md)). All of these are `v2` only and require the

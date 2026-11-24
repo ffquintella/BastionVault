@@ -1694,26 +1694,38 @@ impl Handler for TokenStore {
                 return Err(bv_error_response!("auth methods cannot create root tokens"));
             }
 
-            let mut te = TokenEntry {
-                path: req.path.clone(),
-                meta: auth.metadata.clone(),
-                display_name: auth.display_name.clone(),
-                ttl: token_ttl.as_secs(),
-                policies: auth.token_policies.clone(),
-                explicit_max_ttl: auth.explicit_max_ttl,
-                period: auth.period,
-                // The auth backend's `token_bound_cidrs`, carried here on the
-                // Auth by `TokenParams::populate_token_auth`. Without this the
-                // field is parsed, persisted on the role and echoed back on a
-                // read, but never reaches the token it is supposed to restrict.
-                bound_cidrs: auth.bound_cidrs.clone(),
-                // Set by an auth backend that authenticated this principal
-                // without machine attestation (AppRole `bypass_machine_binding`).
-                machine_identity_exempt: auth.machine_identity_exempt,
-                ..Default::default()
-            };
+            // A token minted by this store's own handlers (`auth/token/create`)
+            // already exists, with its parent link, binding and restrictions
+            // from `handle_create`. Minting a second, parentless entry for it
+            // here handed the caller an orphan that no revoke of its parent
+            // reached, and dropped the restrictions `handle_create` set on the
+            // first. Register that entry instead.
+            let minted_here = !is_unauth_path && !auth.client_token.is_empty();
+            let te = if minted_here {
+                self.lookup(&auth.client_token).await?.ok_or(RvError::ErrAuthTokenNotFound)?
+            } else {
+                let mut te = TokenEntry {
+                    path: req.path.clone(),
+                    meta: auth.metadata.clone(),
+                    display_name: auth.display_name.clone(),
+                    ttl: token_ttl.as_secs(),
+                    policies: auth.token_policies.clone(),
+                    explicit_max_ttl: auth.explicit_max_ttl,
+                    period: auth.period,
+                    // The auth backend's `token_bound_cidrs`, carried here on the
+                    // Auth by `TokenParams::populate_token_auth`. Without this the
+                    // field is parsed, persisted on the role and echoed back on a
+                    // read, but never reaches the token it is supposed to restrict.
+                    bound_cidrs: auth.bound_cidrs.clone(),
+                    // Set by an auth backend that authenticated this principal
+                    // without machine attestation (AppRole `bypass_machine_binding`).
+                    machine_identity_exempt: auth.machine_identity_exempt,
+                    ..Default::default()
+                };
 
-            self.create(&mut te).await?;
+                self.create(&mut te).await?;
+                te
+            };
 
             auth.client_token.clone_from(&te.id);
             auth.ttl = Duration::from_secs(te.ttl);

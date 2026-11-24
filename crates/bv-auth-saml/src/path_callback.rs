@@ -201,6 +201,22 @@ impl SamlBackendInner {
         // No record ⇒ unrestricted; fails closed otherwise.
         crate::kernel_api::namespace::enforce_login_assignment(&self.core, "saml/", &principal, &ns_path).await?;
 
+        // The login is decided. Give the principal an identity entity so shares
+        // and owner-scoped rules apply to it (T555); never refuses the login.
+        if let Some(entity_id) =
+            bv_auth_audit::sso_users::ensure_sso_entity(&self.core, "saml/", &principal, &ns_path).await
+        {
+            metadata.insert("entity_id".into(), entity_id);
+        }
+        let sso_login = sso_login_event(
+            &principal,
+            &state.role_name,
+            &assertion.name_id,
+            &assertion.name_id_format,
+            &assertion.attributes,
+            &metadata,
+        );
+
         // Build the Auth response. TTL handling mirrors OIDC: 0
         // means "use the token store's default."
         let mut auth = Auth::default();
@@ -213,6 +229,11 @@ impl SamlBackendInner {
         crate::kernel_api::namespace::stamp_binding(&mut auth.metadata, &ns_path, &ns_uuid, child_visible);
         auth.ttl = std::time::Duration::from_secs(role.token_ttl_secs);
         auth.period = std::time::Duration::from_secs(role.token_max_ttl_secs);
+
+        // Users page directory (T555). Best-effort: logs, never fails the login.
+        if let Some(login) = &sso_login {
+            bv_auth_audit::sso_users::record_sso_login(&self.core, login).await;
+        }
 
         let mut resp = Response::default();
         resp.auth = Some(auth);
@@ -290,6 +311,38 @@ fn project_attribute_mappings(
             }
         }
     }
+}
+
+/// Attribute names IdPs commonly carry an e-mail address under.
+const EMAIL_ATTRIBUTES: &[&str] = &[
+    "email",
+    "mail",
+    "emailaddress",
+    "urn:oid:0.9.2342.19200300.100.1.3",
+    "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress",
+];
+
+const NAMEID_FORMAT_EMAIL: &str = "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress";
+
+/// The SSO user directory entry of a successful login (T555), or `None` when
+/// the principal name is unusable. E-mail: the role's `email` mapping, then a
+/// well-known attribute, then an e-mail-format NameID.
+fn sso_login_event(
+    principal: &str,
+    role_name: &str,
+    name_id: &str,
+    name_id_format: &str,
+    attributes: &HashMap<String, Vec<String>>,
+    metadata: &HashMap<String, String>,
+) -> Option<bv_auth_audit::sso_users::SsoLogin> {
+    let email = metadata
+        .get("email")
+        .map(String::as_str)
+        .or_else(|| {
+            EMAIL_ATTRIBUTES.iter().find_map(|a| attributes.get(*a).and_then(|v| v.first())).map(String::as_str)
+        })
+        .or_else(|| (name_id_format == NAMEID_FORMAT_EMAIL).then_some(name_id));
+    bv_auth_audit::sso_users::SsoLogin::new("saml/", "saml", principal, role_name, name_id, email)
 }
 
 /// Expected IdP entity id for validation. IdPs vary:
@@ -393,5 +446,45 @@ mod projection_tests {
         let mut metadata = HashMap::new();
         project_attribute_mappings("user", &mappings(&[("email", "email")]), &attributes(&[]), &mut metadata);
         assert!(metadata.is_empty());
+    }
+
+    #[test]
+    fn a_successful_login_becomes_a_directory_entry_under_saml() {
+        let login = sso_login_event(
+            "alice",
+            "staff",
+            "nid-1",
+            "",
+            &attributes(&[("mail", "alice@example.com")]),
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(login.mount(), "saml/");
+        assert_eq!(login.username(), "alice");
+        assert_eq!(login.email(), Some("alice@example.com"));
+    }
+
+    #[test]
+    fn the_role_mapping_wins_and_an_email_nameid_is_the_fallback() {
+        let mapped: HashMap<String, String> = [("email".to_string(), "mapped@example.com".to_string())].into();
+        let l = sso_login_event("a", "r", "nid", "", &attributes(&[("mail", "attr@example.com")]), &mapped).unwrap();
+        assert_eq!(l.email(), Some("mapped@example.com"));
+        let l = sso_login_event(
+            "b@example.com",
+            "r",
+            "b@example.com",
+            NAMEID_FORMAT_EMAIL,
+            &attributes(&[]),
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(l.email(), Some("b@example.com"));
+        let l = sso_login_event("c", "r", "opaque-id", "", &attributes(&[]), &HashMap::new()).unwrap();
+        assert_eq!(l.email(), None);
+    }
+
+    #[test]
+    fn an_empty_principal_name_is_not_recorded() {
+        assert!(sso_login_event("", "r", "", "", &attributes(&[]), &HashMap::new()).is_none());
     }
 }
