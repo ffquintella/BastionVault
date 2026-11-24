@@ -22,7 +22,7 @@ sha2 = "0.11"
 # ML-DSA-65 signing for the optional `--signing-seed-hex` /
 # `--signing-key-name` mode. Same provider the host's verifier uses so
 # the signature is byte-identical to what the host expects.
-bv_crypto = { version = "0.41.0", path = "../bv_crypto", registry = "uox-bastionvault" }
+bv_crypto = { version = "0.42.0", path = "../bv_crypto", registry = "uox-bastionvault" }
 # Shared manifest type + canonical `signing_message`, used verbatim by
 # the host verifier. Signing through it guarantees the host re-derives a
 # byte-identical message, so a signed bundle verifies.

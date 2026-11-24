@@ -42,7 +42,7 @@ bv-client = { path = "../bv-client", version = "0.42.0", registry = "uox-bastion
 # sealed with -- the same scheme the GUI keystore uses, deliberately not a
 # second one.
 bv-mcp = { path = "../bv-mcp", version = "0.3.0", registry = "uox-bastionvault" }
-bv_crypto = { path = "../bv_crypto", version = "0.41.0", registry = "uox-bastionvault" }
+bv_crypto = { path = "../bv_crypto", version = "0.42.0", registry = "uox-bastionvault" }
 # `bvault hsm-gateway` (features/hsm-pool-ha.md § HSM link, T454 phase 3):
 # the gateway, its config block and its validation all live in this Tier 0
 # crate; the command only loads the file, starts logging and runs it.
