@@ -1,6 +1,6 @@
 [package]
 name = "bv-engine-idp"
-version = "0.41.0"
+version = "0.41.1"
 edition = "2021"
 description = "BastionVault's outbound identity provider: canonical workforce identities with a stable, never-reused POSIX uid/gid mapping"
 license = "Apache-2.0"
