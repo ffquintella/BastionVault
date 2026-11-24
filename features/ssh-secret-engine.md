@@ -85,7 +85,7 @@ A role configures *what kind of certificate the engine will issue*:
 | `require_target_host` | bool | User certs only. `sign` then requires `target_host` and issues principals `<user>@<target_host>`, so the cert is accepted only by a machine whose `AuthorizedPrincipalsFile` lists that principal. Default false. |
 | `allowed_hosts` | string | Comma-separated hosts `target_host` may name: exact names/IPs or `*.example.com` (the bare suffix does not match). Empty with `require_target_host` refuses every sign; `*` allows any host. `target_host` must be a plain hostname/IP. |
 
-Destination binding exists because an OpenSSH user certificate has no destination field: without it, a cert for `ubuntu` signed for host A is accepted by every host that trusts the CA and has `ubuntu`. Tests: `policy.rs` unit tests and `tests/test_ssh_engine.rs::test_ssh_sign_binds_certificate_to_target_host`. Not yet bound: agent (MCP) sessions and Rustion-brokered certs, which do not pass a host and are refused by a bound role.
+Destination binding exists because an OpenSSH user certificate has no destination field: without it, a cert for `ubuntu` signed for host A is accepted by every host that trusts the CA and has `ubuntu`. Tests: `policy.rs` unit tests and `tests/test_ssh_engine.rs::test_ssh_sign_binds_certificate_to_target_host`. The shared brokered minter (`BrokeredCertRequest.target_host`) sends the host for MCP agent sessions and Rustion `ssh-engine` sessions; `verify_certificate` accepts `<login>@<host>`.
 
 ### OTP-Mode Roles
 

@@ -180,7 +180,9 @@ pub(crate) fn verify_certificate(
             "SSH role `{role}` signed a certificate valid past {CERT_VALIDITY_SECS} s; lower its max_ttl"
         )));
     }
-    if !facts.valid_principals.iter().any(|p| p == username) {
+    // A role that binds certificates to the destination signs `<login>@<host>`.
+    let bound = |p: &String| p.strip_prefix(username).is_some_and(|rest| rest.starts_with('@') && rest.len() > 1);
+    if !facts.valid_principals.iter().any(|p| p == username || bound(p)) {
         return Err(refuse(format!("SSH role `{role}` did not sign the certificate for login `{username}`")));
     }
     Ok(())
@@ -196,6 +198,7 @@ async fn resolve_login(
     plan: LoginPlan,
     gated: &Gated,
     actor: &str,
+    target_host: &str,
 ) -> Result<(SshLogin, CredentialScrubber, Option<String>), CallError> {
     let failed = |m: String| refused("mcp_session_failed", 422, m);
     match plan {
@@ -244,6 +247,7 @@ async fn resolve_login(
                 principal: Some(&username),
                 critical_options,
                 ttl_secs: Some(CERT_VALIDITY_SECS),
+                target_host: Some(target_host),
             };
             let minted = ssh_credentials::mint_brokered_ssh_cert(ctx, ns_prefix, &ssh_mount, &ssh_role, &request)
                 .await
@@ -365,7 +369,7 @@ pub(crate) async fn prepare_and_run(
     let outcome = match route {
         TransportRoute::Direct => {
             let (login, scrubber, cert_serial) =
-                resolve_login(backend.core.as_ref(), &ns_prefix, &resource, plan, &gated, &actor).await?;
+                resolve_login(backend.core.as_ref(), &ns_prefix, &resource, plan, &gated, &actor, &host).await?;
             let login_kind = login.kind();
             let spec = ExecSpec {
                 target,
@@ -385,9 +389,16 @@ pub(crate) async fn prepare_and_run(
             tokio::spawn(async move { task.run(spec, permit).await.map_err(CallError::Ended) }).await
         }
         TransportRoute::Bastion(route) => {
-            let (credential, scrubber) =
-                bastion::resolve_sealed_credential(backend.core.as_ref(), &ns_prefix, &resource, plan, &gated, &actor)
-                    .await?;
+            let (credential, scrubber) = bastion::resolve_sealed_credential(
+                backend.core.as_ref(),
+                &ns_prefix,
+                &resource,
+                plan,
+                &gated,
+                &host,
+                &actor,
+            )
+            .await?;
             let body = bastion::open_body(&bastion::OpenParams {
                 resource: &resource,
                 profile_id: &profile_id,
@@ -1024,6 +1035,18 @@ mod tests {
         assert!(refused(&f, "", 1_000).message.contains("60 s"));
         // Another login.
         assert!(verify_certificate(&facts("uptime"), "uptime", "", "root", "agent", 1_000).is_err());
+    }
+
+    #[test]
+    fn a_host_bound_principal_is_accepted_only_for_the_same_login() {
+        let mut f = facts("uptime");
+        f.valid_principals = vec!["ops@srv01.example.com".into()];
+        assert_eq!(verify_certificate(&f, "uptime", "", "ops", "agent", 1_000), Ok(()));
+        // Another login, or a login that merely shares a prefix, is not accepted.
+        assert!(verify_certificate(&f, "uptime", "", "root", "agent", 1_000).is_err());
+        assert!(verify_certificate(&f, "uptime", "", "op", "agent", 1_000).is_err());
+        f.valid_principals = vec!["ops@".into()];
+        assert!(verify_certificate(&f, "uptime", "", "ops", "agent", 1_000).is_err());
     }
 
     #[test]

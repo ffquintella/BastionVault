@@ -68,6 +68,7 @@ pub(crate) async fn resolve_sealed_credential(
     resource: &str,
     plan: LoginPlan,
     gated: &Gated,
+    target_host: &str,
     actor: &str,
 ) -> Result<(SealedCredential, CredentialScrubber), CallError> {
     let failed = |m: String| refused("mcp_session_failed", 422, m);
@@ -133,6 +134,7 @@ pub(crate) async fn resolve_sealed_credential(
                 principal: Some(&username),
                 critical_options,
                 ttl_secs: Some(CERT_VALIDITY_SECS),
+                target_host: Some(target_host),
             };
             let minted = ssh_credentials::mint_brokered_ssh_cert(ctx, ns_prefix, &ssh_mount, &ssh_role, &request)
                 .await

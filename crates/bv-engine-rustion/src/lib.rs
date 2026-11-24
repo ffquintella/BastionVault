@@ -2418,6 +2418,10 @@ impl RustionBackendInner {
                                     &ssh_role,
                                     principal.as_deref(),
                                     exec.as_deref(),
+                                    req.get_data("target_host")
+                                        .ok()
+                                        .and_then(|v| v.as_str().map(|s| s.to_string()))
+                                        .as_deref(),
                                 )
                                 .await?;
                             let data = req.data.get_or_insert_with(Map::new);
@@ -2587,10 +2591,12 @@ impl RustionBackendInner {
         ssh_role: &str,
         principal: Option<&str>,
         exec: Option<&str>,
+        target_host: Option<&str>,
     ) -> Result<MintedSshCert, RvError> {
         use base64::{engine::general_purpose::STANDARD, Engine as _};
 
-        let mut request = kernel_api::ssh_credentials::BrokeredCertRequest { principal, ..Default::default() };
+        let mut request =
+            kernel_api::ssh_credentials::BrokeredCertRequest { principal, target_host, ..Default::default() };
         // The exec form: the certificate binds the command as
         // `force-command`, lives at most a minute and carries no extension,
         // as the direct agent path's does (features/mcp-brokered-sessions.md

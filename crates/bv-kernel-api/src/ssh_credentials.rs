@@ -135,6 +135,10 @@ pub struct BrokeredCertRequest<'a> {
     pub critical_options: BTreeMap<String, String>,
     /// Requested validity, seconds. The role's `max_ttl` still caps it.
     pub ttl_secs: Option<u64>,
+    /// The machine the certificate will be used on. Sent as `target_host`;
+    /// a role with `require_target_host` refuses a sign without it and signs
+    /// the principal as `<login>@<host>`, any other role ignores it.
+    pub target_host: Option<&'a str>,
 }
 
 /// An ephemeral key and the certificate the SSH engine signed for it.
@@ -195,6 +199,9 @@ pub async fn mint_brokered_ssh_cert(
         let options: Map<String, Value> =
             request.critical_options.iter().map(|(k, v)| (k.clone(), Value::String(v.clone()))).collect();
         body.insert("critical_options".into(), Value::Object(options));
+    }
+    if let Some(host) = request.target_host.filter(|s| !s.is_empty()) {
+        body.insert("target_host".into(), Value::String(host.to_string()));
     }
     if let Some(ttl) = request.ttl_secs {
         body.insert("ttl".into(), Value::String(format!("{ttl}s")));
