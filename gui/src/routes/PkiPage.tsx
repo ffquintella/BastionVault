@@ -2036,6 +2036,20 @@ function RoleEditor({
             disabled={!editing || !config.allow_upn_sans}
             placeholder="corp.example.com — exact match, subdomains not implied"
           />
+          <MultiSelect
+            label="key_usage"
+            options={KEY_USAGE_OPTIONS}
+            value={config.key_usage}
+            onChange={(v) => set({ key_usage: v })}
+            disabled={!editing}
+          />
+          <MultiSelect
+            label="ext_key_usage (in addition to server_flag / client_flag)"
+            options={EXT_KEY_USAGE_OPTIONS}
+            value={config.ext_key_usage}
+            onChange={(v) => set({ ext_key_usage: v })}
+            disabled={!editing}
+          />
           <Input
             label="ext_key_usage_oids (comma-separated dotted OIDs)"
             value={config.ext_key_usage_oids.join(",")}
@@ -2123,6 +2137,78 @@ function Toggle({
       />
       <code className="text-xs">{label}</code>
     </label>
+  );
+}
+
+const KEY_USAGE_OPTIONS = [
+  "DigitalSignature",
+  "ContentCommitment",
+  "KeyEncipherment",
+  "DataEncipherment",
+  "KeyAgreement",
+  "KeyCertSign",
+  "CrlSign",
+  "EncipherOnly",
+  "DecipherOnly",
+];
+
+const EXT_KEY_USAGE_OPTIONS = [
+  "ServerAuth",
+  "ClientAuth",
+  "CodeSigning",
+  "EmailProtection",
+  "TimeStamping",
+  "OcspSigning",
+  "SmartCardLogon",
+  "KdcAuthentication",
+  "Any",
+];
+
+/** Chip-style multiselect. Values already stored on the role that are not in
+ * `options` (legacy spellings, raw OIDs) stay visible and removable so saving
+ * never silently drops them. Matching is case-insensitive, as the engine's is. */
+function MultiSelect({
+  label,
+  options,
+  value,
+  onChange,
+  disabled,
+}: {
+  label: string;
+  options: string[];
+  value: string[];
+  onChange: (v: string[]) => void;
+  disabled?: boolean;
+}) {
+  const lower = (x: string) => x.toLowerCase();
+  const has = (o: string) => value.some((v) => lower(v) === lower(o));
+  const extras = value.filter((v) => !options.some((o) => lower(o) === lower(v)));
+  const toggle = (o: string) =>
+    onChange(has(o) ? value.filter((v) => lower(v) !== lower(o)) : [...value, o]);
+  const chip = (o: string, on: boolean) => (
+    <button
+      key={o}
+      type="button"
+      disabled={disabled}
+      aria-pressed={on}
+      onClick={() => (extras.includes(o) ? onChange(value.filter((v) => v !== o)) : toggle(o))}
+      className={`px-2.5 py-1 rounded-full text-xs font-mono border transition-colors disabled:opacity-60 ${
+        on
+          ? "bg-blue-500/20 text-blue-400 border-blue-500/40"
+          : "bg-[var(--color-surface-hover)] text-[var(--color-text-muted)] border-[var(--color-border)] hover:text-[var(--color-text)]"
+      }`}
+    >
+      {o}
+    </button>
+  );
+  return (
+    <div className="col-span-2">
+      <div className="text-sm text-[var(--color-text-muted)] mb-1.5">{label}</div>
+      <div className="flex flex-wrap gap-1.5">
+        {options.map((o) => chip(o, has(o)))}
+        {extras.map((o) => chip(o, true))}
+      </div>
+    </div>
   );
 }
 
