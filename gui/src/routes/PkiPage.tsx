@@ -2900,7 +2900,7 @@ function IssueTab({ mount }: { mount: string }) {
           label="Email SANs / rfc822Name (comma-separated)"
           value={emailSans}
           onChange={(e) => setEmailSans(e.target.value)}
-          placeholder="felipe@fgv.br — needs allow_email_sans on the role"
+          placeholder="user@example.com — needs allow_email_sans on the role"
         />
         <Input
           label="TTL (optional)"
@@ -5725,7 +5725,7 @@ function ExternalCsrTab({ mount }: { mount: string }) {
               label="Email SANs / rfc822Name"
               value={genEmailSans}
               onChange={(e) => setGenEmailSans(e.target.value)}
-              placeholder="felipe@fgv.br — needs allow_email_sans"
+              placeholder="user@example.com — needs allow_email_sans"
             />
             <Input
               label="Reuse managed key (optional)"
