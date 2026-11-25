@@ -188,13 +188,21 @@ async fn push_ssh_inner(
     // russh ≥ 0.51 returns `AuthResult` (an enum carrying success +
     // remaining-method hints) rather than a plain bool, and
     // `authenticate_publickey` takes `PrivateKeyWithHashAlg` so the
-    // caller can pin the RSA hash algorithm explicitly. We pass `None`
-    // here, which falls back to russh's default per-algorithm choice.
+    // caller can pin the RSA hash algorithm explicitly. RSA keys use the
+    // server-advertised rsa-sha2 hash (see below); others pass `None`.
     let mut authed = false;
     if !private_key.is_empty() {
         let key = decode_secret_key(&private_key, passphrase.as_deref())
             .map_err(|e| format!("ssh: parse private key: {e}"))?;
-        let key_arg = PrivateKeyWithHashAlg::new(Arc::new(key), None);
+        // An RSA key must sign with the hash the server advertises
+        // (rsa-sha2-256/512); `None` means legacy SHA-1 `ssh-rsa`, which
+        // OpenSSH >= 8.8 rejects while still listing `publickey`.
+        let hash = if key.algorithm().is_rsa() {
+            session.best_supported_rsa_hash().await.map_err(|e| format!("ssh: publickey auth: {e}"))?.flatten()
+        } else {
+            None
+        };
+        let key_arg = PrivateKeyWithHashAlg::new(Arc::new(key), hash);
         authed = session
             .authenticate_publickey(&username, key_arg)
             .await

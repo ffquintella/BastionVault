@@ -475,6 +475,10 @@ EXAMPLE ENTRY:
 
 ### Fixed
 
+#### SSH login with an RSA key
+
+- **Connecting with a stored RSA private key no longer fails with `authentication rejected (offered publickey; server accepts: publickey)` on OpenSSH 8.8+** -- the GUI session and the files-engine SSH sync signed RSA keys with legacy SHA-1 `ssh-rsa`, which modern servers refuse while still listing `publickey`. RSA keys now sign with the `rsa-sha2-256`/`rsa-sha2-512` hash the server advertises; other key types are unchanged.
+
 #### AppID page on a renamed mount
 
 - **Creating or listing AppIDs no longer fails with `HTTP 404: Router mount not found` when the AppID backend is not mounted at `approle/`** -- the GUI hardcoded `auth/approle/` in every AppID command and in the namespace-assignment record, so a server that enabled the backend at another path (e.g. `appid/`) 404ed on the first call. The commands now resolve the mount of type `approle` from `sys/internal/ui/mounts`, preferring `approle/` when several exist.

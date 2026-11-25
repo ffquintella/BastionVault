@@ -556,7 +556,16 @@ pub(super) async fn connect_authenticated(
         SshCredential::PrivateKey { pem, passphrase } => {
             let key = decode_secret_key(pem.as_str(), passphrase.as_deref().map(|p| p.as_str()))
                 .map_err(|e| format!("parse private key: {e}"))?;
-            let key_arg = PrivateKeyWithHashAlg::new(Arc::new(key), None);
+            // An RSA key must sign with the hash the server advertises
+            // (rsa-sha2-256/512). `None` means legacy `ssh-rsa` (SHA-1),
+            // which OpenSSH ≥ 8.8 refuses while still listing `publickey`
+            // as an accepted method — indistinguishable from a bad key.
+            let hash = if key.algorithm().is_rsa() {
+                session.best_supported_rsa_hash().await.map_err(|e| format!("publickey auth: {e}"))?.flatten()
+            } else {
+                None
+            };
+            let key_arg = PrivateKeyWithHashAlg::new(Arc::new(key), hash);
             session.authenticate_publickey(username, key_arg).await.map_err(|e| format!("publickey auth: {e}"))?
         }
         SshCredential::Cert { pem, cert_openssh } => {
