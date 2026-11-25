@@ -386,6 +386,11 @@ EXAMPLE ENTRY:
 
 ### Changed
 
+#### SQL browser opens on a login narrower than the grant
+
+- **Open an SQL session on the best-fitting profile when your grant is broader than every profile's ceiling, instead of refusing with `no_profile_for_grant`** (T557, S109)
+  -- The session keeps your grant limited to the profile's ceiling, refuses everything above it in the vault, and lists it as `narrowed_out` in the session status and the Info panel; a profile that reaches none of the grant still refuses, and a read-only result under `database-first` still needs an exactly read-only login.
+
 #### Asset groups: inherited groups
 
 - **The Asset Groups page marks a group inherited from an ancestor namespace and shows it read-only** (T534, S47)

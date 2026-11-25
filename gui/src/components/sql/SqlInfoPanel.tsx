@@ -131,6 +131,14 @@ export function SqlInfoPanel({
             ))}
           </div>
         )}
+        {(status.narrowed_out ?? []).length > 0 && (
+          <div className="mt-1 flex flex-wrap items-center gap-1" data-testid="sql-narrowed-out">
+            <span className="text-yellow-300">Not available in this session</span>
+            {ordered(status.narrowed_out ?? []).map((c) => (
+              <CapChip key={c} cap={c} tone="warn" title="You hold this, but this connection profile's login cannot" />
+            ))}
+          </div>
+        )}
         {!status.db_enforced && (
           <p className="mt-1 text-[10px] text-yellow-300">
             The database login can do more than you are granted: BastionVault alone refuses the excess, and every

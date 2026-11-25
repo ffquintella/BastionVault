@@ -775,6 +775,15 @@ read/write login that can also insert and delete), the excess is
 classifier-enforced. The session's enforcement panel lists exactly which
 capabilities the database enforces and which only the vault enforces.
 
+When no profile's ceiling covers the whole grant (for example every privilege
+on a resource whose only profile is read-only), the session is **narrowed**
+instead of refused: it uses the profile reaching the most of the grant
+(smallest ceiling on a tie), its capabilities are the grant intersected with
+that ceiling, and the remainder is reported as `narrowed_out` and denied by
+the session for every statement, export, script and grid edit. The step 3
+rule still applies to the narrowed set, and a profile that reaches none of the
+grant never serves (T557).
+
 #### 5.3 Session-level guards (defence in depth)
 
 - **Read-only sessions:**

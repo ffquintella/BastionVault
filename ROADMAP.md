@@ -527,6 +527,9 @@ Next-up list recorded before the migration, in its order:
   - source: roadmap.md feature row "Auth: SAML 2.0", status `[x]` Done
   - initiative: [SAML 2.0 Authentication](features/saml-auth.md) — pure-Rust SP-initiated SSO; AuthnRequest, streaming `quick-xml` parsing, RSA-SHA256/SHA1 verify, hand-rolled Exclusive C14N. Zero libxml2 / xmlsec / OpenSSL footprint. 46 tests.
   - old-notes: [spec](features/saml-auth.md) — pure-Rust SP-initiated SSO, no libxml2 / xmlsec.
+- [x] T557 Open an SQL session narrowed to the login's ceiling when no profile covers the caller's whole grant (S109)
+  - source: operator report — `no_profile_for_grant` opening the SQL browser on a database whose only profile is read-only, for a caller holding every SQL privilege
+  - note: done with caveats. Verified by plugin unit tests only (`cargo nextest run -p bastion-plugin-dbms-management --lib`); not run against a live vault or database, and `make test-release` was not run. Behaviour change against the earlier spec text: an over-broad grant no longer refuses the open.
 - [x] T556 Bind an SSH CA certificate to the machine it was signed for (S58)
   - source: operator question — `ssh/sign` put only the login in `valid principals`, so a cert signed for one machine opened every machine that trusts the CA and has that user
   - note: done with caveats. Role fields `require_target_host` + `allowed_hosts`; `sign` takes `target_host` and issues principals `<user>@<host>`; Resource Connect (ssh-engine, CA mode) passes the host it dials. Targets must list `<user>@<host>` in an `AuthorizedPrincipalsFile`. Off by default, so existing roles are unchanged. The MCP brokered-session (direct and bastion routes) and Rustion `ssh-engine` minters pass the target host too; the agent-session certificate check accepts `<login>@<host>`. The SSH engine's `host`-type certs are not bound
