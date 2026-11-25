@@ -788,6 +788,8 @@ Next-up list recorded before the migration, in its order:
 ## [M9] Packaging and distribution
 > outcome: Done when the signed server image, native client installers and the downloads website with a signed manifest are published by release CI.
 
+- [x] T558 Sign the executables inside every installer with a locally stored certificate, classical or ML-DSA (S30, S68)
+  - source: operator request — cert/key paths live in a per-user config outside the repo and are asked for on first run; ML-KEM is refused because it cannot sign
 - [x] T488 Reorganise the Makefile into command groups with subcommands (S77)
   - source: operator request — one taxonomy (`make <group> <subcommand>`), 15 groups, `make help [<group>]`; legacy target names keep working
 - [x] T83 Publish the server container image for standalone and cluster use (S32, S68)

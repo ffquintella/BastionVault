@@ -76,7 +76,10 @@ linux-cli-deb: ## Build the bvault CLI .deb (Linux amd64; cross-built via Docker
 	}
 	$(_cli_require_cross)
 	$(CLI_LINUX_CARGO) build -p bvault-cli --release --bin bvault --target $(CLI_LINUX_TARGET)
-	cargo deb -p bvault-cli --no-build --no-strip --target $(CLI_LINUX_TARGET)
+	@$(call sign_stage,target/$(CLI_LINUX_TARGET)/release/bvault,target/signed/linux-cli)
+	@V=; ls target/signed/linux-cli/bvault.*p7s >/dev/null 2>&1 && V="--variant signed"; \
+	 echo "==> cargo deb $$V"; \
+	 cargo deb -p bvault-cli --no-build --no-strip --target $(CLI_LINUX_TARGET) $$V
 	@echo ""
 	@echo "==> .deb under target/$(CLI_LINUX_TARGET)/debian/:"
 	@ls -lh target/$(CLI_LINUX_TARGET)/debian/*.deb 2>/dev/null || true
@@ -88,7 +91,10 @@ linux-cli-rpm: ## Build the bvault CLI .rpm (Linux amd64; cross-built via Docker
 	}
 	$(_cli_require_cross)
 	$(CLI_LINUX_CARGO) build -p bvault-cli --release --bin bvault --target $(CLI_LINUX_TARGET)
-	cargo generate-rpm -p bvault-cli --target $(CLI_LINUX_TARGET) --arch $(CLI_LINUX_RPM_ARCH) --auto-req $(CLI_LINUX_AUTOREQ)
+	@$(call sign_stage,target/$(CLI_LINUX_TARGET)/release/bvault,target/signed/linux-cli)
+	@O=; ls target/signed/linux-cli/bvault.*p7s >/dev/null 2>&1 && O="--metadata-overwrite=installers/cli/rpm-signed.toml#package.metadata.generate-rpm"; \
+	 echo "==> cargo generate-rpm $$O"; \
+	 cargo generate-rpm -p bvault-cli --target $(CLI_LINUX_TARGET) --arch $(CLI_LINUX_RPM_ARCH) --auto-req $(CLI_LINUX_AUTOREQ) $$O
 	@echo ""
 	@echo "==> .rpm under target/$(CLI_LINUX_TARGET)/generate-rpm/:"
 	@ls -lh target/$(CLI_LINUX_TARGET)/generate-rpm/*.rpm 2>/dev/null || true
@@ -162,11 +168,12 @@ ifeq ($(CLI_WIN_NATIVE),1)
 		exit 1; \
 	}
 	cargo build -p bvault-cli --release --bin bvault
+	@$(call sign_stage,$(CLI_WIN_EXE),target/signed/windows-cli)
 	@mkdir -p target/msi
 	$(CANDLE) -nologo -arch x64 \
 		-dVersion=$(VERSION) \
 		-dWithUI=1 \
-		-dBvaultExe=$(CLI_WIN_EXE) \
+		-dBvaultExe=target/signed/windows-cli/bvault.exe \
 		-dLicenseRtf=installers/cli/msi/License.rtf \
 		-out target/msi/bvault.wixobj \
 		installers/cli/msi/bvault.wxs
@@ -181,14 +188,16 @@ else
 	}
 	$(_cli_win_require_cross)
 	cross build -p bvault-cli --release --bin bvault --target $(CLI_WIN_TARGET)
+	@$(call sign_stage,$(CLI_WIN_EXE),target/signed/windows-cli)
 	@mkdir -p target/msi
 	$(WIXL) --arch x64 \
 		-D Version=$(VERSION) \
 		-D WithUI=0 \
-		-D BvaultExe=$(CLI_WIN_EXE) \
+		-D BvaultExe=target/signed/windows-cli/bvault.exe \
 		-o target/msi/bvault-$(VERSION)-windows-x64.msi \
 		installers/cli/msi/bvault.wxs
 endif
+	@cp target/signed/windows-cli/bvault.exe.*p7s target/msi/ 2>/dev/null || true
 	@echo ""
 	@echo "==> .msi under target/msi/:"
 	@ls -lh target/msi/*.msi 2>/dev/null || true
@@ -206,7 +215,9 @@ ifeq ($(CLI_WIN_NATIVE),1)
 	cp installers/cli/nupkg/tools/LICENSE.txt \
 	   installers/cli/nupkg/tools/VERIFICATION.txt \
 	   target/nupkg/staging/tools/
-	cp $(CLI_WIN_EXE) target/nupkg/staging/tools/
+	@$(call sign_stage,$(CLI_WIN_EXE),target/signed/windows-cli)
+	cp target/signed/windows-cli/bvault.exe target/signed/windows-cli/bvault.exe.*p7s target/nupkg/staging/tools/ 2>/dev/null \
+		|| cp target/signed/windows-cli/bvault.exe target/nupkg/staging/tools/
 	cd target/nupkg/staging && $(CHOCO) pack bastionvault-cli.nuspec \
 		--version $(VERSION) --outputdirectory ..
 else
@@ -216,11 +227,13 @@ else
 	}
 	$(_cli_win_require_cross)
 	cross build -p bvault-cli --release --bin bvault --target $(CLI_WIN_TARGET)
+	@$(call sign_stage,$(CLI_WIN_EXE),target/signed/windows-cli)
 	@mkdir -p target/nupkg
 	python3 installers/cli/nupkg/build-nupkg.py \
 		--nuspec installers/cli/nupkg/bastionvault-cli.nuspec \
 		--version $(VERSION) \
-		--exe $(CLI_WIN_EXE) \
+		--exe target/signed/windows-cli/bvault.exe \
+		$$(for f in target/signed/windows-cli/bvault.exe.*p7s; do [ -f "$$f" ] && printf -- '--tools %s ' "$$f"; done) \
 		--tools installers/cli/nupkg/tools/LICENSE.txt \
 		--tools installers/cli/nupkg/tools/VERIFICATION.txt \
 		--out target/nupkg
@@ -264,7 +277,9 @@ else
 	else \
 		cargo build -p bvault-cli --release --bin bvault; \
 	fi
-	VERSION=$(VERSION) BVAULT_BIN=$(CLI_MAC_EXE) PKG_ARCH=$(CLI_MAC_ARCH) OUTPUT_DIR=target/pkg \
+	@$(call sign_stage,$(CLI_MAC_EXE),target/signed/macos-cli)
+	VERSION=$(VERSION) BVAULT_BIN=target/signed/macos-cli/bvault BVAULT_SIG_DIR=target/signed/macos-cli \
+		PKG_ARCH=$(CLI_MAC_ARCH) OUTPUT_DIR=target/pkg \
 		bash installers/cli/pkg/build-macos-pkg.sh
 endif
 

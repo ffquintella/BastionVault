@@ -66,6 +66,14 @@ install -d -m 0755 "$ROOT/usr/local/etc/bash_completion.d"
 install -d -m 0755 "$ROOT/usr/local/share/zsh/site-functions"
 
 install -m 0755 "$BVAULT_BIN" "$ROOT/usr/local/bin/bvault"
+# Detached signatures of the binary, when signing produced any.
+if [ -n "${BVAULT_SIG_DIR:-}" ]; then
+    for sig in "$BVAULT_SIG_DIR"/bvault.*p7s; do
+        [ -f "$sig" ] || continue
+        install -d -m 0755 "$ROOT/usr/local/share/bastionvault/signatures"
+        install -m 0644 "$sig" "$ROOT/usr/local/share/bastionvault/signatures/$(basename "$sig")"
+    done
+fi
 gzip -9 -c "$MANPAGE" > "$ROOT/usr/local/share/man/man1/bvault.1.gz"
 chmod 0644 "$ROOT/usr/local/share/man/man1/bvault.1.gz"
 install -m 0644 "$COMP_BASH" "$ROOT/usr/local/etc/bash_completion.d/bvault"

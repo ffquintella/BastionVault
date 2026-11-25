@@ -50,6 +50,17 @@ DIRS=("$@")
 
 [ -n "${BV_GPG_HOMEDIR:-}" ] && export GNUPGHOME="$BV_GPG_HOMEDIR"
 
+# Fall back to the certificate saved by `make package exe-sign-setup` (paths only).
+SIGN_CONF="${BV_SIGN_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/bastionvault/signing.conf}"
+if [ -f "$SIGN_CONF" ] && [ -z "${BV_WIN_PFX:-}${BV_WIN_CERT:-}" ]; then
+    _c="$(sed -n 's/^CLASSICAL_CERT=//p' "$SIGN_CONF" | tail -1)"
+    _k="$(sed -n 's/^CLASSICAL_KEY=//p' "$SIGN_CONF" | tail -1)"
+    case "$_c" in
+        *.pfx|*.p12) BV_WIN_PFX="$_c" ;;
+        ?*) BV_WIN_CERT="$_c"; BV_WIN_KEY="$_k" ;;
+    esac
+fi
+
 # Collect artifacts across the requested directories.
 artifacts=()
 while IFS= read -r -d '' f; do artifacts+=("$f"); done < <(

@@ -60,6 +60,7 @@ include make/70-container.mk
 include make/74-package.mk
 include make/75-pkg-cli.mk
 include make/76-pkg-gui.mk
+include make/77-sign.mk
 include make/80-install.mk
 include make/85-release.mk
 include make/90-plugins.mk

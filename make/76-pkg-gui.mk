@@ -148,9 +148,11 @@ else
 	cd gui && $(GUI_TAURI) build --bundles app -- --features $(GUI_BUNDLE_FEATURES)
 	@APP=$$(find gui/src-tauri/target target -type d -name 'BastionVault.app' -path '*/bundle/macos/*' 2>/dev/null | head -1); \
 	 if [ -z "$$APP" ]; then echo "ERROR: BastionVault.app not found under */bundle/macos/ after tauri build"; exit 1; fi; \
-	 echo "==> wrapping $$APP into a .pkg"; \
-	 VERSION=$(VERSION) APP_PATH=$$APP OUTPUT_DIR=target/pkg \
-		bash gui/src-tauri/installers/macos/build-gui-pkg.sh
+	 $(call sign_stage,"$$APP",target/signed/macos-gui) || exit 1; \
+	 echo "==> wrapping the signed BastionVault.app into a .pkg"; \
+	 VERSION=$(VERSION) APP_PATH=target/signed/macos-gui/BastionVault.app OUTPUT_DIR=target/pkg \
+		bash gui/src-tauri/installers/macos/build-gui-pkg.sh; \
+	 cp target/signed/macos-gui/BastionVault.app.*p7s target/signed/macos-gui/BastionVault.app.manifest target/pkg/ 2>/dev/null || true
 	@ls -lh target/pkg/BastionVault-*.pkg 2>/dev/null || true
 endif
 

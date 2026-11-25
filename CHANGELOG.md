@@ -63,6 +63,11 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### Signed executables in the installers
+
+- **Sign `bvault` and the GUI app with a certificate kept on your machine and ship the signed binary inside the macOS, Windows and Linux installers** (T558, S30)
+  -- `make package exe-sign` builds and signs; every CLI package target and the macOS GUI `.pkg` now sign first. The certificate and key paths are asked for on first run and saved to `~/.config/bastionvault/signing.conf` (mode 600, paths only), never in the Makefile or git. Supports RSA/ECDSA/Ed25519 (`.pem`, `.pfx`) and ML-DSA/SLH-DSA; both together give a dual signature. macOS gets an embedded `codesign` signature, Windows an Authenticode one (`osslsigncode`), and the PQC or ELF signature is a detached CMS file shipped inside the package. An ML-KEM certificate is refused with an explanation, since ML-KEM cannot sign. See `installers/sign/README-exe.md`.
+
 #### SSH certificates bound to the destination host
 
 - **Bind an SSH CA certificate to the one machine it was signed for, so it is useless on any other host that trusts the CA** (T556, S58)

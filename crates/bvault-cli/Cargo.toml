@@ -214,6 +214,20 @@ assets = [
     ["../../CHANGELOG.md", "usr/share/doc/bastionvault/", "644"],
 ]
 
+# Same package plus the detached signatures of the binary (make sign_stage);
+# selected by the Makefile only when signing produced them.
+[package.metadata.deb.variants.signed]
+assets = [
+    ["target/release/bvault", "usr/bin/", "755"],
+    ["../../installers/cli/manpage/bvault.1", "usr/share/man/man1/", "644"],
+    ["../../installers/cli/completions/bvault.bash", "usr/share/bash-completion/completions/bvault", "644"],
+    ["../../installers/cli/completions/_bvault",     "usr/share/zsh/site-functions/_bvault", "644"],
+    ["../../installers/cli/completions/bvault.fish", "usr/share/fish/vendor_completions.d/bvault.fish", "644"],
+    ["../../README.md",    "usr/share/doc/bastionvault/", "644"],
+    ["../../CHANGELOG.md", "usr/share/doc/bastionvault/", "644"],
+    ["../../target/signed/linux-cli/bvault.*p7s", "usr/share/bastionvault/signatures/", "644"],
+]
+
 [package.metadata.generate-rpm]
 name = "bastionvault"
 summary = "BastionVault command-line client"

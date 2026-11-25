@@ -67,7 +67,7 @@ container.subs    := image:container-image run:container-image-run test:containe
 
 package.desc    := Installers (bare: CLI + GUI for this host)
 package.default := host
-package.subs    := host:package-host cli:cli-packages cli-all:cli-packages-all cli-linux:linux-cli-packages cli-deb:linux-cli-deb cli-rpm:linux-cli-rpm cli-windows:windows-cli-packages cli-msi:windows-cli-msi cli-nupkg:windows-cli-nupkg cli-pkg:macos-cli-pkg gui:gui-packages gui-linux:gui-linux-packages gui-msi:gui-windows-msi gui-nsis:gui-windows-nsis gui-nupkg:windows-gui-nupkg gui-pkg:gui-macos-pkg sign:sign-packages
+package.subs    := host:package-host cli:cli-packages cli-all:cli-packages-all cli-linux:linux-cli-packages cli-deb:linux-cli-deb cli-rpm:linux-cli-rpm cli-windows:windows-cli-packages cli-msi:windows-cli-msi cli-nupkg:windows-cli-nupkg cli-pkg:macos-cli-pkg gui:gui-packages gui-linux:gui-linux-packages gui-msi:gui-windows-msi gui-nsis:gui-windows-nsis gui-nupkg:windows-gui-nupkg gui-pkg:gui-macos-pkg sign:sign-packages exe-sign-setup:sign-exe-setup exe-sign:sign-exe exe-verify:sign-exe-verify
 
 install.desc    := Install bvault on this machine
 install.default := bin
