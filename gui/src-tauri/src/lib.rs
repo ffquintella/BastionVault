@@ -508,6 +508,7 @@ pub fn run() {
             commands::files::restore_file_version,
             commands::files::export_file_to_path,
             // AppRole
+            commands::approle::get_approle_mount,
             commands::approle::list_approles,
             commands::approle::read_approle,
             commands::approle::write_approle,

@@ -10,6 +10,69 @@ use crate::state::AppState;
 
 use super::make_request;
 
+/// Mount path the AppID (type `approle`) backend is enabled at, with a trailing
+/// slash. It is operator-chosen (`appid/` on some deployments), so it cannot be
+/// assumed to be `approle/`: hardcoding it made every AppID command 404 with
+/// `Router mount not found` on such a server. Prefers `approle/` when several
+/// approle mounts exist, otherwise the first by path; `approle/` when none is
+/// listed, so the request fails the way it always did instead of guessing.
+pub(crate) fn pick_approle_mount(auth_mounts: &Map<String, Value>) -> String {
+    let mut paths: Vec<&String> = auth_mounts
+        .iter()
+        .filter(|(_, v)| v.get("type").and_then(Value::as_str) == Some("approle"))
+        .map(|(k, _)| k)
+        .collect();
+    paths.sort();
+    if paths.iter().any(|p| p.as_str() == "approle/") {
+        return "approle/".to_string();
+    }
+    paths.first().map(|p| format!("{}/", p.trim_end_matches('/'))).unwrap_or_else(|| "approle/".to_string())
+}
+
+pub(crate) async fn resolve_approle_mount(state: &State<'_, AppState>) -> CmdResult<String> {
+    let map = super::system::read_ui_mounts(state, "auth").await?;
+    Ok(pick_approle_mount(&map))
+}
+
+/// `auth/<approle mount>/<rest>`.
+async fn approle_path(state: &State<'_, AppState>, rest: &str) -> CmdResult<String> {
+    Ok(format!("auth/{}{rest}", resolve_approle_mount(state).await?))
+}
+
+/// The AppID mount path, for the GUI's namespace-assignment records, which are
+/// keyed by the mount a token was minted on.
+#[tauri::command]
+pub async fn get_approle_mount(state: State<'_, AppState>) -> CmdResult<String> {
+    resolve_approle_mount(&state).await
+}
+
+#[cfg(test)]
+mod mount_tests {
+    use super::pick_approle_mount;
+    use serde_json::json;
+
+    fn m(v: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+        v.as_object().cloned().unwrap()
+    }
+
+    #[test]
+    fn follows_a_renamed_mount() {
+        let map = m(json!({"appid/": {"type": "approle"}, "userpass/": {"type": "userpass"}}));
+        assert_eq!(pick_approle_mount(&map), "appid/");
+    }
+
+    #[test]
+    fn prefers_the_default_path_when_both_exist() {
+        let map = m(json!({"appid/": {"type": "approle"}, "approle/": {"type": "approle"}}));
+        assert_eq!(pick_approle_mount(&map), "approle/");
+    }
+
+    #[test]
+    fn falls_back_to_the_default_when_none_is_listed() {
+        assert_eq!(pick_approle_mount(&m(json!({"userpass/": {"type": "userpass"}}))), "approle/");
+    }
+}
+
 // ── Role CRUD ──────────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -50,7 +113,7 @@ pub struct MachineBindingList {
 
 #[tauri::command]
 pub async fn list_approles(state: State<'_, AppState>) -> CmdResult<AppRoleListResult> {
-    let resp = make_request(&state, Operation::List, "auth/approle/role/".into(), None).await?;
+    let resp = make_request(&state, Operation::List, approle_path(&state, "role/").await?, None).await?;
 
     match resp {
         Some(r) => {
@@ -68,7 +131,8 @@ pub async fn list_approles(state: State<'_, AppState>) -> CmdResult<AppRoleListR
 
 #[tauri::command]
 pub async fn read_approle(state: State<'_, AppState>, name: String) -> CmdResult<AppRoleInfo> {
-    let resp = make_request(&state, Operation::Read, format!("auth/approle/role/{name}"), None).await?;
+    let resp =
+        make_request(&state, Operation::Read, approle_path(&state, &format!("role/{name}")).await?, None).await?;
 
     match resp {
         Some(r) => {
@@ -147,13 +211,13 @@ pub async fn write_approle(
         body.insert("token_max_ttl".into(), Value::String(token_max_ttl));
     }
 
-    make_request(&state, Operation::Write, format!("auth/approle/role/{name}"), Some(body)).await?;
+    make_request(&state, Operation::Write, approle_path(&state, &format!("role/{name}")).await?, Some(body)).await?;
     Ok(())
 }
 
 #[tauri::command]
 pub async fn delete_approle(state: State<'_, AppState>, name: String) -> CmdResult<()> {
-    make_request(&state, Operation::Delete, format!("auth/approle/role/{name}"), None).await?;
+    make_request(&state, Operation::Delete, approle_path(&state, &format!("role/{name}")).await?, None).await?;
     Ok(())
 }
 
@@ -166,7 +230,9 @@ pub struct RoleIdInfo {
 
 #[tauri::command]
 pub async fn read_role_id(state: State<'_, AppState>, name: String) -> CmdResult<RoleIdInfo> {
-    let resp = make_request(&state, Operation::Read, format!("auth/approle/role/{name}/role-id"), None).await?;
+    let resp =
+        make_request(&state, Operation::Read, approle_path(&state, &format!("role/{name}/role-id")).await?, None)
+            .await?;
 
     match resp {
         Some(r) => {
@@ -219,8 +285,13 @@ pub async fn generate_secret_id(
         body.insert("environments".into(), Value::Array(environments.into_iter().map(Value::String).collect()));
     }
 
-    let resp =
-        make_request(&state, Operation::Write, format!("auth/approle/role/{name}/secret-id/"), Some(body)).await?;
+    let resp = make_request(
+        &state,
+        Operation::Write,
+        approle_path(&state, &format!("role/{name}/secret-id/")).await?,
+        Some(body),
+    )
+    .await?;
 
     match resp {
         Some(r) => {
@@ -241,7 +312,9 @@ pub async fn generate_secret_id(
 
 #[tauri::command]
 pub async fn list_secret_id_accessors(state: State<'_, AppState>, name: String) -> CmdResult<SecretIdAccessorList> {
-    let resp = make_request(&state, Operation::List, format!("auth/approle/role/{name}/secret-id/"), None).await?;
+    let resp =
+        make_request(&state, Operation::List, approle_path(&state, &format!("role/{name}/secret-id/")).await?, None)
+            .await?;
 
     match resp {
         Some(r) => {
@@ -269,7 +342,7 @@ pub async fn lookup_secret_id_accessor(
     let resp = make_request(
         &state,
         Operation::Write,
-        format!("auth/approle/role/{name}/secret-id-accessor/lookup/"),
+        approle_path(&state, &format!("role/{name}/secret-id-accessor/lookup/")).await?,
         Some(body),
     )
     .await?;
@@ -326,8 +399,13 @@ pub async fn destroy_secret_id_accessor(state: State<'_, AppState>, name: String
     let mut body = Map::new();
     body.insert("secret_id_accessor".into(), Value::String(accessor));
 
-    make_request(&state, Operation::Write, format!("auth/approle/role/{name}/secret-id-accessor/destroy/"), Some(body))
-        .await?;
+    make_request(
+        &state,
+        Operation::Write,
+        approle_path(&state, &format!("role/{name}/secret-id-accessor/destroy/")).await?,
+        Some(body),
+    )
+    .await?;
     Ok(())
 }
 
@@ -335,7 +413,9 @@ pub async fn destroy_secret_id_accessor(state: State<'_, AppState>, name: String
 
 #[tauri::command]
 pub async fn list_role_machines(state: State<'_, AppState>, name: String) -> CmdResult<MachineBindingList> {
-    let resp = make_request(&state, Operation::List, format!("auth/approle/role/{name}/machine/"), None).await?;
+    let resp =
+        make_request(&state, Operation::List, approle_path(&state, &format!("role/{name}/machine/")).await?, None)
+            .await?;
 
     match resp {
         Some(r) => {
@@ -368,12 +448,19 @@ pub async fn add_role_machine(
     }
     body.insert("environments".into(), Value::Array(environments.into_iter().map(Value::String).collect()));
 
-    make_request(&state, Operation::Write, format!("auth/approle/role/{name}/machine/"), Some(body)).await?;
+    make_request(&state, Operation::Write, approle_path(&state, &format!("role/{name}/machine/")).await?, Some(body))
+        .await?;
     Ok(())
 }
 
 #[tauri::command]
 pub async fn delete_role_machine(state: State<'_, AppState>, name: String, machine_id: String) -> CmdResult<()> {
-    make_request(&state, Operation::Delete, format!("auth/approle/role/{name}/machine/{machine_id}"), None).await?;
+    make_request(
+        &state,
+        Operation::Delete,
+        approle_path(&state, &format!("role/{name}/machine/{machine_id}")).await?,
+        None,
+    )
+    .await?;
     Ok(())
 }

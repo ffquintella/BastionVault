@@ -121,7 +121,7 @@ export function AppRolePage() {
     try {
       await api.writeAppRole(newName, newBindSecretId, newPolicies.join(","), 0, "", "", "", "", false);
       // Persist the namespace login-restriction (empty ⇒ unrestricted).
-      await api.setNsAssignment("approle/", newName, newNamespaces);
+      await api.setNsAssignment(await api.getApproleMount(), newName, newNamespaces);
       toast("success", `ID ${newName} created`);
       setShowCreate(false);
       setNewName("");
@@ -564,7 +564,8 @@ function EditRoleModal({
     setBoundSourceIps(roleInfo.bound_source_ips.join(", "));
     setBypassMachine(roleInfo.bypass_machine_binding);
     api
-      .getNsAssignment("approle/", roleInfo.name)
+      .getApproleMount()
+      .then((mount) => api.getNsAssignment(mount, roleInfo.name))
       .then((r) => setNamespaces(r.namespaces))
       .catch(() => setNamespaces([]));
   }, [open, roleInfo]);
@@ -588,7 +589,7 @@ function EditRoleModal({
           .join(","),
         bypassMachine,
       );
-      await api.setNsAssignment("approle/", roleInfo.name, namespaces);
+      await api.setNsAssignment(await api.getApproleMount(), roleInfo.name, namespaces);
       toast("success", `ID ${roleInfo.name} updated`);
       onSaved();
     } catch (e: unknown) {

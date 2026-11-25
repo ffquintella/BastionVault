@@ -1094,6 +1094,8 @@ export const readResourceSecretVersion = (name: string, key: string, version: nu
   invoke<ResourceSecretVersionData>("read_resource_secret_version", { name, key, version });
 
 // AppID (API type "approle")
+/** Mount path (trailing slash) the AppID backend is enabled at; operator-chosen, e.g. `appid/`. */
+export const getApproleMount = () => invoke<string>("get_approle_mount");
 export const listAppRoles = () => invoke<AppRoleListResult>("list_approles");
 export const readAppRole = (name: string) => invoke<AppRoleInfo>("read_approle", { name });
 export const writeAppRole = (

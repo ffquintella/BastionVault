@@ -470,6 +470,10 @@ EXAMPLE ENTRY:
 
 ### Fixed
 
+#### AppID page on a renamed mount
+
+- **Creating or listing AppIDs no longer fails with `HTTP 404: Router mount not found` when the AppID backend is not mounted at `approle/`** -- the GUI hardcoded `auth/approle/` in every AppID command and in the namespace-assignment record, so a server that enabled the backend at another path (e.g. `appid/`) 404ed on the first call. The commands now resolve the mount of type `approle` from `sys/internal/ui/mounts`, preferring `approle/` when several exist.
+
 #### Tokens
 
 - **Revoking a token now revokes the children it minted with `auth/token/create`** (T554)
