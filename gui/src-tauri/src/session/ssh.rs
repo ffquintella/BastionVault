@@ -318,6 +318,8 @@ pub async fn open_ssh_session(
         // listening yet. See `session::output`.
         let mut output = super::output::SessionOutput::new(super::output::OUTPUT_BUFFER_CAPACITY, retain_output);
         let mut received_output = !pre_shell_buf.is_empty();
+        let mut stats = SessionStats::new();
+        stats.record_rx(pre_shell_buf.len());
         output.record(&pre_shell_buf, false);
         {
             use zeroize::Zeroize;
@@ -336,6 +338,7 @@ pub async fn open_ssh_session(
                         // stdout and stderr surface on the same event.
                         Some(ChannelMsg::Data { data }) | Some(ChannelMsg::ExtendedData { data, .. }) => {
                             received_output = true;
+                            stats.record_rx(data.len());
                             let delivered = match output.live_epoch() {
                                 Some(epoch) => {
                                     // Gate the registry's current epoch under
@@ -380,6 +383,9 @@ pub async fn open_ssh_session(
                                 }
                                 None => "ssh transport closed before the shell produced any output".to_string(),
                             };
+                            // How the link behaved right up to the drop, so
+                            // a reset can be told from a quiet path.
+                            close_reason = format!("{close_reason} [{}]", stats.summary());
                             break;
                         }
                         Some(ChannelMsg::ExitStatus { exit_status }) => {
@@ -405,9 +411,10 @@ pub async fn open_ssh_session(
                                 log::warn!(
                                     "resource-connect/ssh: write to channel failed: {e:?}"
                                 );
-                                close_reason = format!("write to ssh channel failed: {e}");
+                                close_reason = format!("write to ssh channel failed: {e} [{}]", stats.summary());
                                 break;
                             }
+                            stats.record_tx(bytes.len());
                         }
                         Some(SshControl::Resize { cols, rows, epoch }) => {
                             if let Err(e) = channel
@@ -460,7 +467,7 @@ pub async fn open_ssh_session(
                 }
             }
         }
-        log::info!("resource-connect/ssh: worker exiting — reason: {close_reason}");
+        log::info!("resource-connect/ssh: worker exiting — reason: {close_reason} (session: {})", stats.summary());
         // Fire the closed event so the WebviewWindow shows
         // "disconnected" instead of waiting forever. The worker can
         // exit before the React listener has subscribed (a server
@@ -671,6 +678,13 @@ impl Handler for HostKeyHandler {
                 "server did not answer keepalives".to_string()
             }
             client::DisconnectReason::Error(russh::Error::InactivityTimeout) => "inactivity timeout".to_string(),
+            // An IO error is the socket itself failing; the kind and errno
+            // tell a peer/middlebox reset (ECONNRESET, EPIPE) from a local
+            // network change (ENETDOWN, ENETUNREACH, EHOSTUNREACH) or a
+            // timeout (ETIMEDOUT).
+            client::DisconnectReason::Error(russh::Error::IO(e)) => {
+                format!("transport error: {e} (io kind={:?}, os_error={:?})", e.kind(), e.raw_os_error())
+            }
             client::DisconnectReason::Error(e) => format!("transport error: {e}"),
         };
         log::warn!("{}: ssh transport ended: {why}", self.log_tag);
@@ -817,10 +831,100 @@ pub async fn drop_session(state: &crate::state::AppState, token: &str) -> Option
     }
 }
 
+/// Traffic counters for one shell session, kept by the pump loop so a
+/// lost connection can say how it died: a host that was streaming output
+/// until the instant of the drop (small `since_last_rx`) was reset or
+/// killed, a quiet link points at the path or the local network.
+pub(super) struct SessionStats {
+    started: std::time::Instant,
+    last_rx: Option<std::time::Instant>,
+    last_tx: Option<std::time::Instant>,
+    rx_bytes: u64,
+    tx_bytes: u64,
+}
+
+impl SessionStats {
+    pub(super) fn new() -> Self {
+        Self { started: std::time::Instant::now(), last_rx: None, last_tx: None, rx_bytes: 0, tx_bytes: 0 }
+    }
+
+    pub(super) fn record_rx(&mut self, n: usize) {
+        self.last_rx = Some(std::time::Instant::now());
+        self.rx_bytes += n as u64;
+    }
+
+    pub(super) fn record_tx(&mut self, n: usize) {
+        self.last_tx = Some(std::time::Instant::now());
+        self.tx_bytes += n as u64;
+    }
+
+    /// One-line summary, e.g.
+    /// `up 12m03s, last data from host 0.4s ago (1.2 MiB rx), last keystroke 31.0s ago (88 B tx)`.
+    pub(super) fn summary(&self) -> String {
+        let ago = |t: Option<std::time::Instant>| match t {
+            Some(t) => format!("{:.1}s ago", t.elapsed().as_secs_f64()),
+            None => "never".to_string(),
+        };
+        let up = self.started.elapsed().as_secs();
+        format!(
+            "up {}m{:02}s, last data from host {} ({} rx), last keystroke {} ({} tx)",
+            up / 60,
+            up % 60,
+            ago(self.last_rx),
+            human_bytes(self.rx_bytes),
+            ago(self.last_tx),
+            human_bytes(self.tx_bytes),
+        )
+    }
+}
+
+fn human_bytes(n: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * 1024;
+    if n >= MIB {
+        format!("{:.1} MiB", n as f64 / MIB as f64)
+    } else if n >= KIB {
+        format!("{:.1} KiB", n as f64 / KIB as f64)
+    } else {
+        format!("{n} B")
+    }
+}
+
 /// Time budget for the whole connect+auth phase. Beyond this we
 /// give up and report a clear timeout to the operator. 30s lines
 /// up with the SMB transport's posture.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[cfg(test)]
+mod session_stats_tests {
+    use super::{human_bytes, SessionStats};
+
+    #[test]
+    fn fresh_session_reports_no_traffic() {
+        let s = SessionStats::new().summary();
+        assert!(s.contains("last data from host never (0 B rx)"), "{s}");
+        assert!(s.contains("last keystroke never (0 B tx)"), "{s}");
+    }
+
+    #[test]
+    fn counts_both_directions_separately() {
+        let mut st = SessionStats::new();
+        st.record_rx(2048);
+        st.record_rx(1024);
+        st.record_tx(5);
+        let s = st.summary();
+        assert!(s.contains("(3.0 KiB rx)"), "{s}");
+        assert!(s.contains("(5 B tx)"), "{s}");
+        assert!(!s.contains("from host never"), "{s}");
+    }
+
+    #[test]
+    fn human_bytes_scales() {
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(1536), "1.5 KiB");
+        assert_eq!(human_bytes(3 * 1024 * 1024), "3.0 MiB");
+    }
+}
 
 #[cfg(test)]
 mod auth_failure_message_tests {
