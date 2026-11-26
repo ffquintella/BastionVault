@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import * as api from "../lib/api";
+import { useAuthStore } from "./authStore";
 
 /**
  * In-app notification state. Backs the header bell + notification center.
@@ -72,6 +73,17 @@ export const useNotificationsStore = create<NotificationsState>((set, get) => ({
   },
 
   refreshUnread: async () => {
+    // The poll timer outlives the token by up to one interval (the session
+    // monitor tears the session down on its own 30 s tick). Without this
+    // guard that last tick reaches the server with a dead or empty token and
+    // lands in the audit trail as `denied` / `invalid-token`.
+    if (!useAuthStore.getState().isAuthenticated) {
+      if (pollTimer !== null) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+      }
+      return;
+    }
     try {
       const count = await api.notificationsUnreadCount();
       // If the badge grew, pull the full list so the center + toast see it.
