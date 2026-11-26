@@ -527,6 +527,8 @@ Next-up list recorded before the migration, in its order:
   - source: roadmap.md feature row "Auth: SAML 2.0", status `[x]` Done
   - initiative: [SAML 2.0 Authentication](features/saml-auth.md) — pure-Rust SP-initiated SSO; AuthnRequest, streaming `quick-xml` parsing, RSA-SHA256/SHA1 verify, hand-rolled Exclusive C14N. Zero libxml2 / xmlsec / OpenSSL footprint. 46 tests.
   - old-notes: [spec](features/saml-auth.md) — pure-Rust SP-initiated SSO, no libxml2 / xmlsec.
+- [x] T560 Reload a plugin when a version is activated and warn on the Plugins page when the running version is not the latest (S109)
+  - source: operator report — v0.1.1 was active but the long-lived v0.1.0 process kept answering
 - [x] T557 Open an SQL session narrowed to the login's ceiling when no profile covers the caller's whole grant (S109)
   - source: operator report — `no_profile_for_grant` opening the SQL browser on a database whose only profile is read-only, for a caller holding every SQL privilege
   - note: done with caveats. Verified by plugin unit tests only (`cargo nextest run -p bastion-plugin-dbms-management --lib`); not run against a live vault or database, and `make test-release` was not run. Behaviour change against the earlier spec text: an over-broad grant no longer refuses the open.

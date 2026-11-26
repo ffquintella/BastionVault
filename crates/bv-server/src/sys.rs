@@ -2820,6 +2820,52 @@ async fn sys_plugins_versions_list_handler(
     result
 }
 
+/// What a successful drain-and-swap reload left behind.
+struct PluginReloaded {
+    active_version: String,
+    sha256: String,
+    cache_entries_evicted: usize,
+}
+
+/// Drain in-flight invocations, then drop the compiled module and the
+/// long-lived supervised child so the next invoke runs the active
+/// binary. Shared by `POST sys/plugins/<name>/reload` and by activating
+/// a version: a long-lived process outlives the pointer that started it,
+/// so switching the pointer alone leaves the previous build serving calls.
+/// The outer `Err` is a storage failure; the inner one is an HTTP answer.
+async fn reload_plugin(core: &Core, name: &str) -> Result<Result<PluginReloaded, HttpResponse>, RvError> {
+    // Phase 5.6: drain-and-swap. Acquire the per-plugin reload
+    // gate's *write* side, which blocks on every in-flight
+    // invocation completing. Default drain timeout: 10s.
+    let drain_timeout = std::time::Duration::from_secs(10);
+    let _reload_guard = match crate::plugins::reload_lock::acquire_reload(name, drain_timeout).await {
+        Ok(g) => g,
+        Err(e) => {
+            return Ok(Err(response_error(StatusCode::SERVICE_UNAVAILABLE, &format!("plugin_reloading: {e}"))));
+        }
+    };
+
+    // Re-fetch the active record (verifies its sha256 against the
+    // stored binary, catching storage-side tampering before the next
+    // invocation), then drop the cached compiled module.
+    let catalog = crate::plugins::PluginCatalog::new();
+    let record = match catalog.get(core.barrier().as_storage(), name).await? {
+        Some(r) => r,
+        None => return Ok(Err(response_error(StatusCode::NOT_FOUND, "plugin not found"))),
+    };
+    let cache = crate::plugins::ModuleCache::shared().map_err(|_| RvError::ErrUnknown)?;
+    let evicted = cache.invalidate(name);
+    // Phase 5.3: tear down any long-lived supervised child so the new
+    // version doesn't share the previous version's process. The next
+    // invoke respawns under the breaker.
+    crate::plugins::process_supervisor::shutdown_for(name).await;
+    Ok(Ok(PluginReloaded {
+        active_version: record.manifest.version.clone(),
+        sha256: record.manifest.sha256.clone(),
+        cache_entries_evicted: evicted,
+    }))
+}
+
 async fn sys_plugins_versions_activate_handler(
     authz: Authorized<SysPluginVersionActivate>,
     req: HttpRequest,
@@ -2837,7 +2883,20 @@ async fn sys_plugins_versions_activate_handler(
         // to invoke. Cheap insurance: invalidate.
         let cache = crate::plugins::ModuleCache::shared().map_err(|_| RvError::ErrUnknown)?;
         cache.invalidate(&name);
-        Ok(response_json_ok(None, json!({ "name": name, "active": version })))
+        // The pointer has moved; a long-lived child still runs the old
+        // build until it is replaced, so do what `reload` does. If the
+        // drain fails the version is active but the old process may still
+        // answer, and the operator is told rather than left to find out.
+        match reload_plugin(&core, &name).await? {
+            Ok(_) => Ok(response_json_ok(None, json!({ "name": name, "active": version, "reloaded": true }))),
+            Err(_) => Ok(response_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &format!(
+                    "version {version} is now active but {name} could not be reloaded (in-flight calls did not drain); \
+                     the previous process may still be serving. Retry the reload"
+                ),
+            )),
+        }
     })
     .await;
     audit.finish(&result).await;
@@ -2872,44 +2931,19 @@ async fn sys_plugins_reload_handler(
     let name = req.match_info().get("name").unwrap_or("").to_string();
 
     let result: Result<HttpResponse, HttpError> = (async move {
-        // Phase 5.6: drain-and-swap. Acquire the per-plugin reload
-        // gate's *write* side, which blocks on every in-flight
-        // invocation completing. Default drain timeout: 10s.
-        let drain_timeout = std::time::Duration::from_secs(10);
-        let _reload_guard = match crate::plugins::reload_lock::acquire_reload(&name, drain_timeout).await {
-            Ok(g) => g,
-            Err(e) => {
-                return Ok(response_error(StatusCode::SERVICE_UNAVAILABLE, &format!("plugin_reloading: {e}")));
-            }
-        };
-
-        // Re-fetch the active record + verify its sha256 against the
-        // stored binary. This catches storage-side tampering before
-        // the next invocation. After verification we drop the cached
-        // compiled module so the next invoke recompiles fresh.
-        let catalog = crate::plugins::PluginCatalog::new();
-        let record = match catalog.get(core.barrier().as_storage(), &name).await? {
-            Some(r) => r,
-            None => return Ok(response_error(StatusCode::NOT_FOUND, "plugin not found")),
-        };
-        let cache = crate::plugins::ModuleCache::shared().map_err(|_| RvError::ErrUnknown)?;
-        let evicted = cache.invalidate(&name);
-        // Phase 5.3: also tear down any long-lived supervised child
-        // so the new version doesn't share the previous version's
-        // process. The next invoke respawns under the breaker.
-        crate::plugins::process_supervisor::shutdown_for(&name).await;
-        // The reload guard drops here; queued invocations resume
-        // against the freshly-compiled module on next call.
-        Ok(response_json_ok(
-            None,
-            json!({
-                "name": name,
-                "active_version": record.manifest.version,
-                "sha256": record.manifest.sha256,
-                "cache_entries_evicted": evicted,
-                "drained_via": "reload_lock::acquire_reload (10s drain)",
-            }),
-        ))
+        match reload_plugin(&core, &name).await? {
+            Ok(r) => Ok(response_json_ok(
+                None,
+                json!({
+                    "name": name,
+                    "active_version": r.active_version,
+                    "sha256": r.sha256,
+                    "cache_entries_evicted": r.cache_entries_evicted,
+                    "drained_via": "reload_lock::acquire_reload (10s drain)",
+                }),
+            )),
+            Err(resp) => Ok(resp),
+        }
     })
     .await;
     audit.finish(&result).await;
@@ -5165,6 +5199,35 @@ mod sql_grant_route_tests {
 
         let (status, _) = server.read("sys/plugins/no-such-plugin/grants/sql-gate", None).unwrap();
         assert_eq!(status, 404);
+    }
+
+    /// Activating a version must also replace the long-lived child, or the
+    /// previous build keeps answering until someone calls `reload` by hand.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn activating_a_version_reloads_the_plugin() {
+        let mut server = TestHttpServer::new("test_plugin_activate_reloads", true).await;
+        server.token = server.root_token.clone();
+        server.url_prefix = server.url_prefix.replace("/v1", "/v2");
+        let storage = server.core.barrier();
+        let storage = storage.as_storage();
+        crate::plugins::verifier::write_accept_unsigned(storage, true).await.unwrap();
+        let catalog = crate::plugins::PluginCatalog::new();
+        let (m1, b1) = manifest("0.1.0", false, None);
+        catalog.put(storage, &m1, &b1).await.unwrap();
+        let (m2, b2) = manifest("0.1.1", false, None);
+        catalog.put(storage, &m2, &b2).await.unwrap();
+
+        let (status, v) =
+            server.request("POST", "sys/plugins/dbms-management/versions/0.1.1/activate", None, None, None).unwrap();
+        assert_eq!(status, 200, "{v:?}");
+        assert_eq!(v["active"], "0.1.1");
+        assert_eq!(v["reloaded"], true, "activation must report the reload it performed: {v:?}");
+
+        // A version that was never registered is refused and nothing moves.
+        let (status, _) =
+            server.request("POST", "sys/plugins/dbms-management/versions/9.9.9/activate", None, None, None).unwrap();
+        assert!(status >= 400, "{status}");
+        assert_eq!(catalog.get_active_version(storage, "dbms-management").await.unwrap().as_deref(), Some("0.1.1"));
     }
 }
 

@@ -480,6 +480,11 @@ EXAMPLE ENTRY:
 
 ### Fixed
 
+#### Plugins: activating a version replaces the running process
+
+- **Activating a plugin version now reloads the plugin, so a long-lived plugin stops serving the previous build, and the Plugins page warns when a newer registered version is not the active one** (T560, S109)
+  -- Switching the active version only moved a pointer: a `long_lived` plugin kept its old process until `sys/plugins/<name>/reload` was called by hand, so an operator who activated a fix still saw the old behaviour. `Activate` now does the same drain-and-swap as Reload and answers 503 with an explanation if in-flight calls do not drain. Each plugin row shows a `vX available` badge and a warning when a registered version is newer than the running one.
+
 #### SSH login with an RSA key
 
 - **Connecting with a stored RSA private key no longer fails with `authentication rejected (offered publickey; server accepts: publickey)` on OpenSSH 8.8+** -- the GUI session and the files-engine SSH sync signed RSA keys with legacy SHA-1 `ssh-rsa`, which modern servers refuse while still listing `publickey`. RSA keys now sign with the `rsa-sha2-256`/`rsa-sha2-512` hash the server advertises; other key types are unchanged.

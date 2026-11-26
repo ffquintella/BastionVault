@@ -39,6 +39,8 @@ export function PluginsPage() {
   const [sqlGranting, setSqlGranting] = useState<PluginManifest | null>(null);
   const [entityData, setEntityData] = useState<PluginManifest | null>(null);
   const [reloading, setReloading] = useState<string | null>(null);
+  // Highest registered version per plugin name, to warn when the active one is older.
+  const [latestVersions, setLatestVersions] = useState<Record<string, string>>({});
   const [acceptUnsigned, setAcceptUnsigned] = useState<boolean | null>(null);
   const [acceptUnsignedBusy, setAcceptUnsignedBusy] = useState(false);
   const [publishers, setPublishers] = useState<Record<string, string> | null>(
@@ -52,16 +54,37 @@ export function PluginsPage() {
   async function refresh(filter: "all" | "dynamic" = kindFilter) {
     setLoading(true);
     try {
-      setPlugins(
+      const list =
         filter === "dynamic"
           ? await api.pluginsListByKind(api.PLUGIN_TYPE_DYNAMIC)
-          : await api.pluginsList(),
-      );
+          : await api.pluginsList();
+      setPlugins(list);
+      void loadLatestVersions(list);
     } catch (e) {
       toast("error", extractError(e));
     } finally {
       setLoading(false);
     }
+  }
+  // A failed lookup only hides that plugin's warning; it never blocks the list.
+  async function loadLatestVersions(list: PluginManifest[]) {
+    const entries = await Promise.all(
+      list.map(async (p) => {
+        try {
+          const r = await api.pluginsVersions(p.name);
+          const latest = r.versions.map((v) => v.version).reduce(
+            (a, b) => (compareVersions(b, a) > 0 ? b : a),
+            p.version,
+          );
+          return [p.name, latest] as const;
+        } catch {
+          return null;
+        }
+      }),
+    );
+    setLatestVersions(
+      Object.fromEntries(entries.filter((e): e is readonly [string, string] => e !== null)),
+    );
   }
   function changeFilter(filter: "all" | "dynamic") {
     setKindFilter(filter);
@@ -321,6 +344,7 @@ export function PluginsPage() {
                   key={p.name}
                   plugin={p}
                   reloading={reloading === p.name}
+                  latestVersion={latestVersions[p.name]}
                   onInvoke={() => setInvoking(p)}
                   onConfigure={() => setConfiguring(p)}
                   onVersions={() => setVersioning(p)}
@@ -437,9 +461,22 @@ export function PluginsPage() {
   );
 }
 
+/** Numeric dotted-version compare (`0.1.10` > `0.1.9`); pre-release suffixes are ignored. */
+function compareVersions(a: string, b: string): number {
+  const parts = (v: string) => v.split(/[-+]/)[0].split(".").map((n) => parseInt(n, 10) || 0);
+  const pa = parts(a);
+  const pb = parts(b);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] ?? 0) - (pb[i] ?? 0);
+    if (d !== 0) return d;
+  }
+  return 0;
+}
+
 function PluginRow({
   plugin,
   reloading,
+  latestVersion,
   onInvoke,
   onConfigure,
   onVersions,
@@ -452,6 +489,7 @@ function PluginRow({
 }: {
   plugin: PluginManifest;
   reloading: boolean;
+  latestVersion?: string;
   onInvoke: () => void;
   onConfigure: () => void;
   onVersions: () => void;
@@ -467,18 +505,25 @@ function PluginRow({
   const isProvider = !!plugin.capabilities.credential_provider;
   const requestsSql = requestsSqlGrants(plugin.capabilities);
   const keepsPerUserData = plugin.capabilities.storage_scope === "entity";
+  const outdated = !!latestVersion && compareVersions(latestVersion, plugin.version) > 0;
   return (
     <div className="flex items-start justify-between p-3 border border-[var(--color-border)] rounded-md gap-3">
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2 flex-wrap">
           <p className="font-medium truncate">{plugin.name}</p>
           <Badge label={`v${plugin.version}`} variant="info" />
+          {outdated && <Badge label={`v${latestVersion} available`} variant="warning" />}
           <Badge label={plugin.runtime} variant="neutral" />
           <Badge label={plugin.plugin_type || "—"} variant="neutral" />
           {plugin.engine_type && (
             <Badge label={`engine: ${plugin.engine_type}`} variant="info" />
           )}
         </div>
+        {outdated && (
+          <p role="alert" className="text-xs text-[var(--color-warning)] mt-1">
+            Running v{plugin.version}, but v{latestVersion} is registered. Open Versions and activate it to use the newer build.
+          </p>
+        )}
         <p className="text-xs text-[var(--color-text-muted)] mt-1 font-mono truncate">
           sha256: {plugin.sha256.slice(0, 16)}… · {plugin.size} bytes · ABI v{plugin.abi_version}
         </p>
