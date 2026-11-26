@@ -12,8 +12,13 @@ skip() { echo "  [skip]   $*" >&2; }
 warn() { echo "  [warn]   $*" >&2; }
 die()  { echo "ERROR: $*" >&2; exit 1; }
 
-TMP=""; KC=""
+TMP=""; KC=""; KC_LIST_SAVED=""
 cleanup() {
+    # Put the user's keychain search list back before dropping ours.
+    if [ -n "$KC_LIST_SAVED" ]; then
+        # shellcheck disable=SC2046
+        eval "security list-keychains -d user -s $KC_LIST_SAVED" >/dev/null 2>&1 || true
+    fi
     [ -n "$KC" ] && security delete-keychain "$KC" >/dev/null 2>&1 || true
     [ -n "$TMP" ] && [ -d "$TMP" ] && rm -rf "$TMP"
     return 0
@@ -223,7 +228,16 @@ codesign_embedded() {
     security set-keychain-settings "$KC"
     security unlock-keychain -p "$pw" "$KC"
     security import "$pk12" -k "$KC" -P "$pw" -T /usr/bin/codesign >/dev/null
-    security set-key-partition-list -S apple-tool:,apple: -s -k "$pw" "$KC" >/dev/null 2>&1 || true
+    security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$pw" "$KC" >/dev/null \
+        || warn "could not set the key partition list; codesign may fail with errSecInternalComponent"
+    # codesign resolves the key and builds the chain through the keychain
+    # SEARCH LIST, not only --keychain. A keychain outside it gives
+    # errSecInternalComponent. Prepend ours, restore the list on exit.
+    KC_LIST_SAVED="$(security list-keychains -d user | sed 's/^ *//; s/$//' | tr '\n' ' ')"
+    # shellcheck disable=SC2086
+    security list-keychains -d user -s "$KC" $KC_LIST_SAVED >/dev/null
+    # Intermediates are in the keychain from the p12; trust is not needed to
+    # sign, so the "self-signed root" chain warning is harmless.
     fp="$("$OSSL" x509 -in "$cert" -noout -fingerprint -sha1 | sed 's/.*=//; s/://g')"
     tsarg="--timestamp=none"; [ -n "$ts" ] && tsarg="--timestamp"
     codesign --force --keychain "$KC" --sign "$fp" "$tsarg" "$target" >&2
