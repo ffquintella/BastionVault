@@ -14,6 +14,7 @@ import {
   sqlRun,
   sqlScript,
   sqlSessionStatus,
+  sqlSessionReconnect,
   type SqlColumn,
   type SqlDescribe,
   type SqlExportRequest,
@@ -36,6 +37,7 @@ import {
   formatSql,
   gridEditBlocker,
   isSessionGone,
+  parsePluginError,
   refusals,
   selectAllFrom,
   splitStatements,
@@ -167,13 +169,58 @@ export default function SqlWorkspace({
   // Once the session is gone it stays gone: a late status read must not
   // report it open again.
   const goneRef = useRef(false);
-  const markGone = useCallback(
-    (e: unknown) => {
+  const reconnectingRef = useRef(false);
+  const [retryable, setRetryable] = useState(false);
+  const setGoneFor = useCallback(
+    (text: string) => {
       goneRef.current = true;
-      setGone(describeSqlError(e));
+      setGone(text);
       onStatusChange?.("closed");
     },
     [onStatusChange],
+  );
+
+  /** The plugin lost the session (a restart, or another node serves the id
+   *  now): reopen it under the same token so the editors and results stay.
+   *  The database connection is a new one, so a transaction or a session
+   *  setting is not carried over, and the statement that hit the error is
+   *  not re-run. */
+  const reconnect = useCallback(
+    async (cause: string) => {
+      if (reconnectingRef.current) return;
+      reconnectingRef.current = true;
+      goneRef.current = true; // keep status polls and statements off while reopening
+      setRetryable(false);
+      onStatusChange?.("connecting");
+      addLog("info", "The SQL session was lost (its plugin node changed); reconnecting…");
+      try {
+        const s = await sqlSessionReconnect(token);
+        if (!aliveRef.current) return;
+        goneRef.current = false;
+        setGone(null);
+        setStatus(s);
+        setStatusAt(Date.now());
+        addLog("info", "Reconnected on a new database connection; an open transaction or session setting was not carried over.");
+        onStatusChange?.("open");
+      } catch (e) {
+        if (!aliveRef.current) return;
+        setRetryable(true);
+        setGoneFor(`${cause} Reconnect failed: ${describeSqlError(e)}`);
+      } finally {
+        reconnectingRef.current = false;
+      }
+    },
+    [token, onStatusChange, addLog, setGoneFor],
+  );
+
+  const markGone = useCallback(
+    (e: unknown) => {
+      if (reconnectingRef.current) return;
+      const text = describeSqlError(e);
+      if (parsePluginError(e).code === "session_on_other_node") void reconnect(text);
+      else setGoneFor(text);
+    },
+    [reconnect, setGoneFor],
   );
 
   const refreshStatus = useCallback(async () => {
@@ -757,6 +804,11 @@ export default function SqlWorkspace({
       {gone && (
         <div role="alert" className="border-b border-[var(--color-border)] bg-red-950/60 px-2 py-1 text-xs text-red-200">
           This SQL session has ended: {gone}
+          {retryable && (
+            <button type="button" className="ml-2 underline" onClick={() => void reconnect(gone)}>
+              Reconnect
+            </button>
+          )}
         </div>
       )}
       {status?.enforcement === "classifier-only" && (

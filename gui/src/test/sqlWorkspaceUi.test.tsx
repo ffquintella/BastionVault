@@ -285,10 +285,38 @@ describe("SQL workspace", () => {
     expect(screen.queryByLabelText("Edit email")).toBeNull();
   });
 
-  it("says so when the session ends underneath it", async () => {
+  it("reconnects under the same token when the plugin lost the session", async () => {
+    const onStatus = vi.fn();
+    let lost = true;
+    setup(
+      base({
+        sql_execute: () => ({ run_id: "r1", state: "running", statements: [] }),
+        sql_run: () => {
+          if (lost) throw new Error("plugin dbms-management returned status 4: session_on_other_node: served by another instance");
+          return PAGE;
+        },
+        sql_session_reconnect: () => {
+          lost = false;
+          return status();
+        },
+      }),
+    );
+    render(<SqlWorkspace token={TOKEN} label="sql" onStatusChange={onStatus} />);
+    await screen.findByTestId("sql-privilege-chips");
+    await typeAndRun("select 1");
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("sql_session_reconnect", { request: { token: TOKEN } }));
+    await waitFor(() => expect(onStatus).toHaveBeenLastCalledWith("open"));
+    expect(screen.queryByText(/This SQL session has ended/)).toBeNull();
+    expect(screen.getByRole("button", { name: "Run (statement at the cursor)" })).toBeEnabled();
+  });
+
+  it("says so, and offers Reconnect, when the reconnect is refused", async () => {
     const onStatus = vi.fn();
     setup(
       base({
+        sql_session_reconnect: () => {
+          throw new Error("plugin dbms-management returned status 4: mfa_required: needs a factor");
+        },
         sql_execute: () => ({ run_id: "r1", state: "running", statements: [] }),
         sql_run: () => {
           throw new Error("plugin dbms-management returned status 4: session_on_other_node: served by another instance");
@@ -299,6 +327,8 @@ describe("SQL workspace", () => {
     await screen.findByTestId("sql-privilege-chips");
     await typeAndRun("select 1");
     expect(await screen.findByText(/This SQL session has ended/)).toHaveTextContent("another vault node");
+    expect(screen.getByText(/This SQL session has ended/)).toHaveTextContent("Reconnect failed");
+    expect(screen.getByRole("button", { name: "Reconnect" })).toBeInTheDocument();
     expect(onStatus).toHaveBeenLastCalledWith("closed");
     expect(screen.getByRole("button", { name: "Run (statement at the cursor)" })).toBeDisabled();
   });

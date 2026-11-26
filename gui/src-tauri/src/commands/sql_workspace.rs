@@ -211,6 +211,57 @@ pub async fn sql_session_status(
     call(&state, s.namespace.as_deref(), Operation::Read, s.path(""), None).await.map(sqls::scrub_status)
 }
 
+/// Reopen the plugin session behind `token` after the plugin lost it
+/// (`session_on_other_node`: a restart or another node serves the id now).
+/// The local token, and so the window, its editors and its results, stay;
+/// only the plugin session id behind it changes. The same resource, profile,
+/// catalog and namespace are requested, so the grant is decided afresh and a
+/// profile that needs a connect-time factor is refused by the plugin rather
+/// than reopened without one. Session state (transaction, settings) is not
+/// carried over: the database connection is a new one.
+#[tauri::command]
+pub async fn sql_session_reconnect(
+    state: State<'_, AppState>,
+    webview: Webview,
+    request: SqlTokenRequest,
+) -> CmdResult<Map<String, Value>> {
+    let old = session_for(&state, &webview, &request.token).await?;
+    let body =
+        sqls::open_body(&old.resource, Some(&old.profile), Some(&old.catalog), None).map_err(CommandError::from)?;
+    let reply =
+        call(&state, old.namespace.as_deref(), Operation::Write, format!("{}v2/sessions", old.mount), Some(body))
+            .await?;
+    let new_id = reply.get("session_id").and_then(Value::as_str).unwrap_or_default().to_string();
+    if !sqls::plugin_session_id_ok(&new_id) {
+        log::warn!("resource-connect/sql: reconnect got a malformed session id (mount={})", old.mount);
+        return Err(CommandError::from("the SQL browser plugin returned a malformed session id".to_string()));
+    }
+    let swapped = {
+        let mut sessions = state.connect_sessions.lock().await;
+        match sessions.get_mut(&request.token) {
+            Some(SessionState::Sql(s)) if s.session_id == old.session_id => {
+                s.session_id = new_id.clone();
+                true
+            }
+            _ => false,
+        }
+    };
+    if !swapped {
+        // The pane was closed, or reconnected by a concurrent call, while the
+        // plugin opened this one: do not leave it for the idle sweep.
+        let _ = close_plugin_session(&state, &old.mount, &new_id, old.namespace.as_deref()).await;
+        return Err(CommandError::from("the SQL session has ended".to_string()));
+    }
+    // The old id is normally already gone; if it still answers, end it.
+    let _ = close_plugin_session(&state, &old.mount, &old.session_id, old.namespace.as_deref()).await;
+    log::info!(
+        target: "audit",
+        "session.reconnect: resource={} protocol=sql profile={} mount={} token={}",
+        old.resource, old.profile, old.mount, request.token
+    );
+    Ok(sqls::scrub_status(reply))
+}
+
 #[derive(Deserialize)]
 pub struct SqlObjectRef {
     pub schema: String,

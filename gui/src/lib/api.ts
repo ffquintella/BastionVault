@@ -3827,6 +3827,11 @@ export const sqlSessionOpen = (request: SqlOpenRequest) =>
 export const sqlSessionStatus = (token: string) =>
   invoke<SqlSessionStatus>("sql_session_status", { request: { token } });
 
+/** Reopen the plugin session behind this token after the plugin lost it
+ *  (`session_on_other_node`); the token, window and editors stay. */
+export const sqlSessionReconnect = (token: string) =>
+  invoke<SqlSessionStatus>("sql_session_reconnect", { request: { token } });
+
 /** The caller's own effective SQL capabilities (display only). */
 export const sqlPrivileges = (token: string, objects: { schema: string; object: string }[] = []) =>
   invoke<import("./sqlPrivileges").SqlPrivileges>("sql_privileges", { request: { token, objects } });

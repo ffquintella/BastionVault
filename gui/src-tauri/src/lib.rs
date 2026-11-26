@@ -722,6 +722,7 @@ pub fn run() {
             // SQL workspace (features/sql-browser.md §10, T125 Phase 4).
             commands::sql_workspace::sql_session_open,
             commands::sql_workspace::sql_session_status,
+            commands::sql_workspace::sql_session_reconnect,
             commands::sql_workspace::sql_privileges,
             commands::sql_workspace::sql_execute,
             commands::sql_workspace::sql_run,

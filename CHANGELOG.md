@@ -480,6 +480,11 @@ EXAMPLE ENTRY:
 
 ### Fixed
 
+#### SQL browser: reconnect when the plugin lost the session
+
+- **A SQL session that the plugin lost (`session_on_other_node`, after a plugin restart or reload) now reconnects by itself under the same window instead of ending** (T561, S109)
+  -- The workspace asks the host to reopen the session for the same resource, profile, catalog and namespace; the editors and result tabs stay. The database connection is a new one, so an open transaction or session setting is not carried over, and the statement that hit the error is not re-run. A profile that needs a connect-time factor is refused by the plugin, and the banner then offers a Reconnect button. New `sql_session_reconnect` command, granted to the SQL window and the workspace only.
+
 #### Plugins: activating a version replaces the running process
 
 - **Activating a plugin version now reloads the plugin, so a long-lived plugin stops serving the previous build, and the Plugins page warns when a newer registered version is not the active one** (T560, S109)

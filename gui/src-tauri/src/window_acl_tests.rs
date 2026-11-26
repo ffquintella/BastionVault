@@ -92,6 +92,7 @@ const WORKSPACE_EXTRA: &[&str] = &[
     // SQL pane drives (each bound by the host to the session it holds). A
     // pane closes through `session_close`, like every other pane.
     "sql_session_open",
+    "sql_session_reconnect",
     "sql_session_status",
     "sql_privileges",
     "sql_execute",
@@ -153,6 +154,7 @@ const SQL_WINDOW: &[&str] = &[
     "sql_run",
     "sql_script",
     "sql_session_close",
+    "sql_session_reconnect",
     "sql_session_status",
     "sql_step_up_begin",
     "sql_step_up_verify",
