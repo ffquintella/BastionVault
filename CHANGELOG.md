@@ -63,6 +63,11 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### Plugin signing: choose the key when you sign
+
+- **`make plugins sign` lists the signing keys it finds and asks which one to use, instead of silently signing with the staging key** (T559, S30)
+  -- It looks for `*.seed` files in `plugins-ext/dist`, `~/keys` and `keys/` (override with `PLUGINS_KEY_DIRS`), shows each with the publisher name it will sign as, and asks you to pick one; the name is suggested from the file name and can be edited. Passing `PLUGINS_SIGNING_KEY` or `PLUGINS_SIGNING_KEY_NAME` skips the prompt, and with no terminal (CI) it signs with the default staging key and says so. Only file names are read, never seed contents.
+
 #### Signed executables in the installers
 
 - **Sign `bvault` and the GUI app with a certificate kept on your machine and ship the signed binary inside the macOS, Windows and Linux installers** (T558, S30)

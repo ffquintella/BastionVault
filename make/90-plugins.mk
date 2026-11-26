@@ -3,7 +3,7 @@
 
 ##@ Plugins
 
-.PHONY: plugins-init plugins-target plugins-process-target plugins-pack-build plugins-wasm plugins-pack plugins-keygen plugins-sign plugins-process plugins-all plugin-bump plugins-clean plugins-test test-dbms dynamic-plugins-test dynamic-plugins-live
+.PHONY: plugins-init plugins-target plugins-process-target plugins-pack-build plugins-wasm plugins-pack plugins-keygen plugins-sign plugins-sign-run plugins-process plugins-all plugin-bump plugins-clean plugins-test test-dbms dynamic-plugins-test dynamic-plugins-live
 
 # ── Reference plugins (plugins-ext/ submodule) ──────────────────────────
 # Build the BastionVault-Plugins reference plugins. WASM plugins compile
@@ -284,7 +284,24 @@ plugins-keygen: plugins-pack-build ## Mint a fresh ML-DSA-65 dev signing keypair
 	@echo "==> register $(PLUGINS_SIGNING_KEY).pub on the host as publisher"
 	@echo "    name=$(PLUGINS_SIGNING_KEY_NAME) so signed bundles validate."
 
-plugins-sign: plugins-wasm plugins-process plugins-pack-build ## Repack each plugin with an ML-DSA-65 signature using $(PLUGINS_SIGNING_KEY).seed
+# Directories searched for `<name>.seed` when `plugins-sign` asks which key to
+# use. Override with PLUGINS_KEY_DIRS="dir1 dir2".
+PLUGINS_KEY_DIRS ?= $(PLUGINS_OUT) $(HOME)/keys keys
+
+# Setting PLUGINS_SIGNING_KEY or PLUGINS_SIGNING_KEY_NAME (command line or
+# environment) skips the prompt; otherwise the key is chosen interactively.
+_plugins_key_explicit := $(filter command line environment,$(origin PLUGINS_SIGNING_KEY) $(origin PLUGINS_SIGNING_KEY_NAME))
+
+plugins-sign: plugins-wasm plugins-process plugins-pack-build ## Build, then sign each plugin with an ML-DSA-65 key picked from the available ones (or PLUGINS_SIGNING_KEY=<path> PLUGINS_SIGNING_KEY_NAME=<name>)
+	@if [ -n "$(_plugins_key_explicit)" ]; then \
+		SEL="$(PLUGINS_SIGNING_KEY)|$(PLUGINS_SIGNING_KEY_NAME)"; \
+	else \
+		SEL=$$(scripts/select-plugin-key.sh "$(PLUGINS_SIGNING_KEY)" "$(PLUGINS_SIGNING_KEY_NAME)" $(PLUGINS_KEY_DIRS)) || exit 1; \
+	fi; \
+	$(MAKE) --no-print-directory plugins-sign-run PLUGINS_SIGNING_KEY="$${SEL%%|*}" PLUGINS_SIGNING_KEY_NAME="$${SEL#*|}"
+
+# Internal: signs with the key already chosen. Use `plugins-sign`.
+plugins-sign-run: plugins-pack-build
 	@if [ ! -f $(PLUGINS_SIGNING_KEY).seed ]; then \
 		echo "==> $(PLUGINS_SIGNING_KEY).seed missing — run \`make plugins-keygen\` first"; \
 		exit 1; \

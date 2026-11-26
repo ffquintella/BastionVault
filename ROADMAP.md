@@ -788,6 +788,8 @@ Next-up list recorded before the migration, in its order:
 ## [M9] Packaging and distribution
 > outcome: Done when the signed server image, native client installers and the downloads website with a signed manifest are published by release CI.
 
+- [x] T559 Choose the plugin signing key from the keys on disk when running `make plugins sign` (S30)
+  - source: operator request — the prod key was signed with the staging default by mistake; the prompt lists `*.seed` in `plugins-ext/dist`, `~/keys` and `keys/`, and an explicit `PLUGINS_SIGNING_KEY` skips it
 - [x] T558 Sign the executables inside every installer with a locally stored certificate, classical or ML-DSA (S30, S68)
   - source: operator request — cert/key paths live in a per-user config outside the repo and are asked for on first run; ML-KEM is refused because it cannot sign
 - [x] T488 Reorganise the Makefile into command groups with subcommands (S77)
