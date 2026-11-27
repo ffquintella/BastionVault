@@ -526,6 +526,7 @@ pub fn run() {
             commands::ferrogate::ferrogate_read_config,
             commands::ferrogate::ferrogate_write_config,
             commands::ferrogate::ferrogate_list_machines,
+            commands::ferrogate::ferrogate_register,
             commands::ferrogate::ferrogate_approve,
             commands::ferrogate::ferrogate_reject,
             commands::ferrogate::ferrogate_revoke,

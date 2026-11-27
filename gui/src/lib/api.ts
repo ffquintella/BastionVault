@@ -1187,6 +1187,8 @@ export const ferrogateWriteConfig = (cfg: {
     selfEnrollRateLimitPerMin: cfg.selfEnrollRateLimitPerMin,
   });
 export const ferrogateListMachines = () => invoke<FerroGateMachine[]>("ferrogate_list_machines");
+export const ferrogateRegister = (spiffeId: string, comment: string) =>
+  invoke<{ id: string; spiffe_id: string; status: string }>("ferrogate_register", { spiffeId, comment });
 export const ferrogateApprove = (id: string, policies: string, ttlSeconds: number, comment: string) =>
   invoke<void>("ferrogate_approve", { id, policies, ttlSeconds, comment });
 export const ferrogateReject = (id: string, reason: string) =>

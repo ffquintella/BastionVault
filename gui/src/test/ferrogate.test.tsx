@@ -98,6 +98,32 @@ describe("FerroGatePage", () => {
     expect(screen.getByRole("button", { name: /^reject$/i })).toBeInTheDocument();
   });
 
+  it("adds a machine by hand: registers the SPIFFE id then opens the approve editor", async () => {
+    const user = userEvent.setup();
+    const NEW = { ...PENDING, id: "b".repeat(64), spiffe_id: "spiffe://ferrogate.test/host/new" };
+    let registered = false;
+    const base = mockInvoke.getMockImplementation()!;
+    mockInvoke.mockImplementation((cmd: string, args?: unknown) => {
+      if (cmd === "ferrogate_register") {
+        registered = true;
+        expect(args).toMatchObject({ spiffeId: NEW.spiffe_id });
+        return Promise.resolve({ id: NEW.id, spiffe_id: NEW.spiffe_id, status: "pending" });
+      }
+      if (cmd === "ferrogate_list_machines") return Promise.resolve(registered ? [PENDING, NEW] : [PENDING]);
+      return base(cmd, args);
+    });
+    const { FerroGatePage } = await import("../routes/FerroGatePage");
+    renderWithProviders(<FerroGatePage />);
+
+    await user.click(await screen.findByRole("button", { name: /^approved/i }));
+    await user.click(screen.getByRole("button", { name: /add machine/i }));
+    await user.type(screen.getByLabelText(/machine \(spiffe id\)/i), NEW.spiffe_id);
+    await user.click(screen.getByRole("button", { name: /continue/i }));
+
+    expect(await screen.findByText("Approve machine")).toBeInTheDocument();
+    expect(registered).toBe(true);
+  });
+
   it("hides machine admin in a child namespace and never calls the root-path list", async () => {
     useNamespaceStore.setState({ active: "dti/esi", namespaces: ["dti", "dti/esi"], loaded: true });
 

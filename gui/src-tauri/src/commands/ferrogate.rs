@@ -239,6 +239,35 @@ pub async fn ferrogate_list_machines(state: State<'_, AppState>) -> CmdResult<Ve
     Ok(machines)
 }
 
+/// Result of an admin pre-registration: the machine handle and its current
+/// status (`pending` for a new record; an existing record is returned as-is).
+#[derive(Serialize, Deserialize, Default)]
+pub struct FerroGateRegistered {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub spiffe_id: String,
+    #[serde(default)]
+    pub status: String,
+}
+
+/// Admin pre-registration of a machine by SPIFFE ID. Creates a `pending`
+/// record only — approval (and the policy grant) is a separate, explicit step.
+#[tauri::command]
+pub async fn ferrogate_register(
+    state: State<'_, AppState>,
+    spiffe_id: String,
+    comment: String,
+) -> CmdResult<FerroGateRegistered> {
+    let mut body = Map::new();
+    body.insert("spiffe_id".into(), Value::String(spiffe_id.trim().to_string()));
+    if !comment.is_empty() {
+        body.insert("comment".into(), Value::String(comment));
+    }
+    let resp = make_request(&state, Operation::Write, "auth/ferrogate/register".into(), Some(body)).await?;
+    Ok(resp.and_then(|r| r.data).and_then(|d| serde_json::from_value(Value::Object(d)).ok()).unwrap_or_default())
+}
+
 #[tauri::command]
 pub async fn ferrogate_approve(
     state: State<'_, AppState>,

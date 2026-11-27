@@ -63,6 +63,11 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### FerroGate: add a machine by hand
+
+- **Add a machine from the Approved tab by typing its SPIFFE ID, then pick its policies and approve it in one flow** (T562, S89)
+  -- The new "Add machine" button registers the machine as pending and opens the usual approve editor, so you no longer wait for the machine to enrol itself. The machine still has to authenticate through the attested FerroGate login.
+
 #### Plugin signing: choose the key when you sign
 
 - **`make plugins sign` lists the signing keys it finds and asks which one to use, instead of silently signing with the staging key** (T559, S30)

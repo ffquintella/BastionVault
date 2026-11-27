@@ -136,6 +136,34 @@ export function FerroGatePage() {
     setApproveTarget(m);
   }
 
+  // "Add machine" — manual inclusion by SPIFFE id. Registers a pending record,
+  // then hands off to the approve modal so policies/TTL use the same editor.
+  const [addOpen, setAddOpen] = useState(false);
+  const [addSpiffe, setAddSpiffe] = useState("");
+  const [addBusy, setAddBusy] = useState(false);
+
+  async function doAddMachine() {
+    const spiffe = addSpiffe.trim();
+    if (!spiffe.startsWith("spiffe://")) {
+      toast("error", "Machine id must be a spiffe:// URI");
+      return;
+    }
+    setAddBusy(true);
+    try {
+      const reg = await api.ferrogateRegister(spiffe, "");
+      setAddOpen(false);
+      setAddSpiffe("");
+      const list = await api.ferrogateListMachines();
+      setMachines(list);
+      const found = list.find((m) => m.id === reg.id);
+      if (found) openApprove(found, found.status === "approved");
+    } catch (e) {
+      toast("error", extractError(e));
+    } finally {
+      setAddBusy(false);
+    }
+  }
+
   const [rejectTarget, setRejectTarget] = useState<FerroGateMachine | null>(null);
   const [rejectReason, setRejectReason] = useState("");
 
@@ -376,6 +404,11 @@ export function FerroGatePage() {
 
             {tab === "approved" && (
               <Card>
+                <div className="flex justify-end mb-3">
+                  <Button size="sm" onClick={() => setAddOpen(true)}>
+                    Add machine
+                  </Button>
+                </div>
                 <Table
                   columns={[
                     spiffeCol,
@@ -467,6 +500,30 @@ export function FerroGatePage() {
           </>
         )}
       </div>
+
+      {/* Add machine modal */}
+      <Modal open={addOpen} onClose={() => setAddOpen(false)} title="Add machine" size="md">
+        <div className="space-y-3">
+          <Input
+            label="Machine (SPIFFE ID)"
+            value={addSpiffe}
+            onChange={(e) => setAddSpiffe(e.target.value)}
+            placeholder="spiffe://ferrogate/host/<uuid>"
+          />
+          <p className="text-xs text-[var(--color-text-muted)]">
+            Registers the machine, then lets you choose its policies and approve it. The machine must still
+            authenticate through the attested FerroGate login.
+          </p>
+          <div className="flex justify-end gap-2">
+            <Button variant="secondary" onClick={() => setAddOpen(false)}>
+              Cancel
+            </Button>
+            <Button disabled={addBusy || !addSpiffe.trim()} onClick={() => void doAddMachine()}>
+              Continue
+            </Button>
+          </div>
+        </div>
+      </Modal>
 
       {/* Approve modal */}
       <Modal
